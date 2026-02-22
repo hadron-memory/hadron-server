@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hadron
+      POSTGRES_USER: hadron
+      POSTGRES_PASSWORD: hadron
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hadron"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgresql://hadron:hadron@db:5432/hadron
+      PORT: 4000
+      NODE_ENV: production
+    env_file:
+      - path: .env.local
+        required: false   # place secrets (GITHUB_CLIENT_SECRET etc.) here
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
