@@ -1,7 +1,7 @@
 {
-  "name": "@hadron/server",
+  "name": "@hadron/controller",
   "version": "0.1.0",
-  "description": "Hadron cloud server — GraphQL API, usage DB, and node collection",
+  "description": "Hadron Controller — GraphQL API, usage DB, and node collection",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
