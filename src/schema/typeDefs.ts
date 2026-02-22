@@ -28,12 +28,30 @@ export const typeDefs = `#graphql
     label: String
   }
 
+  type Session {
+    id: ID!
+    type: String!
+    clientId: String
+    repo: String
+    branch: String
+    prNumber: Int
+    customerId: String
+    language: String
+    summary: String
+    outcome: Float
+    outcomeRef: String
+    outcomeMeta: JSON
+    startedAt: String!
+    endedAt: String
+    autoExpiredAt: String
+    events: [UsageEvent!]!
+  }
+
   type UsageEvent {
     id: ID!
     type: String!
     nodeLoc: String
     actionArgs: JSON
-    success: Boolean
     clientId: String
     sessionId: String
     createdAt: String!
@@ -78,11 +96,20 @@ export const typeDefs = `#graphql
     label: String
   }
 
+  input SessionInput {
+    id: String!
+    type: String
+    repo: String
+    branch: String
+    prNumber: Int
+    customerId: String
+    language: String
+  }
+
   input UsageEventInput {
     type: String!
     nodeLoc: String
     actionArgs: JSON
-    success: Boolean
     clientId: String
     sessionId: String
   }
@@ -107,6 +134,10 @@ export const typeDefs = `#graphql
     # Usage stats for a node (most recent events first)
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
 
+    # Sessions, most recent first
+    sessions(type: String, repo: String, customerId: String, limit: Int): [Session!]!
+    session(id: ID!): Session
+
     # API keys (admin only)
     apiKeys: [ApiKey!]!
 
@@ -122,6 +153,10 @@ export const typeDefs = `#graphql
 
     # Replace all nodes under a namespace owned by a repo (collection tool)
     replaceSubtree(namespace: String!, ownerRepo: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
+
+    # Session lifecycle
+    startSession(input: SessionInput!): Session!
+    endSession(id: ID!, summary: String): Session!
 
     # Record a usage event
     recordUsage(event: UsageEventInput!): Boolean!

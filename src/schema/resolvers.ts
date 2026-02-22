@@ -17,6 +17,8 @@ function requireRole(ctx: Context, required: 'ADMIN' | 'CONTRIBUTOR' | 'READER')
   }
 }
 
+const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
+
 export const resolvers = {
   Query: {
     node: async (_: unknown, { loc }: { loc: string }, ctx: Context) => {
@@ -67,6 +69,27 @@ export const resolvers = {
       });
     },
 
+    sessions: async (
+      _: unknown,
+      { type, repo, customerId, limit }: { type?: string; repo?: string; customerId?: string; limit?: number },
+      ctx: Context,
+    ) => {
+      return ctx.db.session.findMany({
+        where: {
+          ...(type ? { type } : {}),
+          ...(repo ? { repo } : {}),
+          ...(customerId ? { customerId } : {}),
+        },
+        orderBy: { startedAt: 'desc' },
+        take: limit ?? 50,
+        include: SESSION_INCLUDE,
+      });
+    },
+
+    session: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      return ctx.db.session.findUnique({ where: { id }, include: SESSION_INCLUDE });
+    },
+
     apiKeys: async (_: unknown, __: unknown, ctx: Context) => {
       requireRole(ctx, 'ADMIN');
       return ctx.db.apiKey.findMany({ orderBy: { createdAt: 'desc' } });
@@ -74,7 +97,6 @@ export const resolvers = {
 
     me: async (_: unknown, __: unknown, ctx: Context) => {
       if (!ctx.clientId) return null;
-      // clientId format for GitHub OAuth users: "github-oauth:<login>"
       if (!ctx.clientId.startsWith('github-oauth:')) return null;
       const login = ctx.clientId.slice('github-oauth:'.length);
       return ctx.db.user.findFirst({ where: { login } });
@@ -103,8 +125,6 @@ export const resolvers = {
     },
 
     // Full replace of a repo's namespace subtree — used by the collection tool.
-    // Deletes all existing nodes in the namespace owned by ownerRepo, then inserts
-    // the new set. Runs in a transaction so partial failures don't corrupt the graph.
     replaceSubtree: async (
       _: unknown,
       {
@@ -118,17 +138,14 @@ export const resolvers = {
       requireRole(ctx, 'CONTRIBUTOR');
 
       await ctx.db.$transaction(async (tx) => {
-        // Delete all nodes in this namespace owned by this repo
         await tx.node.deleteMany({ where: { namespace, ownerRepo } });
 
-        // Insert new nodes
         for (const input of nodes) {
           await tx.node.create({
             data: { ...input, namespace: deriveNamespace(input.loc), tags: input.tags ?? [] },
           });
         }
 
-        // Insert edges (source and target must already exist)
         for (const edge of edges) {
           const source = await tx.node.findUnique({ where: { loc: edge.sourceLoc } });
           const target = await tx.node.findUnique({ where: { loc: edge.targetLoc } });
@@ -145,6 +162,30 @@ export const resolvers = {
       return nodes.length;
     },
 
+    startSession: async (_: unknown, { input }: { input: SessionInput }, ctx: Context) => {
+      return ctx.db.session.create({
+        data: {
+          id: input.id,
+          type: input.type ?? 'developer',
+          clientId: ctx.clientId,
+          repo: input.repo,
+          branch: input.branch,
+          prNumber: input.prNumber,
+          customerId: input.customerId,
+          language: input.language,
+        },
+        include: SESSION_INCLUDE,
+      });
+    },
+
+    endSession: async (_: unknown, { id, summary }: { id: string; summary?: string }, ctx: Context) => {
+      return ctx.db.session.update({
+        where: { id },
+        data: { endedAt: new Date(), summary },
+        include: SESSION_INCLUDE,
+      });
+    },
+
     recordUsage: async (_: unknown, { event }: { event: UsageEventInput }, ctx: Context) => {
       const node = event.nodeLoc
         ? await ctx.db.node.findUnique({ where: { loc: event.nodeLoc } })
@@ -156,7 +197,6 @@ export const resolvers = {
           nodeLoc: event.nodeLoc,
           nodeId: node?.id,
           actionArgs: event.actionArgs as InputJsonValue | undefined,
-          success: event.success,
           clientId: event.clientId ?? ctx.clientId,
           sessionId: event.sessionId,
         },
@@ -197,8 +237,6 @@ export const resolvers = {
   },
 };
 
-// Derive namespace from a dotted loc: first two dot-separated segments.
-// "micromentor-org.mmdata.models" → "micromentor-org.mmdata"
 function deriveNamespace(loc: string): string {
   const parts = loc.split('.');
   return parts.slice(0, 2).join('.');
@@ -220,11 +258,20 @@ interface EdgeInput {
   label?: string;
 }
 
+interface SessionInput {
+  id: string;
+  type?: string;
+  repo?: string;
+  branch?: string;
+  prNumber?: number;
+  customerId?: string;
+  language?: string;
+}
+
 interface UsageEventInput {
   type: string;
   nodeLoc?: string;
   actionArgs?: Record<string, unknown>;
-  success?: boolean;
   clientId?: string;
   sessionId?: string;
 }

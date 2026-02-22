@@ -38,7 +38,6 @@ export async function createServer() {
           nodeLoc: event.nodeLoc,
           nodeId: node?.id,
           actionArgs: event.actionArgs,
-          success: event.success,
           clientId: event.clientId,
           sessionId: event.sessionId,
         },
@@ -47,6 +46,27 @@ export async function createServer() {
     } catch (err) {
       console.error('Usage ingest error:', err);
       res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  // REST: report session outcome — callable by any system (CRM webhook, edge device, AI agent)
+  // Body: { outcome: 0.0–1.0, outcomeRef?: string, outcomeMeta?: object }
+  app.post('/sessions/:id/outcome', async (req, res) => {
+    const { id } = req.params;
+    const { outcome, outcomeRef, outcomeMeta } = req.body ?? {};
+    if (typeof outcome !== 'number' || outcome < 0 || outcome > 1) {
+      res.status(400).json({ error: 'outcome must be a number between 0 and 1' });
+      return;
+    }
+    try {
+      await db.session.update({
+        where: { id },
+        data: { outcome, outcomeRef, outcomeMeta },
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Outcome report error:', err);
+      res.status(404).json({ error: 'Session not found' });
     }
   });
 
