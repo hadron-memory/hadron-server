@@ -1,0 +1,96 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// A node in the Hadron graph.
+// loc is the canonical dotted path, e.g. "micromentor-org.mmdata.models"
+// namespace is the first two segments, e.g. "micromentor-org.mmdata" — identifies
+// which repo owns this node.
+model Node {
+  id          String   @id @default(cuid())
+  loc         String   @unique
+  name        String
+  alias       String?
+  description String?
+  content     String?  // topic.md full text
+  tags        String[] // e.g. ["action", "generate"]
+  namespace   String   // e.g. "micromentor-org.mmdata"
+  ownerRepo   String   // GitHub repo slug that contributed this node, e.g. "micromentor/mmdata"
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  outgoingEdges Edge[]       @relation("SourceNode")
+  incomingEdges Edge[]       @relation("TargetNode")
+  usageEvents   UsageEvent[]
+
+  @@index([namespace])
+}
+
+// Directed edge between two nodes.
+model Edge {
+  id       String  @id @default(cuid())
+  sourceId String
+  targetId String
+  label    String? // optional relationship label
+
+  source Node @relation("SourceNode", fields: [sourceId], references: [id], onDelete: Cascade)
+  target Node @relation("TargetNode", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, targetId])
+  @@index([targetId])
+}
+
+// Every operation is recorded here.
+model UsageEvent {
+  id         String   @id @default(cuid())
+  type       String   // "read" | "write" | "action-run" | "edge-traversal" | "session-summary"
+  nodeLoc    String?  // stored directly so it survives node deletion
+  nodeId     String?
+  actionArgs Json?    // key-value args when type = "action-run"
+  success    Boolean? // caller-reported outcome for action runs
+  clientId   String?  // API key label, "github-oauth:<login>", or "github-app"
+  sessionId  String?  // groups events within one AI session
+  createdAt  DateTime @default(now())
+
+  node Node? @relation(fields: [nodeId], references: [id], onDelete: SetNull)
+
+  @@index([nodeLoc])
+  @@index([type])
+  @@index([createdAt])
+  @@index([sessionId])
+}
+
+// API keys for machine clients (MCP, CI, edge devices).
+// The raw key is shown once at creation time; only its bcrypt hash is stored.
+model ApiKey {
+  id         String    @id @default(cuid())
+  label      String    @unique // human-readable name, e.g. "mmdata-ci"
+  keyHash    String    // bcrypt hash of the opaque token
+  role       Role      @default(READER)
+  namespace  String?   // for CONTRIBUTOR: restricts write access to this namespace prefix
+  expiresAt  DateTime?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+}
+
+// GitHub OAuth users — cached after first login.
+model User {
+  id        String   @id @default(cuid())
+  githubId  Int      @unique
+  login     String   // GitHub username
+  role      Role     @default(READER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum Role {
+  ADMIN
+  CONTRIBUTOR
+  READER
+}
