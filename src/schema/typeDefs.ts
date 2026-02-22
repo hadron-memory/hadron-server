@@ -37,6 +37,13 @@ export const typeDefs = `#graphql
     prNumber: Int
     customerId: String
     language: String
+    llmModel: String
+    inputTokens: Int
+    outputTokens: Int
+    turnCount: Int
+    errorCount: Int
+    parentSessionId: String
+    prevSessionId: String
     summary: String
     outcome: Float
     outcomeRef: String
@@ -104,6 +111,9 @@ export const typeDefs = `#graphql
     prNumber: Int
     customerId: String
     language: String
+    llmModel: String
+    parentSessionId: String
+    prevSessionId: String
   }
 
   input UsageEventInput {
@@ -156,7 +166,7 @@ export const typeDefs = `#graphql
 
     # Session lifecycle
     startSession(input: SessionInput!): Session!
-    endSession(id: ID!, summary: String): Session!
+    endSession(id: ID!, summary: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int): Session!
 
     # Record a usage event
     recordUsage(event: UsageEventInput!): Boolean!

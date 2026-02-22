@@ -173,15 +173,29 @@ export const resolvers = {
           prNumber: input.prNumber,
           customerId: input.customerId,
           language: input.language,
+          llmModel: input.llmModel,
+          parentSessionId: input.parentSessionId,
+          prevSessionId: input.prevSessionId,
         },
         include: SESSION_INCLUDE,
       });
     },
 
-    endSession: async (_: unknown, { id, summary }: { id: string; summary?: string }, ctx: Context) => {
+    endSession: async (
+      _: unknown,
+      {
+        id,
+        summary,
+        inputTokens,
+        outputTokens,
+        turnCount,
+        errorCount,
+      }: { id: string; summary?: string; inputTokens?: number; outputTokens?: number; turnCount?: number; errorCount?: number },
+      ctx: Context,
+    ) => {
       return ctx.db.session.update({
         where: { id },
-        data: { endedAt: new Date(), summary },
+        data: { endedAt: new Date(), summary, inputTokens, outputTokens, turnCount, errorCount },
         include: SESSION_INCLUDE,
       });
     },
@@ -266,6 +280,9 @@ interface SessionInput {
   prNumber?: number;
   customerId?: string;
   language?: string;
+  llmModel?: string;
+  parentSessionId?: string;
+  prevSessionId?: string;
 }
 
 interface UsageEventInput {

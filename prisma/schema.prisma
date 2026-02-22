@@ -58,6 +58,13 @@ model Session {
   prNumber      Int?      // GitHub PR number, set when known
   customerId    String?   // tenant/customer identifier (for chatbot sessions)
   language      String?   // spoken language ("en", "es") or programming language ("typescript")
+  llmModel      String?   // model used, e.g. "claude-sonnet-4-6", "gpt-4o"
+  inputTokens   Int?      // prompt tokens (priced differently from output)
+  outputTokens  Int?      // completion tokens
+  turnCount     Int?      // number of human↔AI exchanges
+  errorCount    Int?      // number of failed tool calls or action runs
+  parentSessionId String? // vertical: this session was spawned by another (sub-agent)
+  prevSessionId   String? // horizontal: this session continues a prior session (same work thread)
   summary       String?   // short text composed by the AI at h-end-session
   outcome       Float?    // 0.0–1.0, reported externally after the fact
   outcomeRef    String?   // GUID or URL of the authoritative outcome record
@@ -66,12 +73,18 @@ model Session {
   endedAt       DateTime?
   autoExpiredAt DateTime?
 
-  events UsageEvent[]
+  events       UsageEvent[]
+  parent       Session?   @relation("SubAgentSessions", fields: [parentSessionId], references: [id], onDelete: SetNull)
+  subSessions  Session[]  @relation("SubAgentSessions")
+  prev         Session?   @relation("SessionChain", fields: [prevSessionId], references: [id], onDelete: SetNull)
+  nextSessions Session[]  @relation("SessionChain")
 
   @@index([type])
   @@index([repo])
   @@index([customerId])
   @@index([startedAt])
+  @@index([parentSessionId])
+  @@index([prevSessionId])
 }
 
 // Every operation is recorded here.
