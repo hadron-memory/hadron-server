@@ -16,4 +16,4 @@ ENV NODE_ENV=production
 EXPOSE 4000
 
 # Generate client, run migrations, then start — all at runtime when DATABASE_URL is available
-CMD ["sh", "-c", "npx prisma generate && npx prisma migrate deploy && npx tsx src/index.ts"]
+CMD ["sh", "-c", "npx prisma generate && npx prisma db push && npx tsx src/index.ts"]
