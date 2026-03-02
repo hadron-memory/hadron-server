@@ -1,0 +1,137 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// A node in the Hadron graph.
+// loc is the canonical dotted path, e.g. "micromentor-org.mmdata.models"
+// namespace is the first two segments, e.g. "micromentor-org.mmdata" — identifies
+// which repo owns this node.
+model Node {
+  id          String   @id @default(cuid())
+  loc         String   @unique
+  name        String
+  alias       String?
+  description String?
+  content     String?  // topic.md full text
+  tags        String[] // e.g. ["action", "generate"]
+  namespace   String   // e.g. "micromentor-org.mmdata"
+  ownerRepo   String   // GitHub repo slug that contributed this node, e.g. "micromentor/mmdata"
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  outgoingEdges Edge[]       @relation("SourceNode")
+  incomingEdges Edge[]       @relation("TargetNode")
+  usageEvents   UsageEvent[]
+
+  @@index([namespace])
+}
+
+// Directed edge between two nodes.
+model Edge {
+  id       String  @id @default(cuid())
+  sourceId String
+  targetId String
+  label    String? // optional relationship label
+
+  source Node @relation("SourceNode", fields: [sourceId], references: [id], onDelete: Cascade)
+  target Node @relation("TargetNode", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, targetId])
+  @@index([targetId])
+}
+
+// A single AI/agent/chatbot session — the unit of outcome tracking.
+// The id is set by the caller (from h-start-session or equivalent) so that
+// events can reference it before it is created on the server.
+model Session {
+  id            String    @id // caller-generated, e.g. UUID from h-start-session
+  type          String    @default("developer") // "developer" | "chatbot" | "automation" | "edge"
+  clientId      String?   // API key label or "github-oauth:<login>"
+  repo          String?   // git repo slug, e.g. "micromentor/mmdata"
+  branch        String?   // git branch name at session start
+  prNumber      Int?      // GitHub PR number, set when known
+  customerId    String?   // tenant/customer identifier (for chatbot sessions)
+  language      String?   // spoken language ("en", "es") or programming language ("typescript")
+  llmModel      String?   // model used, e.g. "claude-sonnet-4-6", "gpt-4o"
+  inputTokens   Int?      // prompt tokens (priced differently from output)
+  outputTokens  Int?      // completion tokens
+  turnCount     Int?      // number of human↔AI exchanges
+  errorCount    Int?      // number of failed tool calls or action runs
+  parentSessionId String? // vertical: this session was spawned by another (sub-agent)
+  prevSessionId   String? // horizontal: this session continues a prior session (same work thread)
+  summary       String?   // short text composed by the AI at h-end-session
+  outcome       Float?    // 0.0–1.0, reported externally after the fact
+  outcomeRef    String?   // GUID or URL of the authoritative outcome record
+  outcomeMeta   Json?     // domain-specific outcome detail blob
+  startedAt     DateTime  @default(now())
+  endedAt       DateTime?
+  autoExpiredAt DateTime?
+
+  events       UsageEvent[]
+  parent       Session?   @relation("SubAgentSessions", fields: [parentSessionId], references: [id], onDelete: SetNull)
+  subSessions  Session[]  @relation("SubAgentSessions")
+  prev         Session?   @relation("SessionChain", fields: [prevSessionId], references: [id], onDelete: SetNull)
+  nextSessions Session[]  @relation("SessionChain")
+
+  @@index([type])
+  @@index([repo])
+  @@index([customerId])
+  @@index([startedAt])
+  @@index([parentSessionId])
+  @@index([prevSessionId])
+}
+
+// Every operation is recorded here.
+model UsageEvent {
+  id         String   @id @default(cuid())
+  type       String   // "read" | "write" | "action-run" | "edge-traversal" | "session-summary"
+  nodeLoc    String?  // stored directly so it survives node deletion
+  nodeId     String?
+  actionArgs Json?    // key-value args when type = "action-run"
+  clientId   String?  // API key label, "github-oauth:<login>", or "github-app"
+  sessionId  String?  // FK to Session
+  createdAt  DateTime @default(now())
+
+  node    Node?    @relation(fields: [nodeId], references: [id], onDelete: SetNull)
+  session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@index([nodeLoc])
+  @@index([type])
+  @@index([createdAt])
+  @@index([sessionId])
+}
+
+// API keys for machine clients (MCP, CI, edge devices).
+// The raw key is shown once at creation time; only its bcrypt hash is stored.
+model ApiKey {
+  id         String    @id @default(cuid())
+  label      String    @unique // human-readable name, e.g. "mmdata-ci"
+  keyHash    String    // bcrypt hash of the opaque token
+  role       Role      @default(READER)
+  namespace  String?   // for CONTRIBUTOR: restricts write access to this namespace prefix
+  expiresAt  DateTime?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+}
+
+// GitHub OAuth users — cached after first login.
+model User {
+  id        String   @id @default(cuid())
+  githubId  Int      @unique
+  login     String   // GitHub username
+  role      Role     @default(READER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum Role {
+  ADMIN
+  CONTRIBUTOR
+  READER
+}

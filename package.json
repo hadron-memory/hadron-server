@@ -11,7 +11,9 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "db:use-pg": "cp prisma/schema.postgresql.prisma prisma/schema.prisma && prisma generate",
+    "db:use-sqlite": "cp prisma/schema.sqlite.prisma prisma/schema.prisma && prisma generate"
   },
   "dependencies": {
     "@apollo/server": "^4.11.0",

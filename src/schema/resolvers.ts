@@ -2,6 +2,7 @@ import bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { serializeTags, deserializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../db/provider.js';
 
 export interface Context {
   db: PrismaClient;
@@ -20,6 +21,17 @@ function requireRole(ctx: Context, required: 'ADMIN' | 'CONTRIBUTOR' | 'READER')
 const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
 
 export const resolvers = {
+  // Field resolvers: deserialize SQLite TEXT back to arrays/objects for GraphQL
+  Node: {
+    tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
+  },
+  Session: {
+    outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
+  },
+  UsageEvent: {
+    actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
+  },
+
   Query: {
     node: async (_: unknown, { loc }: { loc: string }, ctx: Context) => {
       return ctx.db.node.findUnique({
@@ -36,13 +48,13 @@ export const resolvers = {
       return ctx.db.node.findMany({
         where: {
           ...(namespace ? { namespace: { startsWith: namespace } } : {}),
-          ...(tags?.length ? { tags: { hasEvery: tags } } : {}),
+          ...(tags?.length ? tagsFilter(tags) : {}),
           ...(search
             ? {
                 OR: [
-                  { name: { contains: search, mode: 'insensitive' } },
-                  { description: { contains: search, mode: 'insensitive' } },
-                  { content: { contains: search, mode: 'insensitive' } },
+                  searchContains('name', search),
+                  searchContains('description', search),
+                  searchContains('content', search),
                 ],
               }
             : {}),
@@ -110,10 +122,11 @@ export const resolvers = {
       if (ctx.role === 'CONTRIBUTOR' && ctx.namespace && !namespace.startsWith(ctx.namespace)) {
         throw new Error('Forbidden: outside your writable namespace');
       }
+      const tags = serializeTags(input.tags ?? []) as string[];
       return ctx.db.node.upsert({
         where: { loc: input.loc },
-        create: { ...input, namespace, tags: input.tags ?? [] },
-        update: { ...input, namespace, tags: input.tags ?? [] },
+        create: { ...input, namespace, tags },
+        update: { ...input, namespace, tags },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
     },
@@ -142,7 +155,7 @@ export const resolvers = {
 
         for (const input of nodes) {
           await tx.node.create({
-            data: { ...input, namespace: deriveNamespace(input.loc), tags: input.tags ?? [] },
+            data: { ...input, namespace: deriveNamespace(input.loc), tags: serializeTags(input.tags ?? []) as string[] },
           });
         }
 
@@ -210,7 +223,7 @@ export const resolvers = {
           type: event.type,
           nodeLoc: event.nodeLoc,
           nodeId: node?.id,
-          actionArgs: event.actionArgs as InputJsonValue | undefined,
+          actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
           clientId: event.clientId ?? ctx.clientId,
           sessionId: event.sessionId,
         },

@@ -2,6 +2,7 @@ import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
 import express from 'express';
 import { db } from './db/client.js';
+import { serializeJson } from './db/provider.js';
 import { resolveAuthContext } from './middleware/auth.js';
 import { resolvers } from './schema/resolvers.js';
 import { typeDefs } from './schema/typeDefs.js';
@@ -37,7 +38,7 @@ export async function createServer() {
           type: event.type,
           nodeLoc: event.nodeLoc,
           nodeId: node?.id,
-          actionArgs: event.actionArgs,
+          actionArgs: serializeJson(event.actionArgs) as typeof event.actionArgs,
           clientId: event.clientId,
           sessionId: event.sessionId,
         },
@@ -61,7 +62,7 @@ export async function createServer() {
     try {
       await db.session.update({
         where: { id },
-        data: { outcome, outcomeRef, outcomeMeta },
+        data: { outcome, outcomeRef, outcomeMeta: serializeJson(outcomeMeta) as typeof outcomeMeta },
       });
       res.json({ ok: true });
     } catch (err) {
