@@ -25,6 +25,7 @@ services:
       DATABASE_URL: postgresql://hadron:hadron@db:5432/hadron
       PORT: 4000
       NODE_ENV: production
+      SOURCES_PATH: /var/lib/hadron/sources
     volumes:
       - sources:/var/lib/hadron/sources
     env_file:
@@ -36,3 +37,4 @@ services:
 
 volumes:
   postgres_data:
+  sources:

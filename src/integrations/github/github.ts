@@ -1,5 +1,1 @@
-import { syncGraphFromGithub } from './syncGraphFromGithub.js';
-
-export const github = {
-  syncGraphFromGithub,
-}
+export { syncGraphFromGithub } from './syncGraphFromGithub.js';

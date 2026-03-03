@@ -1,8 +1,8 @@
 import bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
-import type { InputJsonValue } from 'prisma-client-3f3d78e5329141f40a312bfcf7e9ef8b09e49210cd3e6f5ea778592d383ddc18/runtime/library';
-import type { PrismaClient, Role, ClientType } from 'prisma-client-3f3d78e5329141f40a312bfcf7e9ef8b09e49210cd3e6f5ea778592d383ddc18';
-import { serializeTags, deserializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../db/provider';
+import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
+import type { PrismaClient, Role, ClientType, Prisma } from '../../../generated/prisma/index.js';
+import { serializeTags, deserializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
 
 export interface Context {
   db: PrismaClient;
@@ -159,7 +159,7 @@ export const resolvers = {
     ) => {
       requireRole(ctx, 'CONTRIBUTOR');
 
-      await ctx.db.$transaction(async (tx) => {
+      await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
         await tx.node.deleteMany({ where: { namespace, ownerRepo } });
 
         for (const input of nodes) {

@@ -3,8 +3,8 @@ import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
 import cors from 'cors';
 import express from 'express';
-import { db } from './db/client.js';
-import { serializeJson } from './db/provider.js';
+import { db } from './integrations/db/client.js';
+import { serializeJson } from './integrations/db/provider.js';
 import {
   buildAuthUrl,
   exchangeCode,
@@ -16,7 +16,7 @@ import {
 import { resolveAuthContext } from './middleware/auth.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
-import {controller} from "./controller/controller";
+import { controller } from './controller/controller.js';
 
 export async function createServer() {
   const app = express();
@@ -170,31 +170,12 @@ export async function createServer() {
 
   // Ingest usage events (lightweight, no GraphQL overhead for high-frequency calls)
   app.post('/usage', async (req, res) => {
-    const event = req.body;
-    await controller.operations.createUsageEvent(event);
-    // if (!event?.type) {
-    //   res.status(400).json({ error: 'Missing event.type' });
-    //   return;
-    // }
-    // try {
-    //   const node = event.nodeLoc
-    //     ? await db.node.findUnique({ where: { loc: event.nodeLoc } })
-    //     : null;
-    //   await db.usageEvent.create({
-    //     data: {
-    //       type: event.type,
-    //       nodeLoc: event.nodeLoc,
-    //       nodeId: node?.id,
-    //       actionArgs: serializeJson(event.actionArgs) as typeof event.actionArgs,
-    //       clientId: event.clientId,
-    //       sessionId: event.sessionId,
-    //     },
-    //   });
-    //   res.json({ ok: true });
-    // } catch (err) {
-    //   console.error('Usage ingest error:', err);
-    //   res.status(500).json({ error: 'Internal error' });
-    // }
+    const result = await controller.operations.createUsageEvent(req.body);
+    if (result.error) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   // Report session outcome — callable by any system (CRM webhook, edge device, AI agent)
@@ -223,10 +204,15 @@ export async function createServer() {
     }
   });
 
-  // Trigger a graph reload (called by collection tool after pushing nodes)
-  app.post('/reload', (_req, res) => {
-    // Placeholder — in production, invalidate any in-memory graph cache here
-    res.json({ ok: true });
+  // Trigger a graph reload — re-sync all graphs from GitHub
+  app.post('/reload', async (_req, res) => {
+    try {
+      await controller.startup();
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Reload error:', err);
+      res.status(500).json({ error: 'Reload failed' });
+    }
   });
 
   // Health check

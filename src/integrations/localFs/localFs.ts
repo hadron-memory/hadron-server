@@ -1,11 +1,4 @@
-import { loadNodeFromFs } from './loadNodeFromFs';
-import { loadAllGraphsFromFs } from './loadAllGraphsFromFs.js';
-import { loadGraphFromFs } from './loadGraphFromFs.js';
-import { saveNodeToFs } from './saveNodeToFs.js';
-
-export const localFs = {
-  loadAllGraphsFromFs,
-  loadGraphFromFs,
-  loadNodeFromFs,
-  saveNodeToFs,
-}
+export { loadNodeFromFs } from './loadNodeFromFs.js';
+export { loadAllGraphsFromFs } from './loadAllGraphsFromFs.js';
+export { loadGraphFromFs } from './loadGraphFromFs.js';
+export { saveNodeToFs } from './saveNodeToFs.js';

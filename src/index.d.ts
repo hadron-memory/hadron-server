@@ -1,5 +1,5 @@
 export interface HadronGraph {
-  name: String;
+  name: string;
   namespace: string;
   ownerRepo: string;
   nodes: Node[];
@@ -9,10 +9,12 @@ export interface Node {
   id: string;
   loc: string;
   name: string;
-  alias: String;
-  description: String;
-  content: String;
+  alias: string | null;
+  description: string | null;
+  content: string | null;
   tags: string[];
+  namespace: string;
+  ownerRepo: string;
   createdAt: string;
   updatedAt: string;
   outgoingEdges: Edge[];
@@ -23,42 +25,42 @@ export interface Edge {
   id: string;
   source: Node;
   target: Node;
-  label: String;
+  label: string | null;
 }
 
 export interface Session {
   id: string;
   type: string;
-  clientId: String;
-  repo: String;
-  branch: String;
-  prNumber: Int;
-  customerId: String;
-  language: String;
-  llmModel: String;
-  inputTokens: Int;
-  outputTokens: Int;
-  turnCount: Int;
-  errorCount: Int;
-  parentSessionId: String;
-  prevSessionId: String;
-  summary: String;
-  outcome: Float;
-  outcomeRef: String;
-  outcomeMeta: JSON;
+  clientId: string | null;
+  repo: string | null;
+  branch: string | null;
+  prNumber: number | null;
+  customerId: string | null;
+  language: string | null;
+  llmModel: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  turnCount: number | null;
+  errorCount: number | null;
+  parentSessionId: string | null;
+  prevSessionId: string | null;
+  summary: string | null;
+  outcome: number | null;
+  outcomeRef: string | null;
+  outcomeMeta: Record<string, unknown> | null;
   startedAt: string;
-  endedAt: String;
-  autoExpiredAt: String;
-  events: UsageEvent[]
+  endedAt: string | null;
+  autoExpiredAt: string | null;
+  events: UsageEvent[];
 }
 
 export interface UsageEvent {
   id: string;
   type: string;
-  nodeLoc: String;
-  actionArgs: JSON;
-  clientId: String;
-  sessionId: String;
+  nodeLoc: string | null;
+  actionArgs: Record<string, unknown> | null;
+  clientId: string | null;
+  sessionId: string | null;
   createdAt: string;
 }
 
@@ -66,12 +68,12 @@ export interface Client {
   id: string;
   label: string;
   type: ClientType;
-  description: String;
+  description: string | null;
   role: Role;
-  namespace: String;
-  expiresAt: String;
+  namespace: string | null;
+  expiresAt: string | null;
   createdAt: string;
-  lastUsedAt: String;
+  lastUsedAt: string | null;
 }
 
 // Returned once at creation — the raw key is never stored
@@ -84,7 +86,10 @@ export interface User {
   id: string;
   githubId: number;
   login: string;
-  name: String;
-  avatarUrl: String;
+  name: string | null;
+  avatarUrl: string | null;
   role: Role;
 }
+
+export type Role = 'ADMIN' | 'CONTRIBUTOR' | 'READER';
+export type ClientType = 'WORKSTATION' | 'CLOUD' | 'IOT' | 'AGENT';

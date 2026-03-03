@@ -1,0 +1,1 @@
+The Hadron Controller maintains a copy of all graphs used by the organization.

@@ -1,11 +1,11 @@
-import { UsageEvent } from '../../index.d.js'
-import { db } from '../../db/client.js';
-import { serializeJson } from '../../db/provider.js';
+import type { UsageEvent } from '../../index.d.js';
+import type { InputJsonValue } from '../../generated/prisma/runtime/library.js';
+import { db } from '../../integrations/db/client.js';
+import { serializeJson } from '../../integrations/db/provider.js';
 
 export const createUsageEvent = async (
-  event: UsageEvent,
-): Promise<{ event?: UsageEvent, error?: string }> => {
-  // todo: save event to db
+  event: Partial<UsageEvent>,
+): Promise<{ event?: UsageEvent; error?: string }> => {
   if (!event.type) {
     return { error: 'Missing event.type' };
   }
@@ -18,17 +18,17 @@ export const createUsageEvent = async (
     const savedEvent = await db.usageEvent.create({
       data: {
         type: event.type,
-        nodeLoc: event.nodeLoc,
+        nodeLoc: event.nodeLoc ?? null,
         nodeId: node?.id,
-        actionArgs: serializeJson(event.actionArgs) as typeof event.actionArgs,
-        clientId: event.clientId,
-        sessionId: event.sessionId,
+        actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
+        clientId: event.clientId ?? null,
+        sessionId: event.sessionId ?? null,
       },
     });
 
-    return { event: savedEvent };
+    return { event: savedEvent as unknown as UsageEvent };
   } catch (error) {
     console.error('Usage ingest error:', error);
-    return { error: error.message };
+    return { error: (error as Error).message };
   }
-}
+};

@@ -1,8 +1,12 @@
-import { Node } from '../../index.d.js'
+import type { Node } from '../../index.d.js';
+import { createNode } from './createNode.js';
 
+/**
+ * Update an existing node: save to filesystem and upsert into the database.
+ * This is identical to createNode since both use upsert semantics.
+ */
 export const updateNode = async (
-  node: Node,
+  node: Partial<Node>,
 ): Promise<Node> => {
-  // todo: save node to fs, db
-  return node
-}
+  return createNode(node);
+};
