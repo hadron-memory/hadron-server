@@ -7,8 +7,8 @@ import { syncGraphFromGithub } from '../integrations/github/syncGraphFromGithub.
 
 export const controller = {
   startup,
-  syncGraphFromGithub,
   operations: {
+    syncGraphFromGithub,
     findGraph,
     createNode,
     updateNode,
