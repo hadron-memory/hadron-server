@@ -5,6 +5,11 @@ export const typeDefs = `#graphql
     READER
   }
 
+  type HadronGraph {
+    name: String
+    nodes: [Node]
+  }
+
   type Node {
     id: ID!
     loc: String!
@@ -64,9 +69,18 @@ export const typeDefs = `#graphql
     createdAt: String!
   }
 
-  type ApiKey {
+  enum ClientType {
+    WORKSTATION
+    CLOUD
+    IOT
+    AGENT
+  }
+
+  type Client {
     id: ID!
     label: String!
+    type: ClientType!
+    description: String
     role: Role!
     namespace: String
     expiresAt: String
@@ -75,8 +89,8 @@ export const typeDefs = `#graphql
   }
 
   # Returned once at creation — the raw key is never stored
-  type ApiKeyCreated {
-    apiKey: ApiKey!
+  type ClientCreated {
+    client: Client!
     rawKey: String!
   }
 
@@ -84,6 +98,8 @@ export const typeDefs = `#graphql
     id: ID!
     githubId: Int!
     login: String!
+    name: String
+    avatarUrl: String
     role: Role!
   }
 
@@ -148,9 +164,14 @@ export const typeDefs = `#graphql
     sessions(type: String, repo: String, customerId: String, limit: Int): [Session!]!
     session(id: ID!): Session
 
-    # API keys (admin only)
-    apiKeys: [ApiKey!]!
+    # Clients (admin only)
+    clients: [Client!]!
+    client(label: String!): Client
 
+    # Users (admin only)
+    users: [User!]!
+
+    # Current authenticated user
     me: User
   }
 
@@ -171,8 +192,11 @@ export const typeDefs = `#graphql
     # Record a usage event
     recordUsage(event: UsageEventInput!): Boolean!
 
-    # API key management (admin only)
-    createApiKey(label: String!, role: Role!, namespace: String, expiresAt: String): ApiKeyCreated!
-    revokeApiKey(label: String!): Boolean!
+    # Client management (admin only)
+    createClient(label: String!, type: ClientType!, role: Role!, description: String, namespace: String, expiresAt: String): ClientCreated!
+    revokeClient(label: String!): Boolean!
+
+    # User management (admin only)
+    updateUserRole(userId: ID!, role: Role!): User!
   }
 `;

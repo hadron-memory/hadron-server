@@ -107,17 +107,19 @@ model UsageEvent {
   @@index([sessionId])
 }
 
-// API keys for machine clients (MCP, CI, edge devices).
-// The raw key is shown once at creation time; only its bcrypt hash is stored.
-model ApiKey {
-  id         String    @id @default(cuid())
-  label      String    @unique // human-readable name, e.g. "mmdata-ci"
-  keyHash    String    // bcrypt hash of the opaque token
-  role       String    @default("READER") // "ADMIN" | "CONTRIBUTOR" | "READER"
-  namespace  String?   // for CONTRIBUTOR: restricts write access to this namespace prefix
-  expiresAt  DateTime?
-  createdAt  DateTime  @default(now())
-  lastUsedAt DateTime?
+// A machine client — workstation, cloud host, IoT device, or AI agent.
+// Authenticates via API key. The raw key is shown once at creation; only its bcrypt hash is stored.
+model Client {
+  id          String    @id @default(cuid())
+  label       String    @unique // human-readable name, e.g. "mmdata-ci"
+  keyHash     String    // bcrypt hash of the opaque token
+  type        String    @default("WORKSTATION") // "WORKSTATION" | "CLOUD" | "IOT" | "AGENT"
+  description String?
+  role        String    @default("READER") // "ADMIN" | "CONTRIBUTOR" | "READER"
+  namespace   String?   // for CONTRIBUTOR: restricts write access to this namespace prefix
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
 }
 
 // GitHub OAuth users — cached after first login.
@@ -125,6 +127,8 @@ model User {
   id        String   @id @default(cuid())
   githubId  Int      @unique
   login     String   // GitHub username
+  name      String?  // display name from GitHub profile
+  avatarUrl String?  // GitHub avatar URL
   role      String   @default("READER") // "ADMIN" | "CONTRIBUTOR" | "READER"
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

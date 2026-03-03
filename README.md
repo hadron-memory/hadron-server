@@ -16,7 +16,7 @@ npx prisma migrate dev         # apply migrations
 npm run dev                    # http://localhost:4000
 ```
 
-### SQLite (local / single-developer)
+### SQLite (localFs / single-developer)
 
 No external database required — everything lives in a single file.
 

@@ -25,8 +25,10 @@ services:
       DATABASE_URL: postgresql://hadron:hadron@db:5432/hadron
       PORT: 4000
       NODE_ENV: production
+    volumes:
+      - sources:/var/lib/hadron/sources
     env_file:
-      - path: .env.local
+      - path: .env.localFs
         required: false   # place secrets (GITHUB_CLIENT_SECRET etc.) here
     depends_on:
       db:

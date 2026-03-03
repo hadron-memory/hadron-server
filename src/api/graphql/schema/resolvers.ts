@@ -1,12 +1,13 @@
 import bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
-import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
-import type { PrismaClient } from '../generated/prisma/index.js';
-import { serializeTags, deserializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../db/provider.js';
+import type { InputJsonValue } from 'prisma-client-3f3d78e5329141f40a312bfcf7e9ef8b09e49210cd3e6f5ea778592d383ddc18/runtime/library';
+import type { PrismaClient, Role, ClientType } from 'prisma-client-3f3d78e5329141f40a312bfcf7e9ef8b09e49210cd3e6f5ea778592d383ddc18';
+import { serializeTags, deserializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../db/provider';
 
 export interface Context {
   db: PrismaClient;
-  clientId?: string; // set by auth middleware
+  clientId?: string;  // Client.label or "github:<login>"
+  userId?: string;    // User.id — only set for OAuth/JWT users
   role?: 'ADMIN' | 'CONTRIBUTOR' | 'READER';
   namespace?: string; // contributor's writable namespace
 }
@@ -102,16 +103,24 @@ export const resolvers = {
       return ctx.db.session.findUnique({ where: { id }, include: SESSION_INCLUDE });
     },
 
-    apiKeys: async (_: unknown, __: unknown, ctx: Context) => {
+    clients: async (_: unknown, __: unknown, ctx: Context) => {
       requireRole(ctx, 'ADMIN');
-      return ctx.db.apiKey.findMany({ orderBy: { createdAt: 'desc' } });
+      return ctx.db.client.findMany({ orderBy: { createdAt: 'desc' } });
+    },
+
+    client: async (_: unknown, { label }: { label: string }, ctx: Context) => {
+      requireRole(ctx, 'ADMIN');
+      return ctx.db.client.findUnique({ where: { label } });
+    },
+
+    users: async (_: unknown, __: unknown, ctx: Context) => {
+      requireRole(ctx, 'ADMIN');
+      return ctx.db.user.findMany({ orderBy: { createdAt: 'desc' } });
     },
 
     me: async (_: unknown, __: unknown, ctx: Context) => {
-      if (!ctx.clientId) return null;
-      if (!ctx.clientId.startsWith('github-oauth:')) return null;
-      const login = ctx.clientId.slice('github-oauth:'.length);
-      return ctx.db.user.findFirst({ where: { login } });
+      if (!ctx.userId) return null;
+      return ctx.db.user.findUnique({ where: { id: ctx.userId } });
     },
   },
 
@@ -231,35 +240,55 @@ export const resolvers = {
       return true;
     },
 
-    createApiKey: async (
+    createClient: async (
       _: unknown,
       {
         label,
+        type,
         role,
+        description,
         namespace,
         expiresAt,
-      }: { label: string; role: 'ADMIN' | 'CONTRIBUTOR' | 'READER'; namespace?: string; expiresAt?: string },
+      }: {
+        label: string;
+        type: string;
+        role: 'ADMIN' | 'CONTRIBUTOR' | 'READER';
+        description?: string;
+        namespace?: string;
+        expiresAt?: string;
+      },
       ctx: Context,
     ) => {
       requireRole(ctx, 'ADMIN');
       const rawKey = randomBytes(32).toString('hex');
       const keyHash = await bcrypt.hash(rawKey, 12);
-      const apiKey = await ctx.db.apiKey.create({
+      const client = await ctx.db.client.create({
         data: {
           label,
           keyHash,
-          role,
+          type: type as ClientType,
+          description,
+          role: role as Role,
           namespace,
           expiresAt: expiresAt ? new Date(expiresAt) : undefined,
         },
       });
-      return { apiKey, rawKey };
+      return { client, rawKey };
     },
 
-    revokeApiKey: async (_: unknown, { label }: { label: string }, ctx: Context) => {
+    revokeClient: async (_: unknown, { label }: { label: string }, ctx: Context) => {
       requireRole(ctx, 'ADMIN');
-      await ctx.db.apiKey.delete({ where: { label } });
+      await ctx.db.client.delete({ where: { label } });
       return true;
+    },
+
+    updateUserRole: async (
+      _: unknown,
+      { userId, role }: { userId: string; role: string },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'ADMIN');
+      return ctx.db.user.update({ where: { id: userId }, data: { role: role as Role } });
     },
   },
 };

@@ -1,49 +1,67 @@
 import bcrypt from 'bcrypt';
 import type { Request } from 'express';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { verifyJwt } from '../auth/jwt.js';
 
 export interface AuthContext {
-  clientId?: string;
+  clientId?: string;   // Client.label (API keys) or "github:<login>" (OAuth)
+  userId?: string;     // User.id — only set for OAuth/JWT users
   role?: 'ADMIN' | 'CONTRIBUTOR' | 'READER';
   namespace?: string;
 }
 
 // Resolve auth context from an incoming request.
-// Checks Bearer token first (API key), then falls back to session cookie
-// (GitHub OAuth — to be implemented).
-export async function resolveAuthContext(req: Request, db: PrismaClient): Promise<AuthContext> {
+// JWTs (contain dots) → OAuth user; hex API keys (no dots) → machine Client.
+export async function resolveAuthContext(
+  req: Request,
+  db: PrismaClient,
+): Promise<AuthContext> {
   const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) return {};
 
-  if (authHeader?.startsWith('Bearer ')) {
-    const rawKey = authHeader.slice(7);
-    return resolveApiKey(rawKey, db);
+  const token = authHeader.slice(7);
+
+  // JWTs have the form header.payload.signature (two dots); hex API keys do not
+  if (token.includes('.')) {
+    return resolveJwt(token);
   }
-
-  // GitHub OAuth session cookie — placeholder until OAuth flow is implemented
-  // TODO: validate session cookie, fetch GitHub org membership, map to role
-  return {};
+  return resolveClientKey(token, db);
 }
 
-async function resolveApiKey(rawKey: string, db: PrismaClient): Promise<AuthContext> {
-  // Fetch all keys and compare — in production, prefix the key with the label
-  // (e.g., "label:rawSecret") so we can look up by label without full scan.
-  const keys = await db.apiKey.findMany({
+async function resolveJwt(token: string): Promise<AuthContext> {
+  try {
+    const payload = await verifyJwt(token);
+    return {
+      clientId: `github:${payload.login}`,
+      userId: payload.sub,
+      role: payload.role,
+    };
+  } catch {
+    return {}; // invalid or expired JWT
+  }
+}
+
+async function resolveClientKey(
+  rawKey: string,
+  db: PrismaClient,
+): Promise<AuthContext> {
+  const clients = await db.client.findMany({
     where: {
       OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
     },
   });
 
-  for (const key of keys) {
-    const match = await bcrypt.compare(rawKey, key.keyHash);
+  for (const client of clients) {
+    const match = await bcrypt.compare(rawKey, client.keyHash);
     if (match) {
-      await db.apiKey.update({
-        where: { id: key.id },
+      await db.client.update({
+        where: { id: client.id },
         data: { lastUsedAt: new Date() },
       });
       return {
-        clientId: key.label,
-        role: key.role as 'ADMIN' | 'CONTRIBUTOR' | 'READER',
-        namespace: key.namespace ?? undefined,
+        clientId: client.label,
+        role: client.role as 'ADMIN' | 'CONTRIBUTOR' | 'READER',
+        namespace: client.namespace ?? undefined,
       };
     }
   }
