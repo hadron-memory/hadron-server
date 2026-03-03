@@ -2,29 +2,37 @@
 
 GraphQL API, usage database, and node collection service for the Hadron graph.
 
+Graphs are defined in `.hadron-controller.yaml` and synced from GitHub on startup.
+Nodes are stored in both a PostgreSQL database and on the local filesystem.
+
+## Prerequisites
+
+- Node.js 20+
+- PostgreSQL 15+ (or SQLite for single-developer mode)
+
 ## Quick start
 
 ```bash
 npm install
+cp .env.example .env   # edit DATABASE_URL, JWT_SECRET, SOURCES_PATH
 ```
 
 ### PostgreSQL (default)
 
 ```bash
-cp .env.example .env          # edit DATABASE_URL, secrets
-npx prisma migrate dev         # apply migrations
-npm run dev                    # http://localhost:4000
+npm run db:push        # push schema to database (first time)
+npm run dev            # http://localhost:4000
 ```
 
-### SQLite (localFs / single-developer)
+### SQLite (single-developer / offline)
 
 No external database required — everything lives in a single file.
 
 ```bash
-# 1. Switch the Prisma schema to SQLite
+# 1. Switch the Prisma schema to SQLite and regenerate
 npm run db:use-sqlite
 
-# 2. Set environment and push the schema
+# 2. Push the schema
 DB_PROVIDER=sqlite DATABASE_URL="file:./hadron.db" npx prisma db push
 
 # 3. Start the server
@@ -37,158 +45,135 @@ To switch back to PostgreSQL:
 npm run db:use-pg
 ```
 
-## Testing SQLite mode
+## Configuration
 
-Once the server is running with SQLite (step 3 above), you can verify the
-key operations end-to-end.
+Copy `.hadron-controller.yaml.example` (or create one) in the directory pointed to
+by `CONFIG_PATH` (default: project root). Example:
 
-### 1. Create an API key
-
-Mutations require authentication. Seed an admin key with a small script:
-
-```bash
-# save as seed-test-key.ts (delete after testing)
-cat > seed-test-key.ts << 'SEED'
-import { db } from './src/db/client.js';
-import bcrypt from 'bcrypt';
-
-const rawKey = 'test-admin-key-12345';
-const keyHash = await bcrypt.hash(rawKey, 10);
-await db.apiKey.create({ data: { label: 'test-admin', keyHash, role: 'ADMIN' } });
-console.log('Bearer token:', rawKey);
-process.exit(0);
-SEED
-
-DB_PROVIDER=sqlite DATABASE_URL="file:./hadron.db" npx tsx seed-test-key.ts
+```yaml
+graphs:
+  myorg/myrepo:
+    source: "git@github.com:myorg/myrepo.git"
+    version: "latest"
+    path: "myorg/myrepo"
+    updatedAt: "2026-01-01T00:00:00.000Z"
 ```
 
-Use the token in subsequent requests:
+| Key | Description |
+|-----|-------------|
+| `source` | Git clone URL (SSH or HTTPS) |
+| `path` | Local path relative to `SOURCES_PATH` |
+| `version` | Label only — currently unused |
 
-```bash
-AUTH="Authorization: Bearer test-admin-key-12345"
+On startup the controller clones/pulls each graph and loads all nodes into the database.
+`POST /reload` triggers a re-sync without restarting.
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | — | Prisma connection string |
+| `DB_PROVIDER` | `postgresql` | `postgresql` or `sqlite` |
+| `JWT_SECRET` | — | HS256 signing secret (≥ 32 chars) |
+| `SOURCES_PATH` | `./sources` | Root directory for cloned graphs |
+| `CONFIG_PATH` | `.` | Directory containing `.hadron-controller.yaml` |
+| `PORT` | `4000` | HTTP listen port |
+
+## Node filesystem format
+
+Each node is a directory containing a `.node/` subdirectory:
+
+```
+myorg/myrepo/
+  services/
+    .node/
+      node.yaml      # name, description, tags, outgoing edges
+      topic.md       # markdown content
 ```
 
-### 2. Upsert nodes with tags
+`node.yaml` example:
 
-```bash
-curl -s http://localhost:4000/graphql \
-  -H 'Content-Type: application/json' -H "$AUTH" \
-  -d '{"query": "mutation { upsertNode(input: { loc: \"acme.app.models.user\", name: \"User Model\", ownerRepo: \"acme/app\", tags: [\"core\", \"auth\"] }) { id loc name tags } }"}'
+```yaml
+name: services
+description: "Service layer"
+tags: [backend, api]
+nodes:
+  - loc: models          # relative loc of target node
+    rel: "depends on"
 ```
 
-Expected: tags come back as `["core","auth"]`.
+The node's `loc` is derived from its path relative to the graph root, with `/`
+replaced by `.` (e.g. `services/auth` → `services.auth`).
 
-### 3. Filter by tags
+## Authentication
 
-```bash
-# Insert a second node
-curl -s http://localhost:4000/graphql \
-  -H 'Content-Type: application/json' -H "$AUTH" \
-  -d '{"query": "mutation { upsertNode(input: { loc: \"acme.app.views.login\", name: \"Login View\", ownerRepo: \"acme/app\", tags: [\"auth\", \"ui\"] }) { id loc name tags } }"}'
+Two token types are accepted via `Authorization: Bearer <token>`:
 
-# Filter: nodes with tag "auth" — should return both
-curl -s http://localhost:4000/graphql \
-  -H 'Content-Type: application/json' -H "$AUTH" \
-  -d '{"query": "{ nodes(tags: [\"auth\"]) { loc name tags } }"}'
+- **JWT** (contains dots) — issued after GitHub OAuth login; carries `sub`, `login`, `role`.
+- **API key** (hex string) — created via `db.client.create(...)` with a bcrypt-hashed key.
 
-# Filter: nodes with BOTH "auth" AND "core" — should return only User Model
-curl -s http://localhost:4000/graphql \
-  -H 'Content-Type: application/json' -H "$AUTH" \
-  -d '{"query": "{ nodes(tags: [\"auth\", \"core\"]) { loc name tags } }"}'
-```
+Roles: `ADMIN` > `CONTRIBUTOR` > `READER`.
 
-### 4. Case-insensitive search
+## Testing
+
+Tests require a `hadron_test` PostgreSQL database. Create it once:
 
 ```bash
-curl -s http://localhost:4000/graphql \
-  -H 'Content-Type: application/json' -H "$AUTH" \
-  -d '{"query": "{ nodes(search: \"LOGIN\") { loc name } }"}'
+npm run db:test-setup
 ```
 
-Expected: returns "Login View" (SQLite LIKE is case-insensitive for ASCII).
-
-### 5. Sessions and usage events
+Then run:
 
 ```bash
-# Start a session
-curl -s http://localhost:4000/graphql \
-  -H 'Content-Type: application/json' -H "$AUTH" \
-  -d '{"query": "mutation { startSession(input: { id: \"test-001\", type: \"mcp\", repo: \"acme/app\" }) { id type } }"}'
-
-# Record usage via GraphQL (JSON actionArgs passed as variable)
-curl -s http://localhost:4000/graphql \
-  -H 'Content-Type: application/json' -H "$AUTH" \
-  -d '{"query": "mutation R($e: UsageEventInput!) { recordUsage(event: $e) }", "variables": {"e": {"type": "h-view-node", "nodeLoc": "acme.app.models.user", "actionArgs": {"depth": 2}, "sessionId": "test-001"}}}'
-
-# Record usage via REST (no auth required)
-curl -s http://localhost:4000/usage \
-  -H 'Content-Type: application/json' \
-  -d '{"type": "h-run-action", "nodeLoc": "acme.app.views.login", "actionArgs": {"action": "build"}, "sessionId": "test-001"}'
+npm test                # run all tests
+npm run test:watch      # watch mode
+npm run test:coverage   # with coverage report
 ```
 
-### 6. Session outcome (REST)
+Tests use Vitest with `pool: 'forks'` (one process per file) and `fileParallelism: false`
+to prevent concurrent writes to the shared test database.
 
-```bash
-curl -s http://localhost:4000/sessions/test-001/outcome \
-  -H 'Content-Type: application/json' \
-  -d '{"outcome": 0.85, "outcomeRef": "CRM-123", "outcomeMeta": {"source": "crm"}}'
-```
+## Endpoints
 
-### 7. Verify round-trip
-
-Query the session back — all JSON fields (`actionArgs`, `outcomeMeta`) should
-come back as objects, not strings:
-
-```bash
-curl -s http://localhost:4000/graphql \
-  -H 'Content-Type: application/json' -H "$AUTH" \
-  -d '{"query": "{ session(id: \"test-001\") { id outcome outcomeRef outcomeMeta events { type nodeLoc actionArgs } } }"}'
-```
-
-### 8. Clean up
-
-```bash
-rm -f seed-test-key.ts hadron.db
-npm run db:use-pg   # restore PostgreSQL as active schema
-```
-
-## Database provider adapter
-
-The `src/db/provider.ts` module abstracts the differences between PostgreSQL
-and SQLite. The server reads `DB_PROVIDER` at startup:
-
-| Feature | PostgreSQL | SQLite |
-|---------|-----------|--------|
-| Tags | `String[]` (native array) | `String` (JSON-serialized) |
-| JSON fields | `Json` type | `String` (JSON-serialized) |
-| Tag filter (`hasEvery`) | Prisma `hasEvery` | `AND` + `contains` on JSON string |
-| Case-insensitive search | `mode: 'insensitive'` | Omitted (SQLite LIKE is case-insensitive) |
-| Enums | `enum Role` | `String` with defaults |
-
-Field resolvers on `Node`, `Session`, and `UsageEvent` transparently
-deserialize the stored values so the GraphQL API behaves identically
-regardless of database provider.
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `GET /health` | — | Health check |
+| `POST /graphql` | Bearer | GraphQL API (Apollo) |
+| `POST /usage` | — | Ingest a usage event (REST, no auth) |
+| `POST /reload` | — | Re-sync all graphs from GitHub |
 
 ## Scripts
 
 | Script | Description |
 |--------|-------------|
-| `npm run dev` | Start dev server with hot reload |
+| `npm run dev` | Start dev server with hot reload (tsx watch) |
 | `npm run build` | Compile TypeScript |
 | `npm start` | Run compiled server |
+| `npm test` | Run all tests |
+| `npm run test:watch` | Watch mode |
+| `npm run test:coverage` | Coverage report |
 | `npm run db:generate` | Regenerate Prisma client |
-| `npm run db:migrate` | Run Prisma migrations (PostgreSQL) |
 | `npm run db:push` | Push schema to database |
+| `npm run db:migrate` | Run Prisma migrations (PostgreSQL) |
 | `npm run db:studio` | Open Prisma Studio |
 | `npm run db:use-pg` | Switch to PostgreSQL schema |
 | `npm run db:use-sqlite` | Switch to SQLite schema |
+| `npm run db:test-setup` | Create/update the `hadron_test` database |
 
-## Endpoints
+## Database provider adapter
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | Health check |
-| `POST /graphql` | GraphQL API (Apollo) |
-| `POST /usage` | Ingest usage events (REST, no auth) |
-| `POST /sessions/:id/outcome` | Report session outcome (REST) |
-| `POST /reload` | Trigger graph reload |
+`src/integrations/db/provider.ts` abstracts the differences between the two engines.
+The server reads `DB_PROVIDER` at startup:
+
+| Feature | PostgreSQL | SQLite |
+|---------|-----------|--------|
+| Tags | `String[]` (native array) | `String` (JSON-serialized) |
+| JSON fields | `Json` type | `String` (JSON-serialized) |
+| Tag filter | Prisma `hasEvery` | `AND` + `contains` on JSON string |
+| Case-insensitive search | `mode: 'insensitive'` | Omitted (SQLite LIKE is already case-insensitive) |
+| Enums | `enum Role / ClientType` | `String` with defaults |
+
+## Architecture
+
+For deeper architecture documentation, see the hadron nodes in
+[.hadron/hadron-io/hadron-controller/](.hadron/hadron-io/hadron-controller/).

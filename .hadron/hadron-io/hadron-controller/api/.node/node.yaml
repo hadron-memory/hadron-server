@@ -1,0 +1,16 @@
+name: api
+description: The GraphQL and REST endpoints exposed by the Hadron Controller
+
+tags:
+  - api
+  - graphql
+  - rest
+  - apollo
+
+nodes:
+  - loc: hadron-io.hadron-controller
+    rel: The server that exposes these endpoints
+  - loc: hadron-io.hadron-controller.auth
+    rel: All GraphQL mutations and some queries require authentication
+  - loc: hadron-io.hadron-controller.data-model
+    rel: The GraphQL schema mirrors the database models

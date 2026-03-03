@@ -1,0 +1,18 @@
+name: architecture
+description: High-level overview of the Hadron Controller system components and data flow
+
+tags:
+  - architecture
+  - overview
+
+nodes:
+  - loc: hadron-io.hadron-controller
+    rel: Parent node — the controller this architecture describes
+  - loc: hadron-io.hadron-controller.auth
+    rel: Auth layer sits in front of all GraphQL and REST endpoints
+  - loc: hadron-io.hadron-controller.graph-sync
+    rel: Sync engine runs on startup and on demand via /reload
+  - loc: hadron-io.hadron-controller.api
+    rel: The API layer that clients interact with
+  - loc: hadron-io.hadron-controller.dual-database
+    rel: Database layer that the controller reads and writes

@@ -1,0 +1,158 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { join } from 'path';
+import { mkdirSync } from 'fs';
+import { db } from '../db/client.js';
+import { cleanDb, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
+import { syncGraphFromGithub } from './syncGraphFromGithub.js';
+
+// ---------------------------------------------------------------------------
+// Mock child_process.execFile so no actual git commands run
+// execFile may be called with 3 args (cmd, args, cb) or 4 args (cmd, args, opts, cb)
+// depending on whether options are passed. Always treat the last arg as the callback.
+// ---------------------------------------------------------------------------
+vi.mock('child_process', () => {
+  const execFile = vi.fn((...args: unknown[]) => {
+    const cb = args[args.length - 1] as Function;
+    if (typeof cb === 'function') cb(null, '', '');
+  });
+  return { execFile };
+});
+
+// ---------------------------------------------------------------------------
+// Mock config so we can control what graphs are registered
+// ---------------------------------------------------------------------------
+let mockSources: string;
+let cleanup: () => void;
+
+vi.mock('../../config.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../config.js')>();
+  return {
+    ...real,
+    loadConfig: vi.fn(() => ({
+      graphs: {
+        'test/repo': {
+          source: 'git@github.com:test/repo.git',
+          path: 'test/repo',
+          version: '1',
+          updatedAt: '',
+        },
+      },
+    })),
+    get SOURCES_PATH() {
+      return mockSources;
+    },
+  };
+});
+
+beforeEach(async () => {
+  ({ dir: mockSources, cleanup } = makeTmpDir());
+  await cleanDb(db);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
+
+describe('syncGraphFromGithub', () => {
+  it('returns an error when graph name is not in config', async () => {
+    const result = await syncGraphFromGithub('unknown/graph');
+    expect(result.error).toContain('not found in config');
+  });
+
+  it('calls git clone when .git directory does not exist', async () => {
+    // Ensure the target directory does NOT exist (no .git)
+    const { execFile } = await import('child_process');
+    const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
+
+    const result = await syncGraphFromGithub('test/repo');
+
+    const calls = execFileMock.mock.calls;
+    const cloneCall = calls.find((c: any[]) => c[1]?.[0] === 'clone');
+    expect(cloneCall).toBeDefined();
+    expect(cloneCall![1]).toContain('git@github.com:test/repo.git');
+  });
+
+  it('calls git pull when .git directory already exists', async () => {
+    const { execFile } = await import('child_process');
+    const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
+
+    // Pre-create .git directory so it looks like an existing clone
+    const repoPath = join(mockSources, 'test', 'repo');
+    mkdirSync(join(repoPath, '.git'), { recursive: true });
+
+    await syncGraphFromGithub('test/repo');
+
+    const calls = execFileMock.mock.calls;
+    const pullCall = calls.find((c: any[]) => c[1]?.[0] === 'pull');
+    expect(pullCall).toBeDefined();
+    expect(pullCall![1]).toContain('--ff-only');
+  });
+
+  it('returns an error when git fails', async () => {
+    const { execFile } = await import('child_process');
+    const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
+    execFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const cb = args[args.length - 1] as Function;
+      if (typeof cb === 'function') cb(new Error('git authentication failed'), '', '');
+    });
+
+    const result = await syncGraphFromGithub('test/repo');
+    expect(result.error).toContain('git authentication failed');
+  });
+
+  it('loads nodes from the filesystem and upserts them into the DB', async () => {
+    // Write real .node/ files into the expected location
+    const nodeDir = join(mockSources, 'test', 'repo', 'nodeA');
+    mkdirSync(nodeDir, { recursive: true });
+    writeNodeFiles(nodeDir, { name: 'nodeA', description: 'Test node' }, '## Content');
+
+    const result = await syncGraphFromGithub('test/repo');
+    expect(result.error).toBeUndefined();
+    expect(result.nodeCount).toBe(1);
+
+    // loc is the path relative to the graph root, not prefixed with the graph name
+    const inDb = await db.node.findUnique({ where: { loc: 'nodeA' } });
+    expect(inDb).not.toBeNull();
+    expect(inDb!.name).toBe('nodeA');
+  });
+
+  it('re-sync replaces old nodes with the new set', async () => {
+    // First sync: one node
+    const nodeA = join(mockSources, 'test', 'repo', 'nodeA');
+    mkdirSync(nodeA, { recursive: true });
+    writeNodeFiles(nodeA, { name: 'nodeA' });
+
+    await syncGraphFromGithub('test/repo');
+    expect(await db.node.count({ where: { namespace: 'test.repo' } })).toBe(1);
+
+    // Remove nodeA, add nodeB
+    const { rmSync } = await import('fs');
+    rmSync(nodeA, { recursive: true });
+    const nodeB = join(mockSources, 'test', 'repo', 'nodeB');
+    mkdirSync(nodeB, { recursive: true });
+    writeNodeFiles(nodeB, { name: 'nodeB' });
+
+    await syncGraphFromGithub('test/repo');
+
+    const nodes = await db.node.findMany({ where: { namespace: 'test.repo' } });
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].name).toBe('nodeB');
+  });
+
+  it('creates edges between nodes in the DB', async () => {
+    const nodeA = join(mockSources, 'test', 'repo', 'a');
+    const nodeB = join(mockSources, 'test', 'repo', 'b');
+    mkdirSync(nodeA, { recursive: true });
+    mkdirSync(nodeB, { recursive: true });
+    // Edge target uses the relative loc (relative to graph root), not the full namespace-prefixed loc
+    writeNodeFiles(nodeA, { name: 'a', nodes: [{ loc: 'b', rel: 'uses' }] });
+    writeNodeFiles(nodeB, { name: 'b' });
+
+    await syncGraphFromGithub('test/repo');
+
+    const edges = await db.edge.findMany();
+    expect(edges).toHaveLength(1);
+    expect(edges[0].label).toBe('uses');
+  });
+});

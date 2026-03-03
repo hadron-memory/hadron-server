@@ -12,7 +12,7 @@ export const findGraph = async (
   const namespace = graphNameToNamespace(name);
 
   const nodes = await db.node.findMany({
-    where: { namespace: { startsWith: namespace } },
+    where: { namespace },
     orderBy: { loc: 'asc' },
     include: {
       outgoingEdges: { include: { target: true } },

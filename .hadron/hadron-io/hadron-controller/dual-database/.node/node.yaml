@@ -1,0 +1,15 @@
+name: dual-database
+description: How the controller supports both PostgreSQL (production) and SQLite (development) with a single codebase
+
+tags:
+  - database
+  - postgresql
+  - sqlite
+  - prisma
+  - devex
+
+nodes:
+  - loc: hadron-io.hadron-controller
+    rel: The server that implements this database abstraction
+  - loc: hadron-io.hadron-controller.data-model
+    rel: The schema that is expressed in both database variants

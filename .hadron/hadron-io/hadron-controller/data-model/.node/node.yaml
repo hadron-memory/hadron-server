@@ -1,0 +1,18 @@
+name: data-model
+description: The Prisma database schema — Node, Edge, Session, UsageEvent, Client, and User
+
+tags:
+  - database
+  - prisma
+  - schema
+  - models
+
+nodes:
+  - loc: hadron-io.hadron-controller
+    rel: The server that owns and manages this data model
+  - loc: hadron-io.hadron-controller.dual-database
+    rel: The two database backends (PostgreSQL and SQLite) that implement this schema
+  - loc: hadron-io.hadron-controller.graph-sync
+    rel: Graph sync populates the Node and Edge tables
+  - loc: hadron-io.hadron-controller.auth
+    rel: Client and User models are central to authentication

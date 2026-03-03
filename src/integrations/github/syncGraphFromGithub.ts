@@ -41,7 +41,7 @@ export const syncGraphFromGithub = async (
         where: { namespace, ownerRepo: extractOwnerRepo(graphConf.source) },
       });
 
-      // Create all nodes
+      // Create all nodes (use the graph's canonical namespace, not the node-derived one)
       for (const node of graph.nodes) {
         await tx.node.create({
           data: {
@@ -51,7 +51,7 @@ export const syncGraphFromGithub = async (
             description: node.description,
             content: node.content,
             tags: serializeTags(node.tags ?? []) as string[],
-            namespace: node.namespace,
+            namespace,
             ownerRepo: node.ownerRepo,
           },
         });
