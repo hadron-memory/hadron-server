@@ -1,21 +1,68 @@
 import bcrypt from 'bcrypt';
 import { randomBytes, randomUUID } from 'crypto';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
-import type { PrismaClient, Role, ClientType, Prisma } from '../../../generated/prisma/index.js';
+import type { PrismaClient, Role, ClientType, OrgRole, Prisma } from '../../../generated/prisma/index.js';
 import { serializeTags, deserializeTags, serializeRoles, deserializeRoles, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
+import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
+import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 
 export interface Context {
   db: PrismaClient;
-  clientId?: string;  // Client.label or "github:<login>"
-  userId?: string;    // User.id — only set for OAuth/JWT users
+  clientId?: string;       // Client.label or "github:<login>"
+  userId?: string;         // User.id — only set for OAuth/JWT users
   roles?: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[];
-  namespace?: string; // contributor's writable namespace
+  namespace?: string;      // contributor's writable namespace
+  organizationId?: string; // set when the Client is scoped to an organization
 }
 
 function requireRole(ctx: Context, required: 'ADMIN' | 'CONTRIBUTOR' | 'READER') {
   const order: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2 };
   const highest = ctx.roles ? Math.max(...ctx.roles.map((r) => order[r] ?? -1)) : -1;
   if (highest < order[required]) throw new Error('Forbidden');
+}
+
+async function requireOrgRole(
+  ctx: Context,
+  orgId: string,
+  required: 'ADMIN' | 'CONTRIBUTOR' | 'READER',
+): Promise<void> {
+  // Platform ADMIN bypasses org-level check
+  if (ctx.roles?.includes('ADMIN')) return;
+  if (!ctx.userId) throw new Error('Forbidden');
+  const order: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2 };
+  const member = await ctx.db.organizationMember.findUnique({
+    where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+  });
+  if (!member || (order[member.role] ?? -1) < order[required]) {
+    throw new Error('Forbidden');
+  }
+}
+
+const ORG_INCLUDE = {
+  members: { include: { user: true }, orderBy: { createdAt: 'asc' as const } },
+  graphs: { orderBy: { name: 'asc' as const } },
+  subscriptions: { include: { graph: true }, orderBy: { createdAt: 'asc' as const } },
+};
+
+const GRAPH_INCLUDE = {
+  subscriptions: { include: { organization: true }, orderBy: { createdAt: 'asc' as const } },
+};
+
+/**
+ * Return the list of graph namespaces the given org can access:
+ * graphs it owns + graphs it has any subscription to.
+ */
+async function getAccessibleNamespaces(db: PrismaClient, organizationId: string): Promise<string[]> {
+  const graphs = await db.hadronGraph.findMany({
+    where: {
+      OR: [
+        { organizationId },
+        { subscriptions: { some: { organizationId } } },
+      ],
+    },
+    select: { name: true },
+  });
+  return graphs.map((g) => g.name.replace(/\//g, '.'));
 }
 
 const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
@@ -27,6 +74,12 @@ export const resolvers = {
   },
   Client: {
     roles: (client: { roles: string | string[] }) => deserializeRoles(client.roles),
+    graphs: (client: { id: string }, _: unknown, ctx: Context) =>
+      ctx.db.clientGraphSubscription
+        .findMany({ where: { clientId: client.id }, include: { graph: { include: GRAPH_INCLUDE } } })
+        .then((subs) => subs.map((s) => s.graph)),
+    user: (client: { userId?: string | null }, _: unknown, ctx: Context) =>
+      client.userId ? ctx.db.user.findUnique({ where: { id: client.userId } }) : null,
   },
   User: {
     roles: (user: { roles: string | string[] }) => deserializeRoles(user.roles),
@@ -51,8 +104,15 @@ export const resolvers = {
       { namespace, tags, search, limit }: { namespace?: string; tags?: string[]; search?: string; limit?: number },
       ctx: Context,
     ) => {
+      // Org-scoped clients see only nodes in graphs they own or subscribe to
+      let accessibleNamespaces: string[] | null = null;
+      if (ctx.organizationId && !ctx.roles?.includes('ADMIN')) {
+        accessibleNamespaces = await getAccessibleNamespaces(ctx.db, ctx.organizationId);
+      }
+
       return ctx.db.node.findMany({
         where: {
+          ...(accessibleNamespaces ? { namespace: { in: accessibleNamespaces } } : {}),
           ...(namespace ? { namespace: { startsWith: namespace } } : {}),
           ...(tags?.length ? tagsFilter(tags) : {}),
           ...(search
@@ -127,6 +187,71 @@ export const resolvers = {
       if (!ctx.userId) return null;
       return ctx.db.user.findUnique({ where: { id: ctx.userId } });
     },
+
+    organizations: async (_: unknown, __: unknown, ctx: Context) => {
+      requireRole(ctx, 'ADMIN');
+      return ctx.db.organization.findMany({ orderBy: { name: 'asc' }, include: ORG_INCLUDE });
+    },
+
+    myOrganizations: async (_: unknown, __: unknown, ctx: Context) => {
+      if (!ctx.userId) return [];
+      const memberships = await ctx.db.organizationMember.findMany({
+        where: { userId: ctx.userId },
+        include: { organization: { include: ORG_INCLUDE } },
+      });
+      return memberships.map((m) => m.organization);
+    },
+
+    organization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      if (!ctx.roles?.includes('ADMIN')) {
+        // Must be a member
+        if (!ctx.userId) throw new Error('Forbidden');
+        const member = await ctx.db.organizationMember.findUnique({
+          where: { organizationId_userId: { organizationId: id, userId: ctx.userId } },
+        });
+        if (!member) throw new Error('Forbidden');
+      }
+      return ctx.db.organization.findUnique({ where: { id }, include: ORG_INCLUDE });
+    },
+
+    publicGraphs: async (_: unknown, __: unknown, _ctx: Context) => {
+      return _ctx.db.hadronGraph.findMany({
+        where: { visibility: 'PUBLIC' },
+        orderBy: { name: 'asc' },
+        include: GRAPH_INCLUDE,
+      });
+    },
+
+    myGraphs: async (_: unknown, __: unknown, ctx: Context) => {
+      // API-key client — return its explicit ClientGraphSubscriptions
+      if (ctx.clientId && !ctx.userId) {
+        const client = await ctx.db.client.findUnique({
+          where: { label: ctx.clientId },
+          include: { graphSubscriptions: { include: { graph: { include: GRAPH_INCLUDE } } } },
+        });
+        return (client?.graphSubscriptions ?? []).map((s) => s.graph);
+      }
+      // JWT/OAuth user — union of all org-accessible graphs
+      if (ctx.userId) {
+        const memberships = await ctx.db.organizationMember.findMany({
+          where: { userId: ctx.userId },
+          select: { organizationId: true },
+        });
+        const orgIds = memberships.map((m) => m.organizationId);
+        if (orgIds.length === 0) return [];
+        return ctx.db.hadronGraph.findMany({
+          where: {
+            OR: [
+              { organizationId: { in: orgIds } },
+              { subscriptions: { some: { organizationId: { in: orgIds } } } },
+            ],
+          },
+          include: GRAPH_INCLUDE,
+          orderBy: { name: 'asc' },
+        });
+      }
+      throw new Error('Unauthenticated');
+    },
   },
 
   Mutation: {
@@ -136,20 +261,93 @@ export const resolvers = {
       if (!ctx.roles?.includes('ADMIN') && ctx.namespace && !namespace.startsWith(ctx.namespace)) {
         throw new Error('Forbidden: outside your writable namespace');
       }
+
+      // Org-scoped clients must own the graph or have a CONTRIBUTOR subscription
+      if (ctx.organizationId && !ctx.roles?.includes('ADMIN')) {
+        const graph = await ctx.db.hadronGraph.findFirst({
+          where: {
+            name: input.ownerRepo,
+            OR: [
+              { organizationId: ctx.organizationId },
+              { subscriptions: { some: { organizationId: ctx.organizationId, role: 'CONTRIBUTOR' } } },
+            ],
+          },
+          select: { id: true },
+        });
+        if (!graph) throw new Error('Forbidden: no write access to this graph');
+      }
       const tags = serializeTags(input.tags ?? []) as string[];
       const id = input.id ?? randomUUID().replace(/-/g, '');
-      return ctx.db.node.upsert({
+      // Destructure edges out so it's not passed to Prisma (not a DB column)
+      const { edges, ...nodeFields } = input;
+      const node = await ctx.db.node.upsert({
         where: { loc: input.loc },
-        create: { ...input, id, namespace, tags },
-        update: { ...input, namespace, tags },
+        create: { ...nodeFields, id, namespace, tags },
+        update: { ...nodeFields, namespace, tags },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
+
+      // Replace outgoing edges when caller provides them
+      let finalNode = node;
+      if (edges !== undefined) {
+        await ctx.db.edge.deleteMany({ where: { sourceId: node.id } });
+        await ctx.db.pendingEdge.deleteMany({ where: { sourceId: node.id } });
+        for (const e of edges) {
+          const target = await ctx.db.node.findUnique({ where: { id: e.targetId } });
+          if (target) {
+            await ctx.db.edge.upsert({
+              where: { sourceId_targetId: { sourceId: node.id, targetId: target.id } },
+              create: { sourceId: node.id, targetId: target.id, label: e.label ?? null },
+              update: { label: e.label ?? null },
+            });
+          } else {
+            await ctx.db.pendingEdge.upsert({
+              where: { sourceId_targetId: { sourceId: node.id, targetId: e.targetId } },
+              create: { sourceId: node.id, targetId: e.targetId, label: e.label ?? null },
+              update: { label: e.label ?? null },
+            });
+          }
+        }
+        finalNode = (await ctx.db.node.findUnique({
+          where: { id: node.id },
+          include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+        }))!;
+      }
+
+      // Fire-and-forget git write: checkout writeBranch, write YAML, commit, push.
+      writeNodeToGit({
+        id: finalNode.id,
+        loc: finalNode.loc,
+        name: finalNode.name,
+        alias: finalNode.alias,
+        description: finalNode.description,
+        content: finalNode.content,
+        tags: deserializeTags(finalNode.tags) as string[],
+        outgoingEdges: finalNode.outgoingEdges ?? [],
+      }, input.ownerRepo, ctx.clientId).catch((err) => {
+        console.error('[upsertNode] git write error:', err);
+      });
+
+      return finalNode;
     },
 
     deleteNode: async (_: unknown, { loc }: { loc: string }, ctx: Context) => {
       requireRole(ctx, 'CONTRIBUTOR');
       await ctx.db.node.delete({ where: { loc } });
       return true;
+    },
+
+    moveNode: async (_: unknown, { from, to }: { from: string; to: string }, ctx: Context) => {
+      requireRole(ctx, 'CONTRIBUTOR');
+      const namespace = deriveNamespace(to);
+      if (!ctx.roles?.includes('ADMIN') && ctx.namespace && !namespace.startsWith(ctx.namespace)) {
+        throw new Error('Forbidden: outside your writable namespace');
+      }
+      return ctx.db.node.update({
+        where: { loc: from },
+        data: { loc: to, namespace },
+        include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+      });
     },
 
     // Full replace of a repo's namespace subtree — used by the collection tool.
@@ -254,6 +452,8 @@ export const resolvers = {
         roles,
         description,
         namespace,
+        organizationId,
+        userId,
         expiresAt,
       }: {
         label: string;
@@ -261,6 +461,8 @@ export const resolvers = {
         roles: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[];
         description?: string;
         namespace?: string;
+        organizationId?: string;
+        userId?: string;
         expiresAt?: string;
       },
       ctx: Context,
@@ -276,6 +478,8 @@ export const resolvers = {
           description,
           roles: serializeRoles(roles) as Role[],
           namespace,
+          organizationId: organizationId ?? null,
+          userId: userId ?? null,
           expiresAt: expiresAt ? new Date(expiresAt) : undefined,
         },
       });
@@ -288,6 +492,54 @@ export const resolvers = {
       return true;
     },
 
+    // ── Client graph subscriptions ────────────────────────────────────────────
+
+    subscribeClientToGraph: async (
+      _: unknown,
+      { clientId, graphId }: { clientId: string; graphId: string },
+      ctx: Context,
+    ) => {
+      const client = await ctx.db.client.findUniqueOrThrow({ where: { id: clientId } });
+      const orgId = client.organizationId;
+      if (!orgId) throw new Error('Client is not scoped to an organization');
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+
+      // Verify the graph is accessible to the client's org (owned or org-subscribed)
+      const graph = await ctx.db.hadronGraph.findUniqueOrThrow({ where: { id: graphId } });
+      const isOwned = graph.organizationId === orgId;
+      const isSubscribed = isOwned
+        ? null
+        : await ctx.db.hadronGraphSubscription.findUnique({
+            where: { graphId_organizationId: { graphId, organizationId: orgId } },
+          });
+      if (!isOwned && !isSubscribed) {
+        throw new Error("Forbidden: graph is not accessible to this client's organization");
+      }
+
+      await ctx.db.clientGraphSubscription.upsert({
+        where: { clientId_graphId: { clientId, graphId } },
+        create: { clientId, graphId },
+        update: {},
+      });
+      return ctx.db.client.findUniqueOrThrow({ where: { id: clientId } });
+    },
+
+    unsubscribeClientFromGraph: async (
+      _: unknown,
+      { clientId, graphId }: { clientId: string; graphId: string },
+      ctx: Context,
+    ) => {
+      const client = await ctx.db.client.findUniqueOrThrow({ where: { id: clientId } });
+      const orgId = client.organizationId;
+      if (!orgId) throw new Error('Client is not scoped to an organization');
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+
+      await ctx.db.clientGraphSubscription.delete({
+        where: { clientId_graphId: { clientId, graphId } },
+      });
+      return ctx.db.client.findUniqueOrThrow({ where: { id: clientId } });
+    },
+
     updateUserRoles: async (
       _: unknown,
       { userId, roles }: { userId: string; roles: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[] },
@@ -296,12 +548,241 @@ export const resolvers = {
       requireRole(ctx, 'ADMIN');
       return ctx.db.user.update({ where: { id: userId }, data: { roles: serializeRoles(roles) as Role[] } });
     },
+
+    // ── Organization management ───────────────────────────────────────────────
+
+    createOrganization: async (
+      _: unknown,
+      { name, slug }: { name: string; slug: string },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'ADMIN');
+      return ctx.db.organization.create({ data: { name, slug }, include: ORG_INCLUDE });
+    },
+
+    updateOrganization: async (
+      _: unknown,
+      { id, name, slug }: { id: string; name?: string; slug?: string },
+      ctx: Context,
+    ) => {
+      await requireOrgRole(ctx, id, 'ADMIN');
+      return ctx.db.organization.update({
+        where: { id },
+        data: { ...(name ? { name } : {}), ...(slug ? { slug } : {}) },
+        include: ORG_INCLUDE,
+      });
+    },
+
+    deleteOrganization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      requireRole(ctx, 'ADMIN');
+      await ctx.db.organization.delete({ where: { id } });
+      return true;
+    },
+
+    linkGithubApp: async (
+      _: unknown,
+      { orgId, installationId }: { orgId: string; installationId: number },
+      ctx: Context,
+    ) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      return ctx.db.organization.update({
+        where: { id: orgId },
+        data: { githubInstallationId: installationId },
+        include: ORG_INCLUDE,
+      });
+    },
+
+    // ── Organization membership ───────────────────────────────────────────────
+
+    addOrganizationMember: async (
+      _: unknown,
+      { orgId, userId, role }: { orgId: string; userId: string; role: string },
+      ctx: Context,
+    ) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      return ctx.db.organizationMember.create({
+        data: { organizationId: orgId, userId, role: role as OrgRole },
+        include: { user: true },
+      });
+    },
+
+    updateOrganizationMember: async (
+      _: unknown,
+      { orgId, userId, role }: { orgId: string; userId: string; role: string },
+      ctx: Context,
+    ) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      return ctx.db.organizationMember.update({
+        where: { organizationId_userId: { organizationId: orgId, userId } },
+        data: { role: role as OrgRole },
+        include: { user: true },
+      });
+    },
+
+    removeOrganizationMember: async (
+      _: unknown,
+      { orgId, userId }: { orgId: string; userId: string },
+      ctx: Context,
+    ) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      await ctx.db.organizationMember.delete({
+        where: { organizationId_userId: { organizationId: orgId, userId } },
+      });
+      return true;
+    },
+
+    // ── Graph config management ───────────────────────────────────────────────
+
+    createGraphConfig: async (
+      _: unknown,
+      {
+        orgId,
+        name,
+        source,
+        readBranch,
+        writeBranch,
+        visibility,
+        version,
+      }: { orgId: string; name: string; source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string; version?: string },
+      ctx: Context,
+    ) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      return ctx.db.hadronGraph.create({
+        data: { organizationId: orgId, name, source, readBranch, writeBranch, visibility, version },
+        include: GRAPH_INCLUDE,
+      });
+    },
+
+    updateGraphConfig: async (
+      _: unknown,
+      {
+        id,
+        source,
+        readBranch,
+        writeBranch,
+        visibility,
+        version,
+      }: { id: string; source?: string; readBranch?: string; writeBranch?: string; visibility?: string; version?: string },
+      ctx: Context,
+    ) => {
+      const graph = await ctx.db.hadronGraph.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, graph.organizationId, 'ADMIN');
+      return ctx.db.hadronGraph.update({
+        where: { id },
+        data: {
+          ...(source !== undefined ? { source } : {}),
+          ...(readBranch !== undefined ? { readBranch } : {}),
+          ...(writeBranch !== undefined ? { writeBranch } : {}),
+          ...(visibility !== undefined ? { visibility } : {}),
+          ...(version !== undefined ? { version } : {}),
+        },
+        include: GRAPH_INCLUDE,
+      });
+    },
+
+    deleteGraphConfig: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const graph = await ctx.db.hadronGraph.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, graph.organizationId, 'ADMIN');
+      await ctx.db.hadronGraph.delete({ where: { id } });
+      return true;
+    },
+
+    syncGraphConfig: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const graph = await ctx.db.hadronGraph.findUniqueOrThrow({
+        where: { id },
+        include: { organization: true },
+      });
+      await requireOrgRole(ctx, graph.organizationId, 'CONTRIBUTOR');
+
+      const result = await syncGraphFromGithub(graph);
+      if (result.error) throw new Error(result.error);
+
+      return ctx.db.hadronGraph.findUniqueOrThrow({ where: { id }, include: GRAPH_INCLUDE });
+    },
+
+    // ── Graph subscriptions ────────────────────────────────────────────────────
+
+    createGraphSubscription: async (
+      _: unknown,
+      { graphId, orgId, role }: { graphId: string; orgId: string; role: string },
+      ctx: Context,
+    ) => {
+      const graph = await ctx.db.hadronGraph.findUniqueOrThrow({ where: { id: graphId } });
+
+      if (graph.visibility === 'PUBLIC') {
+        // Any org admin may self-subscribe to a public graph
+        await requireOrgRole(ctx, orgId, 'ADMIN');
+      } else {
+        // Private graph: only the owner org admin or platform admin can add subscribers
+        await requireOrgRole(ctx, graph.organizationId, 'ADMIN');
+      }
+
+      // Prevent the owning org from subscribing (they have implicit access)
+      if (graph.organizationId === orgId) {
+        throw new Error('Owner organization has implicit access and cannot subscribe');
+      }
+
+      return ctx.db.hadronGraphSubscription.create({
+        data: { graphId, organizationId: orgId, role },
+        include: { graph: { include: GRAPH_INCLUDE }, organization: { include: ORG_INCLUDE } },
+      });
+    },
+
+    updateGraphSubscription: async (
+      _: unknown,
+      { graphId, orgId, role }: { graphId: string; orgId: string; role: string },
+      ctx: Context,
+    ) => {
+      const graph = await ctx.db.hadronGraph.findUniqueOrThrow({ where: { id: graphId } });
+      await requireOrgRole(ctx, graph.organizationId, 'ADMIN');
+      return ctx.db.hadronGraphSubscription.update({
+        where: { graphId_organizationId: { graphId, organizationId: orgId } },
+        data: { role },
+        include: { graph: { include: GRAPH_INCLUDE }, organization: { include: ORG_INCLUDE } },
+      });
+    },
+
+    deleteGraphSubscription: async (
+      _: unknown,
+      { graphId, orgId }: { graphId: string; orgId: string },
+      ctx: Context,
+    ) => {
+      const graph = await ctx.db.hadronGraph.findUniqueOrThrow({ where: { id: graphId } });
+      // Owner admin, platform admin, or the subscribing org itself can remove
+      const isOwnerAdmin = async () => {
+        if (ctx.roles?.includes('ADMIN')) return true;
+        if (!ctx.userId) return false;
+        const m = await ctx.db.organizationMember.findUnique({
+          where: { organizationId_userId: { organizationId: graph.organizationId, userId: ctx.userId } },
+        });
+        return m?.role === 'ADMIN';
+      };
+      const isSubscriberAdmin = async () => {
+        if (!ctx.userId) return false;
+        const m = await ctx.db.organizationMember.findUnique({
+          where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+        });
+        return m?.role === 'ADMIN';
+      };
+      if (!(await isOwnerAdmin()) && !(await isSubscriberAdmin())) {
+        throw new Error('Forbidden');
+      }
+      await ctx.db.hadronGraphSubscription.delete({
+        where: { graphId_organizationId: { graphId, organizationId: orgId } },
+      });
+      return true;
+    },
   },
 };
 
 function deriveNamespace(loc: string): string {
   const parts = loc.split('.');
   return parts.slice(0, 2).join('.');
+}
+
+interface NodeEdgeInput {
+  targetId: string;
+  label?: string;
 }
 
 interface NodeInput {
@@ -313,6 +794,7 @@ interface NodeInput {
   content?: string;
   tags?: string[];
   ownerRepo: string;
+  edges?: NodeEdgeInput[];
 }
 
 interface EdgeInput {

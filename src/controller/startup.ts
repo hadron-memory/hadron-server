@@ -1,34 +1,27 @@
-import { existsSync } from 'fs';
-import { loadConfig, SOURCES_PATH } from '../config.js';
+import { db } from '../integrations/db/client.js';
 import { syncGraphFromGithub } from '../integrations/github/syncGraphFromGithub.js';
 
 /**
  * Controller startup: sync all configured graphs from GitHub.
+ * Graphs are loaded from the HadronGraph table (not from .hadron-controller.yaml).
  * Runs non-blocking — logs errors but does not prevent the server from starting.
  */
 export const startup = async (): Promise<void> => {
-  let config;
-  try {
-    config = loadConfig();
-  } catch (err) {
-    console.warn('No .hadron-controller.yaml found, skipping graph sync:', (err as Error).message);
-    return;
-  }
+  const graphs = await db.hadronGraph.findMany({ include: { organization: true } });
 
-  const graphNames = Object.keys(config.graphs);
-  if (graphNames.length === 0) {
+  if (graphs.length === 0) {
     console.log('No graphs configured, skipping sync.');
     return;
   }
 
-  console.log(`Starting sync for ${graphNames.length} graph(s)...`);
+  console.log(`Starting sync for ${graphs.length} graph(s)...`);
 
-  for (const name of graphNames) {
-    const result = await syncGraphFromGithub(name);
+  for (const graph of graphs) {
+    const result = await syncGraphFromGithub(graph);
     if (result.error) {
-      console.error(`  [FAIL] ${name}: ${result.error}`);
+      console.error(`  [FAIL] ${graph.organization.slug}/${graph.name}: ${result.error}`);
     } else {
-      console.log(`  [OK]   ${name}: ${result.nodeCount} nodes`);
+      console.log(`  [OK]   ${graph.organization.slug}/${graph.name}: ${result.nodeCount} nodes`);
     }
   }
 

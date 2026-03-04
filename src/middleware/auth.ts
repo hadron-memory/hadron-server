@@ -5,10 +5,11 @@ import { verifyJwt } from '../auth/jwt.js';
 import { deserializeRoles } from '../integrations/db/provider.js';
 
 export interface AuthContext {
-  clientId?: string;   // Client.label (API keys) or "github:<login>" (OAuth)
-  userId?: string;     // User.id — only set for OAuth/JWT users
+  clientId?: string;       // Client.label (API keys) or "github:<login>" (OAuth)
+  userId?: string;         // User.id — only set for OAuth/JWT users
   roles?: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   namespace?: string;
+  organizationId?: string; // set when the Client is scoped to an organization
 }
 
 // Resolve auth context from an incoming request.
@@ -63,6 +64,7 @@ async function resolveClientKey(
         clientId: client.label,
         roles: deserializeRoles(client.roles as string | string[]) as ('ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         namespace: client.namespace ?? undefined,
+        organizationId: client.organizationId ?? undefined,
       };
     }
   }

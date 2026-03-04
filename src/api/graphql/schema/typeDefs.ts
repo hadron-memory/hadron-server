@@ -5,6 +5,12 @@ export const typeDefs = `#graphql
     READER
   }
 
+  enum OrgRole {
+    ADMIN
+    CONTRIBUTOR
+    READER
+  }
+
   type HadronGraph {
     name: String
     nodes: [Node]
@@ -83,6 +89,10 @@ export const typeDefs = `#graphql
     description: String
     roles: [Role!]!
     namespace: String
+    organizationId: String
+    userId: String
+    user: User
+    graphs: [GraphConfig!]!   # graphs this client is subscribed to
     expiresAt: String
     createdAt: String!
     lastUsedAt: String
@@ -103,7 +113,62 @@ export const typeDefs = `#graphql
     roles: [Role!]!
   }
 
+  # A company or team that owns one or more Hadron graphs.
+  type Organization {
+    id: ID!
+    name: String!
+    slug: String!
+    githubInstallationId: Int
+    members: [OrganizationMember!]!
+    graphs: [GraphConfig!]!
+    subscriptions: [GraphSubscription!]!  # graphs this org subscribes to
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Per-organization membership record for a user.
+  type OrganizationMember {
+    id: ID!
+    user: User!
+    role: OrgRole!
+    createdAt: String!
+  }
+
+  # A Hadron graph configuration (git repo + branch settings).
+  # Named GraphConfig to distinguish from the in-memory HadronGraph type.
+  type GraphConfig {
+    id: ID!
+    organizationId: String!
+    name: String!
+    source: String
+    readBranch: String
+    writeBranch: String
+    visibility: String!    # "PUBLIC" | "PRIVATE"
+    version: String
+    lastSyncedAt: String
+    createdAt: String!
+    updatedAt: String!
+    subscriptions: [GraphSubscription!]!
+  }
+
+  # An organization's subscription to a graph it does not own.
+  type GraphSubscription {
+    id: ID!
+    graph: GraphConfig!
+    organization: Organization!
+    role: String!          # "READER" | "CONTRIBUTOR"
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Outgoing edge on a node, used in NodeInput.edges
+  input NodeEdgeInput {
+    targetId: String!
+    label: String
+  }
+
   input NodeInput {
+    id: String
     loc: String!
     name: String!
     alias: String
@@ -111,6 +176,8 @@ export const typeDefs = `#graphql
     content: String
     tags: [String!]
     ownerRepo: String!
+    # Replace all outgoing edges when provided (omit to leave edges unchanged)
+    edges: [NodeEdgeInput!]
   }
 
   input EdgeInput {
@@ -173,6 +240,19 @@ export const typeDefs = `#graphql
 
     # Current authenticated user
     me: User
+
+    # Organizations
+    organizations: [Organization!]!       # platform ADMIN: all orgs
+    myOrganizations: [Organization!]!     # authenticated user: their memberships
+    organization(id: ID!): Organization   # org member or platform ADMIN
+
+    # Public graph marketplace — any authenticated user
+    publicGraphs: [GraphConfig!]!
+
+    # Graphs the caller should sync:
+    #   API-key client → its explicit ClientGraphSubscriptions
+    #   JWT/OAuth user → all graphs accessible to all orgs they belong to
+    myGraphs: [GraphConfig!]!
   }
 
   type Mutation {
@@ -181,6 +261,9 @@ export const typeDefs = `#graphql
 
     # Delete a node by loc
     deleteNode(loc: String!): Boolean!
+
+    # Move a node to a new loc (keeps same id and all incoming edge references)
+    moveNode(from: String!, to: String!): Node!
 
     # Replace all nodes under a namespace owned by a repo (collection tool)
     replaceSubtree(namespace: String!, ownerRepo: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
@@ -193,10 +276,44 @@ export const typeDefs = `#graphql
     recordUsage(event: UsageEventInput!): Boolean!
 
     # Client management (admin only)
-    createClient(label: String!, type: ClientType!, roles: [Role!]!, description: String, namespace: String, expiresAt: String): ClientCreated!
+    createClient(label: String!, type: ClientType!, roles: [Role!]!, description: String, namespace: String, organizationId: String, userId: String, expiresAt: String): ClientCreated!
     revokeClient(label: String!): Boolean!
+
+    # Client graph subscriptions (org ADMIN or platform ADMIN)
+    # graphId must be accessible to the client's org (owned or org-subscribed)
+    subscribeClientToGraph(clientId: ID!, graphId: ID!): Client!
+    unsubscribeClientFromGraph(clientId: ID!, graphId: ID!): Client!
 
     # User management (admin only)
     updateUserRoles(userId: ID!, roles: [Role!]!): User!
+
+    # Organization management (platform ADMIN)
+    createOrganization(name: String!, slug: String!): Organization!
+    updateOrganization(id: ID!, name: String, slug: String): Organization!
+    deleteOrganization(id: ID!): Boolean!
+
+    # Link a GitHub App installation to an organization (org ADMIN or platform ADMIN)
+    linkGithubApp(orgId: ID!, installationId: Int!): Organization!
+
+    # Organization membership (platform ADMIN or org ADMIN)
+    addOrganizationMember(orgId: ID!, userId: ID!, role: OrgRole!): OrganizationMember!
+    updateOrganizationMember(orgId: ID!, userId: ID!, role: OrgRole!): OrganizationMember!
+    removeOrganizationMember(orgId: ID!, userId: ID!): Boolean!
+
+    # Graph config management (org ADMIN)
+    createGraphConfig(orgId: ID!, name: String!, source: String, readBranch: String, writeBranch: String, visibility: String, version: String): GraphConfig!
+    updateGraphConfig(id: ID!, source: String, readBranch: String, writeBranch: String, visibility: String, version: String): GraphConfig!
+    deleteGraphConfig(id: ID!): Boolean!
+
+    # Graph subscriptions
+    # PUBLIC graph: any org admin may subscribe for their own org (READER only by default)
+    # PRIVATE graph: only the owner org ADMIN or platform ADMIN may add subscribers
+    createGraphSubscription(graphId: ID!, orgId: ID!, role: String!): GraphSubscription!
+    updateGraphSubscription(graphId: ID!, orgId: ID!, role: String!): GraphSubscription!
+    # Callable by: owner ADMIN, platform ADMIN, or the subscribing org itself
+    deleteGraphSubscription(graphId: ID!, orgId: ID!): Boolean!
+
+    # Trigger an on-demand sync for one graph (org ADMIN or CONTRIBUTOR)
+    syncGraphConfig(id: ID!): GraphConfig!
   }
 `;

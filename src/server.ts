@@ -215,6 +215,61 @@ export async function createServer() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // GitHub App webhook
+  // ---------------------------------------------------------------------------
+
+  // Receives GitHub App installation events.
+  // When an org installs the app, link the installation ID to the matching Organization.
+  // Set GITHUB_WEBHOOK_SECRET to verify the X-Hub-Signature-256 header (recommended).
+  app.post('/github/webhook', async (req, res) => {
+    const secret = process.env.GITHUB_WEBHOOK_SECRET;
+    if (secret) {
+      const sig = req.headers['x-hub-signature-256'] as string | undefined;
+      if (!sig) {
+        res.status(401).json({ error: 'Missing signature' });
+        return;
+      }
+      const expected = `sha256=${crypto
+        .createHmac('sha256', secret)
+        .update(JSON.stringify(req.body))
+        .digest('hex')}`;
+      if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+        res.status(401).json({ error: 'Invalid signature' });
+        return;
+      }
+    }
+
+    const event = req.headers['x-github-event'] as string | undefined;
+    const { action, installation } = req.body ?? {};
+
+    if (event === 'installation' && installation?.id) {
+      const ghOrgLogin: string | undefined = installation.account?.login;
+      if (ghOrgLogin) {
+        if (action === 'created') {
+          // Link the installation to the Organization whose slug matches the GitHub org login
+          const updated = await db.organization.updateMany({
+            where: { slug: ghOrgLogin, githubInstallationId: null },
+            data: { githubInstallationId: installation.id },
+          });
+          if (updated.count > 0) {
+            console.log(`[webhook] Linked GitHub App installation ${installation.id} → org "${ghOrgLogin}"`);
+          } else {
+            console.warn(`[webhook] No unlinked org found with slug "${ghOrgLogin}"`);
+          }
+        } else if (action === 'deleted') {
+          await db.organization.updateMany({
+            where: { githubInstallationId: installation.id },
+            data: { githubInstallationId: null },
+          });
+          console.log(`[webhook] Unlinked GitHub App installation ${installation.id} (org "${ghOrgLogin}")`);
+        }
+      }
+    }
+
+    res.json({ ok: true });
+  });
+
   // Health check
   app.get('/health', (_req, res) => {
     res.json({ ok: true });

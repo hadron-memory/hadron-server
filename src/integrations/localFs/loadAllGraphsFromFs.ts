@@ -1,7 +1,7 @@
 import { join } from 'path';
 import { existsSync } from 'fs';
 import type { HadronGraph } from '../../index.d.js';
-import type { ControllerConfig } from '../../config.js';
+
 import { loadGraphFromFs, type GraphEdge } from './loadGraphFromFs.js';
 
 export interface LoadedGraph {
@@ -12,9 +12,13 @@ export interface LoadedGraph {
 /**
  * Load all graphs from the filesystem based on the controller config.
  */
+type GraphsInput = {
+  graphs: Record<string, { source: string; path: string; version?: string; updatedAt?: string }>;
+};
+
 export const loadAllGraphsFromFs = async (
   sourcesPath: string,
-  config: ControllerConfig,
+  config: GraphsInput,
 ): Promise<LoadedGraph[]> => {
   const results: LoadedGraph[] = [];
 

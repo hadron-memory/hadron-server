@@ -3,7 +3,7 @@ import { join } from 'path';
 import { mkdirSync } from 'fs';
 import { db } from '../db/client.js';
 import { cleanDb, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
-import { syncGraphFromGithub } from './syncGraphFromGithub.js';
+import { syncGraphFromGithub, type GraphWithOrg } from './syncGraphFromGithub.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -19,7 +19,7 @@ vi.mock('child_process', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Mock config so we can control what graphs are registered
+// Mock config to control SOURCES_PATH dynamically
 // ---------------------------------------------------------------------------
 let mockSources: string;
 let cleanup: () => void;
@@ -28,21 +28,39 @@ vi.mock('../../config.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../config.js')>();
   return {
     ...real,
-    loadConfig: vi.fn(() => ({
-      graphs: {
-        'test/repo': {
-          source: 'git@github.com:test/repo.git',
-          path: 'test/repo',
-          version: '1',
-          updatedAt: '',
-        },
-      },
-    })),
     get SOURCES_PATH() {
       return mockSources;
     },
   };
 });
+
+// ---------------------------------------------------------------------------
+// Fixture: a minimal GraphWithOrg object for "test-org/test/repo"
+// local path = join(SOURCES_PATH, 'test-org', 'test/repo')
+// ---------------------------------------------------------------------------
+function makeGraph(overrides?: Partial<GraphWithOrg>): GraphWithOrg {
+  return {
+    id: 'graph-1',
+    organizationId: 'org-1',
+    name: 'test/repo',
+    source: 'git@github.com:test/repo.git',
+    readBranch: null,
+    writeBranch: null,
+    version: null,
+    lastSyncedAt: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    organization: {
+      id: 'org-1',
+      name: 'Test Org',
+      slug: 'test-org',
+      githubInstallationId: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    ...overrides,
+  } as GraphWithOrg;
+}
 
 beforeEach(async () => {
   ({ dir: mockSources, cleanup } = makeTmpDir());
@@ -55,22 +73,17 @@ afterEach(() => {
 });
 
 describe('syncGraphFromGithub', () => {
-  it('returns an error when graph name is not in config', async () => {
-    const result = await syncGraphFromGithub('unknown/graph');
-    expect(result.error).toContain('not found in config');
-  });
-
   it('calls git clone when .git directory does not exist', async () => {
-    // Ensure the target directory does NOT exist (no .git)
     const { execFile } = await import('child_process');
     const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
 
-    const result = await syncGraphFromGithub('test/repo');
+    const result = await syncGraphFromGithub(makeGraph());
 
     const calls = execFileMock.mock.calls;
     const cloneCall = calls.find((c: any[]) => c[1]?.[0] === 'clone');
     expect(cloneCall).toBeDefined();
     expect(cloneCall![1]).toContain('git@github.com:test/repo.git');
+    expect(result.error).toBeUndefined();
   });
 
   it('calls git pull when .git directory already exists', async () => {
@@ -78,10 +91,10 @@ describe('syncGraphFromGithub', () => {
     const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
 
     // Pre-create .git directory so it looks like an existing clone
-    const repoPath = join(mockSources, 'test', 'repo');
+    const repoPath = join(mockSources, 'test-org', 'test/repo');
     mkdirSync(join(repoPath, '.git'), { recursive: true });
 
-    await syncGraphFromGithub('test/repo');
+    await syncGraphFromGithub(makeGraph());
 
     const calls = execFileMock.mock.calls;
     const pullCall = calls.find((c: any[]) => c[1]?.[0] === 'pull');
@@ -97,17 +110,16 @@ describe('syncGraphFromGithub', () => {
       if (typeof cb === 'function') cb(new Error('git authentication failed'), '', '');
     });
 
-    const result = await syncGraphFromGithub('test/repo');
+    const result = await syncGraphFromGithub(makeGraph());
     expect(result.error).toContain('git authentication failed');
   });
 
   it('loads nodes from the filesystem and upserts them into the DB', async () => {
-    // Write real .node/ files into the expected location
-    const nodeDir = join(mockSources, 'test', 'repo', 'nodeA');
+    const nodeDir = join(mockSources, 'test-org', 'test/repo', 'nodeA');
     mkdirSync(nodeDir, { recursive: true });
     writeNodeFiles(nodeDir, { name: 'nodeA', description: 'Test node' }, '## Content');
 
-    const result = await syncGraphFromGithub('test/repo');
+    const result = await syncGraphFromGithub(makeGraph());
     expect(result.error).toBeUndefined();
     expect(result.nodeCount).toBe(1);
 
@@ -119,39 +131,36 @@ describe('syncGraphFromGithub', () => {
 
   it('re-sync preserves node IDs for unchanged nodes', async () => {
     const nodeId = 'aaaa000000000000000000000000000000';
-    const nodeA = join(mockSources, 'test', 'repo', 'nodeA');
+    const nodeA = join(mockSources, 'test-org', 'test/repo', 'nodeA');
     mkdirSync(nodeA, { recursive: true });
     writeNodeFiles(nodeA, { id: nodeId, name: 'nodeA', description: 'v1' });
 
-    await syncGraphFromGithub('test/repo');
+    await syncGraphFromGithub(makeGraph());
     const first = await db.node.findUnique({ where: { loc: 'nodeA' } });
 
-    // Re-sync with same id, updated description
     writeNodeFiles(nodeA, { id: nodeId, name: 'nodeA', description: 'v2' });
-    await syncGraphFromGithub('test/repo');
+    await syncGraphFromGithub(makeGraph());
     const second = await db.node.findUnique({ where: { loc: 'nodeA' } });
 
-    expect(second!.id).toBe(first!.id); // ID preserved (same YAML id)
-    expect(second!.description).toBe('v2'); // content updated
+    expect(second!.id).toBe(first!.id);
+    expect(second!.description).toBe('v2');
   });
 
   it('re-sync replaces old nodes with the new set', async () => {
-    // First sync: one node
-    const nodeA = join(mockSources, 'test', 'repo', 'nodeA');
+    const nodeA = join(mockSources, 'test-org', 'test/repo', 'nodeA');
     mkdirSync(nodeA, { recursive: true });
     writeNodeFiles(nodeA, { name: 'nodeA' });
 
-    await syncGraphFromGithub('test/repo');
+    await syncGraphFromGithub(makeGraph());
     expect(await db.node.count({ where: { namespace: 'test.repo' } })).toBe(1);
 
-    // Remove nodeA, add nodeB
     const { rmSync } = await import('fs');
     rmSync(nodeA, { recursive: true });
-    const nodeB = join(mockSources, 'test', 'repo', 'nodeB');
+    const nodeB = join(mockSources, 'test-org', 'test/repo', 'nodeB');
     mkdirSync(nodeB, { recursive: true });
     writeNodeFiles(nodeB, { name: 'nodeB' });
 
-    await syncGraphFromGithub('test/repo');
+    await syncGraphFromGithub(makeGraph());
 
     const nodes = await db.node.findMany({ where: { namespace: 'test.repo' } });
     expect(nodes).toHaveLength(1);
@@ -159,15 +168,15 @@ describe('syncGraphFromGithub', () => {
   });
 
   it('creates edges between nodes in the DB', async () => {
-    const nodeA = join(mockSources, 'test', 'repo', 'a');
-    const nodeB = join(mockSources, 'test', 'repo', 'b');
+    const nodeA = join(mockSources, 'test-org', 'test/repo', 'a');
+    const nodeB = join(mockSources, 'test-org', 'test/repo', 'b');
     mkdirSync(nodeA, { recursive: true });
     mkdirSync(nodeB, { recursive: true });
     const bId = 'bbbb000000000000000000000000000000';
     writeNodeFiles(nodeA, { name: 'a', nodes: [{ id: bId, rel: 'uses' }] });
     writeNodeFiles(nodeB, { id: bId, name: 'b' });
 
-    await syncGraphFromGithub('test/repo');
+    await syncGraphFromGithub(makeGraph());
 
     const edges = await db.edge.findMany();
     expect(edges).toHaveLength(1);
@@ -175,12 +184,12 @@ describe('syncGraphFromGithub', () => {
   });
 
   it('parks a cross-repo edge as PendingEdge when target is not yet in DB', async () => {
-    const nodeA = join(mockSources, 'test', 'repo', 'a');
+    const nodeA = join(mockSources, 'test-org', 'test/repo', 'a');
     mkdirSync(nodeA, { recursive: true });
     const missingId = 'cccc000000000000000000000000000000';
     writeNodeFiles(nodeA, { name: 'a', nodes: [{ id: missingId, rel: 'depends on' }] });
 
-    await syncGraphFromGithub('test/repo');
+    await syncGraphFromGithub(makeGraph());
 
     expect(await db.edge.count()).toBe(0);
     const pending = await db.pendingEdge.findMany();
@@ -190,22 +199,19 @@ describe('syncGraphFromGithub', () => {
   });
 
   it('resolves a PendingEdge to a real Edge when the target node is later synced', async () => {
-    // First sync: node A with an edge to a node that doesn't exist yet
-    const nodeA = join(mockSources, 'test', 'repo', 'a');
+    const nodeA = join(mockSources, 'test-org', 'test/repo', 'a');
     mkdirSync(nodeA, { recursive: true });
     const missingId = 'dddd000000000000000000000000000000';
     writeNodeFiles(nodeA, { name: 'a', nodes: [{ id: missingId, rel: 'depends on' }] });
-    await syncGraphFromGithub('test/repo');
+    await syncGraphFromGithub(makeGraph());
     expect(await db.pendingEdge.count()).toBe(1);
     expect(await db.edge.count()).toBe(0);
 
-    // Second sync: add the target node (same repo for simplicity)
-    const nodeB = join(mockSources, 'test', 'repo', 'b');
+    const nodeB = join(mockSources, 'test-org', 'test/repo', 'b');
     mkdirSync(nodeB, { recursive: true });
     writeNodeFiles(nodeB, { id: missingId, name: 'b' });
-    await syncGraphFromGithub('test/repo');
+    await syncGraphFromGithub(makeGraph());
 
-    // PendingEdge should be gone, real Edge should exist
     expect(await db.pendingEdge.count()).toBe(0);
     const edges = await db.edge.findMany();
     expect(edges).toHaveLength(1);

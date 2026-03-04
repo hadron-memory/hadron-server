@@ -2,8 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'path';
 import { makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
 import { loadAllGraphsFromFs } from './loadAllGraphsFromFs.js';
-import type { ControllerConfig } from '../../config.js';
-
 let sourcesDir: string;
 let cleanup: () => void;
 
@@ -12,7 +10,8 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
-function makeConfig(graphs: ControllerConfig['graphs']): ControllerConfig {
+type GraphEntry = { source: string; path: string; version?: string; updatedAt?: string };
+function makeConfig(graphs: Record<string, GraphEntry>) {
   return { graphs };
 }
 
