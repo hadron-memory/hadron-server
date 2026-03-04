@@ -38,10 +38,13 @@ export const loadGraphFromFs = async (
       nodeDirs.push(dir);
     }
 
-    // Continue walking subdirectories (skip hidden dirs and node_modules)
+    // Continue walking subdirectories.
+    // Walk .hadron/ (where node graphs live in project repos) but skip all other
+    // hidden dirs, .node/ subdirs (leaf data only), and node_modules.
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+      if (entry.name === 'node_modules' || entry.name === '.node') continue;
+      if (entry.name.startsWith('.') && entry.name !== '.hadron') continue;
       walk(join(dir, entry.name));
     }
   };

@@ -36,7 +36,14 @@ export const loadNodeFromFs = async (
   const content = existsSync(mdPath) ? readFileSync(mdPath, 'utf-8') : null;
 
   // Derive loc from relative path: micromentor-org/mmdata/services → micromentor-org.mmdata.services
-  const relPath = relative(graphRoot, dirPath);
+  // Strip leading .hadron/ prefix: when nodes live in .hadron/ inside a project repo,
+  // the .hadron segment is transparent and excluded from the loc.
+  let relPath = relative(graphRoot, dirPath);
+  if (relPath === '.hadron') {
+    relPath = '';
+  } else if (relPath.startsWith('.hadron' + sep)) {
+    relPath = relPath.slice('.hadron'.length + 1);
+  }
   const loc = relPath.split(sep).join('.');
   const namespace = loc.split('.').slice(0, 2).join('.');
 

@@ -92,12 +92,42 @@ describe('loadGraphFromFs', () => {
     expect(graph.nodes[0].name).toBe('good');
   });
 
-  it('skips hidden directories', async () => {
+  it('skips hidden directories (other than .hadron)', async () => {
     const hidden = join(graphRoot, '.hidden-dir');
     mkdirSync(join(hidden, '.node'), { recursive: true });
     writeNodeFiles(hidden, { name: 'should-be-hidden' });
 
     const { graph } = await loadGraphFromFs(graphRoot, 'test/graph', 'test/repo');
     expect(graph.nodes).toHaveLength(0);
+  });
+
+  it('discovers nodes inside .hadron/ and strips the prefix from loc', async () => {
+    // Nodes stored in .hadron/ (the standard location in project repos)
+    const nodeDir = join(graphRoot, '.hadron', 'my-org', 'my-graph');
+    mkdirSync(nodeDir, { recursive: true });
+    writeNodeFiles(nodeDir, { name: 'my-graph', description: 'In .hadron' });
+
+    const { graph } = await loadGraphFromFs(graphRoot, 'my-org/my-graph', 'my-org/my-graph');
+    expect(graph.nodes).toHaveLength(1);
+    // loc must NOT include the .hadron prefix
+    expect(graph.nodes[0].loc).toBe('my-org.my-graph');
+    expect(graph.nodes[0].name).toBe('my-graph');
+  });
+
+  it('discovers nodes both at root and inside .hadron/', async () => {
+    // Root-level node
+    const rootNode = join(graphRoot, 'org', 'a');
+    mkdirSync(rootNode, { recursive: true });
+    writeNodeFiles(rootNode, { name: 'a' });
+
+    // .hadron node
+    const hadronNode = join(graphRoot, '.hadron', 'org', 'b');
+    mkdirSync(hadronNode, { recursive: true });
+    writeNodeFiles(hadronNode, { name: 'b' });
+
+    const { graph } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
+    const locs = graph.nodes.map((n) => n.loc).sort();
+    expect(locs).toContain('org.a');
+    expect(locs).toContain('org.b');
   });
 });

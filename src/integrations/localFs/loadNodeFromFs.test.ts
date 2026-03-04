@@ -40,6 +40,15 @@ describe('loadNodeFromFs', () => {
     expect(node.loc).toBe('a.b.c');
   });
 
+  it('strips .hadron/ prefix from loc when node lives inside .hadron/', async () => {
+    const nodeDir = join(graphRoot, '.hadron', 'my-org', 'my-graph');
+    mkdirSync(nodeDir, { recursive: true });
+    writeNodeFiles(nodeDir, { name: 'my-graph' });
+
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'my-org/my-graph');
+    expect(node.loc).toBe('my-org.my-graph');
+  });
+
   it('derives namespace as first two loc segments', async () => {
     const nodeDir = join(graphRoot, 'my-org', 'my-graph', 'sub');
     mkdirSync(nodeDir, { recursive: true });
