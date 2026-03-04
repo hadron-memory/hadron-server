@@ -117,6 +117,23 @@ describe('syncGraphFromGithub', () => {
     expect(inDb!.name).toBe('nodeA');
   });
 
+  it('re-sync preserves node IDs for unchanged nodes', async () => {
+    const nodeA = join(mockSources, 'test', 'repo', 'nodeA');
+    mkdirSync(nodeA, { recursive: true });
+    writeNodeFiles(nodeA, { name: 'nodeA', description: 'v1' });
+
+    await syncGraphFromGithub('test/repo');
+    const first = await db.node.findUnique({ where: { loc: 'nodeA' } });
+
+    // Re-sync with updated description
+    writeNodeFiles(nodeA, { name: 'nodeA', description: 'v2' });
+    await syncGraphFromGithub('test/repo');
+    const second = await db.node.findUnique({ where: { loc: 'nodeA' } });
+
+    expect(second!.id).toBe(first!.id); // ID preserved
+    expect(second!.description).toBe('v2'); // content updated
+  });
+
   it('re-sync replaces old nodes with the new set', async () => {
     // First sync: one node
     const nodeA = join(mockSources, 'test', 'repo', 'nodeA');

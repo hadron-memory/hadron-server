@@ -28,36 +28,44 @@ export const syncGraphFromGithub = async (
     const graphPath = join(SOURCES_PATH, graphConf.path);
     const namespace = graphNameToNamespace(graphName);
 
+    const ownerRepo = extractOwnerRepo(graphConf.source);
+
     // 1. Clone or pull the repo
     await gitSync(graphConf.source, graphPath);
 
     // 2. Load the graph from the filesystem
-    const { graph, edges } = await loadGraphFromFs(graphPath, graphName, extractOwnerRepo(graphConf.source));
+    const { graph, edges } = await loadGraphFromFs(graphPath, graphName, ownerRepo);
 
     // 3. Upsert all nodes and edges into the database (transactional)
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
-      // Delete existing nodes for this namespace + ownerRepo
-      await tx.node.deleteMany({
-        where: { namespace, ownerRepo: extractOwnerRepo(graphConf.source) },
-      });
+      const upsertedLocs: string[] = [];
 
-      // Create all nodes (use the graph's canonical namespace, not the node-derived one)
+      // Upsert nodes by loc — preserves existing IDs so cross-repo edge FKs remain valid
       for (const node of graph.nodes) {
-        await tx.node.create({
-          data: {
-            loc: node.loc,
-            name: node.name,
-            alias: node.alias,
-            description: node.description,
-            content: node.content,
-            tags: serializeTags(node.tags ?? []) as string[],
-            namespace,
-            ownerRepo: node.ownerRepo,
-          },
+        const data = {
+          loc: node.loc,
+          name: node.name,
+          alias: node.alias,
+          description: node.description,
+          content: node.content,
+          tags: serializeTags(node.tags ?? []) as string[],
+          namespace,
+          ownerRepo,
+        };
+        await tx.node.upsert({
+          where: { loc: node.loc },
+          create: data,
+          update: data,
         });
+        upsertedLocs.push(node.loc);
       }
 
-      // Create edges (only where both source and target exist)
+      // Delete nodes that were in this namespace+ownerRepo but are no longer in the sync set
+      await tx.node.deleteMany({
+        where: { namespace, ownerRepo, loc: { notIn: upsertedLocs } },
+      });
+
+      // Upsert edges (only where both source and target exist in DB)
       for (const edge of edges) {
         const source = await tx.node.findUnique({ where: { loc: edge.sourceLoc } });
         const target = await tx.node.findUnique({ where: { loc: edge.targetLoc } });
