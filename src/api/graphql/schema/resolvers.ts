@@ -2,21 +2,20 @@ import bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, ClientType, Prisma } from '../../../generated/prisma/index.js';
-import { serializeTags, deserializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
+import { serializeTags, deserializeTags, serializeRoles, deserializeRoles, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
 
 export interface Context {
   db: PrismaClient;
   clientId?: string;  // Client.label or "github:<login>"
   userId?: string;    // User.id — only set for OAuth/JWT users
-  role?: 'ADMIN' | 'CONTRIBUTOR' | 'READER';
+  roles?: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   namespace?: string; // contributor's writable namespace
 }
 
 function requireRole(ctx: Context, required: 'ADMIN' | 'CONTRIBUTOR' | 'READER') {
-  const order = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2 };
-  if (!ctx.role || order[ctx.role] < order[required]) {
-    throw new Error('Forbidden');
-  }
+  const order: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2 };
+  const highest = ctx.roles ? Math.max(...ctx.roles.map((r) => order[r] ?? -1)) : -1;
+  if (highest < order[required]) throw new Error('Forbidden');
 }
 
 const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
@@ -25,6 +24,12 @@ export const resolvers = {
   // Field resolvers: deserialize SQLite TEXT back to arrays/objects for GraphQL
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
+  },
+  Client: {
+    roles: (client: { roles: string | string[] }) => deserializeRoles(client.roles),
+  },
+  User: {
+    roles: (user: { roles: string | string[] }) => deserializeRoles(user.roles),
   },
   Session: {
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
@@ -128,7 +133,7 @@ export const resolvers = {
     upsertNode: async (_: unknown, { input }: { input: NodeInput }, ctx: Context) => {
       requireRole(ctx, 'CONTRIBUTOR');
       const namespace = deriveNamespace(input.loc);
-      if (ctx.role === 'CONTRIBUTOR' && ctx.namespace && !namespace.startsWith(ctx.namespace)) {
+      if (!ctx.roles?.includes('ADMIN') && ctx.namespace && !namespace.startsWith(ctx.namespace)) {
         throw new Error('Forbidden: outside your writable namespace');
       }
       const tags = serializeTags(input.tags ?? []) as string[];
@@ -245,14 +250,14 @@ export const resolvers = {
       {
         label,
         type,
-        role,
+        roles,
         description,
         namespace,
         expiresAt,
       }: {
         label: string;
         type: string;
-        role: 'ADMIN' | 'CONTRIBUTOR' | 'READER';
+        roles: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[];
         description?: string;
         namespace?: string;
         expiresAt?: string;
@@ -268,7 +273,7 @@ export const resolvers = {
           keyHash,
           type: type as ClientType,
           description,
-          role: role as Role,
+          roles: serializeRoles(roles) as Role[],
           namespace,
           expiresAt: expiresAt ? new Date(expiresAt) : undefined,
         },
@@ -282,13 +287,13 @@ export const resolvers = {
       return true;
     },
 
-    updateUserRole: async (
+    updateUserRoles: async (
       _: unknown,
-      { userId, role }: { userId: string; role: string },
+      { userId, roles }: { userId: string; roles: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[] },
       ctx: Context,
     ) => {
       requireRole(ctx, 'ADMIN');
-      return ctx.db.user.update({ where: { id: userId }, data: { role: role as Role } });
+      return ctx.db.user.update({ where: { id: userId }, data: { roles: serializeRoles(roles) as Role[] } });
     },
   },
 };

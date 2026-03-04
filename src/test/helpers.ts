@@ -60,7 +60,7 @@ export async function createDbNode(
 export async function createDbClient(
   db: PrismaClient,
   label: string,
-  role: 'ADMIN' | 'CONTRIBUTOR' | 'READER' = 'READER',
+  roles: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[] = ['READER'],
   opts: { namespace?: string; expiresAt?: Date } = {},
 ) {
   const keyHash = await bcrypt.hash(TEST_RAW_KEY, 4); // low cost for speed
@@ -68,7 +68,7 @@ export async function createDbClient(
     data: {
       label,
       keyHash,
-      role,
+      roles,
       type: 'WORKSTATION',
       namespace: opts.namespace ?? null,
       expiresAt: opts.expiresAt ?? null,

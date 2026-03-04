@@ -21,6 +21,19 @@ export function deserializeTags(raw: string[] | string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Roles: PostgreSQL Role[] ↔ SQLite JSON string (same pattern as tags)
+// ---------------------------------------------------------------------------
+
+export function serializeRoles(roles: string[]): string[] | string {
+  return isSqlite ? JSON.stringify(roles) : roles;
+}
+
+export function deserializeRoles(raw: string[] | string): string[] {
+  if (typeof raw === 'string') return JSON.parse(raw);
+  return raw;
+}
+
+// ---------------------------------------------------------------------------
 // JSON fields: PostgreSQL Json ↔ SQLite TEXT
 // ---------------------------------------------------------------------------
 

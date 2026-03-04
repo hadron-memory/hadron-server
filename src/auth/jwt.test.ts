@@ -7,7 +7,7 @@ import { signJwt, verifyJwt } from './jwt.js';
 const PAYLOAD = {
   sub: 'user-id-123',
   login: 'alice',
-  role: 'ADMIN' as const,
+  roles: ['ADMIN'] as ('ADMIN' | 'CONTRIBUTOR' | 'READER')[],
   githubId: 42,
 };
 
@@ -17,7 +17,7 @@ describe('signJwt + verifyJwt', () => {
     const result = await verifyJwt(token);
     expect(result.sub).toBe(PAYLOAD.sub);
     expect(result.login).toBe(PAYLOAD.login);
-    expect(result.role).toBe(PAYLOAD.role);
+    expect(result.roles).toEqual(PAYLOAD.roles);
     expect(result.githubId).toBe(PAYLOAD.githubId);
   });
 

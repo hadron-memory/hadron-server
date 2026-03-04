@@ -115,7 +115,7 @@ model Client {
   keyHash     String      // bcrypt hash of the opaque token
   type        ClientType  @default(WORKSTATION)
   description String?
-  role        Role        @default(READER)
+  roles       Role[]      @default([READER])
   namespace   String?     // for CONTRIBUTOR: restricts write access to this namespace prefix
   expiresAt   DateTime?
   createdAt   DateTime    @default(now())
@@ -129,7 +129,7 @@ model User {
   login     String   // GitHub username
   name      String?  // display name from GitHub profile
   avatarUrl String?  // GitHub avatar URL
-  role      Role     @default(READER)
+  roles     Role[]   @default([READER])
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

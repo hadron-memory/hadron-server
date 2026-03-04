@@ -81,7 +81,7 @@ export const typeDefs = `#graphql
     label: String!
     type: ClientType!
     description: String
-    role: Role!
+    roles: [Role!]!
     namespace: String
     expiresAt: String
     createdAt: String!
@@ -100,7 +100,7 @@ export const typeDefs = `#graphql
     login: String!
     name: String
     avatarUrl: String
-    role: Role!
+    roles: [Role!]!
   }
 
   input NodeInput {
@@ -193,10 +193,10 @@ export const typeDefs = `#graphql
     recordUsage(event: UsageEventInput!): Boolean!
 
     # Client management (admin only)
-    createClient(label: String!, type: ClientType!, role: Role!, description: String, namespace: String, expiresAt: String): ClientCreated!
+    createClient(label: String!, type: ClientType!, roles: [Role!]!, description: String, namespace: String, expiresAt: String): ClientCreated!
     revokeClient(label: String!): Boolean!
 
     # User management (admin only)
-    updateUserRole(userId: ID!, role: Role!): User!
+    updateUserRoles(userId: ID!, roles: [Role!]!): User!
   }
 `;

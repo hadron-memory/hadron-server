@@ -4,7 +4,7 @@ import { expressMiddleware } from '@apollo/server/express4';
 import cors from 'cors';
 import express from 'express';
 import { db } from './integrations/db/client.js';
-import { serializeJson } from './integrations/db/provider.js';
+import { serializeJson, deserializeRoles } from './integrations/db/provider.js';
 import {
   buildAuthUrl,
   exchangeCode,
@@ -91,7 +91,7 @@ export async function createServer() {
           login: ghUser.login,
           name: ghUser.name,
           avatarUrl: ghUser.avatar_url,
-          role: 'READER',
+          roles: ['READER'],
         },
         update: {
           login: ghUser.login,
@@ -104,7 +104,7 @@ export async function createServer() {
       const jwt = await signJwt({
         sub: user.id,
         login: user.login,
-        role: user.role as 'ADMIN' | 'CONTRIBUTOR' | 'READER',
+        roles: deserializeRoles(user.roles as string | string[]) as ('ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         githubId: ghUser.id,
       });
 
@@ -140,7 +140,7 @@ export async function createServer() {
         login: user.login,
         name: user.name,
         avatarUrl: user.avatarUrl,
-        role: user.role,
+        roles: deserializeRoles(user.roles as string | string[]),
       });
     } catch {
       res.status(401).json({ error: 'Invalid or expired token' });

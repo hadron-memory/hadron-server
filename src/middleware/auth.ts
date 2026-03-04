@@ -2,11 +2,12 @@ import bcrypt from 'bcrypt';
 import type { Request } from 'express';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { verifyJwt } from '../auth/jwt.js';
+import { deserializeRoles } from '../integrations/db/provider.js';
 
 export interface AuthContext {
   clientId?: string;   // Client.label (API keys) or "github:<login>" (OAuth)
   userId?: string;     // User.id — only set for OAuth/JWT users
-  role?: 'ADMIN' | 'CONTRIBUTOR' | 'READER';
+  roles?: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   namespace?: string;
 }
 
@@ -34,7 +35,7 @@ async function resolveJwt(token: string): Promise<AuthContext> {
     return {
       clientId: `github:${payload.login}`,
       userId: payload.sub,
-      role: payload.role,
+      roles: payload.roles,
     };
   } catch {
     return {}; // invalid or expired JWT
@@ -60,7 +61,7 @@ async function resolveClientKey(
       });
       return {
         clientId: client.label,
-        role: client.role as 'ADMIN' | 'CONTRIBUTOR' | 'READER',
+        roles: deserializeRoles(client.roles as string | string[]) as ('ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         namespace: client.namespace ?? undefined,
       };
     }

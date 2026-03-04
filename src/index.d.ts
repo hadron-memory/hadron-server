@@ -58,6 +58,7 @@ export interface UsageEvent {
   id: string;
   type: string;
   nodeLoc: string | null;
+  nodeId: string | null;
   actionArgs: Record<string, unknown> | null;
   clientId: string | null;
   sessionId: string | null;
@@ -69,7 +70,7 @@ export interface Client {
   label: string;
   type: ClientType;
   description: string | null;
-  role: Role;
+  roles: Role[];
   namespace: string | null;
   expiresAt: string | null;
   createdAt: string;
@@ -88,7 +89,7 @@ export interface User {
   login: string;
   name: string | null;
   avatarUrl: string | null;
-  role: Role;
+  roles: Role[];
 }
 
 export type Role = 'ADMIN' | 'CONTRIBUTOR' | 'READER';

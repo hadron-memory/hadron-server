@@ -3,7 +3,7 @@ import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
 export interface HadronJwtPayload extends JWTPayload {
   sub: string;        // User.id (cuid)
   login: string;      // GitHub username
-  role: 'ADMIN' | 'CONTRIBUTOR' | 'READER';
+  roles: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   githubId: number;
 }
 
