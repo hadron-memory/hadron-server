@@ -20,6 +20,7 @@ export const TEST_RAW_KEY = 'a'.repeat(64);
 export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.usageEvent.deleteMany();
   await db.edge.deleteMany();
+  await db.pendingEdge.deleteMany();
   await db.session.deleteMany();
   await db.node.deleteMany();
   await db.client.deleteMany();

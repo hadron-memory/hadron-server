@@ -173,4 +173,42 @@ describe('syncGraphFromGithub', () => {
     expect(edges).toHaveLength(1);
     expect(edges[0].label).toBe('uses');
   });
+
+  it('parks a cross-repo edge as PendingEdge when target is not yet in DB', async () => {
+    const nodeA = join(mockSources, 'test', 'repo', 'a');
+    mkdirSync(nodeA, { recursive: true });
+    const missingId = 'cccc000000000000000000000000000000';
+    writeNodeFiles(nodeA, { name: 'a', nodes: [{ id: missingId, rel: 'depends on' }] });
+
+    await syncGraphFromGithub('test/repo');
+
+    expect(await db.edge.count()).toBe(0);
+    const pending = await db.pendingEdge.findMany();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].targetId).toBe(missingId);
+    expect(pending[0].label).toBe('depends on');
+  });
+
+  it('resolves a PendingEdge to a real Edge when the target node is later synced', async () => {
+    // First sync: node A with an edge to a node that doesn't exist yet
+    const nodeA = join(mockSources, 'test', 'repo', 'a');
+    mkdirSync(nodeA, { recursive: true });
+    const missingId = 'dddd000000000000000000000000000000';
+    writeNodeFiles(nodeA, { name: 'a', nodes: [{ id: missingId, rel: 'depends on' }] });
+    await syncGraphFromGithub('test/repo');
+    expect(await db.pendingEdge.count()).toBe(1);
+    expect(await db.edge.count()).toBe(0);
+
+    // Second sync: add the target node (same repo for simplicity)
+    const nodeB = join(mockSources, 'test', 'repo', 'b');
+    mkdirSync(nodeB, { recursive: true });
+    writeNodeFiles(nodeB, { id: missingId, name: 'b' });
+    await syncGraphFromGithub('test/repo');
+
+    // PendingEdge should be gone, real Edge should exist
+    expect(await db.pendingEdge.count()).toBe(0);
+    const edges = await db.edge.findMany();
+    expect(edges).toHaveLength(1);
+    expect(edges[0].label).toBe('depends on');
+  });
 });

@@ -26,8 +26,9 @@ model Node {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  outgoingEdges Edge[]       @relation("SourceNode")
-  incomingEdges Edge[]       @relation("TargetNode")
+  outgoingEdges Edge[]        @relation("SourceNode")
+  incomingEdges Edge[]        @relation("TargetNode")
+  pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
 
   @@index([namespace])
@@ -42,6 +43,20 @@ model Edge {
 
   source Node @relation("SourceNode", fields: [sourceId], references: [id], onDelete: Cascade)
   target Node @relation("TargetNode", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, targetId])
+  @@index([targetId])
+}
+
+// Edge whose target node hasn't been synced yet.
+// Stored without a FK on targetId; converted to a real Edge when the target arrives.
+model PendingEdge {
+  id       String  @id @default(cuid())
+  sourceId String
+  targetId String  // intended target node id — NOT a FK
+  label    String?
+
+  source Node @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
   @@unique([sourceId, targetId])
   @@index([targetId])

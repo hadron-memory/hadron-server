@@ -40,7 +40,8 @@ export const syncGraphFromGithub = async (
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       const upsertedIds: string[] = [];
 
-      // Upsert nodes by id (from YAML) — loc can change on move, id is stable
+      // Upsert nodes by id (from YAML) — loc can change on move, id is stable.
+      // After each node upsert, resolve any PendingEdges that were waiting for it.
       for (const node of graph.nodes) {
         const update = {
           loc: node.loc,
@@ -59,6 +60,17 @@ export const syncGraphFromGithub = async (
           update,
         });
         upsertedIds.push(node.id!);
+
+        // Resolve any cross-repo PendingEdges that were waiting for this node
+        const pending = await tx.pendingEdge.findMany({ where: { targetId: node.id! } });
+        for (const p of pending) {
+          await tx.edge.upsert({
+            where: { sourceId_targetId: { sourceId: p.sourceId, targetId: p.targetId } },
+            create: { sourceId: p.sourceId, targetId: p.targetId, label: p.label },
+            update: { label: p.label },
+          });
+          await tx.pendingEdge.delete({ where: { id: p.id } });
+        }
       }
 
       // Delete nodes that were in this namespace+ownerRepo but are no longer in the sync set
@@ -73,7 +85,18 @@ export const syncGraphFromGithub = async (
           select: { id: true },
         });
         if (targetExists) {
+          // Target is in DB — create a real edge, clean up any pending record
           await tx.edge.upsert({
+            where: { sourceId_targetId: { sourceId: edge.sourceId, targetId: edge.targetId } },
+            create: { sourceId: edge.sourceId, targetId: edge.targetId, label: edge.label },
+            update: { label: edge.label },
+          });
+          await tx.pendingEdge.deleteMany({
+            where: { sourceId: edge.sourceId, targetId: edge.targetId },
+          });
+        } else {
+          // Target not yet in DB — park as a pending edge until the target repo is synced
+          await tx.pendingEdge.upsert({
             where: { sourceId_targetId: { sourceId: edge.sourceId, targetId: edge.targetId } },
             create: { sourceId: edge.sourceId, targetId: edge.targetId, label: edge.label },
             update: { label: edge.label },
