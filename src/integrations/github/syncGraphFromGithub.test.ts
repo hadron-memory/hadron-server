@@ -118,19 +118,20 @@ describe('syncGraphFromGithub', () => {
   });
 
   it('re-sync preserves node IDs for unchanged nodes', async () => {
+    const nodeId = 'aaaa000000000000000000000000000000';
     const nodeA = join(mockSources, 'test', 'repo', 'nodeA');
     mkdirSync(nodeA, { recursive: true });
-    writeNodeFiles(nodeA, { name: 'nodeA', description: 'v1' });
+    writeNodeFiles(nodeA, { id: nodeId, name: 'nodeA', description: 'v1' });
 
     await syncGraphFromGithub('test/repo');
     const first = await db.node.findUnique({ where: { loc: 'nodeA' } });
 
-    // Re-sync with updated description
-    writeNodeFiles(nodeA, { name: 'nodeA', description: 'v2' });
+    // Re-sync with same id, updated description
+    writeNodeFiles(nodeA, { id: nodeId, name: 'nodeA', description: 'v2' });
     await syncGraphFromGithub('test/repo');
     const second = await db.node.findUnique({ where: { loc: 'nodeA' } });
 
-    expect(second!.id).toBe(first!.id); // ID preserved
+    expect(second!.id).toBe(first!.id); // ID preserved (same YAML id)
     expect(second!.description).toBe('v2'); // content updated
   });
 
@@ -162,9 +163,9 @@ describe('syncGraphFromGithub', () => {
     const nodeB = join(mockSources, 'test', 'repo', 'b');
     mkdirSync(nodeA, { recursive: true });
     mkdirSync(nodeB, { recursive: true });
-    // Edge target uses the relative loc (relative to graph root), not the full namespace-prefixed loc
-    writeNodeFiles(nodeA, { name: 'a', nodes: [{ loc: 'b', rel: 'uses' }] });
-    writeNodeFiles(nodeB, { name: 'b' });
+    const bId = 'bbbb000000000000000000000000000000';
+    writeNodeFiles(nodeA, { name: 'a', nodes: [{ id: bId, rel: 'uses' }] });
+    writeNodeFiles(nodeB, { id: bId, name: 'b' });
 
     await syncGraphFromGithub('test/repo');
 

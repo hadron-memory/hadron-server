@@ -13,12 +13,13 @@ datasource db {
 // namespace is the first two segments, e.g. "micromentor-org.mmdata" — identifies
 // which repo owns this node.
 model Node {
-  id          String   @id @default(cuid())
+  id          String   @id // UUIDv7 (no hyphens) from node.yaml — stable across moves
   loc         String   @unique
   name        String
   alias       String?
   description String?
   content     String?  // topic.md full text
+  contentHash String?  // SHA256(yaml+topic.md)[0:8] for change detection
   tags        String   @default("[]") // JSON array, e.g. '["action", "generate"]'
   namespace   String   // e.g. "micromentor-org.mmdata"
   ownerRepo   String   // GitHub repo slug that contributed this node, e.g. "micromentor/mmdata"

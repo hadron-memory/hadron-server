@@ -76,21 +76,37 @@ describe('loadNodeFromFs', () => {
     expect(node.tags).toEqual([]);
   });
 
-  it('extracts edges from node.yaml nodes array', async () => {
+  it('extracts edges from node.yaml nodes array using id', async () => {
     const nodeDir = join(graphRoot, 'org', 'graph');
     mkdirSync(nodeDir, { recursive: true });
     writeNodeFiles(nodeDir, {
       name: 'graph',
       nodes: [
-        { loc: 'org.other', rel: 'Related to' },
-        { loc: 'org.another', rel: 'Also related' },
+        { id: 'aaaa000000000000000000000000000000', rel: 'Related to' },
+        { id: 'bbbb000000000000000000000000000000', rel: 'Also related' },
       ],
     });
 
     const { edges } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
     expect(edges).toHaveLength(2);
-    expect(edges[0]).toEqual({ targetLoc: 'org.other', label: 'Related to' });
-    expect(edges[1]).toEqual({ targetLoc: 'org.another', label: 'Also related' });
+    expect(edges[0]).toEqual({ targetId: 'aaaa000000000000000000000000000000', label: 'Related to' });
+    expect(edges[1]).toEqual({ targetId: 'bbbb000000000000000000000000000000', label: 'Also related' });
+  });
+
+  it('skips legacy edge entries that have no id', async () => {
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    const nodeMetaDir = join(nodeDir, '.node');
+    mkdirSync(nodeMetaDir, { recursive: true });
+    // Write a node.yaml with a loc-only edge (no id) directly — bypassing the typed helper
+    const { writeFileSync } = await import('fs');
+    writeFileSync(
+      join(nodeMetaDir, 'node.yaml'),
+      'id: cccc00000000000000000000000000000000\nname: graph\nnodes:\n  - loc: org.other\n    rel: legacy\n',
+      'utf-8',
+    );
+
+    const { edges } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect(edges).toHaveLength(0);
   });
 
   it('returns empty edges when nodes array is absent', async () => {

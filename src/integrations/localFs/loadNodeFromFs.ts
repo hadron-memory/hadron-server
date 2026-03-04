@@ -4,11 +4,12 @@ import { parse } from 'yaml';
 import type { Node } from '../../index.d.js';
 
 interface NodeYaml {
+  id: string;
   name: string;
   description?: string;
   summary?: string;
   tags?: string[];
-  nodes?: Array<{ loc: string; rel: string }>;
+  nodes?: Array<{ id: string; rel: string; loc?: string }>;
   alias?: string;
   contentHash?: string;
 }
@@ -24,7 +25,7 @@ export const loadNodeFromFs = async (
   dirPath: string,
   graphRoot: string,
   ownerRepo: string,
-): Promise<{ node: Partial<Node>; edges: Array<{ targetLoc: string; label: string }> }> => {
+): Promise<{ node: Partial<Node>; edges: Array<{ targetId: string; label: string }> }> => {
   const nodeDir = join(dirPath, '.node');
   const yamlPath = join(nodeDir, 'node.yaml');
   const mdPath = join(nodeDir, 'topic.md');
@@ -39,19 +40,23 @@ export const loadNodeFromFs = async (
   const loc = relPath.split(sep).join('.');
   const namespace = loc.split('.').slice(0, 2).join('.');
 
-  // Extract edges from the nodes array in node.yaml
-  const edges = (meta.nodes ?? []).map((edge) => ({
-    targetLoc: edge.loc,
-    label: edge.rel,
-  }));
+  // Extract edges — modern format uses id; entries without id are skipped
+  const edges = (meta.nodes ?? [])
+    .filter((edge) => !!edge.id)
+    .map((edge) => ({
+      targetId: edge.id,
+      label: edge.rel,
+    }));
 
   return {
     node: {
+      id: meta.id,
       loc,
       name: meta.name,
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
       content: content?.trim() ?? null,
+      contentHash: meta.contentHash ?? null,
       tags: meta.tags ?? [],
       namespace,
       ownerRepo,

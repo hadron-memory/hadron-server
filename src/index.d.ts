@@ -12,6 +12,7 @@ export interface Node {
   alias: string | null;
   description: string | null;
   content: string | null;
+  contentHash: string | null;
   tags: string[];
   namespace: string;
   ownerRepo: string;

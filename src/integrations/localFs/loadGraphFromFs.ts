@@ -4,8 +4,8 @@ import type { HadronGraph, Node } from '../../index.d.js';
 import { loadNodeFromFs } from './loadNodeFromFs.js';
 
 export interface GraphEdge {
-  sourceLoc: string;
-  targetLoc: string;
+  sourceId: string;
+  targetId: string;
   label: string;
 }
 
@@ -55,11 +55,11 @@ export const loadGraphFromFs = async (
       const result = await loadNodeFromFs(dir, graphPath, ownerRepo);
       nodes.push(result.node);
 
-      // Map edges: source is this node's loc
+      // Map edges: source is this node's id
       for (const edge of result.edges) {
         edges.push({
-          sourceLoc: result.node.loc!,
-          targetLoc: edge.targetLoc,
+          sourceId: result.node.id!,
+          targetId: edge.targetId,
           label: edge.label,
         });
       }

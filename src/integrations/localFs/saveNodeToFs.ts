@@ -26,6 +26,7 @@ export const saveNodeToFs = async (
 
     // Build node.yaml
     const meta: Record<string, unknown> = {
+      id: node.id,
       name: node.name,
     };
     if (node.description) meta.description = node.description;

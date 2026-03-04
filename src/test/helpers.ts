@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -31,6 +32,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
 export async function createDbNode(
   db: PrismaClient,
   fields: {
+    id?: string;
     loc: string;
     name?: string;
     namespace?: string;
@@ -43,6 +45,7 @@ export async function createDbNode(
   const namespace = fields.namespace ?? loc.split('.').slice(0, 2).join('.');
   return db.node.create({
     data: {
+      id: fields.id ?? randomUUID().replace(/-/g, ''),
       loc,
       name: fields.name ?? loc,
       namespace,
@@ -92,12 +95,13 @@ export function makeTmpDir(): { dir: string; cleanup: () => void } {
 }
 
 interface NodeMeta {
+  id?: string;
   name: string;
   description?: string;
   summary?: string;
   alias?: string;
   tags?: string[];
-  nodes?: Array<{ loc: string; rel: string }>;
+  nodes?: Array<{ id: string; rel: string }>;
 }
 
 /**
@@ -107,7 +111,9 @@ interface NodeMeta {
 export function writeNodeFiles(dir: string, meta: NodeMeta, content?: string): void {
   const nodeDir = join(dir, '.node');
   mkdirSync(nodeDir, { recursive: true });
-  writeFileSync(join(nodeDir, 'node.yaml'), stringify(meta), 'utf-8');
+  // Ensure every node has an id (generate one if not provided)
+  const withId = { id: randomUUID().replace(/-/g, ''), ...meta };
+  writeFileSync(join(nodeDir, 'node.yaml'), stringify(withId), 'utf-8');
   if (content !== undefined) {
     writeFileSync(join(nodeDir, 'topic.md'), content, 'utf-8');
   }

@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import type { Node } from '../../index.d.js';
 import { SOURCES_PATH } from '../../config.js';
 import { db } from '../../integrations/db/client.js';
@@ -20,18 +21,23 @@ export const createNode = async (
     console.warn(`Failed to save node to filesystem: ${fsResult.error}`);
   }
 
+  // Use YAML id if provided; generate one if creating via API
+  const id = node.id ?? randomUUID().replace(/-/g, '');
+
   // Derive namespace from loc
   const namespace = node.loc.split('.').slice(0, 2).join('.');
 
-  // Upsert into database
+  // Upsert into database (by loc — a node's loc is its stable human identifier via the API)
   const saved = await db.node.upsert({
     where: { loc: node.loc },
     create: {
+      id,
       loc: node.loc,
       name: node.name,
       alias: node.alias ?? null,
       description: node.description ?? null,
       content: node.content ?? null,
+      contentHash: node.contentHash ?? null,
       tags: serializeTags(node.tags ?? []) as string[],
       namespace,
       ownerRepo: node.ownerRepo,
@@ -41,6 +47,7 @@ export const createNode = async (
       alias: node.alias ?? null,
       description: node.description ?? null,
       content: node.content ?? null,
+      contentHash: node.contentHash ?? null,
       tags: serializeTags(node.tags ?? []) as string[],
       namespace,
       ownerRepo: node.ownerRepo,

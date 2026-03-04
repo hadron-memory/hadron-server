@@ -1,5 +1,5 @@
 import bcrypt from 'bcrypt';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, ClientType, Prisma } from '../../../generated/prisma/index.js';
 import { serializeTags, deserializeTags, serializeRoles, deserializeRoles, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
@@ -137,9 +137,10 @@ export const resolvers = {
         throw new Error('Forbidden: outside your writable namespace');
       }
       const tags = serializeTags(input.tags ?? []) as string[];
+      const id = input.id ?? randomUUID().replace(/-/g, '');
       return ctx.db.node.upsert({
         where: { loc: input.loc },
-        create: { ...input, namespace, tags },
+        create: { ...input, id, namespace, tags },
         update: { ...input, namespace, tags },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
@@ -169,7 +170,7 @@ export const resolvers = {
 
         for (const input of nodes) {
           await tx.node.create({
-            data: { ...input, namespace: deriveNamespace(input.loc), tags: serializeTags(input.tags ?? []) as string[] },
+            data: { id: input.id ?? randomUUID().replace(/-/g, ''), ...input, namespace: deriveNamespace(input.loc), tags: serializeTags(input.tags ?? []) as string[] },
           });
         }
 
@@ -304,6 +305,7 @@ function deriveNamespace(loc: string): string {
 }
 
 interface NodeInput {
+  id?: string;
   loc: string;
   name: string;
   alias?: string;

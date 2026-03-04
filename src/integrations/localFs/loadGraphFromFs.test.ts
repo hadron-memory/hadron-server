@@ -59,17 +59,19 @@ describe('loadGraphFromFs', () => {
     expect(locs).toContain('org.graph.sub');
   });
 
-  it('extracts edges between nodes', async () => {
+  it('extracts edges between nodes using node ids', async () => {
     const nodeA = join(graphRoot, 'org', 'a');
     const nodeB = join(graphRoot, 'org', 'b');
     mkdirSync(nodeA, { recursive: true });
     mkdirSync(nodeB, { recursive: true });
-    writeNodeFiles(nodeA, { name: 'a', nodes: [{ loc: 'org.b', rel: 'links to b' }] });
-    writeNodeFiles(nodeB, { name: 'b' });
+    const targetId = 'bbbb000000000000000000000000000000';
+    writeNodeFiles(nodeA, { name: 'a', nodes: [{ id: targetId, rel: 'links to b' }] });
+    writeNodeFiles(nodeB, { id: targetId, name: 'b' });
 
-    const { edges } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
+    const { graph, edges } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
+    const sourceId = graph.nodes.find((n) => n.loc === 'org.a')!.id;
     expect(edges).toHaveLength(1);
-    expect(edges[0]).toEqual({ sourceLoc: 'org.a', targetLoc: 'org.b', label: 'links to b' });
+    expect(edges[0]).toEqual({ sourceId, targetId, label: 'links to b' });
   });
 
   it('logs a warning and continues when a node.yaml is malformed', async () => {

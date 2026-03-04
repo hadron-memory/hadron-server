@@ -38,41 +38,44 @@ export const syncGraphFromGithub = async (
 
     // 3. Upsert all nodes and edges into the database (transactional)
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
-      const upsertedLocs: string[] = [];
+      const upsertedIds: string[] = [];
 
-      // Upsert nodes by loc — preserves existing IDs so cross-repo edge FKs remain valid
+      // Upsert nodes by id (from YAML) — loc can change on move, id is stable
       for (const node of graph.nodes) {
-        const data = {
+        const update = {
           loc: node.loc,
           name: node.name,
           alias: node.alias,
           description: node.description,
           content: node.content,
+          contentHash: node.contentHash,
           tags: serializeTags(node.tags ?? []) as string[],
           namespace,
           ownerRepo,
         };
         await tx.node.upsert({
-          where: { loc: node.loc },
-          create: data,
-          update: data,
+          where: { id: node.id },
+          create: { id: node.id!, ...update },
+          update,
         });
-        upsertedLocs.push(node.loc);
+        upsertedIds.push(node.id!);
       }
 
       // Delete nodes that were in this namespace+ownerRepo but are no longer in the sync set
       await tx.node.deleteMany({
-        where: { namespace, ownerRepo, loc: { notIn: upsertedLocs } },
+        where: { namespace, ownerRepo, id: { notIn: upsertedIds } },
       });
 
-      // Upsert edges (only where both source and target exist in DB)
+      // Upsert edges — sourceId and targetId come directly from the YAML
       for (const edge of edges) {
-        const source = await tx.node.findUnique({ where: { loc: edge.sourceLoc } });
-        const target = await tx.node.findUnique({ where: { loc: edge.targetLoc } });
-        if (source && target) {
+        const targetExists = await tx.node.findUnique({
+          where: { id: edge.targetId },
+          select: { id: true },
+        });
+        if (targetExists) {
           await tx.edge.upsert({
-            where: { sourceId_targetId: { sourceId: source.id, targetId: target.id } },
-            create: { sourceId: source.id, targetId: target.id, label: edge.label },
+            where: { sourceId_targetId: { sourceId: edge.sourceId, targetId: edge.targetId } },
+            create: { sourceId: edge.sourceId, targetId: edge.targetId, label: edge.label },
             update: { label: edge.label },
           });
         }
