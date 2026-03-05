@@ -13,20 +13,22 @@ datasource db {
 // namespace is the first two segments, e.g. "micromentor-org.mmdata" — identifies
 // which repo owns this node.
 model Node {
-  id          String   @id @default(cuid())
+  id          String   @id // UUIDv7 (no hyphens) from node.yaml — stable across moves
   loc         String   @unique
   name        String
   alias       String?
   description String?
   content     String?  // topic.md full text
+  contentHash String?  // SHA256(yaml+topic.md)[0:8] for change detection
   tags        String[] // e.g. ["action", "generate"]
   namespace   String   // e.g. "micromentor-org.mmdata"
   ownerRepo   String   // GitHub repo slug that contributed this node, e.g. "micromentor/mmdata"
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  outgoingEdges Edge[]       @relation("SourceNode")
-  incomingEdges Edge[]       @relation("TargetNode")
+  outgoingEdges Edge[]        @relation("SourceNode")
+  incomingEdges Edge[]        @relation("TargetNode")
+  pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
 
   @@index([namespace])
@@ -41,6 +43,20 @@ model Edge {
 
   source Node @relation("SourceNode", fields: [sourceId], references: [id], onDelete: Cascade)
   target Node @relation("TargetNode", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, targetId])
+  @@index([targetId])
+}
+
+// Edge whose target node hasn't been synced yet.
+// Stored without a FK on targetId; converted to a real Edge when the target arrives.
+model PendingEdge {
+  id       String  @id @default(cuid())
+  sourceId String
+  targetId String  // intended target node id — NOT a FK
+  label    String?
+
+  source Node @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
   @@unique([sourceId, targetId])
   @@index([targetId])
@@ -107,17 +123,25 @@ model UsageEvent {
   @@index([sessionId])
 }
 
-// API keys for machine clients (MCP, CI, edge devices).
-// The raw key is shown once at creation time; only its bcrypt hash is stored.
-model ApiKey {
-  id         String    @id @default(cuid())
-  label      String    @unique // human-readable name, e.g. "mmdata-ci"
-  keyHash    String    // bcrypt hash of the opaque token
-  role       Role      @default(READER)
-  namespace  String?   // for CONTRIBUTOR: restricts write access to this namespace prefix
-  expiresAt  DateTime?
-  createdAt  DateTime  @default(now())
-  lastUsedAt DateTime?
+// A machine client — workstation, cloud host, IoT device, or AI agent.
+// Authenticates via API key. The raw key is shown once at creation; only its bcrypt hash is stored.
+model Client {
+  id             String      @id @default(cuid())
+  label          String      @unique // human-readable name, e.g. "mmdata-ci"
+  keyHash        String      // bcrypt hash of the opaque token
+  type           ClientType  @default(WORKSTATION)
+  description    String?
+  roles          Role[]      @default([READER])
+  namespace      String?     // for CONTRIBUTOR: restricts write access to this namespace prefix
+  organizationId String?     // optional: scopes this client to one organization
+  userId         String?     // optional: the user who owns this client; null for IoT/org-owned
+  expiresAt      DateTime?
+  createdAt      DateTime    @default(now())
+  lastUsedAt     DateTime?
+
+  organization       Organization?            @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  user               User?                    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  graphSubscriptions ClientGraphSubscription[]
 }
 
 // GitHub OAuth users — cached after first login.
@@ -125,13 +149,124 @@ model User {
   id        String   @id @default(cuid())
   githubId  Int      @unique
   login     String   // GitHub username
-  role      Role     @default(READER)
+  name      String?  // display name from GitHub profile
+  avatarUrl String?  // GitHub avatar URL
+  roles     Role[]   @default([READER])
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  memberships        OrganizationMember[]
+  clients            Client[]
+  ownedOrganizations Organization[] @relation("OwnedOrganizations")
+  ownedGraphs        HadronGraph[]  @relation("OwnedGraphs")
+}
+
+// A top-level organization (company or team) that owns one or more graphs.
+model Organization {
+  id                   String    @id @default(cuid())
+  name                 String
+  slug                 String    @unique // URL-safe identifier, e.g. "micromentor-org"
+  githubInstallationId Int?      @unique // set when the GitHub App is installed for this org
+  ownerId              String?   // User who created/owns this org
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  owner         User?                     @relation("OwnedOrganizations", fields: [ownerId], references: [id], onDelete: SetNull)
+  members       OrganizationMember[]
+  graphs        HadronGraph[]
+  clients       Client[]
+  subscriptions HadronGraphSubscription[]
+}
+
+// Per-organization membership and role for a user.
+model OrganizationMember {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  role           OrgRole  @default(READER)
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+// A Hadron graph config — replaces .hadron-controller.yaml entries.
+// Each record describes one GitHub repo to sync.
+model HadronGraph {
+  id             String    @id @default(cuid())
+  organizationId String
+  ownerId        String?   // User who created this graph config
+  name           String    // graph key, e.g. "micromentor-org/mmdata"
+  source         String?   // git clone URL; null = DB-only mode (no git sync/push)
+  readBranch     String?   // branch to clone/pull from; defaults to repo default
+  writeBranch    String?   // branch for node mutations; defaults to "hadron-updates"
+  visibility     String    @default("PRIVATE") // "PUBLIC" | "PRIVATE"
+  version        String?
+  lastSyncedAt   DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization        Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  owner               User?                     @relation("OwnedGraphs", fields: [ownerId], references: [id], onDelete: SetNull)
+  subscriptions       HadronGraphSubscription[]
+  clientSubscriptions ClientGraphSubscription[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+// A client's subscription to a specific graph — controls which graphs the client syncs.
+// Empty subscriptions = no graphs (explicit opt-in required).
+model ClientGraphSubscription {
+  id               String   @id @default(cuid())
+  clientId         String
+  graphId          String
+  subscriptionType String   @default("READ_ONLY") // "READ_ONLY" | "READ_WRITE"
+  namespace        String?  // optional: namespace restriction for this subscription
+  createdAt        DateTime @default(now())
+
+  client Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  graph  HadronGraph @relation(fields: [graphId],  references: [id], onDelete: Cascade)
+
+  @@unique([clientId, graphId])
+  @@index([graphId])
+}
+
+// An organization's subscription to a graph it does not own.
+// The owning organization always has implicit full access.
+model HadronGraphSubscription {
+  id             String   @id @default(cuid())
+  graphId        String
+  organizationId String   // subscriber org (not the owner)
+  role           String   @default("READER") // "READER" | "CONTRIBUTOR"
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  graph        HadronGraph  @relation(fields: [graphId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([graphId, organizationId])
+  @@index([organizationId])
 }
 
 enum Role {
   ADMIN
   CONTRIBUTOR
   READER
+}
+
+enum OrgRole {
+  ADMIN
+  CONTRIBUTOR
+  READER
+}
+
+enum ClientType {
+  WORKSTATION
+  CLOUD
+  IOT
+  AGENT
 }

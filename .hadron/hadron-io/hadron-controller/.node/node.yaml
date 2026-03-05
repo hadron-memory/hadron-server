@@ -1,0 +1,21 @@
+name: Hadron Controller
+description: The organization-wide Hadron graph server — GraphQL API, usage database, and graph sync engine
+
+tags:
+  - hadron
+  - server
+  - graphql
+
+nodes:
+  - loc: hadron-io.hadron-controller.architecture
+    rel: High-level overview of the system components and how they fit together
+  - loc: hadron-io.hadron-controller.auth
+    rel: How authentication and authorization works (GitHub OAuth, JWT, Client API keys, RBAC)
+  - loc: hadron-io.hadron-controller.graph-sync
+    rel: How graphs are synced from GitHub repos into the local filesystem and database
+  - loc: hadron-io.hadron-controller.data-model
+    rel: The Prisma database schema — Node, Edge, Session, UsageEvent, Client, User
+  - loc: hadron-io.hadron-controller.api
+    rel: The GraphQL and REST API endpoints exposed by the server
+  - loc: hadron-io.hadron-controller.dual-database
+    rel: How the server supports both PostgreSQL (production) and SQLite (development)

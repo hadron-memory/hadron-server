@@ -3,6 +3,6 @@ dist/
 src/generated/
 .env
 .env.local
-*.env.local
+*.env.localFs
 prisma/*.db
 prisma/*.db-journal

@@ -1,0 +1,14 @@
+name: graph-sync
+description: How graphs are synced from GitHub repos into the local filesystem and the database
+
+tags:
+  - sync
+  - github
+  - filesystem
+  - graphs
+
+nodes:
+  - loc: hadron-io.hadron-controller
+    rel: The controller that manages graph syncing
+  - loc: hadron-io.hadron-controller.data-model
+    rel: Node and Edge models that receive the synced data

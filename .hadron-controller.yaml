@@ -1,0 +1,46 @@
+graphs:
+  hadrongraph-io:
+    source: "git@github.com:baragaun/hadron-core.git"
+    readBranch: "main"
+    writeBranch: "hadron-updates"
+    version: "latest"
+    path: "baragaun/hadron-core"
+    updatedAt: "2026-02-19T00:00:00.000Z"
+  baragaun-com:
+    source: "git@github.com:baragaun/hadron-baragaun.git"
+    readBranch: "main"
+    writeBranch: "main"
+    version: "latest"
+    path: "baragaun/hadron-baragaun-com"
+    updatedAt: "2026-02-19T00:00:00.000Z"
+  baragaun-com/bg-code-gen:
+    source: "git@github.com:baragaun/hadron-bg-code-gen.git"
+    readBranch: "main"
+    writeBranch: "main"
+    version: "latest"
+    path: "baragaun/hadron-bg-code-gen"
+    updatedAt: "2026-02-19T00:00:00.000Z"
+  baragaun-com/channels-service:
+    source: "git@github.com:baragaun/hadron-channels-service.git"
+    readBranch: "main"
+    writeBranch: "hadron-updates"
+    path: "baragaun/hadron-channels-service"
+    updatedAt: "2026-02-19T00:00:00.000Z"
+  baragaun-com/secureid-service:
+    source: "git@github.com:baragaun/hadron-secureid-service.git"
+    readBranch: "main"
+    writeBranch: "hadron-updates"
+    path: "baragaun/hadron-secureid-service"
+    updatedAt: "2026-02-19T00:00:00.000Z"
+  micromentor-org/mmdata:
+    source: "git@github.com:micromentor-team/mmdata.git"
+    readBranch: "main"
+    writeBranch: "hadron-updates-{client}"
+    path: "micromentor-team/mmdata"
+    updatedAt: "2026-02-19T00:00:00.000Z"
+  micromentor-org/mm-app:
+    source: "git@github.com:micromentor-team/mm-app.git"
+    readBranch: "main"
+    writeBranch: "hadron-updates-{client}"
+    path: "micromentor-team/mm-app"
+    updatedAt: "2026-02-19T00:00:00.000Z"
