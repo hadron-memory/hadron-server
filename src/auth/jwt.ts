@@ -9,7 +9,7 @@ export interface HadronJwtPayload extends JWTPayload {
 
 const JWT_ISSUER = 'hadron-controller';
 const JWT_AUDIENCE = 'hadron';
-const JWT_EXPIRY = '7d';
+const JWT_EXPIRY = process.env.JWT_EXPIRY || '7d';
 
 function getSecret(): Uint8Array {
   const secret = process.env.JWT_SECRET;
