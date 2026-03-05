@@ -82,6 +82,15 @@ export const typeDefs = `#graphql
     AGENT
   }
 
+  # A client's subscription to a specific graph, including access metadata.
+  type ClientGraphSub {
+    id: ID!
+    graph: GraphConfig!
+    subscriptionType: String!   # "READ_ONLY" | "READ_WRITE"
+    namespace: String           # optional namespace restriction
+    createdAt: String!
+  }
+
   type Client {
     id: ID!
     label: String!
@@ -92,7 +101,8 @@ export const typeDefs = `#graphql
     organizationId: String
     userId: String
     user: User
-    graphs: [GraphConfig!]!   # graphs this client is subscribed to
+    graphs: [GraphConfig!]!          # graphs this client is subscribed to
+    subscriptions: [ClientGraphSub!]! # same, with access metadata
     expiresAt: String
     createdAt: String!
     lastUsedAt: String
@@ -119,6 +129,7 @@ export const typeDefs = `#graphql
     name: String!
     slug: String!
     githubInstallationId: Int
+    owner: User
     members: [OrganizationMember!]!
     graphs: [GraphConfig!]!
     subscriptions: [GraphSubscription!]!  # graphs this org subscribes to
@@ -139,6 +150,7 @@ export const typeDefs = `#graphql
   type GraphConfig {
     id: ID!
     organizationId: String!
+    owner: User
     name: String!
     source: String
     readBranch: String
@@ -234,6 +246,8 @@ export const typeDefs = `#graphql
     # Clients (admin only)
     clients: [Client!]!
     client(label: String!): Client
+    # Clients owned by the current user
+    myClients: [Client!]!
 
     # Users (admin only)
     users: [User!]!
@@ -277,11 +291,12 @@ export const typeDefs = `#graphql
 
     # Client management (admin only)
     createClient(label: String!, type: ClientType!, roles: [Role!]!, description: String, namespace: String, organizationId: String, userId: String, expiresAt: String): ClientCreated!
+    regenerateApiKey(id: ID!): ClientCreated!
     revokeClient(label: String!): Boolean!
 
     # Client graph subscriptions (org ADMIN or platform ADMIN)
     # graphId must be accessible to the client's org (owned or org-subscribed)
-    subscribeClientToGraph(clientId: ID!, graphId: ID!): Client!
+    subscribeClientToGraph(clientId: ID!, graphId: ID!, subscriptionType: String, namespace: String): Client!
     unsubscribeClientFromGraph(clientId: ID!, graphId: ID!): Client!
 
     # User management (admin only)
@@ -312,6 +327,10 @@ export const typeDefs = `#graphql
     updateGraphSubscription(graphId: ID!, orgId: ID!, role: String!): GraphSubscription!
     # Callable by: owner ADMIN, platform ADMIN, or the subscribing org itself
     deleteGraphSubscription(graphId: ID!, orgId: ID!): Boolean!
+
+    # Transfer ownership
+    transferOrganizationOwnership(orgId: ID!, newOwnerId: ID!): Organization!
+    transferGraphOwnership(graphId: ID!, newOwnerId: ID!): GraphConfig!
 
     # Trigger an on-demand sync for one graph (org ADMIN or CONTRIBUTOR)
     syncGraphConfig(id: ID!): GraphConfig!

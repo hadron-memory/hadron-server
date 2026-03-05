@@ -108,12 +108,13 @@ export async function createServer() {
         githubId: ghUser.id,
       });
 
-      // Redirect to frontend with token
+      // Redirect to frontend callback page which will set the httpOnly cookie
       const frontendUrl =
         process.env.FRONTEND_URL || 'http://localhost:5173';
-      const redirectUrl = new URL(pending.redirect, frontendUrl);
-      redirectUrl.searchParams.set('token', jwt);
-      res.redirect(redirectUrl.toString());
+      const callbackUrl = new URL('/auth/callback', frontendUrl);
+      callbackUrl.searchParams.set('token', jwt);
+      callbackUrl.searchParams.set('redirect', pending.redirect);
+      res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('OAuth callback error:', err);
       res.status(500).json({ error: 'OAuth authentication failed' });
