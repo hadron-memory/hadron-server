@@ -18,7 +18,7 @@ export const createNode = async (
   // Save to filesystem
   const fsResult = await saveNodeToFs(node, SOURCES_PATH);
   if (fsResult.error) {
-    console.warn(`Failed to save node to filesystem: ${fsResult.error}`);
+    throw new Error(`Failed to save node to filesystem: ${fsResult.error}`);
   }
 
   // Use YAML id if provided; generate one if creating via API
