@@ -35,12 +35,16 @@ export const syncGraphFromGithub = async (
     const localPath = join(SOURCES_PATH, graph.organization.slug, graphName);
     const ownerRepo = extractOwnerRepo(graph.source);
 
-    // 1. Get installation token (if org has GitHub App installed)
-    let cloneUrl = graph.source;
-    if (graph.organization.githubInstallationId) {
-      const token = await getInstallationToken(graph.organization.githubInstallationId);
-      cloneUrl = toHttpsUrl(graph.source, token);
+    // 1. Get installation token (requires GitHub App installation)
+    if (!graph.organization.githubInstallationId) {
+      console.warn(
+        `[syncGraphFromGithub] "${graphName}" — skipping: organization "${graph.organization.slug}" has no githubInstallationId`,
+      );
+      return {};
     }
+
+    const token = await getInstallationToken(graph.organization.githubInstallationId);
+    const cloneUrl = toHttpsUrl(graph.source, token);
 
     // 2. Clone or pull the repo
     await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
