@@ -119,8 +119,21 @@ export const typeDefs = `#graphql
     githubId: Int!
     login: String!
     name: String
+    email: String
     avatarUrl: String
     roles: [Role!]!
+    canInvite: Boolean!
+  }
+
+  type OrgInvite {
+    id: ID!
+    email: String!
+    organization: Organization!
+    invitedBy: User!
+    status: String!
+    token: String
+    createdAt: String!
+    expiresAt: String!
   }
 
   # A company or team that owns one or more Hadron graphs.
@@ -260,6 +273,12 @@ export const typeDefs = `#graphql
     myOrganizations: [Organization!]!     # authenticated user: their memberships
     organization(id: ID!): Organization   # org member or platform ADMIN
 
+    # Invites for the current user (matched by email)
+    myInvites: [OrgInvite!]!
+
+    # Invites for a given organization (org owner/admin only)
+    organizationInvites(orgId: ID!): [OrgInvite!]!
+
     # Public graph marketplace — any authenticated user
     publicGraphs: [GraphConfig!]!
 
@@ -301,6 +320,7 @@ export const typeDefs = `#graphql
 
     # User management (admin only)
     updateUserRoles(userId: ID!, roles: [Role!]!): User!
+    updateUserCanInvite(userId: ID!, canInvite: Boolean!): User!
 
     # Organization management (platform ADMIN)
     createOrganization(name: String!, slug: String!): Organization!
@@ -327,6 +347,12 @@ export const typeDefs = `#graphql
     updateGraphSubscription(graphId: ID!, orgId: ID!, role: String!): GraphSubscription!
     # Callable by: owner ADMIN, platform ADMIN, or the subscribing org itself
     deleteGraphSubscription(graphId: ID!, orgId: ID!): Boolean!
+
+    # Organization invites
+    createOrganizationInvite(orgId: ID!, email: String!): OrgInvite!
+    acceptInvite(inviteId: ID!): OrgInvite!
+    declineInvite(inviteId: ID!): OrgInvite!
+    cancelInvite(inviteId: ID!): OrgInvite!
 
     # Transfer ownership
     transferOrganizationOwnership(orgId: ID!, newOwnerId: ID!): Organization!

@@ -150,13 +150,16 @@ model User {
   githubId  Int      @unique
   login     String   // GitHub username
   name      String?  // display name from GitHub profile
+  email     String?  @unique // email address for invite matching
   avatarUrl String?  // GitHub avatar URL
   roles     Role[]   @default([READER])
+  canInvite Boolean  @default(false) // whether this user can send org invitations
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   memberships OrganizationMember[]
   clients     Client[]
+  sentInvites OrgInvite[] @relation("SentInvites")
 }
 
 // A top-level organization (company or team) that owns one or more graphs.
@@ -172,6 +175,7 @@ model Organization {
   graphs        HadronGraph[]
   clients       Client[]
   subscriptions HadronGraphSubscription[]
+  invites       OrgInvite[]
 }
 
 // Per-organization membership and role for a user.
@@ -242,6 +246,32 @@ model HadronGraphSubscription {
 
   @@unique([graphId, organizationId])
   @@index([organizationId])
+}
+
+// An invitation to join an organization, sent by email.
+model OrgInvite {
+  id          String       @id @default(cuid())
+  orgId       String
+  email       String       // invitee email address
+  invitedById String       // User who sent the invite
+  status      InviteStatus @default(PENDING)
+  token       String?      @unique // for users without an account (future invite-link flow)
+  createdAt   DateTime     @default(now())
+  expiresAt   DateTime
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  invitedBy    User         @relation("SentInvites", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, email, status])
+  @@index([email])
+  @@index([token])
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
 }
 
 enum Role {

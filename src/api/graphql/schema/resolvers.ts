@@ -71,6 +71,13 @@ async function getAccessibleNamespaces(db: PrismaClient, organizationId: string)
   return graphs.map((g) => g.name.replace(/\//g, '.'));
 }
 
+const INVITE_INCLUDE = {
+  organization: { include: ORG_INCLUDE },
+  invitedBy: true,
+};
+
+const INVITE_EXPIRATION_DAYS = 7;
+
 const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
 
 const toISO = (v: Date | string | null | undefined): string | null =>
@@ -110,6 +117,10 @@ export const resolvers = {
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
+  },
+  OrgInvite: {
+    createdAt: (inv: { createdAt: Date | string }) => toISO(inv.createdAt)!,
+    expiresAt: (inv: { expiresAt: Date | string }) => toISO(inv.expiresAt)!,
   },
 
   Query: {
@@ -241,6 +252,26 @@ export const resolvers = {
         if (!member) throw new Error('Forbidden');
       }
       return ctx.db.organization.findUnique({ where: { id }, include: ORG_INCLUDE });
+    },
+
+    myInvites: async (_: unknown, __: unknown, ctx: Context) => {
+      if (!ctx.userId) return [];
+      const user = await ctx.db.user.findUnique({ where: { id: ctx.userId } });
+      if (!user?.email) return [];
+      return ctx.db.orgInvite.findMany({
+        where: { email: user.email, status: 'PENDING' },
+        include: INVITE_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+      });
+    },
+
+    organizationInvites: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      return ctx.db.orgInvite.findMany({
+        where: { orgId },
+        include: INVITE_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+      });
     },
 
     publicGraphs: async (_: unknown, __: unknown, _ctx: Context) => {
@@ -508,7 +539,7 @@ export const resolvers = {
           roles: serializeRoles(roles) as Role[],
           namespace,
           organizationId: organizationId ?? null,
-          userId: userId ?? null,
+          userId: userId ?? ctx.userId ?? null,
           expiresAt: expiresAt ? new Date(expiresAt) : undefined,
         },
       });
@@ -608,6 +639,15 @@ export const resolvers = {
     ) => {
       requireRole(ctx, 'ADMIN');
       return ctx.db.user.update({ where: { id: userId }, data: { roles: serializeRoles(roles) as Role[] } });
+    },
+
+    updateUserCanInvite: async (
+      _: unknown,
+      { userId, canInvite }: { userId: string; canInvite: boolean },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'ADMIN');
+      return ctx.db.user.update({ where: { id: userId }, data: { canInvite } });
     },
 
     // ── Organization management ───────────────────────────────────────────────
@@ -759,6 +799,126 @@ export const resolvers = {
       return true;
     },
 
+    // ── Organization invites ──────────────────────────────────────────────────
+
+    createOrganizationInvite: async (
+      _: unknown,
+      { orgId, email }: { orgId: string; email: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+
+      // Check permission: platform ADMIN, org owner, org ADMIN, or user with canInvite who is an org member
+      const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: orgId } });
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN');
+      const isOrgOwner = org.ownerId === ctx.userId;
+      if (!isPlatformAdmin && !isOrgOwner) {
+        const member = await ctx.db.organizationMember.findUnique({
+          where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+        });
+        if (!member) throw new Error('Forbidden: you must be a member of this organization');
+        const isOrgAdmin = member.role === 'ADMIN';
+        if (!isOrgAdmin) {
+          const user = await ctx.db.user.findUniqueOrThrow({ where: { id: ctx.userId } });
+          if (!user.canInvite) throw new Error('Forbidden: you do not have permission to invite');
+        }
+      }
+
+      // Prevent duplicate pending invites
+      const existing = await ctx.db.orgInvite.findFirst({
+        where: { orgId, email, status: 'PENDING' },
+      });
+      if (existing) throw new Error('A pending invite already exists for this email');
+
+      // Check if there's a user with this email — if not, generate a token
+      const targetUser = await ctx.db.user.findUnique({ where: { email } });
+      const token = targetUser ? null : randomBytes(32).toString('hex');
+
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + INVITE_EXPIRATION_DAYS);
+
+      return ctx.db.orgInvite.create({
+        data: { orgId, email, invitedById: ctx.userId, token, expiresAt },
+        include: INVITE_INCLUDE,
+      });
+    },
+
+    acceptInvite: async (_: unknown, { inviteId }: { inviteId: string }, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const user = await ctx.db.user.findUniqueOrThrow({ where: { id: ctx.userId } });
+      if (!user.email) throw new Error('You must set an email on your account to accept invites');
+
+      const invite = await ctx.db.orgInvite.findUniqueOrThrow({
+        where: { id: inviteId },
+        include: INVITE_INCLUDE,
+      });
+
+      if (invite.email !== user.email) throw new Error('Forbidden: this invite is not for you');
+      if (invite.status !== 'PENDING') throw new Error(`Invite is already ${invite.status.toLowerCase()}`);
+      if (new Date(invite.expiresAt) < new Date()) throw new Error('Invite has expired');
+
+      // Add user as READER member of the org
+      await ctx.db.organizationMember.upsert({
+        where: { organizationId_userId: { organizationId: invite.orgId, userId: ctx.userId } },
+        create: { organizationId: invite.orgId, userId: ctx.userId, role: 'READER' },
+        update: {},
+      });
+
+      return ctx.db.orgInvite.update({
+        where: { id: inviteId },
+        data: { status: 'ACCEPTED' },
+        include: INVITE_INCLUDE,
+      });
+    },
+
+    declineInvite: async (_: unknown, { inviteId }: { inviteId: string }, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const user = await ctx.db.user.findUniqueOrThrow({ where: { id: ctx.userId } });
+      if (!user.email) throw new Error('You must set an email on your account to decline invites');
+
+      const invite = await ctx.db.orgInvite.findUniqueOrThrow({
+        where: { id: inviteId },
+        include: INVITE_INCLUDE,
+      });
+
+      if (invite.email !== user.email) throw new Error('Forbidden: this invite is not for you');
+      if (invite.status !== 'PENDING') throw new Error(`Invite is already ${invite.status.toLowerCase()}`);
+
+      return ctx.db.orgInvite.update({
+        where: { id: inviteId },
+        data: { status: 'DECLINED' },
+        include: INVITE_INCLUDE,
+      });
+    },
+
+    cancelInvite: async (_: unknown, { inviteId }: { inviteId: string }, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+
+      const invite = await ctx.db.orgInvite.findUniqueOrThrow({
+        where: { id: inviteId },
+        include: INVITE_INCLUDE,
+      });
+
+      if (invite.status !== 'PENDING') throw new Error(`Invite is already ${invite.status.toLowerCase()}`);
+
+      // Allow: platform ADMIN, org owner, org ADMIN, or the user who sent the invite
+      const isSender = invite.invitedById === ctx.userId;
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN');
+      if (!isSender && !isPlatformAdmin) {
+        const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: invite.orgId } });
+        const isOrgOwner = org.ownerId === ctx.userId;
+        if (!isOrgOwner) {
+          await requireOrgRole(ctx, invite.orgId, 'ADMIN');
+        }
+      }
+
+      return ctx.db.orgInvite.update({
+        where: { id: inviteId },
+        data: { status: 'CANCELLED' },
+        include: INVITE_INCLUDE,
+      });
+    },
+
     transferOrganizationOwnership: async (
       _: unknown,
       { orgId, newOwnerId }: { orgId: string; newOwnerId: string },
@@ -767,12 +927,28 @@ export const resolvers = {
       const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: orgId } });
       // Only the current owner or a platform ADMIN can transfer
       if (org.ownerId !== ctx.userId && !ctx.roles?.includes('ADMIN')) throw new Error('Forbidden');
-      // Ensure new owner is an ADMIN member (upsert)
-      await ctx.db.organizationMember.upsert({
+
+      // New owner must already be a member of the org
+      const newOwnerMember = await ctx.db.organizationMember.findUnique({
         where: { organizationId_userId: { organizationId: orgId, userId: newOwnerId } },
-        create: { organizationId: orgId, userId: newOwnerId, role: 'ADMIN' },
-        update: { role: 'ADMIN' },
       });
+      if (!newOwnerMember) throw new Error('New owner must already be a member of the organization');
+
+      // Promote new owner to ADMIN
+      await ctx.db.organizationMember.update({
+        where: { organizationId_userId: { organizationId: orgId, userId: newOwnerId } },
+        data: { role: 'ADMIN' },
+      });
+
+      // Demote old owner to ADMIN member (they remain a member, just no longer owner)
+      if (org.ownerId) {
+        await ctx.db.organizationMember.upsert({
+          where: { organizationId_userId: { organizationId: orgId, userId: org.ownerId } },
+          create: { organizationId: orgId, userId: org.ownerId, role: 'ADMIN' },
+          update: { role: 'ADMIN' },
+        });
+      }
+
       return ctx.db.organization.update({
         where: { id: orgId },
         data: { ownerId: newOwnerId },
