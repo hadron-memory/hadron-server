@@ -76,6 +76,8 @@ const INVITE_INCLUDE = {
   invitedBy: true,
 };
 
+const INVITE_EXPIRATION_DAYS = 7;
+
 const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
 
 const toISO = (v: Date | string | null | undefined): string | null =>
@@ -833,7 +835,7 @@ export const resolvers = {
       const token = targetUser ? null : randomBytes(32).toString('hex');
 
       const expiresAt = new Date();
-      expiresAt.setDate(expiresAt.getDate() + 7);
+      expiresAt.setDate(expiresAt.getDate() + INVITE_EXPIRATION_DAYS);
 
       return ctx.db.orgInvite.create({
         data: { orgId, email, invitedById: ctx.userId, token, expiresAt },
