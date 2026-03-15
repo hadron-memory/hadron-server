@@ -17,6 +17,7 @@ import { resolveAuthContext } from './middleware/auth.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { controller } from './controller/controller.js';
+import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
 
 export async function createServer() {
   const app = express();
@@ -258,6 +259,22 @@ export async function createServer() {
     }
 
     res.json({ ok: true });
+  });
+
+  // ---------------------------------------------------------------------------
+  // MCP endpoint (Streamable HTTP transport)
+  // ---------------------------------------------------------------------------
+
+  app.post('/mcp', async (req, res) => {
+    await handleMcpRequest(req, res);
+  });
+
+  app.get('/mcp', async (req, res) => {
+    await handleMcpRequest(req, res);
+  });
+
+  app.delete('/mcp', async (req, res) => {
+    await handleMcpDelete(req, res);
   });
 
   app.get('/health', (_req, res) => {

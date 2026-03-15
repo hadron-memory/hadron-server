@@ -9,6 +9,7 @@ const app = await createServer();
 app.listen(port, () => {
   console.log(`hadron-controller listening on http://localhost:${port}`);
   console.log(`GraphQL: http://localhost:${port}/graphql`);
+  console.log(`MCP:     http://localhost:${port}/mcp`);
 
   // Sync graphs in the background (non-blocking)
   controller.startup().catch((err) => {
