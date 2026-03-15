@@ -109,6 +109,49 @@ Node queries and mutations enforce graph-level access control:
 
 See `hadron-concept/hadron-specs/Authorization/Graph Access Control.md` for the full spec.
 
+## GitHub integration
+
+Hadron integrates with GitHub in two ways: **OAuth** for user authentication and a **GitHub App** for graph synchronization.
+
+### GitHub OAuth (user login)
+
+Users log in via the standard GitHub OAuth flow (`/auth/github` → GitHub → `/auth/github/callback`). On first login, a User record is created and linked to the user's GitHub login. A JWT is issued for subsequent API calls.
+
+Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` from a GitHub OAuth App.
+
+### GitHub App (graph sync)
+
+Graphs are stored as Git repositories on GitHub. A GitHub App provides authenticated access for cloning and pushing to these repos.
+
+**Credentials** are stored per-organization in the database (`githubAppId`, encrypted private key). This allows multi-tenant setups where each org uses its own GitHub App. If no per-org credentials exist, the server falls back to the `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` environment variables.
+
+**Authentication flow:**
+1. The server signs a short-lived JWT with the App's private key
+2. Exchanges it for a 1-hour installation access token via the GitHub API
+3. Uses the token to clone/push repos over authenticated HTTPS
+
+Private keys are encrypted at rest using AES-256-GCM (see `HADRON_ENCRYPTION_KEY`). The server handles PKCS#1 → PKCS#8 key format normalization automatically.
+
+### Webhook auto-linking
+
+The `/github/webhook` endpoint receives GitHub App installation events:
+
+- **`installation.created`** — When the App is installed on a GitHub org, the controller matches the GitHub org name to a Hadron organization (by `githubOrg` field) and stores the installation ID.
+- **`installation.deleted`** — When the App is uninstalled, the installation ID is cleared.
+
+Webhook payloads are verified using HMAC-SHA256 with `GITHUB_WEBHOOK_SECRET`.
+
+### Graph sync flow
+
+On startup (and via `POST /reload`), the controller syncs all graphs that have a `sourceUrl`:
+
+1. Obtains an installation token for the graph's organization
+2. Clones (or pulls) the repo into `GRAPHS_PATH/<namespace>`
+3. Walks the filesystem for `.node/` directories
+4. Upserts nodes and edges into PostgreSQL
+
+When a node is modified via the API, the change is written back to the local clone.
+
 ## Endpoints
 
 | Endpoint | Auth | Description |
@@ -172,8 +215,3 @@ The server reads `DB_PROVIDER` at startup:
 | Tag filter | Prisma `hasEvery` | `AND` + `contains` on JSON string |
 | Case-insensitive search | `mode: 'insensitive'` | Omitted (SQLite LIKE is already case-insensitive) |
 | Enums | `enum Role / ClientType` | `String` with defaults |
-
-## Architecture
-
-For deeper architecture documentation, see the hadron nodes in
-[.hadron/hadron-io/hadron-controller/](.hadron/hadron-io/hadron-controller/).
