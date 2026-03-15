@@ -393,5 +393,8 @@ export const typeDefs = `#graphql
 
     # Trigger an on-demand sync for one graph (org ADMIN or CONTRIBUTOR)
     syncGraph(id: ID!): Graph!
+
+    # Add a public graph to the current user's personal workspace
+    addToMyGraphs(graphId: ID!): Boolean!
   }
 `;

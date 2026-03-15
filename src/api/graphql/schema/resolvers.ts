@@ -1120,6 +1120,50 @@ export const resolvers = {
 
       return ctx.db.graph.findUniqueOrThrow({ where: { id }, include: GRAPH_INCLUDE });
     },
+
+    addToMyGraphs: async (_: unknown, { graphId }: { graphId: string }, ctx: Context) => {
+      requireRole(ctx, 'READER');
+      if (!ctx.userId) throw new Error('Authentication required');
+
+      // Verify the graph is public
+      const graph = await ctx.db.graph.findUniqueOrThrow({ where: { id: graphId } });
+      if (graph.visibility !== 'PUBLIC') throw new Error('Graph is not public');
+
+      // Find user's personal org
+      const membership = await ctx.db.organizationMember.findFirst({
+        where: {
+          userId: ctx.userId,
+          organization: { isPersonal: true },
+        },
+        include: { organization: { include: { graphBundles: true } } },
+      });
+      if (!membership) throw new Error('No personal workspace found');
+
+      const org = membership.organization;
+      const bundle = org.graphBundles[0];
+      if (!bundle) throw new Error('No default bundle found');
+
+      // Create graph subscription (personal org subscribes to the graph)
+      await ctx.db.graphSubscription.upsert({
+        where: { graphId_organizationId: { graphId, organizationId: org.id } },
+        create: {
+          graphId,
+          organizationId: org.id,
+          role: 'READER',
+          activated: true,
+        },
+        update: {},
+      });
+
+      // Add graph to the default bundle
+      await ctx.db.graphBundleGraph.upsert({
+        where: { bundleId_graphId: { bundleId: bundle.id, graphId } },
+        create: { bundleId: bundle.id, graphId },
+        update: {},
+      });
+
+      return true;
+    },
   },
 };
 
