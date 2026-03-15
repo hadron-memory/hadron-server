@@ -12,11 +12,14 @@ import {
   checkOrgMembership,
   signJwt,
   verifyJwt,
+  sendMagicLink,
+  verifyMagicLink,
 } from './auth/index.js';
 import { resolveAuthContext } from './middleware/auth.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { controller } from './controller/controller.js';
+import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
 
 export async function createServer() {
@@ -114,7 +117,7 @@ export async function createServer() {
       // Issue JWT
       const jwt = await signJwt({
         sub: user.id,
-        githubUsername: user.githubUsername,
+        githubUsername: user.githubUsername ?? undefined,
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         githubId: ghUser.id,
       });
@@ -128,6 +131,70 @@ export async function createServer() {
     } catch (err) {
       console.error('OAuth callback error:', err);
       res.status(500).json({ error: 'OAuth authentication failed' });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Email magic-link auth
+  // ---------------------------------------------------------------------------
+
+  app.post('/auth/email', async (req, res) => {
+    const { email, redirect } = req.body as {
+      email?: string;
+      redirect?: string;
+    };
+    if (!email || typeof email !== 'string') {
+      res.status(400).json({ error: 'Email is required' });
+      return;
+    }
+    try {
+      await sendMagicLink(email.trim(), db);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Email auth error:', err);
+      res.status(500).json({ error: 'Failed to send verification email' });
+    }
+  });
+
+  app.get('/auth/email/verify', async (req, res) => {
+    const { token } = req.query as { token?: string };
+    if (!token) {
+      res.status(400).json({ error: 'Missing token' });
+      return;
+    }
+
+    try {
+      const result = await verifyMagicLink(token, db);
+      if (!result) {
+        res.status(400).json({ error: 'Invalid or expired token' });
+        return;
+      }
+
+      // Upsert user by email
+      const user = await db.user.upsert({
+        where: { email: result.email },
+        create: {
+          email: result.email,
+          identityProvider: 'EMAIL',
+          roles: ['READER'],
+        },
+        update: {},
+      });
+
+      const jwt = await signJwt({
+        sub: user.id,
+        email: user.email ?? undefined,
+        roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+      });
+
+      const frontendUrl =
+        process.env.FRONTEND_URL || 'http://localhost:5173';
+      const callbackUrl = new URL('/auth/callback', frontendUrl);
+      callbackUrl.searchParams.set('token', jwt);
+      res.redirect(callbackUrl.toString());
+    } catch (err) {
+      console.error('Email verify error:', err);
+      res.status(500).json({ error: 'Email verification failed' });
     }
   });
 
@@ -148,6 +215,7 @@ export async function createServer() {
         id: user.id,
         githubId: user.githubId,
         githubUsername: user.githubUsername,
+        identityProvider: user.identityProvider,
         name: user.name,
         email: user.email,
         avatarUrl: user.avatarUrl,
@@ -267,6 +335,34 @@ export async function createServer() {
             data: { githubInstallationId: null },
           });
           console.log(`[webhook] Unlinked GitHub App installation ${installation.id} (org "${ghOrgLogin}")`);
+        }
+      }
+    }
+
+    // Push to default branch → sync the matching graph
+    if (event === 'push') {
+      const { ref, repository } = req.body ?? {};
+      const defaultBranch = repository?.default_branch ?? 'main';
+      if (ref === `refs/heads/${defaultBranch}` && repository?.full_name) {
+        const fullName = repository.full_name as string;
+        // Match graphs whose source URL contains the repo's full_name (e.g. "org/repo")
+        const graphs = await db.graph.findMany({
+          where: {
+            deletedAt: null,
+            source: { not: null },
+            OR: [
+              { source: { contains: fullName } },
+            ],
+          },
+          include: { organization: true },
+        });
+        for (const graph of graphs) {
+          // Skip if the graph tracks a specific branch that doesn't match
+          if (graph.readBranch && ref !== `refs/heads/${graph.readBranch}`) continue;
+          console.log(`[webhook] Push to ${fullName}/${defaultBranch} → syncing graph "${graph.name}"`);
+          syncGraphFromGithub(graph).catch((err) => {
+            console.error(`[webhook] Sync failed for graph "${graph.name}":`, err);
+          });
         }
       }
     }

@@ -60,6 +60,8 @@ npm run db:use-pg
 | `GITHUB_CLIENT_ID` | — | GitHub OAuth app client ID |
 | `GITHUB_CLIENT_SECRET` | — | GitHub OAuth app client secret |
 | `GITHUB_WEBHOOK_SECRET` | — | GitHub App webhook verification secret |
+| `RESEND_API_KEY` | — | Resend API key for magic-link emails |
+| `EMAIL_FROM` | `Hadron <noreply@hadrongraph.io>` | Sender address for emails |
 | `JWT_EXPIRY` | `7d` | JWT token lifetime |
 
 See `.env.example` for the full list with generation instructions.
@@ -94,8 +96,13 @@ replaced by `.` (e.g. `services/auth` → `services.auth`).
 
 Two token types are accepted via `Authorization: Bearer <token>`:
 
-- **JWT** (contains dots) — issued after GitHub OAuth login; carries `sub`, `login`, `role`.
+- **JWT** (contains dots) — issued after GitHub OAuth or email magic-link login; carries `sub`, `roles`, and provider-specific claims.
 - **API key** (hex string) — created via the GraphQL API with a bcrypt-hashed key.
+
+Two identity providers are supported:
+
+- **GitHub OAuth** — `GET /auth/github` starts the flow; user is redirected back with a JWT.
+- **Email magic link** — `POST /auth/email` sends a sign-in link via Resend; clicking it verifies the email and issues a JWT.
 
 Roles: `OWNER` > `ADMIN` > `CONTRIBUTOR` > `READER`.
 
@@ -132,14 +139,16 @@ Graphs are stored as Git repositories on GitHub. A GitHub App provides authentic
 
 Private keys are encrypted at rest using AES-256-GCM (see `HADRON_ENCRYPTION_KEY`). The server handles PKCS#1 → PKCS#8 key format normalization automatically.
 
-### Webhook auto-linking
+### Webhooks
 
-The `/github/webhook` endpoint receives GitHub App installation events:
+The `/github/webhook` endpoint receives GitHub App events. Payloads are verified using HMAC-SHA256 with `GITHUB_WEBHOOK_SECRET`.
 
-- **`installation.created`** — When the App is installed on a GitHub org, the controller matches the GitHub org name to a Hadron organization (by `githubOrg` field) and stores the installation ID.
+**Installation events:**
+- **`installation.created`** — When the App is installed on a GitHub org, the controller matches the GitHub org name to a Hadron organization (by domain) and stores the installation ID.
 - **`installation.deleted`** — When the App is uninstalled, the installation ID is cleared.
 
-Webhook payloads are verified using HMAC-SHA256 with `GITHUB_WEBHOOK_SECRET`.
+**Push events (auto-sync):**
+- When a push to the repository's default branch is received, the controller finds all graphs whose `source` URL matches the repository and triggers a sync. If a graph has a `readBranch` set, only pushes to that branch trigger a sync.
 
 ### Graph sync flow
 
@@ -162,6 +171,8 @@ When a node is modified via the API, the change is written back to the local clo
 | `POST /reload` | — | Re-sync all graphs from GitHub |
 | `GET /auth/github` | — | Start GitHub OAuth flow |
 | `GET /auth/github/callback` | — | OAuth callback |
+| `POST /auth/email` | — | Send magic-link email |
+| `GET /auth/email/verify` | — | Verify magic link and issue JWT |
 | `GET /auth/me` | Bearer | Current user info |
 | `POST /github/webhook` | HMAC | GitHub App webhook receiver |
 | `POST /mcp` | Bearer | MCP protocol endpoint |

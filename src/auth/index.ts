@@ -6,3 +6,4 @@ export {
   checkOrgMembership,
   type GitHubUser,
 } from './github.js';
+export { sendMagicLink, verifyMagicLink } from './email.js';

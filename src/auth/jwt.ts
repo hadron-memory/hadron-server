@@ -2,9 +2,10 @@ import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
 
 export interface HadronJwtPayload extends JWTPayload {
   sub: string;            // User.id (cuid)
-  githubUsername: string;  // GitHub username
   roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
-  githubId: number;
+  githubUsername?: string; // GitHub username (GitHub users)
+  githubId?: number;       // GitHub numeric ID (GitHub users)
+  email?: string;          // email address (email users)
 }
 
 const JWT_ISSUER = 'hadron-controller';

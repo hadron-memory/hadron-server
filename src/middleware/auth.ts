@@ -32,8 +32,11 @@ export async function resolveAuthContext(
 async function resolveJwt(token: string): Promise<AuthContext> {
   try {
     const payload = await verifyJwt(token);
+    const clientId = payload.githubUsername
+      ? `github:${payload.githubUsername}`
+      : `email:${payload.email}`;
     return {
-      clientId: `github:${payload.githubUsername}`,
+      clientId,
       userId: payload.sub,
       roles: payload.roles,
     };
