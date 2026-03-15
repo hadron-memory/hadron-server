@@ -2,12 +2,11 @@ import bcrypt from 'bcrypt';
 import type { Request } from 'express';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { verifyJwt } from '../auth/jwt.js';
-import { deserializeRoles } from '../integrations/db/provider.js';
 
 export interface AuthContext {
-  clientId?: string;       // Client.label (API keys) or "github:<login>" (OAuth)
+  clientId?: string;       // Client.id (API keys) or "github:<username>" (OAuth)
   userId?: string;         // User.id — only set for OAuth/JWT users
-  roles?: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[];
+  roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   namespace?: string;
   organizationId?: string; // set when the Client is scoped to an organization
 }
@@ -34,7 +33,7 @@ async function resolveJwt(token: string): Promise<AuthContext> {
   try {
     const payload = await verifyJwt(token);
     return {
-      clientId: `github:${payload.login}`,
+      clientId: `github:${payload.githubUsername}`,
       userId: payload.sub,
       roles: payload.roles,
     };
@@ -49,6 +48,7 @@ async function resolveClientKey(
 ): Promise<AuthContext> {
   const clients = await db.client.findMany({
     where: {
+      deletedAt: null,
       OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
     },
   });
@@ -61,8 +61,8 @@ async function resolveClientKey(
         data: { lastUsedAt: new Date() },
       });
       return {
-        clientId: client.label,
-        roles: deserializeRoles(client.roles as string | string[]) as ('ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+        clientId: client.id,
+        roles: [client.role],
         namespace: client.namespace ?? undefined,
         organizationId: client.organizationId ?? undefined,
       };

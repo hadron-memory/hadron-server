@@ -2,13 +2,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'path';
 import { mkdirSync } from 'fs';
 import { db } from '../db/client.js';
-import { cleanDb, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
+import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
 import { syncGraphFromGithub, type GraphWithOrg } from './syncGraphFromGithub.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
-// execFile may be called with 3 args (cmd, args, cb) or 4 args (cmd, args, opts, cb)
-// depending on whether options are passed. Always treat the last arg as the callback.
 // ---------------------------------------------------------------------------
 vi.mock('child_process', () => {
   const execFile = vi.fn((...args: unknown[]) => {
@@ -17,6 +15,14 @@ vi.mock('child_process', () => {
   });
   return { execFile };
 });
+
+// ---------------------------------------------------------------------------
+// Mock GitHub App functions so we don't need real credentials
+// ---------------------------------------------------------------------------
+vi.mock('./githubApp.js', () => ({
+  getInstallationToken: vi.fn(async () => 'fake-token'),
+  toHttpsUrl: vi.fn((source: string, _token: string) => source),
+}));
 
 // ---------------------------------------------------------------------------
 // Mock config to control SOURCES_PATH dynamically
@@ -38,23 +44,39 @@ vi.mock('../../config.js', async (importOriginal) => {
 // Fixture: a minimal GraphWithOrg object for "test-org/test/repo"
 // local path = join(SOURCES_PATH, 'test-org', 'test/repo')
 // ---------------------------------------------------------------------------
+let dbGraphId: string;
+let dbOrgId: string;
+
 function makeGraph(overrides?: Partial<GraphWithOrg>): GraphWithOrg {
   return {
-    id: 'graph-1',
-    organizationId: 'org-1',
+    id: dbGraphId,
+    organizationId: dbOrgId,
     name: 'test/repo',
     source: 'git@github.com:test/repo.git',
     readBranch: null,
     writeBranch: null,
-    version: null,
+    visibility: 'PRIVATE',
+    syncStatus: 'PENDING',
+    syncError: null,
+    pendingEdgeCount: 0,
+    sourceTokenEncrypted: null,
+    sourceTokenExpiresAt: null,
     lastSyncedAt: null,
+    deletedAt: null,
+    deletedBy: null,
+    createdBy: null,
+    updatedBy: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     organization: {
-      id: 'org-1',
+      id: dbOrgId,
       name: 'Test Org',
-      slug: 'test-org',
-      githubInstallationId: null,
+      domain: 'test-org',
+      githubInstallationId: 12345,
+      deletedAt: null,
+      deletedBy: null,
+      createdBy: null,
+      updatedBy: null,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
@@ -65,6 +87,18 @@ function makeGraph(overrides?: Partial<GraphWithOrg>): GraphWithOrg {
 beforeEach(async () => {
   ({ dir: mockSources, cleanup } = makeTmpDir());
   await cleanDb(db);
+  // Create org and graph in DB so FK constraints are satisfied
+  const { org, graph } = await createDbOrgAndGraph(db, {
+    orgName: 'test-org',
+    graphName: 'test/repo',
+  });
+  dbGraphId = graph.id;
+  dbOrgId = org.id;
+  // Set githubInstallationId on the org
+  await db.organization.update({
+    where: { id: org.id },
+    data: { githubInstallationId: 12345 },
+  });
 });
 
 afterEach(() => {

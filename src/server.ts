@@ -4,7 +4,7 @@ import { expressMiddleware } from '@apollo/server/express4';
 import cors from 'cors';
 import express from 'express';
 import { db } from './integrations/db/client.js';
-import { serializeJson, deserializeRoles } from './integrations/db/provider.js';
+import { serializeJson } from './integrations/db/provider.js';
 import {
   buildAuthUrl,
   exchangeCode,
@@ -33,13 +33,11 @@ export async function createServer() {
   // GitHub OAuth
   // ---------------------------------------------------------------------------
 
-  // Pending OAuth states (in-memory; sufficient for single-instance deployment)
   const pendingStates = new Map<
     string,
     { redirect: string; expiresAt: number }
   >();
 
-  // Step 1: redirect to GitHub
   app.get('/auth/github', (req, res) => {
     const redirect = (req.query.redirect as string) || '/';
     const state = crypto.randomBytes(16).toString('hex');
@@ -50,7 +48,6 @@ export async function createServer() {
     res.redirect(buildAuthUrl(state));
   });
 
-  // Step 2: GitHub callback — exchange code, upsert user, issue JWT
   app.get('/auth/github/callback', async (req, res) => {
     const { code, state } = req.query as { code?: string; state?: string };
 
@@ -71,7 +68,6 @@ export async function createServer() {
       const ghToken = await exchangeCode(code);
       const ghUser = await fetchUser(ghToken);
 
-      // Optional org membership check
       const requiredOrg = process.env.GITHUB_ORG;
       if (requiredOrg) {
         const isMember = await checkOrgMembership(ghToken, requiredOrg);
@@ -88,13 +84,14 @@ export async function createServer() {
         where: { githubId: ghUser.id },
         create: {
           githubId: ghUser.id,
-          login: ghUser.login,
+          githubUsername: ghUser.login,
+          identityProvider: 'GITHUB',
           name: ghUser.name,
           avatarUrl: ghUser.avatar_url,
           roles: ['READER'],
         },
         update: {
-          login: ghUser.login,
+          githubUsername: ghUser.login,
           name: ghUser.name,
           avatarUrl: ghUser.avatar_url,
         },
@@ -103,12 +100,11 @@ export async function createServer() {
       // Issue JWT
       const jwt = await signJwt({
         sub: user.id,
-        login: user.login,
-        roles: deserializeRoles(user.roles as string | string[]) as ('ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+        githubUsername: user.githubUsername,
+        roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         githubId: ghUser.id,
       });
 
-      // Redirect to frontend callback page which will set the httpOnly cookie
       const frontendUrl =
         process.env.FRONTEND_URL || 'http://localhost:5173';
       const callbackUrl = new URL('/auth/callback', frontendUrl);
@@ -121,7 +117,6 @@ export async function createServer() {
     }
   });
 
-  // Current user info from JWT
   app.get('/auth/me', async (req, res) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {
@@ -138,10 +133,11 @@ export async function createServer() {
       res.json({
         id: user.id,
         githubId: user.githubId,
-        login: user.login,
+        githubUsername: user.githubUsername,
         name: user.name,
+        email: user.email,
         avatarUrl: user.avatarUrl,
-        roles: deserializeRoles(user.roles as string | string[]),
+        roles: user.roles,
       });
     } catch {
       res.status(401).json({ error: 'Invalid or expired token' });
@@ -169,7 +165,6 @@ export async function createServer() {
   // REST endpoints
   // ---------------------------------------------------------------------------
 
-  // Ingest usage events (lightweight, no GraphQL overhead for high-frequency calls)
   app.post('/usage', async (req, res) => {
     const result = await controller.operations.createUsageEvent(req.body);
     if (result.error) {
@@ -179,7 +174,6 @@ export async function createServer() {
     res.json({ ok: true });
   });
 
-  // Report session outcome — callable by any system (CRM webhook, edge device, AI agent)
   app.post('/sessions/:id/outcome', async (req, res) => {
     const { id } = req.params;
     const { outcome, outcomeRef, outcomeMeta } = req.body ?? {};
@@ -205,7 +199,6 @@ export async function createServer() {
     }
   });
 
-  // Trigger a graph reload — re-sync all graphs from GitHub
   app.post('/reload', async (_req, res) => {
     try {
       await controller.startup();
@@ -220,9 +213,6 @@ export async function createServer() {
   // GitHub App webhook
   // ---------------------------------------------------------------------------
 
-  // Receives GitHub App installation events.
-  // When an org installs the app, link the installation ID to the matching Organization.
-  // Set GITHUB_WEBHOOK_SECRET to verify the X-Hub-Signature-256 header (recommended).
   app.post('/github/webhook', async (req, res) => {
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
     if (secret) {
@@ -248,15 +238,14 @@ export async function createServer() {
       const ghOrgLogin: string | undefined = installation.account?.login;
       if (ghOrgLogin) {
         if (action === 'created') {
-          // Link the installation to the Organization whose slug matches the GitHub org login
           const updated = await db.organization.updateMany({
-            where: { slug: ghOrgLogin, githubInstallationId: null },
+            where: { domain: ghOrgLogin, githubInstallationId: null },
             data: { githubInstallationId: installation.id },
           });
           if (updated.count > 0) {
             console.log(`[webhook] Linked GitHub App installation ${installation.id} → org "${ghOrgLogin}"`);
           } else {
-            console.warn(`[webhook] No unlinked org found with slug "${ghOrgLogin}"`);
+            console.warn(`[webhook] No unlinked org found with domain "${ghOrgLogin}"`);
           }
         } else if (action === 'deleted') {
           await db.organization.updateMany({
@@ -271,7 +260,6 @@ export async function createServer() {
     res.json({ ok: true });
   });
 
-  // Health check
   app.get('/health', (_req, res) => {
     res.json({ ok: true });
   });

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../../test/helpers.js';
+import { cleanDb, createDbOrgAndGraph } from '../../test/helpers.js';
 import { createNode } from './createNode.js';
 
 // Prevent actual filesystem writes during DB tests
@@ -8,26 +8,30 @@ vi.mock('../../integrations/localFs/saveNodeToFs.js', () => ({
   saveNodeToFs: vi.fn().mockResolvedValue({}),
 }));
 
+let graphId: string;
+
 beforeEach(async () => {
   await cleanDb(db);
+  const { graph } = await createDbOrgAndGraph(db);
+  graphId = graph.id;
 });
 
 describe('createNode', () => {
   it('throws when loc is missing', async () => {
     await expect(
-      createNode({ name: 'test', ownerRepo: 'org/repo' }),
-    ).rejects.toThrow('Node requires loc, name, and ownerRepo');
+      createNode({ name: 'test', graphId }),
+    ).rejects.toThrow('Node requires loc, name, and graphId');
   });
 
   it('throws when name is missing', async () => {
     await expect(
-      createNode({ loc: 'org.graph.node', ownerRepo: 'org/repo' }),
+      createNode({ loc: 'org.graph.node', graphId }),
     ).rejects.toThrow();
   });
 
-  it('throws when ownerRepo is missing', async () => {
+  it('throws when graphId is missing', async () => {
     await expect(
-      createNode({ loc: 'org.graph.node', name: 'test' }),
+      createNode({ loc: 'org.graph.node', name: 'test', graphId: '' }),
     ).rejects.toThrow();
   });
 
@@ -35,13 +39,12 @@ describe('createNode', () => {
     const node = await createNode({
       loc: 'org.graph.node',
       name: 'My Node',
-      ownerRepo: 'org/repo',
+      graphId,
       description: 'A test node',
     });
 
     expect(node.loc).toBe('org.graph.node');
     expect(node.name).toBe('My Node');
-    expect(node.ownerRepo).toBe('org/repo');
     expect(node.description).toBe('A test node');
 
     // Verify it was actually persisted
@@ -53,7 +56,7 @@ describe('createNode', () => {
     const node = await createNode({
       loc: 'my-org.my-graph.sub.deep',
       name: 'Deep Node',
-      ownerRepo: 'my-org/my-graph',
+      graphId,
     });
 
     expect(node.namespace).toBe('my-org.my-graph');
@@ -63,13 +66,13 @@ describe('createNode', () => {
     const first = await createNode({
       loc: 'org.g.n',
       name: 'Original',
-      ownerRepo: 'org/repo',
+      graphId,
     });
 
     const second = await createNode({
       loc: 'org.g.n',
       name: 'Updated',
-      ownerRepo: 'org/repo',
+      graphId,
     });
 
     expect(second.name).toBe('Updated');
@@ -84,7 +87,7 @@ describe('createNode', () => {
     const node = await createNode({
       loc: 'org.g.tagged',
       name: 'Tagged',
-      ownerRepo: 'org/repo',
+      graphId,
       tags: ['alpha', 'beta'],
     });
 

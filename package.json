@@ -14,7 +14,8 @@
     "db:studio": "prisma studio",
     "db:use-pg": "cp prisma/schema.postgresql.prisma prisma/schema.prisma && prisma generate",
     "db:use-sqlite": "cp prisma/schema.sqlite.prisma prisma/schema.prisma && prisma generate",
-    "db:test-setup": "DATABASE_URL=postgresql://holger@localhost:5432/hadron_test prisma db push --schema=prisma/schema.postgresql.prisma",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:test-setup": "DATABASE_URL=postgresql://holger@localhost:5432/hadron_test prisma db push",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"

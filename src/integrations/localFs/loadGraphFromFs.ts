@@ -1,6 +1,13 @@
 import { readdirSync, statSync, existsSync } from 'fs';
 import { join } from 'path';
-import type { HadronGraph, Node } from '../../index.d.js';
+import type { Node } from '../../index.d.js';
+
+interface FsGraph {
+  name: string;
+  namespace: string;
+  ownerRepo: string;
+  nodes: Partial<Node>[];
+}
 import { loadNodeFromFs } from './loadNodeFromFs.js';
 
 export interface GraphEdge {
@@ -20,7 +27,7 @@ export const loadGraphFromFs = async (
   graphPath: string,
   graphName: string,
   ownerRepo: string,
-): Promise<{ graph: HadronGraph; edges: GraphEdge[] }> => {
+): Promise<{ graph: FsGraph; edges: GraphEdge[] }> => {
   const namespace = graphName.replace(/\//g, '.');
   const nodes: Partial<Node>[] = [];
   const edges: GraphEdge[] = [];
@@ -76,7 +83,7 @@ export const loadGraphFromFs = async (
       name: graphName,
       namespace,
       ownerRepo,
-      nodes: nodes as Node[],
+      nodes,
     },
     edges,
   };

@@ -6,7 +6,7 @@ import { createNode } from './createNode.js';
  * This is identical to createNode since both use upsert semantics.
  */
 export const updateNode = async (
-  node: Partial<Node>,
+  node: Partial<Node> & { graphId: string },
 ): Promise<Node> => {
   return createNode(node);
 };

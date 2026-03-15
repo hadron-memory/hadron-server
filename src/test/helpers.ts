@@ -23,8 +23,38 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.pendingEdge.deleteMany();
   await db.session.deleteMany();
   await db.node.deleteMany();
+  await db.clientBundleSubscription.deleteMany();
+  await db.graphBundleGraph.deleteMany();
+  await db.graphBundle.deleteMany();
+  await db.graphSubscription.deleteMany();
+  await db.graphLicense.deleteMany();
   await db.client.deleteMany();
+  await db.organizationMember.deleteMany();
+  await db.graph.deleteMany();
+  await db.organization.deleteMany();
   await db.user.deleteMany();
+}
+
+/**
+ * Create a test Organization + Graph for use in node tests.
+ */
+export async function createDbOrgAndGraph(
+  db: PrismaClient,
+  opts: { orgName?: string; graphName?: string } = {},
+) {
+  const org = await db.organization.create({
+    data: {
+      name: opts.orgName ?? 'test-org',
+      domain: opts.orgName ?? 'test-org',
+    },
+  });
+  const graph = await db.graph.create({
+    data: {
+      organizationId: org.id,
+      name: opts.graphName ?? 'test/repo',
+    },
+  });
+  return { org, graph };
 }
 
 /**
@@ -36,8 +66,10 @@ export async function createDbNode(
     id?: string;
     loc: string;
     name?: string;
+    title?: string;
     namespace?: string;
     ownerRepo?: string;
+    graphId: string;
     tags?: string[];
     content?: string;
   },
@@ -47,8 +79,10 @@ export async function createDbNode(
   return db.node.create({
     data: {
       id: fields.id ?? randomUUID().replace(/-/g, ''),
+      graphId: fields.graphId,
       loc,
       name: fields.name ?? loc,
+      title: fields.title ?? fields.name ?? loc,
       namespace,
       ownerRepo: fields.ownerRepo ?? 'test/repo',
       tags: fields.tags ?? [],
@@ -59,23 +93,24 @@ export async function createDbNode(
 
 /**
  * Insert a test Client record with a known raw key + bcrypt hash.
- * Returns the raw key (TEST_RAW_KEY) so tests can use it directly.
  */
 export async function createDbClient(
   db: PrismaClient,
   label: string,
-  roles: ('ADMIN' | 'CONTRIBUTOR' | 'READER')[] = ['READER'],
-  opts: { namespace?: string; expiresAt?: Date } = {},
+  role: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' = 'READER',
+  opts: { namespace?: string; expiresAt?: Date; organizationId?: string; userId?: string } = {},
 ) {
   const keyHash = await bcrypt.hash(TEST_RAW_KEY, 4); // low cost for speed
   return db.client.create({
     data: {
       label,
       keyHash,
-      roles,
-      type: 'WORKSTATION',
+      role,
+      clientType: 'WORKSTATION',
       namespace: opts.namespace ?? null,
       expiresAt: opts.expiresAt ?? null,
+      organizationId: opts.organizationId ?? null,
+      userId: opts.userId ?? null,
     },
   });
 }
@@ -84,9 +119,6 @@ export async function createDbClient(
 // Filesystem helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Create a temp directory, return its path and a cleanup function.
- */
 export function makeTmpDir(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'hadron-test-'));
   return {
@@ -105,14 +137,9 @@ interface NodeMeta {
   nodes?: Array<{ id: string; rel: string }>;
 }
 
-/**
- * Write `.node/node.yaml` (and optionally `topic.md`) inside `dir`.
- * `dir` is the node's directory (not the `.node/` subdirectory).
- */
 export function writeNodeFiles(dir: string, meta: NodeMeta, content?: string): void {
   const nodeDir = join(dir, '.node');
   mkdirSync(nodeDir, { recursive: true });
-  // Ensure every node has an id (generate one if not provided)
   const withId = { id: randomUUID().replace(/-/g, ''), ...meta };
   writeFileSync(join(nodeDir, 'node.yaml'), stringify(withId), 'utf-8');
   if (content !== undefined) {

@@ -1,21 +1,18 @@
-export interface HadronGraph {
-  name: string;
-  namespace: string;
-  ownerRepo: string;
-  nodes: Node[];
-}
-
 export interface Node {
   id: string;
+  graphId: string;
   loc: string;
   name: string;
+  title: string;
   alias: string | null;
   description: string | null;
   content: string | null;
   contentHash: string | null;
+  tokens: number | null;
   tags: string[];
   namespace: string;
-  ownerRepo: string;
+  ownerRepo: string | null;
+  isRunnable: boolean | null;
   createdAt: string;
   updatedAt: string;
   outgoingEdges: Edge[];
@@ -26,7 +23,7 @@ export interface Edge {
   id: string;
   source: Node;
   target: Node;
-  label: string | null;
+  label: string;
 }
 
 export interface Session {
@@ -38,6 +35,7 @@ export interface Session {
   prNumber: number | null;
   customerId: string | null;
   language: string | null;
+  plan: string | null;
   llmModel: string | null;
   inputTokens: number | null;
   outputTokens: number | null;
@@ -63,22 +61,27 @@ export interface UsageEvent {
   actionArgs: Record<string, unknown> | null;
   clientId: string | null;
   sessionId: string | null;
+  model: string | null;
+  tokensIn: number | null;
+  tokensOut: number | null;
   createdAt: string;
 }
 
 export interface Client {
   id: string;
   label: string;
-  type: ClientType;
+  clientType: ClientType;
   description: string | null;
-  roles: Role[];
+  role: Role;
+  apiKeyShown: boolean;
   namespace: string | null;
+  userId: string | null;
+  organizationId: string | null;
   expiresAt: string | null;
   createdAt: string;
   lastUsedAt: string | null;
 }
 
-// Returned once at creation — the raw key is never stored
 export interface ClientCreated {
   client: Client;
   rawKey: string;
@@ -87,11 +90,15 @@ export interface ClientCreated {
 export interface User {
   id: string;
   githubId: number;
-  login: string;
+  githubUsername: string;
+  identityProvider: IdentityProvider | null;
   name: string | null;
+  email: string | null;
   avatarUrl: string | null;
   roles: Role[];
+  maxReferrals: number | null;
 }
 
-export type Role = 'ADMIN' | 'CONTRIBUTOR' | 'READER';
-export type ClientType = 'WORKSTATION' | 'CLOUD' | 'IOT' | 'AGENT';
+export type Role = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
+export type ClientType = 'WORKSTATION' | 'AGENT' | 'AUTOMATION' | 'CLOUD' | 'IOT';
+export type IdentityProvider = 'GITHUB';

@@ -1,11 +1,9 @@
 import { join } from 'path';
 import { existsSync } from 'fs';
-import type { HadronGraph } from '../../index.d.js';
-
 import { loadGraphFromFs, type GraphEdge } from './loadGraphFromFs.js';
 
 export interface LoadedGraph {
-  graph: HadronGraph;
+  graph: Awaited<ReturnType<typeof loadGraphFromFs>>['graph'];
   edges: GraphEdge[];
 }
 

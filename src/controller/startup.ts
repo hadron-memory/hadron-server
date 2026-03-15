@@ -3,11 +3,14 @@ import { syncGraphFromGithub } from '../integrations/github/syncGraphFromGithub.
 
 /**
  * Controller startup: sync all configured graphs from GitHub.
- * Graphs are loaded from the HadronGraph table (not from .hadron-controller.yaml).
+ * Graphs are loaded from the Graph table.
  * Runs non-blocking — logs errors but does not prevent the server from starting.
  */
 export const startup = async (): Promise<void> => {
-  const graphs = await db.hadronGraph.findMany({ include: { organization: true } });
+  const graphs = await db.graph.findMany({
+    where: { deletedAt: null, source: { not: null } },
+    include: { organization: true },
+  });
 
   if (graphs.length === 0) {
     console.log('No graphs configured, skipping sync.');
@@ -19,9 +22,9 @@ export const startup = async (): Promise<void> => {
   for (const graph of graphs) {
     const result = await syncGraphFromGithub(graph);
     if (result.error) {
-      console.error(`  [FAIL] ${graph.organization.slug}/${graph.name}: ${result.error}`);
+      console.error(`  [FAIL] ${graph.organization.domain}/${graph.name}: ${result.error}`);
     } else {
-      console.log(`  [OK]   ${graph.organization.slug}/${graph.name}: ${result.nodeCount} nodes`);
+      console.log(`  [OK]   ${graph.organization.domain}/${graph.name}: ${result.nodeCount} nodes`);
     }
   }
 

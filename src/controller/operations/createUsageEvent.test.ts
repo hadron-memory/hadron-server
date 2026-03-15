@@ -1,10 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb, createDbNode } from '../../test/helpers.js';
+import { cleanDb, createDbClient, createDbNode, createDbOrgAndGraph } from '../../test/helpers.js';
 import { createUsageEvent } from './createUsageEvent.js';
+
+let graphId: string;
 
 beforeEach(async () => {
   await cleanDb(db);
+  const { graph } = await createDbOrgAndGraph(db);
+  graphId = graph.id;
 });
 
 describe('createUsageEvent', () => {
@@ -24,7 +28,7 @@ describe('createUsageEvent', () => {
   });
 
   it('creates an event with a valid nodeLoc — nodeId is populated', async () => {
-    await createDbNode(db, { loc: 'org.graph.node' });
+    await createDbNode(db, { loc: 'org.graph.node', graphId });
 
     const result = await createUsageEvent({ type: 'node-view', nodeLoc: 'org.graph.node' });
     expect(result.error).toBeUndefined();
@@ -49,12 +53,13 @@ describe('createUsageEvent', () => {
   });
 
   it('stores optional clientId', async () => {
-    // clientId is a free string (no FK); sessionId has a FK to Session so we omit it here
+    // clientId has a FK to Client, so create one first
+    const client = await createDbClient(db, 'test-client', 'READER');
     const result = await createUsageEvent({
       type: 'click',
-      clientId: 'test-client',
+      clientId: client.id,
     });
     expect(result.error).toBeUndefined();
-    expect(result.event!.clientId).toBe('test-client');
+    expect(result.event!.clientId).toBe(client.id);
   });
 });

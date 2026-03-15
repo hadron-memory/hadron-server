@@ -6,6 +6,7 @@ export default defineConfig({
     // Each test file runs in its own subprocess so the PrismaClient singleton
     // (created at module load time) is fresh per file and sees the env vars below.
     // fileParallelism: false prevents concurrent DB access from parallel test files.
+    exclude: ['dist/**', 'node_modules/**'],
     pool: 'forks',
     fileParallelism: false,
     env: {

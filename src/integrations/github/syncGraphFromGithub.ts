@@ -7,17 +7,15 @@ import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
-import type { HadronGraph, Organization } from '../../generated/prisma/index.js';
+import type { Graph, Organization } from '../../generated/prisma/index.js';
 
 const execFile = promisify(execFileCb);
 
-export type GraphWithOrg = HadronGraph & { organization: Organization };
+export type GraphWithOrg = Graph & { organization: Organization };
 
 /**
  * Sync a graph from GitHub: clone/pull the repo, load nodes from filesystem,
  * and upsert them into the database.
- *
- * @param graph HadronGraph record (with organization included)
  */
 export const syncGraphFromGithub = async (
   graph: GraphWithOrg,
@@ -31,14 +29,20 @@ export const syncGraphFromGithub = async (
       return {};
     }
 
+    // Update sync status to SYNCING
+    await db.graph.update({
+      where: { id: graph.id },
+      data: { syncStatus: 'SYNCING', syncError: null },
+    }).catch(() => {});
+
     const namespace = graphNameToNamespace(graphName);
-    const localPath = join(SOURCES_PATH, graph.organization.slug, graphName);
+    const localPath = join(SOURCES_PATH, graph.organization.domain, graphName);
     const ownerRepo = extractOwnerRepo(graph.source);
 
     // 1. Get installation token (requires GitHub App installation)
     if (!graph.organization.githubInstallationId) {
       console.warn(
-        `[syncGraphFromGithub] "${graphName}" — skipping: organization "${graph.organization.slug}" has no githubInstallationId`,
+        `[syncGraphFromGithub] "${graphName}" — skipping: organization "${graph.organization.domain}" has no githubInstallationId`,
       );
       return {};
     }
@@ -53,26 +57,28 @@ export const syncGraphFromGithub = async (
     const { graph: fsGraph, edges } = await loadGraphFromFs(localPath, graphName, ownerRepo);
 
     // 4. Upsert all nodes and edges into the database (transactional)
+    let pendingEdgeCount = 0;
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       const upsertedIds: string[] = [];
 
-      // Upsert nodes by id (from YAML) — loc can change on move, id is stable.
-      // After each node upsert, resolve any PendingEdges that were waiting for it.
       for (const node of fsGraph.nodes) {
+        const loc = node.loc!;
+        const name = node.name!;
         const update = {
-          loc: node.loc,
-          name: node.name,
-          alias: node.alias,
-          description: node.description,
-          content: node.content,
-          contentHash: node.contentHash,
+          loc,
+          name,
+          title: node.title ?? name,
+          alias: node.alias ?? null,
+          description: node.description ?? null,
+          content: node.content ?? null,
+          contentHash: node.contentHash ?? null,
           tags: serializeTags(node.tags ?? []) as string[],
           namespace,
           ownerRepo,
         };
         await tx.node.upsert({
           where: { id: node.id },
-          create: { id: node.id!, ...update },
+          create: { id: node.id!, graphId: graph.id, ...update },
           update,
         });
         upsertedIds.push(node.id!);
@@ -80,31 +86,31 @@ export const syncGraphFromGithub = async (
         // Resolve any cross-repo PendingEdges that were waiting for this node
         const pending = await tx.pendingEdge.findMany({ where: { targetId: node.id! } });
         for (const p of pending) {
+          const label = p.label ?? '';
           await tx.edge.upsert({
-            where: { sourceId_targetId: { sourceId: p.sourceId, targetId: p.targetId } },
-            create: { sourceId: p.sourceId, targetId: p.targetId, label: p.label },
-            update: { label: p.label },
+            where: { sourceId_targetId_label: { sourceId: p.sourceId, targetId: p.targetId, label } },
+            create: { sourceId: p.sourceId, targetId: p.targetId, label },
+            update: {},
           });
           await tx.pendingEdge.delete({ where: { id: p.id } });
         }
       }
 
-      // Delete nodes that were in this namespace+ownerRepo but are no longer in the sync set
       await tx.node.deleteMany({
-        where: { namespace, ownerRepo, id: { notIn: upsertedIds } },
+        where: { namespace, ownerRepo, graphId: graph.id, id: { notIn: upsertedIds } },
       });
 
-      // Upsert edges — sourceId and targetId come directly from the YAML
       for (const edge of edges) {
+        const label = edge.label ?? '';
         const targetExists = await tx.node.findUnique({
           where: { id: edge.targetId },
           select: { id: true },
         });
         if (targetExists) {
           await tx.edge.upsert({
-            where: { sourceId_targetId: { sourceId: edge.sourceId, targetId: edge.targetId } },
-            create: { sourceId: edge.sourceId, targetId: edge.targetId, label: edge.label },
-            update: { label: edge.label },
+            where: { sourceId_targetId_label: { sourceId: edge.sourceId, targetId: edge.targetId, label } },
+            create: { sourceId: edge.sourceId, targetId: edge.targetId, label },
+            update: {},
           });
           await tx.pendingEdge.deleteMany({
             where: { sourceId: edge.sourceId, targetId: edge.targetId },
@@ -115,19 +121,25 @@ export const syncGraphFromGithub = async (
             create: { sourceId: edge.sourceId, targetId: edge.targetId, label: edge.label },
             update: { label: edge.label },
           });
+          pendingEdgeCount++;
         }
       }
     });
 
-    // 5. Record sync time (best-effort — record may not exist in tests)
-    await db.hadronGraph.update({
+    // 5. Record sync time and status
+    await db.graph.update({
       where: { id: graph.id },
-      data: { lastSyncedAt: new Date() },
+      data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null, pendingEdgeCount },
     }).catch(() => {});
 
     console.log(`Synced graph "${graphName}": ${fsGraph.nodes.length} nodes, ${edges.length} edges`);
     return { nodeCount: fsGraph.nodes.length };
   } catch (error) {
+    // Update sync status to ERROR
+    await db.graph.update({
+      where: { id: graph.id },
+      data: { syncStatus: 'ERROR', syncError: (error as Error).message },
+    }).catch(() => {});
     console.error(`Failed to sync graph "${graph.name}":`, error);
     return { error: (error as Error).message };
   }
