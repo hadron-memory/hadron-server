@@ -330,6 +330,14 @@ export const resolvers = {
       }));
     },
 
+    nodeVersions: async (_: unknown, { nodeId, limit }: { nodeId: string; limit?: number }, ctx: Context) => {
+      return ctx.db.nodeVersion.findMany({
+        where: { nodeId },
+        orderBy: { createdAt: 'desc' },
+        take: limit ?? 50,
+      });
+    },
+
     sessions: async (
       _: unknown,
       { type, repo, customerId, limit }: { type?: string; repo?: string; customerId?: string; limit?: number },
@@ -473,6 +481,24 @@ export const resolvers = {
       const namespace = deriveNamespace(input.loc);
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER') && ctx.namespace && !namespace.startsWith(ctx.namespace)) {
         throw new Error('Forbidden: outside your writable namespace');
+      }
+
+      // Snapshot current state before update (for version history)
+      const existing = await ctx.db.node.findUnique({ where: { loc: input.loc } });
+      if (existing) {
+        await ctx.db.nodeVersion.create({
+          data: {
+            nodeId: existing.id,
+            loc: existing.loc,
+            name: existing.name,
+            title: existing.title,
+            alias: existing.alias,
+            description: existing.description,
+            content: existing.content,
+            tags: existing.tags as string[],
+            editedBy: ctx.clientId ?? ctx.userId ?? null,
+          },
+        });
       }
 
       const tags = serializeTags(input.tags ?? []) as string[];
@@ -1119,6 +1145,41 @@ export const resolvers = {
       if (result.error) throw new Error(result.error);
 
       return ctx.db.graph.findUniqueOrThrow({ where: { id }, include: GRAPH_INCLUDE });
+    },
+
+    restoreNodeVersion: async (_: unknown, { versionId }: { versionId: string }, ctx: Context) => {
+      const version = await ctx.db.nodeVersion.findUniqueOrThrow({ where: { id: versionId } });
+      const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
+      await requireGraphWriteAccess(ctx, node.graphId);
+
+      // Snapshot current state before restoring
+      await ctx.db.nodeVersion.create({
+        data: {
+          nodeId: node.id,
+          loc: node.loc,
+          name: node.name,
+          title: node.title,
+          alias: node.alias,
+          description: node.description,
+          content: node.content,
+          tags: node.tags as string[],
+          editedBy: ctx.clientId ?? ctx.userId ?? null,
+        },
+      });
+
+      // Restore the node to the version's state
+      return ctx.db.node.update({
+        where: { id: node.id },
+        data: {
+          name: version.name,
+          title: version.title,
+          alias: version.alias,
+          description: version.description,
+          content: version.content,
+          tags: version.tags as string[],
+        },
+        include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+      });
     },
 
     addToMyGraphs: async (_: unknown, { graphId }: { graphId: string }, ctx: Context) => {

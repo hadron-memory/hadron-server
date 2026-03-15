@@ -98,6 +98,20 @@ export const typeDefs = `#graphql
     createdAt: String!
   }
 
+  type NodeVersion {
+    id: ID!
+    nodeId: String!
+    loc: String!
+    name: String!
+    title: String!
+    alias: String
+    description: String
+    content: String
+    tags: [String!]!
+    editedBy: String
+    createdAt: String!
+  }
+
   # A client's subscription to a graph bundle.
   type ClientBundleSub {
     id: ID!
@@ -288,6 +302,9 @@ export const typeDefs = `#graphql
     # Usage stats for a node (most recent events first)
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
 
+    # Version history for a node
+    nodeVersions(nodeId: ID!, limit: Int): [NodeVersion!]!
+
     # Aggregated usage counts per node and type for a graph
     graphUsageSummary(graphId: ID!): [UsageSummaryEntry!]!
 
@@ -327,6 +344,9 @@ export const typeDefs = `#graphql
 
     # Delete a node by loc
     deleteNode(loc: String!): Boolean!
+
+    # Restore a node to a previous version (creates a new version snapshot first)
+    restoreNodeVersion(versionId: ID!): Node!
 
     # Move a node to a new loc (keeps same id and all incoming edge references)
     moveNode(from: String!, to: String!): Node!
