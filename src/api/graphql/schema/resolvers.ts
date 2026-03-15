@@ -309,6 +309,27 @@ export const resolvers = {
       });
     },
 
+    graphUsageSummary: async (_: unknown, { graphId }: { graphId: string }, ctx: Context) => {
+      // Get all node locs belonging to this graph
+      const nodes = await ctx.db.node.findMany({
+        where: { graphId },
+        select: { loc: true },
+      });
+      const locs = nodes.map((n) => n.loc);
+      if (!locs.length) return [];
+
+      const rows = await ctx.db.usageEvent.groupBy({
+        by: ['nodeLoc', 'type'],
+        where: { nodeLoc: { in: locs } },
+        _count: { id: true },
+      });
+      return rows.map((r) => ({
+        nodeLoc: r.nodeLoc,
+        type: r.type,
+        count: r._count.id,
+      }));
+    },
+
     sessions: async (
       _: unknown,
       { type, repo, customerId, limit }: { type?: string; repo?: string; customerId?: string; limit?: number },

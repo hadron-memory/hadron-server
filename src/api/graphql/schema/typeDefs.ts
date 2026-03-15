@@ -261,6 +261,12 @@ export const typeDefs = `#graphql
     tokensOut: Int
   }
 
+  type UsageSummaryEntry {
+    nodeLoc: String!
+    type: String!
+    count: Int!
+  }
+
   scalar JSON
 
   type Query {
@@ -280,6 +286,9 @@ export const typeDefs = `#graphql
 
     # Usage stats for a node (most recent events first)
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
+
+    # Aggregated usage counts per node and type for a graph
+    graphUsageSummary(graphId: ID!): [UsageSummaryEntry!]!
 
     # Sessions, most recent first
     sessions(type: String, repo: String, customerId: String, limit: Int): [Session!]!
