@@ -1,4 +1,4 @@
-export const SOURCES_PATH = process.env.SOURCES_PATH || './sources';
+export const GRAPHS_PATH = process.env.GRAPHS_PATH || './graphs';
 
 /**
  * Convert a graph name (config key) to a namespace.

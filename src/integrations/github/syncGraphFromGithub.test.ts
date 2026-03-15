@@ -25,7 +25,7 @@ vi.mock('./githubApp.js', () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Mock config to control SOURCES_PATH dynamically
+// Mock config to control GRAPHS_PATH dynamically
 // ---------------------------------------------------------------------------
 let mockSources: string;
 let cleanup: () => void;
@@ -34,7 +34,7 @@ vi.mock('../../config.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../config.js')>();
   return {
     ...real,
-    get SOURCES_PATH() {
+    get GRAPHS_PATH() {
       return mockSources;
     },
   };
@@ -42,7 +42,7 @@ vi.mock('../../config.js', async (importOriginal) => {
 
 // ---------------------------------------------------------------------------
 // Fixture: a minimal GraphWithOrg object for "test-org/test/repo"
-// local path = join(SOURCES_PATH, 'test-org', 'test/repo')
+// local path = join(GRAPHS_PATH, 'test-org', 'test/repo')
 // ---------------------------------------------------------------------------
 let dbGraphId: string;
 let dbOrgId: string;

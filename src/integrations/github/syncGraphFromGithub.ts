@@ -1,8 +1,9 @@
 import { execFile as execFileCb } from 'child_process';
+import { createDecipheriv } from 'crypto';
 import { promisify } from 'util';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
-import { SOURCES_PATH, graphNameToNamespace } from '../../config.js';
+import { GRAPHS_PATH, graphNameToNamespace } from '../../config.js';
 import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
@@ -10,6 +11,19 @@ import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import type { Graph, Organization } from '../../generated/prisma/index.js';
 
 const execFile = promisify(execFileCb);
+
+function decryptToken(ciphertext: string): string {
+  const key = process.env.HADRON_ENCRYPTION_KEY;
+  if (!key) throw new Error('HADRON_ENCRYPTION_KEY env var is required');
+  const keyBuf = Buffer.from(key, 'hex');
+  const buf = Buffer.from(ciphertext, 'base64');
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const data = buf.subarray(28);
+  const decipher = createDecipheriv('aes-256-gcm', keyBuf, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+}
 
 export type GraphWithOrg = Graph & { organization: Organization };
 
@@ -36,7 +50,7 @@ export const syncGraphFromGithub = async (
     }).catch(() => {});
 
     const namespace = graphNameToNamespace(graphName);
-    const localPath = join(SOURCES_PATH, graph.organization.domain, graphName);
+    const localPath = join(GRAPHS_PATH, graph.organization.domain, graphName);
     const ownerRepo = extractOwnerRepo(graph.source);
 
     // 1. Get installation token (requires GitHub App installation)
@@ -47,7 +61,13 @@ export const syncGraphFromGithub = async (
       return {};
     }
 
-    const token = await getInstallationToken(graph.organization.githubInstallationId);
+    // Build per-org credentials if available
+    const org = graph.organization;
+    const credentials = org.githubAppId && org.githubAppPrivateKeyEncrypted
+      ? { appId: org.githubAppId, privateKeyPem: decryptToken(org.githubAppPrivateKeyEncrypted) }
+      : undefined;
+
+    const token = await getInstallationToken(graph.organization.githubInstallationId, credentials);
     const cloneUrl = toHttpsUrl(graph.source, token);
 
     // 2. Clone or pull the repo

@@ -14,7 +14,7 @@ export default defineConfig({
         process.env.TEST_DATABASE_URL ?? 'postgresql://holger@localhost:5432/hadron_test',
       DB_PROVIDER: 'postgresql',
       JWT_SECRET: 'test-secret-at-least-32-characters-!!',
-      SOURCES_PATH: '/tmp/hadron-test-sources',
+      GRAPHS_PATH: '/tmp/hadron-test-graphs',
     },
     coverage: {
       provider: 'v8',

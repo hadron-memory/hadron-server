@@ -1,3 +1,4 @@
+import { createPrivateKey } from 'crypto';
 import { SignJWT, importPKCS8 } from 'jose';
 
 const GITHUB_API = 'https://api.github.com';
@@ -5,23 +6,28 @@ const GITHUB_API = 'https://api.github.com';
 /**
  * Exchange a GitHub App installation ID for a short-lived access token.
  *
- * Requires env vars:
- *   GITHUB_APP_ID         — numeric App ID from the GitHub App settings page
- *   GITHUB_APP_PRIVATE_KEY — PEM-encoded RSA private key (PKCS#8 or PKCS#1)
+ * Credentials can be provided explicitly (per-org SaaS model) or fall back
+ * to env vars GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY.
  *
  * The returned token is valid for ~1 hour and can be used as HTTPS clone
  * credentials: https://x-access-token:<token>@github.com/owner/repo.git
  */
-export async function getInstallationToken(installationId: number): Promise<string> {
-  const appId = process.env.GITHUB_APP_ID;
-  const privateKeyPem = process.env.GITHUB_APP_PRIVATE_KEY;
+export async function getInstallationToken(
+  installationId: number,
+  credentials?: { appId: string; privateKeyPem: string },
+): Promise<string> {
+  const appId = credentials?.appId ?? process.env.GITHUB_APP_ID;
+  const privateKeyPem = credentials?.privateKeyPem ?? process.env.GITHUB_APP_PRIVATE_KEY;
 
   if (!appId || !privateKeyPem) {
-    throw new Error('GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be set');
+    throw new Error('GitHub App credentials are not configured for this organization');
   }
 
   // GitHub App JWTs must be signed with RS256
-  const privateKey = await importPKCS8(privateKeyPem.replace(/\\n/g, '\n'), 'RS256');
+  // GitHub generates PKCS#1 (RSA PRIVATE KEY) but jose needs PKCS#8 — normalize via Node crypto
+  const pem = privateKeyPem.replace(/\\n/g, '\n');
+  const pkcs8Pem = createPrivateKey(pem).export({ type: 'pkcs8', format: 'pem' }) as string;
+  const privateKey = await importPKCS8(pkcs8Pem, 'RS256');
 
   const now = Math.floor(Date.now() / 1000);
   const jwt = await new SignJWT({})

@@ -7,7 +7,7 @@ import type { Node } from '../../index.d.js';
  * Save a node to the filesystem.
  *
  * @param node        The node to save
- * @param sourcesPath Absolute path to the sources root directory
+ * @param sourcesPath Absolute path to the graphs root directory
  */
 export const saveNodeToFs = async (
   node: Partial<Node>,

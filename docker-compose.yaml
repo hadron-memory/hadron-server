@@ -27,9 +27,9 @@ services:
       DATABASE_URL: postgresql://hadron:hadron@db:5432/hadron
       PORT: 4000
       NODE_ENV: production
-      SOURCES_PATH: /var/lib/hadron/sources
+      GRAPHS_PATH: /var/lib/hadron/graphs
     volumes:
-      - sources:/var/lib/hadron/sources
+      - graphs:/var/lib/hadron/graphs
     env_file:
       - path: .env.localFs
         required: false   # place secrets (GITHUB_CLIENT_SECRET etc.) here
@@ -39,4 +39,4 @@ services:
 
 volumes:
   postgres_data:
-  sources:
+  graphs:

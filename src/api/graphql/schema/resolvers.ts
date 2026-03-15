@@ -37,6 +37,133 @@ async function requireOrgRole(
   }
 }
 
+// ── Graph access control ──────────────────────────────────────────────
+
+/**
+ * Returns the graph IDs accessible to the current caller, or null if the
+ * caller has unrestricted access (global ADMIN/OWNER).
+ *
+ * - Clients: graphs from bundle subscriptions only
+ * - Users: graphs from org memberships + cross-org subscriptions + public graphs
+ * - Unauthenticated: public graphs only
+ */
+async function getAccessibleGraphIds(ctx: Context): Promise<string[] | null> {
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return null;
+
+  // API-key client — graphs from bundle subscriptions
+  if (ctx.clientId && !ctx.userId) {
+    const subs = await ctx.db.clientBundleSubscription.findMany({
+      where: { clientId: ctx.clientId, deletedAt: null },
+      include: { bundle: { include: { graphs: { select: { graphId: true } } } } },
+    });
+    const ids: string[] = [];
+    for (const sub of subs) {
+      for (const bg of sub.bundle.graphs) ids.push(bg.graphId);
+    }
+    return ids;
+  }
+
+  // JWT user — org graphs + subscribed graphs + public graphs
+  if (ctx.userId) {
+    const memberships = await ctx.db.organizationMember.findMany({
+      where: { userId: ctx.userId, deletedAt: null },
+      select: { organizationId: true },
+    });
+    const orgIds = memberships.map((m) => m.organizationId);
+    const graphs = await ctx.db.graph.findMany({
+      where: {
+        deletedAt: null,
+        OR: [
+          ...(orgIds.length > 0
+            ? [
+                { organizationId: { in: orgIds } },
+                { subscriptions: { some: { organizationId: { in: orgIds } } } },
+              ]
+            : []),
+          { visibility: 'PUBLIC' as any },
+        ],
+      },
+      select: { id: true },
+    });
+    return graphs.map((g) => g.id);
+  }
+
+  // Unauthenticated — public graphs only
+  const publicGraphs = await ctx.db.graph.findMany({
+    where: { visibility: 'PUBLIC', deletedAt: null },
+    select: { id: true },
+  });
+  return publicGraphs.map((g) => g.id);
+}
+
+/** Prisma `where` clause that restricts nodes to accessible graphs. */
+async function graphAccessFilter(ctx: Context): Promise<Record<string, unknown>> {
+  const ids = await getAccessibleGraphIds(ctx);
+  return ids === null ? {} : { graphId: { in: ids } };
+}
+
+/**
+ * Verify the caller has write access to a specific graph.
+ *
+ * Checks (most restrictive wins):
+ * 1. Global ADMIN/OWNER — always allowed
+ * 2. Clients: role >= CONTRIBUTOR, bundle subscription is READ_WRITE, namespace match
+ * 3. Users: org member with CONTRIBUTOR+, or cross-org subscription with CONTRIBUTOR role
+ */
+async function requireGraphWriteAccess(ctx: Context, graphId: string): Promise<void> {
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
+
+  // API-key client path
+  if (ctx.clientId && !ctx.userId) {
+    const highestRole = Math.max(...(ctx.roles ?? []).map((r) => ROLE_ORDER[r] ?? -1));
+    if (highestRole < ROLE_ORDER['CONTRIBUTOR']) {
+      throw new Error('Forbidden: client role insufficient for writes');
+    }
+    const sub = await ctx.db.clientBundleSubscription.findFirst({
+      where: {
+        clientId: ctx.clientId,
+        deletedAt: null,
+        subscriptionType: 'READ_WRITE',
+        bundle: { graphs: { some: { graphId } } },
+      },
+    });
+    if (!sub) throw new Error('Forbidden: no write access to this graph');
+    return;
+  }
+
+  // JWT user path
+  if (!ctx.userId) throw new Error('Unauthenticated');
+
+  const graph = await ctx.db.graph.findUniqueOrThrow({
+    where: { id: graphId },
+    select: { organizationId: true },
+  });
+
+  // Direct org member with CONTRIBUTOR+?
+  const member = await ctx.db.organizationMember.findUnique({
+    where: { organizationId_userId: { organizationId: graph.organizationId, userId: ctx.userId } },
+  });
+  if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+
+  // Cross-org subscription with CONTRIBUTOR role?
+  const userOrgs = await ctx.db.organizationMember.findMany({
+    where: {
+      userId: ctx.userId,
+      deletedAt: null,
+      role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] as any },
+    },
+    select: { organizationId: true },
+  });
+  for (const uo of userOrgs) {
+    const graphSub = await ctx.db.graphSubscription.findUnique({
+      where: { graphId_organizationId: { graphId, organizationId: uo.organizationId } },
+    });
+    if (graphSub && (ROLE_ORDER[graphSub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+  }
+
+  throw new Error('Forbidden: no write access to this graph');
+}
+
 const GRAPH_INCLUDE = {
   subscriptions: { include: { organization: true }, orderBy: { createdAt: 'asc' as const } },
 };
@@ -76,6 +203,17 @@ function encryptToken(plaintext: string): string {
   return Buffer.concat([iv, tag, encrypted]).toString('base64');
 }
 
+function decryptToken(ciphertext: string): string {
+  const key = getEncryptionKey();
+  const buf = Buffer.from(ciphertext, 'base64');
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const data = buf.subarray(28);
+  const decipher = createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+}
+
 export const resolvers = {
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
@@ -88,8 +226,12 @@ export const resolvers = {
   Organization: {
     createdAt: (o: { createdAt: Date | string }) => toISO(o.createdAt)!,
     updatedAt: (o: { updatedAt: Date | string }) => toISO(o.updatedAt)!,
+    hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
   },
   Client: {
+    createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,
+    lastUsedAt: (c: { lastUsedAt?: Date | string | null }) => toISO(c.lastUsedAt),
+    expiresAt: (c: { expiresAt?: Date | string | null }) => toISO(c.expiresAt),
     user: (client: { userId?: string | null }, _: unknown, ctx: Context) =>
       client.userId ? ctx.db.user.findUnique({ where: { id: client.userId } }) : null,
     bundleSubscriptions: (client: { id: string }, _: unknown, ctx: Context) =>
@@ -98,6 +240,9 @@ export const resolvers = {
         include: { bundle: { include: BUNDLE_INCLUDE } },
         orderBy: { createdAt: 'asc' as const },
       }),
+  },
+  GraphBundle: {
+    createdAt: (b: { createdAt: Date | string }) => toISO(b.createdAt)!,
   },
   Session: {
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
@@ -108,10 +253,16 @@ export const resolvers = {
 
   Query: {
     node: async (_: unknown, { loc }: { loc: string }, ctx: Context) => {
-      return ctx.db.node.findUnique({
+      const access = await graphAccessFilter(ctx);
+      const node = await ctx.db.node.findUnique({
         where: { loc },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
+      if (node && access.graphId) {
+        const allowed = (access.graphId as { in: string[] }).in;
+        if (!allowed.includes(node.graphId)) return null;
+      }
+      return node;
     },
 
     nodes: async (
@@ -119,8 +270,10 @@ export const resolvers = {
       { namespace, tags, search, limit }: { namespace?: string; tags?: string[]; search?: string; limit?: number },
       ctx: Context,
     ) => {
+      const access = await graphAccessFilter(ctx);
       return ctx.db.node.findMany({
         where: {
+          ...access,
           ...(namespace ? { namespace: { startsWith: namespace } } : {}),
           ...(tags?.length ? tagsFilter(tags) : {}),
           ...(search
@@ -140,8 +293,9 @@ export const resolvers = {
     },
 
     subtree: async (_: unknown, { prefix }: { prefix: string }, ctx: Context) => {
+      const access = await graphAccessFilter(ctx);
       return ctx.db.node.findMany({
-        where: { loc: { startsWith: prefix } },
+        where: { ...access, loc: { startsWith: prefix } },
         orderBy: { loc: 'asc' },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
@@ -294,7 +448,7 @@ export const resolvers = {
 
   Mutation: {
     upsertNode: async (_: unknown, { input }: { input: NodeInput }, ctx: Context) => {
-      requireRole(ctx, 'CONTRIBUTOR');
+      await requireGraphWriteAccess(ctx, input.graphId);
       const namespace = deriveNamespace(input.loc);
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER') && ctx.namespace && !namespace.startsWith(ctx.namespace)) {
         throw new Error('Forbidden: outside your writable namespace');
@@ -353,13 +507,18 @@ export const resolvers = {
     },
 
     deleteNode: async (_: unknown, { loc }: { loc: string }, ctx: Context) => {
-      requireRole(ctx, 'CONTRIBUTOR');
+      const node = await ctx.db.node.findUniqueOrThrow({ where: { loc } });
+      await requireGraphWriteAccess(ctx, node.graphId);
       await ctx.db.node.delete({ where: { loc } });
       return true;
     },
 
     moveNode: async (_: unknown, { from, to }: { from: string; to: string }, ctx: Context) => {
-      requireRole(ctx, 'CONTRIBUTOR');
+      const node = await ctx.db.node.findUniqueOrThrow({ where: { loc: from } });
+      await requireGraphWriteAccess(ctx, node.graphId);
+      if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER') && ctx.namespace && !deriveNamespace(to).startsWith(ctx.namespace)) {
+        throw new Error('Forbidden: outside your writable namespace');
+      }
       const namespace = deriveNamespace(to);
       return ctx.db.node.update({
         where: { loc: from },
@@ -379,7 +538,7 @@ export const resolvers = {
       }: { namespace: string; ownerRepo: string; graphId: string; nodes: NodeInput[]; edges: EdgeInput[] },
       ctx: Context,
     ) => {
-      requireRole(ctx, 'CONTRIBUTOR');
+      await requireGraphWriteAccess(ctx, graphId);
 
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
         await tx.node.deleteMany({ where: { namespace, ownerRepo, graphId } });
@@ -638,6 +797,37 @@ export const resolvers = {
       return ctx.db.organization.update({
         where: { id: orgId },
         data: { githubInstallationId: installationId },
+        include: ORG_INCLUDE,
+      });
+    },
+
+    updateOrgGithubApp: async (
+      _: unknown,
+      { orgId, appId, privateKey }: { orgId: string; appId: string; privateKey: string },
+      ctx: Context,
+    ) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      const encrypted = encryptToken(privateKey);
+      return ctx.db.organization.update({
+        where: { id: orgId },
+        data: { githubAppId: appId, githubAppPrivateKeyEncrypted: encrypted },
+        include: ORG_INCLUDE,
+      });
+    },
+
+    unlinkGithubApp: async (
+      _: unknown,
+      { orgId }: { orgId: string },
+      ctx: Context,
+    ) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      return ctx.db.organization.update({
+        where: { id: orgId },
+        data: {
+          githubInstallationId: null,
+          githubAppId: null,
+          githubAppPrivateKeyEncrypted: null,
+        },
         include: ORG_INCLUDE,
       });
     },

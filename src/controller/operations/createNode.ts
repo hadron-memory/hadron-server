@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { Node } from '../../index.d.js';
-import { SOURCES_PATH } from '../../config.js';
+import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
@@ -16,7 +16,7 @@ export const createNode = async (
   }
 
   // Save to filesystem
-  const fsResult = await saveNodeToFs(node, SOURCES_PATH);
+  const fsResult = await saveNodeToFs(node, GRAPHS_PATH);
   if (fsResult.error) {
     throw new Error(`Failed to save node to filesystem: ${fsResult.error}`);
   }

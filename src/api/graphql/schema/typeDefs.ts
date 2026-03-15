@@ -148,6 +148,8 @@ export const typeDefs = `#graphql
     name: String!
     domain: String!
     githubInstallationId: Int
+    githubAppId: String
+    hasGithubAppPrivateKey: Boolean!
     members: [OrganizationMember!]!
     graphs: [Graph!]!
     graphBundles: [GraphBundle!]!
@@ -348,6 +350,12 @@ export const typeDefs = `#graphql
 
     # Link a GitHub App installation to an organization (org ADMIN or platform ADMIN)
     linkGithubApp(orgId: ID!, installationId: Int!): Organization!
+
+    # Set GitHub App credentials for an organization (encrypted at rest)
+    updateOrgGithubApp(orgId: ID!, appId: String!, privateKey: String!): Organization!
+
+    # Remove all GitHub App config from an organization
+    unlinkGithubApp(orgId: ID!): Organization!
 
     # Organization membership (platform ADMIN or org OWNER/ADMIN)
     addOrganizationMember(orgId: ID!, userId: ID!, role: Role!): OrganizationMember!

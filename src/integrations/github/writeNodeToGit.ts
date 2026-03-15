@@ -3,7 +3,7 @@ import { promisify } from 'util';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { stringify } from 'yaml';
-import { SOURCES_PATH } from '../../config.js';
+import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 
@@ -50,7 +50,7 @@ export async function writeNodeToGit(
     return;
   }
 
-  const localPath = join(SOURCES_PATH, graphRecord.organization.domain, graphRecord.name);
+  const localPath = join(GRAPHS_PATH, graphRecord.organization.domain, graphRecord.name);
 
   if (!existsSync(join(localPath, '.git'))) {
     console.warn(`[writeNodeToGit] Repo not cloned yet at ${localPath} — skipping git write`);

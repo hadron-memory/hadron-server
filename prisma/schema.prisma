@@ -99,8 +99,10 @@ model Organization {
   id                   String   @id @default(cuid())
   name                 String
   domain               String   @unique
-  githubInstallationId Int?     @unique
-  createdAt            DateTime @default(now())
+  githubInstallationId            Int?     @unique
+  githubAppId                     String?
+  githubAppPrivateKeyEncrypted    String?
+  createdAt                       DateTime @default(now())
   createdBy            String?
   updatedAt            DateTime @updatedAt
   updatedBy            String?

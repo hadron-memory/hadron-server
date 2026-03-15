@@ -80,23 +80,36 @@ export async function createServer() {
         }
       }
 
-      // Upsert user
-      const user = await db.user.upsert({
-        where: { githubId: ghUser.id },
-        create: {
-          githubId: ghUser.id,
-          githubUsername: ghUser.login,
-          identityProvider: 'GITHUB',
-          name: ghUser.name,
-          avatarUrl: ghUser.avatar_url,
-          roles: ['READER'],
-        },
-        update: {
-          githubUsername: ghUser.login,
-          name: ghUser.name,
-          avatarUrl: ghUser.avatar_url,
-        },
+      // Upsert user — first check by githubUsername to handle seed data
+      // that may have a placeholder githubId
+      const existing = await db.user.findUnique({
+        where: { githubUsername: ghUser.login },
       });
+      const user = existing
+        ? await db.user.update({
+            where: { id: existing.id },
+            data: {
+              githubId: ghUser.id,
+              name: ghUser.name,
+              avatarUrl: ghUser.avatar_url,
+            },
+          })
+        : await db.user.upsert({
+            where: { githubId: ghUser.id },
+            create: {
+              githubId: ghUser.id,
+              githubUsername: ghUser.login,
+              identityProvider: 'GITHUB',
+              name: ghUser.name,
+              avatarUrl: ghUser.avatar_url,
+              roles: ['READER'],
+            },
+            update: {
+              githubUsername: ghUser.login,
+              name: ghUser.name,
+              avatarUrl: ghUser.avatar_url,
+            },
+          });
 
       // Issue JWT
       const jwt = await signJwt({
