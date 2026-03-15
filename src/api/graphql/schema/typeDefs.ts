@@ -147,6 +147,7 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     domain: String!
+    isPersonal: Boolean!
     githubInstallationId: Int
     githubAppId: String
     hasGithubAppPrivateKey: Boolean!

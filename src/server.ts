@@ -21,6 +21,10 @@ import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
+import {
+  provisionPersonalWorkspace,
+  hasPersonalWorkspace,
+} from './provisioning/personal-workspace.js';
 
 export async function createServer() {
   const app = express();
@@ -114,6 +118,16 @@ export async function createServer() {
             },
           });
 
+      // Provision personal workspace for new users
+      const isNew = !(await hasPersonalWorkspace(db, user.id));
+      if (isNew) {
+        await provisionPersonalWorkspace(
+          db,
+          user.id,
+          user.name ?? user.githubUsername ?? 'My Workspace',
+        );
+      }
+
       // Issue JWT
       const jwt = await signJwt({
         sub: user.id,
@@ -126,7 +140,8 @@ export async function createServer() {
         process.env.FRONTEND_URL || 'http://localhost:5173';
       const callbackUrl = new URL('/auth/callback', frontendUrl);
       callbackUrl.searchParams.set('token', jwt);
-      callbackUrl.searchParams.set('redirect', pending.redirect);
+      // New users go to setup page instead of their intended redirect
+      callbackUrl.searchParams.set('redirect', isNew ? '/app/setup' : pending.redirect);
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('OAuth callback error:', err);
@@ -181,6 +196,16 @@ export async function createServer() {
         update: {},
       });
 
+      // Provision personal workspace for new users
+      const isNew = !(await hasPersonalWorkspace(db, user.id));
+      if (isNew) {
+        await provisionPersonalWorkspace(
+          db,
+          user.id,
+          user.name ?? user.email ?? 'My Workspace',
+        );
+      }
+
       const jwt = await signJwt({
         sub: user.id,
         email: user.email ?? undefined,
@@ -191,6 +216,8 @@ export async function createServer() {
         process.env.FRONTEND_URL || 'http://localhost:5173';
       const callbackUrl = new URL('/auth/callback', frontendUrl);
       callbackUrl.searchParams.set('token', jwt);
+      // New users go to setup page
+      if (isNew) callbackUrl.searchParams.set('redirect', '/app/setup');
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('Email verify error:', err);
@@ -220,6 +247,62 @@ export async function createServer() {
         email: user.email,
         avatarUrl: user.avatarUrl,
         roles: user.roles,
+      });
+    } catch {
+      res.status(401).json({ error: 'Invalid or expired token' });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Setup info (returns API key for first-time setup)
+  // ---------------------------------------------------------------------------
+
+  app.get('/setup/info', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      res.status(401).json({ error: 'No token provided' });
+      return;
+    }
+    try {
+      const payload = await verifyJwt(authHeader.slice(7));
+      const setup = await db.pendingSetup.findUnique({
+        where: { userId: payload.sub },
+      });
+      if (!setup || setup.consumed) {
+        res.json({ hasSetup: false });
+        return;
+      }
+
+      // Find the personal org and bundle for context
+      const membership = await db.organizationMember.findFirst({
+        where: { userId: payload.sub, organization: { isPersonal: true } },
+        include: {
+          organization: {
+            include: {
+              graphBundles: true,
+              graphs: true,
+            },
+          },
+        },
+      });
+
+      // Mark as consumed — API key is shown only once
+      await db.pendingSetup.update({
+        where: { id: setup.id },
+        data: { consumed: true },
+      });
+
+      res.json({
+        hasSetup: true,
+        apiKey: setup.rawKeyEncrypted, // TODO: decrypt when encryption is added
+        clientId: setup.clientId,
+        orgId: membership?.organization.id,
+        orgName: membership?.organization.name,
+        bundleId: membership?.organization.graphBundles[0]?.id,
+        graphs: membership?.organization.graphs.map((g) => ({
+          id: g.id,
+          name: g.name,
+        })) ?? [],
       });
     } catch {
       res.status(401).json({ error: 'Invalid or expired token' });

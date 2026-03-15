@@ -92,6 +92,7 @@ model User {
   sentInvitations           UserInvitation[]           @relation("SentInvitations")
   invitationActivations     UserInvitationActivation[]
   receivedMemberInvitations MemberInvitation[]         @relation("ReceivedMemberInvitations")
+  pendingSetup              PendingSetup?
 
   @@map("users")
 }
@@ -100,6 +101,7 @@ model Organization {
   id                   String   @id @default(cuid())
   name                 String
   domain               String   @unique
+  isPersonal           Boolean  @default(false)
   githubInstallationId            Int?     @unique
   githubAppId                     String?
   githubAppPrivateKeyEncrypted    String?
@@ -255,6 +257,7 @@ model Node {
   incomingEdges Edge[]        @relation("TargetNode")
   pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
+  versions      NodeVersion[]
 
   @@index([namespace])
   @@index([graphId])
@@ -625,4 +628,36 @@ model EmailVerificationToken {
 
   @@index([email])
   @@map("email_verification_tokens")
+}
+
+model NodeVersion {
+  id          String   @id @default(cuid())
+  nodeId      String
+  loc         String
+  name        String
+  title       String
+  alias       String?
+  description String?
+  content     String?
+  tags        String[]
+  editedBy    String?
+  createdAt   DateTime @default(now())
+
+  node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@index([nodeId, createdAt])
+  @@map("node_versions")
+}
+
+model PendingSetup {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  clientId        String
+  rawKeyEncrypted String
+  consumed        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("pending_setups")
 }
