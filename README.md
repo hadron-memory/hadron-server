@@ -1,8 +1,10 @@
 # Hadron Controller
 
-GraphQL API, graph sync engine, and usage database for the Hadron knowledge graph platform.
+GraphQL API, MCP server, graph sync engine, and usage database for the [Hadron](https://hadrongraph.io) knowledge graph platform.
 
-Graphs are managed through the GraphQL API (via hadron-web) and synced from GitHub.
+Serves both **consumer** and **enterprise** users. On sign-up, each user gets a personal workspace (auto-provisioned org, API key, default bundle) so they can connect their AI tool within minutes. Organizations, teams, and advanced graph management are available when needed.
+
+Graphs are managed through the GraphQL API (via hadron-web) and optionally synced from GitHub.
 Nodes are stored in PostgreSQL and cloned locally for filesystem operations.
 
 ## Prerequisites
@@ -161,6 +163,34 @@ On startup (and via `POST /reload`), the controller syncs all graphs that have a
 
 When a node is modified via the API, the change is written back to the local clone.
 
+## Personal workspace provisioning
+
+When a new user signs up (via GitHub OAuth or email magic link), the controller
+automatically provisions a personal workspace:
+
+1. Creates an `Organization` with `isPersonal: true`
+2. Adds the user as OWNER
+3. Creates a default "My Graphs" bundle
+4. Creates a WORKSTATION client with an API key
+5. Subscribes the client to the default bundle (READ_WRITE)
+6. Stores the raw API key in a `PendingSetup` record (shown once on the setup page)
+
+New users are redirected to `/app/setup` where they download a config file for their AI tool.
+
+## Node version history
+
+Every call to `upsertNode` snapshots the current node state before applying changes. This creates
+a linear version history per node without requiring git branches.
+
+- `nodeVersions(nodeId, limit)` — query version history (most recent first)
+- `restoreNodeVersion(versionId)` — snapshots current state, then restores the node to a previous version
+
+## Marketplace
+
+The `publicGraphs` query returns all graphs with `visibility: PUBLIC`. The `addToMyGraphs` mutation
+lets an authenticated user add a public graph to their personal workspace (creates a subscription
+and adds the graph to their default bundle).
+
 ## Endpoints
 
 | Endpoint | Auth | Description |
@@ -174,6 +204,7 @@ When a node is modified via the API, the change is written back to the local clo
 | `POST /auth/email` | — | Send magic-link email |
 | `GET /auth/email/verify` | — | Verify magic link and issue JWT |
 | `GET /auth/me` | Bearer | Current user info |
+| `GET /setup/info` | Bearer | One-time setup info (API key, graphs) |
 | `POST /github/webhook` | HMAC | GitHub App webhook receiver |
 | `POST /mcp` | Bearer | MCP protocol endpoint |
 
