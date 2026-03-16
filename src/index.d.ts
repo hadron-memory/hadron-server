@@ -2,6 +2,7 @@ export interface Node {
   id: string;
   graphId: string;
   loc: string;
+  isLink: boolean;
   name: string;
   title: string;
   alias: string | null;

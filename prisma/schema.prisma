@@ -236,7 +236,8 @@ model Node {
   name        String
   title       String
   alias       String?
-  loc         String   @unique
+  loc         String
+  isLink      Boolean  @default(false)
   description String?
   content     String?
   contentHash String?
@@ -259,6 +260,8 @@ model Node {
   usageEvents   UsageEvent[]
   versions      NodeVersion[]
 
+  @@unique([loc, graphId])
+  @@index([loc])
   @@index([namespace])
   @@index([graphId])
   @@map("nodes")

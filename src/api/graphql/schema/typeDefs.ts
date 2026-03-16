@@ -35,6 +35,7 @@ export const typeDefs = `#graphql
     id: ID!
     graphId: String!
     loc: String!
+    isLink: Boolean!
     name: String!
     title: String!
     alias: String
@@ -342,14 +343,14 @@ export const typeDefs = `#graphql
     # Create or update a single node
     upsertNode(input: NodeInput!): Node!
 
-    # Delete a node by loc
-    deleteNode(loc: String!): Boolean!
+    # Delete a node by loc within a specific graph
+    deleteNode(loc: String!, graphId: String!): Boolean!
 
     # Restore a node to a previous version (creates a new version snapshot first)
     restoreNodeVersion(versionId: ID!): Node!
 
-    # Move a node to a new loc (keeps same id and all incoming edge references)
-    moveNode(from: String!, to: String!): Node!
+    # Move a node to a new loc within a specific graph (keeps same id and all incoming edge references)
+    moveNode(from: String!, to: String!, graphId: String!): Node!
 
     # Replace all nodes under a namespace owned by a repo (collection tool)
     replaceSubtree(namespace: String!, ownerRepo: String!, graphId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!

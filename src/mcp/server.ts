@@ -121,7 +121,14 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const where: Record<string, unknown> = {};
       if (graphIds) where.graphId = { in: graphIds };
 
-      const nodes = await db.node.findMany({ where, take: 1000 });
+      const allNodes = await db.node.findMany({ where, take: 1000 });
+      // Deduplicate by loc: prefer canonical (isLink=false) over link nodes
+      const byLoc = new Map<string, typeof allNodes[0]>();
+      for (const n of allNodes) {
+        const existing = byLoc.get(n.loc);
+        if (!existing || (existing.isLink && !n.isLink)) byLoc.set(n.loc, n);
+      }
+      const nodes = Array.from(byLoc.values());
       const matches = nodes.filter((n) => matchesQuery(n, query));
       const limited = matches.slice(0, limit ?? 50);
 
@@ -142,20 +149,20 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'Read a node by its dotted path (e.g. my-org.my-repo.models)',
     { loc: z.string().describe('Dotted path to the node') },
     async ({ loc }) => {
-      const node = await db.node.findUnique({
-        where: { loc },
+      const graphIds = await getAccessibleGraphIds(auth);
+      const where: Record<string, unknown> = { loc };
+      if (graphIds) where.graphId = { in: graphIds };
+
+      const candidates = await db.node.findMany({
+        where,
         include: {
           outgoingEdges: { include: { target: true } },
           incomingEdges: { include: { source: true } },
         },
       });
+      // Prefer canonical (isLink=false) over link nodes
+      const node = candidates.find((n) => !n.isLink) ?? candidates[0] ?? null;
       if (!node) {
-        return textResult(`Node "${loc}" not found.`);
-      }
-
-      // Access check
-      const graphIds = await getAccessibleGraphIds(auth);
-      if (graphIds && !graphIds.includes(node.graphId)) {
         return textResult(`Node "${loc}" not found.`);
       }
 
@@ -282,10 +289,10 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
       const namespace = loc.split('.').slice(0, 2).join('.');
 
-      const existing = await db.node.findUnique({ where: { loc } });
+      const existing = await db.node.findUnique({ where: { loc_graphId: { loc, graphId } } });
 
       const upserted = await db.node.upsert({
-        where: { loc },
+        where: { loc_graphId: { loc, graphId } },
         create: {
           id: existing?.id ?? randomUUID().replace(/-/g, ''),
           graphId,
@@ -351,7 +358,12 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult((e as Error).message);
       }
 
-      const node = await db.node.findUnique({ where: { loc: from } });
+      // Find the node — try accessible graphs, prefer canonical
+      const graphIds = await getAccessibleGraphIds(auth);
+      const moveWhere: Record<string, unknown> = { loc: from };
+      if (graphIds) moveWhere.graphId = { in: graphIds };
+      const candidates = await db.node.findMany({ where: moveWhere });
+      const node = candidates.find((n) => !n.isLink) ?? candidates[0] ?? null;
       if (!node) return textResult(`Node "${from}" not found.`);
 
       if (!(await canWriteToGraph(auth, node.graphId))) {
@@ -362,7 +374,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const newName = to.split('.').pop()!;
 
       await db.node.update({
-        where: { id: node.id },
+        where: { loc_graphId: { loc: from, graphId: node.graphId } },
         data: { loc: to, name: newName, namespace: newNamespace },
       });
 
@@ -380,17 +392,15 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       args: z.record(z.string(), z.string()).optional().describe('Action arguments as key-value pairs'),
     },
     async ({ loc, args }) => {
-      const node = await db.node.findUnique({
-        where: { loc },
+      const graphIds = await getAccessibleGraphIds(auth);
+      const actionWhere: Record<string, unknown> = { loc };
+      if (graphIds) actionWhere.graphId = { in: graphIds };
+      const actionCandidates = await db.node.findMany({
+        where: actionWhere,
         include: { outgoingEdges: { include: { target: true } } },
       });
+      const node = actionCandidates.find((n) => !n.isLink) ?? actionCandidates[0] ?? null;
       if (!node) return textResult(`Node "${loc}" not found.`);
-
-      // Access check
-      const graphIds = await getAccessibleGraphIds(auth);
-      if (graphIds && !graphIds.includes(node.graphId)) {
-        return textResult(`Node "${loc}" not found.`);
-      }
 
       let actionContent = node.content || '';
 

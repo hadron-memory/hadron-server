@@ -339,7 +339,7 @@ describe('Mutation.deleteNode access control', () => {
   it('client with write access can delete', async () => {
     const result = await resolvers.Mutation.deleteNode(
       null,
-      { loc: 'org-a.repo.nodeA' },
+      { loc: 'org-a.repo.nodeA', graphId: graphA.id },
       ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
     );
     expect(result).toBe(true);
@@ -349,7 +349,7 @@ describe('Mutation.deleteNode access control', () => {
     await expect(
       resolvers.Mutation.deleteNode(
         null,
-        { loc: 'org-a.repo.nodeA' },
+        { loc: 'org-a.repo.nodeA', graphId: graphA.id },
         ctx({ clientId: clientReader.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -359,7 +359,7 @@ describe('Mutation.deleteNode access control', () => {
     await expect(
       resolvers.Mutation.deleteNode(
         null,
-        { loc: 'org-b.repo.nodeB' },
+        { loc: 'org-b.repo.nodeB', graphId: graphB.id },
         ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -374,7 +374,7 @@ describe('Mutation.moveNode access control', () => {
   it('client with write access can move', async () => {
     const node = await resolvers.Mutation.moveNode(
       null,
-      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedNode' },
+      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedNode', graphId: graphA.id },
       ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
     );
     expect(node.loc).toBe('org-a.repo.movedNode');
@@ -384,7 +384,7 @@ describe('Mutation.moveNode access control', () => {
     await expect(
       resolvers.Mutation.moveNode(
         null,
-        { from: 'org-b.repo.nodeB', to: 'org-b.repo.moved' },
+        { from: 'org-b.repo.nodeB', to: 'org-b.repo.moved', graphId: graphB.id },
         ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -408,7 +408,7 @@ describe('Mutation.moveNode access control', () => {
     await expect(
       resolvers.Mutation.moveNode(
         null,
-        { from: 'org-a.repo.nodeA', to: 'other.ns.moved' },
+        { from: 'org-a.repo.nodeA', to: 'other.ns.moved', graphId: graphA.id },
         ctx({ clientId: nsClient.id, roles: ['CONTRIBUTOR'], namespace: 'org-a.repo' }),
       ),
     ).rejects.toThrow('namespace');
@@ -494,7 +494,7 @@ describe('global ADMIN bypass', () => {
   it('ADMIN can delete any node', async () => {
     const result = await resolvers.Mutation.deleteNode(
       null,
-      { loc: 'org-b.repo.nodeB' },
+      { loc: 'org-b.repo.nodeB', graphId: graphB.id },
       ctx({ clientId: 'github:admin', userId: 'admin-id', roles: ['ADMIN'] }),
     );
     expect(result).toBe(true);

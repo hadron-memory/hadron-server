@@ -12,7 +12,8 @@ export const createUsageEvent = async (
 
   try {
     const node = event.nodeLoc
-      ? await db.node.findUnique({ where: { loc: event.nodeLoc } })
+      ? await db.node.findFirst({ where: { loc: event.nodeLoc, isLink: false } })
+        ?? await db.node.findFirst({ where: { loc: event.nodeLoc } })
       : null;
 
     const savedEvent = await db.usageEvent.create({

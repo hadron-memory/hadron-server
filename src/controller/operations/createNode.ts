@@ -25,7 +25,7 @@ export const createNode = async (
   const namespace = node.loc.split('.').slice(0, 2).join('.');
 
   const saved = await db.node.upsert({
-    where: { loc: node.loc },
+    where: { loc_graphId: { loc: node.loc, graphId: node.graphId } },
     create: {
       id,
       graphId: node.graphId,

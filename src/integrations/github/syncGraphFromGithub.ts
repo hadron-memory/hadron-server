@@ -89,6 +89,7 @@ export const syncGraphFromGithub = async (
           name,
           title: node.title ?? name,
           alias: node.alias ?? null,
+          isLink: node.isLink ?? false,
           description: node.description ?? null,
           content: node.content ?? null,
           contentHash: node.contentHash ?? null,
@@ -97,7 +98,7 @@ export const syncGraphFromGithub = async (
           ownerRepo,
         };
         await tx.node.upsert({
-          where: { id: node.id },
+          where: { loc_graphId: { loc, graphId: graph.id } },
           create: { id: node.id!, graphId: graph.id, ...update },
           update,
         });

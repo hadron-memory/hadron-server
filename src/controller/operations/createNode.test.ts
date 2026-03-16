@@ -48,7 +48,7 @@ describe('createNode', () => {
     expect(node.description).toBe('A test node');
 
     // Verify it was actually persisted
-    const inDb = await db.node.findUnique({ where: { loc: 'org.graph.node' } });
+    const inDb = await db.node.findFirst({ where: { loc: 'org.graph.node' } });
     expect(inDb).not.toBeNull();
   });
 

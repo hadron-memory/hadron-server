@@ -6,6 +6,7 @@ import type { Node } from '../../index.d.js';
 interface NodeYaml {
   id: string;
   name: string;
+  type?: string;
   description?: string;
   summary?: string;
   tags?: string[];
@@ -60,6 +61,7 @@ export const loadNodeFromFs = async (
       id: meta.id,
       loc,
       name: meta.name,
+      isLink: meta.type === 'link',
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
       content: content?.trim() ?? null,

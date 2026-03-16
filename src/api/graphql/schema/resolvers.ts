@@ -103,6 +103,21 @@ async function graphAccessFilter(ctx: Context): Promise<Record<string, unknown>>
 }
 
 /**
+ * Deduplicate nodes by loc: when multiple nodes share the same loc across
+ * different graphs, prefer canonical (isLink=false) over link nodes.
+ */
+function deduplicateNodes<T extends { loc: string; isLink: boolean }>(nodes: T[]): T[] {
+  const byLoc = new Map<string, T>();
+  for (const node of nodes) {
+    const existing = byLoc.get(node.loc);
+    if (!existing || (existing.isLink && !node.isLink)) {
+      byLoc.set(node.loc, node);
+    }
+  }
+  return Array.from(byLoc.values());
+}
+
+/**
  * Verify the caller has write access to a specific graph.
  *
  * Checks (most restrictive wins):
@@ -254,15 +269,13 @@ export const resolvers = {
   Query: {
     node: async (_: unknown, { loc }: { loc: string }, ctx: Context) => {
       const access = await graphAccessFilter(ctx);
-      const node = await ctx.db.node.findUnique({
-        where: { loc },
+      const candidates = await ctx.db.node.findMany({
+        where: { loc, ...access },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
-      if (node && access.graphId) {
-        const allowed = (access.graphId as { in: string[] }).in;
-        if (!allowed.includes(node.graphId)) return null;
-      }
-      return node;
+      if (candidates.length === 0) return null;
+      // Prefer canonical (isLink=false) over link nodes
+      return candidates.find((n) => !n.isLink) ?? candidates[0];
     },
 
     nodes: async (
@@ -271,7 +284,7 @@ export const resolvers = {
       ctx: Context,
     ) => {
       const access = await graphAccessFilter(ctx);
-      return ctx.db.node.findMany({
+      const results = await ctx.db.node.findMany({
         where: {
           ...access,
           ...(namespace ? { namespace: { startsWith: namespace } } : {}),
@@ -286,19 +299,20 @@ export const resolvers = {
               }
             : {}),
         },
-        take: limit ?? 100,
         orderBy: { loc: 'asc' },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
+      return deduplicateNodes(results).slice(0, limit ?? 100);
     },
 
     subtree: async (_: unknown, { prefix }: { prefix: string }, ctx: Context) => {
       const access = await graphAccessFilter(ctx);
-      return ctx.db.node.findMany({
+      const results = await ctx.db.node.findMany({
         where: { ...access, loc: { startsWith: prefix } },
         orderBy: { loc: 'asc' },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
+      return deduplicateNodes(results);
     },
 
     nodeUsage: async (_: unknown, { loc, limit }: { loc: string; limit?: number }, ctx: Context) => {
@@ -484,7 +498,9 @@ export const resolvers = {
       }
 
       // Snapshot current state before update (for version history)
-      const existing = await ctx.db.node.findUnique({ where: { loc: input.loc } });
+      const existing = await ctx.db.node.findUnique({
+        where: { loc_graphId: { loc: input.loc, graphId: input.graphId } },
+      });
       if (existing) {
         await ctx.db.nodeVersion.create({
           data: {
@@ -505,7 +521,7 @@ export const resolvers = {
       const id = input.id ?? randomUUID().replace(/-/g, '');
       const { edges, ...nodeFields } = input;
       const node = await ctx.db.node.upsert({
-        where: { loc: input.loc },
+        where: { loc_graphId: { loc: input.loc, graphId: input.graphId } },
         create: { ...nodeFields, id, namespace, tags },
         update: { ...nodeFields, namespace, tags },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
@@ -553,22 +569,20 @@ export const resolvers = {
       return finalNode;
     },
 
-    deleteNode: async (_: unknown, { loc }: { loc: string }, ctx: Context) => {
-      const node = await ctx.db.node.findUniqueOrThrow({ where: { loc } });
-      await requireGraphWriteAccess(ctx, node.graphId);
-      await ctx.db.node.delete({ where: { loc } });
+    deleteNode: async (_: unknown, { loc, graphId }: { loc: string; graphId: string }, ctx: Context) => {
+      await requireGraphWriteAccess(ctx, graphId);
+      await ctx.db.node.delete({ where: { loc_graphId: { loc, graphId } } });
       return true;
     },
 
-    moveNode: async (_: unknown, { from, to }: { from: string; to: string }, ctx: Context) => {
-      const node = await ctx.db.node.findUniqueOrThrow({ where: { loc: from } });
-      await requireGraphWriteAccess(ctx, node.graphId);
+    moveNode: async (_: unknown, { from, to, graphId }: { from: string; to: string; graphId: string }, ctx: Context) => {
+      await requireGraphWriteAccess(ctx, graphId);
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER') && ctx.namespace && !deriveNamespace(to).startsWith(ctx.namespace)) {
         throw new Error('Forbidden: outside your writable namespace');
       }
       const namespace = deriveNamespace(to);
       return ctx.db.node.update({
-        where: { loc: from },
+        where: { loc_graphId: { loc: from, graphId } },
         data: { loc: to, namespace },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
@@ -602,8 +616,8 @@ export const resolvers = {
         }
 
         for (const edge of edges) {
-          const source = await tx.node.findUnique({ where: { loc: edge.sourceLoc } });
-          const target = await tx.node.findUnique({ where: { loc: edge.targetLoc } });
+          const source = await tx.node.findUnique({ where: { loc_graphId: { loc: edge.sourceLoc, graphId } } });
+          const target = await tx.node.findFirst({ where: { loc: edge.targetLoc } });
           if (source && target) {
             await tx.edge.upsert({
               where: { sourceId_targetId_label: { sourceId: source.id, targetId: target.id, label: edge.label } },
@@ -657,7 +671,8 @@ export const resolvers = {
 
     recordUsage: async (_: unknown, { event }: { event: UsageEventInput }, ctx: Context) => {
       const node = event.nodeLoc
-        ? await ctx.db.node.findUnique({ where: { loc: event.nodeLoc } })
+        ? await ctx.db.node.findFirst({ where: { loc: event.nodeLoc, isLink: false } })
+          ?? await ctx.db.node.findFirst({ where: { loc: event.nodeLoc } })
         : null;
 
       await ctx.db.usageEvent.create({
