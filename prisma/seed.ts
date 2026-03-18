@@ -94,7 +94,7 @@ async function main() {
       props: {
         data: {
           organizationId: hadronOrg.id,
-          name: 'hadronmemory-com',
+          name: 'hadronmemory-com.core',
           source: 'https://github.com/hadron-memory/hadronmem-core',
           readBranch: 'main',
           writeBranch: 'hadron-updates',
