@@ -35,6 +35,15 @@ async function main() {
   });
   console.log(`  Created Organization: ${baragaunOrg.name} (${baragaunOrg.domain})`);
 
+  // 2. Organization: Baragaun
+  const micromentorOrg = await db.organization.create({
+    data: {
+      name: 'Micromentor',
+      domain: 'micromentor-org',
+    },
+  });
+  console.log(`  Created Organization: ${micromentorOrg.name} (${micromentorOrg.domain})`);
+
   // 3. Users
   const holger = await db.user.create({
     data: {
@@ -72,8 +81,8 @@ async function main() {
   // 4. OrgMembers
   for (const { user, role } of [
     { user: holger, role: 'OWNER' as const },
-    { user: raghvind, role: 'ADMIN' as const },
-    { user: rupali, role: 'ADMIN' as const },
+    { user: raghvind, role: 'OWNER' as const },
+    { user: rupali, role: 'OWNER' as const },
   ]) {
     await db.orgMember.create({
       data: {
@@ -84,6 +93,38 @@ async function main() {
       },
     });
     console.log(`  Created OrgMember: ${user.name} → ${baragaunOrg.name} (${role})`);
+  }
+
+  for (const { user, role } of [
+    { user: holger, role: 'OWNER' as const },
+    { user: raghvind, role: 'OWNER' as const },
+    { user: rupali, role: 'OWNER' as const },
+  ]) {
+    await db.orgMember.create({
+      data: {
+        organizationId: hadronOrg.id,
+        userId: user.id,
+        role,
+        canInvite: true,
+      },
+    });
+    console.log(`  Created OrgMember: ${user.name} → ${hadronOrg.name} (${role})`);
+  }
+
+  for (const { user, role } of [
+    { user: holger, role: 'OWNER' as const },
+    { user: raghvind, role: 'OWNER' as const },
+    { user: rupali, role: 'OWNER' as const },
+  ]) {
+    await db.orgMember.create({
+      data: {
+        organizationId: micromentorOrg.id,
+        userId: user.id,
+        role,
+        canInvite: true,
+      },
+    });
+    console.log(`  Created OrgMember: ${user.name} → ${micromentorOrg.name} (${role})`);
   }
 
   // 5. Memory: hadron-core
@@ -129,6 +170,51 @@ async function main() {
           readBranch: 'main',
           writeBranch: 'hadron-updates',
           visibility: 'PUBLIC',
+          syncStatus: 'PENDING',
+        },
+      },
+    },
+    {
+      id: '',
+      name: '',
+      props: {
+        data: {
+          organizationId: baragaunOrg.id,
+          name: 'baragaun-com.bg-node-client',
+          source: 'https://github.com/baragaun/hadronmem-bg-node-client',
+          readBranch: 'main',
+          writeBranch: 'hadron-updates',
+          visibility: 'PUBLIC',
+          syncStatus: 'PENDING',
+        },
+      },
+    },
+    {
+      id: '',
+      name: '',
+      props: {
+        data: {
+          organizationId: micromentorOrg.id,
+          name: 'micromentor-org.mmdata',
+          source: 'https://github.com/micromentor-team/hadronmem-mmdata',
+          readBranch: 'main',
+          writeBranch: 'hadron-updates',
+          visibility: 'PRIVATE',
+          syncStatus: 'PENDING',
+        },
+      },
+    },
+    {
+      id: '',
+      name: '',
+      props: {
+        data: {
+          organizationId: micromentorOrg.id,
+          name: 'micromentor-org.mm-app',
+          source: 'https://github.com/micromentor-team/hadronmem-mm-app',
+          readBranch: 'main',
+          writeBranch: 'hadron-updates',
+          visibility: 'PRIVATE',
           syncStatus: 'PENDING',
         },
       },
