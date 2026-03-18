@@ -1,6 +1,7 @@
-import { PrismaClient } from '../src/generated/prisma/index.js';
+import {Prisma, PrismaClient} from '../src/generated/prisma/index.js';
 import bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
+import MemoryCreateArgs = Prisma.MemoryCreateArgs;
 
 const db = new PrismaClient();
 
@@ -16,14 +17,23 @@ async function main() {
   });
   console.log(`  Created HadronServer: ${server.url}`);
 
+  // 2. Organization: Hadron Memory
+  const hadronOrg = await db.organization.create({
+    data: {
+      name: 'Hadron Memory',
+      domain: 'hadronmemory-com',
+    },
+  });
+  console.log(`  Created Organization: ${hadronOrg.name} (${hadronOrg.domain})`);
+
   // 2. Organization: Baragaun
-  const org = await db.organization.create({
+  const baragaunOrg = await db.organization.create({
     data: {
       name: 'Baragaun',
       domain: 'baragaun-com',
     },
   });
-  console.log(`  Created Organization: ${org.name} (${org.domain})`);
+  console.log(`  Created Organization: ${baragaunOrg.name} (${baragaunOrg.domain})`);
 
   // 3. Users
   const holger = await db.user.create({
@@ -67,33 +77,75 @@ async function main() {
   ]) {
     await db.orgMember.create({
       data: {
-        organizationId: org.id,
+        organizationId: baragaunOrg.id,
         userId: user.id,
         role,
         canInvite: true,
       },
     });
-    console.log(`  Created OrgMember: ${user.name} → ${org.name} (${role})`);
+    console.log(`  Created OrgMember: ${user.name} → ${baragaunOrg.name} (${role})`);
   }
 
   // 5. Memory: hadron-core
-  const memory = await db.memory.create({
-    data: {
-      organizationId: org.id,
-      name: 'baragaun-com/hadron-core',
-      source: 'https://github.com/baragaun/hadron-core.git',
-      readBranch: 'main',
-      writeBranch: 'hadron-updates',
-      visibility: 'PUBLIC',
-      syncStatus: 'PENDING',
+  const seedMemories: { id: string, name: string, props: MemoryCreateArgs }[] = [
+    {
+      id: '',
+      name: '',
+      props: {
+        data: {
+          organizationId: hadronOrg.id,
+          name: 'hadronmemory-com',
+          source: 'https://github.com/hadron-memory/hadronmem-core',
+          readBranch: 'main',
+          writeBranch: 'hadron-updates',
+          visibility: 'PUBLIC',
+          syncStatus: 'PENDING',
+        },
+      }
     },
-  });
-  console.log(`  Created Memory: ${memory.name}`);
+    {
+      id: '',
+      name: '',
+      props: {
+        data: {
+          organizationId: baragaunOrg.id,
+          name: 'baragaun-com',
+          source: 'https://github.com/baragaun/hadronmem-baragaun-com',
+          readBranch: 'main',
+          writeBranch: 'hadron-updates',
+          visibility: 'PUBLIC',
+          syncStatus: 'PENDING',
+        },
+      }
+    },
+    {
+      id: '',
+      name: '',
+      props: {
+        data: {
+          organizationId: baragaunOrg.id,
+          name: 'baragaun-com.bg-code-gen',
+          source: 'https://github.com/baragaun/hadronmem-bg-code-gen',
+          readBranch: 'main',
+          writeBranch: 'hadron-updates',
+          visibility: 'PUBLIC',
+          syncStatus: 'PENDING',
+        },
+      },
+    },
+  ]
+
+  for (const mem of seedMemories) {
+    const memory = await db.memory.create(mem.props);
+    mem.id = memory.id
+    mem.name = memory.name
+    console.log(`  Created Memory: ${memory.name}`);
+  }
 
   // 6. MemoryBundle: Engineering
   const bundle = await db.memoryBundle.create({
     data: {
-      organizationId: org.id,
+      organizationId: baragaunOrg.id,
       name: 'Engineering',
       description: 'All Baragaun engineering memories',
     },
@@ -101,13 +153,15 @@ async function main() {
   console.log(`  Created MemoryBundle: ${bundle.name}`);
 
   // 7. MemoryBundleItem: Engineering → hadron-core
-  await db.memoryBundleItem.create({
-    data: {
-      bundleId: bundle.id,
-      memoryId: memory.id,
-    },
-  });
-  console.log(`  Linked ${memory.name} → ${bundle.name}`);
+  for (const mem of seedMemories) {
+    await db.memoryBundleItem.create({
+      data: {
+        bundleId: bundle.id,
+        memoryId: mem.id,
+      },
+    });
+    console.log(`  Linked ${mem.name} → ${bundle.name}`);
+  }
 
   // 8. Clients + subscriptions (one per user)
   const clientDefs = [
@@ -122,7 +176,7 @@ async function main() {
     const client = await db.client.create({
       data: {
         userId: user.id,
-        organizationId: org.id,
+        organizationId: baragaunOrg.id,
         clientType: 'WORKSTATION',
         label,
         keyHash,
