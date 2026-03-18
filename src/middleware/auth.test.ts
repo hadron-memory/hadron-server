@@ -25,7 +25,7 @@ async function makeJwt(
   return new SignJWT(payload)
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
-    .setIssuer(opts.issuer ?? 'hadron-controller')
+    .setIssuer(opts.issuer ?? 'hadron-server')
     .setAudience(opts.audience ?? 'hadron')
     .setExpirationTime(opts.expiry ?? '7d')
     .sign(secret);

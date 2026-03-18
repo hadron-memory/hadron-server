@@ -122,7 +122,7 @@ export async function writeNodeToGit(
     if (!stdout.trim()) return; // nothing to commit
 
     await execFile('git', [
-      'commit', '-m', `Update node ${node.loc}\n\n[hadron-controller]`,
+      'commit', '-m', `Update node ${node.loc}\n\n[hadron-server]`,
     ], { cwd: localPath });
 
     // Embed token in remote URL for push, then restore original

@@ -8,7 +8,7 @@ export interface HadronJwtPayload extends JWTPayload {
   email?: string;          // email address (email users)
 }
 
-const JWT_ISSUER = 'hadron-controller';
+const JWT_ISSUER = 'hadron-server';
 const JWT_AUDIENCE = 'hadron';
 const JWT_EXPIRY = process.env.JWT_EXPIRY || '7d';
 

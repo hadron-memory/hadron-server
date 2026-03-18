@@ -34,7 +34,7 @@ describe('verifyJwt error cases', () => {
     const token = await new SignJWT(PAYLOAD)
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
-      .setIssuer('hadron-controller')
+      .setIssuer('hadron-server')
       .setAudience('hadron')
       .setExpirationTime('7d')
       .sign(secret);
@@ -47,7 +47,7 @@ describe('verifyJwt error cases', () => {
     const token = await new SignJWT(PAYLOAD)
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
-      .setIssuer('hadron-controller')
+      .setIssuer('hadron-server')
       .setAudience('hadron')
       .setExpirationTime('-1s') // already expired
       .sign(secret);
@@ -73,7 +73,7 @@ describe('verifyJwt error cases', () => {
     const token = await new SignJWT(PAYLOAD)
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
-      .setIssuer('hadron-controller')
+      .setIssuer('hadron-server')
       .setAudience('wrong-audience')
       .setExpirationTime('7d')
       .sign(secret);
