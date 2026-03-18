@@ -7,14 +7,14 @@ const db = new PrismaClient();
 async function main() {
   console.log('Seeding database...');
 
-  // 1. HadronController
-  const controller = await db.hadronController.create({
+  // 1. HadronServer
+  const server = await db.hadronServer.create({
     data: {
       url: 'https://hc.hadrongraph.io',
       logLevel: 'ERROR',
     },
   });
-  console.log(`  Created HadronController: ${controller.url}`);
+  console.log(`  Created HadronServer: ${server.url}`);
 
   // 2. Organization: Baragaun
   const org = await db.organization.create({
@@ -25,8 +25,8 @@ async function main() {
   });
   console.log(`  Created Organization: ${org.name} (${org.domain})`);
 
-  // 3. User: Holger
-  const user = await db.user.create({
+  // 3. Users
+  const holger = await db.user.create({
     data: {
       githubId: 204708, // shadowbrush GitHub ID
       githubUsername: 'shadowbrush',
@@ -37,21 +37,47 @@ async function main() {
       maxReferrals: 100,
     },
   });
-  console.log(`  Created User: ${user.name} (${user.githubUsername})`);
+  console.log(`  Created User: ${holger.name} (${holger.githubUsername})`);
 
-  // 4. OrganizationMember: Holger as OWNER of Baragaun
-  await db.organizationMember.create({
+  const raghvind = await db.user.create({
     data: {
-      organizationId: org.id,
-      userId: user.id,
-      role: 'OWNER',
-      canInvite: true,
+      identityProvider: 'EMAIL',
+      name: 'Raghvind Ragav',
+      email: 'raghvind@baragaun.com',
+      roles: ['ADMIN'],
     },
   });
-  console.log(`  Created OrganizationMember: ${user.name} → ${org.name} (OWNER)`);
+  console.log(`  Created User: ${raghvind.name} (${raghvind.email})`);
 
-  // 5. Graph: hadron-core
-  const graph = await db.graph.create({
+  const rupali = await db.user.create({
+    data: {
+      identityProvider: 'EMAIL',
+      name: 'Rupali Raijput',
+      email: 'rupali@baragaun.com',
+      roles: ['ADMIN'],
+    },
+  });
+  console.log(`  Created User: ${rupali.name} (${rupali.email})`);
+
+  // 4. OrgMembers
+  for (const { user, role } of [
+    { user: holger, role: 'OWNER' as const },
+    { user: raghvind, role: 'ADMIN' as const },
+    { user: rupali, role: 'ADMIN' as const },
+  ]) {
+    await db.orgMember.create({
+      data: {
+        organizationId: org.id,
+        userId: user.id,
+        role,
+        canInvite: true,
+      },
+    });
+    console.log(`  Created OrgMember: ${user.name} → ${org.name} (${role})`);
+  }
+
+  // 5. Memory: hadron-core
+  const memory = await db.memory.create({
     data: {
       organizationId: org.id,
       name: 'baragaun-com/hadron-core',
@@ -62,55 +88,61 @@ async function main() {
       syncStatus: 'PENDING',
     },
   });
-  console.log(`  Created Graph: ${graph.name}`);
+  console.log(`  Created Memory: ${memory.name}`);
 
-  // 6. GraphBundle: Engineering
-  const bundle = await db.graphBundle.create({
+  // 6. MemoryBundle: Engineering
+  const bundle = await db.memoryBundle.create({
     data: {
       organizationId: org.id,
       name: 'Engineering',
-      description: 'All Baragaun engineering graphs',
+      description: 'All Baragaun engineering memories',
     },
   });
-  console.log(`  Created GraphBundle: ${bundle.name}`);
+  console.log(`  Created MemoryBundle: ${bundle.name}`);
 
-  // 7. GraphBundleGraph: Engineering → hadron-core
-  await db.graphBundleGraph.create({
+  // 7. MemoryBundleItem: Engineering → hadron-core
+  await db.memoryBundleItem.create({
     data: {
       bundleId: bundle.id,
-      graphId: graph.id,
+      memoryId: memory.id,
     },
   });
-  console.log(`  Linked ${graph.name} → ${bundle.name}`);
+  console.log(`  Linked ${memory.name} → ${bundle.name}`);
 
-  // 8. Client: biene-mbp4
-  const rawKey = randomBytes(32).toString('hex');
-  const keyHash = await bcrypt.hash(rawKey, 12);
-  const client = await db.client.create({
-    data: {
-      userId: user.id,
-      organizationId: org.id,
-      clientType: 'WORKSTATION',
-      label: 'biene-mbp4',
-      keyHash,
-      role: 'ADMIN',
-      apiKeyShown: false,
-    },
-  });
-  console.log(`  Created Client: ${client.label}`);
-  console.log(`  API Key: ${rawKey}`);
-  console.log(`  (Save this key — it will not be shown again)`);
+  // 8. Clients + subscriptions (one per user)
+  const clientDefs = [
+    { user: holger, label: 'biene-mbp4' },
+    { user: raghvind, label: 'raghvind-ws' },
+    { user: rupali, label: 'rupali-ws' },
+  ];
 
-  // 9. ClientBundleSubscription: biene-mbp4 → Engineering (READ_WRITE, training)
-  await db.clientBundleSubscription.create({
-    data: {
-      clientId: client.id,
-      bundleId: bundle.id,
-      subscriptionType: 'READ_WRITE',
-      trainingMode: true,
-    },
-  });
-  console.log(`  Subscribed ${client.label} → ${bundle.name} (READ_WRITE, training)`);
+  for (const { user, label } of clientDefs) {
+    const rawKey = randomBytes(32).toString('hex');
+    const keyHash = await bcrypt.hash(rawKey, 12);
+    const client = await db.client.create({
+      data: {
+        userId: user.id,
+        organizationId: org.id,
+        clientType: 'WORKSTATION',
+        label,
+        keyHash,
+        role: 'ADMIN',
+        apiKeyShown: false,
+      },
+    });
+    console.log(`  Created Client: ${client.label} (user: ${user.name})`);
+    console.log(`    API Key: ${rawKey}`);
+
+    await db.clientBundleSubscription.create({
+      data: {
+        clientId: client.id,
+        bundleId: bundle.id,
+        subscriptionType: 'READ_WRITE',
+        trainingMode: true,
+      },
+    });
+    console.log(`    Subscribed ${client.label} → ${bundle.name} (READ_WRITE, training)`);
+  }
 
   console.log('\nSeed complete!');
 }
