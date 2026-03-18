@@ -210,11 +210,21 @@ and adds the graph to their default bundle).
 
 ## Testing
 
-Tests require a `hadron_test` PostgreSQL database. Create it once:
+Tests require a `hadron_test` PostgreSQL database. Push the current schema to it:
 
 ```bash
 pnpm run db:test-setup
 ```
+
+If the schema has changed in a way that can't be applied incrementally (e.g. a new
+required column without a default), you'll need to force-reset the test database:
+
+```bash
+DATABASE_URL=postgresql://holger@localhost:5432/hadron_test pnpm prisma db push --force-reset
+```
+
+This drops and recreates the database — all test data is lost. Only use this on the
+test database, never on production.
 
 Then run:
 
