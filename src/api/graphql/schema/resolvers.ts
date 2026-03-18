@@ -29,7 +29,7 @@ async function requireOrgRole(
 ): Promise<void> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
   if (!ctx.userId) throw new Error('Forbidden');
-  const member = await ctx.db.organizationMember.findUnique({
+  const member = await ctx.db.orgMember.findUnique({
     where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
   });
   if (!member || (ROLE_ORDER[member.role] ?? -1) < ROLE_ORDER[required]) {
@@ -37,40 +37,40 @@ async function requireOrgRole(
   }
 }
 
-// ── Graph access control ──────────────────────────────────────────────
+// ── Memory access control ──────────────────────────────────────────────
 
 /**
- * Returns the graph IDs accessible to the current caller, or null if the
+ * Returns the memory IDs accessible to the current caller, or null if the
  * caller has unrestricted access (global ADMIN/OWNER).
  *
- * - Clients: graphs from bundle subscriptions only
- * - Users: graphs from org memberships + cross-org subscriptions + public graphs
- * - Unauthenticated: public graphs only
+ * - Clients: memories from bundle subscriptions only
+ * - Users: memories from org memberships + cross-org subscriptions + public memories
+ * - Unauthenticated: public memories only
  */
-async function getAccessibleGraphIds(ctx: Context): Promise<string[] | null> {
+async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return null;
 
-  // API-key client — graphs from bundle subscriptions
+  // API-key client — memories from bundle subscriptions
   if (ctx.clientId && !ctx.userId) {
     const subs = await ctx.db.clientBundleSubscription.findMany({
       where: { clientId: ctx.clientId, deletedAt: null },
-      include: { bundle: { include: { graphs: { select: { graphId: true } } } } },
+      include: { bundle: { include: { items: { select: { memoryId: true } } } } },
     });
     const ids: string[] = [];
     for (const sub of subs) {
-      for (const bg of sub.bundle.graphs) ids.push(bg.graphId);
+      for (const bg of sub.bundle.items) ids.push(bg.memoryId);
     }
     return ids;
   }
 
-  // JWT user — org graphs + subscribed graphs + public graphs
+  // JWT user — org memories + subscribed memories + public memories
   if (ctx.userId) {
-    const memberships = await ctx.db.organizationMember.findMany({
+    const memberships = await ctx.db.orgMember.findMany({
       where: { userId: ctx.userId, deletedAt: null },
       select: { organizationId: true },
     });
     const orgIds = memberships.map((m) => m.organizationId);
-    const graphs = await ctx.db.graph.findMany({
+    const memories = await ctx.db.memory.findMany({
       where: {
         deletedAt: null,
         OR: [
@@ -85,26 +85,26 @@ async function getAccessibleGraphIds(ctx: Context): Promise<string[] | null> {
       },
       select: { id: true },
     });
-    return graphs.map((g) => g.id);
+    return memories.map((g) => g.id);
   }
 
-  // Unauthenticated — public graphs only
-  const publicGraphs = await ctx.db.graph.findMany({
+  // Unauthenticated — public memories only
+  const publicMemories = await ctx.db.memory.findMany({
     where: { visibility: 'PUBLIC', deletedAt: null },
     select: { id: true },
   });
-  return publicGraphs.map((g) => g.id);
+  return publicMemories.map((g) => g.id);
 }
 
-/** Prisma `where` clause that restricts nodes to accessible graphs. */
-async function graphAccessFilter(ctx: Context): Promise<Record<string, unknown>> {
-  const ids = await getAccessibleGraphIds(ctx);
-  return ids === null ? {} : { graphId: { in: ids } };
+/** Prisma `where` clause that restricts nodes to accessible memories. */
+async function memoryAccessFilter(ctx: Context): Promise<Record<string, unknown>> {
+  const ids = await getAccessibleMemoryIds(ctx);
+  return ids === null ? {} : { memoryId: { in: ids } };
 }
 
 /**
  * Deduplicate nodes by loc: when multiple nodes share the same loc across
- * different graphs, prefer canonical (isLink=false) over link nodes.
+ * different memories, prefer canonical (isLink=false) over link nodes.
  */
 function deduplicateNodes<T extends { loc: string; isLink: boolean }>(nodes: T[]): T[] {
   const byLoc = new Map<string, T>();
@@ -118,14 +118,14 @@ function deduplicateNodes<T extends { loc: string; isLink: boolean }>(nodes: T[]
 }
 
 /**
- * Verify the caller has write access to a specific graph.
+ * Verify the caller has write access to a specific memory.
  *
  * Checks (most restrictive wins):
  * 1. Global ADMIN/OWNER — always allowed
  * 2. Clients: role >= CONTRIBUTOR, bundle subscription is READ_WRITE, namespace match
  * 3. Users: org member with CONTRIBUTOR+, or cross-org subscription with CONTRIBUTOR role
  */
-async function requireGraphWriteAccess(ctx: Context, graphId: string): Promise<void> {
+async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
 
   // API-key client path
@@ -139,29 +139,29 @@ async function requireGraphWriteAccess(ctx: Context, graphId: string): Promise<v
         clientId: ctx.clientId,
         deletedAt: null,
         subscriptionType: 'READ_WRITE',
-        bundle: { graphs: { some: { graphId } } },
+        bundle: { items: { some: { memoryId } } },
       },
     });
-    if (!sub) throw new Error('Forbidden: no write access to this graph');
+    if (!sub) throw new Error('Forbidden: no write access to this memory');
     return;
   }
 
   // JWT user path
   if (!ctx.userId) throw new Error('Unauthenticated');
 
-  const graph = await ctx.db.graph.findUniqueOrThrow({
-    where: { id: graphId },
+  const memory = await ctx.db.memory.findUniqueOrThrow({
+    where: { id: memoryId },
     select: { organizationId: true },
   });
 
   // Direct org member with CONTRIBUTOR+?
-  const member = await ctx.db.organizationMember.findUnique({
-    where: { organizationId_userId: { organizationId: graph.organizationId, userId: ctx.userId } },
+  const member = await ctx.db.orgMember.findUnique({
+    where: { organizationId_userId: { organizationId: memory.organizationId, userId: ctx.userId } },
   });
   if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
 
   // Cross-org subscription with CONTRIBUTOR role?
-  const userOrgs = await ctx.db.organizationMember.findMany({
+  const userOrgs = await ctx.db.orgMember.findMany({
     where: {
       userId: ctx.userId,
       deletedAt: null,
@@ -170,28 +170,28 @@ async function requireGraphWriteAccess(ctx: Context, graphId: string): Promise<v
     select: { organizationId: true },
   });
   for (const uo of userOrgs) {
-    const graphSub = await ctx.db.graphSubscription.findUnique({
-      where: { graphId_organizationId: { graphId, organizationId: uo.organizationId } },
+    const memorySub = await ctx.db.memorySubscription.findUnique({
+      where: { memoryId_organizationId: { memoryId, organizationId: uo.organizationId } },
     });
-    if (graphSub && (ROLE_ORDER[graphSub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+    if (memorySub && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
   }
 
-  throw new Error('Forbidden: no write access to this graph');
+  throw new Error('Forbidden: no write access to this memory');
 }
 
-const GRAPH_INCLUDE = {
+const MEMORY_INCLUDE = {
   subscriptions: { include: { organization: true }, orderBy: { createdAt: 'asc' as const } },
 };
 
 const ORG_INCLUDE = {
   members: { include: { user: true }, orderBy: { createdAt: 'asc' as const } },
-  graphs: { include: GRAPH_INCLUDE, orderBy: { name: 'asc' as const } },
-  graphBundles: { include: { graphs: { include: { graph: true } } }, orderBy: { name: 'asc' as const } },
-  subscriptions: { include: { graph: true }, orderBy: { createdAt: 'asc' as const } },
+  memories: { include: MEMORY_INCLUDE, orderBy: { name: 'asc' as const } },
+  memoryBundles: { include: { items: { include: { memory: true } } }, orderBy: { name: 'asc' as const } },
+  subscriptions: { include: { memory: true }, orderBy: { createdAt: 'asc' as const } },
 };
 
 const BUNDLE_INCLUDE = {
-  graphs: { include: { graph: { include: GRAPH_INCLUDE } } },
+  items: { include: { memory: { include: MEMORY_INCLUDE } } },
 };
 
 const CLIENT_INCLUDE = {
@@ -233,7 +233,7 @@ export const resolvers = {
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
   },
-  Graph: {
+  Memory: {
     lastSyncedAt: (g: { lastSyncedAt?: Date | string | null }) => toISO(g.lastSyncedAt),
     createdAt: (g: { createdAt: Date | string }) => toISO(g.createdAt)!,
     updatedAt: (g: { updatedAt: Date | string }) => toISO(g.updatedAt)!,
@@ -256,7 +256,7 @@ export const resolvers = {
         orderBy: { createdAt: 'asc' as const },
       }),
   },
-  GraphBundle: {
+  MemoryBundle: {
     createdAt: (b: { createdAt: Date | string }) => toISO(b.createdAt)!,
   },
   Session: {
@@ -268,7 +268,7 @@ export const resolvers = {
 
   Query: {
     node: async (_: unknown, { loc }: { loc: string }, ctx: Context) => {
-      const access = await graphAccessFilter(ctx);
+      const access = await memoryAccessFilter(ctx);
       const candidates = await ctx.db.node.findMany({
         where: { loc, ...access },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
@@ -283,7 +283,7 @@ export const resolvers = {
       { namespace, tags, search, limit }: { namespace?: string; tags?: string[]; search?: string; limit?: number },
       ctx: Context,
     ) => {
-      const access = await graphAccessFilter(ctx);
+      const access = await memoryAccessFilter(ctx);
       const results = await ctx.db.node.findMany({
         where: {
           ...access,
@@ -306,7 +306,7 @@ export const resolvers = {
     },
 
     subtree: async (_: unknown, { prefix }: { prefix: string }, ctx: Context) => {
-      const access = await graphAccessFilter(ctx);
+      const access = await memoryAccessFilter(ctx);
       const results = await ctx.db.node.findMany({
         where: { ...access, loc: { startsWith: prefix } },
         orderBy: { loc: 'asc' },
@@ -323,10 +323,10 @@ export const resolvers = {
       });
     },
 
-    graphUsageSummary: async (_: unknown, { graphId }: { graphId: string }, ctx: Context) => {
-      // Get all node locs belonging to this graph
+    memoryUsageSummary: async (_: unknown, { memoryId }: { memoryId: string }, ctx: Context) => {
+      // Get all node locs belonging to this memory
       const nodes = await ctx.db.node.findMany({
-        where: { graphId },
+        where: { memoryId },
         select: { loc: true },
       });
       const locs = nodes.map((n) => n.loc);
@@ -424,7 +424,7 @@ export const resolvers = {
 
     myOrganizations: async (_: unknown, __: unknown, ctx: Context) => {
       if (!ctx.userId) return [];
-      const memberships = await ctx.db.organizationMember.findMany({
+      const memberships = await ctx.db.orgMember.findMany({
         where: { userId: ctx.userId, deletedAt: null },
         include: { organization: { include: ORG_INCLUDE } },
       });
@@ -434,7 +434,7 @@ export const resolvers = {
     organization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
         if (!ctx.userId) throw new Error('Forbidden');
-        const member = await ctx.db.organizationMember.findUnique({
+        const member = await ctx.db.orgMember.findUnique({
           where: { organizationId_userId: { organizationId: id, userId: ctx.userId } },
         });
         if (!member) throw new Error('Forbidden');
@@ -442,38 +442,38 @@ export const resolvers = {
       return ctx.db.organization.findUnique({ where: { id }, include: ORG_INCLUDE });
     },
 
-    publicGraphs: async (_: unknown, __: unknown, ctx: Context) => {
-      return ctx.db.graph.findMany({
+    publicMemories: async (_: unknown, __: unknown, ctx: Context) => {
+      return ctx.db.memory.findMany({
         where: { visibility: 'PUBLIC', deletedAt: null },
         orderBy: { name: 'asc' },
-        include: GRAPH_INCLUDE,
+        include: MEMORY_INCLUDE,
       });
     },
 
-    myGraphs: async (_: unknown, __: unknown, ctx: Context) => {
-      // API-key client — return graphs from bundle subscriptions
+    myMemories: async (_: unknown, __: unknown, ctx: Context) => {
+      // API-key client — return memories from bundle subscriptions
       if (ctx.clientId && !ctx.userId) {
         const subs = await ctx.db.clientBundleSubscription.findMany({
           where: { clientId: ctx.clientId, deletedAt: null },
-          include: { bundle: { include: { graphs: { include: { graph: { include: GRAPH_INCLUDE } } } } } },
+          include: { bundle: { include: { items: { include: { memory: { include: MEMORY_INCLUDE } } } } } },
         });
-        const graphMap = new Map<string, any>();
+        const memoryMap = new Map<string, any>();
         for (const sub of subs) {
-          for (const bg of sub.bundle.graphs) {
-            graphMap.set(bg.graph.id, bg.graph);
+          for (const bg of sub.bundle.items) {
+            memoryMap.set(bg.memory.id, bg.memory);
           }
         }
-        return Array.from(graphMap.values());
+        return Array.from(memoryMap.values());
       }
-      // JWT/OAuth user — union of all org-accessible graphs
+      // JWT/OAuth user — union of all org-accessible memories
       if (ctx.userId) {
-        const memberships = await ctx.db.organizationMember.findMany({
+        const memberships = await ctx.db.orgMember.findMany({
           where: { userId: ctx.userId, deletedAt: null },
           select: { organizationId: true },
         });
         const orgIds = memberships.map((m) => m.organizationId);
         if (orgIds.length === 0) return [];
-        return ctx.db.graph.findMany({
+        return ctx.db.memory.findMany({
           where: {
             deletedAt: null,
             OR: [
@@ -481,7 +481,7 @@ export const resolvers = {
               { subscriptions: { some: { organizationId: { in: orgIds } } } },
             ],
           },
-          include: GRAPH_INCLUDE,
+          include: MEMORY_INCLUDE,
           orderBy: { name: 'asc' },
         });
       }
@@ -491,7 +491,7 @@ export const resolvers = {
 
   Mutation: {
     upsertNode: async (_: unknown, { input }: { input: NodeInput }, ctx: Context) => {
-      await requireGraphWriteAccess(ctx, input.graphId);
+      await requireMemoryWriteAccess(ctx, input.memoryId);
       const namespace = deriveNamespace(input.loc);
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER') && ctx.namespace && !namespace.startsWith(ctx.namespace)) {
         throw new Error('Forbidden: outside your writable namespace');
@@ -499,7 +499,7 @@ export const resolvers = {
 
       // Snapshot current state before update (for version history)
       const existing = await ctx.db.node.findUnique({
-        where: { loc_graphId: { loc: input.loc, graphId: input.graphId } },
+        where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
       });
       if (existing) {
         await ctx.db.nodeVersion.create({
@@ -521,7 +521,7 @@ export const resolvers = {
       const id = input.id ?? randomUUID().replace(/-/g, '');
       const { edges, ...nodeFields } = input;
       const node = await ctx.db.node.upsert({
-        where: { loc_graphId: { loc: input.loc, graphId: input.graphId } },
+        where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
         create: { ...nodeFields, id, namespace, tags },
         update: { ...nodeFields, namespace, tags },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
@@ -569,20 +569,20 @@ export const resolvers = {
       return finalNode;
     },
 
-    deleteNode: async (_: unknown, { loc, graphId }: { loc: string; graphId: string }, ctx: Context) => {
-      await requireGraphWriteAccess(ctx, graphId);
-      await ctx.db.node.delete({ where: { loc_graphId: { loc, graphId } } });
+    deleteNode: async (_: unknown, { loc, memoryId }: { loc: string; memoryId: string }, ctx: Context) => {
+      await requireMemoryWriteAccess(ctx, memoryId);
+      await ctx.db.node.delete({ where: { loc_memoryId: { loc, memoryId } } });
       return true;
     },
 
-    moveNode: async (_: unknown, { from, to, graphId }: { from: string; to: string; graphId: string }, ctx: Context) => {
-      await requireGraphWriteAccess(ctx, graphId);
+    moveNode: async (_: unknown, { from, to, memoryId }: { from: string; to: string; memoryId: string }, ctx: Context) => {
+      await requireMemoryWriteAccess(ctx, memoryId);
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER') && ctx.namespace && !deriveNamespace(to).startsWith(ctx.namespace)) {
         throw new Error('Forbidden: outside your writable namespace');
       }
       const namespace = deriveNamespace(to);
       return ctx.db.node.update({
-        where: { loc_graphId: { loc: from, graphId } },
+        where: { loc_memoryId: { loc: from, memoryId } },
         data: { loc: to, namespace },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
@@ -593,16 +593,16 @@ export const resolvers = {
       {
         namespace,
         ownerRepo,
-        graphId,
+        memoryId,
         nodes,
         edges,
-      }: { namespace: string; ownerRepo: string; graphId: string; nodes: NodeInput[]; edges: EdgeInput[] },
+      }: { namespace: string; ownerRepo: string; memoryId: string; nodes: NodeInput[]; edges: EdgeInput[] },
       ctx: Context,
     ) => {
-      await requireGraphWriteAccess(ctx, graphId);
+      await requireMemoryWriteAccess(ctx, memoryId);
 
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
-        await tx.node.deleteMany({ where: { namespace, ownerRepo, graphId } });
+        await tx.node.deleteMany({ where: { namespace, ownerRepo, memoryId } });
 
         for (const input of nodes) {
           await tx.node.create({
@@ -616,7 +616,7 @@ export const resolvers = {
         }
 
         for (const edge of edges) {
-          const source = await tx.node.findUnique({ where: { loc_graphId: { loc: edge.sourceLoc, graphId } } });
+          const source = await tx.node.findUnique({ where: { loc_memoryId: { loc: edge.sourceLoc, memoryId } } });
           const target = await tx.node.findFirst({ where: { loc: edge.targetLoc } });
           if (source && target) {
             await tx.edge.upsert({
@@ -760,7 +760,7 @@ export const resolvers = {
       ctx: Context,
     ) => {
       const client = await ctx.db.client.findUniqueOrThrow({ where: { id: clientId } });
-      const bundle = await ctx.db.graphBundle.findUniqueOrThrow({ where: { id: bundleId } });
+      const bundle = await ctx.db.memoryBundle.findUniqueOrThrow({ where: { id: bundleId } });
 
       if (client.organizationId) {
         await requireOrgRole(ctx, client.organizationId, 'ADMIN');
@@ -824,7 +824,7 @@ export const resolvers = {
         include: ORG_INCLUDE,
       });
       if (ctx.userId) {
-        await ctx.db.organizationMember.create({
+        await ctx.db.orgMember.create({
           data: { organizationId: org.id, userId: ctx.userId, role: 'OWNER', canInvite: true },
         });
       }
@@ -896,56 +896,56 @@ export const resolvers = {
 
     // ── Organization membership ─────────────────────────────────────────
 
-    addOrganizationMember: async (
+    addOrgMember: async (
       _: unknown,
       { orgId, userId, role }: { orgId: string; userId: string; role: string },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
-      return ctx.db.organizationMember.create({
+      return ctx.db.orgMember.create({
         data: { organizationId: orgId, userId, role: role as Role },
         include: { user: true },
       });
     },
 
-    updateOrganizationMember: async (
+    updateOrgMember: async (
       _: unknown,
       { orgId, userId, role }: { orgId: string; userId: string; role: string },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
-      return ctx.db.organizationMember.update({
+      return ctx.db.orgMember.update({
         where: { organizationId_userId: { organizationId: orgId, userId } },
         data: { role: role as Role },
         include: { user: true },
       });
     },
 
-    removeOrganizationMember: async (
+    removeOrgMember: async (
       _: unknown,
       { orgId, userId }: { orgId: string; userId: string },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
       // Cannot remove the last OWNER
-      const owners = await ctx.db.organizationMember.findMany({
+      const owners = await ctx.db.orgMember.findMany({
         where: { organizationId: orgId, role: 'OWNER', deletedAt: null },
       });
-      const member = await ctx.db.organizationMember.findUniqueOrThrow({
+      const member = await ctx.db.orgMember.findUniqueOrThrow({
         where: { organizationId_userId: { organizationId: orgId, userId } },
       });
       if (member.role === 'OWNER' && owners.length <= 1) {
         throw new Error('Cannot remove the last owner of an organization');
       }
-      await ctx.db.organizationMember.delete({
+      await ctx.db.orgMember.delete({
         where: { organizationId_userId: { organizationId: orgId, userId } },
       });
       return true;
     },
 
-    // ── Graph management ────────────────────────────────────────────────
+    // ── Memory management ────────────────────────────────────────────────
 
-    createGraph: async (
+    createMemory: async (
       _: unknown,
       {
         orgId,
@@ -958,7 +958,7 @@ export const resolvers = {
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
-      return ctx.db.graph.create({
+      return ctx.db.memory.create({
         data: {
           organizationId: orgId,
           name,
@@ -967,11 +967,11 @@ export const resolvers = {
           writeBranch,
           visibility: (visibility as Visibility) ?? 'PRIVATE',
         },
-        include: GRAPH_INCLUDE,
+        include: MEMORY_INCLUDE,
       });
     },
 
-    updateGraph: async (
+    updateMemory: async (
       _: unknown,
       {
         id,
@@ -982,9 +982,9 @@ export const resolvers = {
       }: { id: string; source?: string; readBranch?: string; writeBranch?: string; visibility?: string },
       ctx: Context,
     ) => {
-      const graph = await ctx.db.graph.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, graph.organizationId, 'ADMIN');
-      return ctx.db.graph.update({
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      return ctx.db.memory.update({
         where: { id },
         data: {
           ...(source !== undefined ? { source } : {}),
@@ -992,150 +992,150 @@ export const resolvers = {
           ...(writeBranch !== undefined ? { writeBranch } : {}),
           ...(visibility !== undefined ? { visibility: visibility as Visibility } : {}),
         },
-        include: GRAPH_INCLUDE,
+        include: MEMORY_INCLUDE,
       });
     },
 
-    deleteGraph: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const graph = await ctx.db.graph.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, graph.organizationId, 'ADMIN');
-      await ctx.db.graph.update({ where: { id }, data: { deletedAt: new Date() } });
+    deleteMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      await ctx.db.memory.update({ where: { id }, data: { deletedAt: new Date() } });
       return true;
     },
 
-    setGraphSourceToken: async (
+    setMemorySourceToken: async (
       _: unknown,
       { id, token, expiresAt }: { id: string; token: string; expiresAt?: string },
       ctx: Context,
     ) => {
-      const graph = await ctx.db.graph.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, graph.organizationId, 'ADMIN');
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
       const encrypted = encryptToken(token);
-      return ctx.db.graph.update({
+      return ctx.db.memory.update({
         where: { id },
         data: {
           sourceTokenEncrypted: encrypted,
           sourceTokenExpiresAt: expiresAt ? new Date(expiresAt) : null,
         },
-        include: GRAPH_INCLUDE,
+        include: MEMORY_INCLUDE,
       });
     },
 
-    // ── Graph bundle management ─────────────────────────────────────────
+    // ── Memory bundle management ─────────────────────────────────────────
 
-    createGraphBundle: async (
+    createMemoryBundle: async (
       _: unknown,
       { orgId, name, description }: { orgId: string; name: string; description?: string },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
-      return ctx.db.graphBundle.create({
+      return ctx.db.memoryBundle.create({
         data: { organizationId: orgId, name, description },
         include: BUNDLE_INCLUDE,
       });
     },
 
-    updateGraphBundle: async (
+    updateMemoryBundle: async (
       _: unknown,
       { id, name, description }: { id: string; name?: string; description?: string },
       ctx: Context,
     ) => {
-      const bundle = await ctx.db.graphBundle.findUniqueOrThrow({ where: { id } });
+      const bundle = await ctx.db.memoryBundle.findUniqueOrThrow({ where: { id } });
       await requireOrgRole(ctx, bundle.organizationId, 'ADMIN');
-      return ctx.db.graphBundle.update({
+      return ctx.db.memoryBundle.update({
         where: { id },
         data: { ...(name ? { name } : {}), ...(description !== undefined ? { description } : {}) },
         include: BUNDLE_INCLUDE,
       });
     },
 
-    deleteGraphBundle: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const bundle = await ctx.db.graphBundle.findUniqueOrThrow({ where: { id } });
+    deleteMemoryBundle: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const bundle = await ctx.db.memoryBundle.findUniqueOrThrow({ where: { id } });
       await requireOrgRole(ctx, bundle.organizationId, 'ADMIN');
-      await ctx.db.graphBundle.update({ where: { id }, data: { deletedAt: new Date() } });
+      await ctx.db.memoryBundle.update({ where: { id }, data: { deletedAt: new Date() } });
       return true;
     },
 
-    addGraphToBundle: async (
+    addMemoryToBundle: async (
       _: unknown,
-      { bundleId, graphId }: { bundleId: string; graphId: string },
+      { bundleId, memoryId }: { bundleId: string; memoryId: string },
       ctx: Context,
     ) => {
-      const bundle = await ctx.db.graphBundle.findUniqueOrThrow({ where: { id: bundleId } });
+      const bundle = await ctx.db.memoryBundle.findUniqueOrThrow({ where: { id: bundleId } });
       await requireOrgRole(ctx, bundle.organizationId, 'ADMIN');
-      await ctx.db.graphBundleGraph.create({ data: { bundleId, graphId } });
-      return ctx.db.graphBundle.findUniqueOrThrow({ where: { id: bundleId }, include: BUNDLE_INCLUDE });
+      await ctx.db.memoryBundleItem.create({ data: { bundleId, memoryId } });
+      return ctx.db.memoryBundle.findUniqueOrThrow({ where: { id: bundleId }, include: BUNDLE_INCLUDE });
     },
 
-    removeGraphFromBundle: async (
+    removeMemoryFromBundle: async (
       _: unknown,
-      { bundleId, graphId }: { bundleId: string; graphId: string },
+      { bundleId, memoryId }: { bundleId: string; memoryId: string },
       ctx: Context,
     ) => {
-      const bundle = await ctx.db.graphBundle.findUniqueOrThrow({ where: { id: bundleId } });
+      const bundle = await ctx.db.memoryBundle.findUniqueOrThrow({ where: { id: bundleId } });
       await requireOrgRole(ctx, bundle.organizationId, 'ADMIN');
-      await ctx.db.graphBundleGraph.delete({
-        where: { bundleId_graphId: { bundleId, graphId } },
+      await ctx.db.memoryBundleItem.delete({
+        where: { bundleId_memoryId: { bundleId, memoryId } },
       });
-      return ctx.db.graphBundle.findUniqueOrThrow({ where: { id: bundleId }, include: BUNDLE_INCLUDE });
+      return ctx.db.memoryBundle.findUniqueOrThrow({ where: { id: bundleId }, include: BUNDLE_INCLUDE });
     },
 
-    // ── Graph subscriptions ─────────────────────────────────────────────
+    // ── Memory subscriptions ─────────────────────────────────────────────
 
-    createGraphSubscription: async (
+    createMemorySubscription: async (
       _: unknown,
-      { graphId, orgId, role }: { graphId: string; orgId: string; role: string },
+      { memoryId, orgId, role }: { memoryId: string; orgId: string; role: string },
       ctx: Context,
     ) => {
-      const graph = await ctx.db.graph.findUniqueOrThrow({ where: { id: graphId } });
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
 
-      if (graph.visibility === 'PUBLIC') {
+      if (memory.visibility === 'PUBLIC') {
         await requireOrgRole(ctx, orgId, 'ADMIN');
       } else {
-        await requireOrgRole(ctx, graph.organizationId, 'ADMIN');
+        await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
       }
 
-      if (graph.organizationId === orgId) {
+      if (memory.organizationId === orgId) {
         throw new Error('Owner organization has implicit access and cannot subscribe');
       }
 
-      return ctx.db.graphSubscription.create({
-        data: { graphId, organizationId: orgId, role: role as Role },
-        include: { graph: { include: GRAPH_INCLUDE }, organization: { include: ORG_INCLUDE } },
+      return ctx.db.memorySubscription.create({
+        data: { memoryId, organizationId: orgId, role: role as Role },
+        include: { memory: { include: MEMORY_INCLUDE }, organization: { include: ORG_INCLUDE } },
       });
     },
 
-    updateGraphSubscription: async (
+    updateMemorySubscription: async (
       _: unknown,
-      { graphId, orgId, role }: { graphId: string; orgId: string; role: string },
+      { memoryId, orgId, role }: { memoryId: string; orgId: string; role: string },
       ctx: Context,
     ) => {
-      const graph = await ctx.db.graph.findUniqueOrThrow({ where: { id: graphId } });
-      await requireOrgRole(ctx, graph.organizationId, 'ADMIN');
-      return ctx.db.graphSubscription.update({
-        where: { graphId_organizationId: { graphId, organizationId: orgId } },
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      return ctx.db.memorySubscription.update({
+        where: { memoryId_organizationId: { memoryId, organizationId: orgId } },
         data: { role: role as Role },
-        include: { graph: { include: GRAPH_INCLUDE }, organization: { include: ORG_INCLUDE } },
+        include: { memory: { include: MEMORY_INCLUDE }, organization: { include: ORG_INCLUDE } },
       });
     },
 
-    deleteGraphSubscription: async (
+    deleteMemorySubscription: async (
       _: unknown,
-      { graphId, orgId }: { graphId: string; orgId: string },
+      { memoryId, orgId }: { memoryId: string; orgId: string },
       ctx: Context,
     ) => {
-      const graph = await ctx.db.graph.findUniqueOrThrow({ where: { id: graphId } });
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
       const isOwnerAdmin = async () => {
         if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
         if (!ctx.userId) return false;
-        const m = await ctx.db.organizationMember.findUnique({
-          where: { organizationId_userId: { organizationId: graph.organizationId, userId: ctx.userId } },
+        const m = await ctx.db.orgMember.findUnique({
+          where: { organizationId_userId: { organizationId: memory.organizationId, userId: ctx.userId } },
         });
         return m?.role === 'ADMIN' || m?.role === 'OWNER';
       };
       const isSubscriberAdmin = async () => {
         if (!ctx.userId) return false;
-        const m = await ctx.db.organizationMember.findUnique({
+        const m = await ctx.db.orgMember.findUnique({
           where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
         });
         return m?.role === 'ADMIN' || m?.role === 'OWNER';
@@ -1143,29 +1143,29 @@ export const resolvers = {
       if (!(await isOwnerAdmin()) && !(await isSubscriberAdmin())) {
         throw new Error('Forbidden');
       }
-      await ctx.db.graphSubscription.delete({
-        where: { graphId_organizationId: { graphId, organizationId: orgId } },
+      await ctx.db.memorySubscription.delete({
+        where: { memoryId_organizationId: { memoryId, organizationId: orgId } },
       });
       return true;
     },
 
-    syncGraph: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const graph = await ctx.db.graph.findUniqueOrThrow({
+    syncMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const memory = await ctx.db.memory.findUniqueOrThrow({
         where: { id },
         include: { organization: true },
       });
-      await requireOrgRole(ctx, graph.organizationId, 'CONTRIBUTOR');
+      await requireOrgRole(ctx, memory.organizationId, 'CONTRIBUTOR');
 
-      const result = await syncGraphFromGithub(graph);
+      const result = await syncGraphFromGithub(memory);
       if (result.error) throw new Error(result.error);
 
-      return ctx.db.graph.findUniqueOrThrow({ where: { id }, include: GRAPH_INCLUDE });
+      return ctx.db.memory.findUniqueOrThrow({ where: { id }, include: MEMORY_INCLUDE });
     },
 
     restoreNodeVersion: async (_: unknown, { versionId }: { versionId: string }, ctx: Context) => {
       const version = await ctx.db.nodeVersion.findUniqueOrThrow({ where: { id: versionId } });
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
-      await requireGraphWriteAccess(ctx, node.graphId);
+      await requireMemoryWriteAccess(ctx, node.memoryId);
 
       // Snapshot current state before restoring
       await ctx.db.nodeVersion.create({
@@ -1197,33 +1197,33 @@ export const resolvers = {
       });
     },
 
-    addToMyGraphs: async (_: unknown, { graphId }: { graphId: string }, ctx: Context) => {
+    addToMyMemories: async (_: unknown, { memoryId }: { memoryId: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
       if (!ctx.userId) throw new Error('Authentication required');
 
-      // Verify the graph is public
-      const graph = await ctx.db.graph.findUniqueOrThrow({ where: { id: graphId } });
-      if (graph.visibility !== 'PUBLIC') throw new Error('Graph is not public');
+      // Verify the memory is public
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      if (memory.visibility !== 'PUBLIC') throw new Error('Memory is not public');
 
       // Find user's personal org
-      const membership = await ctx.db.organizationMember.findFirst({
+      const membership = await ctx.db.orgMember.findFirst({
         where: {
           userId: ctx.userId,
           organization: { isPersonal: true },
         },
-        include: { organization: { include: { graphBundles: true } } },
+        include: { organization: { include: { memoryBundles: true } } },
       });
       if (!membership) throw new Error('No personal workspace found');
 
       const org = membership.organization;
-      const bundle = org.graphBundles[0];
+      const bundle = org.memoryBundles[0];
       if (!bundle) throw new Error('No default bundle found');
 
-      // Create graph subscription (personal org subscribes to the graph)
-      await ctx.db.graphSubscription.upsert({
-        where: { graphId_organizationId: { graphId, organizationId: org.id } },
+      // Create memory subscription (personal org subscribes to the memory)
+      await ctx.db.memorySubscription.upsert({
+        where: { memoryId_organizationId: { memoryId, organizationId: org.id } },
         create: {
-          graphId,
+          memoryId,
           organizationId: org.id,
           role: 'READER',
           activated: true,
@@ -1231,10 +1231,10 @@ export const resolvers = {
         update: {},
       });
 
-      // Add graph to the default bundle
-      await ctx.db.graphBundleGraph.upsert({
-        where: { bundleId_graphId: { bundleId: bundle.id, graphId } },
-        create: { bundleId: bundle.id, graphId },
+      // Add memory to the default bundle
+      await ctx.db.memoryBundleItem.upsert({
+        where: { bundleId_memoryId: { bundleId: bundle.id, memoryId } },
+        create: { bundleId: bundle.id, memoryId },
         update: {},
       });
 
@@ -1255,7 +1255,7 @@ interface NodeEdgeInput {
 
 interface NodeInput {
   id?: string;
-  graphId: string;
+  memoryId: string;
   loc: string;
   name: string;
   title: string;

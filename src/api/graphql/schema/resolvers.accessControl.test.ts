@@ -45,7 +45,7 @@ beforeEach(async () => {
   userA = await db.user.create({
     data: { githubId: 1001, githubUsername: 'user-a', roles: ['READER'] },
   });
-  await db.organizationMember.create({
+  await db.orgMember.create({
     data: { organizationId: orgA.id, userId: userA.id, role: 'CONTRIBUTOR' },
   });
 
@@ -53,16 +53,16 @@ beforeEach(async () => {
   userB = await db.user.create({
     data: { githubId: 1002, githubUsername: 'user-b', roles: ['READER'] },
   });
-  await db.organizationMember.create({
+  await db.orgMember.create({
     data: { organizationId: orgB.id, userId: userB.id, role: 'READER' },
   });
 
   // Create a bundle in org A and add graph A
-  const bundle = await db.graphBundle.create({
+  const bundle = await db.memoryBundle.create({
     data: { organizationId: orgA.id, name: 'default-bundle' },
   });
-  await db.graphBundleGraph.create({
-    data: { bundleId: bundle.id, graphId: graphA.id },
+  await db.memoryBundleItem.create({
+    data: { bundleId: bundle.id, memoryId: graphA.id },
   });
 
   // Client with READER role subscribed to bundle (READ_ONLY)
@@ -94,8 +94,8 @@ beforeEach(async () => {
   });
 
   // Seed nodes
-  await createDbNode(db, { loc: 'org-a.repo.nodeA', graphId: graphA.id });
-  await createDbNode(db, { loc: 'org-b.repo.nodeB', graphId: graphB.id });
+  await createDbNode(db, { loc: 'org-a.repo.nodeA', memoryId: graphA.id });
+  await createDbNode(db, { loc: 'org-b.repo.nodeB', memoryId: graphB.id });
 });
 
 // ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ describe('Query.nodes access control', () => {
 
   it('unauthenticated sees only public graph nodes', async () => {
     // Make graph B public
-    await db.graph.update({ where: { id: graphB.id }, data: { visibility: 'PUBLIC' } });
+    await db.memory.update({ where: { id: graphB.id }, data: { visibility: 'PUBLIC' } });
     const nodes = await resolvers.Query.nodes(null, {}, ctx());
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('org-b.repo.nodeB');
@@ -212,8 +212,8 @@ describe('Query.subtree access control', () => {
 describe('cross-org graph subscription access', () => {
   it('user sees nodes from subscribed cross-org graphs', async () => {
     // Org B subscribes to graph A
-    await db.graphSubscription.create({
-      data: { graphId: graphA.id, organizationId: orgB.id, role: 'READER' },
+    await db.memorySubscription.create({
+      data: { memoryId: graphA.id, organizationId: orgB.id, role: 'READER' },
     });
     const nodes = await resolvers.Query.nodes(
       null, {}, ctx({ clientId: `github:${userB.id}`, userId: userB.id, roles: ['READER'] }),
@@ -233,7 +233,7 @@ describe('Mutation.upsertNode access control', () => {
   it('client with READ_WRITE subscription can write', async () => {
     const node = await resolvers.Mutation.upsertNode(
       null,
-      { input: { graphId: graphA.id, loc: 'org-a.repo.new', name: 'new', title: 'New' } },
+      { input: { memoryId: graphA.id, loc: 'org-a.repo.new', name: 'new', title: 'New' } },
       ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
     );
     expect(node.loc).toBe('org-a.repo.new');
@@ -243,7 +243,7 @@ describe('Mutation.upsertNode access control', () => {
     await expect(
       resolvers.Mutation.upsertNode(
         null,
-        { input: { graphId: graphA.id, loc: 'org-a.repo.new2', name: 'new2', title: 'New2' } },
+        { input: { memoryId: graphA.id, loc: 'org-a.repo.new2', name: 'new2', title: 'New2' } },
         ctx({ clientId: clientReader.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -251,7 +251,7 @@ describe('Mutation.upsertNode access control', () => {
 
   it('client with READER role is rejected even with READ_WRITE subscription', async () => {
     // Create a READER client with READ_WRITE bundle subscription
-    const bundle = await db.graphBundle.findFirst({ where: { organizationId: orgA.id } });
+    const bundle = await db.memoryBundle.findFirst({ where: { organizationId: orgA.id } });
     const readerClient = await db.client.create({
       data: { label: 'reader-rw', keyHash: 'x', role: 'READER', clientType: 'WORKSTATION' },
     });
@@ -261,7 +261,7 @@ describe('Mutation.upsertNode access control', () => {
     await expect(
       resolvers.Mutation.upsertNode(
         null,
-        { input: { graphId: graphA.id, loc: 'org-a.repo.rdr', name: 'rdr', title: 'Rdr' } },
+        { input: { memoryId: graphA.id, loc: 'org-a.repo.rdr', name: 'rdr', title: 'Rdr' } },
         ctx({ clientId: readerClient.id, roles: ['READER'] }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -271,7 +271,7 @@ describe('Mutation.upsertNode access control', () => {
     await expect(
       resolvers.Mutation.upsertNode(
         null,
-        { input: { graphId: graphB.id, loc: 'org-b.repo.hack', name: 'hack', title: 'Hack' } },
+        { input: { memoryId: graphB.id, loc: 'org-b.repo.hack', name: 'hack', title: 'Hack' } },
         ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -280,7 +280,7 @@ describe('Mutation.upsertNode access control', () => {
   it('user with CONTRIBUTOR org role can write', async () => {
     const node = await resolvers.Mutation.upsertNode(
       null,
-      { input: { graphId: graphA.id, loc: 'org-a.repo.user-node', name: 'un', title: 'Un' } },
+      { input: { memoryId: graphA.id, loc: 'org-a.repo.user-node', name: 'un', title: 'Un' } },
       ctx({ clientId: `github:user-a`, userId: userA.id, roles: ['READER'] }),
     );
     expect(node.loc).toBe('org-a.repo.user-node');
@@ -290,7 +290,7 @@ describe('Mutation.upsertNode access control', () => {
     await expect(
       resolvers.Mutation.upsertNode(
         null,
-        { input: { graphId: graphB.id, loc: 'org-b.repo.nope', name: 'nope', title: 'Nope' } },
+        { input: { memoryId: graphB.id, loc: 'org-b.repo.nope', name: 'nope', title: 'Nope' } },
         ctx({ clientId: `github:user-b`, userId: userB.id, roles: ['READER'] }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -298,7 +298,7 @@ describe('Mutation.upsertNode access control', () => {
 
   it('namespace restriction is enforced for clients', async () => {
     // Create contributor client with namespace restriction
-    const bundle = await db.graphBundle.findFirst({ where: { organizationId: orgA.id } });
+    const bundle = await db.memoryBundle.findFirst({ where: { organizationId: orgA.id } });
     const nsClient = await db.client.create({
       data: {
         label: 'ns-client',
@@ -315,7 +315,7 @@ describe('Mutation.upsertNode access control', () => {
     // Write within namespace — allowed
     const node = await resolvers.Mutation.upsertNode(
       null,
-      { input: { graphId: graphA.id, loc: 'org-a.repo.allowed', name: 'ok', title: 'Ok' } },
+      { input: { memoryId: graphA.id, loc: 'org-a.repo.allowed', name: 'ok', title: 'Ok' } },
       ctx({ clientId: nsClient.id, roles: ['CONTRIBUTOR'], namespace: 'org-a.repo' }),
     );
     expect(node.loc).toBe('org-a.repo.allowed');
@@ -324,7 +324,7 @@ describe('Mutation.upsertNode access control', () => {
     await expect(
       resolvers.Mutation.upsertNode(
         null,
-        { input: { graphId: graphA.id, loc: 'other.ns.node', name: 'bad', title: 'Bad' } },
+        { input: { memoryId: graphA.id, loc: 'other.ns.node', name: 'bad', title: 'Bad' } },
         ctx({ clientId: nsClient.id, roles: ['CONTRIBUTOR'], namespace: 'org-a.repo' }),
       ),
     ).rejects.toThrow('namespace');
@@ -339,7 +339,7 @@ describe('Mutation.deleteNode access control', () => {
   it('client with write access can delete', async () => {
     const result = await resolvers.Mutation.deleteNode(
       null,
-      { loc: 'org-a.repo.nodeA', graphId: graphA.id },
+      { loc: 'org-a.repo.nodeA', memoryId: graphA.id },
       ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
     );
     expect(result).toBe(true);
@@ -349,7 +349,7 @@ describe('Mutation.deleteNode access control', () => {
     await expect(
       resolvers.Mutation.deleteNode(
         null,
-        { loc: 'org-a.repo.nodeA', graphId: graphA.id },
+        { loc: 'org-a.repo.nodeA', memoryId: graphA.id },
         ctx({ clientId: clientReader.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -359,7 +359,7 @@ describe('Mutation.deleteNode access control', () => {
     await expect(
       resolvers.Mutation.deleteNode(
         null,
-        { loc: 'org-b.repo.nodeB', graphId: graphB.id },
+        { loc: 'org-b.repo.nodeB', memoryId: graphB.id },
         ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -374,7 +374,7 @@ describe('Mutation.moveNode access control', () => {
   it('client with write access can move', async () => {
     const node = await resolvers.Mutation.moveNode(
       null,
-      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedNode', graphId: graphA.id },
+      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedNode', memoryId: graphA.id },
       ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
     );
     expect(node.loc).toBe('org-a.repo.movedNode');
@@ -384,14 +384,14 @@ describe('Mutation.moveNode access control', () => {
     await expect(
       resolvers.Mutation.moveNode(
         null,
-        { from: 'org-b.repo.nodeB', to: 'org-b.repo.moved', graphId: graphB.id },
+        { from: 'org-b.repo.nodeB', to: 'org-b.repo.moved', memoryId: graphB.id },
         ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
   it('namespace restriction applies to move target', async () => {
-    const bundle = await db.graphBundle.findFirst({ where: { organizationId: orgA.id } });
+    const bundle = await db.memoryBundle.findFirst({ where: { organizationId: orgA.id } });
     const nsClient = await db.client.create({
       data: {
         label: 'ns-move-client',
@@ -408,7 +408,7 @@ describe('Mutation.moveNode access control', () => {
     await expect(
       resolvers.Mutation.moveNode(
         null,
-        { from: 'org-a.repo.nodeA', to: 'other.ns.moved', graphId: graphA.id },
+        { from: 'org-a.repo.nodeA', to: 'other.ns.moved', memoryId: graphA.id },
         ctx({ clientId: nsClient.id, roles: ['CONTRIBUTOR'], namespace: 'org-a.repo' }),
       ),
     ).rejects.toThrow('namespace');
@@ -426,9 +426,9 @@ describe('Mutation.replaceSubtree access control', () => {
       {
         namespace: 'org-a.repo',
         ownerRepo: 'org-a/repo',
-        graphId: graphA.id,
+        memoryId: graphA.id,
         nodes: [
-          { graphId: graphA.id, loc: 'org-a.repo.replaced', name: 'replaced', title: 'Replaced' },
+          { memoryId: graphA.id, loc: 'org-a.repo.replaced', name: 'replaced', title: 'Replaced' },
         ],
         edges: [],
       },
@@ -444,7 +444,7 @@ describe('Mutation.replaceSubtree access control', () => {
         {
           namespace: 'org-a.repo',
           ownerRepo: 'org-a/repo',
-          graphId: graphA.id,
+          memoryId: graphA.id,
           nodes: [],
           edges: [],
         },
@@ -460,7 +460,7 @@ describe('Mutation.replaceSubtree access control', () => {
         {
           namespace: 'org-b.repo',
           ownerRepo: 'org-b/repo',
-          graphId: graphB.id,
+          memoryId: graphB.id,
           nodes: [],
           edges: [],
         },
@@ -485,7 +485,7 @@ describe('global ADMIN bypass', () => {
   it('ADMIN can write to any graph', async () => {
     const node = await resolvers.Mutation.upsertNode(
       null,
-      { input: { graphId: graphB.id, loc: 'org-b.repo.admin-node', name: 'admin', title: 'Admin' } },
+      { input: { memoryId: graphB.id, loc: 'org-b.repo.admin-node', name: 'admin', title: 'Admin' } },
       ctx({ clientId: 'github:admin', userId: 'admin-id', roles: ['ADMIN'] }),
     );
     expect(node.loc).toBe('org-b.repo.admin-node');
@@ -494,7 +494,7 @@ describe('global ADMIN bypass', () => {
   it('ADMIN can delete any node', async () => {
     const result = await resolvers.Mutation.deleteNode(
       null,
-      { loc: 'org-b.repo.nodeB', graphId: graphB.id },
+      { loc: 'org-b.repo.nodeB', memoryId: graphB.id },
       ctx({ clientId: 'github:admin', userId: 'admin-id', roles: ['ADMIN'] }),
     );
     expect(result).toBe(true);

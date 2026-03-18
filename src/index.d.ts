@@ -1,6 +1,6 @@
 export interface Node {
   id: string;
-  graphId: string;
+  memoryId: string;
   loc: string;
   isLink: boolean;
   name: string;

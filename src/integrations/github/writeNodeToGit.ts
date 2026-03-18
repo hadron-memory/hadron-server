@@ -24,7 +24,7 @@ export interface NodeForGit {
  * Write a node to the appropriate git repo and branch, then push.
  * Fire-and-forget safe — errors are logged, not thrown.
  *
- * Branch resolution (from Graph.writeBranch):
+ * Branch resolution (from Memory.writeBranch):
  *   "main"                    → push directly to main
  *   "hadron-updates"          → push to shared feature branch
  *   "hadron-updates-{client}" → push to per-client branch
@@ -34,14 +34,14 @@ export async function writeNodeToGit(
   ownerRepo: string,
   clientId?: string | null,
 ): Promise<void> {
-  // 1. Find Graph config for this ownerRepo
-  const graphRecord = await db.graph.findFirst({
+  // 1. Find Memory config for this ownerRepo
+  const graphRecord = await db.memory.findFirst({
     where: { source: { contains: ownerRepo } },
     include: { organization: true },
   });
 
   if (!graphRecord) {
-    console.warn(`[writeNodeToGit] No Graph found for ownerRepo "${ownerRepo}"`);
+    console.warn(`[writeNodeToGit] No Memory found for ownerRepo "${ownerRepo}"`);
     return;
   }
 

@@ -9,10 +9,10 @@ import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
  * Create a new node: save to filesystem and upsert into the database.
  */
 export const createNode = async (
-  node: Partial<Node> & { graphId: string },
+  node: Partial<Node> & { memoryId: string },
 ): Promise<Node> => {
-  if (!node.loc || !node.name || !node.graphId) {
-    throw new Error('Node requires loc, name, and graphId');
+  if (!node.loc || !node.name || !node.memoryId) {
+    throw new Error('Node requires loc, name, and memoryId');
   }
 
   // Save to filesystem
@@ -25,10 +25,10 @@ export const createNode = async (
   const namespace = node.loc.split('.').slice(0, 2).join('.');
 
   const saved = await db.node.upsert({
-    where: { loc_graphId: { loc: node.loc, graphId: node.graphId } },
+    where: { loc_memoryId: { loc: node.loc, memoryId: node.memoryId } },
     create: {
       id,
-      graphId: node.graphId,
+      memoryId: node.memoryId,
       loc: node.loc,
       name: node.name,
       title: node.title ?? node.name,

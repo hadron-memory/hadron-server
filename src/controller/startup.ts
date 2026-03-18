@@ -2,31 +2,31 @@ import { db } from '../integrations/db/client.js';
 import { syncGraphFromGithub } from '../integrations/github/syncGraphFromGithub.js';
 
 /**
- * Controller startup: sync all configured graphs from GitHub.
- * Graphs are loaded from the Graph table.
+ * Controller startup: sync all configured memories from GitHub.
+ * Memories are loaded from the Memory table.
  * Runs non-blocking — logs errors but does not prevent the server from starting.
  */
 export const startup = async (): Promise<void> => {
-  const graphs = await db.graph.findMany({
+  const memories = await db.memory.findMany({
     where: { deletedAt: null, source: { not: null } },
     include: { organization: true },
   });
 
-  if (graphs.length === 0) {
-    console.log('No graphs configured, skipping sync.');
+  if (memories.length === 0) {
+    console.log('No memories configured, skipping sync.');
     return;
   }
 
-  console.log(`Starting sync for ${graphs.length} graph(s)...`);
+  console.log(`Starting sync for ${memories.length} memory(s)...`);
 
-  for (const graph of graphs) {
-    const result = await syncGraphFromGithub(graph);
+  for (const memory of memories) {
+    const result = await syncGraphFromGithub(memory);
     if (result.error) {
-      console.error(`  [FAIL] ${graph.organization.domain}/${graph.name}: ${result.error}`);
+      console.error(`  [FAIL] ${memory.organization.domain}/${memory.name}: ${result.error}`);
     } else {
-      console.log(`  [OK]   ${graph.organization.domain}/${graph.name}: ${result.nodeCount} nodes`);
+      console.log(`  [OK]   ${memory.organization.domain}/${memory.name}: ${result.nodeCount} nodes`);
     }
   }
 
-  console.log('Graph sync complete.');
+  console.log('Memory sync complete.');
 };

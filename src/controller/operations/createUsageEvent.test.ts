@@ -3,12 +3,12 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbClient, createDbNode, createDbOrgAndGraph } from '../../test/helpers.js';
 import { createUsageEvent } from './createUsageEvent.js';
 
-let graphId: string;
+let memoryId: string;
 
 beforeEach(async () => {
   await cleanDb(db);
   const { graph } = await createDbOrgAndGraph(db);
-  graphId = graph.id;
+  memoryId = graph.id;
 });
 
 describe('createUsageEvent', () => {
@@ -28,7 +28,7 @@ describe('createUsageEvent', () => {
   });
 
   it('creates an event with a valid nodeLoc — nodeId is populated', async () => {
-    await createDbNode(db, { loc: 'org.graph.node', graphId });
+    await createDbNode(db, { loc: 'org.graph.node', memoryId });
 
     const result = await createUsageEvent({ type: 'node-view', nodeLoc: 'org.graph.node' });
     expect(result.error).toBeUndefined();

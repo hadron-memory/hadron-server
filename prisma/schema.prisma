@@ -56,7 +56,7 @@ enum LogLevel {
   ERROR
 }
 
-enum GraphLogEventType {
+enum MemoryLogEventType {
   SYNC
   LICENSE
   EDGE
@@ -87,11 +87,11 @@ model User {
   deletedAt        DateTime?
   deletedBy        String?
 
-  memberships               OrganizationMember[]
+  memberships               OrgMember[]
   clients                   Client[]
   sentInvitations           UserInvitation[]           @relation("SentInvitations")
   invitationActivations     UserInvitationActivation[]
-  receivedMemberInvitations MemberInvitation[]         @relation("ReceivedMemberInvitations")
+  receivedMemberInvitations OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
   pendingSetup              PendingSetup?
 
   @@map("users")
@@ -112,17 +112,17 @@ model Organization {
   deletedAt            DateTime?
   deletedBy            String?
 
-  members       OrganizationMember[]
-  graphs        Graph[]
+  members       OrgMember[]
+  memories      Memory[]
   clients       Client[]
-  graphBundles  GraphBundle[]
-  subscriptions GraphSubscription[]
+  memoryBundles MemoryBundle[]
+  subscriptions MemorySubscription[]
   invitations   UserInvitation[]     @relation("OrgInvitations")
 
   @@map("organizations")
 }
 
-model OrganizationMember {
+model OrgMember {
   id             String   @id @default(cuid())
   organizationId String
   userId         String
@@ -135,13 +135,13 @@ model OrganizationMember {
   deletedAt      DateTime?
   deletedBy      String?
 
-  organization          Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user                  User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sentMemberInvitations MemberInvitation[] @relation("SentByMember")
+  organization          Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user                  User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sentMemberInvitations OrgMemberInvitation[] @relation("SentByMember")
 
   @@unique([organizationId, userId])
   @@index([userId])
-  @@map("organization_members")
+  @@map("org_members")
 }
 
 model Client {
@@ -189,14 +189,14 @@ model ClientBundleSubscription {
   deletedAt        DateTime?
   deletedBy        String?
 
-  client Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  bundle GraphBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  client Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  bundle MemoryBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
 
   @@unique([clientId, bundleId])
   @@map("client_bundle_subscriptions")
 }
 
-model Graph {
+model Memory {
   id                   String     @id @default(cuid())
   organizationId       String
   name                 String
@@ -218,21 +218,21 @@ model Graph {
   deletedAt            DateTime?
   deletedBy            String?
 
-  organization  Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization  Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   nodes         Node[]
-  subscriptions GraphSubscription[]
-  bundleGraphs  GraphBundleGraph[]
-  licenses      GraphLicense[]
-  logEntries    GraphLogEntry[]
+  subscriptions MemorySubscription[]
+  bundleItems   MemoryBundleItem[]
+  licenses      MemoryLicense[]
+  logEntries    MemoryLogEntry[]
 
   @@unique([organizationId, name])
   @@index([organizationId])
-  @@map("graphs")
+  @@map("memories")
 }
 
 model Node {
   id          String   @id // UUIDv7 from node.yaml — stable across moves
-  graphId     String
+  memoryId    String
   name        String
   title       String
   alias       String?
@@ -253,17 +253,17 @@ model Node {
   deletedAt   DateTime?
   deletedBy   String?
 
-  graph         Graph         @relation(fields: [graphId], references: [id], onDelete: Cascade)
+  memory        Memory        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   outgoingEdges Edge[]        @relation("SourceNode")
   incomingEdges Edge[]        @relation("TargetNode")
   pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
   versions      NodeVersion[]
 
-  @@unique([loc, graphId])
+  @@unique([loc, memoryId])
   @@index([loc])
   @@index([namespace])
-  @@index([graphId])
+  @@index([memoryId])
   @@map("nodes")
 }
 
@@ -384,7 +384,7 @@ model UsageEvent {
   @@map("usage_events")
 }
 
-model GraphBundle {
+model MemoryBundle {
   id             String   @id @default(cuid())
   organizationId String
   name           String
@@ -397,17 +397,17 @@ model GraphBundle {
   deletedBy      String?
 
   organization        Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  graphs              GraphBundleGraph[]
+  items               MemoryBundleItem[]
   clientSubscriptions ClientBundleSubscription[]
 
   @@unique([organizationId, name])
-  @@map("graph_bundles")
+  @@map("memory_bundles")
 }
 
-model GraphBundleGraph {
+model MemoryBundleItem {
   id       String   @id @default(cuid())
   bundleId String
-  graphId  String
+  memoryId String
   createdAt DateTime @default(now())
   createdBy String?
   updatedAt DateTime?
@@ -415,16 +415,16 @@ model GraphBundleGraph {
   deletedAt DateTime?
   deletedBy String?
 
-  bundle GraphBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
-  graph  Graph       @relation(fields: [graphId], references: [id], onDelete: Cascade)
+  bundle MemoryBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  memory Memory       @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
-  @@unique([bundleId, graphId])
-  @@map("graph_bundle_graphs")
+  @@unique([bundleId, memoryId])
+  @@map("memory_bundle_items")
 }
 
-model GraphLicense {
+model MemoryLicense {
   id          String   @id @default(cuid())
-  graphId     String
+  memoryId    String
   licenseType String
   seats       Int
   validFrom   DateTime
@@ -439,15 +439,15 @@ model GraphLicense {
   deletedAt   DateTime?
   deletedBy   String?
 
-  graph         Graph              @relation(fields: [graphId], references: [id], onDelete: Cascade)
-  subscriptions GraphSubscription[]
+  memory        Memory              @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  subscriptions MemorySubscription[]
 
-  @@map("graph_licenses")
+  @@map("memory_licenses")
 }
 
-model GraphSubscription {
+model MemorySubscription {
   id             String  @id @default(cuid())
-  graphId        String
+  memoryId       String
   organizationId String
   licenseId      String?
   role           Role    @default(READER)
@@ -459,16 +459,16 @@ model GraphSubscription {
   deletedAt      DateTime?
   deletedBy      String?
 
-  graph        Graph         @relation(fields: [graphId], references: [id], onDelete: Cascade)
-  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  license      GraphLicense? @relation(fields: [licenseId], references: [id], onDelete: SetNull)
+  memory       Memory         @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  license      MemoryLicense? @relation(fields: [licenseId], references: [id], onDelete: SetNull)
 
-  @@unique([graphId, organizationId])
+  @@unique([memoryId, organizationId])
   @@index([organizationId])
-  @@map("graph_subscriptions")
+  @@map("memory_subscriptions")
 }
 
-model HadronController {
+model HadronServer {
   id              String    @id @default(cuid())
   organizationId  String?
   url             String
@@ -482,16 +482,16 @@ model HadronController {
   deletedAt       DateTime?
   deletedBy       String?
 
-  logEntries ControllerLogEntry[]
+  logEntries ServerLogEntry[]
 
-  @@map("hadron_controller")
+  @@map("hadron_server")
 }
 
-model ControllerLogEntry {
+model ServerLogEntry {
   id           String   @id @default(cuid())
-  controllerId String
+  serverId     String
   level        LogLevel
-  graphId      String?
+  memoryId     String?
   message      String
   detail       Json?
   createdAt    DateTime @default(now())
@@ -501,19 +501,19 @@ model ControllerLogEntry {
   deletedAt    DateTime?
   deletedBy    String?
 
-  controller HadronController @relation(fields: [controllerId], references: [id], onDelete: Cascade)
+  server HadronServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
-  @@index([controllerId])
+  @@index([serverId])
   @@index([level])
   @@index([createdAt])
-  @@map("controller_log")
+  @@map("server_log")
 }
 
 model ClientLogEntry {
   id        String   @id @default(cuid())
   clientId  String
   level     LogLevel
-  graphId   String?
+  memoryId  String?
   sessionId String?
   message   String
   detail    Json?
@@ -532,30 +532,30 @@ model ClientLogEntry {
   @@map("client_log")
 }
 
-model GraphLogEntry {
-  id        String            @id @default(cuid())
-  graphId   String
+model MemoryLogEntry {
+  id        String             @id @default(cuid())
+  memoryId  String
   level     LogLevel
-  eventType GraphLogEventType
+  eventType MemoryLogEventType
   message   String
   detail    Json?
-  createdAt DateTime          @default(now())
+  createdAt DateTime           @default(now())
   createdBy String?
   updatedAt DateTime?
   updatedBy String?
   deletedAt DateTime?
   deletedBy String?
 
-  graph Graph @relation(fields: [graphId], references: [id], onDelete: Cascade)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
-  @@index([graphId])
+  @@index([memoryId])
   @@index([level])
   @@index([eventType])
   @@index([createdAt])
-  @@map("graph_log")
+  @@map("memory_log")
 }
 
-model MemberInvitation {
+model OrgMemberInvitation {
   id              String    @id @default(cuid())
   memberUserId    String
   recipientUserId String
@@ -569,10 +569,10 @@ model MemberInvitation {
   deletedAt       DateTime?
   deletedBy       String?
 
-  sender    OrganizationMember @relation("SentByMember", fields: [memberUserId], references: [id], onDelete: Cascade)
-  recipient User               @relation("ReceivedMemberInvitations", fields: [recipientUserId], references: [id], onDelete: Cascade)
+  sender    OrgMember @relation("SentByMember", fields: [memberUserId], references: [id], onDelete: Cascade)
+  recipient User      @relation("ReceivedMemberInvitations", fields: [recipientUserId], references: [id], onDelete: Cascade)
 
-  @@map("member_invitations")
+  @@map("org_member_invitations")
 }
 
 model UserInvitation {

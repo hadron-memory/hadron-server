@@ -6,7 +6,7 @@ import { db } from '../../integrations/db/client.js';
  * Returns the Graph record with its nodes.
  */
 export const findGraph = async (name: string) => {
-  const graph = await db.graph.findFirst({
+  const graph = await db.memory.findFirst({
     where: { name, deletedAt: null },
     include: {
       organization: true,

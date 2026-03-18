@@ -24,19 +24,19 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.session.deleteMany();
   await db.node.deleteMany();
   await db.clientBundleSubscription.deleteMany();
-  await db.graphBundleGraph.deleteMany();
-  await db.graphBundle.deleteMany();
-  await db.graphSubscription.deleteMany();
-  await db.graphLicense.deleteMany();
+  await db.memoryBundleItem.deleteMany();
+  await db.memoryBundle.deleteMany();
+  await db.memorySubscription.deleteMany();
+  await db.memoryLicense.deleteMany();
   await db.client.deleteMany();
-  await db.organizationMember.deleteMany();
-  await db.graph.deleteMany();
+  await db.orgMember.deleteMany();
+  await db.memory.deleteMany();
   await db.organization.deleteMany();
   await db.user.deleteMany();
 }
 
 /**
- * Create a test Organization + Graph for use in node tests.
+ * Create a test Organization + Memory for use in node tests.
  */
 export async function createDbOrgAndGraph(
   db: PrismaClient,
@@ -48,7 +48,7 @@ export async function createDbOrgAndGraph(
       domain: opts.orgName ?? 'test-org',
     },
   });
-  const graph = await db.graph.create({
+  const graph = await db.memory.create({
     data: {
       organizationId: org.id,
       name: opts.graphName ?? 'test/repo',
@@ -69,7 +69,7 @@ export async function createDbNode(
     title?: string;
     namespace?: string;
     ownerRepo?: string;
-    graphId: string;
+    memoryId: string;
     tags?: string[];
     content?: string;
   },
@@ -79,7 +79,7 @@ export async function createDbNode(
   return db.node.create({
     data: {
       id: fields.id ?? randomUUID().replace(/-/g, ''),
-      graphId: fields.graphId,
+      memoryId: fields.memoryId,
       loc,
       name: fields.name ?? loc,
       title: fields.title ?? fields.name ?? loc,

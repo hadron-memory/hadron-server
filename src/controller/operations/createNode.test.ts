@@ -8,30 +8,30 @@ vi.mock('../../integrations/localFs/saveNodeToFs.js', () => ({
   saveNodeToFs: vi.fn().mockResolvedValue({}),
 }));
 
-let graphId: string;
+let memoryId: string;
 
 beforeEach(async () => {
   await cleanDb(db);
   const { graph } = await createDbOrgAndGraph(db);
-  graphId = graph.id;
+  memoryId = graph.id;
 });
 
 describe('createNode', () => {
   it('throws when loc is missing', async () => {
     await expect(
-      createNode({ name: 'test', graphId }),
-    ).rejects.toThrow('Node requires loc, name, and graphId');
+      createNode({ name: 'test', memoryId }),
+    ).rejects.toThrow('Node requires loc, name, and memoryId');
   });
 
   it('throws when name is missing', async () => {
     await expect(
-      createNode({ loc: 'org.graph.node', graphId }),
+      createNode({ loc: 'org.graph.node', memoryId }),
     ).rejects.toThrow();
   });
 
-  it('throws when graphId is missing', async () => {
+  it('throws when memoryId is missing', async () => {
     await expect(
-      createNode({ loc: 'org.graph.node', name: 'test', graphId: '' }),
+      createNode({ loc: 'org.graph.node', name: 'test', memoryId: '' }),
     ).rejects.toThrow();
   });
 
@@ -39,7 +39,7 @@ describe('createNode', () => {
     const node = await createNode({
       loc: 'org.graph.node',
       name: 'My Node',
-      graphId,
+      memoryId,
       description: 'A test node',
     });
 
@@ -56,7 +56,7 @@ describe('createNode', () => {
     const node = await createNode({
       loc: 'my-org.my-graph.sub.deep',
       name: 'Deep Node',
-      graphId,
+      memoryId,
     });
 
     expect(node.namespace).toBe('my-org.my-graph');
@@ -66,13 +66,13 @@ describe('createNode', () => {
     const first = await createNode({
       loc: 'org.g.n',
       name: 'Original',
-      graphId,
+      memoryId,
     });
 
     const second = await createNode({
       loc: 'org.g.n',
       name: 'Updated',
-      graphId,
+      memoryId,
     });
 
     expect(second.name).toBe('Updated');
@@ -87,7 +87,7 @@ describe('createNode', () => {
     const node = await createNode({
       loc: 'org.g.tagged',
       name: 'Tagged',
-      graphId,
+      memoryId,
       tags: ['alpha', 'beta'],
     });
 

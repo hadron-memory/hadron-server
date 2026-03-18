@@ -8,7 +8,7 @@ import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
-import type { Graph, Organization } from '../../generated/prisma/index.js';
+import type { Memory, Organization } from '../../generated/prisma/index.js';
 
 const execFile = promisify(execFileCb);
 
@@ -25,14 +25,14 @@ function decryptToken(ciphertext: string): string {
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
 
-export type GraphWithOrg = Graph & { organization: Organization };
+export type MemoryWithOrg = Memory & { organization: Organization };
 
 /**
- * Sync a graph from GitHub: clone/pull the repo, load nodes from filesystem,
+ * Sync a memory from GitHub: clone/pull the repo, load nodes from filesystem,
  * and upsert them into the database.
  */
 export const syncGraphFromGithub = async (
-  graph: GraphWithOrg,
+  graph: MemoryWithOrg,
 ): Promise<{ error?: string; nodeCount?: number }> => {
   try {
     const graphName = graph.name;
@@ -44,7 +44,7 @@ export const syncGraphFromGithub = async (
     }
 
     // Update sync status to SYNCING
-    await db.graph.update({
+    await db.memory.update({
       where: { id: graph.id },
       data: { syncStatus: 'SYNCING', syncError: null },
     }).catch(() => {});
@@ -98,8 +98,8 @@ export const syncGraphFromGithub = async (
           ownerRepo,
         };
         await tx.node.upsert({
-          where: { loc_graphId: { loc, graphId: graph.id } },
-          create: { id: node.id!, graphId: graph.id, ...update },
+          where: { loc_memoryId: { loc, memoryId: graph.id } },
+          create: { id: node.id!, memoryId: graph.id, ...update },
           update,
         });
         upsertedIds.push(node.id!);
@@ -118,7 +118,7 @@ export const syncGraphFromGithub = async (
       }
 
       await tx.node.deleteMany({
-        where: { namespace, ownerRepo, graphId: graph.id, id: { notIn: upsertedIds } },
+        where: { namespace, ownerRepo, memoryId: graph.id, id: { notIn: upsertedIds } },
       });
 
       for (const edge of edges) {
@@ -148,20 +148,20 @@ export const syncGraphFromGithub = async (
     });
 
     // 5. Record sync time and status
-    await db.graph.update({
+    await db.memory.update({
       where: { id: graph.id },
       data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null, pendingEdgeCount },
     }).catch(() => {});
 
-    console.log(`Synced graph "${graphName}": ${fsGraph.nodes.length} nodes, ${edges.length} edges`);
+    console.log(`Synced memory "${graphName}": ${fsGraph.nodes.length} nodes, ${edges.length} edges`);
     return { nodeCount: fsGraph.nodes.length };
   } catch (error) {
     // Update sync status to ERROR
-    await db.graph.update({
+    await db.memory.update({
       where: { id: graph.id },
       data: { syncStatus: 'ERROR', syncError: (error as Error).message },
     }).catch(() => {});
-    console.error(`Failed to sync graph "${graph.name}":`, error);
+    console.error(`Failed to sync memory "${graph.name}":`, error);
     return { error: (error as Error).message };
   }
 };

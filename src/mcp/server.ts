@@ -37,14 +37,14 @@ function validateLoc(loc: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Access control: check if a client can access/write to a graph
+// Access control: check if a client can access/write to a memory
 // ---------------------------------------------------------------------------
 
 /**
- * Get the graph IDs accessible to a client through bundle subscriptions.
- * Returns a map of graphId → subscriptionType.
+ * Get the memory IDs accessible to a client through bundle subscriptions.
+ * Returns a map of memoryId → subscriptionType.
  */
-async function getClientGraphAccess(
+async function getClientMemoryAccess(
   clientId: string,
 ): Promise<Map<string, string>> {
   const subs = await db.clientBundleSubscription.findMany({
@@ -52,7 +52,7 @@ async function getClientGraphAccess(
     include: {
       bundle: {
         include: {
-          graphs: { include: { graph: true } },
+          items: { include: { memory: true } },
         },
       },
     },
@@ -60,11 +60,11 @@ async function getClientGraphAccess(
 
   const access = new Map<string, string>();
   for (const sub of subs) {
-    for (const bg of sub.bundle.graphs) {
-      // If multiple subs include the same graph, READ_WRITE wins
-      const existing = access.get(bg.graphId);
+    for (const bg of sub.bundle.items) {
+      // If multiple subs include the same memory, READ_WRITE wins
+      const existing = access.get(bg.memoryId);
       if (!existing || sub.subscriptionType === 'READ_WRITE') {
-        access.set(bg.graphId, sub.subscriptionType);
+        access.set(bg.memoryId, sub.subscriptionType);
       }
     }
   }
@@ -72,31 +72,31 @@ async function getClientGraphAccess(
 }
 
 /**
- * Check if a client has write access to a specific graph.
+ * Check if a client has write access to a specific memory.
  * Platform ADMINs and OWNERs bypass subscription checks.
  */
-async function canWriteToGraph(
+async function canWriteToMemory(
   auth: AuthContext,
-  graphId: string,
+  memoryId: string,
 ): Promise<boolean> {
   if (!auth.clientId) return false;
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
 
-  const access = await getClientGraphAccess(auth.clientId);
-  return access.get(graphId) === 'READ_WRITE';
+  const access = await getClientMemoryAccess(auth.clientId);
+  return access.get(memoryId) === 'READ_WRITE';
 }
 
 /**
- * Get the set of node IDs the client can see (via bundle subscriptions).
- * Returns null to mean "all nodes" (for ADMIN/OWNER).
+ * Get the set of memory IDs the client can see (via bundle subscriptions).
+ * Returns null to mean "all" (for ADMIN/OWNER).
  */
-async function getAccessibleGraphIds(
+async function getAccessibleMemoryIds(
   auth: AuthContext,
 ): Promise<string[] | null> {
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return null;
   if (!auth.clientId) return [];
 
-  const access = await getClientGraphAccess(auth.clientId);
+  const access = await getClientMemoryAccess(auth.clientId);
   return [...access.keys()];
 }
 
@@ -117,9 +117,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'Search for nodes by name, tags, or description',
     { query: z.string().describe('Search query'), limit: z.number().optional().describe('Max results (default 50)') },
     async ({ query, limit }) => {
-      const graphIds = await getAccessibleGraphIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(auth);
       const where: Record<string, unknown> = {};
-      if (graphIds) where.graphId = { in: graphIds };
+      if (memoryIds) where.memoryId = { in: memoryIds };
 
       const allNodes = await db.node.findMany({ where, take: 1000 });
       // Deduplicate by loc: prefer canonical (isLink=false) over link nodes
@@ -149,9 +149,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'Read a node by its dotted path (e.g. my-org.my-repo.models)',
     { loc: z.string().describe('Dotted path to the node') },
     async ({ loc }) => {
-      const graphIds = await getAccessibleGraphIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(auth);
       const where: Record<string, unknown> = { loc };
-      if (graphIds) where.graphId = { in: graphIds };
+      if (memoryIds) where.memoryId = { in: memoryIds };
 
       const candidates = await db.node.findMany({
         where,
@@ -206,11 +206,11 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     },
     async ({ parent, current }) => {
       const prefix = parent + '.';
-      const graphIds = await getAccessibleGraphIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(auth);
       const where: Record<string, unknown> = {
         loc: { startsWith: prefix },
       };
-      if (graphIds) where.graphId = { in: graphIds };
+      if (memoryIds) where.memoryId = { in: memoryIds };
 
       const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
       // Direct children only (no further dots after prefix)
@@ -262,10 +262,10 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-create-node',
-    'Create or update a node. Requires write access to the graph.',
+    'Create or update a node. Requires write access to the memory.',
     {
       loc: z.string().describe('Dotted path for the node'),
-      graphId: z.string().describe('ID of the graph this node belongs to'),
+      memoryId: z.string().describe('ID of the memory this node belongs to'),
       name: z.string().describe('Node name'),
       title: z.string().describe('Display title'),
       description: z.string().optional().describe('Short description'),
@@ -276,26 +276,26 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
-    async ({ loc, graphId, name, title, description, content, tags, edges }) => {
+    async ({ loc, memoryId, name, title, description, content, tags, edges }) => {
       try {
         validateLoc(loc);
       } catch (e) {
         return textResult((e as Error).message);
       }
 
-      if (!(await canWriteToGraph(auth, graphId))) {
-        return textResult('Write access denied for this graph.');
+      if (!(await canWriteToMemory(auth, memoryId))) {
+        return textResult('Write access denied for this memory.');
       }
 
       const namespace = loc.split('.').slice(0, 2).join('.');
 
-      const existing = await db.node.findUnique({ where: { loc_graphId: { loc, graphId } } });
+      const existing = await db.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
 
       const upserted = await db.node.upsert({
-        where: { loc_graphId: { loc, graphId } },
+        where: { loc_memoryId: { loc, memoryId } },
         create: {
           id: existing?.id ?? randomUUID().replace(/-/g, ''),
-          graphId,
+          memoryId,
           loc,
           name,
           title,
@@ -358,23 +358,23 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult((e as Error).message);
       }
 
-      // Find the node — try accessible graphs, prefer canonical
-      const graphIds = await getAccessibleGraphIds(auth);
+      // Find the node — try accessible memories, prefer canonical
+      const memoryIds = await getAccessibleMemoryIds(auth);
       const moveWhere: Record<string, unknown> = { loc: from };
-      if (graphIds) moveWhere.graphId = { in: graphIds };
+      if (memoryIds) moveWhere.memoryId = { in: memoryIds };
       const candidates = await db.node.findMany({ where: moveWhere });
       const node = candidates.find((n) => !n.isLink) ?? candidates[0] ?? null;
       if (!node) return textResult(`Node "${from}" not found.`);
 
-      if (!(await canWriteToGraph(auth, node.graphId))) {
-        return textResult('Write access denied for this graph.');
+      if (!(await canWriteToMemory(auth, node.memoryId))) {
+        return textResult('Write access denied for this memory.');
       }
 
       const newNamespace = to.split('.').slice(0, 2).join('.');
       const newName = to.split('.').pop()!;
 
       await db.node.update({
-        where: { loc_graphId: { loc: from, graphId: node.graphId } },
+        where: { loc_memoryId: { loc: from, memoryId: node.memoryId } },
         data: { loc: to, name: newName, namespace: newNamespace },
       });
 
@@ -392,9 +392,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       args: z.record(z.string(), z.string()).optional().describe('Action arguments as key-value pairs'),
     },
     async ({ loc, args }) => {
-      const graphIds = await getAccessibleGraphIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(auth);
       const actionWhere: Record<string, unknown> = { loc };
-      if (graphIds) actionWhere.graphId = { in: graphIds };
+      if (memoryIds) actionWhere.memoryId = { in: memoryIds };
       const actionCandidates = await db.node.findMany({
         where: actionWhere,
         include: { outgoingEdges: { include: { target: true } } },
@@ -524,12 +524,12 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-validate',
-    'Check the graph for broken edge references and nodes with missing content',
+    'Check the memory for broken edge references and nodes with missing content',
     {},
     async () => {
-      const graphIds = await getAccessibleGraphIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(auth);
       const where: Record<string, unknown> = {};
-      if (graphIds) where.graphId = { in: graphIds };
+      if (memoryIds) where.memoryId = { in: memoryIds };
 
       const nodes = await db.node.findMany({
         where,
@@ -562,25 +562,25 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-sync-graph',
-    'Trigger an on-demand sync for a graph from its GitHub source.',
+    'Trigger an on-demand sync for a memory from its GitHub source.',
     {
-      graphId: z.string().describe('ID of the graph to sync'),
+      memoryId: z.string().describe('ID of the memory to sync'),
     },
-    async ({ graphId }) => {
-      if (!(await canWriteToGraph(auth, graphId))) {
+    async ({ memoryId }) => {
+      if (!(await canWriteToMemory(auth, memoryId))) {
         return textResult('Access denied.');
       }
 
-      const graph = await db.graph.findUnique({
-        where: { id: graphId },
+      const memory = await db.memory.findUnique({
+        where: { id: memoryId },
         include: { organization: true },
       });
-      if (!graph) return textResult('Graph not found.');
-      if (!graph.source) return textResult('Graph has no source repository configured.');
+      if (!memory) return textResult('Memory not found.');
+      if (!memory.source) return textResult('Memory has no source repository configured.');
 
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub } = await import('../integrations/github/syncGraphFromGithub.js');
-      const result = await syncGraphFromGithub(graph as Parameters<typeof syncGraphFromGithub>[0]);
+      const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
 
       if (result.error) return textResult(`Sync failed: ${result.error}`);
       return textResult(`Synced ${result.nodeCount ?? 0} nodes.`);

@@ -3,7 +3,7 @@ import { join } from 'path';
 import { mkdirSync } from 'fs';
 import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
-import { syncGraphFromGithub, type GraphWithOrg } from './syncGraphFromGithub.js';
+import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -41,13 +41,13 @@ vi.mock('../../config.js', async (importOriginal) => {
 });
 
 // ---------------------------------------------------------------------------
-// Fixture: a minimal GraphWithOrg object for "test-org/test/repo"
+// Fixture: a minimal MemoryWithOrg object for "test-org/test/repo"
 // local path = join(GRAPHS_PATH, 'test-org', 'test/repo')
 // ---------------------------------------------------------------------------
 let dbGraphId: string;
 let dbOrgId: string;
 
-function makeGraph(overrides?: Partial<GraphWithOrg>): GraphWithOrg {
+function makeGraph(overrides?: Partial<MemoryWithOrg>): MemoryWithOrg {
   return {
     id: dbGraphId,
     organizationId: dbOrgId,
@@ -81,7 +81,7 @@ function makeGraph(overrides?: Partial<GraphWithOrg>): GraphWithOrg {
       updatedAt: new Date(),
     },
     ...overrides,
-  } as GraphWithOrg;
+  } as MemoryWithOrg;
 }
 
 beforeEach(async () => {

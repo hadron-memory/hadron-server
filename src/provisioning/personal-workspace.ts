@@ -15,7 +15,7 @@ interface ProvisionResult {
  * Creates:
  * 1. A personal organization (hidden from the user)
  * 2. The user as OWNER of that org
- * 3. A default "My Graphs" bundle
+ * 3. A default "My Memories" bundle
  * 4. A workstation client with an API key
  * 5. A bundle subscription (READ_WRITE) for the client
  * 6. A PendingSetup record so the raw API key can be shown once
@@ -38,7 +38,7 @@ export async function provisionPersonalWorkspace(
   });
 
   // 2. Add user as OWNER
-  await db.organizationMember.create({
+  await db.orgMember.create({
     data: {
       organizationId: org.id,
       userId,
@@ -48,10 +48,10 @@ export async function provisionPersonalWorkspace(
   });
 
   // 3. Create default bundle
-  const bundle = await db.graphBundle.create({
+  const bundle = await db.memoryBundle.create({
     data: {
       organizationId: org.id,
-      name: 'My Graphs',
+      name: 'My Memories',
     },
   });
 
@@ -102,7 +102,7 @@ export async function hasPersonalWorkspace(
   db: PrismaClient,
   userId: string,
 ): Promise<boolean> {
-  const membership = await db.organizationMember.findFirst({
+  const membership = await db.orgMember.findFirst({
     where: {
       userId,
       organization: { isPersonal: true },

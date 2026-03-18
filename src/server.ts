@@ -274,13 +274,13 @@ export async function createServer() {
       }
 
       // Find the personal org and bundle for context
-      const membership = await db.organizationMember.findFirst({
+      const membership = await db.orgMember.findFirst({
         where: { userId: payload.sub, organization: { isPersonal: true } },
         include: {
           organization: {
             include: {
-              graphBundles: true,
-              graphs: true,
+              memoryBundles: true,
+              memories: true,
             },
           },
         },
@@ -298,8 +298,8 @@ export async function createServer() {
         clientId: setup.clientId,
         orgId: membership?.organization.id,
         orgName: membership?.organization.name,
-        bundleId: membership?.organization.graphBundles[0]?.id,
-        graphs: membership?.organization.graphs.map((g) => ({
+        bundleId: membership?.organization.memoryBundles[0]?.id,
+        memories: membership?.organization.memories.map((g) => ({
           id: g.id,
           name: g.name,
         })) ?? [],
@@ -422,14 +422,14 @@ export async function createServer() {
       }
     }
 
-    // Push to default branch → sync the matching graph
+    // Push to default branch → sync the matching memory
     if (event === 'push') {
       const { ref, repository } = req.body ?? {};
       const defaultBranch = repository?.default_branch ?? 'main';
       if (ref === `refs/heads/${defaultBranch}` && repository?.full_name) {
         const fullName = repository.full_name as string;
-        // Match graphs whose source URL contains the repo's full_name (e.g. "org/repo")
-        const graphs = await db.graph.findMany({
+        // Match memories whose source URL contains the repo's full_name (e.g. "org/repo")
+        const memories = await db.memory.findMany({
           where: {
             deletedAt: null,
             source: { not: null },
@@ -439,12 +439,12 @@ export async function createServer() {
           },
           include: { organization: true },
         });
-        for (const graph of graphs) {
-          // Skip if the graph tracks a specific branch that doesn't match
-          if (graph.readBranch && ref !== `refs/heads/${graph.readBranch}`) continue;
-          console.log(`[webhook] Push to ${fullName}/${defaultBranch} → syncing graph "${graph.name}"`);
-          syncGraphFromGithub(graph).catch((err) => {
-            console.error(`[webhook] Sync failed for graph "${graph.name}":`, err);
+        for (const memory of memories) {
+          // Skip if the memory tracks a specific branch that doesn't match
+          if (memory.readBranch && ref !== `refs/heads/${memory.readBranch}`) continue;
+          console.log(`[webhook] Push to ${fullName}/${defaultBranch} → syncing memory "${memory.name}"`);
+          syncGraphFromGithub(memory).catch((err) => {
+            console.error(`[webhook] Sync failed for memory "${memory.name}":`, err);
           });
         }
       }
