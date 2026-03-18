@@ -15,15 +15,15 @@ Nodes are stored in PostgreSQL and cloned locally for filesystem operations.
 ## Quick start
 
 ```bash
-npm install
+pnpm install
 cp .env.example .env   # edit DATABASE_URL, JWT_SECRET, HADRON_ENCRYPTION_KEY
 ```
 
 ### PostgreSQL (default)
 
 ```bash
-npm run db:push        # push schema to database (first time)
-npm run dev            # http://localhost:4000
+pnpm run db:push        # push schema to database (first time)
+pnpm run dev            # http://localhost:4000
 ```
 
 ### SQLite (single-developer / offline)
@@ -32,19 +32,19 @@ No external database required — everything lives in a single file.
 
 ```bash
 # 1. Switch the Prisma schema to SQLite and regenerate
-npm run db:use-sqlite
+pnpm run db:use-sqlite
 
 # 2. Push the schema
-DB_PROVIDER=sqlite DATABASE_URL="file:./hadron.db" npx prisma db push
+DB_PROVIDER=sqlite DATABASE_URL="file:./hadron.db" pnpm prisma db push
 
 # 3. Start the server
-DB_PROVIDER=sqlite DATABASE_URL="file:./hadron.db" npm run dev
+DB_PROVIDER=sqlite DATABASE_URL="file:./hadron.db" pnpm run dev
 ```
 
 To switch back to PostgreSQL:
 
 ```bash
-npm run db:use-pg
+pnpm run db:use-pg
 ```
 
 ### Environment variables
@@ -213,15 +213,15 @@ and adds the graph to their default bundle).
 Tests require a `hadron_test` PostgreSQL database. Create it once:
 
 ```bash
-npm run db:test-setup
+pnpm run db:test-setup
 ```
 
 Then run:
 
 ```bash
-npm test                # run all tests
-npm run test:watch      # watch mode
-npm run test:coverage   # with coverage report
+pnpm test                # run all tests
+pnpm run test:watch      # watch mode
+pnpm run test:coverage   # with coverage report
 ```
 
 Tests use Vitest with `pool: 'forks'` (one process per file) and `fileParallelism: false`
@@ -231,19 +231,19 @@ to prevent concurrent writes to the shared test database.
 
 | Script | Description |
 |--------|-------------|
-| `npm run dev` | Start dev server with hot reload (tsx watch) |
-| `npm run build` | Compile TypeScript |
-| `npm start` | Run compiled server |
-| `npm test` | Run all tests |
-| `npm run test:watch` | Watch mode |
-| `npm run test:coverage` | Coverage report |
-| `npm run db:generate` | Regenerate Prisma client |
-| `npm run db:push` | Push schema to database |
-| `npm run db:migrate` | Run Prisma migrations (PostgreSQL) |
-| `npm run db:studio` | Open Prisma Studio |
-| `npm run db:use-pg` | Switch to PostgreSQL schema |
-| `npm run db:use-sqlite` | Switch to SQLite schema |
-| `npm run db:test-setup` | Create/update the `hadron_test` database |
+| `pnpm run dev` | Start dev server with hot reload (tsx watch) |
+| `pnpm run build` | Compile TypeScript |
+| `pnpm start` | Run compiled server |
+| `pnpm test` | Run all tests |
+| `pnpm run test:watch` | Watch mode |
+| `pnpm run test:coverage` | Coverage report |
+| `pnpm run db:generate` | Regenerate Prisma client |
+| `pnpm run db:push` | Push schema to database |
+| `pnpm run db:migrate` | Run Prisma migrations (PostgreSQL) |
+| `pnpm run db:studio` | Open Prisma Studio |
+| `pnpm run db:use-pg` | Switch to PostgreSQL schema |
+| `pnpm run db:use-sqlite` | Switch to SQLite schema |
+| `pnpm run db:test-setup` | Create/update the `hadron_test` database |
 
 ## Database provider adapter
 

@@ -12,3 +12,6 @@ prisma/*.db-journal
 
 # IDEs
 .idea
+
+# npm (no longer used)
+package-lock.json
