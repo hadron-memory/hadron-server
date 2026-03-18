@@ -72,20 +72,20 @@ enum Visibility {
 
 model User {
   id               String            @id @default(cuid())
-  githubId         Int?              @unique
-  githubUsername    String?           @unique
-  identityProvider IdentityProvider?
+  githubId         Int?              @unique @map("github_id")
+  githubUsername    String?           @unique @map("github_username")
+  identityProvider IdentityProvider? @map("identity_provider")
   name             String?
   email            String?           @unique
-  avatarUrl        String?
+  avatarUrl        String?           @map("avatar_url")
   roles            Role[]            @default([READER])
-  maxReferrals     Int?
-  createdAt        DateTime          @default(now())
-  createdBy        String?
-  updatedAt        DateTime          @updatedAt
-  updatedBy        String?
-  deletedAt        DateTime?
-  deletedBy        String?
+  maxReferrals     Int?              @map("max_referrals")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  createdBy        String?           @map("created_by")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+  updatedBy        String?           @map("updated_by")
+  deletedAt        DateTime?         @map("deleted_at")
+  deletedBy        String?           @map("deleted_by")
 
   memberships               OrgMember[]
   clients                   Client[]
@@ -98,19 +98,19 @@ model User {
 }
 
 model Organization {
-  id                   String   @id @default(cuid())
-  name                 String
-  domain               String   @unique
-  isPersonal           Boolean  @default(false)
-  githubInstallationId            Int?     @unique
-  githubAppId                     String?
-  githubAppPrivateKeyEncrypted    String?
-  createdAt                       DateTime @default(now())
-  createdBy            String?
-  updatedAt            DateTime @updatedAt
-  updatedBy            String?
-  deletedAt            DateTime?
-  deletedBy            String?
+  id                           String   @id @default(cuid())
+  name                         String
+  domain                       String   @unique
+  isPersonal                   Boolean  @default(false) @map("is_personal")
+  githubInstallationId         Int?     @unique @map("github_installation_id")
+  githubAppId                  String?  @map("github_app_id")
+  githubAppPrivateKeyEncrypted String?  @map("github_app_private_key_encrypted")
+  createdAt                    DateTime @default(now()) @map("created_at")
+  createdBy                    String?  @map("created_by")
+  updatedAt                    DateTime @updatedAt @map("updated_at")
+  updatedBy                    String?  @map("updated_by")
+  deletedAt                    DateTime? @map("deleted_at")
+  deletedBy                    String?  @map("deleted_by")
 
   members       OrgMember[]
   memories      Memory[]
@@ -124,16 +124,16 @@ model Organization {
 
 model OrgMember {
   id             String   @id @default(cuid())
-  organizationId String
-  userId         String
+  organizationId String   @map("organization_id")
+  userId         String   @map("user_id")
   role           Role     @default(READER)
-  canInvite      Boolean  @default(false)
-  createdAt      DateTime @default(now())
-  createdBy      String?
-  updatedAt      DateTime?
-  updatedBy      String?
-  deletedAt      DateTime?
-  deletedBy      String?
+  canInvite      Boolean  @default(false) @map("can_invite")
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by")
+  updatedAt      DateTime? @map("updated_at")
+  updatedBy      String?  @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?  @map("deleted_by")
 
   organization          Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user                  User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -146,23 +146,23 @@ model OrgMember {
 
 model Client {
   id             String     @id @default(cuid())
-  userId         String?
-  organizationId String?
-  clientType     ClientType @default(WORKSTATION)
+  userId         String?    @map("user_id")
+  organizationId String?    @map("organization_id")
+  clientType     ClientType @default(WORKSTATION) @map("client_type")
   label          String
-  keyHash        String
-  apiKeyShown    Boolean    @default(false)
+  keyHash        String     @map("key_hash")
+  apiKeyShown    Boolean    @default(false) @map("api_key_shown")
   role           Role       @default(READER)
   namespace      String?
   description    String?
-  expiresAt      DateTime?
-  lastUsedAt     DateTime?
-  createdAt      DateTime   @default(now())
-  createdBy      String?
-  updatedAt      DateTime?
-  updatedBy      String?
-  deletedAt      DateTime?
-  deletedBy      String?
+  expiresAt      DateTime?  @map("expires_at")
+  lastUsedAt     DateTime?  @map("last_used_at")
+  createdAt      DateTime   @default(now()) @map("created_at")
+  createdBy      String?    @map("created_by")
+  updatedAt      DateTime?  @map("updated_at")
+  updatedBy      String?    @map("updated_by")
+  deletedAt      DateTime?  @map("deleted_at")
+  deletedBy      String?    @map("deleted_by")
 
   user                User?                      @relation(fields: [userId], references: [id], onDelete: SetNull)
   organization        Organization?              @relation(fields: [organizationId], references: [id], onDelete: SetNull)
@@ -178,16 +178,16 @@ model Client {
 
 model ClientBundleSubscription {
   id               String           @id @default(cuid())
-  clientId         String
-  bundleId         String
-  subscriptionType SubscriptionType @default(READ_ONLY)
-  trainingMode     Boolean          @default(false)
-  createdAt        DateTime         @default(now())
-  createdBy        String?
-  updatedAt        DateTime?
-  updatedBy        String?
-  deletedAt        DateTime?
-  deletedBy        String?
+  clientId         String           @map("client_id")
+  bundleId         String           @map("bundle_id")
+  subscriptionType SubscriptionType @default(READ_ONLY) @map("subscription_type")
+  trainingMode     Boolean          @default(false) @map("training_mode")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  createdBy        String?          @map("created_by")
+  updatedAt        DateTime?        @map("updated_at")
+  updatedBy        String?          @map("updated_by")
+  deletedAt        DateTime?        @map("deleted_at")
+  deletedBy        String?          @map("deleted_by")
 
   client Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
   bundle MemoryBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
@@ -198,25 +198,25 @@ model ClientBundleSubscription {
 
 model Memory {
   id                   String     @id @default(cuid())
-  organizationId       String
+  organizationId       String     @map("organization_id")
   name                 String
   source               String?
-  sourceTokenEncrypted String?
-  sourceTokenExpiresAt DateTime?
-  readBranch           String?
-  writeBranch          String?
+  sourceTokenEncrypted String?    @map("source_token_encrypted")
+  sourceTokenExpiresAt DateTime?  @map("source_token_expires_at")
+  readBranch           String?    @map("read_branch")
+  writeBranch          String?    @map("write_branch")
   visibility           Visibility @default(PRIVATE)
-  requiresLicense      Boolean    @default(false)
-  lastSyncedAt         DateTime?
-  syncStatus           SyncStatus @default(PENDING)
-  syncError            String?
-  pendingEdgeCount     Int        @default(0)
-  createdAt            DateTime   @default(now())
-  createdBy            String?
-  updatedAt            DateTime   @updatedAt
-  updatedBy            String?
-  deletedAt            DateTime?
-  deletedBy            String?
+  requiresLicense      Boolean    @default(false) @map("requires_license")
+  lastSyncedAt         DateTime?  @map("last_synced_at")
+  syncStatus           SyncStatus @default(PENDING) @map("sync_status")
+  syncError            String?    @map("sync_error")
+  pendingEdgeCount     Int        @default(0) @map("pending_edge_count")
+  createdAt            DateTime   @default(now()) @map("created_at")
+  createdBy            String?    @map("created_by")
+  updatedAt            DateTime   @updatedAt @map("updated_at")
+  updatedBy            String?    @map("updated_by")
+  deletedAt            DateTime?  @map("deleted_at")
+  deletedBy            String?    @map("deleted_by")
 
   organization  Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   nodes         Node[]
@@ -232,26 +232,26 @@ model Memory {
 
 model Node {
   id          String   @id // UUIDv7 from node.yaml — stable across moves
-  memoryId    String
+  memoryId    String   @map("memory_id")
   name        String
   title       String
   alias       String?
   loc         String
-  isLink      Boolean  @default(false)
+  isLink      Boolean  @default(false) @map("is_link")
   description String?
   content     String?
-  contentHash String?
+  contentHash String?  @map("content_hash")
   tokens      Int?
   tags        String[]
   namespace   String
-  ownerRepo   String?
-  isRunnable  Boolean?
-  createdAt   DateTime @default(now())
-  createdBy   String?
-  updatedAt   DateTime @updatedAt
-  updatedBy   String?
-  deletedAt   DateTime?
-  deletedBy   String?
+  ownerRepo   String?  @map("owner_repo")
+  isRunnable  Boolean? @map("is_runnable")
+  createdAt   DateTime @default(now()) @map("created_at")
+  createdBy   String?  @map("created_by")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  updatedBy   String?  @map("updated_by")
+  deletedAt   DateTime? @map("deleted_at")
+  deletedBy   String?  @map("deleted_by")
 
   memory        Memory        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   outgoingEdges Edge[]        @relation("SourceNode")
@@ -268,16 +268,16 @@ model Node {
 }
 
 model Edge {
-  id       String @id @default(cuid())
-  sourceId String
-  targetId String
+  id       String    @id @default(cuid())
+  sourceId String    @map("source_id")
+  targetId String    @map("target_id")
   label    String
-  createdAt DateTime  @default(now())
-  createdBy String?
-  updatedAt DateTime?
-  updatedBy String?
-  deletedAt DateTime?
-  deletedBy String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @map("updated_at")
+  updatedBy String?   @map("updated_by")
+  deletedAt DateTime? @map("deleted_at")
+  deletedBy String?   @map("deleted_by")
 
   source Node @relation("SourceNode", fields: [sourceId], references: [id], onDelete: Cascade)
   target Node @relation("TargetNode", fields: [targetId], references: [id], onDelete: Cascade)
@@ -288,16 +288,16 @@ model Edge {
 }
 
 model PendingEdge {
-  id       String  @id @default(cuid())
-  sourceId String
-  targetId String // intended target node id — NOT a FK
+  id       String    @id @default(cuid())
+  sourceId String    @map("source_id")
+  targetId String    @map("target_id") // intended target node id — NOT a FK
   label    String?
-  createdAt DateTime  @default(now())
-  createdBy String?
-  updatedAt DateTime?
-  updatedBy String?
-  deletedAt DateTime?
-  deletedBy String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @map("updated_at")
+  updatedBy String?   @map("updated_by")
+  deletedAt DateTime? @map("deleted_at")
+  deletedBy String?   @map("deleted_by")
 
   source Node @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
@@ -309,33 +309,33 @@ model PendingEdge {
 model Session {
   id              String      @id // caller-generated (e.g. UUID from h-start-session)
   type            SessionType @default(DEVELOPER)
-  clientId        String?
+  clientId        String?     @map("client_id")
   repo            String?
   branch          String?
-  prNumber        Int?
-  customerId      String?
+  prNumber        Int?        @map("pr_number")
+  customerId      String?     @map("customer_id")
   language        String?
   plan            String?
-  llmModel        String?
-  inputTokens     Int?
-  outputTokens    Int?
-  turnCount       Int?
-  errorCount      Int?
-  parentSessionId String?
-  prevSessionId   String?
+  llmModel        String?     @map("llm_model")
+  inputTokens     Int?        @map("input_tokens")
+  outputTokens    Int?        @map("output_tokens")
+  turnCount       Int?        @map("turn_count")
+  errorCount      Int?        @map("error_count")
+  parentSessionId String?     @map("parent_session_id")
+  prevSessionId   String?     @map("prev_session_id")
   summary         String?
   outcome         Float?
-  outcomeRef      String?
-  outcomeMeta     Json?
-  startedAt       DateTime    @default(now())
-  endedAt         DateTime?
-  autoExpiredAt   DateTime?
-  createdAt       DateTime    @default(now())
-  createdBy       String?
-  updatedAt       DateTime?
-  updatedBy       String?
-  deletedAt       DateTime?
-  deletedBy       String?
+  outcomeRef      String?     @map("outcome_ref")
+  outcomeMeta     Json?       @map("outcome_meta")
+  startedAt       DateTime    @default(now()) @map("started_at")
+  endedAt         DateTime?   @map("ended_at")
+  autoExpiredAt   DateTime?   @map("auto_expired_at")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  createdBy       String?     @map("created_by")
+  updatedAt       DateTime?   @map("updated_at")
+  updatedBy       String?     @map("updated_by")
+  deletedAt       DateTime?   @map("deleted_at")
+  deletedBy       String?     @map("deleted_by")
 
   client       Client?    @relation(fields: [clientId], references: [id], onDelete: SetNull)
   events       UsageEvent[]
@@ -355,22 +355,22 @@ model Session {
 }
 
 model UsageEvent {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   type       String
-  nodeLoc    String?
-  nodeId     String?
-  sessionId  String?
-  clientId   String?
-  actionArgs Json?
+  nodeLoc    String?   @map("node_loc")
+  nodeId     String?   @map("node_id")
+  sessionId  String?   @map("session_id")
+  clientId   String?   @map("client_id")
+  actionArgs Json?     @map("action_args")
   model      String?
-  tokensIn   Int?
-  tokensOut  Int?
-  createdAt  DateTime @default(now())
-  createdBy  String?
-  updatedAt  DateTime?
-  updatedBy  String?
-  deletedAt  DateTime?
-  deletedBy  String?
+  tokensIn   Int?      @map("tokens_in")
+  tokensOut  Int?      @map("tokens_out")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  createdBy  String?   @map("created_by")
+  updatedAt  DateTime? @map("updated_at")
+  updatedBy  String?   @map("updated_by")
+  deletedAt  DateTime? @map("deleted_at")
+  deletedBy  String?   @map("deleted_by")
 
   node    Node?    @relation(fields: [nodeId], references: [id], onDelete: SetNull)
   session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
@@ -385,16 +385,16 @@ model UsageEvent {
 }
 
 model MemoryBundle {
-  id             String   @id @default(cuid())
-  organizationId String
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id")
   name           String
   description    String?
-  createdAt      DateTime @default(now())
-  createdBy      String?
-  updatedAt      DateTime?
-  updatedBy      String?
-  deletedAt      DateTime?
-  deletedBy      String?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
 
   organization        Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   items               MemoryBundleItem[]
@@ -405,15 +405,15 @@ model MemoryBundle {
 }
 
 model MemoryBundleItem {
-  id       String   @id @default(cuid())
-  bundleId String
-  memoryId String
-  createdAt DateTime @default(now())
-  createdBy String?
-  updatedAt DateTime?
-  updatedBy String?
-  deletedAt DateTime?
-  deletedBy String?
+  id       String    @id @default(cuid())
+  bundleId String    @map("bundle_id")
+  memoryId String    @map("memory_id")
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @map("updated_at")
+  updatedBy String?   @map("updated_by")
+  deletedAt DateTime? @map("deleted_at")
+  deletedBy String?   @map("deleted_by")
 
   bundle MemoryBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
   memory Memory       @relation(fields: [memoryId], references: [id], onDelete: Cascade)
@@ -423,21 +423,21 @@ model MemoryBundleItem {
 }
 
 model MemoryLicense {
-  id          String   @id @default(cuid())
-  memoryId    String
-  licenseType String
+  id          String    @id @default(cuid())
+  memoryId    String    @map("memory_id")
+  licenseType String    @map("license_type")
   seats       Int
-  validFrom   DateTime
-  validUntil  DateTime
-  licenseKeys String[]
+  validFrom   DateTime  @map("valid_from")
+  validUntil  DateTime  @map("valid_until")
+  licenseKeys String[]  @map("license_keys")
   terms       String
-  activated   Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  createdBy   String?
-  updatedAt   DateTime?
-  updatedBy   String?
-  deletedAt   DateTime?
-  deletedBy   String?
+  activated   Boolean   @default(false)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  createdBy   String?   @map("created_by")
+  updatedAt   DateTime? @map("updated_at")
+  updatedBy   String?   @map("updated_by")
+  deletedAt   DateTime? @map("deleted_at")
+  deletedBy   String?   @map("deleted_by")
 
   memory        Memory              @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   subscriptions MemorySubscription[]
@@ -446,18 +446,18 @@ model MemoryLicense {
 }
 
 model MemorySubscription {
-  id             String  @id @default(cuid())
-  memoryId       String
-  organizationId String
-  licenseId      String?
-  role           Role    @default(READER)
-  activated      Boolean @default(false)
-  createdAt      DateTime @default(now())
-  createdBy      String?
-  updatedAt      DateTime?
-  updatedBy      String?
-  deletedAt      DateTime?
-  deletedBy      String?
+  id             String    @id @default(cuid())
+  memoryId       String    @map("memory_id")
+  organizationId String    @map("organization_id")
+  licenseId      String?   @map("license_id")
+  role           Role      @default(READER)
+  activated      Boolean   @default(false)
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
 
   memory       Memory         @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -470,17 +470,17 @@ model MemorySubscription {
 
 model HadronServer {
   id              String    @id @default(cuid())
-  organizationId  String?
+  organizationId  String?   @map("organization_id")
   url             String
-  logLevel        LogLevel  @default(ERROR)
+  logLevel        LogLevel  @default(ERROR) @map("log_level")
   version         String?
-  lastHeartbeatAt DateTime?
-  createdAt       DateTime  @default(now())
-  createdBy       String?
-  updatedAt       DateTime?
-  updatedBy       String?
-  deletedAt       DateTime?
-  deletedBy       String?
+  lastHeartbeatAt DateTime? @map("last_heartbeat_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  createdBy       String?   @map("created_by")
+  updatedAt       DateTime? @map("updated_at")
+  updatedBy       String?   @map("updated_by")
+  deletedAt       DateTime? @map("deleted_at")
+  deletedBy       String?   @map("deleted_by")
 
   logEntries ServerLogEntry[]
 
@@ -488,18 +488,18 @@ model HadronServer {
 }
 
 model ServerLogEntry {
-  id           String   @id @default(cuid())
-  serverId     String
-  level        LogLevel
-  memoryId     String?
-  message      String
-  detail       Json?
-  createdAt    DateTime @default(now())
-  createdBy    String?
-  updatedAt    DateTime?
-  updatedBy    String?
-  deletedAt    DateTime?
-  deletedBy    String?
+  id        String    @id @default(cuid())
+  serverId  String    @map("server_id")
+  level     LogLevel
+  memoryId  String?   @map("memory_id")
+  message   String
+  detail    Json?
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @map("updated_at")
+  updatedBy String?   @map("updated_by")
+  deletedAt DateTime? @map("deleted_at")
+  deletedBy String?   @map("deleted_by")
 
   server HadronServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
@@ -510,19 +510,19 @@ model ServerLogEntry {
 }
 
 model ClientLogEntry {
-  id        String   @id @default(cuid())
-  clientId  String
+  id        String    @id @default(cuid())
+  clientId  String    @map("client_id")
   level     LogLevel
-  memoryId  String?
-  sessionId String?
+  memoryId  String?   @map("memory_id")
+  sessionId String?   @map("session_id")
   message   String
   detail    Json?
-  createdAt DateTime @default(now())
-  createdBy String?
-  updatedAt DateTime?
-  updatedBy String?
-  deletedAt DateTime?
-  deletedBy String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @map("updated_at")
+  updatedBy String?   @map("updated_by")
+  deletedAt DateTime? @map("deleted_at")
+  deletedBy String?   @map("deleted_by")
 
   client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
@@ -534,17 +534,17 @@ model ClientLogEntry {
 
 model MemoryLogEntry {
   id        String             @id @default(cuid())
-  memoryId  String
+  memoryId  String             @map("memory_id")
   level     LogLevel
-  eventType MemoryLogEventType
+  eventType MemoryLogEventType @map("event_type")
   message   String
   detail    Json?
-  createdAt DateTime           @default(now())
-  createdBy String?
-  updatedAt DateTime?
-  updatedBy String?
-  deletedAt DateTime?
-  deletedBy String?
+  createdAt DateTime           @default(now()) @map("created_at")
+  createdBy String?            @map("created_by")
+  updatedAt DateTime?          @map("updated_at")
+  updatedBy String?            @map("updated_by")
+  deletedAt DateTime?          @map("deleted_at")
+  deletedBy String?            @map("deleted_by")
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
@@ -557,17 +557,17 @@ model MemoryLogEntry {
 
 model OrgMemberInvitation {
   id              String    @id @default(cuid())
-  memberUserId    String
-  recipientUserId String
+  memberUserId    String    @map("member_user_id")
+  recipientUserId String    @map("recipient_user_id")
   role            Role      @default(READER)
-  expiresAt       DateTime?
-  acceptedAt      DateTime?
-  createdAt       DateTime  @default(now())
-  createdBy       String?
-  updatedAt       DateTime?
-  updatedBy       String?
-  deletedAt       DateTime?
-  deletedBy       String?
+  expiresAt       DateTime? @map("expires_at")
+  acceptedAt      DateTime? @map("accepted_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  createdBy       String?   @map("created_by")
+  updatedAt       DateTime? @map("updated_at")
+  updatedBy       String?   @map("updated_by")
+  deletedAt       DateTime? @map("deleted_at")
+  deletedBy       String?   @map("deleted_by")
 
   sender    OrgMember @relation("SentByMember", fields: [memberUserId], references: [id], onDelete: Cascade)
   recipient User      @relation("ReceivedMemberInvitations", fields: [recipientUserId], references: [id], onDelete: Cascade)
@@ -577,25 +577,25 @@ model OrgMemberInvitation {
 
 model UserInvitation {
   id             String    @id @default(cuid())
-  senderUserId   String?
-  organizationId String?
+  senderUserId   String?   @map("sender_user_id")
+  organizationId String?   @map("organization_id")
   slug           String    @unique
-  userRole       Role?
-  memberRole     Role      @default(READER)
-  newUserId      String?
+  userRole       Role?     @map("user_role")
+  memberRole     Role      @default(READER) @map("member_role")
+  newUserId      String?   @map("new_user_id")
   name           String?
   email          String?
-  githubUsername  String?
-  phoneNumber    String?
-  maxActivations Int?
-  expiresAt      DateTime?
-  acceptedAt     DateTime?
-  createdAt      DateTime  @default(now())
-  createdBy      String?
-  updatedAt      DateTime?
-  updatedBy      String?
-  deletedAt      DateTime?
-  deletedBy      String?
+  githubUsername  String?   @map("github_username")
+  phoneNumber    String?   @map("phone_number")
+  maxActivations Int?      @map("max_activations")
+  expiresAt      DateTime? @map("expires_at")
+  acceptedAt     DateTime? @map("accepted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
 
   sender       User?          @relation("SentInvitations", fields: [senderUserId], references: [id], onDelete: SetNull)
   organization Organization?  @relation("OrgInvitations", fields: [organizationId], references: [id], onDelete: SetNull)
@@ -605,15 +605,15 @@ model UserInvitation {
 }
 
 model UserInvitationActivation {
-  id           String   @id @default(cuid())
-  invitationId String
-  userId       String
-  createdAt    DateTime @default(now())
-  createdBy    String?
-  updatedAt    DateTime?
-  updatedBy    String?
-  deletedAt    DateTime?
-  deletedBy    String?
+  id           String    @id @default(cuid())
+  invitationId String    @map("invitation_id")
+  userId       String    @map("user_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  createdBy    String?   @map("created_by")
+  updatedAt    DateTime? @map("updated_at")
+  updatedBy    String?   @map("updated_by")
+  deletedAt    DateTime? @map("deleted_at")
+  deletedBy    String?   @map("deleted_by")
 
   invitation UserInvitation @relation(fields: [invitationId], references: [id], onDelete: Cascade)
   user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -622,12 +622,12 @@ model UserInvitationActivation {
 }
 
 model EmailVerificationToken {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   email     String
-  token     String   @unique
-  expiresAt DateTime
-  usedAt    DateTime?
-  createdAt DateTime @default(now())
+  token     String    @unique
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
 
   @@index([email])
   @@map("email_verification_tokens")
@@ -635,7 +635,7 @@ model EmailVerificationToken {
 
 model NodeVersion {
   id          String   @id @default(cuid())
-  nodeId      String
+  nodeId      String   @map("node_id")
   loc         String
   name        String
   title       String
@@ -643,8 +643,8 @@ model NodeVersion {
   description String?
   content     String?
   tags        String[]
-  editedBy    String?
-  createdAt   DateTime @default(now())
+  editedBy    String?  @map("edited_by")
+  createdAt   DateTime @default(now()) @map("created_at")
 
   node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
 
@@ -654,11 +654,11 @@ model NodeVersion {
 
 model PendingSetup {
   id              String   @id @default(cuid())
-  userId          String   @unique
-  clientId        String
-  rawKeyEncrypted String
+  userId          String   @unique @map("user_id")
+  clientId        String   @map("client_id")
+  rawKeyEncrypted String   @map("raw_key_encrypted")
   consumed        Boolean  @default(false)
-  createdAt       DateTime @default(now())
+  createdAt       DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
