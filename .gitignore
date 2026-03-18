@@ -9,3 +9,6 @@ prisma/*.db-journal
 
 # Cloned graph repos (created by sync)
 /graphs/
+
+# IDEs
+.idea
