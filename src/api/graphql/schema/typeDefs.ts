@@ -147,8 +147,8 @@ export const typeDefs = `#graphql
 
   type User {
     id: ID!
-    githubId: Int!
-    githubUsername: String!
+    githubId: Int
+    githubUsername: String
     identityProvider: String
     name: String
     email: String
@@ -162,7 +162,6 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     domain: String!
-    isPersonal: Boolean!
     isVisible: Boolean
     githubInstallationId: Int
     githubAppId: String

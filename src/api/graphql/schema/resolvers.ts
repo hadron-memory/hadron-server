@@ -1213,7 +1213,7 @@ export const resolvers = {
       const membership = await ctx.db.orgMember.findFirst({
         where: {
           userId: ctx.userId,
-          organization: { isPersonal: true },
+          organization: { isVisible: { not: true } },
         },
         include: { organization: { include: { memoryBundles: true } } },
       });

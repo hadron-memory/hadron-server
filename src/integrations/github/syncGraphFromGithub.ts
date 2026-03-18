@@ -1,5 +1,5 @@
 import { execFile as execFileCb } from 'child_process';
-import { createDecipheriv } from 'crypto';
+import { createDecipheriv, randomUUID } from 'crypto';
 import { promisify } from 'util';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -84,6 +84,7 @@ export const syncGraphFromGithub = async (
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
         const name = node.name!;
+        const nodeId = node.id ?? randomUUID().replace(/-/g, '');
         const update = {
           loc,
           name,
@@ -99,13 +100,13 @@ export const syncGraphFromGithub = async (
         };
         await tx.node.upsert({
           where: { loc_memoryId: { loc, memoryId: graph.id } },
-          create: { id: node.id!, memoryId: graph.id, ...update },
+          create: { id: nodeId, memoryId: graph.id, ...update },
           update,
         });
-        upsertedIds.push(node.id!);
+        upsertedIds.push(nodeId);
 
         // Resolve any cross-repo PendingEdges that were waiting for this node
-        const pending = await tx.pendingEdge.findMany({ where: { targetId: node.id! } });
+        const pending = await tx.pendingEdge.findMany({ where: { targetId: nodeId } });
         for (const p of pending) {
           const label = p.label ?? '';
           await tx.edge.upsert({

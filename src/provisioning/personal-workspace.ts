@@ -33,7 +33,7 @@ export async function provisionPersonalWorkspace(
     data: {
       name: displayName,
       domain,
-      isPersonal: true,
+      isVisible: null,
     },
   });
 
@@ -105,7 +105,7 @@ export async function hasPersonalWorkspace(
   const membership = await db.orgMember.findFirst({
     where: {
       userId,
-      organization: { isPersonal: true },
+      organization: { isVisible: { not: true } },
     },
   });
   return !!membership;

@@ -275,7 +275,7 @@ export async function createServer() {
 
       // Find the personal org and bundle for context
       const membership = await db.orgMember.findFirst({
-        where: { userId: payload.sub, organization: { isPersonal: true } },
+        where: { userId: payload.sub, organization: { isVisible: { not: true } } },
         include: {
           organization: {
             include: {

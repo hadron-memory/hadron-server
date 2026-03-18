@@ -101,7 +101,6 @@ model Organization {
   id                           String   @id @default(cuid())
   name                         String
   domain                       String   @unique
-  isPersonal                   Boolean  @default(false) @map("is_personal")
   isVisible                    Boolean? @map("is_visible")
   githubInstallationId         Int?     @unique @map("github_installation_id")
   githubAppId                  String?  @map("github_app_id")
