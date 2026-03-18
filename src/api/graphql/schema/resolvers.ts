@@ -820,7 +820,7 @@ export const resolvers = {
     ) => {
       requireRole(ctx, 'READER');
       const org = await ctx.db.organization.create({
-        data: { name, domain },
+        data: { name, domain, isVisible: true },
         include: ORG_INCLUDE,
       });
       if (ctx.userId) {
@@ -833,13 +833,17 @@ export const resolvers = {
 
     updateOrganization: async (
       _: unknown,
-      { id, name, domain }: { id: string; name?: string; domain?: string },
+      { id, name, domain, isVisible }: { id: string; name?: string; domain?: string; isVisible?: boolean },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, id, 'ADMIN');
       return ctx.db.organization.update({
         where: { id },
-        data: { ...(name ? { name } : {}), ...(domain ? { domain } : {}) },
+        data: {
+          ...(name ? { name } : {}),
+          ...(domain ? { domain } : {}),
+          ...(isVisible !== undefined ? { isVisible } : {}),
+        },
         include: ORG_INCLUDE,
       });
     },

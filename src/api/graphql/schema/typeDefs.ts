@@ -163,6 +163,7 @@ export const typeDefs = `#graphql
     name: String!
     domain: String!
     isPersonal: Boolean!
+    isVisible: Boolean
     githubInstallationId: Int
     githubAppId: String
     hasGithubAppPrivateKey: Boolean!
@@ -376,7 +377,7 @@ export const typeDefs = `#graphql
 
     # Organization management
     createOrganization(name: String!, domain: String!): Organization!
-    updateOrganization(id: ID!, name: String, domain: String): Organization!
+    updateOrganization(id: ID!, name: String, domain: String, isVisible: Boolean): Organization!
     deleteOrganization(id: ID!): Boolean!
 
     # Link a GitHub App installation to an organization (org ADMIN or platform ADMIN)
