@@ -33,7 +33,7 @@ export async function provisionPersonalWorkspace(
     data: {
       name: displayName,
       domain,
-      isVisible: null,
+      isVisible: false,
     },
   });
 

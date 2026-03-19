@@ -22,6 +22,7 @@ async function main() {
     data: {
       name: 'Hadron Memory',
       domain: 'hadronmemory-com',
+      isVisible: true,
     },
   });
   console.log(`  Created Organization: ${hadronOrg.name} (${hadronOrg.domain})`);
@@ -31,6 +32,7 @@ async function main() {
     data: {
       name: 'Baragaun',
       domain: 'baragaun-com',
+      isVisible: true,
     },
   });
   console.log(`  Created Organization: ${baragaunOrg.name} (${baragaunOrg.domain})`);
@@ -40,6 +42,7 @@ async function main() {
     data: {
       name: 'Micromentor',
       domain: 'micromentor-org',
+      isVisible: true,
     },
   });
   console.log(`  Created Organization: ${micromentorOrg.name} (${micromentorOrg.domain})`);
@@ -60,10 +63,13 @@ async function main() {
 
   const raghvind = await db.user.create({
     data: {
-      identityProvider: 'EMAIL',
-      name: 'Raghvind Ragav',
-      email: 'raghvind@baragaun.com',
+      githubId: 123397631,
+      githubUsername: 'RaghvindYadav',
+      identityProvider: 'GITHUB',
+      name: 'Raghvind Yadav',
+      email: 'vadayraghvind@baragaun.com',
       roles: ['ADMIN'],
+      maxReferrals: 100,
     },
   });
   console.log(`  Created User: ${raghvind.name} (${raghvind.email})`);
