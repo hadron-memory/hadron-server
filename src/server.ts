@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
 import cors from 'cors';
-import express from 'express';
+import express, { type Express } from 'express';
 import { db } from './integrations/db/client.js';
 import { serializeJson } from './integrations/db/provider.js';
 import {
@@ -26,7 +26,7 @@ import {
   hasPersonalWorkspace,
 } from './provisioning/personal-workspace.js';
 
-export async function createServer() {
+export async function createServer(): Promise<Express> {
   const app = express();
 
   app.use(
@@ -119,13 +119,22 @@ export async function createServer() {
           });
 
       // Provision personal workspace for new users
-      const isNew = !(await hasPersonalWorkspace(db, user.id));
+      let isNew = !(await hasPersonalWorkspace(db, user.id));
       if (isNew) {
-        await provisionPersonalWorkspace(
-          db,
-          user.id,
-          user.name ?? user.githubUsername ?? 'My Workspace',
-        );
+        try {
+          await provisionPersonalWorkspace(
+            db,
+            user.id,
+            user.name ?? user.githubUsername ?? 'My Workspace',
+          );
+        } catch (err: any) {
+          // P2002 = unique constraint violation — another concurrent request already provisioned
+          if (err?.code === 'P2002') {
+            isNew = false;
+          } else {
+            throw err;
+          }
+        }
       }
 
       // Issue JWT
