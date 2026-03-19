@@ -96,17 +96,23 @@ export async function provisionPersonalWorkspace(
 }
 
 /**
- * Check if a user already has a personal workspace provisioned.
+ * Check if a user already has a personal workspace provisioned,
+ * or already has any client (e.g. from seed data).
  */
 export async function hasPersonalWorkspace(
   db: PrismaClient,
   userId: string,
 ): Promise<boolean> {
-  const membership = await db.orgMember.findFirst({
-    where: {
-      userId,
-      organization: { isVisible: { not: true } },
-    },
-  });
-  return !!membership;
+  const [membership, client] = await Promise.all([
+    db.orgMember.findFirst({
+      where: {
+        userId,
+        organization: { isVisible: { not: true } },
+      },
+    }),
+    db.client.findFirst({
+      where: { userId, deletedAt: null },
+    }),
+  ]);
+  return !!membership || !!client;
 }

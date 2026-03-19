@@ -702,6 +702,7 @@ export const resolvers = {
         organizationId,
         userId,
         expiresAt,
+        agentTools,
       }: {
         label: string;
         clientType: string;
@@ -711,6 +712,7 @@ export const resolvers = {
         organizationId?: string;
         userId?: string;
         expiresAt?: string;
+        agentTools?: string[];
       },
       ctx: Context,
     ) => {
@@ -725,12 +727,30 @@ export const resolvers = {
           description,
           role: role as Role,
           namespace,
+          agentTools: agentTools ?? [],
           organizationId: organizationId ?? null,
           userId: userId ?? ctx.userId ?? null,
           expiresAt: expiresAt ? new Date(expiresAt) : undefined,
         },
       });
       return { client, rawKey };
+    },
+
+    updateClient: async (
+      _: unknown,
+      { id, description, agentTools }: { id: string; description?: string; agentTools?: string[] },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'READER');
+      const existing = await ctx.db.client.findUniqueOrThrow({ where: { id } });
+      if (existing.userId !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) throw new Error('Forbidden');
+      return ctx.db.client.update({
+        where: { id },
+        data: {
+          ...(description !== undefined ? { description } : {}),
+          ...(agentTools !== undefined ? { agentTools } : {}),
+        },
+      });
     },
 
     regenerateApiKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {

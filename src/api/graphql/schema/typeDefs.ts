@@ -130,6 +130,7 @@ export const typeDefs = `#graphql
     role: Role!
     apiKeyShown: Boolean!
     namespace: String
+    agentTools: [String!]!
     organizationId: String
     userId: String
     user: User
@@ -363,7 +364,8 @@ export const typeDefs = `#graphql
     recordUsage(event: UsageEventInput!): Boolean!
 
     # Client management
-    createClient(label: String!, clientType: ClientType!, role: Role!, description: String, namespace: String, organizationId: String, userId: String, expiresAt: String): ClientCreated!
+    createClient(label: String!, clientType: ClientType!, role: Role!, description: String, namespace: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!]): ClientCreated!
+    updateClient(id: ID!, description: String, agentTools: [String!]): Client!
     regenerateApiKey(id: ID!): ClientCreated!
     revokeClient(id: ID!): Boolean!
 

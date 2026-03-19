@@ -1,7 +1,18 @@
 import {Prisma, PrismaClient} from '../src/generated/prisma/index.js';
 import bcrypt from 'bcrypt';
-import { randomBytes } from 'crypto';
+import { randomBytes, createCipheriv } from 'crypto';
 import MemoryCreateArgs = Prisma.MemoryCreateArgs;
+
+function encryptToken(plaintext: string): string {
+  const key = process.env.HADRON_ENCRYPTION_KEY;
+  if (!key) throw new Error('HADRON_ENCRYPTION_KEY env var is required for seeding');
+  const keyBuf = Buffer.from(key, 'hex');
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', keyBuf, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, encrypted]).toString('base64');
+}
 
 const db = new PrismaClient();
 
@@ -32,6 +43,11 @@ async function main() {
     data: {
       name: 'Baragaun',
       domain: 'baragaun-com',
+      githubAppId: '3098677',
+      githubInstallationId: 116578712,
+      githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_BARAGAUN_PRIVATE_KEY
+        ? encryptToken(process.env.GITHUB_APP_BARAGAUN_PRIVATE_KEY)
+        : undefined,
       isVisible: true,
     },
   });
@@ -274,6 +290,7 @@ async function main() {
         keyHash,
         role: 'ADMIN',
         apiKeyShown: false,
+        agentTools: ['CLAUDE_CODE', 'CURSOR'],
       },
     });
     console.log(`  Created Client: ${client.label} (user: ${user.name})`);
