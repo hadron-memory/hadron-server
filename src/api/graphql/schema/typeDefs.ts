@@ -113,10 +113,10 @@ export const typeDefs = `#graphql
     createdAt: String!
   }
 
-  # A client's subscription to a memory bundle.
-  type ClientBundleSub {
+  # A client's subscription to an agent.
+  type ClientAgentSub {
     id: ID!
-    bundle: MemoryBundle!
+    agent: Agent!
     subscriptionType: SubscriptionType!
     trainingMode: Boolean!
     createdAt: String!
@@ -134,7 +134,7 @@ export const typeDefs = `#graphql
     organizationId: String
     userId: String
     user: User
-    bundleSubscriptions: [ClientBundleSub!]!
+    agentSubscriptions: [ClientAgentSub!]!
     expiresAt: String
     createdAt: String!
     lastUsedAt: String
@@ -169,7 +169,7 @@ export const typeDefs = `#graphql
     hasGithubAppPrivateKey: Boolean!
     members: [OrgMember!]!
     memories: [Memory!]!
-    memoryBundles: [MemoryBundle!]!
+    agents: [Agent!]!
     subscriptions: [MemorySubscription!]!
     createdAt: String!
     updatedAt: String!
@@ -202,17 +202,17 @@ export const typeDefs = `#graphql
     subscriptions: [MemorySubscription!]!
   }
 
-  # A named grouping of memories; clients subscribe to bundles.
-  type MemoryBundle {
+  # A named agent configuration; groups memories and (future) tools.
+  type Agent {
     id: ID!
     organizationId: String!
     name: String!
     description: String
-    items: [MemoryBundleItem!]!
+    memoryItems: [AgentMemoryItem!]!
     createdAt: String!
   }
 
-  type MemoryBundleItem {
+  type AgentMemoryItem {
     id: ID!
     memory: Memory!
     createdAt: String!
@@ -369,9 +369,9 @@ export const typeDefs = `#graphql
     regenerateApiKey(id: ID!): ClientCreated!
     revokeClient(id: ID!): Boolean!
 
-    # Client bundle subscriptions (org ADMIN or platform ADMIN)
-    subscribeClientToBundle(clientId: ID!, bundleId: ID!, subscriptionType: SubscriptionType, trainingMode: Boolean): Client!
-    unsubscribeClientFromBundle(clientId: ID!, bundleId: ID!): Client!
+    # Client agent subscriptions (org ADMIN or platform ADMIN)
+    subscribeClientToAgent(clientId: ID!, agentId: ID!, subscriptionType: SubscriptionType, trainingMode: Boolean): Client!
+    unsubscribeClientFromAgent(clientId: ID!, agentId: ID!): Client!
 
     # User management (admin only)
     updateUserRoles(userId: ID!, roles: [Role!]!): User!
@@ -402,12 +402,12 @@ export const typeDefs = `#graphql
     # Set encrypted source token for non-GitHub-App repos
     setMemorySourceToken(id: ID!, token: String!, expiresAt: String): Memory!
 
-    # Memory bundle management (org ADMIN)
-    createMemoryBundle(orgId: ID!, name: String!, description: String): MemoryBundle!
-    updateMemoryBundle(id: ID!, name: String, description: String): MemoryBundle!
-    deleteMemoryBundle(id: ID!): Boolean!
-    addMemoryToBundle(bundleId: ID!, memoryId: ID!): MemoryBundle!
-    removeMemoryFromBundle(bundleId: ID!, memoryId: ID!): MemoryBundle!
+    # Agent management (org ADMIN)
+    createAgent(orgId: ID!, name: String!, description: String): Agent!
+    updateAgent(id: ID!, name: String, description: String): Agent!
+    deleteAgent(id: ID!): Boolean!
+    addMemoryToAgent(agentId: ID!, memoryId: ID!): Agent!
+    removeMemoryFromAgent(agentId: ID!, memoryId: ID!): Agent!
 
     # Memory subscriptions (cross-org)
     createMemorySubscription(memoryId: ID!, orgId: ID!, role: Role!): MemorySubscription!

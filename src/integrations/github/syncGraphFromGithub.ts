@@ -169,6 +169,8 @@ export const syncGraphFromGithub = async (
 
 async function gitSync(cloneUrl: string, localPath: string, readBranch?: string): Promise<void> {
   if (existsSync(join(localPath, '.git'))) {
+    // Update remote URL with fresh token before pulling
+    await execFile('git', ['remote', 'set-url', 'origin', cloneUrl], { cwd: localPath });
     if (readBranch) {
       await execFile('git', ['checkout', readBranch], { cwd: localPath });
     }

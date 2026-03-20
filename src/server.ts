@@ -288,7 +288,7 @@ export async function createServer(): Promise<Express> {
         include: {
           organization: {
             include: {
-              memoryBundles: true,
+              agents: true,
               memories: true,
             },
           },
@@ -307,7 +307,7 @@ export async function createServer(): Promise<Express> {
         clientId: setup.clientId,
         orgId: membership?.organization.id,
         orgName: membership?.organization.name,
-        bundleId: membership?.organization.memoryBundles[0]?.id,
+        agentId: membership?.organization.agents[0]?.id,
         memories: membership?.organization.memories.map((g) => ({
           id: g.id,
           name: g.name,

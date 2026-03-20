@@ -250,25 +250,25 @@ async function main() {
     console.log(`  Created Memory: ${memory.name}`);
   }
 
-  // 6. MemoryBundle: Engineering
-  const bundle = await db.memoryBundle.create({
+  // 6. Agent: Engineering
+  const agent = await db.agent.create({
     data: {
       organizationId: baragaunOrg.id,
       name: 'Engineering',
       description: 'All Baragaun engineering memories',
     },
   });
-  console.log(`  Created MemoryBundle: ${bundle.name}`);
+  console.log(`  Created Agent: ${agent.name}`);
 
-  // 7. MemoryBundleItem: Engineering → hadron-core
+  // 7. AgentMemoryItem: Engineering → memories
   for (const mem of seedMemories) {
-    await db.memoryBundleItem.create({
+    await db.agentMemoryItem.create({
       data: {
-        bundleId: bundle.id,
+        agentId: agent.id,
         memoryId: mem.id,
       },
     });
-    console.log(`  Linked ${mem.name} → ${bundle.name}`);
+    console.log(`  Linked ${mem.name} → ${agent.name}`);
   }
 
   // 8. Clients + subscriptions (one per user)
@@ -296,15 +296,15 @@ async function main() {
     console.log(`  Created Client: ${client.label} (user: ${user.name})`);
     console.log(`    API Key: ${rawKey}`);
 
-    await db.clientBundleSubscription.create({
+    await db.clientAgentSubscription.create({
       data: {
         clientId: client.id,
-        bundleId: bundle.id,
+        agentId: agent.id,
         subscriptionType: 'READ_WRITE',
         trainingMode: true,
       },
     });
-    console.log(`    Subscribed ${client.label} → ${bundle.name} (READ_WRITE, training)`);
+    console.log(`    Subscribed ${client.label} → ${agent.name} (READ_WRITE, training)`);
   }
 
   console.log('\nSeed complete!');

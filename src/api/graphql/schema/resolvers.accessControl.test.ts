@@ -57,15 +57,15 @@ beforeEach(async () => {
     data: { organizationId: orgB.id, userId: userB.id, role: 'READER' },
   });
 
-  // Create a bundle in org A and add graph A
-  const bundle = await db.memoryBundle.create({
-    data: { organizationId: orgA.id, name: 'default-bundle' },
+  // Create an agent in org A and add graph A
+  const agent = await db.agent.create({
+    data: { organizationId: orgA.id, name: 'default-agent' },
   });
-  await db.memoryBundleItem.create({
-    data: { bundleId: bundle.id, memoryId: graphA.id },
+  await db.agentMemoryItem.create({
+    data: { agentId: agent.id, memoryId: graphA.id },
   });
 
-  // Client with READER role subscribed to bundle (READ_ONLY)
+  // Client with READER role subscribed to agent (READ_ONLY)
   clientReader = await db.client.create({
     data: {
       label: 'reader-client',
@@ -75,11 +75,11 @@ beforeEach(async () => {
       organizationId: orgA.id,
     },
   });
-  await db.clientBundleSubscription.create({
-    data: { clientId: clientReader.id, bundleId: bundle.id, subscriptionType: 'READ_ONLY' },
+  await db.clientAgentSubscription.create({
+    data: { clientId: clientReader.id, agentId: agent.id, subscriptionType: 'READ_ONLY' },
   });
 
-  // Client with CONTRIBUTOR role subscribed to bundle (READ_WRITE)
+  // Client with CONTRIBUTOR role subscribed to agent (READ_WRITE)
   clientContributor = await db.client.create({
     data: {
       label: 'contributor-client',
@@ -89,8 +89,8 @@ beforeEach(async () => {
       organizationId: orgA.id,
     },
   });
-  await db.clientBundleSubscription.create({
-    data: { clientId: clientContributor.id, bundleId: bundle.id, subscriptionType: 'READ_WRITE' },
+  await db.clientAgentSubscription.create({
+    data: { clientId: clientContributor.id, agentId: agent.id, subscriptionType: 'READ_WRITE' },
   });
 
   // Seed nodes
@@ -126,7 +126,7 @@ describe('Query.nodes access control', () => {
     expect(nodes[0].loc).toBe('org-b.repo.nodeB');
   });
 
-  it('client with bundle subscription sees only subscribed graphs', async () => {
+  it('client with agent subscription sees only subscribed graphs', async () => {
     const nodes = await resolvers.Query.nodes(
       null, {}, ctx({ clientId: clientReader.id, roles: ['READER'] }),
     );
@@ -250,13 +250,13 @@ describe('Mutation.upsertNode access control', () => {
   });
 
   it('client with READER role is rejected even with READ_WRITE subscription', async () => {
-    // Create a READER client with READ_WRITE bundle subscription
-    const bundle = await db.memoryBundle.findFirst({ where: { organizationId: orgA.id } });
+    // Create a READER client with READ_WRITE agent subscription
+    const agent = await db.agent.findFirst({ where: { organizationId: orgA.id } });
     const readerClient = await db.client.create({
       data: { label: 'reader-rw', keyHash: 'x', role: 'READER', clientType: 'WORKSTATION' },
     });
-    await db.clientBundleSubscription.create({
-      data: { clientId: readerClient.id, bundleId: bundle!.id, subscriptionType: 'READ_WRITE' },
+    await db.clientAgentSubscription.create({
+      data: { clientId: readerClient.id, agentId: agent!.id, subscriptionType: 'READ_WRITE' },
     });
     await expect(
       resolvers.Mutation.upsertNode(
@@ -298,7 +298,7 @@ describe('Mutation.upsertNode access control', () => {
 
   it('namespace restriction is enforced for clients', async () => {
     // Create contributor client with namespace restriction
-    const bundle = await db.memoryBundle.findFirst({ where: { organizationId: orgA.id } });
+    const agent = await db.agent.findFirst({ where: { organizationId: orgA.id } });
     const nsClient = await db.client.create({
       data: {
         label: 'ns-client',
@@ -308,8 +308,8 @@ describe('Mutation.upsertNode access control', () => {
         namespace: 'org-a.repo',
       },
     });
-    await db.clientBundleSubscription.create({
-      data: { clientId: nsClient.id, bundleId: bundle!.id, subscriptionType: 'READ_WRITE' },
+    await db.clientAgentSubscription.create({
+      data: { clientId: nsClient.id, agentId: agent!.id, subscriptionType: 'READ_WRITE' },
     });
 
     // Write within namespace — allowed
@@ -391,7 +391,7 @@ describe('Mutation.moveNode access control', () => {
   });
 
   it('namespace restriction applies to move target', async () => {
-    const bundle = await db.memoryBundle.findFirst({ where: { organizationId: orgA.id } });
+    const agent = await db.agent.findFirst({ where: { organizationId: orgA.id } });
     const nsClient = await db.client.create({
       data: {
         label: 'ns-move-client',
@@ -401,8 +401,8 @@ describe('Mutation.moveNode access control', () => {
         namespace: 'org-a.repo',
       },
     });
-    await db.clientBundleSubscription.create({
-      data: { clientId: nsClient.id, bundleId: bundle!.id, subscriptionType: 'READ_WRITE' },
+    await db.clientAgentSubscription.create({
+      data: { clientId: nsClient.id, agentId: agent!.id, subscriptionType: 'READ_WRITE' },
     });
 
     await expect(

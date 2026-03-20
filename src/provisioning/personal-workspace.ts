@@ -4,7 +4,7 @@ import type { PrismaClient } from '../generated/prisma/client.js';
 
 interface ProvisionResult {
   orgId: string;
-  bundleId: string;
+  agentId: string;
   clientId: string;
   rawKey: string;
 }
@@ -15,9 +15,9 @@ interface ProvisionResult {
  * Creates:
  * 1. A personal organization (hidden from the user)
  * 2. The user as OWNER of that org
- * 3. A default "My Memories" bundle
+ * 3. A default "My Memories" agent
  * 4. A workstation client with an API key
- * 5. A bundle subscription (READ_WRITE) for the client
+ * 5. An agent subscription (READ_WRITE) for the client
  * 6. A PendingSetup record so the raw API key can be shown once
  */
 export async function provisionPersonalWorkspace(
@@ -47,8 +47,8 @@ export async function provisionPersonalWorkspace(
     },
   });
 
-  // 3. Create default bundle
-  const bundle = await db.memoryBundle.create({
+  // 3. Create default agent
+  const agent = await db.agent.create({
     data: {
       organizationId: org.id,
       name: 'My Memories',
@@ -69,11 +69,11 @@ export async function provisionPersonalWorkspace(
     },
   });
 
-  // 5. Subscribe client to default bundle
-  await db.clientBundleSubscription.create({
+  // 5. Subscribe client to default agent
+  await db.clientAgentSubscription.create({
     data: {
       clientId: client.id,
-      bundleId: bundle.id,
+      agentId: agent.id,
       subscriptionType: 'READ_WRITE',
     },
   });
@@ -89,7 +89,7 @@ export async function provisionPersonalWorkspace(
 
   return {
     orgId: org.id,
-    bundleId: bundle.id,
+    agentId: agent.id,
     clientId: client.id,
     rawKey,
   };

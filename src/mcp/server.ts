@@ -41,18 +41,18 @@ function validateLoc(loc: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Get the memory IDs accessible to a client through bundle subscriptions.
+ * Get the memory IDs accessible to a client through agent subscriptions.
  * Returns a map of memoryId → subscriptionType.
  */
 async function getClientMemoryAccess(
   clientId: string,
 ): Promise<Map<string, string>> {
-  const subs = await db.clientBundleSubscription.findMany({
+  const subs = await db.clientAgentSubscription.findMany({
     where: { clientId, deletedAt: null },
     include: {
-      bundle: {
+      agent: {
         include: {
-          items: { include: { memory: true } },
+          memoryItems: { include: { memory: true } },
         },
       },
     },
@@ -60,11 +60,11 @@ async function getClientMemoryAccess(
 
   const access = new Map<string, string>();
   for (const sub of subs) {
-    for (const bg of sub.bundle.items) {
+    for (const item of sub.agent.memoryItems) {
       // If multiple subs include the same memory, READ_WRITE wins
-      const existing = access.get(bg.memoryId);
+      const existing = access.get(item.memoryId);
       if (!existing || sub.subscriptionType === 'READ_WRITE') {
-        access.set(bg.memoryId, sub.subscriptionType);
+        access.set(item.memoryId, sub.subscriptionType);
       }
     }
   }

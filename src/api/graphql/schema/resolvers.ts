@@ -43,22 +43,22 @@ async function requireOrgRole(
  * Returns the memory IDs accessible to the current caller, or null if the
  * caller has unrestricted access (global ADMIN/OWNER).
  *
- * - Clients: memories from bundle subscriptions only
+ * - Clients: memories from agent subscriptions only
  * - Users: memories from org memberships + cross-org subscriptions + public memories
  * - Unauthenticated: public memories only
  */
 async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return null;
 
-  // API-key client — memories from bundle subscriptions
+  // API-key client — memories from agent subscriptions
   if (ctx.clientId && !ctx.userId) {
-    const subs = await ctx.db.clientBundleSubscription.findMany({
+    const subs = await ctx.db.clientAgentSubscription.findMany({
       where: { clientId: ctx.clientId, deletedAt: null },
-      include: { bundle: { include: { items: { select: { memoryId: true } } } } },
+      include: { agent: { include: { memoryItems: { select: { memoryId: true } } } } },
     });
     const ids: string[] = [];
     for (const sub of subs) {
-      for (const bg of sub.bundle.items) ids.push(bg.memoryId);
+      for (const item of sub.agent.memoryItems) ids.push(item.memoryId);
     }
     return ids;
   }
@@ -134,12 +134,12 @@ async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise
     if (highestRole < ROLE_ORDER['CONTRIBUTOR']) {
       throw new Error('Forbidden: client role insufficient for writes');
     }
-    const sub = await ctx.db.clientBundleSubscription.findFirst({
+    const sub = await ctx.db.clientAgentSubscription.findFirst({
       where: {
         clientId: ctx.clientId,
         deletedAt: null,
         subscriptionType: 'READ_WRITE',
-        bundle: { items: { some: { memoryId } } },
+        agent: { memoryItems: { some: { memoryId } } },
       },
     });
     if (!sub) throw new Error('Forbidden: no write access to this memory');
@@ -186,16 +186,16 @@ const MEMORY_INCLUDE = {
 const ORG_INCLUDE = {
   members: { include: { user: true }, orderBy: { createdAt: 'asc' as const } },
   memories: { include: MEMORY_INCLUDE, orderBy: { name: 'asc' as const } },
-  memoryBundles: { include: { items: { include: { memory: true } } }, orderBy: { name: 'asc' as const } },
+  agents: { include: { memoryItems: { include: { memory: true } } }, orderBy: { name: 'asc' as const } },
   subscriptions: { include: { memory: true }, orderBy: { createdAt: 'asc' as const } },
 };
 
-const BUNDLE_INCLUDE = {
-  items: { include: { memory: { include: MEMORY_INCLUDE } } },
+const AGENT_INCLUDE = {
+  memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
 };
 
 const CLIENT_INCLUDE = {
-  bundleSubscriptions: { include: { bundle: { include: BUNDLE_INCLUDE } }, orderBy: { createdAt: 'asc' as const } },
+  agentSubscriptions: { include: { agent: { include: AGENT_INCLUDE } }, orderBy: { createdAt: 'asc' as const } },
 };
 
 const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
@@ -249,14 +249,14 @@ export const resolvers = {
     expiresAt: (c: { expiresAt?: Date | string | null }) => toISO(c.expiresAt),
     user: (client: { userId?: string | null }, _: unknown, ctx: Context) =>
       client.userId ? ctx.db.user.findUnique({ where: { id: client.userId } }) : null,
-    bundleSubscriptions: (client: { id: string }, _: unknown, ctx: Context) =>
-      ctx.db.clientBundleSubscription.findMany({
+    agentSubscriptions: (client: { id: string }, _: unknown, ctx: Context) =>
+      ctx.db.clientAgentSubscription.findMany({
         where: { clientId: client.id },
-        include: { bundle: { include: BUNDLE_INCLUDE } },
+        include: { agent: { include: AGENT_INCLUDE } },
         orderBy: { createdAt: 'asc' as const },
       }),
   },
-  MemoryBundle: {
+  Agent: {
     createdAt: (b: { createdAt: Date | string }) => toISO(b.createdAt)!,
   },
   Session: {
@@ -451,16 +451,16 @@ export const resolvers = {
     },
 
     myMemories: async (_: unknown, __: unknown, ctx: Context) => {
-      // API-key client — return memories from bundle subscriptions
+      // API-key client — return memories from agent subscriptions
       if (ctx.clientId && !ctx.userId) {
-        const subs = await ctx.db.clientBundleSubscription.findMany({
+        const subs = await ctx.db.clientAgentSubscription.findMany({
           where: { clientId: ctx.clientId, deletedAt: null },
-          include: { bundle: { include: { items: { include: { memory: { include: MEMORY_INCLUDE } } } } } },
+          include: { agent: { include: { memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } } } } },
         });
         const memoryMap = new Map<string, any>();
         for (const sub of subs) {
-          for (const bg of sub.bundle.items) {
-            memoryMap.set(bg.memory.id, bg.memory);
+          for (const item of sub.agent.memoryItems) {
+            memoryMap.set(item.memory.id, item.memory);
           }
         }
         return Array.from(memoryMap.values());
@@ -772,15 +772,15 @@ export const resolvers = {
       return true;
     },
 
-    // ── Client bundle subscriptions ──────────────────────────────────────
+    // ── Client agent subscriptions ──────────────────────────────────────
 
-    subscribeClientToBundle: async (
+    subscribeClientToAgent: async (
       _: unknown,
-      { clientId, bundleId, subscriptionType, trainingMode }: { clientId: string; bundleId: string; subscriptionType?: string; trainingMode?: boolean },
+      { clientId, agentId, subscriptionType, trainingMode }: { clientId: string; agentId: string; subscriptionType?: string; trainingMode?: boolean },
       ctx: Context,
     ) => {
       const client = await ctx.db.client.findUniqueOrThrow({ where: { id: clientId } });
-      const bundle = await ctx.db.memoryBundle.findUniqueOrThrow({ where: { id: bundleId } });
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
 
       if (client.organizationId) {
         await requireOrgRole(ctx, client.organizationId, 'ADMIN');
@@ -788,11 +788,11 @@ export const resolvers = {
         if (client.userId !== ctx.userId && !ctx.roles?.includes('ADMIN')) throw new Error('Forbidden');
       }
 
-      await ctx.db.clientBundleSubscription.upsert({
-        where: { clientId_bundleId: { clientId, bundleId } },
+      await ctx.db.clientAgentSubscription.upsert({
+        where: { clientId_agentId: { clientId, agentId } },
         create: {
           clientId,
-          bundleId,
+          agentId,
           subscriptionType: (subscriptionType as any) ?? 'READ_ONLY',
           trainingMode: trainingMode ?? false,
         },
@@ -804,9 +804,9 @@ export const resolvers = {
       return ctx.db.client.findUniqueOrThrow({ where: { id: clientId }, include: CLIENT_INCLUDE });
     },
 
-    unsubscribeClientFromBundle: async (
+    unsubscribeClientFromAgent: async (
       _: unknown,
-      { clientId, bundleId }: { clientId: string; bundleId: string },
+      { clientId, agentId }: { clientId: string; agentId: string },
       ctx: Context,
     ) => {
       const client = await ctx.db.client.findUniqueOrThrow({ where: { id: clientId } });
@@ -816,8 +816,8 @@ export const resolvers = {
         if (client.userId !== ctx.userId && !ctx.roles?.includes('ADMIN')) throw new Error('Forbidden');
       }
 
-      await ctx.db.clientBundleSubscription.delete({
-        where: { clientId_bundleId: { clientId, bundleId } },
+      await ctx.db.clientAgentSubscription.delete({
+        where: { clientId_agentId: { clientId, agentId } },
       });
       return ctx.db.client.findUniqueOrThrow({ where: { id: clientId }, include: CLIENT_INCLUDE });
     },
@@ -1045,63 +1045,63 @@ export const resolvers = {
       });
     },
 
-    // ── Memory bundle management ─────────────────────────────────────────
+    // ── Agent management ──────────────────────────────────────────────────
 
-    createMemoryBundle: async (
+    createAgent: async (
       _: unknown,
       { orgId, name, description }: { orgId: string; name: string; description?: string },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
-      return ctx.db.memoryBundle.create({
+      return ctx.db.agent.create({
         data: { organizationId: orgId, name, description },
-        include: BUNDLE_INCLUDE,
+        include: AGENT_INCLUDE,
       });
     },
 
-    updateMemoryBundle: async (
+    updateAgent: async (
       _: unknown,
       { id, name, description }: { id: string; name?: string; description?: string },
       ctx: Context,
     ) => {
-      const bundle = await ctx.db.memoryBundle.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, bundle.organizationId, 'ADMIN');
-      return ctx.db.memoryBundle.update({
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      return ctx.db.agent.update({
         where: { id },
         data: { ...(name ? { name } : {}), ...(description !== undefined ? { description } : {}) },
-        include: BUNDLE_INCLUDE,
+        include: AGENT_INCLUDE,
       });
     },
 
-    deleteMemoryBundle: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const bundle = await ctx.db.memoryBundle.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, bundle.organizationId, 'ADMIN');
-      await ctx.db.memoryBundle.update({ where: { id }, data: { deletedAt: new Date() } });
+    deleteAgent: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await ctx.db.agent.update({ where: { id }, data: { deletedAt: new Date() } });
       return true;
     },
 
-    addMemoryToBundle: async (
+    addMemoryToAgent: async (
       _: unknown,
-      { bundleId, memoryId }: { bundleId: string; memoryId: string },
+      { agentId, memoryId }: { agentId: string; memoryId: string },
       ctx: Context,
     ) => {
-      const bundle = await ctx.db.memoryBundle.findUniqueOrThrow({ where: { id: bundleId } });
-      await requireOrgRole(ctx, bundle.organizationId, 'ADMIN');
-      await ctx.db.memoryBundleItem.create({ data: { bundleId, memoryId } });
-      return ctx.db.memoryBundle.findUniqueOrThrow({ where: { id: bundleId }, include: BUNDLE_INCLUDE });
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await ctx.db.agentMemoryItem.create({ data: { agentId, memoryId } });
+      return ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, include: AGENT_INCLUDE });
     },
 
-    removeMemoryFromBundle: async (
+    removeMemoryFromAgent: async (
       _: unknown,
-      { bundleId, memoryId }: { bundleId: string; memoryId: string },
+      { agentId, memoryId }: { agentId: string; memoryId: string },
       ctx: Context,
     ) => {
-      const bundle = await ctx.db.memoryBundle.findUniqueOrThrow({ where: { id: bundleId } });
-      await requireOrgRole(ctx, bundle.organizationId, 'ADMIN');
-      await ctx.db.memoryBundleItem.delete({
-        where: { bundleId_memoryId: { bundleId, memoryId } },
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await ctx.db.agentMemoryItem.delete({
+        where: { agentId_memoryId: { agentId, memoryId } },
       });
-      return ctx.db.memoryBundle.findUniqueOrThrow({ where: { id: bundleId }, include: BUNDLE_INCLUDE });
+      return ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, include: AGENT_INCLUDE });
     },
 
     // ── Memory subscriptions ─────────────────────────────────────────────
@@ -1235,13 +1235,13 @@ export const resolvers = {
           userId: ctx.userId,
           organization: { isVisible: { not: true } },
         },
-        include: { organization: { include: { memoryBundles: true } } },
+        include: { organization: { include: { agents: true } } },
       });
       if (!membership) throw new Error('No personal workspace found');
 
       const org = membership.organization;
-      const bundle = org.memoryBundles[0];
-      if (!bundle) throw new Error('No default bundle found');
+      const agent = org.agents[0];
+      if (!agent) throw new Error('No default agent found');
 
       // Create memory subscription (personal org subscribes to the memory)
       await ctx.db.memorySubscription.upsert({
@@ -1255,10 +1255,10 @@ export const resolvers = {
         update: {},
       });
 
-      // Add memory to the default bundle
-      await ctx.db.memoryBundleItem.upsert({
-        where: { bundleId_memoryId: { bundleId: bundle.id, memoryId } },
-        create: { bundleId: bundle.id, memoryId },
+      // Add memory to the default agent
+      await ctx.db.agentMemoryItem.upsert({
+        where: { agentId_memoryId: { agentId: agent.id, memoryId } },
+        create: { agentId: agent.id, memoryId },
         update: {},
       });
 
