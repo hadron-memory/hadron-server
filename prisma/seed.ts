@@ -33,6 +33,11 @@ async function main() {
     data: {
       name: 'Hadron Memory',
       domain: 'hadronmemory-com',
+      githubAppId: '3125298',
+      githubInstallationId: 117769692,
+      githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_PRIVATE_KEY
+        ? encryptToken(process.env.GITHUB_APP_PRIVATE_KEY)
+        : undefined,
       isVisible: true,
     },
   });
@@ -43,10 +48,10 @@ async function main() {
     data: {
       name: 'Baragaun',
       domain: 'baragaun-com',
-      githubAppId: '3098677',
-      githubInstallationId: 116578712,
-      githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_BARAGAUN_PRIVATE_KEY
-        ? encryptToken(process.env.GITHUB_APP_BARAGAUN_PRIVATE_KEY)
+      githubAppId: '3125298',
+      githubInstallationId: 117385803,
+      githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_PRIVATE_KEY
+        ? encryptToken(process.env.GITHUB_APP_PRIVATE_KEY)
         : undefined,
       isVisible: true,
     },
@@ -58,6 +63,11 @@ async function main() {
     data: {
       name: 'Micromentor',
       domain: 'micromentor-org',
+      githubAppId: '3125298',
+      githubInstallationId: 117769754,
+      githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_PRIVATE_KEY
+        ? encryptToken(process.env.GITHUB_APP_PRIVATE_KEY)
+        : undefined,
       isVisible: true,
     },
   });

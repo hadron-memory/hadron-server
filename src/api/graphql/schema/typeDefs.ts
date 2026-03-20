@@ -188,6 +188,7 @@ export const typeDefs = `#graphql
   type Memory {
     id: ID!
     organizationId: String!
+    organization: Organization
     name: String!
     source: String
     readBranch: String

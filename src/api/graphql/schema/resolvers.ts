@@ -187,7 +187,7 @@ const ORG_INCLUDE = {
   members: { include: { user: true }, orderBy: { createdAt: 'asc' as const } },
   memories: { include: MEMORY_INCLUDE, orderBy: { name: 'asc' as const } },
   agents: { include: { memoryItems: { include: { memory: true } } }, orderBy: { name: 'asc' as const } },
-  subscriptions: { include: { memory: true }, orderBy: { createdAt: 'asc' as const } },
+  subscriptions: { include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
 };
 
 const AGENT_INCLUDE = {
@@ -237,6 +237,9 @@ export const resolvers = {
     lastSyncedAt: (g: { lastSyncedAt?: Date | string | null }) => toISO(g.lastSyncedAt),
     createdAt: (g: { createdAt: Date | string }) => toISO(g.createdAt)!,
     updatedAt: (g: { updatedAt: Date | string }) => toISO(g.updatedAt)!,
+    organization: (g: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
+      (g as Record<string, unknown>).organization ??
+      ctx.db.organization.findUnique({ where: { id: g.organizationId } }),
   },
   Organization: {
     createdAt: (o: { createdAt: Date | string }) => toISO(o.createdAt)!,
