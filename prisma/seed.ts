@@ -110,11 +110,24 @@ async function main() {
   });
   console.log(`  Created User: ${rupali.name} (${rupali.email})`);
 
+  const noel = await db.user.create({
+    data: {
+      githubId: 107146551,
+      githubUsername: 'LASITW',
+      identityProvider: 'GITHUB',
+      name: 'Noel Saji',
+      email: 'saji.noel@gmail.com',
+      roles: ['ADMIN'],
+    },
+  });
+  console.log(`  Created User: ${noel.name} (${noel.email})`);
+
   // 4. OrgMembers
   for (const { user, role } of [
     { user: holger, role: 'OWNER' as const },
     { user: raghvind, role: 'OWNER' as const },
     { user: rupali, role: 'OWNER' as const },
+    { user: noel, role: 'OWNER' as const },
   ]) {
     await db.orgMember.create({
       data: {
@@ -131,6 +144,7 @@ async function main() {
     { user: holger, role: 'OWNER' as const },
     { user: raghvind, role: 'OWNER' as const },
     { user: rupali, role: 'OWNER' as const },
+    { user: noel, role: 'OWNER' as const },
   ]) {
     await db.orgMember.create({
       data: {
@@ -147,6 +161,7 @@ async function main() {
     { user: holger, role: 'OWNER' as const },
     { user: raghvind, role: 'OWNER' as const },
     { user: rupali, role: 'OWNER' as const },
+    { user: noel, role: 'OWNER' as const },
   ]) {
     await db.orgMember.create({
       data: {
@@ -286,6 +301,7 @@ async function main() {
     { user: holger, label: 'biene-mbp4' },
     { user: raghvind, label: 'raghvind-ws' },
     { user: rupali, label: 'rupali-ws' },
+    { user: noel, role: 'noel-ws' as const },
   ];
 
   for (const { user, label } of clientDefs) {
@@ -296,7 +312,7 @@ async function main() {
         userId: user.id,
         organizationId: baragaunOrg.id,
         clientType: 'WORKSTATION',
-        label,
+        label: label || '',
         keyHash,
         role: 'ADMIN',
         apiKeyShown: false,
