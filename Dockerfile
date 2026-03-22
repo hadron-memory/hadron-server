@@ -17,7 +17,7 @@ COPY tsconfig.json ./
 COPY src ./src/
 
 ENV NODE_ENV=production
-EXPOSE 4000
+EXPOSE 10300
 
 # Generate client, run migrations, then start — all at runtime when DATABASE_URL is available
 CMD ["doppler", "run", "--", "sh", "-c", "pnpm prisma generate && pnpm prisma db push && pnpm tsx src/index.ts"]
