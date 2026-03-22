@@ -1,4 +1,9 @@
 FROM node:20-alpine
+RUN apk add --no-cache curl gnupg && \
+    curl -sLf --retry 3 --tlsv1.2 --proto "=https" 'https://packages.doppler.com/public/cli/rsa.8004D9FF50437357.key' | gpg --import && \
+    curl -sLf --retry 3 --tlsv1.2 --proto "=https" 'https://packages.doppler.com/public/cli/config.alpine.txt' >> /etc/apk/repositories && \
+    apk add --no-cache doppler && \
+    apk del curl gnupg
 RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
@@ -17,4 +22,4 @@ ENV NODE_ENV=production
 EXPOSE 4000
 
 # Generate client, run migrations, then start — all at runtime when DATABASE_URL is available
-CMD ["sh", "-c", "pnpm prisma generate && pnpm prisma db push && pnpm tsx src/index.ts"]
+CMD ["doppler", "run", "--", "sh", "-c", "pnpm prisma generate && pnpm prisma db push && pnpm tsx src/index.ts"]
