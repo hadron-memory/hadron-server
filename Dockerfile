@@ -1,9 +1,7 @@
 FROM node:20-alpine
-RUN apk add --no-cache curl gnupg && \
-    curl -sLf --retry 3 --tlsv1.2 --proto "=https" 'https://packages.doppler.com/public/cli/rsa.8004D9FF50437357.key' | gpg --import && \
-    curl -sLf --retry 3 --tlsv1.2 --proto "=https" 'https://packages.doppler.com/public/cli/config.alpine.txt' >> /etc/apk/repositories && \
-    apk add --no-cache doppler && \
-    apk del curl gnupg
+RUN apk add --no-cache curl && \
+    curl -sLf --retry 3 --tlsv1.2 --proto "=https" 'https://cli.doppler.com/install.sh' | sh && \
+    apk del curl
 RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
