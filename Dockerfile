@@ -1,7 +1,7 @@
 FROM node:20-alpine
-RUN apk add --no-cache curl && \
+RUN apk add --no-cache curl gnupg && \
     curl -sLf --retry 3 --tlsv1.2 --proto "=https" 'https://cli.doppler.com/install.sh' | sh && \
-    apk del curl
+    apk del curl gnupg
 RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
