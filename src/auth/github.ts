@@ -11,8 +11,8 @@ const GITHUB_API = 'https://api.github.com';
 
 export function buildAuthUrl(state: string): string {
   const params = new URLSearchParams({
-    client_id: process.env.GITHUB_CLIENT_ID!,
-    redirect_uri: getCallbackUrl(),
+    client_id: process.env.GITHUB_OAUTH_APP_CLIENT_ID!,
+    redirect_uri: process.env.GITHUB_OAUTH_APP_AUTH_CALLBACK_URL ?? getCallbackUrl(),
     scope: 'read:org',
     state,
   });
@@ -27,8 +27,8 @@ export async function exchangeCode(code: string): Promise<string> {
       Accept: 'application/json',
     },
     body: JSON.stringify({
-      client_id: process.env.GITHUB_CLIENT_ID,
-      client_secret: process.env.GITHUB_CLIENT_SECRET,
+      client_id: process.env.GITHUB_OAUTH_APP_CLIENT_ID,
+      client_secret: process.env.GITHUB_OAUTH_APP_CLIENT_SECRET,
       code,
     }),
   });
