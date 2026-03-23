@@ -21,8 +21,8 @@ let graphA: { id: string };
 let graphB: { id: string };
 let userA: { id: string };
 let userB: { id: string };
-let clientReader: { id: string };
-let clientContributor: { id: string };
+let stationReader: { id: string };
+let stationContributor: { id: string };
 
 function ctx(overrides: Partial<Context> = {}): Context {
   return { db, ...overrides };
@@ -65,32 +65,32 @@ beforeEach(async () => {
     data: { agentId: agent.id, memoryId: graphA.id },
   });
 
-  // Client with READER role subscribed to agent (READ_ONLY)
-  clientReader = await db.client.create({
+  // Station with READER role subscribed to agent (READ_ONLY)
+  stationReader = await db.station.create({
     data: {
-      label: 'reader-client',
+      label: 'reader-station',
       keyHash: 'not-used-in-resolver-tests',
       role: 'READER',
-      clientType: 'WORKSTATION',
+      stationType: 'WORKSTATION',
       organizationId: orgA.id,
     },
   });
-  await db.clientAgentSubscription.create({
-    data: { clientId: clientReader.id, agentId: agent.id, subscriptionType: 'READ_ONLY' },
+  await db.stationAgentSubscription.create({
+    data: { stationId: stationReader.id, agentId: agent.id, subscriptionType: 'READ_ONLY' },
   });
 
-  // Client with CONTRIBUTOR role subscribed to agent (READ_WRITE)
-  clientContributor = await db.client.create({
+  // Station with CONTRIBUTOR role subscribed to agent (READ_WRITE)
+  stationContributor = await db.station.create({
     data: {
-      label: 'contributor-client',
+      label: 'contributor-station',
       keyHash: 'not-used-in-resolver-tests',
       role: 'CONTRIBUTOR',
-      clientType: 'AGENT',
+      stationType: 'AGENT',
       organizationId: orgA.id,
     },
   });
-  await db.clientAgentSubscription.create({
-    data: { clientId: clientContributor.id, agentId: agent.id, subscriptionType: 'READ_WRITE' },
+  await db.stationAgentSubscription.create({
+    data: { stationId: stationContributor.id, agentId: agent.id, subscriptionType: 'READ_WRITE' },
   });
 
   // Seed nodes
@@ -126,25 +126,25 @@ describe('Query.nodes access control', () => {
     expect(nodes[0].loc).toBe('org-b.repo.nodeB');
   });
 
-  it('client with agent subscription sees only subscribed graphs', async () => {
+  it('station with agent subscription sees only subscribed graphs', async () => {
     const nodes = await resolvers.Query.nodes(
-      null, {}, ctx({ clientId: clientReader.id, roles: ['READER'] }),
+      null, {}, ctx({ clientId: stationReader.id, roles: ['READER'] }),
     );
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('org-a.repo.nodeA');
   });
 
-  it('client with no subscriptions sees nothing', async () => {
-    const noSubClient = await db.client.create({
+  it('station with no subscriptions sees nothing', async () => {
+    const noSubStation = await db.station.create({
       data: {
-        label: 'no-sub-client',
+        label: 'no-sub-station',
         keyHash: 'not-used',
         role: 'READER',
-        clientType: 'WORKSTATION',
+        stationType: 'WORKSTATION',
       },
     });
     const nodes = await resolvers.Query.nodes(
-      null, {}, ctx({ clientId: noSubClient.id, roles: ['READER'] }),
+      null, {}, ctx({ clientId: noSubStation.id, roles: ['READER'] }),
     );
     expect(nodes).toHaveLength(0);
   });
@@ -166,7 +166,7 @@ describe('Query.node access control', () => {
   it('returns node when caller has access', async () => {
     const node = await resolvers.Query.node(
       null, { loc: 'org-a.repo.nodeA' },
-      ctx({ clientId: clientReader.id, roles: ['READER'] }),
+      ctx({ clientId: stationReader.id, roles: ['READER'] }),
     );
     expect(node).not.toBeNull();
     expect(node!.loc).toBe('org-a.repo.nodeA');
@@ -175,7 +175,7 @@ describe('Query.node access control', () => {
   it('returns null when caller lacks access', async () => {
     const node = await resolvers.Query.node(
       null, { loc: 'org-b.repo.nodeB' },
-      ctx({ clientId: clientReader.id, roles: ['READER'] }),
+      ctx({ clientId: stationReader.id, roles: ['READER'] }),
     );
     expect(node).toBeNull();
   });
@@ -183,7 +183,7 @@ describe('Query.node access control', () => {
   it('returns null for non-existent node', async () => {
     const node = await resolvers.Query.node(
       null, { loc: 'does.not.exist' },
-      ctx({ clientId: clientReader.id, roles: ['READER'] }),
+      ctx({ clientId: stationReader.id, roles: ['READER'] }),
     );
     expect(node).toBeNull();
   });
@@ -230,49 +230,49 @@ describe('cross-org graph subscription access', () => {
 // ---------------------------------------------------------------------------
 
 describe('Mutation.upsertNode access control', () => {
-  it('client with READ_WRITE subscription can write', async () => {
+  it('station with READ_WRITE subscription can write', async () => {
     const node = await resolvers.Mutation.upsertNode(
       null,
       { input: { memoryId: graphA.id, loc: 'org-a.repo.new', name: 'new', title: 'New' } },
-      ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
+      ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
     );
     expect(node.loc).toBe('org-a.repo.new');
   });
 
-  it('client with READ_ONLY subscription is rejected', async () => {
+  it('station with READ_ONLY subscription is rejected', async () => {
     await expect(
       resolvers.Mutation.upsertNode(
         null,
         { input: { memoryId: graphA.id, loc: 'org-a.repo.new2', name: 'new2', title: 'New2' } },
-        ctx({ clientId: clientReader.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ clientId: stationReader.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
-  it('client with READER role is rejected even with READ_WRITE subscription', async () => {
-    // Create a READER client with READ_WRITE agent subscription
+  it('station with READER role is rejected even with READ_WRITE subscription', async () => {
+    // Create a READER station with READ_WRITE agent subscription
     const agent = await db.agent.findFirst({ where: { organizationId: orgA.id } });
-    const readerClient = await db.client.create({
-      data: { label: 'reader-rw', keyHash: 'x', role: 'READER', clientType: 'WORKSTATION' },
+    const readerStation = await db.station.create({
+      data: { label: 'reader-rw', keyHash: 'x', role: 'READER', stationType: 'WORKSTATION' },
     });
-    await db.clientAgentSubscription.create({
-      data: { clientId: readerClient.id, agentId: agent!.id, subscriptionType: 'READ_WRITE' },
+    await db.stationAgentSubscription.create({
+      data: { stationId: readerStation.id, agentId: agent!.id, subscriptionType: 'READ_WRITE' },
     });
     await expect(
       resolvers.Mutation.upsertNode(
         null,
         { input: { memoryId: graphA.id, loc: 'org-a.repo.rdr', name: 'rdr', title: 'Rdr' } },
-        ctx({ clientId: readerClient.id, roles: ['READER'] }),
+        ctx({ clientId: readerStation.id, roles: ['READER'] }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
-  it('client cannot write to graph outside its subscriptions', async () => {
+  it('station cannot write to graph outside its subscriptions', async () => {
     await expect(
       resolvers.Mutation.upsertNode(
         null,
         { input: { memoryId: graphB.id, loc: 'org-b.repo.hack', name: 'hack', title: 'Hack' } },
-        ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
   });
@@ -296,27 +296,27 @@ describe('Mutation.upsertNode access control', () => {
     ).rejects.toThrow('Forbidden');
   });
 
-  it('namespace restriction is enforced for clients', async () => {
-    // Create contributor client with namespace restriction
+  it('namespace restriction is enforced for stations', async () => {
+    // Create contributor station with namespace restriction
     const agent = await db.agent.findFirst({ where: { organizationId: orgA.id } });
-    const nsClient = await db.client.create({
+    const nsStation = await db.station.create({
       data: {
-        label: 'ns-client',
+        label: 'ns-station',
         keyHash: 'x',
         role: 'CONTRIBUTOR',
-        clientType: 'AGENT',
+        stationType: 'AGENT',
         namespace: 'org-a.repo',
       },
     });
-    await db.clientAgentSubscription.create({
-      data: { clientId: nsClient.id, agentId: agent!.id, subscriptionType: 'READ_WRITE' },
+    await db.stationAgentSubscription.create({
+      data: { stationId: nsStation.id, agentId: agent!.id, subscriptionType: 'READ_WRITE' },
     });
 
     // Write within namespace — allowed
     const node = await resolvers.Mutation.upsertNode(
       null,
       { input: { memoryId: graphA.id, loc: 'org-a.repo.allowed', name: 'ok', title: 'Ok' } },
-      ctx({ clientId: nsClient.id, roles: ['CONTRIBUTOR'], namespace: 'org-a.repo' }),
+      ctx({ clientId: nsStation.id, roles: ['CONTRIBUTOR'], namespace: 'org-a.repo' }),
     );
     expect(node.loc).toBe('org-a.repo.allowed');
 
@@ -325,7 +325,7 @@ describe('Mutation.upsertNode access control', () => {
       resolvers.Mutation.upsertNode(
         null,
         { input: { memoryId: graphA.id, loc: 'other.ns.node', name: 'bad', title: 'Bad' } },
-        ctx({ clientId: nsClient.id, roles: ['CONTRIBUTOR'], namespace: 'org-a.repo' }),
+        ctx({ clientId: nsStation.id, roles: ['CONTRIBUTOR'], namespace: 'org-a.repo' }),
       ),
     ).rejects.toThrow('namespace');
   });
@@ -336,31 +336,31 @@ describe('Mutation.upsertNode access control', () => {
 // ---------------------------------------------------------------------------
 
 describe('Mutation.deleteNode access control', () => {
-  it('client with write access can delete', async () => {
+  it('station with write access can delete', async () => {
     const result = await resolvers.Mutation.deleteNode(
       null,
       { loc: 'org-a.repo.nodeA', memoryId: graphA.id },
-      ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
+      ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
     );
     expect(result).toBe(true);
   });
 
-  it('client without write access is rejected', async () => {
+  it('station without write access is rejected', async () => {
     await expect(
       resolvers.Mutation.deleteNode(
         null,
         { loc: 'org-a.repo.nodeA', memoryId: graphA.id },
-        ctx({ clientId: clientReader.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ clientId: stationReader.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
-  it('client cannot delete nodes in other graphs', async () => {
+  it('station cannot delete nodes in other graphs', async () => {
     await expect(
       resolvers.Mutation.deleteNode(
         null,
         { loc: 'org-b.repo.nodeB', memoryId: graphB.id },
-        ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
   });
@@ -371,45 +371,45 @@ describe('Mutation.deleteNode access control', () => {
 // ---------------------------------------------------------------------------
 
 describe('Mutation.moveNode access control', () => {
-  it('client with write access can move', async () => {
+  it('station with write access can move', async () => {
     const node = await resolvers.Mutation.moveNode(
       null,
       { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedNode', memoryId: graphA.id },
-      ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
+      ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
     );
     expect(node.loc).toBe('org-a.repo.movedNode');
   });
 
-  it('client cannot move nodes in inaccessible graphs', async () => {
+  it('station cannot move nodes in inaccessible graphs', async () => {
     await expect(
       resolvers.Mutation.moveNode(
         null,
         { from: 'org-b.repo.nodeB', to: 'org-b.repo.moved', memoryId: graphB.id },
-        ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
   it('namespace restriction applies to move target', async () => {
     const agent = await db.agent.findFirst({ where: { organizationId: orgA.id } });
-    const nsClient = await db.client.create({
+    const nsStation = await db.station.create({
       data: {
-        label: 'ns-move-client',
+        label: 'ns-move-station',
         keyHash: 'x',
         role: 'CONTRIBUTOR',
-        clientType: 'AGENT',
+        stationType: 'AGENT',
         namespace: 'org-a.repo',
       },
     });
-    await db.clientAgentSubscription.create({
-      data: { clientId: nsClient.id, agentId: agent!.id, subscriptionType: 'READ_WRITE' },
+    await db.stationAgentSubscription.create({
+      data: { stationId: nsStation.id, agentId: agent!.id, subscriptionType: 'READ_WRITE' },
     });
 
     await expect(
       resolvers.Mutation.moveNode(
         null,
         { from: 'org-a.repo.nodeA', to: 'other.ns.moved', memoryId: graphA.id },
-        ctx({ clientId: nsClient.id, roles: ['CONTRIBUTOR'], namespace: 'org-a.repo' }),
+        ctx({ clientId: nsStation.id, roles: ['CONTRIBUTOR'], namespace: 'org-a.repo' }),
       ),
     ).rejects.toThrow('namespace');
   });
@@ -420,7 +420,7 @@ describe('Mutation.moveNode access control', () => {
 // ---------------------------------------------------------------------------
 
 describe('Mutation.replaceSubtree access control', () => {
-  it('client with write access can replace', async () => {
+  it('station with write access can replace', async () => {
     const count = await resolvers.Mutation.replaceSubtree(
       null,
       {
@@ -432,12 +432,12 @@ describe('Mutation.replaceSubtree access control', () => {
         ],
         edges: [],
       },
-      ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
+      ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
     );
     expect(count).toBe(1);
   });
 
-  it('client without write access is rejected', async () => {
+  it('station without write access is rejected', async () => {
     await expect(
       resolvers.Mutation.replaceSubtree(
         null,
@@ -448,12 +448,12 @@ describe('Mutation.replaceSubtree access control', () => {
           nodes: [],
           edges: [],
         },
-        ctx({ clientId: clientReader.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ clientId: stationReader.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
-  it('client cannot replace subtree in other graph', async () => {
+  it('station cannot replace subtree in other graph', async () => {
     await expect(
       resolvers.Mutation.replaceSubtree(
         null,
@@ -464,7 +464,7 @@ describe('Mutation.replaceSubtree access control', () => {
           nodes: [],
           edges: [],
         },
-        ctx({ clientId: clientContributor.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
       ),
     ).rejects.toThrow('Forbidden');
   });

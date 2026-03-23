@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { SignJWT } from 'jose';
 import type { Request } from 'express';
 import { db } from '../integrations/db/client.js';
-import { cleanDb, createDbClient, TEST_RAW_KEY } from '../test/helpers.js';
+import { cleanDb, createDbStation, TEST_RAW_KEY } from '../test/helpers.js';
 import { resolveAuthContext } from './auth.js';
 
 // JWT_SECRET is set in vitest.config.ts env
@@ -78,41 +78,41 @@ describe('resolveAuthContext', () => {
     expect(ctx).toEqual({});
   });
 
-  it('resolves a valid API key to client context', async () => {
-    const client = await createDbClient(db, 'my-service', 'CONTRIBUTOR');
+  it('resolves a valid API key to station context', async () => {
+    const station = await createDbStation(db, 'my-service', 'CONTRIBUTOR');
 
     const ctx = await resolveAuthContext(makeReq(`Bearer ${TEST_RAW_KEY}`), db);
-    expect(ctx.clientId).toBe(client.id);
+    expect(ctx.clientId).toBe(station.id);
     expect(ctx.roles).toEqual(['CONTRIBUTOR']);
     expect(ctx.userId).toBeUndefined();
   });
 
   it('returns empty context for an invalid API key', async () => {
-    await createDbClient(db, 'my-service', 'READER');
+    await createDbStation(db, 'my-service', 'READER');
 
     const ctx = await resolveAuthContext(makeReq(`Bearer ${'z'.repeat(64)}`), db);
     expect(ctx).toEqual({});
   });
 
-  it('returns empty context for an expired Client', async () => {
+  it('returns empty context for an expired Station', async () => {
     const past = new Date(Date.now() - 1000);
-    await createDbClient(db, 'expired-client', 'READER', { expiresAt: past });
+    await createDbStation(db, 'expired-station', 'READER', { expiresAt: past });
 
     const ctx = await resolveAuthContext(makeReq(`Bearer ${TEST_RAW_KEY}`), db);
     expect(ctx).toEqual({});
   });
 
   it('updates lastUsedAt in DB when API key is valid', async () => {
-    await createDbClient(db, 'tracking-client', 'ADMIN');
+    await createDbStation(db, 'tracking-station', 'ADMIN');
 
     await resolveAuthContext(makeReq(`Bearer ${TEST_RAW_KEY}`), db);
 
-    const client = await db.client.findFirst({ where: { label: 'tracking-client' } });
-    expect(client!.lastUsedAt).not.toBeNull();
+    const station = await db.station.findFirst({ where: { label: 'tracking-station' } });
+    expect(station!.lastUsedAt).not.toBeNull();
   });
 
-  it('propagates namespace from client to context', async () => {
-    await createDbClient(db, 'ns-client', 'READER', { namespace: 'org.graph' });
+  it('propagates namespace from station to context', async () => {
+    await createDbStation(db, 'ns-station', 'READER', { namespace: 'org.graph' });
 
     const ctx = await resolveAuthContext(makeReq(`Bearer ${TEST_RAW_KEY}`), db);
     expect(ctx.namespace).toBe('org.graph');

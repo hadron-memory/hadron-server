@@ -23,12 +23,12 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.pendingEdge.deleteMany();
   await db.session.deleteMany();
   await db.node.deleteMany();
-  await db.clientAgentSubscription.deleteMany();
+  await db.stationAgentSubscription.deleteMany();
   await db.agentMemoryItem.deleteMany();
   await db.agent.deleteMany();
   await db.memorySubscription.deleteMany();
   await db.memoryLicense.deleteMany();
-  await db.client.deleteMany();
+  await db.station.deleteMany();
   await db.orgMember.deleteMany();
   await db.memory.deleteMany();
   await db.organization.deleteMany();
@@ -92,21 +92,21 @@ export async function createDbNode(
 }
 
 /**
- * Insert a test Client record with a known raw key + bcrypt hash.
+ * Insert a test Station record with a known raw key + bcrypt hash.
  */
-export async function createDbClient(
+export async function createDbStation(
   db: PrismaClient,
   label: string,
   role: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' = 'READER',
   opts: { namespace?: string; expiresAt?: Date; organizationId?: string; userId?: string } = {},
 ) {
   const keyHash = await bcrypt.hash(TEST_RAW_KEY, 4); // low cost for speed
-  return db.client.create({
+  return db.station.create({
     data: {
       label,
       keyHash,
       role,
-      clientType: 'WORKSTATION',
+      stationType: 'WORKSTATION',
       namespace: opts.namespace ?? null,
       expiresAt: opts.expiresAt ?? null,
       organizationId: opts.organizationId ?? null,

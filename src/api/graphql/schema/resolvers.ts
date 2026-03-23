@@ -1,14 +1,14 @@
 import bcrypt from 'bcrypt';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'crypto';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
-import type { PrismaClient, Role, ClientType, Visibility, Prisma } from '../../../generated/prisma/index.js';
+import type { PrismaClient, Role, StationType, Visibility, Prisma } from '../../../generated/prisma/index.js';
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 
 export interface Context {
   db: PrismaClient;
-  clientId?: string;       // Client.id or "github:<username>"
+  clientId?: string;       // Station.id or "github:<username>"
   userId?: string;         // User.id — only set for OAuth/JWT users
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   namespace?: string;      // contributor's writable namespace
@@ -52,8 +52,8 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
 
   // API-key client — memories from agent subscriptions
   if (ctx.clientId && !ctx.userId) {
-    const subs = await ctx.db.clientAgentSubscription.findMany({
-      where: { clientId: ctx.clientId, deletedAt: null },
+    const subs = await ctx.db.stationAgentSubscription.findMany({
+      where: { stationId: ctx.clientId, deletedAt: null },
       include: { agent: { include: { memoryItems: { select: { memoryId: true } } } } },
     });
     const ids: string[] = [];
@@ -132,11 +132,11 @@ async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise
   if (ctx.clientId && !ctx.userId) {
     const highestRole = Math.max(...(ctx.roles ?? []).map((r) => ROLE_ORDER[r] ?? -1));
     if (highestRole < ROLE_ORDER['CONTRIBUTOR']) {
-      throw new Error('Forbidden: client role insufficient for writes');
+      throw new Error('Forbidden: station role insufficient for writes');
     }
-    const sub = await ctx.db.clientAgentSubscription.findFirst({
+    const sub = await ctx.db.stationAgentSubscription.findFirst({
       where: {
-        clientId: ctx.clientId,
+        stationId: ctx.clientId,
         deletedAt: null,
         subscriptionType: 'READ_WRITE',
         agent: { memoryItems: { some: { memoryId } } },
@@ -194,7 +194,7 @@ const AGENT_INCLUDE = {
   memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
 };
 
-const CLIENT_INCLUDE = {
+const STATION_INCLUDE = {
   agentSubscriptions: { include: { agent: { include: AGENT_INCLUDE } }, orderBy: { createdAt: 'asc' as const } },
 };
 
@@ -246,15 +246,15 @@ export const resolvers = {
     updatedAt: (o: { updatedAt: Date | string }) => toISO(o.updatedAt)!,
     hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
   },
-  Client: {
+  Station: {
     createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,
     lastUsedAt: (c: { lastUsedAt?: Date | string | null }) => toISO(c.lastUsedAt),
     expiresAt: (c: { expiresAt?: Date | string | null }) => toISO(c.expiresAt),
-    user: (client: { userId?: string | null }, _: unknown, ctx: Context) =>
-      client.userId ? ctx.db.user.findUnique({ where: { id: client.userId } }) : null,
-    agentSubscriptions: (client: { id: string }, _: unknown, ctx: Context) =>
-      ctx.db.clientAgentSubscription.findMany({
-        where: { clientId: client.id },
+    user: (station: { userId?: string | null }, _: unknown, ctx: Context) =>
+      station.userId ? ctx.db.user.findUnique({ where: { id: station.userId } }) : null,
+    agentSubscriptions: (station: { id: string }, _: unknown, ctx: Context) =>
+      ctx.db.stationAgentSubscription.findMany({
+        where: { stationId: station.id },
         include: { agent: { include: AGENT_INCLUDE } },
         orderBy: { createdAt: 'asc' as const },
       }),
@@ -376,19 +376,19 @@ export const resolvers = {
       return ctx.db.session.findUnique({ where: { id }, include: SESSION_INCLUDE });
     },
 
-    clients: async (_: unknown, __: unknown, ctx: Context) => {
+    stations: async (_: unknown, __: unknown, ctx: Context) => {
       requireRole(ctx, 'ADMIN');
-      return ctx.db.client.findMany({ where: { deletedAt: null }, orderBy: { createdAt: 'desc' } });
+      return ctx.db.station.findMany({ where: { deletedAt: null }, orderBy: { createdAt: 'desc' } });
     },
 
-    client: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    station: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       requireRole(ctx, 'ADMIN');
-      return ctx.db.client.findUnique({ where: { id } });
+      return ctx.db.station.findUnique({ where: { id } });
     },
 
-    myClients: async (_: unknown, __: unknown, ctx: Context) => {
+    myStations: async (_: unknown, __: unknown, ctx: Context) => {
       if (!ctx.userId) return [];
-      return ctx.db.client.findMany({
+      return ctx.db.station.findMany({
         where: { userId: ctx.userId, deletedAt: null },
         orderBy: { createdAt: 'desc' },
       });
@@ -456,8 +456,8 @@ export const resolvers = {
     myMemories: async (_: unknown, __: unknown, ctx: Context) => {
       // API-key client — return memories from agent subscriptions
       if (ctx.clientId && !ctx.userId) {
-        const subs = await ctx.db.clientAgentSubscription.findMany({
-          where: { clientId: ctx.clientId, deletedAt: null },
+        const subs = await ctx.db.stationAgentSubscription.findMany({
+          where: { stationId: ctx.clientId, deletedAt: null },
           include: { agent: { include: { memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } } } } },
         });
         const memoryMap = new Map<string, any>();
@@ -639,7 +639,7 @@ export const resolvers = {
         data: {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
-          clientId: ctx.clientId?.startsWith('github:') ? undefined : ctx.clientId,
+          stationId: ctx.clientId?.startsWith('github:') ? undefined : ctx.clientId,
           repo: input.repo,
           branch: input.branch,
           prNumber: input.prNumber,
@@ -684,7 +684,7 @@ export const resolvers = {
           nodeLoc: event.nodeLoc,
           nodeId: node?.id,
           actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
-          clientId: ctx.clientId?.startsWith('github:') ? undefined : ctx.clientId,
+          stationId: ctx.clientId?.startsWith('github:') ? undefined : ctx.clientId,
           sessionId: event.sessionId,
           model: event.model,
           tokensIn: event.tokensIn,
@@ -694,11 +694,11 @@ export const resolvers = {
       return true;
     },
 
-    createClient: async (
+    createStation: async (
       _: unknown,
       {
         label,
-        clientType,
+        stationType,
         role,
         description,
         namespace,
@@ -708,7 +708,7 @@ export const resolvers = {
         agentTools,
       }: {
         label: string;
-        clientType: string;
+        stationType: string;
         role: string;
         description?: string;
         namespace?: string;
@@ -722,11 +722,11 @@ export const resolvers = {
       requireRole(ctx, 'READER');
       const rawKey = randomBytes(32).toString('hex');
       const keyHash = await bcrypt.hash(rawKey, 12);
-      const client = await ctx.db.client.create({
+      const station = await ctx.db.station.create({
         data: {
           label,
           keyHash,
-          clientType: clientType as ClientType,
+          stationType: stationType as StationType,
           description,
           role: role as Role,
           namespace,
@@ -736,18 +736,18 @@ export const resolvers = {
           expiresAt: expiresAt ? new Date(expiresAt) : undefined,
         },
       });
-      return { client, rawKey };
+      return { station, rawKey };
     },
 
-    updateClient: async (
+    updateStation: async (
       _: unknown,
       { id, description, agentTools }: { id: string; description?: string; agentTools?: string[] },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
-      const existing = await ctx.db.client.findUniqueOrThrow({ where: { id } });
+      const existing = await ctx.db.station.findUniqueOrThrow({ where: { id } });
       if (existing.userId !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) throw new Error('Forbidden');
-      return ctx.db.client.update({
+      return ctx.db.station.update({
         where: { id },
         data: {
           ...(description !== undefined ? { description } : {}),
@@ -758,43 +758,43 @@ export const resolvers = {
 
     regenerateApiKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
-      const existing = await ctx.db.client.findUniqueOrThrow({ where: { id } });
+      const existing = await ctx.db.station.findUniqueOrThrow({ where: { id } });
       if (existing.userId !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) throw new Error('Forbidden');
       const rawKey = randomBytes(32).toString('hex');
       const keyHash = await bcrypt.hash(rawKey, 12);
-      const client = await ctx.db.client.update({ where: { id }, data: { keyHash, apiKeyShown: false } });
-      return { client, rawKey };
+      const station = await ctx.db.station.update({ where: { id }, data: { keyHash, apiKeyShown: false } });
+      return { station, rawKey };
     },
 
-    revokeClient: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    revokeStation: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
-      const existing = await ctx.db.client.findUnique({ where: { id } });
-      if (!existing) throw new Error('Client not found');
+      const existing = await ctx.db.station.findUnique({ where: { id } });
+      if (!existing) throw new Error('Station not found');
       if (existing.userId !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) throw new Error('Forbidden');
-      await ctx.db.client.update({ where: { id }, data: { deletedAt: new Date() } });
+      await ctx.db.station.update({ where: { id }, data: { deletedAt: new Date() } });
       return true;
     },
 
-    // ── Client agent subscriptions ──────────────────────────────────────
+    // ── Station agent subscriptions ─────────────────────────────────────
 
-    subscribeClientToAgent: async (
+    subscribeStationToAgent: async (
       _: unknown,
-      { clientId, agentId, subscriptionType, trainingMode }: { clientId: string; agentId: string; subscriptionType?: string; trainingMode?: boolean },
+      { stationId, agentId, subscriptionType, trainingMode }: { stationId: string; agentId: string; subscriptionType?: string; trainingMode?: boolean },
       ctx: Context,
     ) => {
-      const client = await ctx.db.client.findUniqueOrThrow({ where: { id: clientId } });
+      const station = await ctx.db.station.findUniqueOrThrow({ where: { id: stationId } });
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
 
-      if (client.organizationId) {
-        await requireOrgRole(ctx, client.organizationId, 'ADMIN');
+      if (station.organizationId) {
+        await requireOrgRole(ctx, station.organizationId, 'ADMIN');
       } else {
-        if (client.userId !== ctx.userId && !ctx.roles?.includes('ADMIN')) throw new Error('Forbidden');
+        if (station.userId !== ctx.userId && !ctx.roles?.includes('ADMIN')) throw new Error('Forbidden');
       }
 
-      await ctx.db.clientAgentSubscription.upsert({
-        where: { clientId_agentId: { clientId, agentId } },
+      await ctx.db.stationAgentSubscription.upsert({
+        where: { stationId_agentId: { stationId, agentId } },
         create: {
-          clientId,
+          stationId,
           agentId,
           subscriptionType: (subscriptionType as any) ?? 'READ_ONLY',
           trainingMode: trainingMode ?? false,
@@ -804,25 +804,25 @@ export const resolvers = {
           ...(trainingMode !== undefined ? { trainingMode } : {}),
         },
       });
-      return ctx.db.client.findUniqueOrThrow({ where: { id: clientId }, include: CLIENT_INCLUDE });
+      return ctx.db.station.findUniqueOrThrow({ where: { id: stationId }, include: STATION_INCLUDE });
     },
 
-    unsubscribeClientFromAgent: async (
+    unsubscribeStationFromAgent: async (
       _: unknown,
-      { clientId, agentId }: { clientId: string; agentId: string },
+      { stationId, agentId }: { stationId: string; agentId: string },
       ctx: Context,
     ) => {
-      const client = await ctx.db.client.findUniqueOrThrow({ where: { id: clientId } });
-      if (client.organizationId) {
-        await requireOrgRole(ctx, client.organizationId, 'ADMIN');
+      const station = await ctx.db.station.findUniqueOrThrow({ where: { id: stationId } });
+      if (station.organizationId) {
+        await requireOrgRole(ctx, station.organizationId, 'ADMIN');
       } else {
-        if (client.userId !== ctx.userId && !ctx.roles?.includes('ADMIN')) throw new Error('Forbidden');
+        if (station.userId !== ctx.userId && !ctx.roles?.includes('ADMIN')) throw new Error('Forbidden');
       }
 
-      await ctx.db.clientAgentSubscription.delete({
-        where: { clientId_agentId: { clientId, agentId } },
+      await ctx.db.stationAgentSubscription.delete({
+        where: { stationId_agentId: { stationId, agentId } },
       });
-      return ctx.db.client.findUniqueOrThrow({ where: { id: clientId }, include: CLIENT_INCLUDE });
+      return ctx.db.station.findUniqueOrThrow({ where: { id: stationId }, include: STATION_INCLUDE });
     },
 
     updateUserRoles: async (

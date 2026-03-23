@@ -37,18 +37,18 @@ function validateLoc(loc: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Access control: check if a client can access/write to a memory
+// Access control: check if a station can access/write to a memory
 // ---------------------------------------------------------------------------
 
 /**
- * Get the memory IDs accessible to a client through agent subscriptions.
+ * Get the memory IDs accessible to a station through agent subscriptions.
  * Returns a map of memoryId → subscriptionType.
  */
-async function getClientMemoryAccess(
-  clientId: string,
+async function getStationMemoryAccess(
+  stationId: string,
 ): Promise<Map<string, string>> {
-  const subs = await db.clientAgentSubscription.findMany({
-    where: { clientId, deletedAt: null },
+  const subs = await db.stationAgentSubscription.findMany({
+    where: { stationId, deletedAt: null },
     include: {
       agent: {
         include: {
@@ -72,7 +72,7 @@ async function getClientMemoryAccess(
 }
 
 /**
- * Check if a client has write access to a specific memory.
+ * Check if a station has write access to a specific memory.
  * Platform ADMINs and OWNERs bypass subscription checks.
  */
 async function canWriteToMemory(
@@ -82,7 +82,7 @@ async function canWriteToMemory(
   if (!auth.clientId) return false;
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
 
-  const access = await getClientMemoryAccess(auth.clientId);
+  const access = await getStationMemoryAccess(auth.clientId);
   return access.get(memoryId) === 'READ_WRITE';
 }
 
@@ -96,7 +96,7 @@ async function getAccessibleMemoryIds(
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return null;
   if (!auth.clientId) return [];
 
-  const access = await getClientMemoryAccess(auth.clientId);
+  const access = await getStationMemoryAccess(auth.clientId);
   return [...access.keys()];
 }
 
@@ -172,7 +172,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           type: 'read',
           nodeLoc: loc,
           nodeId: node.id,
-          clientId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
           sessionId: null,
         },
       }).catch(() => {});
@@ -333,7 +333,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           type: 'write',
           nodeLoc: loc,
           nodeId: upserted.id,
-          clientId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
           sessionId: null,
         },
       }).catch(() => {});
@@ -428,7 +428,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           type: 'action-run',
           nodeLoc: loc,
           nodeId: node.id,
-          clientId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
           sessionId: null,
           actionArgs: (args ?? undefined) as Record<string, string> | undefined,
         },
@@ -469,7 +469,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           id: sessionId,
           type: (type || 'DEVELOPER') as SessionType,
           plan: description,
-          clientId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
           repo: repo ?? null,
           branch: branch ?? null,
           prNumber: prNumber ?? null,

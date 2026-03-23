@@ -5,7 +5,7 @@ import type { PrismaClient } from '../generated/prisma/client.js';
 interface ProvisionResult {
   orgId: string;
   agentId: string;
-  clientId: string;
+  stationId: string;
   rawKey: string;
 }
 
@@ -55,24 +55,24 @@ export async function provisionPersonalWorkspace(
     },
   });
 
-  // 4. Create workstation client with API key
+  // 4. Create workstation station with API key
   const rawKey = randomBytes(32).toString('hex');
   const keyHash = await bcrypt.hash(rawKey, 12);
-  const client = await db.client.create({
+  const station = await db.station.create({
     data: {
       label: 'My Workstation',
       keyHash,
-      clientType: 'WORKSTATION',
+      stationType: 'WORKSTATION',
       role: 'READER',
       organizationId: org.id,
       userId,
     },
   });
 
-  // 5. Subscribe client to default agent
-  await db.clientAgentSubscription.create({
+  // 5. Subscribe station to default agent
+  await db.stationAgentSubscription.create({
     data: {
-      clientId: client.id,
+      stationId: station.id,
       agentId: agent.id,
       subscriptionType: 'READ_WRITE',
     },
@@ -82,7 +82,7 @@ export async function provisionPersonalWorkspace(
   await db.pendingSetup.create({
     data: {
       userId,
-      clientId: client.id,
+      stationId: station.id,
       rawKeyEncrypted: rawKey, // TODO: encrypt at rest with app-level key
     },
   });
@@ -90,29 +90,29 @@ export async function provisionPersonalWorkspace(
   return {
     orgId: org.id,
     agentId: agent.id,
-    clientId: client.id,
+    stationId: station.id,
     rawKey,
   };
 }
 
 /**
  * Check if a user already has a personal workspace provisioned,
- * or already has any client (e.g. from seed data).
+ * or already has any station (e.g. from seed data).
  */
 export async function hasPersonalWorkspace(
   db: PrismaClient,
   userId: string,
 ): Promise<boolean> {
-  const [membership, client] = await Promise.all([
+  const [membership, station] = await Promise.all([
     db.orgMember.findFirst({
       where: {
         userId,
         organization: { isVisible: { not: true } },
       },
     }),
-    db.client.findFirst({
+    db.station.findFirst({
       where: { userId, deletedAt: null },
     }),
   ]);
-  return !!membership || !!client;
+  return !!membership || !!station;
 }

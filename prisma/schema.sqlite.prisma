@@ -123,9 +123,9 @@ model UsageEvent {
   @@index([sessionId])
 }
 
-// A machine client — workstation, cloud host, IoT device, or AI agent.
+// A machine station — workstation, cloud host, IoT device, or AI agent.
 // Authenticates via API key. The raw key is shown once at creation; only its bcrypt hash is stored.
-model Client {
+model Station {
   id             String    @id @default(cuid())
   label          String    @unique // human-readable name, e.g. "mmdata-ci"
   keyHash        String    // bcrypt hash of the opaque token
@@ -133,15 +133,15 @@ model Client {
   description    String?
   roles          String    @default("[\"READER\"]") // JSON array of "ADMIN" | "CONTRIBUTOR" | "READER"
   namespace      String?   // for CONTRIBUTOR: restricts write access to this namespace prefix
-  organizationId String?   // optional: scopes this client to one organization
-  userId         String?   // optional: the user who owns this client; null for IoT/org-owned
+  organizationId String?   // optional: scopes this station to one organization
+  userId         String?   // optional: the user who owns this station; null for IoT/org-owned
   expiresAt      DateTime?
   createdAt      DateTime  @default(now())
   lastUsedAt     DateTime?
 
-  organization       Organization?            @relation(fields: [organizationId], references: [id], onDelete: SetNull)
-  user               User?                    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  graphSubscriptions ClientGraphSubscription[]
+  organization       Organization?             @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  user               User?                     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  graphSubscriptions StationGraphSubscription[]
 }
 
 // GitHub OAuth users — cached after first login.
@@ -158,7 +158,7 @@ model User {
   updatedAt DateTime @updatedAt
 
   memberships OrganizationMember[]
-  clients     Client[]
+  stations    Station[]
   sentInvites OrgInvite[] @relation("SentInvites")
 }
 
@@ -173,7 +173,7 @@ model Organization {
 
   members       OrganizationMember[]
   graphs        HadronGraph[]
-  clients       Client[]
+  stations      Station[]
   subscriptions HadronGraphSubscription[]
   invites       OrgInvite[]
 }
@@ -210,24 +210,24 @@ model HadronGraph {
 
   organization        Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   subscriptions       HadronGraphSubscription[]
-  clientSubscriptions ClientGraphSubscription[]
+  stationSubscriptions StationGraphSubscription[]
 
   @@unique([organizationId, name])
   @@index([organizationId])
 }
 
-// A client's subscription to a specific graph — controls which graphs the client syncs.
+// A station's subscription to a specific graph — controls which graphs the station syncs.
 // Empty subscriptions = no graphs (explicit opt-in required).
-model ClientGraphSubscription {
+model StationGraphSubscription {
   id        String   @id @default(cuid())
-  clientId  String
+  stationId String
   graphId   String
   createdAt DateTime @default(now())
 
-  client Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  graph  HadronGraph @relation(fields: [graphId],  references: [id], onDelete: Cascade)
+  station Station     @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  graph   HadronGraph @relation(fields: [graphId],  references: [id], onDelete: Cascade)
 
-  @@unique([clientId, graphId])
+  @@unique([stationId, graphId])
   @@index([graphId])
 }
 

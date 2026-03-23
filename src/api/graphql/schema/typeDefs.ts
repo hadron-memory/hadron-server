@@ -6,7 +6,7 @@ export const typeDefs = `#graphql
     READER
   }
 
-  enum ClientType {
+  enum StationType {
     WORKSTATION
     AGENT
     AUTOMATION
@@ -62,7 +62,7 @@ export const typeDefs = `#graphql
   type Session {
     id: ID!
     type: String!
-    clientId: String
+    stationId: String
     repo: String
     branch: String
     prNumber: Int
@@ -91,7 +91,7 @@ export const typeDefs = `#graphql
     type: String!
     nodeLoc: String
     actionArgs: JSON
-    clientId: String
+    stationId: String
     sessionId: String
     model: String
     tokensIn: Int
@@ -113,8 +113,8 @@ export const typeDefs = `#graphql
     createdAt: String!
   }
 
-  # A client's subscription to an agent.
-  type ClientAgentSub {
+  # A station's subscription to an agent.
+  type StationAgentSub {
     id: ID!
     agent: Agent!
     subscriptionType: SubscriptionType!
@@ -122,10 +122,10 @@ export const typeDefs = `#graphql
     createdAt: String!
   }
 
-  type Client {
+  type Station {
     id: ID!
     label: String!
-    clientType: ClientType!
+    stationType: StationType!
     description: String
     role: Role!
     apiKeyShown: Boolean!
@@ -134,15 +134,15 @@ export const typeDefs = `#graphql
     organizationId: String
     userId: String
     user: User
-    agentSubscriptions: [ClientAgentSub!]!
+    agentSubscriptions: [StationAgentSub!]!
     expiresAt: String
     createdAt: String!
     lastUsedAt: String
   }
 
   # Returned once at creation — the raw key is never stored
-  type ClientCreated {
-    client: Client!
+  type StationCreated {
+    station: Station!
     rawKey: String!
   }
 
@@ -315,11 +315,11 @@ export const typeDefs = `#graphql
     sessions(type: String, repo: String, customerId: String, limit: Int): [Session!]!
     session(id: ID!): Session
 
-    # Clients (admin only)
-    clients: [Client!]!
-    client(id: ID!): Client
-    # Clients owned by the current user
-    myClients: [Client!]!
+    # Stations (admin only)
+    stations: [Station!]!
+    station(id: ID!): Station
+    # Stations owned by the current user
+    myStations: [Station!]!
 
     # Users (admin only)
     users: [User!]!
@@ -364,15 +364,15 @@ export const typeDefs = `#graphql
     # Record a usage event
     recordUsage(event: UsageEventInput!): Boolean!
 
-    # Client management
-    createClient(label: String!, clientType: ClientType!, role: Role!, description: String, namespace: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!]): ClientCreated!
-    updateClient(id: ID!, description: String, agentTools: [String!]): Client!
-    regenerateApiKey(id: ID!): ClientCreated!
-    revokeClient(id: ID!): Boolean!
+    # Station management
+    createStation(label: String!, stationType: StationType!, role: Role!, description: String, namespace: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!]): StationCreated!
+    updateStation(id: ID!, description: String, agentTools: [String!]): Station!
+    regenerateApiKey(id: ID!): StationCreated!
+    revokeStation(id: ID!): Boolean!
 
-    # Client agent subscriptions (org ADMIN or platform ADMIN)
-    subscribeClientToAgent(clientId: ID!, agentId: ID!, subscriptionType: SubscriptionType, trainingMode: Boolean): Client!
-    unsubscribeClientFromAgent(clientId: ID!, agentId: ID!): Client!
+    # Station agent subscriptions (org ADMIN or platform ADMIN)
+    subscribeStationToAgent(stationId: ID!, agentId: ID!, subscriptionType: SubscriptionType, trainingMode: Boolean): Station!
+    unsubscribeStationFromAgent(stationId: ID!, agentId: ID!): Station!
 
     # User management (admin only)
     updateUserRoles(userId: ID!, roles: [Role!]!): User!

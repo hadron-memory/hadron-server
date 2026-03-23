@@ -4,7 +4,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { verifyJwt } from '../auth/jwt.js';
 
 export interface AuthContext {
-  clientId?: string;       // Client.id (API keys) or "github:<username>" (OAuth)
+  clientId?: string;       // Station.id (API keys) or "github:<username>" (OAuth)
   userId?: string;         // User.id — only set for OAuth/JWT users
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   namespace?: string;
@@ -26,7 +26,7 @@ export async function resolveAuthContext(
   if (token.includes('.')) {
     return resolveJwt(token);
   }
-  return resolveClientKey(token, db);
+  return resolveStationKey(token, db);
 }
 
 async function resolveJwt(token: string): Promise<AuthContext> {
@@ -45,29 +45,29 @@ async function resolveJwt(token: string): Promise<AuthContext> {
   }
 }
 
-async function resolveClientKey(
+async function resolveStationKey(
   rawKey: string,
   db: PrismaClient,
 ): Promise<AuthContext> {
-  const clients = await db.client.findMany({
+  const stations = await db.station.findMany({
     where: {
       deletedAt: null,
       OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
     },
   });
 
-  for (const client of clients) {
-    const match = await bcrypt.compare(rawKey, client.keyHash);
+  for (const station of stations) {
+    const match = await bcrypt.compare(rawKey, station.keyHash);
     if (match) {
-      await db.client.update({
-        where: { id: client.id },
+      await db.station.update({
+        where: { id: station.id },
         data: { lastUsedAt: new Date() },
       });
       return {
-        clientId: client.id,
-        roles: [client.role],
-        namespace: client.namespace ?? undefined,
-        organizationId: client.organizationId ?? undefined,
+        clientId: station.id,
+        roles: [station.role],
+        namespace: station.namespace ?? undefined,
+        organizationId: station.organizationId ?? undefined,
       };
     }
   }

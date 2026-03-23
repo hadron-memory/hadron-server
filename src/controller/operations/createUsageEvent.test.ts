@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb, createDbClient, createDbNode, createDbOrgAndGraph } from '../../test/helpers.js';
+import { cleanDb, createDbStation, createDbNode, createDbOrgAndGraph } from '../../test/helpers.js';
 import { createUsageEvent } from './createUsageEvent.js';
 
 let memoryId: string;
@@ -52,14 +52,14 @@ describe('createUsageEvent', () => {
     expect(typeof stored === 'object' && stored !== null).toBe(true);
   });
 
-  it('stores optional clientId', async () => {
-    // clientId has a FK to Client, so create one first
-    const client = await createDbClient(db, 'test-client', 'READER');
+  it('stores optional stationId', async () => {
+    // stationId has a FK to Station, so create one first
+    const station = await createDbStation(db, 'test-station', 'READER');
     const result = await createUsageEvent({
       type: 'click',
-      clientId: client.id,
+      stationId: station.id,
     });
     expect(result.error).toBeUndefined();
-    expect(result.event!.clientId).toBe(client.id);
+    expect(result.event!.stationId).toBe(station.id);
   });
 });

@@ -30,7 +30,7 @@ export interface Edge {
 export interface Session {
   id: string;
   type: string;
-  clientId: string | null;
+  stationId: string | null;
   repo: string | null;
   branch: string | null;
   prNumber: number | null;
@@ -60,7 +60,7 @@ export interface UsageEvent {
   nodeLoc: string | null;
   nodeId: string | null;
   actionArgs: Record<string, unknown> | null;
-  clientId: string | null;
+  stationId: string | null;
   sessionId: string | null;
   model: string | null;
   tokensIn: number | null;
@@ -68,10 +68,10 @@ export interface UsageEvent {
   createdAt: string;
 }
 
-export interface Client {
+export interface Station {
   id: string;
   label: string;
-  clientType: ClientType;
+  stationType: StationType;
   description: string | null;
   role: Role;
   apiKeyShown: boolean;
@@ -83,8 +83,8 @@ export interface Client {
   lastUsedAt: string | null;
 }
 
-export interface ClientCreated {
-  client: Client;
+export interface StationCreated {
+  station: Station;
   rawKey: string;
 }
 
@@ -101,5 +101,5 @@ export interface User {
 }
 
 export type Role = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
-export type ClientType = 'WORKSTATION' | 'AGENT' | 'AUTOMATION' | 'CLOUD' | 'IOT';
+export type StationType = 'WORKSTATION' | 'AGENT' | 'AUTOMATION' | 'CLOUD' | 'IOT';
 export type IdentityProvider = 'GITHUB';

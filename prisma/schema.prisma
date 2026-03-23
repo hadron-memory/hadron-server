@@ -17,7 +17,7 @@ enum Role {
   READER
 }
 
-enum ClientType {
+enum StationType {
   WORKSTATION
   AGENT
   AUTOMATION
@@ -88,7 +88,7 @@ model User {
   deletedBy        String?           @map("deleted_by")
 
   memberships               OrgMember[]
-  clients                   Client[]
+  stations                  Station[]
   sentInvitations           UserInvitation[]           @relation("SentInvitations")
   invitationActivations     UserInvitationActivation[]
   receivedMemberInvitations OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
@@ -114,7 +114,7 @@ model Organization {
 
   members       OrgMember[]
   memories      Memory[]
-  clients       Client[]
+  stations      Station[]
   agents        Agent[]
   subscriptions MemorySubscription[]
   invitations   UserInvitation[]     @relation("OrgInvitations")
@@ -144,42 +144,42 @@ model OrgMember {
   @@map("org_members")
 }
 
-model Client {
-  id             String     @id @default(cuid())
-  userId         String?    @map("user_id")
-  organizationId String?    @map("organization_id")
-  clientType     ClientType @default(WORKSTATION) @map("client_type")
+model Station {
+  id             String      @id @default(cuid())
+  userId         String?     @map("user_id")
+  organizationId String?     @map("organization_id")
+  stationType    StationType @default(WORKSTATION) @map("station_type")
   label          String
-  keyHash        String     @map("key_hash")
-  apiKeyShown    Boolean    @default(false) @map("api_key_shown")
-  role           Role       @default(READER)
+  keyHash        String      @map("key_hash")
+  apiKeyShown    Boolean     @default(false) @map("api_key_shown")
+  role           Role        @default(READER)
   namespace      String?
   description    String?
-  agentTools     String[]   @default([]) @map("agent_tools")
-  expiresAt      DateTime?  @map("expires_at")
-  lastUsedAt     DateTime?  @map("last_used_at")
-  createdAt      DateTime   @default(now()) @map("created_at")
-  createdBy      String?    @map("created_by")
-  updatedAt      DateTime?  @map("updated_at")
-  updatedBy      String?    @map("updated_by")
-  deletedAt      DateTime?  @map("deleted_at")
-  deletedBy      String?    @map("deleted_by")
+  agentTools     String[]    @default([]) @map("agent_tools")
+  expiresAt      DateTime?   @map("expires_at")
+  lastUsedAt     DateTime?   @map("last_used_at")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  createdBy      String?     @map("created_by")
+  updatedAt      DateTime?   @map("updated_at")
+  updatedBy      String?     @map("updated_by")
+  deletedAt      DateTime?   @map("deleted_at")
+  deletedBy      String?     @map("deleted_by")
 
-  user               User?                     @relation(fields: [userId], references: [id], onDelete: SetNull)
-  organization       Organization?             @relation(fields: [organizationId], references: [id], onDelete: SetNull)
-  agentSubscriptions ClientAgentSubscription[]
+  user               User?                      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  organization       Organization?              @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  agentSubscriptions StationAgentSubscription[]
   sessions           Session[]
   usageEvents        UsageEvent[]
-  logEntries         ClientLogEntry[]
+  logEntries         StationLogEntry[]
 
   @@unique([organizationId, label])
   @@unique([userId, label])
-  @@map("clients")
+  @@map("stations")
 }
 
-model ClientAgentSubscription {
+model StationAgentSubscription {
   id               String           @id @default(cuid())
-  clientId         String           @map("client_id")
+  stationId        String           @map("station_id")
   agentId          String           @map("agent_id")
   subscriptionType SubscriptionType @default(READ_ONLY) @map("subscription_type")
   trainingMode     Boolean          @default(false) @map("training_mode")
@@ -190,11 +190,11 @@ model ClientAgentSubscription {
   deletedAt        DateTime?        @map("deleted_at")
   deletedBy        String?          @map("deleted_by")
 
-  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  agent  Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  station Station @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  agent   Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
-  @@unique([clientId, agentId])
-  @@map("client_agent_subscriptions")
+  @@unique([stationId, agentId])
+  @@map("station_agent_subscriptions")
 }
 
 model Memory {
@@ -310,7 +310,7 @@ model PendingEdge {
 model Session {
   id              String      @id // caller-generated (e.g. UUID from h-start-session)
   type            SessionType @default(DEVELOPER)
-  clientId        String?     @map("client_id")
+  stationId       String?     @map("station_id")
   repo            String?
   branch          String?
   prNumber        Int?        @map("pr_number")
@@ -338,7 +338,7 @@ model Session {
   deletedAt       DateTime?   @map("deleted_at")
   deletedBy       String?     @map("deleted_by")
 
-  client       Client?      @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  station      Station?     @relation(fields: [stationId], references: [id], onDelete: SetNull)
   events       UsageEvent[]
   parent       Session?     @relation("SubAgentSessions", fields: [parentSessionId], references: [id], onDelete: SetNull)
   subSessions  Session[]    @relation("SubAgentSessions")
@@ -351,7 +351,7 @@ model Session {
   @@index([startedAt])
   @@index([parentSessionId])
   @@index([prevSessionId])
-  @@index([clientId])
+  @@index([stationId])
   @@map("sessions")
 }
 
@@ -361,7 +361,7 @@ model UsageEvent {
   nodeLoc    String?   @map("node_loc")
   nodeId     String?   @map("node_id")
   sessionId  String?   @map("session_id")
-  clientId   String?   @map("client_id")
+  stationId  String?   @map("station_id")
   actionArgs Json?     @map("action_args")
   model      String?
   tokensIn   Int?      @map("tokens_in")
@@ -375,13 +375,13 @@ model UsageEvent {
 
   node    Node?    @relation(fields: [nodeId], references: [id], onDelete: SetNull)
   session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
-  client  Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  station Station? @relation(fields: [stationId], references: [id], onDelete: SetNull)
 
   @@index([nodeLoc])
   @@index([type])
   @@index([createdAt])
   @@index([sessionId])
-  @@index([clientId])
+  @@index([stationId])
   @@map("usage_events")
 }
 
@@ -399,7 +399,7 @@ model Agent {
 
   organization        Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   memoryItems         AgentMemoryItem[]
-  clientSubscriptions ClientAgentSubscription[]
+  stationSubscriptions StationAgentSubscription[]
 
   @@unique([organizationId, name])
   @@map("agents")
@@ -510,9 +510,9 @@ model ServerLogEntry {
   @@map("server_log")
 }
 
-model ClientLogEntry {
+model StationLogEntry {
   id        String    @id @default(cuid())
-  clientId  String    @map("client_id")
+  stationId String    @map("station_id")
   level     LogLevel
   memoryId  String?   @map("memory_id")
   sessionId String?   @map("session_id")
@@ -525,12 +525,12 @@ model ClientLogEntry {
   deletedAt DateTime? @map("deleted_at")
   deletedBy String?   @map("deleted_by")
 
-  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  station Station @relation(fields: [stationId], references: [id], onDelete: Cascade)
 
-  @@index([clientId])
+  @@index([stationId])
   @@index([level])
   @@index([createdAt])
-  @@map("client_log")
+  @@map("station_log")
 }
 
 model MemoryLogEntry {
@@ -656,7 +656,7 @@ model NodeVersion {
 model PendingSetup {
   id              String   @id @default(cuid())
   userId          String   @unique @map("user_id")
-  clientId        String   @map("client_id")
+  stationId       String   @map("station_id")
   rawKeyEncrypted String   @map("raw_key_encrypted")
   consumed        Boolean  @default(false)
   createdAt       DateTime @default(now()) @map("created_at")

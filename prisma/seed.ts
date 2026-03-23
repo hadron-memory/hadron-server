@@ -296,22 +296,22 @@ async function main() {
     console.log(`  Linked ${mem.name} → ${agent.name}`);
   }
 
-  // 8. Clients + subscriptions (one per user)
-  const clientDefs = [
+  // 8. Stations + subscriptions (one per user)
+  const stationDefs = [
     { user: holger, label: 'biene-mbp4' },
     { user: raghvind, label: 'raghvind-ws' },
     { user: rupali, label: 'rupali-ws' },
     { user: noel, role: 'noel-ws' as const },
   ];
 
-  for (const { user, label } of clientDefs) {
+  for (const { user, label } of stationDefs) {
     const rawKey = randomBytes(32).toString('hex');
     const keyHash = await bcrypt.hash(rawKey, 12);
-    const client = await db.client.create({
+    const station = await db.station.create({
       data: {
         userId: user.id,
         organizationId: baragaunOrg.id,
-        clientType: 'WORKSTATION',
+        stationType: 'WORKSTATION',
         label: label || '',
         keyHash,
         role: 'ADMIN',
@@ -319,18 +319,18 @@ async function main() {
         agentTools: ['CLAUDE_CODE', 'CURSOR'],
       },
     });
-    console.log(`  Created Client: ${client.label} (user: ${user.name})`);
+    console.log(`  Created Station: ${station.label} (user: ${user.name})`);
     console.log(`    API Key: ${rawKey}`);
 
-    await db.clientAgentSubscription.create({
+    await db.stationAgentSubscription.create({
       data: {
-        clientId: client.id,
+        stationId: station.id,
         agentId: agent.id,
         subscriptionType: 'READ_WRITE',
         trainingMode: true,
       },
     });
-    console.log(`    Subscribed ${client.label} → ${agent.name} (READ_WRITE, training)`);
+    console.log(`    Subscribed ${station.label} → ${agent.name} (READ_WRITE, training)`);
   }
 
   console.log('\nSeed complete!');

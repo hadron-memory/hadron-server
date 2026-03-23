@@ -5,7 +5,7 @@ export enum Role {
   READER = 'READER',
 }
 
-export enum ClientType {
+export enum StationType {
   WORKSTATION = 'WORKSTATION',
   AGENT = 'AGENT',
   AUTOMATION = 'AUTOMATION',

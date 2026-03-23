@@ -304,7 +304,7 @@ export async function createServer(): Promise<Express> {
       res.json({
         hasSetup: true,
         apiKey: setup.rawKeyEncrypted, // TODO: decrypt when encryption is added
-        clientId: setup.clientId,
+        stationId: setup.stationId,
         orgId: membership?.organization.id,
         orgName: membership?.organization.name,
         agentId: membership?.organization.agents[0]?.id,
