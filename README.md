@@ -208,6 +208,42 @@ and adds the graph to their default bundle).
 | `POST /github/webhook` | HMAC | GitHub App webhook receiver |
 | `POST /mcp` | Bearer | MCP protocol endpoint |
 
+## Docker deployment
+
+### Running database migrations
+
+Never run `prisma db push` or `prisma migrate` as part of the container entrypoint — if it fails, the container enters a restart loop. Instead, run migrations separately using `docker compose run`:
+
+```bash
+docker compose run --rm hadron-server npx prisma db push
+```
+
+This spins up a fresh container with all env vars from your compose file, runs the command, and exits.
+
+For schema changes that require dropping and recreating (e.g. enum changes), use `--force-reset`. **This wipes all data:**
+
+```bash
+docker compose run --rm hadron-server npx prisma db push --force-reset
+```
+
+### Recovering from a restart loop
+
+If a failed migration or startup error puts the container in a restart loop:
+
+```bash
+docker compose stop hadron-server
+docker compose run --rm hadron-server npx prisma db push --force-reset
+docker compose start hadron-server
+```
+
+### Re-seeding after a reset
+
+After `--force-reset`, the database is empty. Re-seed if needed:
+
+```bash
+docker compose run --rm hadron-server npx prisma db seed
+```
+
 ## Testing
 
 Tests require a `hadron_test` PostgreSQL database. Push the current schema to it:
@@ -266,4 +302,4 @@ The server reads `DB_PROVIDER` at startup:
 | JSON fields | `Json` type | `String` (JSON-serialized) |
 | Tag filter | Prisma `hasEvery` | `AND` + `contains` on JSON string |
 | Case-insensitive search | `mode: 'insensitive'` | Omitted (SQLite LIKE is already case-insensitive) |
-| Enums | `enum Role / ClientType` | `String` with defaults |
+| Enums | `enum Role / StationType` | `String` with defaults |
