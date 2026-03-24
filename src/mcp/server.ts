@@ -396,6 +396,122 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     },
   );
 
+  // ── h-update-node ────────────────────────────────────────────────────────
+
+  server.tool(
+    'h-update-node',
+    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved.',
+    {
+      loc: z.string().describe('Dotted path of the node to update'),
+      name: z.string().optional().describe('New node name'),
+      title: z.string().optional().describe('New display title'),
+      description: z.string().optional().describe('New short description'),
+      content: z.string().optional().describe('New markdown content'),
+      seq: z.number().optional().describe('New sort order among siblings'),
+      tags: z.array(z.string()).optional().describe('Replace tags'),
+      edges: z.array(z.object({
+        targetId: z.string().describe('Target node ID or dotted loc path'),
+        label: z.string().describe('Relationship label'),
+      })).optional().describe('Replace outgoing edges'),
+      reason: z.string().optional().describe('Why this change was made (stored in version history)'),
+    },
+    async ({ loc, name, title, description, content, seq, tags, edges, reason }) => {
+      // Find the existing node
+      const memoryIds = await getAccessibleMemoryIds(auth);
+      const where: Record<string, unknown> = { loc };
+      if (memoryIds) where.memoryId = { in: memoryIds };
+
+      const existing = await db.node.findFirst({ where });
+      if (!existing) {
+        return textResult(`Node not found: "${loc}"`);
+      }
+
+      if (!(await canWriteToMemory(auth, existing.memoryId))) {
+        return textResult('Write access denied for this memory.');
+      }
+
+      // Snapshot current state for version history
+      await db.nodeVersion.create({
+        data: {
+          nodeId: existing.id,
+          loc: existing.loc,
+          name: existing.name,
+          title: existing.title,
+          alias: existing.alias,
+          description: existing.description,
+          content: existing.content,
+          tags: existing.tags as string[],
+          editedBy: reason ?? (auth.clientId ?? null),
+          createdBy: auth.clientId ?? null,
+        },
+      }).catch(() => {});
+
+      // Build partial update — only fields that were provided
+      const data: Record<string, unknown> = {};
+      if (name !== undefined) data.name = name;
+      if (title !== undefined) data.title = title;
+      if (description !== undefined) data.description = description;
+      if (content !== undefined) data.content = content;
+      if (seq !== undefined) data.seq = seq;
+      if (tags !== undefined) data.tags = tags;
+
+      if (Object.keys(data).length > 0) {
+        await db.node.update({ where: { id: existing.id }, data });
+      }
+
+      // Replace edges if provided (same logic as h-create-node)
+      if (edges !== undefined) {
+        await db.edge.deleteMany({ where: { sourceId: existing.id } });
+        await db.pendingEdge.deleteMany({ where: { sourceId: existing.id } });
+        for (const edge of edges) {
+          let resolvedTargetId = edge.targetId;
+          if (edge.targetId.includes('.')) {
+            const targetNode = await db.node.findFirst({ where: { loc: edge.targetId } });
+            if (targetNode) {
+              resolvedTargetId = targetNode.id;
+            } else {
+              await db.pendingEdge.upsert({
+                where: { sourceId_targetId: { sourceId: existing.id, targetId: edge.targetId } },
+                create: {
+                  sourceId: existing.id,
+                  targetId: edge.targetId,
+                  label: edge.label,
+                  createdBy: auth.clientId ?? null,
+                },
+                update: { label: edge.label },
+              });
+              continue;
+            }
+          }
+          await db.edge.upsert({
+            where: { sourceId_targetId_label: { sourceId: existing.id, targetId: resolvedTargetId, label: edge.label } },
+            create: {
+              sourceId: existing.id,
+              targetId: resolvedTargetId,
+              label: edge.label,
+              createdBy: auth.clientId ?? null,
+            },
+            update: {},
+          });
+        }
+      }
+
+      // Record usage event
+      db.usageEvent.create({
+        data: {
+          type: 'write',
+          nodeLoc: loc,
+          nodeId: existing.id,
+          stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          createdBy: auth.clientId ?? null,
+          sessionId: null,
+        },
+      }).catch(() => {});
+
+      return textResult(`Node updated: ${loc}`);
+    },
+  );
+
   // ── h-move-node ──────────────────────────────────────────────────────────
 
   server.tool(
