@@ -202,6 +202,16 @@ model Memory {
   id                   String     @id @default(cuid())
   organizationId       String     @map("organization_id")
   name                 String
+  shortDescription     String?    @map("short_description")
+  description          String?
+  tags                 String[]
+  license              String?
+  category0            String?    @map("category_0")
+  category1            String?    @map("category_1")
+  category2            String?    @map("category_2")
+  iconUrl              String?    @map("icon_url")
+  heroUrl              String?    @map("hero_url")
+  homeUrl              String?    @map("home_url")
   source               String?
   sourceTokenEncrypted String?    @map("source_token_encrypted")
   sourceTokenExpiresAt DateTime?  @map("source_token_expires_at")
@@ -646,6 +656,7 @@ model NodeVersion {
   content     String?
   tags        String[]
   editedBy    String?  @map("edited_by")
+  createdBy   String?  @map("created_by")
   createdAt   DateTime @default(now()) @map("created_at")
 
   node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
@@ -660,6 +671,7 @@ model PendingSetup {
   stationId       String   @map("station_id")
   rawKeyEncrypted String   @map("raw_key_encrypted")
   consumed        Boolean  @default(false)
+  createdBy       String?  @map("created_by")
   createdAt       DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)

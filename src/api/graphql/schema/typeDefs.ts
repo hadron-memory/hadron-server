@@ -191,6 +191,16 @@ export const typeDefs = `#graphql
     organizationId: String!
     organization: Organization
     name: String!
+    shortDescription: String
+    description: String
+    tags: [String!]!
+    license: String
+    category0: String
+    category1: String
+    category2: String
+    iconUrl: String
+    heroUrl: String
+    homeUrl: String
     source: String
     readBranch: String
     writeBranch: String
@@ -398,8 +408,8 @@ export const typeDefs = `#graphql
     removeOrgMember(orgId: ID!, userId: ID!): Boolean!
 
     # Memory management (org ADMIN)
-    createMemory(orgId: ID!, name: String!, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility): Memory!
-    updateMemory(id: ID!, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility): Memory!
+    createMemory(orgId: ID!, name: String!, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility): Memory!
+    updateMemory(id: ID!, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility): Memory!
     deleteMemory(id: ID!): Boolean!
     # Set encrypted source token for non-GitHub-App repos
     setMemorySourceToken(id: ID!, token: String!, expiresAt: String): Memory!

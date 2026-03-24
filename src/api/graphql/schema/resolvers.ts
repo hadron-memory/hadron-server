@@ -5,6 +5,7 @@ import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
+import { createNode } from '../../../controller/operations/createNode.js';
 
 export interface Context {
   db: PrismaClient;
@@ -985,18 +986,44 @@ export const resolvers = {
       {
         orgId,
         name,
+        shortDescription,
+        description,
+        tags,
+        license,
+        category0,
+        category1,
+        category2,
+        iconUrl,
+        heroUrl,
+        homeUrl,
         source,
         readBranch,
         writeBranch,
         visibility,
-      }: { orgId: string; name: string; source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string },
+      }: {
+        orgId: string; name: string;
+        shortDescription?: string; description?: string; tags?: string[];
+        license?: string; category0?: string; category1?: string; category2?: string;
+        iconUrl?: string; heroUrl?: string; homeUrl?: string;
+        source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
+      },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
-      return ctx.db.memory.create({
+      const memory = await ctx.db.memory.create({
         data: {
           organizationId: orgId,
           name,
+          shortDescription,
+          description,
+          tags: tags ?? [],
+          license,
+          category0,
+          category1,
+          category2,
+          iconUrl,
+          heroUrl,
+          homeUrl,
           source,
           readBranch,
           writeBranch,
@@ -1005,17 +1032,44 @@ export const resolvers = {
         },
         include: MEMORY_INCLUDE,
       });
+
+      // Create the root node for this memory
+      const rootName = name.split('.').pop() ?? name;
+      await createNode({
+        memoryId: memory.id,
+        loc: name,
+        name: rootName,
+        title: rootName,
+      });
+
+      return memory;
     },
 
     updateMemory: async (
       _: unknown,
       {
         id,
+        shortDescription,
+        description,
+        tags,
+        license,
+        category0,
+        category1,
+        category2,
+        iconUrl,
+        heroUrl,
+        homeUrl,
         source,
         readBranch,
         writeBranch,
         visibility,
-      }: { id: string; source?: string; readBranch?: string; writeBranch?: string; visibility?: string },
+      }: {
+        id: string;
+        shortDescription?: string; description?: string; tags?: string[];
+        license?: string; category0?: string; category1?: string; category2?: string;
+        iconUrl?: string; heroUrl?: string; homeUrl?: string;
+        source?: string; readBranch?: string; writeBranch?: string; visibility?: string;
+      },
       ctx: Context,
     ) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
@@ -1023,6 +1077,16 @@ export const resolvers = {
       return ctx.db.memory.update({
         where: { id },
         data: {
+          ...(shortDescription !== undefined ? { shortDescription } : {}),
+          ...(description !== undefined ? { description } : {}),
+          ...(tags !== undefined ? { tags } : {}),
+          ...(license !== undefined ? { license } : {}),
+          ...(category0 !== undefined ? { category0 } : {}),
+          ...(category1 !== undefined ? { category1 } : {}),
+          ...(category2 !== undefined ? { category2 } : {}),
+          ...(iconUrl !== undefined ? { iconUrl } : {}),
+          ...(heroUrl !== undefined ? { heroUrl } : {}),
+          ...(homeUrl !== undefined ? { homeUrl } : {}),
           ...(source !== undefined ? { source } : {}),
           ...(readBranch !== undefined ? { readBranch } : {}),
           ...(writeBranch !== undefined ? { writeBranch } : {}),
