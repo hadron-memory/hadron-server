@@ -256,6 +256,7 @@ model Node {
   tokens      Int?
   tags        String[]
   namespace   String
+  seq         Int?
   ownerRepo   String?   @map("owner_repo")
   isRunnable  Boolean?  @map("is_runnable")
   createdAt   DateTime  @default(now()) @map("created_at")

@@ -182,6 +182,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         `**${node.title}** (${node.name})`,
         node.description ? `> ${node.description}` : '',
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
+        node.seq !== null ? `Seq: ${node.seq}` : '',
         node.outgoingEdges.length
           ? `Related:\n${node.outgoingEdges.map((e) => `  - ${e.target.loc} (${e.target.name}) — ${e.label}`).join('\n')}`
           : '',
@@ -200,7 +201,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-read-next-node',
-    'Read the next sibling node under a parent, ordered by name. Returns the first child if current is omitted.',
+    'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted.',
     {
       parent: z.string().describe('Dotted path of the parent node'),
       current: z.string().optional().describe('Dotted path of the current child node'),
@@ -215,7 +216,15 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
       const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
       // Direct children only (no further dots after prefix)
-      const children = allNodes.filter((n) => !n.loc.slice(prefix.length).includes('.'));
+      const children = allNodes
+        .filter((n) => !n.loc.slice(prefix.length).includes('.'))
+        .sort((a, b) => {
+          // Sort by seq first (nodes with seq come before those without), then by loc
+          if (a.seq !== null && b.seq !== null) return a.seq - b.seq;
+          if (a.seq !== null) return -1;
+          if (b.seq !== null) return 1;
+          return a.loc.localeCompare(b.loc);
+        });
 
       if (children.length === 0) {
         return textResult(`No children found under "${parent}".`);
@@ -248,6 +257,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         `**${node.title}** (${node.name})`,
         node.description ? `> ${node.description}` : '',
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
+        node.seq !== null ? `Seq: ${node.seq}` : '',
         node.outgoingEdges.length
           ? `Related:\n${node.outgoingEdges.map((e) => `  - ${e.target.loc} (${e.target.name}) — ${e.label}`).join('\n')}`
           : '',
@@ -271,13 +281,14 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       title: z.string().describe('Display title'),
       description: z.string().optional().describe('Short description'),
       content: z.string().optional().describe('Markdown content'),
+      seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
       tags: z.array(z.string()).optional().describe('Tags'),
       edges: z.array(z.object({
         targetId: z.string().describe('Target node ID or dotted loc path'),
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
-    async ({ loc, memoryId, name, title, description, content, tags, edges }) => {
+    async ({ loc, memoryId, name, title, description, content, seq, tags, edges }) => {
       try {
         validateLoc(loc);
       } catch (e) {
@@ -303,6 +314,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           namespace,
           description: description ?? null,
           content: content ?? null,
+          seq: seq ?? null,
           tags: tags ?? [],
           createdBy: auth.clientId ?? null,
         },
@@ -311,6 +323,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           title,
           description: description ?? null,
           content: content ?? null,
+          seq: seq ?? null,
           tags: tags ?? [],
         },
       });

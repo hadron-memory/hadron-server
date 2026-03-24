@@ -45,6 +45,7 @@ export const typeDefs = `#graphql
     tokens: Int
     tags: [String!]!
     namespace: String!
+    seq: Int
     ownerRepo: String
     isRunnable: Boolean
     createdAt: String!
@@ -255,6 +256,7 @@ export const typeDefs = `#graphql
     alias: String
     description: String
     content: String
+    seq: Int
     tags: [String!]
     ownerRepo: String
     # Replace all outgoing edges when provided (omit to leave edges unchanged)

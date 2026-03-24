@@ -1368,6 +1368,7 @@ interface NodeInput {
   alias?: string;
   description?: string;
   content?: string;
+  seq?: number;
   tags?: string[];
   ownerRepo?: string;
   edges?: NodeEdgeInput[];
