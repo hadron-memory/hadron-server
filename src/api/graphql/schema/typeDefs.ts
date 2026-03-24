@@ -241,6 +241,25 @@ export const typeDefs = `#graphql
     createdAt: String!
   }
 
+  # Invitation to join the platform (and optionally an organization)
+  type UserInvitation {
+    id: ID!
+    slug: String!
+    senderUserId: String
+    sender: User
+    organizationId: String
+    organization: Organization
+    memberRole: Role!
+    name: String
+    email: String
+    githubUsername: String
+    maxActivations: Int
+    expiresAt: String
+    acceptedAt: String
+    createdAt: String!
+    activationCount: Int!
+  }
+
   # Outgoing edge on a node, used in NodeInput.edges
   input NodeEdgeInput {
     targetId: String!
@@ -347,6 +366,9 @@ export const typeDefs = `#graphql
     myOrganizations: [Organization!]!     # authenticated user: their memberships
     organization(id: ID!): Organization   # org member or platform ADMIN
 
+    # Invitation lookup (public — no auth required, used by invite acceptance page)
+    invitation(slug: String!): UserInvitation
+
     # Public memory marketplace — any authenticated user
     publicMemories: [Memory!]!
 
@@ -403,6 +425,10 @@ export const typeDefs = `#graphql
 
     # Remove all GitHub App config from an organization
     unlinkGithubApp(orgId: ID!): Organization!
+
+    # User invitations (org ADMIN or platform ADMIN)
+    createUserInvitation(orgId: ID!, memberRole: Role!, name: String, email: String, githubUsername: String, maxActivations: Int, expiresInDays: Int): UserInvitation!
+    acceptInvitation(slug: String!): Boolean!
 
     # Organization membership (platform ADMIN or org OWNER/ADMIN)
     addOrgMember(orgId: ID!, userId: ID!, role: Role!): OrgMember!

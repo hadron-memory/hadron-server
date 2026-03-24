@@ -448,6 +448,22 @@ export const resolvers = {
       return ctx.db.organization.findUnique({ where: { id }, include: ORG_INCLUDE });
     },
 
+    invitation: async (_: unknown, { slug }: { slug: string }, ctx: Context) => {
+      const invite = await ctx.db.userInvitation.findUnique({
+        where: { slug },
+        include: {
+          sender: true,
+          organization: true,
+          activations: true,
+        },
+      });
+      if (!invite || invite.deletedAt) return null;
+      return {
+        ...invite,
+        activationCount: invite.activations.length,
+      };
+    },
+
     publicMemories: async (_: unknown, __: unknown, ctx: Context) => {
       return ctx.db.memory.findMany({
         where: { visibility: 'PUBLIC', deletedAt: null },
@@ -928,6 +944,104 @@ export const resolvers = {
         },
         include: ORG_INCLUDE,
       });
+    },
+
+    // ── User invitations ────────────────────────────────────────────────
+
+    createUserInvitation: async (
+      _: unknown,
+      {
+        orgId,
+        memberRole,
+        name,
+        email,
+        githubUsername,
+        maxActivations,
+        expiresInDays,
+      }: {
+        orgId: string; memberRole: string;
+        name?: string; email?: string; githubUsername?: string;
+        maxActivations?: number; expiresInDays?: number;
+      },
+      ctx: Context,
+    ) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      const slug = randomUUID().replace(/-/g, '').slice(0, 16);
+      const expiresAt = expiresInDays
+        ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
+        : null;
+      const invite = await ctx.db.userInvitation.create({
+        data: {
+          slug,
+          senderUserId: ctx.userId ?? null,
+          organizationId: orgId,
+          memberRole: (memberRole as Role) ?? 'READER',
+          name: name ?? null,
+          email: email ?? null,
+          githubUsername: githubUsername ?? null,
+          maxActivations: maxActivations ?? 1,
+          expiresAt,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+        include: { sender: true, organization: true, activations: true },
+      });
+      return { ...invite, activationCount: invite.activations.length };
+    },
+
+    acceptInvitation: async (
+      _: unknown,
+      { slug }: { slug: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('You must be signed in to accept an invitation');
+
+      const invite = await ctx.db.userInvitation.findUnique({
+        where: { slug },
+        include: { activations: true },
+      });
+      if (!invite || invite.deletedAt) throw new Error('Invitation not found');
+      if (invite.expiresAt && invite.expiresAt < new Date()) throw new Error('Invitation has expired');
+      if (invite.maxActivations && invite.activations.length >= invite.maxActivations) {
+        throw new Error('Invitation has reached its maximum number of uses');
+      }
+
+      // Check if user already activated this invite
+      if (invite.activations.some((a) => a.userId === ctx.userId)) {
+        throw new Error('You have already accepted this invitation');
+      }
+
+      // Create activation record
+      await ctx.db.userInvitationActivation.create({
+        data: {
+          invitationId: invite.id,
+          userId: ctx.userId!,
+          createdBy: ctx.userId ?? null,
+        },
+      });
+
+      // Add user to org if not already a member
+      if (invite.organizationId) {
+        const existing = await ctx.db.orgMember.findUnique({
+          where: {
+            organizationId_userId: {
+              organizationId: invite.organizationId,
+              userId: ctx.userId!,
+            },
+          },
+        });
+        if (!existing) {
+          await ctx.db.orgMember.create({
+            data: {
+              organizationId: invite.organizationId,
+              userId: ctx.userId!,
+              role: invite.memberRole as Role,
+              createdBy: ctx.userId ?? null,
+            },
+          });
+        }
+      }
+
+      return true;
     },
 
     // ── Organization membership ─────────────────────────────────────────
