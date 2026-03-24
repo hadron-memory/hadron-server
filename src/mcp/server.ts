@@ -36,6 +36,27 @@ function validateLoc(loc: string): void {
   }
 }
 
+/**
+ * Resolve a memoryId that may be either a cuid (primary key) or a memory name
+ * (e.g. "micromentor-org.mmdata"). Returns the actual database ID, or null if not found.
+ */
+async function resolveMemoryId(memoryIdOrName: string): Promise<string | null> {
+  // If it looks like a cuid (no dots, no slashes), try it directly
+  if (!memoryIdOrName.includes('.') && !memoryIdOrName.includes('/')) {
+    const exists = await db.memory.findUnique({ where: { id: memoryIdOrName }, select: { id: true } });
+    if (exists) return exists.id;
+  }
+  // Try to find by name
+  const byName = await db.memory.findFirst({ where: { name: memoryIdOrName }, select: { id: true } });
+  if (byName) return byName.id;
+  // Last resort: try as ID even if it contains dots (shouldn't happen, but be safe)
+  if (memoryIdOrName.includes('.')) {
+    const byId = await db.memory.findUnique({ where: { id: memoryIdOrName }, select: { id: true } });
+    if (byId) return byId.id;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Access control: check if a station can access/write to a memory
 // ---------------------------------------------------------------------------
@@ -276,7 +297,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'Create or update a node. Requires write access to the memory.',
     {
       loc: z.string().describe('Dotted path for the node'),
-      memoryId: z.string().describe('ID of the memory this node belongs to'),
+      memoryId: z.string().describe('Memory ID or memory name (e.g. "micromentor-org.mmdata")'),
       name: z.string().describe('Node name'),
       title: z.string().describe('Display title'),
       description: z.string().optional().describe('Short description'),
@@ -288,11 +309,16 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
-    async ({ loc, memoryId, name, title, description, content, seq, tags, edges }) => {
+    async ({ loc, memoryId: rawMemoryId, name, title, description, content, seq, tags, edges }) => {
       try {
         validateLoc(loc);
       } catch (e) {
         return textResult((e as Error).message);
+      }
+
+      const memoryId = await resolveMemoryId(rawMemoryId);
+      if (!memoryId) {
+        return textResult(`Memory not found: "${rawMemoryId}". Use the memory name (e.g. "my-org.my-repo") or its ID.`);
       }
 
       if (!(await canWriteToMemory(auth, memoryId))) {
