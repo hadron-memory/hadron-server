@@ -297,7 +297,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'Create or update a node. Requires write access to the memory.',
     {
       loc: z.string().describe('Dotted path for the node'),
-      memoryId: z.string().describe('Memory ID or memory name (e.g. "micromentor-org.mmdata")'),
+      memoryId: z.string().optional().describe('Memory ID or name. Omit to auto-detect: uses the only writable memory, or infers from edge targets.'),
       name: z.string().describe('Node name'),
       title: z.string().describe('Display title'),
       description: z.string().optional().describe('Short description'),
@@ -316,9 +316,49 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult((e as Error).message);
       }
 
-      const memoryId = await resolveMemoryId(rawMemoryId);
-      if (!memoryId) {
-        return textResult(`Memory not found: "${rawMemoryId}". Use the memory name (e.g. "my-org.my-repo") or its ID.`);
+      let memoryId: string | null = null;
+
+      if (rawMemoryId) {
+        // Explicit memoryId provided — resolve by name or ID
+        memoryId = await resolveMemoryId(rawMemoryId);
+        if (!memoryId) {
+          return textResult(`Memory not found: "${rawMemoryId}". Use the memory name (e.g. "my-org.my-repo") or its ID.`);
+        }
+      } else {
+        // Infer memoryId
+        const access = auth.clientId ? await getStationMemoryAccess(auth.clientId) : new Map();
+        const writableIds = [...access.entries()].filter(([, v]) => v === 'READ_WRITE').map(([k]) => k);
+
+        if (writableIds.length === 1) {
+          // Only one writable memory — use it
+          memoryId = writableIds[0];
+        } else if (writableIds.length > 1 && edges?.length) {
+          // Multiple writable memories — check if edges point to exactly one
+          const edgeMemoryIds = new Set<string>();
+          for (const edge of edges) {
+            if (edge.targetId.includes('.')) {
+              const targetNode = await db.node.findFirst({ where: { loc: edge.targetId }, select: { memoryId: true } });
+              if (targetNode && writableIds.includes(targetNode.memoryId)) {
+                edgeMemoryIds.add(targetNode.memoryId);
+              }
+            }
+          }
+          if (edgeMemoryIds.size === 1) {
+            memoryId = [...edgeMemoryIds][0];
+          }
+        }
+
+        if (!memoryId) {
+          const names = await Promise.all(writableIds.map(async (id) => {
+            const m = await db.memory.findUnique({ where: { id }, select: { name: true } });
+            return m?.name ?? id;
+          }));
+          return textResult(
+            writableIds.length === 0
+              ? 'No writable memories available. Subscribe to a memory with READ_WRITE access.'
+              : `Multiple writable memories available: ${names.join(', ')}. Please specify memoryId.`
+          );
+        }
       }
 
       if (!(await canWriteToMemory(auth, memoryId))) {
