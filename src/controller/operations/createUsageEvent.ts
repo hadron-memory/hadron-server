@@ -23,6 +23,7 @@ export const createUsageEvent = async (
         nodeId: node?.id,
         actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
         stationId: event.stationId ?? null,
+        createdBy: event.stationId ?? null,
         sessionId: event.sessionId ?? null,
       },
     });

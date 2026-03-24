@@ -34,6 +34,7 @@ export async function provisionPersonalWorkspace(
       name: displayName,
       domain,
       isVisible: false,
+      createdBy: userId,
     },
   });
 
@@ -44,6 +45,7 @@ export async function provisionPersonalWorkspace(
       userId,
       role: 'OWNER',
       canInvite: true,
+      createdBy: userId,
     },
   });
 
@@ -52,6 +54,7 @@ export async function provisionPersonalWorkspace(
     data: {
       organizationId: org.id,
       name: 'My Memories',
+      createdBy: userId,
     },
   });
 
@@ -66,6 +69,7 @@ export async function provisionPersonalWorkspace(
       role: 'READER',
       organizationId: org.id,
       userId,
+      createdBy: userId,
     },
   });
 
@@ -75,6 +79,7 @@ export async function provisionPersonalWorkspace(
       stationId: station.id,
       agentId: agent.id,
       subscriptionType: 'READ_WRITE',
+      createdBy: userId,
     },
   });
 
@@ -84,6 +89,7 @@ export async function provisionPersonalWorkspace(
       userId,
       stationId: station.id,
       rawKeyEncrypted: rawKey, // TODO: encrypt at rest with app-level key
+      createdBy: userId,
     },
   });
 

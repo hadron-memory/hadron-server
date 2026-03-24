@@ -1,7 +1,7 @@
 import bcrypt from 'bcrypt';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'crypto';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
-import type { PrismaClient, Role, StationType, Visibility, Prisma } from '../../../generated/prisma/index.js';
+import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
@@ -63,7 +63,7 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
     return ids;
   }
 
-  // JWT user — org memories + subscribed memories + public memories
+  // JWT user — org memories (respecting visibility) + subscribed memories + public memories
   if (ctx.userId) {
     const memberships = await ctx.db.orgMember.findMany({
       where: { userId: ctx.userId, deletedAt: null },
@@ -74,9 +74,11 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
       where: {
         deletedAt: null,
         OR: [
+          // Org memories: ORGANIZATION or PUBLIC visible to all members, PRIVATE only to creator
           ...(orgIds.length > 0
             ? [
-                { organizationId: { in: orgIds } },
+                { organizationId: { in: orgIds }, visibility: { not: 'PRIVATE' as any } },
+                { organizationId: { in: orgIds }, visibility: 'PRIVATE' as any, createdBy: ctx.userId },
                 { subscriptions: { some: { organizationId: { in: orgIds } } } },
               ]
             : []),
@@ -516,6 +518,7 @@ export const resolvers = {
             content: existing.content,
             tags: existing.tags as string[],
             editedBy: ctx.clientId ?? ctx.userId ?? null,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
           },
         });
       }
@@ -523,9 +526,10 @@ export const resolvers = {
       const tags = serializeTags(input.tags ?? []) as string[];
       const id = input.id ?? randomUUID().replace(/-/g, '');
       const { edges, ...nodeFields } = input;
+      const createdBy = ctx.userId ?? ctx.clientId ?? null;
       const node = await ctx.db.node.upsert({
         where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-        create: { ...nodeFields, id, namespace, tags },
+        create: { ...nodeFields, id, namespace, tags, createdBy },
         update: { ...nodeFields, namespace, tags },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
@@ -539,13 +543,13 @@ export const resolvers = {
           if (target) {
             await ctx.db.edge.upsert({
               where: { sourceId_targetId_label: { sourceId: node.id, targetId: target.id, label: e.label ?? '' } },
-              create: { sourceId: node.id, targetId: target.id, label: e.label ?? '' },
+              create: { sourceId: node.id, targetId: target.id, label: e.label ?? '', createdBy },
               update: {},
             });
           } else {
             await ctx.db.pendingEdge.upsert({
               where: { sourceId_targetId: { sourceId: node.id, targetId: e.targetId } },
-              create: { sourceId: node.id, targetId: e.targetId, label: e.label ?? null },
+              create: { sourceId: node.id, targetId: e.targetId, label: e.label ?? null, createdBy },
               update: { label: e.label ?? null },
             });
           }
@@ -640,6 +644,7 @@ export const resolvers = {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
           stationId: ctx.clientId?.startsWith('github:') ? undefined : ctx.clientId,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
           repo: input.repo,
           branch: input.branch,
           prNumber: input.prNumber,
@@ -685,6 +690,7 @@ export const resolvers = {
           nodeId: node?.id,
           actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
           stationId: ctx.clientId?.startsWith('github:') ? undefined : ctx.clientId,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
           sessionId: event.sessionId,
           model: event.model,
           tokensIn: event.tokensIn,
@@ -734,6 +740,7 @@ export const resolvers = {
           organizationId: organizationId ?? null,
           userId: userId ?? ctx.userId ?? null,
           expiresAt: expiresAt ? new Date(expiresAt) : undefined,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
       });
       return { station, rawKey };
@@ -798,6 +805,7 @@ export const resolvers = {
           agentId,
           subscriptionType: (subscriptionType as any) ?? 'READ_ONLY',
           trainingMode: trainingMode ?? false,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
         update: {
           ...(subscriptionType ? { subscriptionType: subscriptionType as any } : {}),
@@ -843,12 +851,12 @@ export const resolvers = {
     ) => {
       requireRole(ctx, 'READER');
       const org = await ctx.db.organization.create({
-        data: { name, domain, isVisible: true },
+        data: { name, domain, isVisible: true, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: ORG_INCLUDE,
       });
       if (ctx.userId) {
         await ctx.db.orgMember.create({
-          data: { organizationId: org.id, userId: ctx.userId, role: 'OWNER', canInvite: true },
+          data: { organizationId: org.id, userId: ctx.userId, role: 'OWNER', canInvite: true, createdBy: ctx.userId },
         });
       }
       return ctx.db.organization.findUniqueOrThrow({ where: { id: org.id }, include: ORG_INCLUDE });
@@ -930,7 +938,7 @@ export const resolvers = {
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
       return ctx.db.orgMember.create({
-        data: { organizationId: orgId, userId, role: role as Role },
+        data: { organizationId: orgId, userId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: { user: true },
       });
     },
@@ -992,7 +1000,8 @@ export const resolvers = {
           source,
           readBranch,
           writeBranch,
-          visibility: (visibility as Visibility) ?? 'PRIVATE',
+          visibility: (visibility as MemoryVisibility) ?? 'PRIVATE',
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
         include: MEMORY_INCLUDE,
       });
@@ -1017,7 +1026,7 @@ export const resolvers = {
           ...(source !== undefined ? { source } : {}),
           ...(readBranch !== undefined ? { readBranch } : {}),
           ...(writeBranch !== undefined ? { writeBranch } : {}),
-          ...(visibility !== undefined ? { visibility: visibility as Visibility } : {}),
+          ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
         },
         include: MEMORY_INCLUDE,
       });
@@ -1057,7 +1066,7 @@ export const resolvers = {
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
       return ctx.db.agent.create({
-        data: { organizationId: orgId, name, description },
+        data: { organizationId: orgId, name, description, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: AGENT_INCLUDE,
       });
     },
@@ -1090,7 +1099,7 @@ export const resolvers = {
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
-      await ctx.db.agentMemoryItem.create({ data: { agentId, memoryId } });
+      await ctx.db.agentMemoryItem.create({ data: { agentId, memoryId, createdBy: ctx.userId ?? ctx.clientId ?? null } });
       return ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, include: AGENT_INCLUDE });
     },
 
@@ -1116,6 +1125,10 @@ export const resolvers = {
     ) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
 
+      if (memory.visibility === 'ORGANIZATION' || memory.visibility === 'PRIVATE') {
+        throw new Error('Only public memories can be subscribed to by other organizations');
+      }
+
       if (memory.visibility === 'PUBLIC') {
         await requireOrgRole(ctx, orgId, 'ADMIN');
       } else {
@@ -1127,7 +1140,7 @@ export const resolvers = {
       }
 
       return ctx.db.memorySubscription.create({
-        data: { memoryId, organizationId: orgId, role: role as Role },
+        data: { memoryId, organizationId: orgId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: { memory: { include: MEMORY_INCLUDE }, organization: { include: ORG_INCLUDE } },
       });
     },
@@ -1206,6 +1219,7 @@ export const resolvers = {
           content: node.content,
           tags: node.tags as string[],
           editedBy: ctx.clientId ?? ctx.userId ?? null,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
       });
 
@@ -1254,6 +1268,7 @@ export const resolvers = {
           organizationId: org.id,
           role: 'READER',
           activated: true,
+          createdBy: ctx.userId ?? null,
         },
         update: {},
       });
@@ -1261,7 +1276,7 @@ export const resolvers = {
       // Add memory to the default agent
       await ctx.db.agentMemoryItem.upsert({
         where: { agentId_memoryId: { agentId: agent.id, memoryId } },
-        create: { agentId: agent.id, memoryId },
+        create: { agentId: agent.id, memoryId, createdBy: ctx.userId ?? null },
         update: {},
       });
 

@@ -173,6 +173,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           nodeLoc: loc,
           nodeId: node.id,
           stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          createdBy: auth.clientId ?? null,
           sessionId: null,
         },
       }).catch(() => {});
@@ -303,6 +304,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           description: description ?? null,
           content: content ?? null,
           tags: tags ?? [],
+          createdBy: auth.clientId ?? null,
         },
         update: {
           name,
@@ -322,6 +324,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
               sourceId: upserted.id,
               targetId: edge.targetId,
               label: edge.label,
+              createdBy: auth.clientId ?? null,
             },
           });
         }
@@ -334,6 +337,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           nodeLoc: loc,
           nodeId: upserted.id,
           stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          createdBy: auth.clientId ?? null,
           sessionId: null,
         },
       }).catch(() => {});
@@ -429,6 +433,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           nodeLoc: loc,
           nodeId: node.id,
           stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          createdBy: auth.clientId ?? null,
           sessionId: null,
           actionArgs: (args ?? undefined) as Record<string, string> | undefined,
         },
@@ -470,6 +475,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           type: (type || 'DEVELOPER') as SessionType,
           plan: description,
           stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          createdBy: auth.clientId ?? null,
           repo: repo ?? null,
           branch: branch ?? null,
           prNumber: prNumber ?? null,

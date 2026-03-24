@@ -26,9 +26,10 @@ export const typeDefs = `#graphql
     ERROR
   }
 
-  enum Visibility {
+  enum MemoryVisibility {
     PUBLIC
     PRIVATE
+    ORGANIZATION
   }
 
   type Node {
@@ -193,7 +194,7 @@ export const typeDefs = `#graphql
     source: String
     readBranch: String
     writeBranch: String
-    visibility: Visibility!
+    visibility: MemoryVisibility!
     syncStatus: SyncStatus!
     syncError: String
     pendingEdgeCount: Int!
@@ -397,8 +398,8 @@ export const typeDefs = `#graphql
     removeOrgMember(orgId: ID!, userId: ID!): Boolean!
 
     # Memory management (org ADMIN)
-    createMemory(orgId: ID!, name: String!, source: String, readBranch: String, writeBranch: String, visibility: Visibility): Memory!
-    updateMemory(id: ID!, source: String, readBranch: String, writeBranch: String, visibility: Visibility): Memory!
+    createMemory(orgId: ID!, name: String!, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility): Memory!
+    updateMemory(id: ID!, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility): Memory!
     deleteMemory(id: ID!): Boolean!
     # Set encrypted source token for non-GitHub-App repos
     setMemorySourceToken(id: ID!, token: String!, expiresAt: String): Memory!

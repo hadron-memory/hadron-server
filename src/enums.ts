@@ -43,7 +43,8 @@ export enum LogLevel {
   ERROR = 'ERROR',
 }
 
-export enum Visibility {
+export enum MemoryVisibility {
   PUBLIC = 'PUBLIC',
   PRIVATE = 'PRIVATE',
+  ORGANIZATION = 'ORGANIZATION',
 }

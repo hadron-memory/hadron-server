@@ -63,9 +63,10 @@ enum MemoryLogEventType {
   OTHER
 }
 
-enum Visibility {
+enum MemoryVisibility {
   PUBLIC
   PRIVATE
+  ORGANIZATION
 }
 
 // ─── Models ────────────────────────────────────────────────────────────
@@ -206,7 +207,7 @@ model Memory {
   sourceTokenExpiresAt DateTime?  @map("source_token_expires_at")
   readBranch           String?    @map("read_branch")
   writeBranch          String?    @map("write_branch")
-  visibility           Visibility @default(PRIVATE)
+  visibility           MemoryVisibility @default(PRIVATE)
   requiresLicense      Boolean    @default(false) @map("requires_license")
   lastSyncedAt         DateTime?  @map("last_synced_at")
   syncStatus           SyncStatus @default(PENDING) @map("sync_status")
