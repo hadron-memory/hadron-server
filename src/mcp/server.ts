@@ -273,7 +273,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       content: z.string().optional().describe('Markdown content'),
       tags: z.array(z.string()).optional().describe('Tags'),
       edges: z.array(z.object({
-        targetId: z.string().describe('Target node ID'),
+        targetId: z.string().describe('Target node ID or dotted loc path'),
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
@@ -318,16 +318,53 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Replace edges if provided
       if (edges) {
         await db.edge.deleteMany({ where: { sourceId: upserted.id } });
+        await db.pendingEdge.deleteMany({ where: { sourceId: upserted.id } });
         for (const edge of edges) {
-          await db.edge.create({
-            data: {
+          // Resolve targetId: if it looks like a loc path (contains dots), look up the node
+          let resolvedTargetId = edge.targetId;
+          if (edge.targetId.includes('.')) {
+            const targetNode = await db.node.findFirst({ where: { loc: edge.targetId } });
+            if (targetNode) {
+              resolvedTargetId = targetNode.id;
+            } else {
+              // Target doesn't exist yet — create a PendingEdge
+              await db.pendingEdge.upsert({
+                where: { sourceId_targetId: { sourceId: upserted.id, targetId: edge.targetId } },
+                create: {
+                  sourceId: upserted.id,
+                  targetId: edge.targetId,
+                  label: edge.label,
+                  createdBy: auth.clientId ?? null,
+                },
+                update: { label: edge.label },
+              });
+              continue;
+            }
+          }
+          // Target exists — create a real Edge
+          await db.edge.upsert({
+            where: { sourceId_targetId_label: { sourceId: upserted.id, targetId: resolvedTargetId, label: edge.label } },
+            create: {
               sourceId: upserted.id,
-              targetId: edge.targetId,
+              targetId: resolvedTargetId,
               label: edge.label,
               createdBy: auth.clientId ?? null,
             },
+            update: {},
           });
         }
+      }
+
+      // Resolve any PendingEdges waiting for this node (by ID or loc)
+      const pendingByLoc = await db.pendingEdge.findMany({ where: { targetId: loc } });
+      const pendingById = await db.pendingEdge.findMany({ where: { targetId: upserted.id } });
+      for (const p of [...pendingByLoc, ...pendingById]) {
+        await db.edge.upsert({
+          where: { sourceId_targetId_label: { sourceId: p.sourceId, targetId: upserted.id, label: p.label ?? '' } },
+          create: { sourceId: p.sourceId, targetId: upserted.id, label: p.label ?? '' },
+          update: {},
+        });
+        await db.pendingEdge.delete({ where: { id: p.id } });
       }
 
       // Record usage event
