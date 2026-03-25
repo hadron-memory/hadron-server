@@ -188,6 +188,7 @@ export const typeDefs = `#graphql
     id: ID!
     organizationId: String!
     organization: Organization
+    urn: String!
     name: String!
     shortDescription: String
     description: String
