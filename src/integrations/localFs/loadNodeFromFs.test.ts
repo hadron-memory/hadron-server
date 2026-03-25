@@ -37,7 +37,7 @@ describe('loadNodeFromFs', () => {
     writeNodeFiles(nodeDir, { name: 'c' });
 
     const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
-    expect(node.loc).toBe('a.b.c');
+    expect(node.loc).toBe('a:b:c');
   });
 
   it('strips .hadron/ prefix from loc when node lives inside .hadron/', async () => {
@@ -46,16 +46,7 @@ describe('loadNodeFromFs', () => {
     writeNodeFiles(nodeDir, { name: 'my-graph' });
 
     const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'my-org/my-graph');
-    expect(node.loc).toBe('my-org.my-graph');
-  });
-
-  it('derives namespace as first two loc segments', async () => {
-    const nodeDir = join(graphRoot, 'my-org', 'my-graph', 'sub');
-    mkdirSync(nodeDir, { recursive: true });
-    writeNodeFiles(nodeDir, { name: 'sub' });
-
-    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
-    expect(node.namespace).toBe('my-org.my-graph');
+    expect(node.loc).toBe('my-org:my-graph');
   });
 
   it('returns null content when topic.md is absent', async () => {

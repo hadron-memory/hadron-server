@@ -71,7 +71,7 @@ function makeGraph(overrides?: Partial<MemoryWithOrg>): MemoryWithOrg {
     organization: {
       id: dbOrgId,
       name: 'Test Org',
-      domain: 'test-org',
+      urn: 'test-org',
       githubInstallationId: 12345,
       deletedAt: null,
       deletedBy: null,
@@ -186,7 +186,7 @@ describe('syncGraphFromGithub', () => {
     writeNodeFiles(nodeA, { name: 'nodeA' });
 
     await syncGraphFromGithub(makeGraph());
-    expect(await db.node.count({ where: { namespace: 'test.repo' } })).toBe(1);
+    expect(await db.node.count({ where: { memoryId: dbGraphId } })).toBe(1);
 
     const { rmSync } = await import('fs');
     rmSync(nodeA, { recursive: true });
@@ -196,7 +196,7 @@ describe('syncGraphFromGithub', () => {
 
     await syncGraphFromGithub(makeGraph());
 
-    const nodes = await db.node.findMany({ where: { namespace: 'test.repo' } });
+    const nodes = await db.node.findMany({ where: { memoryId: dbGraphId } });
     expect(nodes).toHaveLength(1);
     expect(nodes[0].name).toBe('nodeB');
   });

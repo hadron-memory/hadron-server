@@ -22,7 +22,6 @@ export const createNode = async (
   }
 
   const id = node.id ?? randomUUID().replace(/-/g, '');
-  const namespace = node.loc.split('.').slice(0, 2).join('.');
 
   const saved = await db.node.upsert({
     where: { loc_memoryId: { loc: node.loc, memoryId: node.memoryId } },
@@ -31,24 +30,20 @@ export const createNode = async (
       memoryId: node.memoryId,
       loc: node.loc,
       name: node.name,
-      title: node.title ?? node.name,
       alias: node.alias ?? null,
       description: node.description ?? null,
       content: node.content ?? null,
       contentHash: node.contentHash ?? null,
       tags: serializeTags(node.tags ?? []) as string[],
-      namespace,
       ownerRepo: node.ownerRepo ?? null,
     },
     update: {
       name: node.name,
-      title: node.title ?? node.name,
       alias: node.alias ?? null,
       description: node.description ?? null,
       content: node.content ?? null,
       contentHash: node.contentHash ?? null,
       tags: serializeTags(node.tags ?? []) as string[],
-      namespace,
       ownerRepo: node.ownerRepo ?? null,
     },
     include: {

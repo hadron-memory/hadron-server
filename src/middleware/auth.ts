@@ -7,7 +7,6 @@ export interface AuthContext {
   clientId?: string;       // Station.id (API keys) or "github:<username>" (OAuth)
   userId?: string;         // User.id — only set for OAuth/JWT users
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
-  namespace?: string;
   organizationId?: string; // set when the Client is scoped to an organization
 }
 
@@ -66,7 +65,6 @@ async function resolveStationKey(
       return {
         clientId: station.id,
         roles: [station.role],
-        namespace: station.namespace ?? undefined,
         organizationId: station.organizationId ?? undefined,
       };
     }

@@ -4,14 +4,12 @@ export interface Node {
   loc: string;
   isLink: boolean;
   name: string;
-  title: string;
   alias: string | null;
   description: string | null;
   content: string | null;
   contentHash: string | null;
   tokens: number | null;
   tags: string[];
-  namespace: string;
   ownerRepo: string | null;
   isRunnable: boolean | null;
   createdAt: string;
@@ -70,12 +68,12 @@ export interface UsageEvent {
 
 export interface Station {
   id: string;
-  label: string;
+  urn: string;
+  name: string;
   stationType: StationType;
   description: string | null;
   role: Role;
   apiKeyShown: boolean;
-  namespace: string | null;
   userId: string | null;
   organizationId: string | null;
   expiresAt: string | null;

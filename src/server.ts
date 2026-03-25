@@ -413,13 +413,13 @@ export async function createServer(): Promise<Express> {
       if (ghOrgLogin) {
         if (action === 'created') {
           const updated = await db.organization.updateMany({
-            where: { domain: ghOrgLogin, githubInstallationId: null },
+            where: { urn: ghOrgLogin, githubInstallationId: null },
             data: { githubInstallationId: installation.id },
           });
           if (updated.count > 0) {
             console.log(`[webhook] Linked GitHub App installation ${installation.id} → org "${ghOrgLogin}"`);
           } else {
-            console.warn(`[webhook] No unlinked org found with domain "${ghOrgLogin}"`);
+            console.warn(`[webhook] No unlinked org found with urn "${ghOrgLogin}"`);
           }
         } else if (action === 'deleted') {
           await db.organization.updateMany({

@@ -22,9 +22,9 @@ export const startup = async (): Promise<void> => {
   for (const memory of memories) {
     const result = await syncGraphFromGithub(memory);
     if (result.error) {
-      console.error(`  [FAIL] ${memory.organization.domain}/${memory.name}: ${result.error}`);
+      console.error(`  [FAIL] ${memory.organization.urn}/${memory.name}: ${result.error}`);
     } else {
-      console.log(`  [OK]   ${memory.organization.domain}/${memory.name}: ${result.nodeCount} nodes`);
+      console.log(`  [OK]   ${memory.organization.urn}/${memory.name}: ${result.nodeCount} nodes`);
     }
   }
 

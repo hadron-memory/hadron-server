@@ -3,7 +3,7 @@ import { createDecipheriv, randomUUID } from 'crypto';
 import { promisify } from 'util';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
-import { GRAPHS_PATH, graphNameToNamespace } from '../../config.js';
+import { GRAPHS_PATH } from '../../config.js';
 import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
@@ -49,14 +49,13 @@ export const syncGraphFromGithub = async (
       data: { syncStatus: 'SYNCING', syncError: null },
     }).catch(() => {});
 
-    const namespace = graphNameToNamespace(graphName);
-    const localPath = join(GRAPHS_PATH, graph.organization.domain, graphName);
+    const localPath = join(GRAPHS_PATH, graph.organization.urn, graphName);
     const ownerRepo = extractOwnerRepo(graph.source);
 
     // 1. Get installation token (requires GitHub App installation)
     if (!graph.organization.githubInstallationId) {
       console.warn(
-        `[syncGraphFromGithub] "${graphName}" — skipping: organization "${graph.organization.domain}" has no githubInstallationId`,
+        `[syncGraphFromGithub] "${graphName}" — skipping: organization "${graph.organization.urn}" has no githubInstallationId`,
       );
       return {};
     }
@@ -88,14 +87,12 @@ export const syncGraphFromGithub = async (
         const update = {
           loc,
           name,
-          title: node.title ?? name,
           alias: node.alias ?? null,
           isLink: node.isLink ?? false,
           description: node.description ?? null,
           content: node.content ?? null,
           contentHash: node.contentHash ?? null,
           tags: serializeTags(node.tags ?? []) as string[],
-          namespace,
           ownerRepo,
         };
         await tx.node.upsert({
@@ -119,7 +116,7 @@ export const syncGraphFromGithub = async (
       }
 
       await tx.node.deleteMany({
-        where: { namespace, ownerRepo, memoryId: graph.id, id: { notIn: upsertedIds } },
+        where: { ownerRepo, memoryId: graph.id, id: { notIn: upsertedIds } },
       });
 
       for (const edge of edges) {

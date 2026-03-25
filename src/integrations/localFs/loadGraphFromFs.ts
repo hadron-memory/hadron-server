@@ -4,7 +4,6 @@ import type { Node } from '../../index.d.js';
 
 interface FsGraph {
   name: string;
-  namespace: string;
   ownerRepo: string;
   nodes: Partial<Node>[];
 }
@@ -28,7 +27,6 @@ export const loadGraphFromFs = async (
   graphName: string,
   ownerRepo: string,
 ): Promise<{ graph: FsGraph; edges: GraphEdge[] }> => {
-  const namespace = graphName.replace(/\//g, '.');
   const nodes: Partial<Node>[] = [];
   const edges: GraphEdge[] = [];
 
@@ -81,7 +79,6 @@ export const loadGraphFromFs = async (
   return {
     graph: {
       name: graphName,
-      namespace,
       ownerRepo,
       nodes,
     },

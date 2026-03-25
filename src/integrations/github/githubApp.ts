@@ -32,8 +32,8 @@ export async function getInstallationToken(
   const now = Math.floor(Date.now() / 1000);
   const jwt = await new SignJWT({})
     .setProtectedHeader({ alg: 'RS256' })
-    .setIssuedAt(now - 60) // allow 60s clock skew
-    .setExpirationTime(now + 600) // 10 minutes (GitHub max)
+    .setIssuedAt(now - 30) // allow 30s clock skew
+    .setExpirationTime(now + 540) // 9 minutes (under GitHub's 10-min max)
     .setIssuer(appId)
     .sign(privateKey);
 

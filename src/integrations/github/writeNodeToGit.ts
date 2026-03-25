@@ -50,7 +50,7 @@ export async function writeNodeToGit(
     return;
   }
 
-  const localPath = join(GRAPHS_PATH, graphRecord.organization.domain, graphRecord.name);
+  const localPath = join(GRAPHS_PATH, graphRecord.organization.urn, graphRecord.name);
 
   if (!existsSync(join(localPath, '.git'))) {
     console.warn(`[writeNodeToGit] Repo not cloned yet at ${localPath} — skipping git write`);
@@ -93,7 +93,7 @@ export async function writeNodeToGit(
   }
 
   // 5. Write node.yaml
-  const locParts = node.loc.split('.');
+  const locParts = node.loc.split(':');
   const nodeDir = join(localPath, '.hadron', ...locParts, '.node');
   mkdirSync(nodeDir, { recursive: true });
 

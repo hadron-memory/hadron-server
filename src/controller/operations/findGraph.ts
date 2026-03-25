@@ -1,4 +1,3 @@
-import { graphNameToNamespace } from '../../config.js';
 import { db } from '../../integrations/db/client.js';
 
 /**

@@ -18,7 +18,7 @@ describe('findGraph', () => {
     await createDbNode(db, {
       loc: 'org.graph.root',
       name: 'Root',
-      namespace: 'org.graph',
+
       memoryId: graph.id,
     });
 
@@ -31,9 +31,9 @@ describe('findGraph', () => {
 
   it('returns all nodes in the graph, ordered by loc', async () => {
     const { graph } = await createDbOrgAndGraph(db, { graphName: 'org/g' });
-    await createDbNode(db, { loc: 'org.g.b', namespace: 'org.g', memoryId: graph.id });
-    await createDbNode(db, { loc: 'org.g.a', namespace: 'org.g', memoryId: graph.id });
-    await createDbNode(db, { loc: 'org.g.c', namespace: 'org.g', memoryId: graph.id });
+    await createDbNode(db, { loc: 'org.g.b', memoryId: graph.id });
+    await createDbNode(db, { loc: 'org.g.a', memoryId: graph.id });
+    await createDbNode(db, { loc: 'org.g.c', memoryId: graph.id });
 
     const result = await findGraph('org/g');
     expect(result!.nodes).toHaveLength(3);
@@ -43,8 +43,8 @@ describe('findGraph', () => {
   it('does not include nodes from a different graph', async () => {
     const { graph: graph1 } = await createDbOrgAndGraph(db, { orgName: 'org1', graphName: 'org/g' });
     const { graph: graph2 } = await createDbOrgAndGraph(db, { orgName: 'org2', graphName: 'org/graph' });
-    await createDbNode(db, { loc: 'org.g.node', namespace: 'org.g', memoryId: graph1.id });
-    await createDbNode(db, { loc: 'org.graph.node', namespace: 'org.graph', memoryId: graph2.id });
+    await createDbNode(db, { loc: 'org.g.node', memoryId: graph1.id });
+    await createDbNode(db, { loc: 'org.graph.node', memoryId: graph2.id });
 
     const result = await findGraph('org/g');
     expect(result!.nodes).toHaveLength(1);
@@ -55,12 +55,10 @@ describe('findGraph', () => {
     const { graph } = await createDbOrgAndGraph(db, { graphName: 'org/g' });
     const nodeA = await createDbNode(db, {
       loc: 'org.g.a',
-      namespace: 'org.g',
       memoryId: graph.id,
     });
     const nodeB = await createDbNode(db, {
       loc: 'org.g.b',
-      namespace: 'org.g',
       memoryId: graph.id,
     });
 

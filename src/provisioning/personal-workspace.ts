@@ -25,14 +25,14 @@ export async function provisionPersonalWorkspace(
   userId: string,
   displayName: string,
 ): Promise<ProvisionResult> {
-  // Generate a unique domain for the personal org
-  const domain = `personal-${userId}`;
+  // Generate a unique URN for the personal org
+  const urn = `personal-${userId}`;
 
   // 1. Create personal org
   const org = await db.organization.create({
     data: {
       name: displayName,
-      domain,
+      urn,
       isVisible: false,
       createdBy: userId,
     },
@@ -53,6 +53,7 @@ export async function provisionPersonalWorkspace(
   const agent = await db.agent.create({
     data: {
       organizationId: org.id,
+      urn: `${urn}:my-memories`,
       name: 'My Memories',
       createdBy: userId,
     },
@@ -63,7 +64,8 @@ export async function provisionPersonalWorkspace(
   const keyHash = await bcrypt.hash(rawKey, 12);
   const station = await db.station.create({
     data: {
-      label: 'My Workstation',
+      name: 'My Workstation',
+      urn: `${urn}:my-workstation`,
       keyHash,
       stationType: 'WORKSTATION',
       role: 'READER',

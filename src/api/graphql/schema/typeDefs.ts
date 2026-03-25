@@ -38,13 +38,11 @@ export const typeDefs = `#graphql
     loc: String!
     isLink: Boolean!
     name: String!
-    title: String!
     alias: String
     description: String
     content: String
     tokens: Int
     tags: [String!]!
-    namespace: String!
     seq: Int
     ownerRepo: String
     isRunnable: Boolean
@@ -106,7 +104,6 @@ export const typeDefs = `#graphql
     nodeId: String!
     loc: String!
     name: String!
-    title: String!
     alias: String
     description: String
     content: String
@@ -126,12 +123,12 @@ export const typeDefs = `#graphql
 
   type Station {
     id: ID!
-    label: String!
+    urn: String!
+    name: String!
     stationType: StationType!
     description: String
     role: Role!
     apiKeyShown: Boolean!
-    namespace: String
     agentTools: [String!]!
     organizationId: String
     userId: String
@@ -164,7 +161,7 @@ export const typeDefs = `#graphql
   type Organization {
     id: ID!
     name: String!
-    domain: String!
+    urn: String!
     isVisible: Boolean
     githubInstallationId: Int
     githubAppId: String
@@ -219,6 +216,7 @@ export const typeDefs = `#graphql
   type Agent {
     id: ID!
     organizationId: String!
+    urn: String!
     name: String!
     description: String
     memoryItems: [AgentMemoryItem!]!
@@ -271,7 +269,6 @@ export const typeDefs = `#graphql
     memoryId: String!
     loc: String!
     name: String!
-    title: String!
     alias: String
     description: String
     content: String
@@ -320,12 +317,11 @@ export const typeDefs = `#graphql
   scalar JSON
 
   type Query {
-    # Get a single node by its dotted loc
+    # Get a single node by its loc path
     node(loc: String!): Node
 
-    # List or search nodes; optionally filter by namespace prefix or tags
+    # List or search nodes; optionally filter by tags
     nodes(
-      namespace: String
       tags: [String!]
       search: String
       limit: Int
@@ -389,8 +385,8 @@ export const typeDefs = `#graphql
     # Move a node to a new loc within a specific memory (keeps same id and all incoming edge references)
     moveNode(from: String!, to: String!, memoryId: String!): Node!
 
-    # Replace all nodes under a namespace owned by a repo (collection tool)
-    replaceSubtree(namespace: String!, ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
+    # Replace all nodes owned by a repo within a memory (collection tool)
+    replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
 
     # Session lifecycle
     startSession(input: SessionInput!): Session!
@@ -400,7 +396,7 @@ export const typeDefs = `#graphql
     recordUsage(event: UsageEventInput!): Boolean!
 
     # Station management
-    createStation(label: String!, stationType: StationType!, role: Role!, description: String, namespace: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!]): StationCreated!
+    createStation(name: String!, stationType: StationType!, role: Role!, description: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!]): StationCreated!
     updateStation(id: ID!, description: String, agentTools: [String!]): Station!
     regenerateApiKey(id: ID!): StationCreated!
     revokeStation(id: ID!): Boolean!
@@ -413,8 +409,8 @@ export const typeDefs = `#graphql
     updateUserRoles(userId: ID!, roles: [Role!]!): User!
 
     # Organization management
-    createOrganization(name: String!, domain: String!): Organization!
-    updateOrganization(id: ID!, name: String, domain: String, isVisible: Boolean): Organization!
+    createOrganization(name: String!, urn: String!): Organization!
+    updateOrganization(id: ID!, name: String, urn: String, isVisible: Boolean): Organization!
     deleteOrganization(id: ID!): Boolean!
 
     # Link a GitHub App installation to an organization (org ADMIN or platform ADMIN)

@@ -26,18 +26,17 @@ describe('loadGraphFromFs', () => {
 
     const { graph } = await loadGraphFromFs(graphRoot, 'my-org/my-graph', 'my-org/my-graph');
     expect(graph.nodes).toHaveLength(1);
-    expect(graph.nodes[0].loc).toBe('my-org.my-graph');
+    expect(graph.nodes[0].loc).toBe('my-org:my-graph');
     expect(graph.nodes[0].name).toBe('my-graph');
   });
 
-  it('sets graph name and namespace correctly', async () => {
+  it('sets graph name and ownerRepo correctly', async () => {
     const nodeDir = join(graphRoot, 'my-org', 'my-graph');
     mkdirSync(nodeDir, { recursive: true });
     writeNodeFiles(nodeDir, { name: 'root' });
 
     const { graph } = await loadGraphFromFs(graphRoot, 'my-org/my-graph', 'my-org/my-repo');
     expect(graph.name).toBe('my-org/my-graph');
-    expect(graph.namespace).toBe('my-org.my-graph');
     expect(graph.ownerRepo).toBe('my-org/my-repo');
   });
 
@@ -55,8 +54,8 @@ describe('loadGraphFromFs', () => {
     const { graph } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
     const locs = graph.nodes.map((n) => n.loc).sort();
     expect(locs).toContain('org');
-    expect(locs).toContain('org.graph');
-    expect(locs).toContain('org.graph.sub');
+    expect(locs).toContain('org:graph');
+    expect(locs).toContain('org:graph:sub');
   });
 
   it('extracts edges between nodes using node ids', async () => {
@@ -69,7 +68,7 @@ describe('loadGraphFromFs', () => {
     writeNodeFiles(nodeB, { id: targetId, name: 'b' });
 
     const { graph, edges } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
-    const sourceId = graph.nodes.find((n) => n.loc === 'org.a')!.id;
+    const sourceId = graph.nodes.find((n) => n.loc === 'org:a')!.id;
     expect(edges).toHaveLength(1);
     expect(edges[0]).toEqual({ sourceId, targetId, label: 'links to b' });
   });
@@ -110,7 +109,7 @@ describe('loadGraphFromFs', () => {
     const { graph } = await loadGraphFromFs(graphRoot, 'my-org/my-graph', 'my-org/my-graph');
     expect(graph.nodes).toHaveLength(1);
     // loc must NOT include the .hadron prefix
-    expect(graph.nodes[0].loc).toBe('my-org.my-graph');
+    expect(graph.nodes[0].loc).toBe('my-org:my-graph');
     expect(graph.nodes[0].name).toBe('my-graph');
   });
 
@@ -127,7 +126,7 @@ describe('loadGraphFromFs', () => {
 
     const { graph } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
     const locs = graph.nodes.map((n) => n.loc).sort();
-    expect(locs).toContain('org.a');
-    expect(locs).toContain('org.b');
+    expect(locs).toContain('org:a');
+    expect(locs).toContain('org:b');
   });
 });

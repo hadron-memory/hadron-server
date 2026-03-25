@@ -12,7 +12,6 @@ export interface Context {
   clientId?: string;       // Station.id or "github:<username>"
   userId?: string;         // User.id — only set for OAuth/JWT users
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
-  namespace?: string;      // contributor's writable namespace
   organizationId?: string; // set when the Client is scoped to an organization
 }
 
@@ -125,7 +124,7 @@ function deduplicateNodes<T extends { loc: string; isLink: boolean }>(nodes: T[]
  *
  * Checks (most restrictive wins):
  * 1. Global ADMIN/OWNER — always allowed
- * 2. Clients: role >= CONTRIBUTOR, bundle subscription is READ_WRITE, namespace match
+ * 2. Clients: role >= CONTRIBUTOR, bundle subscription is READ_WRITE
  * 3. Users: org member with CONTRIBUTOR+, or cross-org subscription with CONTRIBUTOR role
  */
 async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
@@ -286,14 +285,13 @@ export const resolvers = {
 
     nodes: async (
       _: unknown,
-      { namespace, tags, search, limit }: { namespace?: string; tags?: string[]; search?: string; limit?: number },
+      { tags, search, limit }: { tags?: string[]; search?: string; limit?: number },
       ctx: Context,
     ) => {
       const access = await memoryAccessFilter(ctx);
       const results = await ctx.db.node.findMany({
         where: {
           ...access,
-          ...(namespace ? { namespace: { startsWith: namespace } } : {}),
           ...(tags?.length ? tagsFilter(tags) : {}),
           ...(search
             ? {
@@ -514,10 +512,6 @@ export const resolvers = {
   Mutation: {
     upsertNode: async (_: unknown, { input }: { input: NodeInput }, ctx: Context) => {
       await requireMemoryWriteAccess(ctx, input.memoryId);
-      const namespace = deriveNamespace(input.loc);
-      if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER') && ctx.namespace && !namespace.startsWith(ctx.namespace)) {
-        throw new Error('Forbidden: outside your writable namespace');
-      }
 
       // Snapshot current state before update (for version history)
       const existing = await ctx.db.node.findUnique({
@@ -529,7 +523,6 @@ export const resolvers = {
             nodeId: existing.id,
             loc: existing.loc,
             name: existing.name,
-            title: existing.title,
             alias: existing.alias,
             description: existing.description,
             content: existing.content,
@@ -546,8 +539,8 @@ export const resolvers = {
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
       const node = await ctx.db.node.upsert({
         where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-        create: { ...nodeFields, id, namespace, tags, createdBy },
-        update: { ...nodeFields, namespace, tags },
+        create: { ...nodeFields, id, tags, createdBy },
+        update: { ...nodeFields, tags },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
 
@@ -601,13 +594,9 @@ export const resolvers = {
 
     moveNode: async (_: unknown, { from, to, memoryId }: { from: string; to: string; memoryId: string }, ctx: Context) => {
       await requireMemoryWriteAccess(ctx, memoryId);
-      if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER') && ctx.namespace && !deriveNamespace(to).startsWith(ctx.namespace)) {
-        throw new Error('Forbidden: outside your writable namespace');
-      }
-      const namespace = deriveNamespace(to);
       return ctx.db.node.update({
         where: { loc_memoryId: { loc: from, memoryId } },
-        data: { loc: to, namespace },
+        data: { loc: to },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
     },
@@ -615,25 +604,23 @@ export const resolvers = {
     replaceSubtree: async (
       _: unknown,
       {
-        namespace,
         ownerRepo,
         memoryId,
         nodes,
         edges,
-      }: { namespace: string; ownerRepo: string; memoryId: string; nodes: NodeInput[]; edges: EdgeInput[] },
+      }: { ownerRepo: string; memoryId: string; nodes: NodeInput[]; edges: EdgeInput[] },
       ctx: Context,
     ) => {
       await requireMemoryWriteAccess(ctx, memoryId);
 
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
-        await tx.node.deleteMany({ where: { namespace, ownerRepo, memoryId } });
+        await tx.node.deleteMany({ where: { ownerRepo, memoryId } });
 
         for (const input of nodes) {
           await tx.node.create({
             data: {
               id: input.id ?? randomUUID().replace(/-/g, ''),
               ...input,
-              namespace: deriveNamespace(input.loc),
               tags: serializeTags(input.tags ?? []) as string[],
             },
           });
@@ -720,21 +707,19 @@ export const resolvers = {
     createStation: async (
       _: unknown,
       {
-        label,
+        name,
         stationType,
         role,
         description,
-        namespace,
         organizationId,
         userId,
         expiresAt,
         agentTools,
       }: {
-        label: string;
+        name: string;
         stationType: string;
         role: string;
         description?: string;
-        namespace?: string;
         organizationId?: string;
         userId?: string;
         expiresAt?: string;
@@ -745,14 +730,22 @@ export const resolvers = {
       requireRole(ctx, 'READER');
       const rawKey = randomBytes(32).toString('hex');
       const keyHash = await bcrypt.hash(rawKey, 12);
+
+      // Generate URN from org + name
+      let urn = name;
+      if (organizationId) {
+        const org = await ctx.db.organization.findUnique({ where: { id: organizationId }, select: { urn: true } });
+        if (org) urn = `${org.urn}:${name}`;
+      }
+
       const station = await ctx.db.station.create({
         data: {
-          label,
+          name,
+          urn,
           keyHash,
           stationType: stationType as StationType,
-          description,
+          description: description ?? null,
           role: role as Role,
-          namespace,
           agentTools: agentTools ?? [],
           organizationId: organizationId ?? null,
           userId: userId ?? ctx.userId ?? null,
@@ -863,12 +856,12 @@ export const resolvers = {
 
     createOrganization: async (
       _: unknown,
-      { name, domain }: { name: string; domain: string },
+      { name, urn }: { name: string; urn: string },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
       const org = await ctx.db.organization.create({
-        data: { name, domain, isVisible: true, createdBy: ctx.userId ?? ctx.clientId ?? null },
+        data: { name, urn, isVisible: true, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: ORG_INCLUDE,
       });
       if (ctx.userId) {
@@ -881,7 +874,7 @@ export const resolvers = {
 
     updateOrganization: async (
       _: unknown,
-      { id, name, domain, isVisible }: { id: string; name?: string; domain?: string; isVisible?: boolean },
+      { id, name, urn, isVisible }: { id: string; name?: string; urn?: string; isVisible?: boolean },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, id, 'ADMIN');
@@ -889,7 +882,7 @@ export const resolvers = {
         where: { id },
         data: {
           ...(name ? { name } : {}),
-          ...(domain ? { domain } : {}),
+          ...(urn ? { urn } : {}),
           ...(isVisible !== undefined ? { isVisible } : {}),
         },
         include: ORG_INCLUDE,
@@ -1124,9 +1117,13 @@ export const resolvers = {
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
+      // Generate memory URN from org + name
+      const memOrg = await ctx.db.organization.findUniqueOrThrow({ where: { id: orgId }, select: { urn: true } });
+      const memoryUrn = `${memOrg.urn}:${name}`;
       const memory = await ctx.db.memory.create({
         data: {
           organizationId: orgId,
+          urn: memoryUrn,
           name,
           shortDescription,
           description,
@@ -1148,12 +1145,11 @@ export const resolvers = {
       });
 
       // Create the root node for this memory
-      const rootName = name.split('.').pop() ?? name;
+      const rootName = name.split(':').pop() ?? name;
       await createNode({
         memoryId: memory.id,
         loc: name,
         name: rootName,
-        title: rootName,
       });
 
       return memory;
@@ -1243,8 +1239,11 @@ export const resolvers = {
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
+      // Generate agent URN from org + name
+      const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: orgId }, select: { urn: true } });
+      const agentUrn = `${org.urn}:${name}`;
       return ctx.db.agent.create({
-        data: { organizationId: orgId, name, description, createdBy: ctx.userId ?? ctx.clientId ?? null },
+        data: { organizationId: orgId, urn: agentUrn, name, description, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: AGENT_INCLUDE,
       });
     },
@@ -1391,7 +1390,6 @@ export const resolvers = {
           nodeId: node.id,
           loc: node.loc,
           name: node.name,
-          title: node.title,
           alias: node.alias,
           description: node.description,
           content: node.content,
@@ -1406,7 +1404,6 @@ export const resolvers = {
         where: { id: node.id },
         data: {
           name: version.name,
-          title: version.title,
           alias: version.alias,
           description: version.description,
           content: version.content,
@@ -1463,11 +1460,6 @@ export const resolvers = {
   },
 };
 
-function deriveNamespace(loc: string): string {
-  const parts = loc.split('.');
-  return parts.slice(0, 2).join('.');
-}
-
 interface NodeEdgeInput {
   targetId: string;
   label?: string;
@@ -1478,7 +1470,6 @@ interface NodeInput {
   memoryId: string;
   loc: string;
   name: string;
-  title: string;
   alias?: string;
   description?: string;
   content?: string;

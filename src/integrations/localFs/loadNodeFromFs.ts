@@ -45,8 +45,7 @@ export const loadNodeFromFs = async (
   } else if (relPath.startsWith('.hadron' + sep)) {
     relPath = relPath.slice('.hadron'.length + 1);
   }
-  const loc = relPath.split(sep).join('.');
-  const namespace = loc.split('.').slice(0, 2).join('.');
+  const loc = relPath.split(sep).join(':');
 
   // Extract edges — modern format uses id; entries without id are skipped
   const edges = (meta.nodes ?? [])
@@ -67,7 +66,6 @@ export const loadNodeFromFs = async (
       content: content?.trim() ?? null,
       contentHash: meta.contentHash ?? null,
       tags: meta.tags ?? [],
-      namespace,
       ownerRepo,
     },
     edges,

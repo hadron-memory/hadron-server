@@ -101,7 +101,7 @@ model User {
 model Organization {
   id                           String    @id @default(cuid())
   name                         String
-  domain                       String    @unique
+  urn                          String    @unique
   isVisible                    Boolean?  @map("is_visible")
   githubInstallationId         Int?      @unique @map("github_installation_id")
   githubAppId                  String?   @map("github_app_id")
@@ -150,11 +150,11 @@ model Station {
   userId         String?     @map("user_id")
   organizationId String?     @map("organization_id")
   stationType    StationType @default(WORKSTATION) @map("station_type")
-  label          String
+  urn            String      @unique
+  name           String
   keyHash        String      @map("key_hash")
   apiKeyShown    Boolean     @default(false) @map("api_key_shown")
   role           Role        @default(READER)
-  namespace      String?
   description    String?
   agentTools     String[]    @default([]) @map("agent_tools")
   expiresAt      DateTime?   @map("expires_at")
@@ -173,8 +173,6 @@ model Station {
   usageEvents        UsageEvent[]
   logEntries         StationLogEntry[]
 
-  @@unique([organizationId, label])
-  @@unique([userId, label])
   @@map("stations")
 }
 
@@ -201,6 +199,7 @@ model StationAgentSubscription {
 model Memory {
   id                   String     @id @default(cuid())
   organizationId       String     @map("organization_id")
+  urn                  String     @unique
   name                 String
   shortDescription     String?    @map("short_description")
   description          String?
@@ -237,7 +236,6 @@ model Memory {
   licenses      MemoryLicense[]
   logEntries    MemoryLogEntry[]
 
-  @@unique([organizationId, name])
   @@index([organizationId])
   @@map("memories")
 }
@@ -246,7 +244,6 @@ model Node {
   id          String    @id // UUIDv7 from node.yaml — stable across moves
   memoryId    String    @map("memory_id")
   name        String
-  title       String
   alias       String?
   loc         String
   isLink      Boolean   @default(false) @map("is_link")
@@ -255,7 +252,6 @@ model Node {
   contentHash String?   @map("content_hash")
   tokens      Int?
   tags        String[]
-  namespace   String
   seq         Int?
   ownerRepo   String?   @map("owner_repo")
   isRunnable  Boolean?  @map("is_runnable")
@@ -275,7 +271,6 @@ model Node {
 
   @@unique([loc, memoryId])
   @@index([loc])
-  @@index([namespace])
   @@index([memoryId])
   @@map("nodes")
 }
@@ -400,6 +395,7 @@ model UsageEvent {
 model Agent {
   id             String    @id @default(cuid())
   organizationId String    @map("organization_id")
+  urn            String    @unique
   name           String
   description    String?
   createdAt      DateTime  @default(now()) @map("created_at")
@@ -413,7 +409,6 @@ model Agent {
   memoryItems         AgentMemoryItem[]
   stationSubscriptions StationAgentSubscription[]
 
-  @@unique([organizationId, name])
   @@map("agents")
 }
 
@@ -651,7 +646,6 @@ model NodeVersion {
   nodeId      String   @map("node_id")
   loc         String
   name        String
-  title       String
   alias       String?
   description String?
   content     String?

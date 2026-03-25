@@ -18,8 +18,8 @@ export const saveNodeToFs = async (
   }
 
   try {
-    // Derive directory path: micromentor-org.mmdata.services → micromentor-org/mmdata/services
-    const dirPath = join(sourcesPath, ...node.loc.split('.'));
+    // Derive directory path: micromentor-org:mmdata:services → micromentor-org/mmdata/services
+    const dirPath = join(sourcesPath, ...node.loc.split(':'));
     const nodeDir = join(dirPath, '.node');
 
     mkdirSync(nodeDir, { recursive: true });

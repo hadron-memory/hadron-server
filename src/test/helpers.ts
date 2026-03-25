@@ -45,13 +45,15 @@ export async function createDbOrgAndGraph(
   const org = await db.organization.create({
     data: {
       name: opts.orgName ?? 'test-org',
-      domain: opts.orgName ?? 'test-org',
+      urn: opts.orgName ?? 'test-org',
     },
   });
+  const memName = opts.graphName ?? 'test/repo';
   const graph = await db.memory.create({
     data: {
       organizationId: org.id,
-      name: opts.graphName ?? 'test/repo',
+      urn: `${opts.orgName ?? 'test-org'}:${memName}`,
+      name: memName,
     },
   });
   return { org, graph };
@@ -66,8 +68,6 @@ export async function createDbNode(
     id?: string;
     loc: string;
     name?: string;
-    title?: string;
-    namespace?: string;
     ownerRepo?: string;
     memoryId: string;
     tags?: string[];
@@ -75,15 +75,12 @@ export async function createDbNode(
   },
 ) {
   const loc = fields.loc;
-  const namespace = fields.namespace ?? loc.split('.').slice(0, 2).join('.');
   return db.node.create({
     data: {
       id: fields.id ?? randomUUID().replace(/-/g, ''),
       memoryId: fields.memoryId,
       loc,
       name: fields.name ?? loc,
-      title: fields.title ?? fields.name ?? loc,
-      namespace,
       ownerRepo: fields.ownerRepo ?? 'test/repo',
       tags: fields.tags ?? [],
       content: fields.content ?? null,
@@ -96,18 +93,18 @@ export async function createDbNode(
  */
 export async function createDbStation(
   db: PrismaClient,
-  label: string,
+  name: string,
   role: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' = 'READER',
-  opts: { namespace?: string; expiresAt?: Date; organizationId?: string; userId?: string } = {},
+  opts: { expiresAt?: Date; organizationId?: string; userId?: string } = {},
 ) {
   const keyHash = await bcrypt.hash(TEST_RAW_KEY, 4); // low cost for speed
   return db.station.create({
     data: {
-      label,
+      name,
+      urn: name,
       keyHash,
       role,
       stationType: 'WORKSTATION',
-      namespace: opts.namespace ?? null,
       expiresAt: opts.expiresAt ?? null,
       organizationId: opts.organizationId ?? null,
       userId: opts.userId ?? null,

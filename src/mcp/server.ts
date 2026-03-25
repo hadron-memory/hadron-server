@@ -5,7 +5,6 @@ import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
-import { graphNameToNamespace } from '../config.js';
 import type { SessionType } from '../generated/prisma/index.js';
 
 // ---------------------------------------------------------------------------
@@ -28,7 +27,7 @@ function matchesQuery(
 }
 
 function validateLoc(loc: string): void {
-  const parts = loc.split('.');
+  const parts = loc.split(':');
   if (parts.some((p) => !/^[a-zA-Z0-9_-]+$/.test(p))) {
     throw new Error(
       `Invalid loc "${loc}": each segment must contain only letters, digits, hyphens, or underscores`,
@@ -37,20 +36,23 @@ function validateLoc(loc: string): void {
 }
 
 /**
- * Resolve a memoryId that may be either a cuid (primary key) or a memory name
- * (e.g. "micromentor-org.mmdata"). Returns the actual database ID, or null if not found.
+ * Resolve a memoryId that may be either a cuid (primary key) or a memory URN.
+ * Returns the actual database ID, or null if not found.
  */
 async function resolveMemoryId(memoryIdOrName: string): Promise<string | null> {
-  // If it looks like a cuid (no dots, no slashes), try it directly
-  if (!memoryIdOrName.includes('.') && !memoryIdOrName.includes('/')) {
+  // If it looks like a cuid (no colons, no slashes), try it directly
+  if (!memoryIdOrName.includes(':') && !memoryIdOrName.includes('/')) {
     const exists = await db.memory.findUnique({ where: { id: memoryIdOrName }, select: { id: true } });
     if (exists) return exists.id;
   }
+  // Try to find by URN
+  const byUrn = await db.memory.findFirst({ where: { urn: memoryIdOrName }, select: { id: true } });
+  if (byUrn) return byUrn.id;
   // Try to find by name
   const byName = await db.memory.findFirst({ where: { name: memoryIdOrName }, select: { id: true } });
   if (byName) return byName.id;
-  // Last resort: try as ID even if it contains dots (shouldn't happen, but be safe)
-  if (memoryIdOrName.includes('.')) {
+  // Last resort: try as ID
+  if (memoryIdOrName.includes(':')) {
     const byId = await db.memory.findUnique({ where: { id: memoryIdOrName }, select: { id: true } });
     if (byId) return byId.id;
   }
@@ -167,8 +169,8 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-read-node',
-    'Read a node by its dotted path (e.g. my-org.my-repo.models)',
-    { loc: z.string().describe('Dotted path to the node') },
+    'Read a node by its colon-delimited path (e.g. my-org:my-repo:models)',
+    { loc: z.string().describe('Colon-delimited path to the node') },
     async ({ loc }) => {
       const memoryIds = await getAccessibleMemoryIds(auth);
       const where: Record<string, unknown> = { loc };
@@ -200,7 +202,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       }).catch(() => {});
 
       const meta = [
-        `**${node.title}** (${node.name})`,
+        `**${node.name}**`,
         node.description ? `> ${node.description}` : '',
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',
@@ -224,11 +226,11 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-read-next-node',
     'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted.',
     {
-      parent: z.string().describe('Dotted path of the parent node'),
-      current: z.string().optional().describe('Dotted path of the current child node'),
+      parent: z.string().describe('Colon-delimited path of the parent node'),
+      current: z.string().optional().describe('Colon-delimited path of the current child node'),
     },
     async ({ parent, current }) => {
-      const prefix = parent + '.';
+      const prefix = parent + ':';
       const memoryIds = await getAccessibleMemoryIds(auth);
       const where: Record<string, unknown> = {
         loc: { startsWith: prefix },
@@ -236,9 +238,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       if (memoryIds) where.memoryId = { in: memoryIds };
 
       const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
-      // Direct children only (no further dots after prefix)
+      // Direct children only (no further colons after prefix)
       const children = allNodes
-        .filter((n) => !n.loc.slice(prefix.length).includes('.'))
+        .filter((n) => !n.loc.slice(prefix.length).includes(':'))
         .sort((a, b) => {
           // Sort by seq first (nodes with seq come before those without), then by loc
           if (a.seq !== null && b.seq !== null) return a.seq - b.seq;
@@ -275,7 +277,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       if (!node) return textResult('Node not found.');
 
       const meta = [
-        `**${node.title}** (${node.name})`,
+        `**${node.name}**`,
         node.description ? `> ${node.description}` : '',
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',
@@ -296,20 +298,19 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-create-node',
     'Create or update a node. Requires write access to the memory.',
     {
-      loc: z.string().describe('Dotted path for the node'),
+      loc: z.string().describe('Colon-delimited path for the node'),
       memoryId: z.string().optional().describe('Memory ID or name. Omit to auto-detect: uses the only writable memory, or infers from edge targets.'),
       name: z.string().describe('Node name'),
-      title: z.string().describe('Display title'),
       description: z.string().optional().describe('Short description'),
       content: z.string().optional().describe('Markdown content'),
       seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
       tags: z.array(z.string()).optional().describe('Tags'),
       edges: z.array(z.object({
-        targetId: z.string().describe('Target node ID or dotted loc path'),
+        targetId: z.string().describe('Target node ID or loc path'),
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
-    async ({ loc, memoryId: rawMemoryId, name, title, description, content, seq, tags, edges }) => {
+    async ({ loc, memoryId: rawMemoryId, name, description, content, seq, tags, edges }) => {
       try {
         validateLoc(loc);
       } catch (e) {
@@ -336,7 +337,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           // Multiple writable memories — check if edges point to exactly one
           const edgeMemoryIds = new Set<string>();
           for (const edge of edges) {
-            if (edge.targetId.includes('.')) {
+            if (edge.targetId.includes(':')) {
               const targetNode = await db.node.findFirst({ where: { loc: edge.targetId }, select: { memoryId: true } });
               if (targetNode && writableIds.includes(targetNode.memoryId)) {
                 edgeMemoryIds.add(targetNode.memoryId);
@@ -365,8 +366,6 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult('Write access denied for this memory.');
       }
 
-      const namespace = loc.split('.').slice(0, 2).join('.');
-
       const existing = await db.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
 
       const upserted = await db.node.upsert({
@@ -376,8 +375,6 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           memoryId,
           loc,
           name,
-          title,
-          namespace,
           description: description ?? null,
           content: content ?? null,
           seq: seq ?? null,
@@ -386,7 +383,6 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         },
         update: {
           name,
-          title,
           description: description ?? null,
           content: content ?? null,
           seq: seq ?? null,
@@ -401,7 +397,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         for (const edge of edges) {
           // Resolve targetId: if it looks like a loc path (contains dots), look up the node
           let resolvedTargetId = edge.targetId;
-          if (edge.targetId.includes('.')) {
+          if (edge.targetId.includes(':')) {
             const targetNode = await db.node.findFirst({ where: { loc: edge.targetId } });
             if (targetNode) {
               resolvedTargetId = targetNode.id;
@@ -468,20 +464,19 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-update-node',
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved.',
     {
-      loc: z.string().describe('Dotted path of the node to update'),
+      loc: z.string().describe('Colon-delimited path of the node to update'),
       name: z.string().optional().describe('New node name'),
-      title: z.string().optional().describe('New display title'),
       description: z.string().optional().describe('New short description'),
       content: z.string().optional().describe('New markdown content'),
       seq: z.number().optional().describe('New sort order among siblings'),
       tags: z.array(z.string()).optional().describe('Replace tags'),
       edges: z.array(z.object({
-        targetId: z.string().describe('Target node ID or dotted loc path'),
+        targetId: z.string().describe('Target node ID or loc path'),
         label: z.string().describe('Relationship label'),
       })).optional().describe('Replace outgoing edges'),
       reason: z.string().optional().describe('Why this change was made (stored in version history)'),
     },
-    async ({ loc, name, title, description, content, seq, tags, edges, reason }) => {
+    async ({ loc, name, description, content, seq, tags, edges, reason }) => {
       // Find the existing node
       const memoryIds = await getAccessibleMemoryIds(auth);
       const where: Record<string, unknown> = { loc };
@@ -502,7 +497,6 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           nodeId: existing.id,
           loc: existing.loc,
           name: existing.name,
-          title: existing.title,
           alias: existing.alias,
           description: existing.description,
           content: existing.content,
@@ -515,7 +509,6 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Build partial update — only fields that were provided
       const data: Record<string, unknown> = {};
       if (name !== undefined) data.name = name;
-      if (title !== undefined) data.title = title;
       if (description !== undefined) data.description = description;
       if (content !== undefined) data.content = content;
       if (seq !== undefined) data.seq = seq;
@@ -531,7 +524,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         await db.pendingEdge.deleteMany({ where: { sourceId: existing.id } });
         for (const edge of edges) {
           let resolvedTargetId = edge.targetId;
-          if (edge.targetId.includes('.')) {
+          if (edge.targetId.includes(':')) {
             const targetNode = await db.node.findFirst({ where: { loc: edge.targetId } });
             if (targetNode) {
               resolvedTargetId = targetNode.id;
@@ -584,8 +577,8 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-move-node',
     'Move or rename a node. The node keeps its stable ID so all edge references remain valid.',
     {
-      from: z.string().describe('Current dotted path'),
-      to: z.string().describe('New dotted path'),
+      from: z.string().describe('Current colon-delimited path'),
+      to: z.string().describe('New colon-delimited path'),
     },
     async ({ from, to }) => {
       try {
@@ -606,12 +599,11 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult('Write access denied for this memory.');
       }
 
-      const newNamespace = to.split('.').slice(0, 2).join('.');
-      const newName = to.split('.').pop()!;
+      const newName = to.split(':').pop()!;
 
       await db.node.update({
         where: { loc_memoryId: { loc: from, memoryId: node.memoryId } },
-        data: { loc: to, name: newName, namespace: newNamespace },
+        data: { loc: to, name: newName },
       });
 
       return textResult(`Moved "${from}" → "${to}"`);
@@ -624,7 +616,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-run-action',
     'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content.',
     {
-      loc: z.string().describe('Dotted path to the action node'),
+      loc: z.string().describe('Colon-delimited path to the action node'),
       args: z.record(z.string(), z.string()).optional().describe('Action arguments as key-value pairs'),
     },
     async ({ loc, args }) => {

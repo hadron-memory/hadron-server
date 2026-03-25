@@ -52,16 +52,6 @@ describe('createNode', () => {
     expect(inDb).not.toBeNull();
   });
 
-  it('derives namespace from loc (first 2 segments)', async () => {
-    const node = await createNode({
-      loc: 'my-org.my-graph.sub.deep',
-      name: 'Deep Node',
-      memoryId,
-    });
-
-    expect(node.namespace).toBe('my-org.my-graph');
-  });
-
   it('upserts: second call with same loc updates, id unchanged', async () => {
     const first = await createNode({
       loc: 'org.g.n',

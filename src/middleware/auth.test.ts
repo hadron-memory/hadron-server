@@ -107,14 +107,8 @@ describe('resolveAuthContext', () => {
 
     await resolveAuthContext(makeReq(`Bearer ${TEST_RAW_KEY}`), db);
 
-    const station = await db.station.findFirst({ where: { label: 'tracking-station' } });
+    const station = await db.station.findFirst({ where: { name: 'tracking-station' } });
     expect(station!.lastUsedAt).not.toBeNull();
   });
 
-  it('propagates namespace from station to context', async () => {
-    await createDbStation(db, 'ns-station', 'READER', { namespace: 'org.graph' });
-
-    const ctx = await resolveAuthContext(makeReq(`Bearer ${TEST_RAW_KEY}`), db);
-    expect(ctx.namespace).toBe('org.graph');
-  });
 });
