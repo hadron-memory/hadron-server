@@ -106,6 +106,7 @@ export async function createServer(): Promise<Express> {
             create: {
               githubId: ghUser.id,
               githubUsername: ghUser.login,
+              handle: ghUser.login,
               identityProvider: 'GITHUB',
               name: ghUser.name,
               avatarUrl: ghUser.avatar_url,

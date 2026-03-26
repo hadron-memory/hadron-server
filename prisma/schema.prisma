@@ -72,7 +72,8 @@ enum MemoryVisibility {
 // ─── Models ────────────────────────────────────────────────────────────
 
 model User {
-  id               String            @id
+  id               String            @id @default(cuid())
+  handle           String?           @unique
   githubId         Int?              @unique @map("github_id")
   githubUsername   String?           @unique @map("github_username")
   identityProvider IdentityProvider? @map("identity_provider")

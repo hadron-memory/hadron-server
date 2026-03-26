@@ -147,6 +147,7 @@ export const typeDefs = `#graphql
 
   type User {
     id: ID!
+    handle: String
     githubId: Int
     githubUsername: String
     identityProvider: String

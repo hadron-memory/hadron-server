@@ -88,6 +88,7 @@ export interface StationCreated {
 
 export interface User {
   id: string;
+  handle: string | null;
   githubId: number;
   githubUsername: string;
   identityProvider: IdentityProvider | null;
