@@ -36,7 +36,7 @@ export const syncGraphFromGithub = async (
   graph: MemoryWithOrg,
 ): Promise<{ error?: string; nodeCount?: number }> => {
   try {
-    const graphName = graph.name;
+    const graphName = graph.urn;
 
     // DB-only mode — skip all git operations
     if (!graph.source) {
@@ -50,7 +50,8 @@ export const syncGraphFromGithub = async (
       data: { syncStatus: 'SYNCING', syncError: null },
     }).catch(() => {});
 
-    const localPath = join(GRAPHS_PATH, graph.organization.urn, graphName);
+    const slug = graphName.includes(':') ? graphName.split(':').slice(1).join(':') : graphName;
+    const localPath = join(GRAPHS_PATH, graph.organization.urn, slug);
     const ownerRepo = extractOwnerRepo(graph.source);
 
     // 1. Get installation token (requires GitHub App installation)

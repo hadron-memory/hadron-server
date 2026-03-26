@@ -1,8 +1,8 @@
 import { execFile as execFileCb } from 'child_process';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
-import { stringify } from 'yaml';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
+import { join, dirname, basename } from 'path';
+import { stringify, parse } from 'yaml';
 import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
@@ -21,36 +21,40 @@ export interface NodeForGit {
 }
 
 /**
+ * Derive the local filesystem path for a memory's cloned repo.
+ * Uses the URN slug (part after the colon) as the directory name.
+ */
+function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
+  const slug = memoryUrn.includes(':') ? memoryUrn.split(':').slice(1).join(':') : memoryUrn;
+  return join(GRAPHS_PATH, orgUrn, slug);
+}
+
+/**
  * Write a node to the appropriate git repo and branch, then push.
+ * Writes the new frontmatter markdown format with optional edge sidecar.
  * Fire-and-forget safe — errors are logged, not thrown.
- *
- * Branch resolution (from Memory.writeBranch):
- *   "main"                    → push directly to main
- *   "hadron-updates"          → push to shared feature branch
- *   "hadron-updates-{client}" → push to per-client branch
  */
 export async function writeNodeToGit(
   node: NodeForGit,
   ownerRepo: string,
   clientId?: string | null,
 ): Promise<void> {
-  // 1. Find Memory config for this ownerRepo
-  const graphRecord = await db.memory.findFirst({
-    where: { source: { contains: ownerRepo } },
-    include: { organization: true },
-  });
+  // 1. Find Memory config — try by ownerRepo, fall back to memoryId lookup
+  const graphRecord = ownerRepo
+    ? await db.memory.findFirst({
+        where: { source: { contains: ownerRepo } },
+        include: { organization: true },
+      })
+    : null;
 
   if (!graphRecord) {
     console.warn(`[writeNodeToGit] No Memory found for ownerRepo "${ownerRepo}"`);
     return;
   }
 
-  if (!graphRecord.source) {
-    // DB-only mode — no git push
-    return;
-  }
+  if (!graphRecord.source) return; // DB-only mode
 
-  const localPath = join(GRAPHS_PATH, graphRecord.organization.urn, graphRecord.name);
+  const localPath = memoryLocalPath(graphRecord.organization.urn, graphRecord.urn);
 
   if (!existsSync(join(localPath, '.git'))) {
     console.warn(`[writeNodeToGit] Repo not cloned yet at ${localPath} — skipping git write`);
@@ -61,11 +65,15 @@ export async function writeNodeToGit(
   const rawBranch = graphRecord.writeBranch ?? 'hadron-updates';
   const branch = rawBranch.replace('{client}', clientId ?? 'unknown');
 
-  // 3. Get installation token (if org has GitHub App installed)
+  // 3. Get installation token
   let token: string | null = null;
   if (graphRecord.organization.githubInstallationId) {
     try {
-      token = await getInstallationToken(graphRecord.organization.githubInstallationId);
+      const org = graphRecord.organization;
+      const credentials = org.githubAppId && org.githubAppPrivateKeyEncrypted
+        ? { appId: org.githubAppId, privateKeyPem: decryptToken(org.githubAppPrivateKeyEncrypted) }
+        : undefined;
+      token = await getInstallationToken(graphRecord.organization.githubInstallationId, credentials);
     } catch (err) {
       console.error(`[writeNodeToGit] Failed to get installation token:`, err);
       return;
@@ -74,6 +82,10 @@ export async function writeNodeToGit(
 
   // 4. Checkout / create the branch
   try {
+    if (token) {
+      const tokenUrl = toHttpsUrl(graphRecord.source, token);
+      await execFile('git', ['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
+    }
     await execFile('git', ['fetch', 'origin'], { cwd: localPath });
 
     if (branch === 'main' || branch === 'master') {
@@ -89,58 +101,124 @@ export async function writeNodeToGit(
     }
   } catch (err) {
     console.error(`[writeNodeToGit] Branch setup failed (${branch}) for ${node.loc}:`, err);
+    restoreRemote(localPath, graphRecord.source);
     return;
   }
 
-  // 5. Write node.yaml
+  // 5. Write frontmatter markdown file
   const locParts = node.loc.split(':');
-  const nodeDir = join(localPath, '.hadron', ...locParts, '.node');
-  mkdirSync(nodeDir, { recursive: true });
+  let mdPath: string;
+  let sidecarDir: string;
 
-  const yamlData: Record<string, unknown> = { id: node.id, name: node.name };
-  if (node.alias)       yamlData.alias       = node.alias;
-  if (node.description) yamlData.description = node.description;
-  if (node.tags.length > 0) yamlData.tags = node.tags;
+  if (locParts.length === 0 || node.loc === '') {
+    // Root node → README.md
+    mdPath = join(localPath, 'README.md');
+    sidecarDir = join(localPath, '.README');
+  } else {
+    // Check if this node has children (is it a folder?)
+    const folderPath = join(localPath, ...locParts);
+    if (existsSync(folderPath) && hasChildNodes(folderPath)) {
+      // Parent node → folder/README.md
+      mdPath = join(folderPath, 'README.md');
+      sidecarDir = join(dirname(folderPath), '.' + basename(folderPath));
+    } else {
+      // Leaf node → parent/name.md
+      const name = locParts[locParts.length - 1];
+      const parentParts = locParts.slice(0, -1);
+      mdPath = join(localPath, ...parentParts, name + '.md');
+      sidecarDir = join(localPath, ...parentParts, '.' + name);
+    }
+  }
+
+  // Build frontmatter
+  const frontmatter: Record<string, unknown> = { name: node.name, id: node.id };
+  if (node.alias) frontmatter.alias = node.alias;
+  if (node.description) frontmatter.description = node.description;
+  if (node.tags.length > 0) frontmatter.tags = node.tags;
+
+  // Preserve existing frontmatter fields we don't manage (urn, author, etc.)
+  if (existsSync(mdPath)) {
+    try {
+      const existing = readFileSync(mdPath, 'utf-8');
+      const fmMatch = existing.match(/^---\n([\s\S]*?)\n---/);
+      if (fmMatch) {
+        const existingMeta = parse(fmMatch[1]) as Record<string, unknown>;
+        for (const key of ['urn', 'author']) {
+          if (existingMeta[key] && !frontmatter[key]) {
+            frontmatter[key] = existingMeta[key];
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const fmYaml = stringify(frontmatter, { lineWidth: 0 }).trim();
+  const body = node.content ?? '';
+  mkdirSync(dirname(mdPath), { recursive: true });
+  writeFileSync(mdPath, `---\n${fmYaml}\n---\n\n${body}\n`, 'utf-8');
+
+  // Write edge sidecar if there are edges
   if (node.outgoingEdges.length > 0) {
-    yamlData.nodes = node.outgoingEdges.map((e) => ({
+    mkdirSync(sidecarDir, { recursive: true });
+    const edges = node.outgoingEdges.map((e) => ({
       id: e.target.id,
-      ...(e.label ? { rel: e.label } : {}),
+      rel: e.label ?? '',
     }));
+    writeFileSync(join(sidecarDir, 'edges.yaml'), stringify(edges), 'utf-8');
   }
 
-  writeFileSync(join(nodeDir, 'node.yaml'), stringify(yamlData), 'utf-8');
-
-  // 6. Write topic.md if content present
-  if (node.content) {
-    writeFileSync(join(nodeDir, 'topic.md'), node.content, 'utf-8');
-  }
-
-  // 7. Commit and push (skip if nothing changed)
+  // 6. Commit and push
   try {
-    await execFile('git', ['add', nodeDir], { cwd: localPath });
+    await execFile('git', ['add', '-A'], { cwd: localPath });
     const { stdout } = await execFile('git', ['status', '--porcelain'], { cwd: localPath });
-    if (!stdout.trim()) return; // nothing to commit
+    if (!stdout.trim()) {
+      restoreRemote(localPath, graphRecord.source);
+      return;
+    }
 
     await execFile('git', [
       'commit', '-m', `Update node ${node.loc}\n\n[hadron-server]`,
     ], { cwd: localPath });
 
-    // Embed token in remote URL for push, then restore original
-    if (token) {
-      const tokenUrl = toHttpsUrl(graphRecord.source, token);
-      await execFile('git', ['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
-    }
-
     try {
       await execFile('git', ['push', 'origin', branch], { cwd: localPath });
       console.log(`[writeNodeToGit] Pushed ${node.loc} → ${ownerRepo}@${branch}`);
     } finally {
-      // Always restore original remote URL
-      if (token) {
-        await execFile('git', ['remote', 'set-url', 'origin', graphRecord.source], { cwd: localPath });
-      }
+      restoreRemote(localPath, graphRecord.source);
     }
   } catch (err) {
     console.error(`[writeNodeToGit] Commit/push failed for ${node.loc}:`, err);
+    restoreRemote(localPath, graphRecord.source);
   }
+}
+
+function restoreRemote(localPath: string, originalUrl: string): void {
+  execFile('git', ['remote', 'set-url', 'origin', originalUrl], { cwd: localPath }).catch(() => {});
+}
+
+function hasChildNodes(dir: string): boolean {
+  try {
+    const { readdirSync } = require('fs');
+    const entries = readdirSync(dir, { withFileTypes: true });
+    return entries.some((e: { isFile: () => boolean; name: string }) =>
+      (e.isFile() && e.name.endsWith('.md') && e.name !== 'README.md') ||
+      (entries.some((d: { isDirectory: () => boolean; name: string }) => d.isDirectory() && !d.name.startsWith('.')))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function decryptToken(ciphertext: string): string {
+  const { createDecipheriv } = require('crypto');
+  const key = process.env.HADRON_ENCRYPTION_KEY;
+  if (!key) throw new Error('HADRON_ENCRYPTION_KEY env var is required');
+  const keyBuf = Buffer.from(key, 'hex');
+  const buf = Buffer.from(ciphertext, 'base64');
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const data = buf.subarray(28);
+  const decipher = createDecipheriv('aes-256-gcm', keyBuf, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
