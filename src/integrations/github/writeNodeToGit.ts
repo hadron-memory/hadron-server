@@ -1,6 +1,7 @@
 import { execFile as execFileCb } from 'child_process';
+import { createDecipheriv } from 'crypto';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { stringify, parse } from 'yaml';
 import { GRAPHS_PATH } from '../../config.js';
@@ -203,11 +204,10 @@ function restoreRemote(localPath: string, originalUrl: string): void {
 
 function hasChildNodes(dir: string): boolean {
   try {
-    const { readdirSync } = require('fs');
     const entries = readdirSync(dir, { withFileTypes: true });
-    return entries.some((e: { isFile: () => boolean; name: string }) =>
+    return entries.some((e) =>
       (e.isFile() && e.name.endsWith('.md') && e.name !== 'README.md') ||
-      (entries.some((d: { isDirectory: () => boolean; name: string }) => d.isDirectory() && !d.name.startsWith('.')))
+      (e.isDirectory() && !e.name.startsWith('.'))
     );
   } catch {
     return false;
@@ -215,7 +215,6 @@ function hasChildNodes(dir: string): boolean {
 }
 
 function decryptToken(ciphertext: string): string {
-  const { createDecipheriv } = require('crypto');
   const key = process.env.HADRON_ENCRYPTION_KEY;
   if (!key) throw new Error('HADRON_ENCRYPTION_KEY env var is required');
   const keyBuf = Buffer.from(key, 'hex');
