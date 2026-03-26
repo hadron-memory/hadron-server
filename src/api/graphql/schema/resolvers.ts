@@ -580,7 +580,7 @@ export const resolvers = {
         content: finalNode.content,
         tags: deserializeTags(finalNode.tags) as string[],
         outgoingEdges: finalNode.outgoingEdges ?? [],
-      }, input.ownerRepo ?? '', ctx.clientId).catch((err) => {
+      }, input.ownerRepo ?? '', ctx.clientId, input.memoryId).catch((err) => {
         console.error('[upsertNode] git write error:', err);
       });
 

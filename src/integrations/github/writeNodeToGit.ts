@@ -38,17 +38,22 @@ export async function writeNodeToGit(
   node: NodeForGit,
   ownerRepo: string,
   clientId?: string | null,
+  memoryId?: string,
 ): Promise<void> {
-  // 1. Find Memory config — try by ownerRepo, fall back to memoryId lookup
-  const graphRecord = ownerRepo
-    ? await db.memory.findFirst({
-        where: { source: { contains: ownerRepo } },
-        include: { organization: true },
-      })
+  // 1. Find Memory config — try by memoryId first, then ownerRepo
+  let graphRecord = memoryId
+    ? await db.memory.findUnique({ where: { id: memoryId }, include: { organization: true } })
     : null;
 
+  if (!graphRecord && ownerRepo) {
+    graphRecord = await db.memory.findFirst({
+      where: { source: { contains: ownerRepo } },
+      include: { organization: true },
+    });
+  }
+
   if (!graphRecord) {
-    console.warn(`[writeNodeToGit] No Memory found for ownerRepo "${ownerRepo}"`);
+    console.warn(`[writeNodeToGit] No Memory found for ownerRepo="${ownerRepo}" memoryId="${memoryId}"`);
     return;
   }
 
