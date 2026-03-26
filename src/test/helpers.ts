@@ -134,6 +134,7 @@ interface NodeMeta {
   nodes?: Array<{ id: string; rel: string }>;
 }
 
+/** Write a legacy node (`.node/node.yaml` + `topic.md`). */
 export function writeNodeFiles(dir: string, meta: NodeMeta, content?: string): void {
   const nodeDir = join(dir, '.node');
   mkdirSync(nodeDir, { recursive: true });
@@ -141,5 +142,36 @@ export function writeNodeFiles(dir: string, meta: NodeMeta, content?: string): v
   writeFileSync(join(nodeDir, 'node.yaml'), stringify(withId), 'utf-8');
   if (content !== undefined) {
     writeFileSync(join(nodeDir, 'topic.md'), content, 'utf-8');
+  }
+}
+
+interface EdgeEntry {
+  target: string;
+  rel: string;
+  id?: string;
+}
+
+/** Write a frontmatter markdown node (Obsidian vault format). */
+export function writeFrontmatterNode(
+  filePath: string,
+  meta: NodeMeta,
+  content?: string,
+  edges?: EdgeEntry[],
+): void {
+  mkdirSync(join(filePath, '..'), { recursive: true });
+  const withId = { id: generateId(), ...meta };
+  const frontmatter = stringify(withId, { lineWidth: 0 }).trim();
+  const body = content ?? '';
+  writeFileSync(filePath, `---\n${frontmatter}\n---\n\n${body}\n`, 'utf-8');
+
+  // Write sidecar edges if provided
+  if (edges?.length) {
+    const fileName = filePath.replace(/\.md$/, '');
+    const baseName = fileName.split('/').pop()!;
+    const sidecarDir = baseName === 'README'
+      ? join(filePath, '..', '..', '.' + filePath.split('/').slice(-2, -1)[0])
+      : join(filePath, '..', '.' + baseName);
+    mkdirSync(sidecarDir, { recursive: true });
+    writeFileSync(join(sidecarDir, 'edges.yaml'), stringify(edges), 'utf-8');
   }
 }

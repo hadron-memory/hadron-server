@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join } from 'path';
 import { mkdirSync } from 'fs';
-import { makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
+import { makeTmpDir, writeNodeFiles, writeFrontmatterNode } from '../../test/helpers.js';
 import { loadNodeFromFs } from './loadNodeFromFs.js';
 
 let dir: string;
@@ -132,5 +132,69 @@ describe('loadNodeFromFs', () => {
     mkdirSync(join(nodeDir, '.node'), { recursive: true }); // .node dir exists but no node.yaml
 
     await expect(loadNodeFromFs(nodeDir, graphRoot, 'test/repo')).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Frontmatter markdown format (Obsidian vault)
+// ---------------------------------------------------------------------------
+
+describe('loadNodeFromFs — frontmatter format', () => {
+  it('loads metadata and content from a frontmatter .md file', async () => {
+    const mdPath = join(graphRoot, 'architecture.md');
+    writeFrontmatterNode(mdPath, { name: 'Architecture', description: 'System overview', tags: ['arch'] }, '# Architecture\n\nContent here.');
+
+    const { node } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
+    expect(node.name).toBe('Architecture');
+    expect(node.description).toBe('System overview');
+    expect(node.tags).toEqual(['arch']);
+    expect(node.content).toContain('Content here');
+    expect(node.loc).toBe('architecture');
+  });
+
+  it('derives loc for nested frontmatter files', async () => {
+    const mdPath = join(graphRoot, 'server', 'graphql-api.md');
+    writeFrontmatterNode(mdPath, { name: 'GraphQL API' });
+
+    const { node } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
+    expect(node.loc).toBe('server:graphql-api');
+  });
+
+  it('derives loc from README.md as folder name', async () => {
+    const mdPath = join(graphRoot, 'server', 'README.md');
+    writeFrontmatterNode(mdPath, { name: 'Server' });
+
+    const { node } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
+    expect(node.loc).toBe('server');
+  });
+
+  it('loads edges from sidecar edges.yaml', async () => {
+    const mdPath = join(graphRoot, 'architecture.md');
+    writeFrontmatterNode(
+      mdPath,
+      { name: 'Architecture' },
+      '# Arch',
+      [
+        { target: 'entities', rel: 'Data model' },
+        { target: 'urn', rel: 'Naming scheme', id: 'abc123' },
+      ],
+    );
+
+    const { edges } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
+    expect(edges).toHaveLength(2);
+    expect(edges[0]).toEqual({ targetId: 'entities', label: 'Data model' });
+    expect(edges[1]).toEqual({ targetId: 'abc123', label: 'Naming scheme' });
+  });
+
+  it('falls back to frontmatter nodes array when no sidecar exists', async () => {
+    const mdPath = join(graphRoot, 'architecture.md');
+    writeFrontmatterNode(mdPath, {
+      name: 'Architecture',
+      nodes: [{ id: 'aaa111', rel: 'Related' }],
+    });
+
+    const { edges } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
+    expect(edges).toHaveLength(1);
+    expect(edges[0]).toEqual({ targetId: 'aaa111', label: 'Related' });
   });
 });

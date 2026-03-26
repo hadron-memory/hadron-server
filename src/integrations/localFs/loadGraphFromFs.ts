@@ -1,13 +1,13 @@
-import { readdirSync, statSync, existsSync } from 'fs';
+import { readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import type { Node } from '../../index.d.js';
+import { loadNodeFromFs } from './loadNodeFromFs.js';
 
 interface FsGraph {
   name: string;
   ownerRepo: string;
   nodes: Partial<Node>[];
 }
-import { loadNodeFromFs } from './loadNodeFromFs.js';
 
 export interface GraphEdge {
   sourceId: string;
@@ -16,11 +16,13 @@ export interface GraphEdge {
 }
 
 /**
- * Load an entire graph from the filesystem by recursively walking for `.node/` dirs.
+ * Load an entire graph from the filesystem.
  *
- * @param graphPath Absolute path to the graph root directory
- * @param graphName Graph name (config key), e.g. "micromentor-org/mmdata"
- * @param ownerRepo GitHub repo slug, e.g. "micromentor-team/mmdata"
+ * Supports two layouts:
+ * 1. **Legacy**: directories with `.node/node.yaml` + `.node/topic.md`
+ * 2. **Frontmatter (Obsidian vault)**: `.md` files with YAML frontmatter + optional `.name/edges.yaml` sidecars
+ *
+ * Both formats can coexist in the same graph.
  */
 export const loadGraphFromFs = async (
   graphPath: string,
@@ -30,22 +32,32 @@ export const loadGraphFromFs = async (
   const nodes: Partial<Node>[] = [];
   const edges: GraphEdge[] = [];
 
-  // Recursively find directories containing `.node/`
+  // Collect node sources: either directory paths (legacy) or .md file paths (frontmatter)
+  const nodeSources: string[] = [];
+
   const walk = (dir: string) => {
     if (!existsSync(dir)) return;
 
     const entries = readdirSync(dir, { withFileTypes: true });
-    const hasNodeDir = entries.some((e) => e.isDirectory() && e.name === '.node');
 
+    // Legacy format: directory contains `.node/`
+    const hasNodeDir = entries.some((e) => e.isDirectory() && e.name === '.node');
     if (hasNodeDir) {
-      // This directory is a node — load it synchronously via the async fn
-      // We'll collect promises and resolve them after the walk
-      nodeDirs.push(dir);
+      nodeSources.push(dir);
+    }
+
+    // Frontmatter format: `.md` files in this directory (not inside .node/)
+    if (!hasNodeDir) {
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (!entry.name.endsWith('.md')) continue;
+        if (entry.name.startsWith('.')) continue;
+        nodeSources.push(join(dir, entry.name));
+      }
     }
 
     // Continue walking subdirectories.
-    // Walk .hadron/ (where node graphs live in project repos) but skip all other
-    // hidden dirs, .node/ subdirs (leaf data only), and node_modules.
+    // Walk .hadron/ but skip other hidden dirs, .node/ dirs, and node_modules.
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       if (entry.name === 'node_modules' || entry.name === '.node') continue;
@@ -54,16 +66,14 @@ export const loadGraphFromFs = async (
     }
   };
 
-  const nodeDirs: string[] = [];
   walk(graphPath);
 
   // Load all discovered nodes
-  for (const dir of nodeDirs) {
+  for (const source of nodeSources) {
     try {
-      const result = await loadNodeFromFs(dir, graphPath, ownerRepo);
+      const result = await loadNodeFromFs(source, graphPath, ownerRepo);
       nodes.push(result.node);
 
-      // Map edges: source is this node's id
       for (const edge of result.edges) {
         edges.push({
           sourceId: result.node.id!,
@@ -72,7 +82,7 @@ export const loadGraphFromFs = async (
         });
       }
     } catch (err) {
-      console.warn(`Failed to load node at ${dir}:`, (err as Error).message);
+      console.warn(`Failed to load node at ${source}:`, (err as Error).message);
     }
   }
 
