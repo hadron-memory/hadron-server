@@ -182,9 +182,16 @@ export async function writeNodeToGit(
       return;
     }
 
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: graphRecord.organization.name,
+      GIT_AUTHOR_EMAIL: `hadron@${graphRecord.organization.urn}`,
+      GIT_COMMITTER_NAME: graphRecord.organization.name,
+      GIT_COMMITTER_EMAIL: `hadron@${graphRecord.organization.urn}`,
+    };
     await execFile('git', [
       'commit', '-m', `Update node ${node.loc}\n\n[hadron-server]`,
-    ], { cwd: localPath });
+    ], { cwd: localPath, env: gitEnv });
 
     try {
       await execFile('git', ['push', 'origin', branch], { cwd: localPath });
