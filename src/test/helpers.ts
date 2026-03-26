@@ -1,5 +1,5 @@
-import { randomUUID } from 'crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { generateId } from '../lib/id.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { stringify } from 'yaml';
@@ -77,7 +77,7 @@ export async function createDbNode(
   const loc = fields.loc;
   return db.node.create({
     data: {
-      id: fields.id ?? randomUUID().replace(/-/g, ''),
+      id: fields.id ?? generateId(),
       memoryId: fields.memoryId,
       loc,
       name: fields.name ?? loc,
@@ -137,7 +137,7 @@ interface NodeMeta {
 export function writeNodeFiles(dir: string, meta: NodeMeta, content?: string): void {
   const nodeDir = join(dir, '.node');
   mkdirSync(nodeDir, { recursive: true });
-  const withId = { id: randomUUID().replace(/-/g, ''), ...meta };
+  const withId = { id: generateId(), ...meta };
   writeFileSync(join(nodeDir, 'node.yaml'), stringify(withId), 'utf-8');
   if (content !== undefined) {
     writeFileSync(join(nodeDir, 'topic.md'), content, 'utf-8');

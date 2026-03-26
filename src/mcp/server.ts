@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { generateId } from '../lib/id.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
@@ -371,7 +372,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const upserted = await db.node.upsert({
         where: { loc_memoryId: { loc, memoryId } },
         create: {
-          id: existing?.id ?? randomUUID().replace(/-/g, ''),
+          id: existing?.id ?? generateId(),
           memoryId,
           loc,
           name,
@@ -691,7 +692,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       prevSessionId: z.string().optional().describe('Previous session ID'),
     },
     async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId }) => {
-      const sessionId = randomUUID();
+      const sessionId = generateId();
 
       const session = await db.session.create({
         data: {

@@ -1,5 +1,6 @@
 import { execFile as execFileCb } from 'child_process';
-import { createDecipheriv, randomUUID } from 'crypto';
+import { createDecipheriv } from 'crypto';
+import { generateId } from '../../lib/id.js';
 import { promisify } from 'util';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -83,7 +84,7 @@ export const syncGraphFromGithub = async (
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
         const name = node.name!;
-        const nodeId = node.id ?? randomUUID().replace(/-/g, '');
+        const nodeId = node.id ?? generateId();
         const update = {
           loc,
           name,

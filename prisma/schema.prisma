@@ -72,7 +72,7 @@ enum MemoryVisibility {
 // ─── Models ────────────────────────────────────────────────────────────
 
 model User {
-  id               String            @id @default(cuid())
+  id               String            @id
   githubId         Int?              @unique @map("github_id")
   githubUsername   String?           @unique @map("github_username")
   identityProvider IdentityProvider? @map("identity_provider")
@@ -99,7 +99,7 @@ model User {
 }
 
 model Organization {
-  id                           String    @id @default(cuid())
+  id                           String    @id
   name                         String
   urn                          String    @unique
   isVisible                    Boolean?  @map("is_visible")
@@ -124,7 +124,7 @@ model Organization {
 }
 
 model OrgMember {
-  id             String    @id @default(cuid())
+  id             String    @id
   organizationId String    @map("organization_id")
   userId         String    @map("user_id")
   role           Role      @default(READER)
@@ -146,7 +146,7 @@ model OrgMember {
 }
 
 model Station {
-  id             String      @id @default(cuid())
+  id             String      @id
   userId         String?     @map("user_id")
   organizationId String?     @map("organization_id")
   stationType    StationType @default(WORKSTATION) @map("station_type")
@@ -177,7 +177,7 @@ model Station {
 }
 
 model StationAgentSubscription {
-  id               String           @id @default(cuid())
+  id               String           @id
   stationId        String           @map("station_id")
   agentId          String           @map("agent_id")
   subscriptionType SubscriptionType @default(READ_ONLY) @map("subscription_type")
@@ -197,7 +197,7 @@ model StationAgentSubscription {
 }
 
 model Memory {
-  id                   String     @id @default(cuid())
+  id                   String     @id
   organizationId       String     @map("organization_id")
   urn                  String     @unique
   name                 String
@@ -276,7 +276,7 @@ model Node {
 }
 
 model Edge {
-  id        String    @id @default(cuid())
+  id        String    @id
   sourceId  String    @map("source_id")
   targetId  String    @map("target_id")
   label     String
@@ -296,7 +296,7 @@ model Edge {
 }
 
 model PendingEdge {
-  id        String    @id @default(cuid())
+  id        String    @id
   sourceId  String    @map("source_id")
   targetId  String    @map("target_id") // intended target node id — NOT a FK
   label     String?
@@ -363,7 +363,7 @@ model Session {
 }
 
 model UsageEvent {
-  id         String    @id @default(cuid())
+  id         String    @id
   type       String
   nodeLoc    String?   @map("node_loc")
   nodeId     String?   @map("node_id")
@@ -393,7 +393,7 @@ model UsageEvent {
 }
 
 model Agent {
-  id             String    @id @default(cuid())
+  id             String    @id
   organizationId String    @map("organization_id")
   urn            String    @unique
   name           String
@@ -413,7 +413,7 @@ model Agent {
 }
 
 model AgentMemoryItem {
-  id        String    @id @default(cuid())
+  id        String    @id
   agentId   String    @map("agent_id")
   memoryId  String    @map("memory_id")
   createdAt DateTime  @default(now()) @map("created_at")
@@ -431,7 +431,7 @@ model AgentMemoryItem {
 }
 
 model MemoryLicense {
-  id          String    @id @default(cuid())
+  id          String    @id
   memoryId    String    @map("memory_id")
   licenseType String    @map("license_type")
   seats       Int
@@ -454,7 +454,7 @@ model MemoryLicense {
 }
 
 model MemorySubscription {
-  id             String    @id @default(cuid())
+  id             String    @id
   memoryId       String    @map("memory_id")
   organizationId String    @map("organization_id")
   licenseId      String?   @map("license_id")
@@ -477,7 +477,7 @@ model MemorySubscription {
 }
 
 model HadronServer {
-  id              String    @id @default(cuid())
+  id              String    @id
   organizationId  String?   @map("organization_id")
   url             String
   logLevel        LogLevel  @default(ERROR) @map("log_level")
@@ -496,7 +496,7 @@ model HadronServer {
 }
 
 model ServerLogEntry {
-  id        String    @id @default(cuid())
+  id        String    @id
   serverId  String    @map("server_id")
   level     LogLevel
   memoryId  String?   @map("memory_id")
@@ -518,7 +518,7 @@ model ServerLogEntry {
 }
 
 model StationLogEntry {
-  id        String    @id @default(cuid())
+  id        String    @id
   stationId String    @map("station_id")
   level     LogLevel
   memoryId  String?   @map("memory_id")
@@ -541,7 +541,7 @@ model StationLogEntry {
 }
 
 model MemoryLogEntry {
-  id        String             @id @default(cuid())
+  id        String             @id
   memoryId  String             @map("memory_id")
   level     LogLevel
   eventType MemoryLogEventType @map("event_type")
@@ -564,7 +564,7 @@ model MemoryLogEntry {
 }
 
 model OrgMemberInvitation {
-  id              String    @id @default(cuid())
+  id              String    @id
   memberUserId    String    @map("member_user_id")
   recipientUserId String    @map("recipient_user_id")
   role            Role      @default(READER)
@@ -584,7 +584,7 @@ model OrgMemberInvitation {
 }
 
 model UserInvitation {
-  id             String    @id @default(cuid())
+  id             String    @id
   senderUserId   String?   @map("sender_user_id")
   organizationId String?   @map("organization_id")
   slug           String    @unique
@@ -613,7 +613,7 @@ model UserInvitation {
 }
 
 model UserInvitationActivation {
-  id           String    @id @default(cuid())
+  id           String    @id
   invitationId String    @map("invitation_id")
   userId       String    @map("user_id")
   createdAt    DateTime  @default(now()) @map("created_at")
@@ -630,7 +630,7 @@ model UserInvitationActivation {
 }
 
 model EmailVerificationToken {
-  id        String    @id @default(cuid())
+  id        String    @id
   email     String
   token     String    @unique
   expiresAt DateTime  @map("expires_at")
@@ -642,7 +642,7 @@ model EmailVerificationToken {
 }
 
 model NodeVersion {
-  id          String   @id @default(cuid())
+  id          String   @id
   nodeId      String   @map("node_id")
   loc         String
   name        String
@@ -661,7 +661,7 @@ model NodeVersion {
 }
 
 model PendingSetup {
-  id              String   @id @default(cuid())
+  id              String   @id
   userId          String   @unique @map("user_id")
   stationId       String   @map("station_id")
   rawKeyEncrypted String   @map("raw_key_encrypted")

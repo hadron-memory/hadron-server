@@ -1,3 +1,21 @@
 import { PrismaClient } from '../../generated/prisma/index.js';
+import { generateId } from '../../lib/id.js';
 
-export const db = new PrismaClient();
+const basePrisma = new PrismaClient();
+
+/**
+ * Extended Prisma client that auto-generates UUIDv7 IDs (no dashes) for all
+ * create operations where `id` is not explicitly provided.
+ */
+export const db = basePrisma.$extends({
+  query: {
+    $allModels: {
+      async create({ args, query }) {
+        if (!args.data.id) {
+          (args.data as Record<string, unknown>).id = generateId();
+        }
+        return query(args);
+      },
+    },
+  },
+}) as unknown as PrismaClient;

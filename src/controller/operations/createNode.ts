@@ -1,6 +1,6 @@
-import { randomUUID } from 'crypto';
 import type { Node } from '../../index.d.js';
 import { GRAPHS_PATH } from '../../config.js';
+import { generateId } from '../../lib/id.js';
 import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
@@ -21,7 +21,7 @@ export const createNode = async (
     throw new Error(`Failed to save node to filesystem: ${fsResult.error}`);
   }
 
-  const id = node.id ?? randomUUID().replace(/-/g, '');
+  const id = node.id ?? generateId();
 
   const saved = await db.node.upsert({
     where: { loc_memoryId: { loc: node.loc, memoryId: node.memoryId } },

@@ -1,5 +1,6 @@
 import bcrypt from 'bcrypt';
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'crypto';
+import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { generateId } from '../../../lib/id.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
@@ -534,7 +535,7 @@ export const resolvers = {
       }
 
       const tags = serializeTags(input.tags ?? []) as string[];
-      const id = input.id ?? randomUUID().replace(/-/g, '');
+      const id = input.id ?? generateId();
       const { edges, ...nodeFields } = input;
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
       const node = await ctx.db.node.upsert({
@@ -619,7 +620,7 @@ export const resolvers = {
         for (const input of nodes) {
           await tx.node.create({
             data: {
-              id: input.id ?? randomUUID().replace(/-/g, ''),
+              id: input.id ?? generateId(),
               ...input,
               tags: serializeTags(input.tags ?? []) as string[],
             },
@@ -959,7 +960,7 @@ export const resolvers = {
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
-      const slug = randomUUID().replace(/-/g, '').slice(0, 16);
+      const slug = generateId().slice(0, 16);
       const expiresAt = expiresInDays
         ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
         : null;
