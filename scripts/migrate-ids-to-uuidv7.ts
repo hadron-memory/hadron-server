@@ -138,17 +138,20 @@ async function main() {
 
   console.log(`\nTotal: ${totalIds} IDs to migrate. Running in transaction...\n`);
 
-  await db.$executeRawUnsafe('SET CONSTRAINTS ALL DEFERRED');
-
   await db.$transaction(async (tx) => {
     for (const entity of ENTITIES) {
       const map = mappings.get(entity.table);
       if (!map || map.size === 0) continue;
 
-      // Update FK references first (in other tables pointing to this table)
-      for (const fk of entity.fkRefs) {
-        const fkMap = map; // The map for the referenced table
-        for (const [oldId, newId] of fkMap) {
+      // For each row: update the PK first, then update all FK references.
+      // After the PK update the new value exists, so FK updates succeed.
+      for (const [oldId, newId] of map) {
+        await tx.$executeRawUnsafe(
+          `UPDATE "${entity.table}" SET id = $1 WHERE id = $2`,
+          newId,
+          oldId,
+        );
+        for (const fk of entity.fkRefs) {
           await tx.$executeRawUnsafe(
             `UPDATE "${fk.table}" SET "${fk.column}" = $1 WHERE "${fk.column}" = $2`,
             newId,
@@ -157,18 +160,9 @@ async function main() {
         }
       }
 
-      // Update the primary key itself
-      for (const [oldId, newId] of map) {
-        await tx.$executeRawUnsafe(
-          `UPDATE "${entity.table}" SET id = $1 WHERE id = $2`,
-          newId,
-          oldId,
-        );
-      }
-
       console.log(`  ✓ ${entity.table}: ${map.size} IDs updated`);
     }
-  }, { timeout: 60_000 });
+  }, { timeout: 120_000 });
 
   console.log('\nDone! All IDs migrated to UUIDv7.');
   await db.$disconnect();
