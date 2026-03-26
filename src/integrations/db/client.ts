@@ -5,7 +5,7 @@ const basePrisma = new PrismaClient();
 
 /**
  * Extended Prisma client that auto-generates UUIDv7 IDs (no dashes) for all
- * create operations where `id` is not explicitly provided.
+ * create and upsert operations where `id` is not explicitly provided.
  */
 export const db = basePrisma.$extends({
   query: {
@@ -13,6 +13,12 @@ export const db = basePrisma.$extends({
       async create({ args, query }) {
         if (!args.data.id) {
           (args.data as Record<string, unknown>).id = generateId();
+        }
+        return query(args);
+      },
+      async upsert({ args, query }) {
+        if (!(args.create as Record<string, unknown>).id) {
+          (args.create as Record<string, unknown>).id = generateId();
         }
         return query(args);
       },
