@@ -35,6 +35,7 @@ export const typeDefs = `#graphql
   type Node {
     id: ID!
     memoryId: String!
+    nodeType: String!
     loc: String!
     isLink: Boolean!
     name: String!
@@ -43,6 +44,7 @@ export const typeDefs = `#graphql
     content: String
     tokens: Int
     tags: [String!]!
+    properties: JSON
     seq: Int
     ownerRepo: String
     isRunnable: Boolean
@@ -221,6 +223,7 @@ export const typeDefs = `#graphql
     urn: String!
     name: String!
     description: String
+    properties: JSON
     memoryItems: [AgentMemoryItem!]!
     createdAt: String!
   }
@@ -269,6 +272,7 @@ export const typeDefs = `#graphql
   input NodeInput {
     id: String
     memoryId: String!
+    nodeType: String
     loc: String!
     name: String!
     alias: String
@@ -276,6 +280,7 @@ export const typeDefs = `#graphql
     content: String
     seq: Int
     tags: [String!]
+    properties: JSON
     ownerRepo: String
     # Replace all outgoing edges when provided (omit to leave edges unchanged)
     edges: [NodeEdgeInput!]
@@ -322,8 +327,9 @@ export const typeDefs = `#graphql
     # Get a single node by its loc path
     node(loc: String!): Node
 
-    # List or search nodes; optionally filter by tags
+    # List or search nodes; optionally filter by tags and nodeType
     nodes(
+      nodeType: String
       tags: [String!]
       search: String
       limit: Int

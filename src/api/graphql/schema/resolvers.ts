@@ -286,13 +286,14 @@ export const resolvers = {
 
     nodes: async (
       _: unknown,
-      { tags, search, limit }: { tags?: string[]; search?: string; limit?: number },
+      { nodeType, tags, search, limit }: { nodeType?: string; tags?: string[]; search?: string; limit?: number },
       ctx: Context,
     ) => {
       const access = await memoryAccessFilter(ctx);
       const results = await ctx.db.node.findMany({
         where: {
           ...access,
+          ...(nodeType ? { nodeType } : {}),
           ...(tags?.length ? tagsFilter(tags) : {}),
           ...(search
             ? {

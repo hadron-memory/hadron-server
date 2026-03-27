@@ -242,8 +242,9 @@ model Memory {
 }
 
 model Node {
-  id          String    @id // UUIDv7 from node.yaml — stable across moves
+  id          String    @id @default(cuid()) // UUIDv7 from node.yaml — stable across moves
   memoryId    String    @map("memory_id")
+  nodeType    String    @default("knowledge") @map("node_type") // "knowledge" or "data"
   name        String
   alias       String?
   loc         String
@@ -253,6 +254,7 @@ model Node {
   contentHash String?   @map("content_hash")
   tokens      Int?
   tags        String[]
+  properties  Json?
   seq         Int?
   ownerRepo   String?   @map("owner_repo")
   isRunnable  Boolean?  @map("is_runnable")
@@ -394,11 +396,12 @@ model UsageEvent {
 }
 
 model Agent {
-  id             String    @id
+  id             String    @id @default(cuid())
   organizationId String    @map("organization_id")
   urn            String    @unique
   name           String
   description    String?
+  properties     Json?
   createdAt      DateTime  @default(now()) @map("created_at")
   createdBy      String?   @map("created_by")
   updatedAt      DateTime? @map("updated_at")
