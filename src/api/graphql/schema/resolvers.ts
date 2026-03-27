@@ -1261,14 +1261,23 @@ export const resolvers = {
 
     updateAgent: async (
       _: unknown,
-      { id, name, description }: { id: string; name?: string; description?: string },
+      { id, name, urn, description }: { id: string; name?: string; urn?: string; description?: string },
       ctx: Context,
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      let newUrn: string | undefined;
+      if (urn !== undefined) {
+        const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: agent.organizationId }, select: { urn: true } });
+        newUrn = `${org.urn}:${urn}`;
+      }
       return ctx.db.agent.update({
         where: { id },
-        data: { ...(name ? { name } : {}), ...(description !== undefined ? { description } : {}) },
+        data: {
+          ...(name !== undefined ? { name } : {}),
+          ...(newUrn !== undefined ? { urn: newUrn } : {}),
+          ...(description !== undefined ? { description } : {}),
+        },
         include: AGENT_INCLUDE,
       });
     },

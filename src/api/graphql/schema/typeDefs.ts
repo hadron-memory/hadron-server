@@ -442,7 +442,7 @@ export const typeDefs = `#graphql
 
     # Agent management (org ADMIN)
     createAgent(orgId: ID!, name: String!, description: String): Agent!
-    updateAgent(id: ID!, name: String, description: String): Agent!
+    updateAgent(id: ID!, name: String, urn: String, description: String): Agent!
     deleteAgent(id: ID!): Boolean!
     addMemoryToAgent(agentId: ID!, memoryId: ID!): Agent!
     removeMemoryFromAgent(agentId: ID!, memoryId: ID!): Agent!
