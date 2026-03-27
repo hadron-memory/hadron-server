@@ -1162,6 +1162,7 @@ export const resolvers = {
         id,
         name,
         urn,
+        organizationId: newOrgId,
         shortDescription,
         description,
         tags,
@@ -1177,7 +1178,7 @@ export const resolvers = {
         writeBranch,
         visibility,
       }: {
-        id: string; name?: string; urn?: string;
+        id: string; name?: string; urn?: string; organizationId?: string;
         shortDescription?: string; description?: string; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
@@ -1187,16 +1188,23 @@ export const resolvers = {
     ) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
-      // If URN slug changed, rebuild the full URN
+      // If transferring to a new org, require ADMIN on the target org too
+      if (newOrgId && newOrgId !== memory.organizationId) {
+        await requireOrgRole(ctx, newOrgId, 'ADMIN');
+      }
+      // Rebuild URN if slug or org changed
+      const effectiveOrgId = newOrgId ?? memory.organizationId;
       let newUrn: string | undefined;
-      if (urn !== undefined) {
-        const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: memory.organizationId }, select: { urn: true } });
-        newUrn = `${org.urn}:${urn}`;
+      if (urn !== undefined || (newOrgId && newOrgId !== memory.organizationId)) {
+        const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: effectiveOrgId }, select: { urn: true } });
+        const slug = urn ?? memory.urn.split(':').slice(1).join(':');
+        newUrn = `${org.urn}:${slug}`;
       }
       return ctx.db.memory.update({
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
+          ...(newOrgId ? { organizationId: newOrgId } : {}),
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(shortDescription !== undefined ? { shortDescription } : {}),
           ...(description !== undefined ? { description } : {}),
