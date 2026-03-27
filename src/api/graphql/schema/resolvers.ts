@@ -1160,6 +1160,8 @@ export const resolvers = {
       _: unknown,
       {
         id,
+        name,
+        urn,
         shortDescription,
         description,
         tags,
@@ -1175,7 +1177,7 @@ export const resolvers = {
         writeBranch,
         visibility,
       }: {
-        id: string;
+        id: string; name?: string; urn?: string;
         shortDescription?: string; description?: string; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
@@ -1185,9 +1187,17 @@ export const resolvers = {
     ) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      // If URN slug changed, rebuild the full URN
+      let newUrn: string | undefined;
+      if (urn !== undefined) {
+        const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: memory.organizationId }, select: { urn: true } });
+        newUrn = `${org.urn}:${urn}`;
+      }
       return ctx.db.memory.update({
         where: { id },
         data: {
+          ...(name !== undefined ? { name } : {}),
+          ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(shortDescription !== undefined ? { shortDescription } : {}),
           ...(description !== undefined ? { description } : {}),
           ...(tags !== undefined ? { tags } : {}),
