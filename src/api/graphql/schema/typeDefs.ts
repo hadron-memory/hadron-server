@@ -455,6 +455,9 @@ export const typeDefs = `#graphql
     # Trigger an on-demand sync for one memory (org ADMIN or CONTRIBUTOR)
     syncMemory(id: ID!): Memory!
 
+    # Push all nodes in a memory to its configured git repo
+    pushMemoryToGit(id: ID!): Boolean!
+
     # Add a public memory to the current user's personal workspace
     addToMyMemories(memoryId: ID!): Boolean!
   }

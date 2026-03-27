@@ -1399,6 +1399,16 @@ export const resolvers = {
       return ctx.db.memory.findUniqueOrThrow({ where: { id }, include: MEMORY_INCLUDE });
     },
 
+    pushMemoryToGit: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+
+      const { pushMemoryToGit: push } = await import('../../../integrations/github/pushMemoryToGit.js');
+      const result = await push(id);
+      if (result.error) throw new Error(result.error);
+      return true;
+    },
+
     restoreNodeVersion: async (_: unknown, { versionId }: { versionId: string }, ctx: Context) => {
       const version = await ctx.db.nodeVersion.findUniqueOrThrow({ where: { id: versionId } });
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
