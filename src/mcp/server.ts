@@ -327,6 +327,55 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     },
   );
 
+  // ── h-list-children ──────────────────────────────────────────────────────
+
+  server.tool(
+    'h-list-children',
+    'List direct child nodes under a parent, ordered by seq then loc. Returns loc, name, description, seq, and nodeType for each child.',
+    {
+      parent: z.string().describe('Parent node loc path or full URN'),
+    },
+    async ({ parent: rawParent }) => {
+      const memoryIds = await getAccessibleMemoryIds(auth);
+      const resolved = await resolveLocFromUrn(rawParent, memoryIds);
+      const parent = resolved.loc;
+      const prefix = parent + ':';
+      const where: Record<string, unknown> = {
+        loc: { startsWith: prefix },
+      };
+      if (resolved.memoryId) where.memoryId = resolved.memoryId;
+      else if (memoryIds) where.memoryId = { in: memoryIds };
+
+      const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
+      // Direct children only (no further colons after prefix)
+      const children = allNodes
+        .filter((n) => !n.loc.slice(prefix.length).includes(':'))
+        .sort((a, b) => {
+          if (a.seq !== null && b.seq !== null) return a.seq - b.seq;
+          if (a.seq !== null) return -1;
+          if (b.seq !== null) return 1;
+          return a.loc.localeCompare(b.loc);
+        });
+
+      if (children.length === 0) {
+        return textResult(`No children found under "${parent}".`);
+      }
+
+      const lines = children.map((n) => {
+        const parts = [
+          `- **${n.loc}**`,
+          n.name,
+        ];
+        if (n.seq !== null) parts.push(`(seq: ${n.seq})`);
+        if (n.nodeType !== 'knowledge') parts.push(`[${n.nodeType}]`);
+        if (n.description) parts.push(`— ${n.description}`);
+        return parts.join(' ');
+      });
+
+      return textResult(`${children.length} children under "${parent}":\n\n${lines.join('\n')}`);
+    },
+  );
+
   // ── h-create-node ────────────────────────────────────────────────────────
 
   server.tool(
