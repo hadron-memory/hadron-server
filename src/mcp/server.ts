@@ -38,6 +38,37 @@ function validateLoc(loc: string): void {
 }
 
 /**
+ * If the user passes a full URN (e.g. "hadronmemory.com:dev:architecture"),
+ * try to strip the memory URN prefix and return just the loc.
+ * Also returns the matched memoryId for scoping.
+ */
+async function resolveLocFromUrn(
+  input: string,
+  accessibleMemoryIds: string[] | null,
+): Promise<{ loc: string; memoryId?: string }> {
+  // First, try as-is — it might already be a valid loc
+  const directWhere: Record<string, unknown> = { loc: input };
+  if (accessibleMemoryIds) directWhere.memoryId = { in: accessibleMemoryIds };
+  const direct = await db.node.findFirst({ where: directWhere, select: { id: true } });
+  if (direct) return { loc: input };
+
+  // Try stripping known memory URN prefixes
+  // Load accessible memories and check if input starts with any URN
+  const memoryFilter = accessibleMemoryIds ? { id: { in: accessibleMemoryIds } } : {};
+  const memories = await db.memory.findMany({ where: memoryFilter, select: { id: true, urn: true } });
+  for (const mem of memories) {
+    const prefix = mem.urn + ':';
+    if (input.startsWith(prefix)) {
+      const loc = input.slice(prefix.length);
+      return { loc, memoryId: mem.id };
+    }
+  }
+
+  // No match — return as-is
+  return { loc: input };
+}
+
+/**
  * Resolve a memoryId that may be either a cuid (primary key) or a memory URN.
  * Returns the actual database ID, or null if not found.
  */
@@ -171,12 +202,14 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-read-node',
-    'Read a node by its colon-delimited path (e.g. my-org:my-repo:models)',
-    { loc: z.string().describe('Colon-delimited path to the node') },
-    async ({ loc }) => {
+    'Read a node by its loc path (e.g. architecture) or full URN (e.g. hadronmemory.com:dev:architecture)',
+    { loc: z.string().describe('Node loc path or full URN') },
+    async ({ loc: rawLoc }) => {
       const memoryIds = await getAccessibleMemoryIds(auth);
+      const { loc, memoryId } = await resolveLocFromUrn(rawLoc, memoryIds);
       const where: Record<string, unknown> = { loc };
-      if (memoryIds) where.memoryId = { in: memoryIds };
+      if (memoryId) where.memoryId = memoryId;
+      else if (memoryIds) where.memoryId = { in: memoryIds };
 
       const candidates = await db.node.findMany({
         where,
@@ -498,7 +531,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-update-node',
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved.',
     {
-      loc: z.string().describe('Colon-delimited path of the node to update'),
+      loc: z.string().describe('Node loc path or full URN'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node type: "knowledge" or "data"'),
       description: z.string().optional().describe('New short description'),
@@ -514,11 +547,14 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       })).optional().describe('Replace outgoing edges'),
       reason: z.string().optional().describe('Why this change was made (stored in version history)'),
     },
-    async ({ loc, name, nodeType, description, content, seq, tags, properties, llmModel, aiAgent, edges, reason }) => {
-      // Find the existing node
+    async ({ loc: rawLoc, name, nodeType, description, content, seq, tags, properties, llmModel, aiAgent, edges, reason }) => {
+      // Resolve URN to loc if needed
       const memoryIds = await getAccessibleMemoryIds(auth);
+      const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
+      const loc = resolved.loc;
       const where: Record<string, unknown> = { loc };
-      if (memoryIds) where.memoryId = { in: memoryIds };
+      if (resolved.memoryId) where.memoryId = resolved.memoryId;
+      else if (memoryIds) where.memoryId = { in: memoryIds };
 
       const existing = await db.node.findFirst({ where });
       if (!existing) {
@@ -678,13 +714,16 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-run-action',
     'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content.',
     {
-      loc: z.string().describe('Colon-delimited path to the action node'),
+      loc: z.string().describe('Node loc path or full URN'),
       args: z.record(z.string(), z.string()).optional().describe('Action arguments as key-value pairs'),
     },
-    async ({ loc, args }) => {
+    async ({ loc: rawLoc, args }) => {
       const memoryIds = await getAccessibleMemoryIds(auth);
+      const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
+      const loc = resolved.loc;
       const actionWhere: Record<string, unknown> = { loc };
-      if (memoryIds) actionWhere.memoryId = { in: memoryIds };
+      if (resolved.memoryId) actionWhere.memoryId = resolved.memoryId;
+      else if (memoryIds) actionWhere.memoryId = { in: memoryIds };
       const actionCandidates = await db.node.findMany({
         where: actionWhere,
         include: { outgoingEdges: { include: { target: true } } },
