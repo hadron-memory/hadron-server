@@ -166,6 +166,35 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     { capabilities: { tools: {} } },
   );
 
+  // ── h-list-memories ──────────────────────────────────────────────────────
+
+  server.tool(
+    'h-list-memories',
+    'List all memories this station has access to, with URN and access level (read-only or read-write).',
+    {},
+    async () => {
+      if (!auth.clientId) return textResult('Not authenticated.');
+
+      const access = await getStationMemoryAccess(auth.clientId);
+      if (access.size === 0) {
+        return textResult('No memories accessible. Subscribe to an agent with memories first.');
+      }
+
+      const memoryIds = [...access.keys()];
+      const memories = await db.memory.findMany({
+        where: { id: { in: memoryIds } },
+        select: { id: true, urn: true, name: true },
+      });
+
+      const lines = memories.map((m) => {
+        const level = access.get(m.id) === 'READ_WRITE' ? 'read-write' : 'read-only';
+        return `- **${m.urn}** — ${m.name} (${level})`;
+      });
+
+      return textResult(`${memories.length} accessible memories:\n\n${lines.join('\n')}`);
+    },
+  );
+
   // ── h-find-node ──────────────────────────────────────────────────────────
 
   server.tool(
