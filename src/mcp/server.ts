@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
+import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import type { SessionType } from '../generated/prisma/index.js';
 
 // ---------------------------------------------------------------------------
@@ -467,6 +468,26 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         },
       }).catch(() => {});
 
+      // Write to git (fire-and-forget)
+      const nodeForGit = await db.node.findUnique({
+        where: { id: upserted.id },
+        include: { outgoingEdges: { include: { target: true } } },
+      });
+      if (nodeForGit) {
+        writeNodeToGit({
+          id: nodeForGit.id,
+          loc: nodeForGit.loc,
+          name: nodeForGit.name,
+          alias: nodeForGit.alias,
+          description: nodeForGit.description,
+          content: nodeForGit.content,
+          tags: nodeForGit.tags as string[],
+          outgoingEdges: nodeForGit.outgoingEdges ?? [],
+        }, '', auth.clientId, memoryId).catch((err) => {
+          console.error('[h-create-node] git write error:', err);
+        });
+      }
+
       return textResult(`Node saved: ${loc}`);
     },
   );
@@ -587,6 +608,26 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           sessionId: null,
         },
       }).catch(() => {});
+
+      // Write to git (fire-and-forget)
+      const updatedNode = await db.node.findUnique({
+        where: { id: existing.id },
+        include: { outgoingEdges: { include: { target: true } } },
+      });
+      if (updatedNode) {
+        writeNodeToGit({
+          id: updatedNode.id,
+          loc: updatedNode.loc,
+          name: updatedNode.name,
+          alias: updatedNode.alias,
+          description: updatedNode.description,
+          content: updatedNode.content,
+          tags: updatedNode.tags as string[],
+          outgoingEdges: updatedNode.outgoingEdges ?? [],
+        }, '', auth.clientId, existing.memoryId).catch((err) => {
+          console.error('[h-update-node] git write error:', err);
+        });
+      }
 
       return textResult(`Node updated: ${loc}`);
     },
