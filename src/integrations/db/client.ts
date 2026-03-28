@@ -1,7 +1,9 @@
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 
-const basePrisma = new PrismaClient();
+const basePrisma = new PrismaClient({
+  datasourceUrl: process.env.DATABASE_URL,
+});
 
 /**
  * Extended Prisma client that auto-generates UUIDv7 IDs (no dashes) for all
