@@ -333,8 +333,8 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-create-node',
     'Create or update a node. Requires write access to the memory.',
     {
-      loc: z.string().describe('Colon-delimited path for the node'),
-      memoryId: z.string().optional().describe('Memory ID or name. Omit to auto-detect: uses the only writable memory, or infers from edge targets.'),
+      loc: z.string().describe('Node loc path or full URN (e.g. architecture or hadronmemory.com:dev:architecture)'),
+      memoryId: z.string().optional().describe('Memory ID or URN. Omit to auto-detect from loc URN prefix, or uses the only writable memory.'),
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node type: "knowledge" (default) or "data"'),
       description: z.string().optional().describe('Short description'),
@@ -349,7 +349,14 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
-    async ({ loc, memoryId: rawMemoryId, name, nodeType, description, content, seq, tags, properties, llmModel, aiAgent, edges }) => {
+    async ({ loc: rawLoc, memoryId: inputMemoryId, name, nodeType, description, content, seq, tags, properties, llmModel, aiAgent, edges }) => {
+      // Resolve URN to loc + memoryId if a full URN was passed
+      const memoryIds = await getAccessibleMemoryIds(auth);
+      const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
+      const loc = resolved.loc;
+      // If URN resolution found a memory, use it (unless explicitly provided)
+      let rawMemoryId = inputMemoryId ?? resolved.memoryId ?? undefined;
+
       try {
         validateLoc(loc);
       } catch (e) {
