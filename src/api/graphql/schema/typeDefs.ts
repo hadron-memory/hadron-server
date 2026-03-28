@@ -410,7 +410,7 @@ export const typeDefs = `#graphql
 
     # Station management
     createStation(name: String!, stationType: StationType!, role: Role!, description: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!]): StationCreated!
-    updateStation(id: ID!, description: String, agentTools: [String!]): Station!
+    updateStation(id: ID!, name: String, stationType: StationType, description: String, agentTools: [String!]): Station!
     regenerateApiKey(id: ID!): StationCreated!
     revokeStation(id: ID!): Boolean!
 

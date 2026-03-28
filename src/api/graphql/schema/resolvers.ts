@@ -760,7 +760,7 @@ export const resolvers = {
 
     updateStation: async (
       _: unknown,
-      { id, description, agentTools }: { id: string; description?: string; agentTools?: string[] },
+      { id, name, stationType, description, agentTools }: { id: string; name?: string; stationType?: string; description?: string; agentTools?: string[] },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
@@ -769,6 +769,8 @@ export const resolvers = {
       return ctx.db.station.update({
         where: { id },
         data: {
+          ...(name !== undefined ? { name } : {}),
+          ...(stationType !== undefined ? { stationType: stationType as any } : {}),
           ...(description !== undefined ? { description } : {}),
           ...(agentTools !== undefined ? { agentTools } : {}),
         },
