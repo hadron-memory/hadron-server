@@ -19,6 +19,7 @@ enum Role {
 
 enum StationType {
   WORKSTATION
+  CHATBOT
   AGENT
   AUTOMATION
   CLOUD

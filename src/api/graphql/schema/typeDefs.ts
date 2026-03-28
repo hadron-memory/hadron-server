@@ -8,6 +8,7 @@ export const typeDefs = `#graphql
 
   enum StationType {
     WORKSTATION
+    CHATBOT
     AGENT
     AUTOMATION
     CLOUD
