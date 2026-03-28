@@ -258,6 +258,8 @@ model Node {
   seq         Int?
   ownerRepo   String?   @map("owner_repo")
   isRunnable  Boolean?  @map("is_runnable")
+  llmModel    String?   @map("llm_model")
+  aiAgent     String?   @map("ai_agent")
   createdAt   DateTime  @default(now()) @map("created_at")
   createdBy   String?   @map("created_by")
   updatedAt   DateTime  @updatedAt @map("updated_at")

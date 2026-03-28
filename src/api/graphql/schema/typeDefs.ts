@@ -48,6 +48,8 @@ export const typeDefs = `#graphql
     seq: Int
     ownerRepo: String
     isRunnable: Boolean
+    llmModel: String
+    aiAgent: String
     createdAt: String!
     updatedAt: String!
     outgoingEdges: [Edge!]!
