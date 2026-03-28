@@ -909,15 +909,12 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     return;
   }
 
-  // New session — only allowed for initialization requests
-  if (sessionId && !transports.has(sessionId)) {
-    res.status(404).json({ error: 'Session not found' });
-    return;
-  }
-
-  // Create new transport + MCP server for this session
+  // Session not found or no session — create a new one.
+  // This handles both first-time connections and reconnections after server restart.
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
+    sessionIdGenerator: sessionId
+      ? () => sessionId  // Reuse the client's session ID so it doesn't need to re-init
+      : () => randomUUID(),
   });
 
   const mcpServer = createMcpServerInstance(auth);
@@ -929,7 +926,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
 
   await mcpServer.connect(transport);
 
-  // Store transport by session ID (set after handleRequest processes the init)
+  // Handle the request with the new transport
   await transport.handleRequest(req, res, req.body);
 
   const sid = transport.sessionId;
