@@ -302,16 +302,20 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       loc: z.string().describe('Colon-delimited path for the node'),
       memoryId: z.string().optional().describe('Memory ID or name. Omit to auto-detect: uses the only writable memory, or infers from edge targets.'),
       name: z.string().describe('Node name'),
+      nodeType: z.string().optional().describe('Node type: "knowledge" (default) or "data"'),
       description: z.string().optional().describe('Short description'),
       content: z.string().optional().describe('Markdown content'),
       seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
       tags: z.array(z.string()).optional().describe('Tags'),
+      properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
+      llmModel: z.string().optional().describe('LLM model used (e.g. claude-opus-4-6)'),
+      aiAgent: z.string().optional().describe('AI agent tool used (e.g. claude-code, cursor)'),
       edges: z.array(z.object({
         targetId: z.string().describe('Target node ID or loc path'),
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
-    async ({ loc, memoryId: rawMemoryId, name, description, content, seq, tags, edges }) => {
+    async ({ loc, memoryId: rawMemoryId, name, nodeType, description, content, seq, tags, properties, llmModel, aiAgent, edges }) => {
       try {
         validateLoc(loc);
       } catch (e) {
@@ -376,19 +380,27 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           memoryId,
           loc,
           name,
+          nodeType: nodeType ?? 'knowledge',
           description: description ?? null,
           content: content ?? null,
           seq: seq ?? null,
           tags: tags ?? [],
+          properties: properties as any ?? undefined,
+          llmModel: llmModel ?? null,
+          aiAgent: aiAgent ?? null,
           createdBy: auth.clientId ?? null,
         },
         update: {
           name,
+          ...(nodeType ? { nodeType } : {}),
           description: description ?? null,
           content: content ?? null,
           seq: seq ?? null,
           tags: tags ?? [],
-        },
+          ...(properties !== undefined ? { properties: properties as any } : {}),
+          ...(llmModel ? { llmModel } : {}),
+          ...(aiAgent ? { aiAgent } : {}),
+        } as any,
       });
 
       // Replace edges if provided
@@ -467,17 +479,21 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     {
       loc: z.string().describe('Colon-delimited path of the node to update'),
       name: z.string().optional().describe('New node name'),
+      nodeType: z.string().optional().describe('Node type: "knowledge" or "data"'),
       description: z.string().optional().describe('New short description'),
       content: z.string().optional().describe('New markdown content'),
       seq: z.number().optional().describe('New sort order among siblings'),
       tags: z.array(z.string()).optional().describe('Replace tags'),
+      properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
+      llmModel: z.string().optional().describe('LLM model used'),
+      aiAgent: z.string().optional().describe('AI agent tool used'),
       edges: z.array(z.object({
         targetId: z.string().describe('Target node ID or loc path'),
         label: z.string().describe('Relationship label'),
       })).optional().describe('Replace outgoing edges'),
       reason: z.string().optional().describe('Why this change was made (stored in version history)'),
     },
-    async ({ loc, name, description, content, seq, tags, edges, reason }) => {
+    async ({ loc, name, nodeType, description, content, seq, tags, properties, llmModel, aiAgent, edges, reason }) => {
       // Find the existing node
       const memoryIds = await getAccessibleMemoryIds(auth);
       const where: Record<string, unknown> = { loc };
@@ -510,10 +526,14 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Build partial update — only fields that were provided
       const data: Record<string, unknown> = {};
       if (name !== undefined) data.name = name;
+      if (nodeType !== undefined) data.nodeType = nodeType;
       if (description !== undefined) data.description = description;
       if (content !== undefined) data.content = content;
       if (seq !== undefined) data.seq = seq;
       if (tags !== undefined) data.tags = tags;
+      if (properties !== undefined) data.properties = properties as any;
+      if (llmModel !== undefined) data.llmModel = llmModel;
+      if (aiAgent !== undefined) data.aiAgent = aiAgent;
 
       if (Object.keys(data).length > 0) {
         await db.node.update({ where: { id: existing.id }, data });

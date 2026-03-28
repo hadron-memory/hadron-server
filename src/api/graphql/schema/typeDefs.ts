@@ -284,6 +284,8 @@ export const typeDefs = `#graphql
     tags: [String!]
     properties: JSON
     ownerRepo: String
+    llmModel: String
+    aiAgent: String
     # Replace all outgoing edges when provided (omit to leave edges unchanged)
     edges: [NodeEdgeInput!]
   }
