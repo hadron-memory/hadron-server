@@ -173,7 +173,7 @@ export async function createServer(): Promise<Express> {
       return;
     }
     try {
-      await sendMagicLink(email.trim(), db);
+      await sendMagicLink(email.trim(), db, redirect);
       res.json({ ok: true });
     } catch (err) {
       console.error('Email auth error:', err);
@@ -182,7 +182,7 @@ export async function createServer(): Promise<Express> {
   });
 
   app.get('/auth/email/verify', async (req, res) => {
-    const { token } = req.query as { token?: string };
+    const { token, redirect: redirectParam } = req.query as { token?: string; redirect?: string };
     if (!token) {
       res.status(400).json({ error: 'Missing token' });
       return;
@@ -226,8 +226,9 @@ export async function createServer(): Promise<Express> {
         process.env.FRONTEND_URL || 'http://localhost:5173';
       const callbackUrl = new URL('/auth/callback', frontendUrl);
       callbackUrl.searchParams.set('token', jwt);
-      // New users go to setup page
-      if (isNew) callbackUrl.searchParams.set('redirect', '/app/setup');
+      // Custom redirect (e.g., from invite link) takes priority, then setup for new users
+      if (redirectParam) callbackUrl.searchParams.set('redirect', redirectParam);
+      else if (isNew) callbackUrl.searchParams.set('redirect', '/app/setup');
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('Email verify error:', err);

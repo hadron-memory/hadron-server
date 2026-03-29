@@ -18,6 +18,7 @@ function getResend(): Resend {
 export async function sendMagicLink(
   email: string,
   db: PrismaClient,
+  redirect?: string,
 ): Promise<void> {
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + TOKEN_EXPIRY_MINUTES * 60 * 1000);
@@ -28,7 +29,8 @@ export async function sendMagicLink(
 
   const baseUrl =
     process.env.BASE_URL ?? `http://localhost:${process.env.PORT ?? 4000}`;
-  const verifyUrl = `${baseUrl}/auth/email/verify?token=${token}`;
+  let verifyUrl = `${baseUrl}/auth/email/verify?token=${token}`;
+  if (redirect) verifyUrl += `&redirect=${encodeURIComponent(redirect)}`;
 
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
 
