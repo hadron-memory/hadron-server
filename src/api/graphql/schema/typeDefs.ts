@@ -439,6 +439,8 @@ export const typeDefs = `#graphql
 
     # User invitations (org ADMIN or platform ADMIN)
     createUserInvitation(orgId: ID!, memberRole: Role!, name: String, email: String, githubUsername: String, maxActivations: Int, expiresInDays: Int): UserInvitation!
+    # Platform invite — no org association, just onboards a new user
+    inviteUser(name: String, email: String, githubUsername: String, maxActivations: Int, expiresInDays: Int): UserInvitation!
     acceptInvitation(slug: String!): Boolean!
 
     # Organization membership (platform ADMIN or org OWNER/ADMIN)

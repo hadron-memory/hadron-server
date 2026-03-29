@@ -1005,6 +1005,37 @@ export const resolvers = {
       return { ...invite, activationCount: invite.activations.length };
     },
 
+    inviteUser: async (
+      _: unknown,
+      { name, email, githubUsername, maxActivations, expiresInDays }: {
+        name?: string; email?: string; githubUsername?: string;
+        maxActivations?: number; expiresInDays?: number;
+      },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const slug = generateId().slice(0, 16);
+      const expiresAt = expiresInDays
+        ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
+        : null;
+      const invite = await ctx.db.userInvitation.create({
+        data: {
+          slug,
+          senderUserId: ctx.userId,
+          organizationId: null,
+          memberRole: 'READER',
+          name: name ?? null,
+          email: email ?? null,
+          githubUsername: githubUsername ?? null,
+          maxActivations: maxActivations ?? 1,
+          expiresAt,
+          createdBy: ctx.userId,
+        },
+        include: { sender: true, organization: true, activations: true },
+      });
+      return { ...invite, activationCount: invite.activations.length };
+    },
+
     acceptInvitation: async (
       _: unknown,
       { slug }: { slug: string },
