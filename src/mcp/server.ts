@@ -457,31 +457,48 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         if (writableIds.length === 1) {
           // Only one writable memory — use it
           memoryId = writableIds[0];
-        } else if (writableIds.length > 1 && edges?.length) {
-          // Multiple writable memories — check if edges point to exactly one
-          const edgeMemoryIds = new Set<string>();
-          for (const edge of edges) {
-            if (edge.targetId.includes(':')) {
-              const targetNode = await db.node.findFirst({ where: { loc: edge.targetId }, select: { memoryId: true } });
-              if (targetNode && writableIds.includes(targetNode.memoryId)) {
-                edgeMemoryIds.add(targetNode.memoryId);
-              }
+        } else if (writableIds.length > 1) {
+          // Multiple writable memories — find the right one by looking for parent nodes
+          const locParts = loc.split(':');
+          for (let i = locParts.length - 1; i >= 1; i--) {
+            const parentLoc = locParts.slice(0, i).join(':');
+            const parentNode = await db.node.findFirst({
+              where: { loc: parentLoc, memoryId: { in: writableIds } },
+              select: { memoryId: true },
+            });
+            if (parentNode) {
+              memoryId = parentNode.memoryId;
+              break;
             }
           }
-          if (edgeMemoryIds.size === 1) {
-            memoryId = [...edgeMemoryIds][0];
+
+          // If no parent found, try edges
+          if (!memoryId && edges?.length) {
+            const edgeMemoryIds = new Set<string>();
+            for (const edge of edges) {
+              if (edge.targetId.includes(':')) {
+                const targetNode = await db.node.findFirst({ where: { loc: edge.targetId }, select: { memoryId: true } });
+                if (targetNode && writableIds.includes(targetNode.memoryId)) {
+                  edgeMemoryIds.add(targetNode.memoryId);
+                }
+              }
+            }
+            if (edgeMemoryIds.size === 1) {
+              memoryId = [...edgeMemoryIds][0];
+            }
           }
         }
 
         if (!memoryId) {
-          const names = await Promise.all(writableIds.map(async (id) => {
-            const m = await db.memory.findUnique({ where: { id }, select: { name: true } });
-            return m?.name ?? id;
-          }));
+          const memories = await db.memory.findMany({
+            where: { id: { in: writableIds } },
+            select: { urn: true, name: true },
+          });
+          const list = memories.map((m) => `${m.name} (${m.urn})`).join(', ');
           return textResult(
             writableIds.length === 0
               ? 'No writable memories available. Subscribe to a memory with READ_WRITE access.'
-              : `Multiple writable memories available: ${names.join(', ')}. Please specify memoryId.`
+              : `Multiple writable memories available: ${list}. Please specify memoryId using the memory URN.`
           );
         }
       }
