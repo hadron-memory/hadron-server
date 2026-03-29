@@ -7,6 +7,11 @@ import { syncGraphFromGithub } from '../integrations/github/syncGraphFromGithub.
  * Runs non-blocking — logs errors but does not prevent the server from starting.
  */
 export const startup = async (): Promise<void> => {
+  if (process.env.DISABLE_STARTUP_SYNC === 'true') {
+    console.log('Startup sync disabled (DISABLE_STARTUP_SYNC=true).');
+    return;
+  }
+
   const memories = await db.memory.findMany({
     where: { deletedAt: null, source: { not: null } },
     include: { organization: true },
