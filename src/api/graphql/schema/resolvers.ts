@@ -360,7 +360,7 @@ export const resolvers = {
 
     sessions: async (
       _: unknown,
-      { type, repo, customerId, limit }: { type?: string; repo?: string; customerId?: string; limit?: number },
+      { type, repo, customerId, limit, offset }: { type?: string; repo?: string; customerId?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       return ctx.db.session.findMany({
@@ -371,6 +371,7 @@ export const resolvers = {
         },
         orderBy: { startedAt: 'desc' },
         take: limit ?? 50,
+        skip: offset ?? 0,
         include: SESSION_INCLUDE,
       });
     },

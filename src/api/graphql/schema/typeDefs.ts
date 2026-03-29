@@ -354,7 +354,7 @@ export const typeDefs = `#graphql
     memoryUsageSummary(memoryId: ID!): [UsageSummaryEntry!]!
 
     # Sessions, most recent first
-    sessions(type: String, repo: String, customerId: String, limit: Int): [Session!]!
+    sessions(type: String, repo: String, customerId: String, limit: Int, offset: Int): [Session!]!
     session(id: ID!): Session
 
     # Stations (admin only)
