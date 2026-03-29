@@ -234,6 +234,7 @@ export const typeDefs = `#graphql
   type AgentMemoryItem {
     id: ID!
     memory: Memory!
+    role: String!
     createdAt: String!
   }
 
@@ -455,7 +456,7 @@ export const typeDefs = `#graphql
     createAgent(orgId: ID!, name: String!, description: String): Agent!
     updateAgent(id: ID!, name: String, urn: String, description: String): Agent!
     deleteAgent(id: ID!): Boolean!
-    addMemoryToAgent(agentId: ID!, memoryId: ID!): Agent!
+    addMemoryToAgent(agentId: ID!, memoryId: ID!, role: String): Agent!
     removeMemoryFromAgent(agentId: ID!, memoryId: ID!): Agent!
 
     # Memory subscriptions (cross-org)

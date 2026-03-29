@@ -1302,12 +1302,12 @@ export const resolvers = {
 
     addMemoryToAgent: async (
       _: unknown,
-      { agentId, memoryId }: { agentId: string; memoryId: string },
+      { agentId, memoryId, role }: { agentId: string; memoryId: string; role?: string },
       ctx: Context,
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
-      await ctx.db.agentMemoryItem.create({ data: { agentId, memoryId, createdBy: ctx.userId ?? ctx.clientId ?? null } });
+      await ctx.db.agentMemoryItem.create({ data: { agentId, memoryId, role: role ?? 'read', createdBy: ctx.userId ?? ctx.clientId ?? null } });
       return ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, include: AGENT_INCLUDE });
     },
 

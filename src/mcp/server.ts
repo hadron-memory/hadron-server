@@ -117,10 +117,18 @@ async function getStationMemoryAccess(
   const access = new Map<string, string>();
   for (const sub of subs) {
     for (const item of sub.agent.memoryItems) {
+      // Effective access = min(station subscription type, agent memory item role)
+      // Station READ_ONLY → always read-only regardless of agent role
+      // Station READ_WRITE + agent role "read" → read-only
+      // Station READ_WRITE + agent role "read-write" → read-write
+      const agentRole = (item as any).role ?? 'read';
+      const effective = sub.subscriptionType === 'READ_WRITE' && agentRole === 'read-write'
+        ? 'READ_WRITE'
+        : 'READ_ONLY';
       // If multiple subs include the same memory, READ_WRITE wins
       const existing = access.get(item.memoryId);
-      if (!existing || sub.subscriptionType === 'READ_WRITE') {
-        access.set(item.memoryId, sub.subscriptionType);
+      if (!existing || effective === 'READ_WRITE') {
+        access.set(item.memoryId, effective);
       }
     }
   }

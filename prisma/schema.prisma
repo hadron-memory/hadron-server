@@ -420,9 +420,10 @@ model Agent {
 }
 
 model AgentMemoryItem {
-  id        String    @id
+  id        String    @id @default(cuid())
   agentId   String    @map("agent_id")
   memoryId  String    @map("memory_id")
+  role      String    @default("read") // "read" or "read-write"
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
   updatedAt DateTime? @map("updated_at")
