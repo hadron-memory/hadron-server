@@ -45,9 +45,15 @@ async function resolveJwt(token: string): Promise<AuthContext> {
 }
 
 async function resolveStationKey(
-  rawKey: string,
+  rawKeyOrPrefixed: string,
   db: PrismaClient,
 ): Promise<AuthContext> {
+  // Accept both prefixed format (urn/date/key) and raw key
+  // Prefixed: "micromentor.org:engineering/202603281412/3ee91ad69c..."
+  // Raw: "3ee91ad69c..."
+  const parts = rawKeyOrPrefixed.split('/');
+  const rawKey = parts.length >= 3 ? parts[parts.length - 1] : rawKeyOrPrefixed;
+
   const stations = await db.station.findMany({
     where: {
       deletedAt: null,

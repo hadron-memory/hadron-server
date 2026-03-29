@@ -755,7 +755,9 @@ export const resolvers = {
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
       });
-      return { station, rawKey };
+      const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+      const prefixedKey = `${urn}/${dateStamp}/${rawKey}`;
+      return { station, rawKey: prefixedKey };
     },
 
     updateStation: async (
@@ -784,7 +786,9 @@ export const resolvers = {
       const rawKey = randomBytes(32).toString('hex');
       const keyHash = await bcrypt.hash(rawKey, 12);
       const station = await ctx.db.station.update({ where: { id }, data: { keyHash, apiKeyShown: false } });
-      return { station, rawKey };
+      const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+      const prefixedKey = `${existing.urn}/${dateStamp}/${rawKey}`;
+      return { station, rawKey: prefixedKey };
     },
 
     revokeStation: async (_: unknown, { id }: { id: string }, ctx: Context) => {
