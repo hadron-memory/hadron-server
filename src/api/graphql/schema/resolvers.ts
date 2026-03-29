@@ -1311,6 +1311,20 @@ export const resolvers = {
       return ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, include: AGENT_INCLUDE });
     },
 
+    updateAgentMemoryRole: async (
+      _: unknown,
+      { agentId, memoryId, role }: { agentId: string; memoryId: string; role: string },
+      ctx: Context,
+    ) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await ctx.db.agentMemoryItem.update({
+        where: { agentId_memoryId: { agentId, memoryId } },
+        data: { role },
+      });
+      return ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, include: AGENT_INCLUDE });
+    },
+
     removeMemoryFromAgent: async (
       _: unknown,
       { agentId, memoryId }: { agentId: string; memoryId: string },

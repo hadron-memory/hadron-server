@@ -457,6 +457,7 @@ export const typeDefs = `#graphql
     updateAgent(id: ID!, name: String, urn: String, description: String): Agent!
     deleteAgent(id: ID!): Boolean!
     addMemoryToAgent(agentId: ID!, memoryId: ID!, role: String): Agent!
+    updateAgentMemoryRole(agentId: ID!, memoryId: ID!, role: String!): Agent!
     removeMemoryFromAgent(agentId: ID!, memoryId: ID!): Agent!
 
     # Memory subscriptions (cross-org)
