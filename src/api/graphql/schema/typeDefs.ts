@@ -419,7 +419,8 @@ export const typeDefs = `#graphql
     subscribeStationToAgent(stationId: ID!, agentId: ID!, subscriptionType: SubscriptionType, trainingMode: Boolean): Station!
     unsubscribeStationFromAgent(stationId: ID!, agentId: ID!): Station!
 
-    # User management (admin only)
+    # User management
+    updateMyProfile(name: String, handle: String, email: String): User!
     updateUserRoles(userId: ID!, roles: [Role!]!): User!
 
     # Organization management

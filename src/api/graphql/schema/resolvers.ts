@@ -847,6 +847,22 @@ export const resolvers = {
       return ctx.db.station.findUniqueOrThrow({ where: { id: stationId }, include: STATION_INCLUDE });
     },
 
+    updateMyProfile: async (
+      _: unknown,
+      { name, handle, email }: { name?: string; handle?: string; email?: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      return ctx.db.user.update({
+        where: { id: ctx.userId },
+        data: {
+          ...(name !== undefined ? { name } : {}),
+          ...(handle !== undefined ? { handle } : {}),
+          ...(email !== undefined ? { email } : {}),
+        },
+      });
+    },
+
     updateUserRoles: async (
       _: unknown,
       { userId, roles }: { userId: string; roles: Role[] },
