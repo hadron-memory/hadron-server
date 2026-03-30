@@ -370,9 +370,6 @@ export const typeDefs = `#graphql
     sessions(type: String, repo: String, customerId: String, limit: Int, offset: Int): [Session!]!
     session(id: ID!): Session
 
-    # Usage events, most recent first
-    usageEvents(type: String, nodeLoc: String, limit: Int, offset: Int): [UsageEvent!]!
-
     # Stations (admin only)
     stations: [Station!]!
     station(id: ID!): Station
