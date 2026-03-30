@@ -380,6 +380,22 @@ export const resolvers = {
       return ctx.db.session.findUnique({ where: { id }, include: SESSION_INCLUDE });
     },
 
+    usageEvents: async (
+      _: unknown,
+      { type, nodeLoc, limit, offset }: { type?: string; nodeLoc?: string; limit?: number; offset?: number },
+      ctx: Context,
+    ) => {
+      return ctx.db.usageEvent.findMany({
+        where: {
+          ...(type ? { type } : {}),
+          ...(nodeLoc ? { nodeLoc: { contains: nodeLoc } } : {}),
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit ?? 50,
+        skip: offset ?? 0,
+      });
+    },
+
     stations: async (_: unknown, __: unknown, ctx: Context) => {
       requireRole(ctx, 'ADMIN');
       return ctx.db.station.findMany({ where: { deletedAt: null }, orderBy: { createdAt: 'desc' } });

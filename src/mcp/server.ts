@@ -405,7 +405,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           n.name,
         ];
         if (n.seq !== null) parts.push(`(seq: ${n.seq})`);
-        if (n.nodeType !== 'knowledge') parts.push(`[${n.nodeType}]`);
+        if (n.nodeType !== 'info') parts.push(`[${n.nodeType}]`);
         if (n.description) parts.push(`— ${n.description}`);
         return parts.join(' ');
       });
@@ -423,7 +423,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       loc: z.string().describe('Node loc path or full URN (e.g. architecture or hadronmemory.com:dev:architecture)'),
       memoryId: z.string().optional().describe('Memory ID or URN. Omit to auto-detect from loc URN prefix, or uses the only writable memory.'),
       name: z.string().describe('Node name'),
-      nodeType: z.string().optional().describe('Node type: "knowledge" (default) or "data"'),
+      nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('Short description'),
       content: z.string().optional().describe('Markdown content'),
       seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
@@ -525,7 +525,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           memoryId,
           loc,
           name,
-          nodeType: nodeType ?? 'knowledge',
+          nodeType: nodeType ?? 'info',
           description: description ?? null,
           content: content ?? null,
           seq: seq ?? null,
@@ -644,7 +644,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     {
       loc: z.string().describe('Node loc path or full URN'),
       name: z.string().optional().describe('New node name'),
-      nodeType: z.string().optional().describe('Node type: "knowledge" or "data"'),
+      nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('New short description'),
       content: z.string().optional().describe('New markdown content'),
       seq: z.number().optional().describe('New sort order among siblings'),

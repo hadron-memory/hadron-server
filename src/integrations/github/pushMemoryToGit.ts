@@ -91,7 +91,7 @@ export async function pushMemoryToGit(
 
   // 4. Load all nodes with edges
   const nodes = await db.node.findMany({
-    where: { memoryId, nodeType: 'knowledge' },
+    where: { memoryId, nodeType: { not: 'data' } },
     include: {
       outgoingEdges: { include: { target: true } },
     },

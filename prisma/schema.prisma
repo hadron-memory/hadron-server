@@ -245,7 +245,7 @@ model Memory {
 model Node {
   id          String    @id @default(cuid()) // UUIDv7 from node.yaml — stable across moves
   memoryId    String    @map("memory_id")
-  nodeType    String    @default("knowledge") @map("node_type") // "knowledge" or "data"
+  nodeType    String    @default("info") @map("node_type") // "info", "data", "task", "record", "chat", "plan", "parent"
   name        String
   alias       String?
   loc         String
