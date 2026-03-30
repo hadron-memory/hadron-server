@@ -432,6 +432,32 @@ export const resolvers = {
       });
     },
 
+    stationNodes: async (
+      _: unknown,
+      { stationId, limit }: { stationId: string; limit?: number },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'READER');
+      // Get all memory IDs accessible by this station
+      const subs = await ctx.db.stationAgentSubscription.findMany({
+        where: { stationId, deletedAt: null },
+        include: { agent: { include: { memoryItems: true } } },
+      });
+      const memoryIds = [...new Set(subs.flatMap((s) => s.agent.memoryItems.map((m) => m.memoryId)))];
+      if (memoryIds.length === 0) return [];
+
+      return ctx.db.node.findMany({
+        where: { memoryId: { in: memoryIds }, deletedAt: null },
+        orderBy: { loc: 'asc' },
+        take: limit ?? 500,
+        include: {
+          outgoingEdges: { include: { target: true } },
+          incomingEdges: { include: { source: true } },
+          memory: { select: { id: true, urn: true, name: true } },
+        },
+      });
+    },
+
     stationAIConfig: async (_: unknown, { stationId }: { stationId: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
       const station = await ctx.db.station.findUniqueOrThrow({ where: { id: stationId } });

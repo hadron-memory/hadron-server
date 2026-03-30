@@ -53,6 +53,7 @@ export const typeDefs = `#graphql
     aiAgent: String
     createdAt: String!
     updatedAt: String!
+    memory: Memory
     outgoingEdges: [Edge!]!
     incomingEdges: [Edge!]!
   }
@@ -375,6 +376,8 @@ export const typeDefs = `#graphql
     station(id: ID!): Station
     # Stations owned by the current user
     myStations: [Station!]!
+    # All nodes accessible by a station (across all subscribed memories)
+    stationNodes(stationId: ID!, limit: Int): [Node!]!
     # Decrypted AI config for a station (owner only)
     stationAIConfig(stationId: ID!): StationAIConfig
 
