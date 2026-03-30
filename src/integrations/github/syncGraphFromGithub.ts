@@ -110,7 +110,7 @@ export const syncGraphFromGithub = async (
           const label = p.label ?? '';
           await tx.edge.upsert({
             where: { sourceId_targetId_label: { sourceId: p.sourceId, targetId: p.targetId, label } },
-            create: { sourceId: p.sourceId, targetId: p.targetId, label },
+            create: { id: generateId(), sourceId: p.sourceId, targetId: p.targetId, label },
             update: {},
           });
           await tx.pendingEdge.delete({ where: { id: p.id } });
@@ -130,7 +130,7 @@ export const syncGraphFromGithub = async (
         if (targetExists) {
           await tx.edge.upsert({
             where: { sourceId_targetId_label: { sourceId: edge.sourceId, targetId: edge.targetId, label } },
-            create: { sourceId: edge.sourceId, targetId: edge.targetId, label },
+            create: { id: generateId(), sourceId: edge.sourceId, targetId: edge.targetId, label },
             update: {},
           });
           await tx.pendingEdge.deleteMany({
@@ -139,7 +139,7 @@ export const syncGraphFromGithub = async (
         } else {
           await tx.pendingEdge.upsert({
             where: { sourceId_targetId: { sourceId: edge.sourceId, targetId: edge.targetId } },
-            create: { sourceId: edge.sourceId, targetId: edge.targetId, label: edge.label },
+            create: { id: generateId(), sourceId: edge.sourceId, targetId: edge.targetId, label: edge.label },
             update: { label: edge.label },
           });
           pendingEdgeCount++;

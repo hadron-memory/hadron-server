@@ -135,6 +135,9 @@ export const typeDefs = `#graphql
     role: Role!
     apiKeyShown: Boolean!
     agentTools: [String!]!
+    aiProvider: String
+    aiModel: String
+    hasAiApiKey: Boolean!
     organizationId: String
     userId: String
     user: User
@@ -148,6 +151,13 @@ export const typeDefs = `#graphql
   type StationCreated {
     station: Station!
     rawKey: String!
+  }
+
+  # Decrypted AI config for chatbot use (only returned to station owner)
+  type StationAIConfig {
+    provider: String!
+    apiKey: String!
+    model: String!
   }
 
   type User {
@@ -347,6 +357,9 @@ export const typeDefs = `#graphql
     # Usage stats for a node (most recent events first)
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
 
+    # Usage events (most recent first), optionally filtered by type or nodeLoc
+    usageEvents(type: String, nodeLoc: String, limit: Int, offset: Int): [UsageEvent!]!
+
     # Version history for a node
     nodeVersions(nodeId: ID!, limit: Int): [NodeVersion!]!
 
@@ -362,6 +375,8 @@ export const typeDefs = `#graphql
     station(id: ID!): Station
     # Stations owned by the current user
     myStations: [Station!]!
+    # Decrypted AI config for a station (owner only)
+    stationAIConfig(stationId: ID!): StationAIConfig
 
     # Users (admin only)
     users: [User!]!
@@ -410,8 +425,8 @@ export const typeDefs = `#graphql
     recordUsage(event: UsageEventInput!): Boolean!
 
     # Station management
-    createStation(name: String!, stationType: StationType!, role: Role!, description: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!]): StationCreated!
-    updateStation(id: ID!, name: String, stationType: StationType, description: String, agentTools: [String!]): Station!
+    createStation(name: String!, stationType: StationType!, role: Role!, description: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): StationCreated!
+    updateStation(id: ID!, name: String, stationType: StationType, description: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): Station!
     regenerateApiKey(id: ID!): StationCreated!
     revokeStation(id: ID!): Boolean!
 

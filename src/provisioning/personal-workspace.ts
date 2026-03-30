@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto';
 import bcrypt from 'bcrypt';
 import type { PrismaClient } from '../generated/prisma/client.js';
+import { generateId } from '../lib/id.js';
 
 interface ProvisionResult {
   orgId: string;
@@ -31,6 +32,7 @@ export async function provisionPersonalWorkspace(
   // 1. Create personal org
   const org = await db.organization.create({
     data: {
+      id: generateId(),
       name: displayName,
       urn,
       isVisible: false,
@@ -41,6 +43,7 @@ export async function provisionPersonalWorkspace(
   // 2. Add user as OWNER
   await db.orgMember.create({
     data: {
+      id: generateId(),
       organizationId: org.id,
       userId,
       role: 'OWNER',
@@ -52,6 +55,7 @@ export async function provisionPersonalWorkspace(
   // 3. Create default agent
   const agent = await db.agent.create({
     data: {
+      id: generateId(),
       organizationId: org.id,
       urn: `${urn}:my-memories`,
       name: 'My Memories',
@@ -64,6 +68,7 @@ export async function provisionPersonalWorkspace(
   const keyHash = await bcrypt.hash(rawKey, 12);
   const station = await db.station.create({
     data: {
+      id: generateId(),
       name: 'My Workstation',
       urn: `${urn}:my-workstation`,
       keyHash,
@@ -78,6 +83,7 @@ export async function provisionPersonalWorkspace(
   // 5. Subscribe station to default agent
   await db.stationAgentSubscription.create({
     data: {
+      id: generateId(),
       stationId: station.id,
       agentId: agent.id,
       subscriptionType: 'READ_WRITE',
@@ -88,6 +94,7 @@ export async function provisionPersonalWorkspace(
   // 6. Store raw key for the setup page (shown once, then consumed)
   await db.pendingSetup.create({
     data: {
+      id: generateId(),
       userId,
       stationId: station.id,
       rawKeyEncrypted: rawKey, // TODO: encrypt at rest with app-level key

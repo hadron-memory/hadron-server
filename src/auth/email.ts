@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { Resend } from 'resend';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { generateId } from '../lib/id.js';
 
 const TOKEN_EXPIRY_MINUTES = 15;
 
@@ -24,7 +25,7 @@ export async function sendMagicLink(
   const expiresAt = new Date(Date.now() + TOKEN_EXPIRY_MINUTES * 60 * 1000);
 
   await db.emailVerificationToken.create({
-    data: { email: email.toLowerCase(), token, expiresAt },
+    data: { id: generateId(), email: email.toLowerCase(), token, expiresAt },
   });
 
   const baseUrl =

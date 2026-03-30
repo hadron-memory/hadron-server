@@ -1,6 +1,7 @@
 import {Prisma, PrismaClient} from '../src/generated/prisma/index.js';
 import bcrypt from 'bcrypt';
 import { randomBytes, createCipheriv } from 'crypto';
+import { generateId } from '../src/lib/id.js';
 import MemoryCreateArgs = Prisma.MemoryCreateArgs;
 
 function encryptToken(plaintext: string): string {
@@ -22,6 +23,7 @@ async function main() {
   // 1. HadronServer
   const server = await db.hadronServer.create({
     data: {
+      id: generateId(),
       url: 'https://hc.hadrongraph.io',
       logLevel: 'ERROR',
     },
@@ -31,8 +33,9 @@ async function main() {
   // 2. Organization: Hadron Memory
   const hadronOrg = await db.organization.create({
     data: {
+      id: generateId(),
       name: 'Hadron Memory',
-      domain: 'hadronmemory-com',
+      urn: 'hadronmemory-com',
       githubAppId: '3125298',
       githubInstallationId: 117769692,
       githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_PRIVATE_KEY
@@ -41,13 +44,14 @@ async function main() {
       isVisible: true,
     },
   });
-  console.log(`  Created Organization: ${hadronOrg.name} (${hadronOrg.domain})`);
+  console.log(`  Created Organization: ${hadronOrg.name} (${hadronOrg.urn})`);
 
   // 2. Organization: Baragaun
   const baragaunOrg = await db.organization.create({
     data: {
+      id: generateId(),
       name: 'Baragaun',
-      domain: 'baragaun-com',
+      urn: 'baragaun-com',
       githubAppId: '3125298',
       githubInstallationId: 117385803,
       githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_PRIVATE_KEY
@@ -56,13 +60,14 @@ async function main() {
       isVisible: true,
     },
   });
-  console.log(`  Created Organization: ${baragaunOrg.name} (${baragaunOrg.domain})`);
+  console.log(`  Created Organization: ${baragaunOrg.name} (${baragaunOrg.urn})`);
 
   // 2. Organization: Baragaun
   const micromentorOrg = await db.organization.create({
     data: {
+      id: generateId(),
       name: 'Micromentor',
-      domain: 'micromentor-org',
+      urn: 'micromentor-org',
       githubAppId: '3125298',
       githubInstallationId: 117769754,
       githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_PRIVATE_KEY
@@ -71,7 +76,7 @@ async function main() {
       isVisible: true,
     },
   });
-  console.log(`  Created Organization: ${micromentorOrg.name} (${micromentorOrg.domain})`);
+  console.log(`  Created Organization: ${micromentorOrg.name} (${micromentorOrg.urn})`);
 
   // 3. Users
   const holger = await db.user.create({
@@ -131,6 +136,7 @@ async function main() {
   ]) {
     await db.orgMember.create({
       data: {
+        id: generateId(),
         organizationId: baragaunOrg.id,
         userId: user.id,
         role,
@@ -148,6 +154,7 @@ async function main() {
   ]) {
     await db.orgMember.create({
       data: {
+        id: generateId(),
         organizationId: hadronOrg.id,
         userId: user.id,
         role,
@@ -165,6 +172,7 @@ async function main() {
   ]) {
     await db.orgMember.create({
       data: {
+        id: generateId(),
         organizationId: micromentorOrg.id,
         userId: user.id,
         role,
@@ -181,7 +189,9 @@ async function main() {
       name: '',
       props: {
         data: {
+          id: generateId(),
           organizationId: hadronOrg.id,
+          urn: `${hadronOrg.urn}:core`,
           name: 'hadronmemory-com.core',
           source: 'https://github.com/hadron-memory/hadronmem-core',
           readBranch: 'main',
@@ -196,7 +206,9 @@ async function main() {
       name: '',
       props: {
         data: {
+          id: generateId(),
           organizationId: baragaunOrg.id,
+          urn: `${baragaunOrg.urn}:baragaun-com`,
           name: 'baragaun-com',
           source: 'https://github.com/baragaun/hadronmem-baragaun-com',
           readBranch: 'main',
@@ -211,7 +223,9 @@ async function main() {
       name: '',
       props: {
         data: {
+          id: generateId(),
           organizationId: baragaunOrg.id,
+          urn: `${baragaunOrg.urn}:bg-code-gen`,
           name: 'baragaun-com.bg-code-gen',
           source: 'https://github.com/baragaun/hadronmem-bg-code-gen',
           readBranch: 'main',
@@ -226,7 +240,9 @@ async function main() {
       name: '',
       props: {
         data: {
+          id: generateId(),
           organizationId: baragaunOrg.id,
+          urn: `${baragaunOrg.urn}:bg-node-client`,
           name: 'baragaun-com.bg-node-client',
           source: 'https://github.com/baragaun/hadronmem-bg-node-client',
           readBranch: 'main',
@@ -241,7 +257,9 @@ async function main() {
       name: '',
       props: {
         data: {
+          id: generateId(),
           organizationId: micromentorOrg.id,
+          urn: `${micromentorOrg.urn}:mmdata`,
           name: 'micromentor-org.mmdata',
           source: 'https://github.com/micromentor-team/hadronmem-mmdata',
           readBranch: 'main',
@@ -256,7 +274,9 @@ async function main() {
       name: '',
       props: {
         data: {
+          id: generateId(),
           organizationId: micromentorOrg.id,
+          urn: `${micromentorOrg.urn}:mm-app`,
           name: 'micromentor-org.mm-app',
           source: 'https://github.com/micromentor-team/hadronmem-mm-app',
           readBranch: 'main',
@@ -278,7 +298,9 @@ async function main() {
   // 6. Agent: Engineering
   const agent = await db.agent.create({
     data: {
+      id: generateId(),
       organizationId: baragaunOrg.id,
+      urn: `${baragaunOrg.urn}:engineering`,
       name: 'Engineering',
       description: 'All Baragaun engineering memories',
     },
@@ -289,6 +311,7 @@ async function main() {
   for (const mem of seedMemories) {
     await db.agentMemoryItem.create({
       data: {
+        id: generateId(),
         agentId: agent.id,
         memoryId: mem.id,
       },
@@ -298,39 +321,43 @@ async function main() {
 
   // 8. Stations + subscriptions (one per user)
   const stationDefs = [
-    { user: holger, label: 'biene-mbp4' },
-    { user: raghvind, label: 'raghvind-ws' },
-    { user: rupali, label: 'rupali-ws' },
-    { user: noel, role: 'noel-ws' as const },
+    { user: holger, name: 'biene-mbp4' },
+    { user: raghvind, name: 'raghvind-ws' },
+    { user: rupali, name: 'rupali-ws' },
+    { user: noel, name: 'noel-ws' },
   ];
 
-  for (const { user, label } of stationDefs) {
+  for (const def of stationDefs) {
     const rawKey = randomBytes(32).toString('hex');
     const keyHash = await bcrypt.hash(rawKey, 12);
+    const stationUrn = `${baragaunOrg.urn}:${def.name}`;
     const station = await db.station.create({
       data: {
-        userId: user.id,
+        id: generateId(),
+        userId: def.user.id,
         organizationId: baragaunOrg.id,
         stationType: 'WORKSTATION',
-        label: label || '',
+        urn: stationUrn,
+        name: def.name,
         keyHash,
         role: 'ADMIN',
         apiKeyShown: false,
         agentTools: ['CLAUDE_CODE', 'CURSOR'],
       },
     });
-    console.log(`  Created Station: ${station.label} (user: ${user.name})`);
+    console.log(`  Created Station: ${station.name} (user: ${def.user.name})`);
     console.log(`    API Key: ${rawKey}`);
 
     await db.stationAgentSubscription.create({
       data: {
+        id: generateId(),
         stationId: station.id,
         agentId: agent.id,
         subscriptionType: 'READ_WRITE',
         trainingMode: true,
       },
     });
-    console.log(`    Subscribed ${station.label} → ${agent.name} (READ_WRITE, training)`);
+    console.log(`    Subscribed ${station.name} → ${agent.name} (READ_WRITE, training)`);
   }
 
   console.log('\nSeed complete!');
