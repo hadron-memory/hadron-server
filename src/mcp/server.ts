@@ -278,6 +278,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         node.description ? `> ${node.description}` : '',
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',
+        node.properties ? `Properties: ${JSON.stringify(node.properties)}` : '',
         node.outgoingEdges.length
           ? `Related:\n${node.outgoingEdges.map((e) => `  - ${e.target.loc} (${e.target.name}) — ${e.label}`).join('\n')}`
           : '',
