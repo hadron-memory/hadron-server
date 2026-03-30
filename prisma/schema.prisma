@@ -681,3 +681,13 @@ model PendingSetup {
 
   @@map("pending_setups")
 }
+
+model WaitingListItem {
+  id                String   @id @default(cuid())
+  email             String
+  requestedFeatures String?  @map("requested_features")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([email])
+  @@map("waiting_list")
+}

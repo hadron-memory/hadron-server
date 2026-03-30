@@ -479,5 +479,9 @@ export const typeDefs = `#graphql
 
     # Add a public memory to the current user's personal workspace
     addToMyMemories(memoryId: ID!): Boolean!
+
+    # Public mutations (no auth required)
+    joinWaitingList(email: String!, requestedFeatures: String): Boolean!
+    sendContactMessage(name: String!, email: String!, message: String!): Boolean!
   }
 `;

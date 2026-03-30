@@ -1580,6 +1580,41 @@ export const resolvers = {
 
       return true;
     },
+
+    joinWaitingList: async (
+      _: unknown,
+      { email, requestedFeatures }: { email: string; requestedFeatures?: string },
+      ctx: Context,
+    ) => {
+      await ctx.db.waitingListItem.create({
+        data: { email: email.trim().toLowerCase(), requestedFeatures: requestedFeatures ?? null },
+      });
+      return true;
+    },
+
+    sendContactMessage: async (
+      _: unknown,
+      { name, email, message }: { name: string; email: string; message: string },
+    ) => {
+      const apiKey = process.env.RESEND_API_KEY;
+      if (!apiKey) throw new Error('Email service not configured');
+      const contactEmail = process.env.CONTACT_EMAIL ?? 'info@baragaun.com';
+
+      await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          from: 'Hadron <noreply@hadronmemory.com>',
+          to: contactEmail,
+          subject: `Contact from ${name}`,
+          text: `New contact form submission:\n\nFrom: ${name} <${email}>\n\n${message}`,
+        }),
+      });
+      return true;
+    },
   },
 };
 
