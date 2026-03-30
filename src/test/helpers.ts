@@ -44,6 +44,7 @@ export async function createDbOrgAndGraph(
 ) {
   const org = await db.organization.create({
     data: {
+      id: generateId(),
       name: opts.orgName ?? 'test-org',
       urn: opts.orgName ?? 'test-org',
     },
@@ -51,6 +52,7 @@ export async function createDbOrgAndGraph(
   const memName = opts.graphName ?? 'test/repo';
   const graph = await db.memory.create({
     data: {
+      id: generateId(),
       organizationId: org.id,
       urn: `${opts.orgName ?? 'test-org'}:${memName}`,
       name: memName,
@@ -100,6 +102,7 @@ export async function createDbStation(
   const keyHash = await bcrypt.hash(TEST_RAW_KEY, 4); // low cost for speed
   return db.station.create({
     data: {
+      id: generateId(),
       name,
       urn: name,
       keyHash,

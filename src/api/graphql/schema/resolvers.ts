@@ -253,6 +253,7 @@ export const resolvers = {
     createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,
     lastUsedAt: (c: { lastUsedAt?: Date | string | null }) => toISO(c.lastUsedAt),
     expiresAt: (c: { expiresAt?: Date | string | null }) => toISO(c.expiresAt),
+    hasAiApiKey: (c: { aiApiKeyEncrypted?: string | null }) => !!c.aiApiKeyEncrypted,
     user: (station: { userId?: string | null }, _: unknown, ctx: Context) =>
       station.userId ? ctx.db.user.findUnique({ where: { id: station.userId } }) : null,
     agentSubscriptions: (station: { id: string }, _: unknown, ctx: Context) =>
@@ -326,6 +327,23 @@ export const resolvers = {
         where: { nodeLoc: loc },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 50,
+      });
+    },
+
+    usageEvents: async (
+      _: unknown,
+      { type, nodeLoc, limit, offset }: { type?: string; nodeLoc?: string; limit?: number; offset?: number },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'READER');
+      return ctx.db.usageEvent.findMany({
+        where: {
+          ...(type ? { type } : {}),
+          ...(nodeLoc ? { nodeLoc } : {}),
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit ?? 50,
+        skip: offset ?? 0,
       });
     },
 
@@ -412,6 +430,18 @@ export const resolvers = {
         where: { userId: ctx.userId, deletedAt: null },
         orderBy: { createdAt: 'desc' },
       });
+    },
+
+    stationAIConfig: async (_: unknown, { stationId }: { stationId: string }, ctx: Context) => {
+      requireRole(ctx, 'READER');
+      const station = await ctx.db.station.findUniqueOrThrow({ where: { id: stationId } });
+      if (station.userId !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) throw new Error('Forbidden');
+      if (!station.aiProvider || !station.aiModel || !station.aiApiKeyEncrypted) return null;
+      return {
+        provider: station.aiProvider,
+        apiKey: decryptToken(station.aiApiKeyEncrypted),
+        model: station.aiModel,
+      };
     },
 
     users: async (_: unknown, __: unknown, ctx: Context) => {
@@ -734,6 +764,9 @@ export const resolvers = {
         userId,
         expiresAt,
         agentTools,
+        aiProvider,
+        aiModel,
+        aiApiKey,
       }: {
         name: string;
         stationType: string;
@@ -743,6 +776,9 @@ export const resolvers = {
         userId?: string;
         expiresAt?: string;
         agentTools?: string[];
+        aiProvider?: string;
+        aiModel?: string;
+        aiApiKey?: string;
       },
       ctx: Context,
     ) => {
@@ -766,6 +802,9 @@ export const resolvers = {
           description: description ?? null,
           role: role as Role,
           agentTools: agentTools ?? [],
+          aiProvider: aiProvider ?? null,
+          aiModel: aiModel ?? null,
+          aiApiKeyEncrypted: aiApiKey ? encryptToken(aiApiKey) : null,
           organizationId: organizationId ?? null,
           userId: userId ?? ctx.userId ?? null,
           expiresAt: expiresAt ? new Date(expiresAt) : undefined,
@@ -779,7 +818,10 @@ export const resolvers = {
 
     updateStation: async (
       _: unknown,
-      { id, name, stationType, description, agentTools }: { id: string; name?: string; stationType?: string; description?: string; agentTools?: string[] },
+      { id, name, stationType, description, agentTools, aiProvider, aiModel, aiApiKey }: {
+        id: string; name?: string; stationType?: string; description?: string; agentTools?: string[];
+        aiProvider?: string; aiModel?: string; aiApiKey?: string;
+      },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
@@ -792,6 +834,9 @@ export const resolvers = {
           ...(stationType !== undefined ? { stationType: stationType as any } : {}),
           ...(description !== undefined ? { description } : {}),
           ...(agentTools !== undefined ? { agentTools } : {}),
+          ...(aiProvider !== undefined ? { aiProvider } : {}),
+          ...(aiModel !== undefined ? { aiModel } : {}),
+          ...(aiApiKey !== undefined ? { aiApiKeyEncrypted: aiApiKey ? encryptToken(aiApiKey) : null } : {}),
         },
       });
     },
@@ -1006,6 +1051,7 @@ export const resolvers = {
         : null;
       const invite = await ctx.db.userInvitation.create({
         data: {
+          id: generateId(),
           slug,
           senderUserId: ctx.userId ?? null,
           organizationId: orgId,
@@ -1037,6 +1083,7 @@ export const resolvers = {
         : null;
       const invite = await ctx.db.userInvitation.create({
         data: {
+          id: generateId(),
           slug,
           senderUserId: ctx.userId,
           organizationId: null,
@@ -1078,6 +1125,7 @@ export const resolvers = {
       // Create activation record
       await ctx.db.userInvitationActivation.create({
         data: {
+          id: generateId(),
           invitationId: invite.id,
           userId: ctx.userId!,
           createdBy: ctx.userId ?? null,
@@ -1097,6 +1145,7 @@ export const resolvers = {
         if (!existing) {
           await ctx.db.orgMember.create({
             data: {
+              id: generateId(),
               organizationId: invite.organizationId,
               userId: ctx.userId!,
               role: invite.memberRole as Role,
@@ -1118,7 +1167,7 @@ export const resolvers = {
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
       return ctx.db.orgMember.create({
-        data: { organizationId: orgId, userId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
+        data: { id: generateId(), organizationId: orgId, userId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: { user: true },
       });
     },
@@ -1194,6 +1243,7 @@ export const resolvers = {
       const memoryUrn = `${memOrg.urn}:${name}`;
       const memory = await ctx.db.memory.create({
         data: {
+          id: generateId(),
           organizationId: orgId,
           urn: memoryUrn,
           name,
@@ -1430,7 +1480,7 @@ export const resolvers = {
       }
 
       return ctx.db.memorySubscription.create({
-        data: { memoryId, organizationId: orgId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
+        data: { id: generateId(), memoryId, organizationId: orgId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: { memory: { include: MEMORY_INCLUDE }, organization: { include: ORG_INCLUDE } },
       });
     },
@@ -1510,6 +1560,7 @@ export const resolvers = {
       // Snapshot current state before restoring
       await ctx.db.nodeVersion.create({
         data: {
+          id: generateId(),
           nodeId: node.id,
           loc: node.loc,
           name: node.name,
@@ -1562,6 +1613,7 @@ export const resolvers = {
       await ctx.db.memorySubscription.upsert({
         where: { memoryId_organizationId: { memoryId, organizationId: org.id } },
         create: {
+          id: generateId(),
           memoryId,
           organizationId: org.id,
           role: 'READER',
@@ -1574,7 +1626,7 @@ export const resolvers = {
       // Add memory to the default agent
       await ctx.db.agentMemoryItem.upsert({
         where: { agentId_memoryId: { agentId: agent.id, memoryId } },
-        create: { agentId: agent.id, memoryId, createdBy: ctx.userId ?? null },
+        create: { id: generateId(), agentId: agent.id, memoryId, createdBy: ctx.userId ?? null },
         update: {},
       });
 

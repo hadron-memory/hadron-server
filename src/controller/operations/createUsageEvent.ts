@@ -1,6 +1,7 @@
 import type { UsageEvent } from '../../index.d.js';
 import type { InputJsonValue } from '../../generated/prisma/runtime/library.js';
 import { db } from '../../integrations/db/client.js';
+import { generateId } from '../../lib/id.js';
 import { serializeJson } from '../../integrations/db/provider.js';
 
 export const createUsageEvent = async (
@@ -18,6 +19,7 @@ export const createUsageEvent = async (
 
     const savedEvent = await db.usageEvent.create({
       data: {
+        id: generateId(),
         type: event.type,
         nodeLoc: event.nodeLoc ?? null,
         nodeId: node?.id,

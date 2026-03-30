@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
+import { generateId } from '../../lib/id.js';
 import { cleanDb, createDbNode, createDbOrgAndGraph } from '../../test/helpers.js';
 import { findGraph } from './findGraph.js';
 
@@ -63,7 +64,7 @@ describe('findGraph', () => {
     });
 
     await db.edge.create({
-      data: { sourceId: nodeA.id, targetId: nodeB.id, label: 'links to' },
+      data: { id: generateId(), sourceId: nodeA.id, targetId: nodeB.id, label: 'links to' },
     });
 
     const result = await findGraph('org/g');

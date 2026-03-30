@@ -264,6 +264,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Record usage event (fire-and-forget)
       db.usageEvent.create({
         data: {
+          id: generateId(),
           type: 'read',
           nodeLoc: loc,
           nodeId: node.id,
@@ -564,6 +565,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
               await db.pendingEdge.upsert({
                 where: { sourceId_targetId: { sourceId: upserted.id, targetId: edge.targetId } },
                 create: {
+                  id: generateId(),
                   sourceId: upserted.id,
                   targetId: edge.targetId,
                   label: edge.label,
@@ -578,6 +580,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           await db.edge.upsert({
             where: { sourceId_targetId_label: { sourceId: upserted.id, targetId: resolvedTargetId, label: edge.label } },
             create: {
+              id: generateId(),
               sourceId: upserted.id,
               targetId: resolvedTargetId,
               label: edge.label,
@@ -594,7 +597,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       for (const p of [...pendingByLoc, ...pendingById]) {
         await db.edge.upsert({
           where: { sourceId_targetId_label: { sourceId: p.sourceId, targetId: upserted.id, label: p.label ?? '' } },
-          create: { sourceId: p.sourceId, targetId: upserted.id, label: p.label ?? '' },
+          create: { id: generateId(), sourceId: p.sourceId, targetId: upserted.id, label: p.label ?? '' },
           update: {},
         });
         await db.pendingEdge.delete({ where: { id: p.id } });
@@ -603,6 +606,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Record usage event
       db.usageEvent.create({
         data: {
+          id: generateId(),
           type: 'write',
           nodeLoc: loc,
           nodeId: upserted.id,
@@ -679,6 +683,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Snapshot current state for version history
       await db.nodeVersion.create({
         data: {
+          id: generateId(),
           nodeId: existing.id,
           loc: existing.loc,
           name: existing.name,
@@ -721,6 +726,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
               await db.pendingEdge.upsert({
                 where: { sourceId_targetId: { sourceId: existing.id, targetId: edge.targetId } },
                 create: {
+                  id: generateId(),
                   sourceId: existing.id,
                   targetId: edge.targetId,
                   label: edge.label,
@@ -734,6 +740,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           await db.edge.upsert({
             where: { sourceId_targetId_label: { sourceId: existing.id, targetId: resolvedTargetId, label: edge.label } },
             create: {
+              id: generateId(),
               sourceId: existing.id,
               targetId: resolvedTargetId,
               label: edge.label,
@@ -747,6 +754,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Record usage event
       db.usageEvent.create({
         data: {
+          id: generateId(),
           type: 'write',
           nodeLoc: loc,
           nodeId: existing.id,
@@ -865,6 +873,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Record usage event
       db.usageEvent.create({
         data: {
+          id: generateId(),
           type: 'action-run',
           nodeLoc: loc,
           nodeId: node.id,
