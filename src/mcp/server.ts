@@ -1052,19 +1052,19 @@ const transports = new Map<string, StreamableHTTPServerTransport>();
  * Authenticates via Bearer token, creates or reuses transport sessions.
  */
 export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
-  // Authenticate
-  const auth = await resolveAuthContext(req, db);
-  if (!auth.clientId && !auth.userId) {
-    res.status(401).json({ error: 'Authentication required' });
-    return;
-  }
-
-  // Check for existing session
+  // Check for existing session first — skip expensive auth if already authenticated
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
   if (sessionId && transports.has(sessionId)) {
     const transport = transports.get(sessionId)!;
     await transport.handleRequest(req, res, req.body);
+    return;
+  }
+
+  // New session — authenticate
+  const auth = await resolveAuthContext(req, db);
+  if (!auth.clientId && !auth.userId) {
+    res.status(401).json({ error: 'Authentication required' });
     return;
   }
 
