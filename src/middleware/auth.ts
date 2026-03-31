@@ -21,8 +21,12 @@ export async function resolveAuthContext(
 
   const token = authHeader.slice(7);
 
-  // JWTs have the form header.payload.signature (two dots); hex API keys do not
-  if (token.includes('.')) {
+  // JWTs have the form header.payload.signature (exactly two dots separating
+  // three base64url segments).  Station keys may contain dots in their URN
+  // prefix (e.g. "baragaun.com:ws/date/hex"), so a simple includes('.') check
+  // is not sufficient.
+  const isJwt = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token);
+  if (isJwt) {
     return resolveJwt(token);
   }
   return resolveStationKey(token, db);

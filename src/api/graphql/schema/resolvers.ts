@@ -330,23 +330,6 @@ export const resolvers = {
       });
     },
 
-    usageEvents: async (
-      _: unknown,
-      { type, nodeLoc, limit, offset }: { type?: string; nodeLoc?: string; limit?: number; offset?: number },
-      ctx: Context,
-    ) => {
-      requireRole(ctx, 'READER');
-      return ctx.db.usageEvent.findMany({
-        where: {
-          ...(type ? { type } : {}),
-          ...(nodeLoc ? { nodeLoc } : {}),
-        },
-        orderBy: { createdAt: 'desc' },
-        take: limit ?? 50,
-        skip: offset ?? 0,
-      });
-    },
-
     memoryUsageSummary: async (_: unknown, { memoryId }: { memoryId: string }, ctx: Context) => {
       // Get all node locs belonging to this memory
       const nodes = await ctx.db.node.findMany({
@@ -403,6 +386,7 @@ export const resolvers = {
       { type, nodeLoc, limit, offset }: { type?: string; nodeLoc?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
+      requireRole(ctx, 'READER');
       return ctx.db.usageEvent.findMany({
         where: {
           ...(type ? { type } : {}),
