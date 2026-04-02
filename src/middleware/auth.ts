@@ -58,6 +58,34 @@ async function resolveStationKey(
   const parts = rawKeyOrPrefixed.split('/');
   const rawKey = parts.length >= 3 ? parts[parts.length - 1] : rawKeyOrPrefixed;
 
+  // First, check the new station_keys table (non-revoked keys for active stations)
+  const stationKeys = await db.stationKey.findMany({
+    where: { revokedAt: null },
+    include: {
+      station: {
+        select: { id: true, role: true, organizationId: true, deletedAt: true, expiresAt: true },
+      },
+    },
+  });
+
+  for (const sk of stationKeys) {
+    if (sk.station.deletedAt) continue;
+    if (sk.station.expiresAt && sk.station.expiresAt < new Date()) continue;
+    const match = await bcrypt.compare(rawKey, sk.keyHash);
+    if (match) {
+      // Update lastUsedAt on both the key and the station (fire-and-forget)
+      const now = new Date();
+      db.stationKey.update({ where: { id: sk.id }, data: { lastUsedAt: now } }).catch(() => {});
+      db.station.update({ where: { id: sk.station.id }, data: { lastUsedAt: now } }).catch(() => {});
+      return {
+        clientId: sk.station.id,
+        roles: [sk.station.role],
+        organizationId: sk.station.organizationId ?? undefined,
+      };
+    }
+  }
+
+  // Fallback: check legacy Station.keyHash for keys not yet migrated
   const stations = await db.station.findMany({
     where: {
       deletedAt: null,

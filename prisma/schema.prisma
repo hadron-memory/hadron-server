@@ -92,6 +92,7 @@ model User {
 
   memberships               OrgMember[]
   stations                  Station[]
+  stationKeys               StationKey[]
   sentInvitations           UserInvitation[]           @relation("SentInvitations")
   invitationActivations     UserInvitationActivation[]
   receivedMemberInvitations OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
@@ -173,12 +174,31 @@ model Station {
 
   user               User?                      @relation(fields: [userId], references: [id], onDelete: SetNull)
   organization       Organization?              @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  keys               StationKey[]
   agentSubscriptions StationAgentSubscription[]
   sessions           Session[]
   usageEvents        UsageEvent[]
   logEntries         StationLogEntry[]
 
   @@map("stations")
+}
+
+model StationKey {
+  id         String    @id @default(cuid())
+  stationId  String    @map("station_id")
+  userId     String    @map("user_id")
+  keyHash    String    @map("key_hash")
+  label      String?
+  lastUsedAt DateTime? @map("last_used_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  createdBy  String?   @map("created_by")
+  revokedAt  DateTime? @map("revoked_at")
+
+  station Station @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([stationId])
+  @@map("station_keys")
 }
 
 model StationAgentSubscription {
