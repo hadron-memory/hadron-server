@@ -70,7 +70,7 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
       where: { userId: ctx.userId, deletedAt: null },
       select: { organizationId: true },
     });
-    const orgIds = memberships.map((m) => m.organizationId);
+    const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
     const memories = await ctx.db.memory.findMany({
       where: {
         deletedAt: null,
@@ -88,7 +88,7 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
       },
       select: { id: true },
     });
-    return memories.map((g) => g.id);
+    return memories.map((g: { id: string }) => g.id);
   }
 
   // Unauthenticated — public memories only
@@ -341,7 +341,7 @@ export const resolvers = {
         where: { memoryId },
         select: { loc: true },
       });
-      const locs = nodes.map((n) => n.loc);
+      const locs = nodes.map((n: { loc: string }) => n.loc);
       if (!locs.length) return [];
 
       const rows = await ctx.db.usageEvent.groupBy({
@@ -349,7 +349,7 @@ export const resolvers = {
         where: { nodeLoc: { in: locs } },
         _count: { id: true },
       });
-      return rows.map((r) => ({
+      return rows.map((r: { nodeLoc: string | null; type: string; _count: { id: number } }) => ({
         nodeLoc: r.nodeLoc,
         type: r.type,
         count: r._count.id,
@@ -432,7 +432,7 @@ export const resolvers = {
         where: { stationId, deletedAt: null },
         include: { agent: { include: { memoryItems: true } } },
       });
-      const memoryIds = [...new Set(subs.flatMap((s) => s.agent.memoryItems.map((m) => m.memoryId)))];
+      const memoryIds = [...new Set(subs.flatMap((s: any) => s.agent.memoryItems.map((m: any) => m.memoryId)))];
       if (memoryIds.length === 0) return [];
 
       return ctx.db.node.findMany({
@@ -506,7 +506,7 @@ export const resolvers = {
         where: { userId: ctx.userId, deletedAt: null },
         include: { organization: { include: ORG_INCLUDE } },
       });
-      return memberships.map((m) => m.organization);
+      return memberships.map((m: any) => m.organization);
     },
 
     organization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
@@ -565,7 +565,7 @@ export const resolvers = {
           where: { userId: ctx.userId, deletedAt: null },
           select: { organizationId: true },
         });
-        const orgIds = memberships.map((m) => m.organizationId);
+        const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
         if (orgIds.length === 0) return [];
         return ctx.db.memory.findMany({
           where: {
@@ -837,7 +837,8 @@ export const resolvers = {
         },
       });
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const prefixedKey = `${urn}/${dateStamp}/${rawKey}`;
+      const sanitizedName = name.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      const prefixedKey = `${urn}/${sanitizedName}/${dateStamp}/${rawKey}`;
       return { station, rawKey: prefixedKey };
     },
 
@@ -874,7 +875,8 @@ export const resolvers = {
       const keyHash = await bcrypt.hash(rawKey, 12);
       const station = await ctx.db.station.update({ where: { id }, data: { keyHash, apiKeyShown: false } });
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const prefixedKey = `${existing.urn}/${dateStamp}/${rawKey}`;
+      const sanitizedName = (existing.name ?? 'key').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      const prefixedKey = `${existing.urn}/${sanitizedName}/${dateStamp}/${rawKey}`;
       return { station, rawKey: prefixedKey };
     },
 
@@ -913,7 +915,8 @@ export const resolvers = {
       });
 
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const prefixedKey = `${station.urn}/${dateStamp}/${rawKey}`;
+      const sanitizedLabel = (label ?? 'key').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      const prefixedKey = `${station.urn}/${sanitizedLabel}/${dateStamp}/${rawKey}`;
       return { key, rawKey: prefixedKey };
     },
 
@@ -1184,7 +1187,7 @@ export const resolvers = {
       }
 
       // Check if user already activated this invite
-      if (invite.activations.some((a) => a.userId === ctx.userId)) {
+      if (invite.activations.some((a: any) => a.userId === ctx.userId)) {
         throw new Error('You have already accepted this invitation');
       }
 
