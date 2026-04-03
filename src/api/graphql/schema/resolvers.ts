@@ -822,7 +822,8 @@ export const resolvers = {
         },
       });
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const prefixedKey = `${urn}/${dateStamp}/${rawKey}`;
+      const keyPrefix = station.name.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      const prefixedKey = `${keyPrefix}/${dateStamp}/${rawKey}`;
       return { station, rawKey: prefixedKey };
     },
 
@@ -859,7 +860,8 @@ export const resolvers = {
       const keyHash = await bcrypt.hash(rawKey, 12);
       const station = await ctx.db.station.update({ where: { id }, data: { keyHash, apiKeyShown: false } });
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const prefixedKey = `${existing.urn}/${dateStamp}/${rawKey}`;
+      const keyPrefix = existing.name.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      const prefixedKey = `${keyPrefix}/${dateStamp}/${rawKey}`;
       return { station, rawKey: prefixedKey };
     },
 
