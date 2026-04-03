@@ -8,6 +8,11 @@ import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 
+/** Sanitize a name for use as a client-key prefix (replace spaces/special chars with dashes). */
+function toKeyPrefix(name: string): string {
+  return name.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+}
+
 export interface Context {
   db: PrismaClient;
   clientId?: string;       // Station.id or "github:<username>"
@@ -837,8 +842,7 @@ export const resolvers = {
         },
       });
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const keyPrefix = station.name.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-      const prefixedKey = `${keyPrefix}/${dateStamp}/${rawKey}`;
+      const prefixedKey = `${toKeyPrefix(name)}/${dateStamp}/${rawKey}`;
       return { station, rawKey: prefixedKey };
     },
 
@@ -875,8 +879,7 @@ export const resolvers = {
       const keyHash = await bcrypt.hash(rawKey, 12);
       const station = await ctx.db.station.update({ where: { id }, data: { keyHash, apiKeyShown: false } });
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const keyPrefix = existing.name.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-      const prefixedKey = `${keyPrefix}/${dateStamp}/${rawKey}`;
+      const prefixedKey = `${toKeyPrefix(existing.name)}/${dateStamp}/${rawKey}`;
       return { station, rawKey: prefixedKey };
     },
 
@@ -915,7 +918,7 @@ export const resolvers = {
       });
 
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const prefixedKey = `${station.urn}/${dateStamp}/${rawKey}`;
+      const prefixedKey = `${toKeyPrefix(label || station.name)}/${dateStamp}/${rawKey}`;
       return { key, rawKey: prefixedKey };
     },
 
