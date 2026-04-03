@@ -917,9 +917,8 @@ export const resolvers = {
       });
 
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const sanitizedLabel = (label ?? 'key').replace(/[^a-zA-Z0-9._:]/g, '-').replace(/-+/g, '-').toLowerCase();
-      const sanitizedUrn = station.urn.replace(/[^a-zA-Z0-9._:-]/g, '-').replace(/-+/g, '-').toLowerCase();
-      const prefixedKey = `${sanitizedUrn}/${sanitizedLabel}/${dateStamp}/${rawKey}`;
+      const sanitizedLabel = (label ?? 'key').replace(/[^a-zA-Z0-9._:-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      const prefixedKey = `${sanitizedLabel}/${dateStamp}/${rawKey}`;
       return { key, rawKey: prefixedKey };
     },
 
