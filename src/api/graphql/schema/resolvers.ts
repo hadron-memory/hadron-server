@@ -837,8 +837,9 @@ export const resolvers = {
         },
       });
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const sanitizedName = name.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/-+/g, '-').toLowerCase();
-      const prefixedKey = `${urn}/${sanitizedName}/${dateStamp}/${rawKey}`;
+      const sanitizedName = name.replace(/[^a-zA-Z0-9._:-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      const sanitizedUrn = urn.replace(/[^a-zA-Z0-9._:-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      const prefixedKey = `${sanitizedUrn}/${sanitizedName}/${dateStamp}/${rawKey}`;
       return { station, rawKey: prefixedKey };
     },
 
@@ -875,8 +876,9 @@ export const resolvers = {
       const keyHash = await bcrypt.hash(rawKey, 12);
       const station = await ctx.db.station.update({ where: { id }, data: { keyHash, apiKeyShown: false } });
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const sanitizedName = (existing.name ?? 'key').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/-+/g, '-').toLowerCase();
-      const prefixedKey = `${existing.urn}/${sanitizedName}/${dateStamp}/${rawKey}`;
+      const sanitizedName = (existing.name ?? 'key').replace(/[^a-zA-Z0-9._:-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      const sanitizedUrn = existing.urn.replace(/[^a-zA-Z0-9._:-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      const prefixedKey = `${sanitizedUrn}/${sanitizedName}/${dateStamp}/${rawKey}`;
       return { station, rawKey: prefixedKey };
     },
 
@@ -915,8 +917,9 @@ export const resolvers = {
       });
 
       const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const sanitizedLabel = (label ?? 'key').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/-+/g, '-').toLowerCase();
-      const prefixedKey = `${station.urn}/${sanitizedLabel}/${dateStamp}/${rawKey}`;
+      const sanitizedLabel = (label ?? 'key').replace(/[^a-zA-Z0-9._:]/g, '-').replace(/-+/g, '-').toLowerCase();
+      const sanitizedUrn = station.urn.replace(/[^a-zA-Z0-9._:-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      const prefixedKey = `${sanitizedUrn}/${sanitizedLabel}/${dateStamp}/${rawKey}`;
       return { key, rawKey: prefixedKey };
     },
 
