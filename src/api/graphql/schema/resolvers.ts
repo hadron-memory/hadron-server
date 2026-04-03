@@ -263,6 +263,11 @@ export const resolvers = {
         orderBy: { createdAt: 'asc' as const },
       }),
   },
+  StationKey: {
+    createdAt: (k: { createdAt: Date | string }) => toISO(k.createdAt)!,
+    lastUsedAt: (k: { lastUsedAt?: Date | string | null }) => toISO(k.lastUsedAt),
+    revokedAt: (k: { revokedAt?: Date | string | null }) => toISO(k.revokedAt),
+  },
   Agent: {
     createdAt: (b: { createdAt: Date | string }) => toISO(b.createdAt)!,
   },
@@ -452,6 +457,16 @@ export const resolvers = {
         apiKey: decryptToken(station.aiApiKeyEncrypted),
         model: station.aiModel,
       };
+    },
+
+    stationKeys: async (_: unknown, { stationId }: { stationId: string }, ctx: Context) => {
+      requireRole(ctx, 'READER');
+      const station = await ctx.db.station.findUniqueOrThrow({ where: { id: stationId } });
+      // Owner sees own keys; org admins see all keys
+      const isAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      const where: Record<string, unknown> = { stationId, revokedAt: null };
+      if (!isAdmin) where.userId = ctx.userId;
+      return ctx.db.stationKey.findMany({ where, orderBy: { createdAt: 'desc' as const } });
     },
 
     users: async (_: unknown, __: unknown, ctx: Context) => {
@@ -871,6 +886,47 @@ export const resolvers = {
       if (!existing) throw new Error('Station not found');
       if (existing.userId !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) throw new Error('Forbidden');
       await ctx.db.station.update({ where: { id }, data: { deletedAt: new Date() } });
+      return true;
+    },
+
+    // ── Station key management ────────────────────────────────────────
+
+    createStationKey: async (
+      _: unknown,
+      { stationId, label }: { stationId: string; label?: string },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'READER');
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const station = await ctx.db.station.findUniqueOrThrow({ where: { id: stationId } });
+      if (station.userId !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) throw new Error('Forbidden');
+
+      const rawKey = randomBytes(32).toString('hex');
+      const keyHash = await bcrypt.hash(rawKey, 12);
+
+      const key = await ctx.db.stationKey.create({
+        data: {
+          stationId,
+          userId: ctx.userId,
+          keyHash,
+          label: label ?? null,
+          createdBy: ctx.userId,
+        },
+      });
+
+      const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+      const prefixedKey = `${station.urn}/${dateStamp}/${rawKey}`;
+      return { key, rawKey: prefixedKey };
+    },
+
+    revokeStationKey: async (_: unknown, { keyId }: { keyId: string }, ctx: Context) => {
+      requireRole(ctx, 'READER');
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const key = await ctx.db.stationKey.findUniqueOrThrow({ where: { id: keyId } });
+      // Owner of the key or org admin can revoke
+      const isAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      if (key.userId !== ctx.userId && !isAdmin) throw new Error('Forbidden');
+      await ctx.db.stationKey.update({ where: { id: keyId }, data: { revokedAt: new Date() } });
       return true;
     },
 

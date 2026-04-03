@@ -154,6 +154,22 @@ export const typeDefs = `#graphql
     rawKey: String!
   }
 
+  type StationKey {
+    id: ID!
+    stationId: String!
+    userId: String!
+    label: String
+    lastUsedAt: String
+    createdAt: String!
+    revokedAt: String
+  }
+
+  # Returned once at key creation — the raw key is never stored
+  type StationKeyCreated {
+    key: StationKey!
+    rawKey: String!
+  }
+
   # Decrypted AI config for chatbot use (only returned to station owner)
   type StationAIConfig {
     provider: String!
@@ -380,6 +396,8 @@ export const typeDefs = `#graphql
     stationNodes(stationId: ID!, limit: Int): [Node!]!
     # Decrypted AI config for a station (owner only)
     stationAIConfig(stationId: ID!): StationAIConfig
+    # List keys for a station (current user's keys; org admins see all)
+    stationKeys(stationId: ID!): [StationKey!]!
 
     # Users (admin only)
     users: [User!]!
@@ -432,6 +450,10 @@ export const typeDefs = `#graphql
     updateStation(id: ID!, name: String, stationType: StationType, description: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): Station!
     regenerateApiKey(id: ID!): StationCreated!
     revokeStation(id: ID!): Boolean!
+
+    # Station key management
+    createStationKey(stationId: ID!, label: String): StationKeyCreated!
+    revokeStationKey(keyId: ID!): Boolean!
 
     # Station agent subscriptions (org ADMIN or platform ADMIN)
     subscribeStationToAgent(stationId: ID!, agentId: ID!, subscriptionType: SubscriptionType, trainingMode: Boolean): Station!
