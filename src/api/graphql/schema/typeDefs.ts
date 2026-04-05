@@ -365,6 +365,7 @@ export const typeDefs = `#graphql
       nodeType: String
       tags: [String!]
       search: String
+      prefix: String
       limit: Int
     ): [Node!]!
 

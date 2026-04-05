@@ -292,7 +292,7 @@ export const resolvers = {
 
     nodes: async (
       _: unknown,
-      { nodeType, tags, search, limit }: { nodeType?: string; tags?: string[]; search?: string; limit?: number },
+      { nodeType, tags, search, prefix, limit }: { nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number },
       ctx: Context,
     ) => {
       const access = await memoryAccessFilter(ctx);
@@ -301,6 +301,7 @@ export const resolvers = {
           ...access,
           ...(nodeType ? { nodeType } : {}),
           ...(tags?.length ? tagsFilter(tags) : {}),
+          ...(prefix ? { loc: { startsWith: prefix } } : {}),
           ...(search
             ? {
                 OR: [
