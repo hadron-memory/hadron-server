@@ -423,11 +423,12 @@ model UsageEvent {
 }
 
 model Agent {
-  id             String    @id @default(cuid())
-  organizationId String    @map("organization_id")
-  urn            String    @unique
+  id             String           @id @default(cuid())
+  organizationId String           @map("organization_id")
+  urn            String           @unique
   name           String
   description    String?
+  visibility     MemoryVisibility @default(PRIVATE)
   properties     Json?
   createdAt      DateTime  @default(now()) @map("created_at")
   createdBy      String?   @map("created_by")

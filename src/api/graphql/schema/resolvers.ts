@@ -1471,7 +1471,7 @@ export const resolvers = {
 
     createAgent: async (
       _: unknown,
-      { orgId, name, description }: { orgId: string; name: string; description?: string },
+      { orgId, name, description, visibility }: { orgId: string; name: string; description?: string; visibility?: string },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
@@ -1479,14 +1479,18 @@ export const resolvers = {
       const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: orgId }, select: { urn: true } });
       const agentUrn = `${org.urn}:${name}`;
       return ctx.db.agent.create({
-        data: { organizationId: orgId, urn: agentUrn, name, description, createdBy: ctx.userId ?? ctx.clientId ?? null },
+        data: {
+          organizationId: orgId, urn: agentUrn, name, description,
+          visibility: (visibility as MemoryVisibility) ?? 'PRIVATE',
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+        },
         include: AGENT_INCLUDE,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { id, name, urn, description }: { id: string; name?: string; urn?: string; description?: string },
+      { id, name, urn, description, visibility }: { id: string; name?: string; urn?: string; description?: string; visibility?: string },
       ctx: Context,
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
@@ -1502,6 +1506,7 @@ export const resolvers = {
           ...(name !== undefined ? { name } : {}),
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(description !== undefined ? { description } : {}),
+          ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
         },
         include: AGENT_INCLUDE,
       });
