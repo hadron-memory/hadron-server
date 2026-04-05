@@ -159,6 +159,7 @@ export const typeDefs = `#graphql
     stationId: String!
     userId: String!
     label: String
+    keyPreview: String
     lastUsedAt: String
     createdAt: String!
     revokedAt: String
@@ -448,7 +449,7 @@ export const typeDefs = `#graphql
 
     # Station management
     createStation(name: String!, stationType: StationType!, role: Role!, description: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): StationCreated!
-    updateStation(id: ID!, name: String, stationType: StationType, description: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): Station!
+    updateStation(id: ID!, name: String, urn: String, stationType: StationType, description: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): Station!
     regenerateApiKey(id: ID!): StationCreated!
     revokeStation(id: ID!): Boolean!
 

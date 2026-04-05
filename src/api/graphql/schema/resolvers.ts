@@ -861,8 +861,8 @@ export const resolvers = {
 
     updateStation: async (
       _: unknown,
-      { id, name, stationType, description, agentTools, aiProvider, aiModel, aiApiKey }: {
-        id: string; name?: string; stationType?: string; description?: string; agentTools?: string[];
+      { id, name, urn, stationType, description, agentTools, aiProvider, aiModel, aiApiKey }: {
+        id: string; name?: string; urn?: string; stationType?: string; description?: string; agentTools?: string[];
         aiProvider?: string; aiModel?: string; aiApiKey?: string;
       },
       ctx: Context,
@@ -874,6 +874,7 @@ export const resolvers = {
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
+          ...(urn !== undefined ? { urn } : {}),
           ...(stationType !== undefined ? { stationType: stationType as any } : {}),
           ...(description !== undefined ? { description } : {}),
           ...(agentTools !== undefined ? { agentTools } : {}),
@@ -921,19 +922,22 @@ export const resolvers = {
 
       const rawKey = randomBytes(32).toString('hex');
       const keyHash = await bcrypt.hash(rawKey, 12);
+      const keyPreview = rawKey.slice(-4);
+
+      const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+      const sanitizedLabel = (label ?? 'key').replace(/[^a-zA-Z0-9._:-]/g, '-').replace(/-+/g, '-').toLowerCase();
 
       const key = await ctx.db.stationKey.create({
         data: {
           stationId,
           userId: ctx.userId,
           keyHash,
+          keyPreview,
           label: label ?? null,
           createdBy: ctx.userId,
         },
       });
 
-      const dateStamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const sanitizedLabel = (label ?? 'key').replace(/[^a-zA-Z0-9._:-]/g, '-').replace(/-+/g, '-').toLowerCase();
       const prefixedKey = `${sanitizedLabel}/${dateStamp}/${rawKey}`;
       return { key, rawKey: prefixedKey };
     },
