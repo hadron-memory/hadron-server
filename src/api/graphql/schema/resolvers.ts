@@ -248,6 +248,24 @@ export const resolvers = {
     createdAt: (o: { createdAt: Date | string }) => toISO(o.createdAt)!,
     updatedAt: (o: { updatedAt: Date | string }) => toISO(o.updatedAt)!,
     hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
+    agents: async (org: { id: string }, _: unknown, ctx: Context) => {
+      const where: Record<string, unknown> = { organizationId: org.id, deletedAt: null };
+      if (ctx.userId) {
+        // PRIVATE: only creator; ORGANIZATION + PUBLIC: all org members
+        where.OR = [
+          { visibility: { not: 'PRIVATE' as MemoryVisibility } },
+          { visibility: 'PRIVATE' as MemoryVisibility, createdBy: ctx.userId },
+        ];
+      } else if (ctx.clientId) {
+        // Station access: only ORGANIZATION and PUBLIC agents
+        where.visibility = { not: 'PRIVATE' as MemoryVisibility };
+      }
+      return ctx.db.agent.findMany({
+        where,
+        include: { memoryItems: { include: { memory: true } } },
+        orderBy: { name: 'asc' },
+      });
+    },
   },
   Station: {
     createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,
