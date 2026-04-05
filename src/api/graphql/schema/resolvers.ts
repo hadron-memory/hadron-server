@@ -586,6 +586,21 @@ export const resolvers = {
 
   Mutation: {
     upsertNode: async (_: unknown, { input }: { input: NodeInput }, ctx: Context) => {
+      // Resolve memoryId from loc prefix when not provided
+      if (!input.memoryId) {
+        const memories = await ctx.db.memory.findMany({
+          where: { deletedAt: null },
+          select: { id: true, urn: true },
+        });
+        const match = memories
+          .filter((m) => m.urn && input.loc.startsWith(m.urn))
+          .sort((a, b) => b.urn.length - a.urn.length)[0];
+        if (match) {
+          input.memoryId = match.id;
+        } else {
+          throw new Error(`Cannot resolve memory for loc "${input.loc}". Provide a memoryId or set an active memory.`);
+        }
+      }
       await requireMemoryWriteAccess(ctx, input.memoryId);
 
       // Snapshot current state before update (for version history)
