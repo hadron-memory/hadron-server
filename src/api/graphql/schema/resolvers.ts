@@ -597,6 +597,11 @@ export const resolvers = {
           .sort((a, b) => b.urn.length - a.urn.length)[0];
         if (match) {
           input.memoryId = match.id;
+          // Strip memory URN prefix from loc — loc should be memory-relative
+          const prefix = match.urn + ':';
+          if (input.loc.startsWith(prefix)) {
+            input.loc = input.loc.slice(prefix.length);
+          }
         } else {
           throw new Error(`Cannot resolve memory for loc "${input.loc}". Provide a memoryId or set an active memory.`);
         }
