@@ -243,14 +243,21 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-add-parent-node',
     'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes.',
     {
-      parentRel: z.string().describe('Parent node rel path'),
+      parentRel: z.string().optional().describe('Parent node rel path (omit for root-level node)'),
       name: z.string().describe('Node name'),
       description: z.string().optional().describe('What this section contains'),
       tags: z.array(z.string()).optional(),
     },
     async ({ parentRel, name, description, tags }) => {
-      const loc = `${parentRel}:${name}`;
       const content = description ?? `Section: ${name}`;
+
+      // Resolve parent: strip URN prefixes, find memory
+      const memoryIds = await getAccessibleMemoryIds(auth);
+      const resolved = parentRel ? await resolveLocFromUrn(parentRel, memoryIds) : { loc: '', memoryId: undefined };
+      const parentLoc = resolved.loc;
+
+      // Build the final loc: if parent is empty (root-level), just use the name
+      const loc = parentLoc ? `${parentLoc}:${name}` : name;
 
       try {
         validateLoc(loc);
@@ -258,18 +265,24 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult((e as Error).message);
       }
 
-      // Resolve memory from parent
-      const memoryIds = await getAccessibleMemoryIds(auth);
-      const resolved = await resolveLocFromUrn(parentRel, memoryIds);
+      // Determine target memory
       let memoryId = resolved.memoryId;
 
-      if (!memoryId) {
+      if (!memoryId && parentLoc) {
         // Try to find parent node to get memoryId
         const parentNode = await db.node.findFirst({
-          where: { loc: resolved.loc, ...(memoryIds ? { memoryId: { in: memoryIds } } : {}) },
+          where: { loc: parentLoc, ...(memoryIds ? { memoryId: { in: memoryIds } } : {}) },
           select: { memoryId: true },
         });
         memoryId = parentNode?.memoryId ?? undefined;
+      }
+
+      if (!memoryId) {
+        // Try active memory URN
+        if (activeMemoryUrn) {
+          const mem = await db.memory.findFirst({ where: { urn: activeMemoryUrn }, select: { id: true } });
+          if (mem) memoryId = mem.id;
+        }
       }
 
       if (!memoryId) {
@@ -280,7 +293,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       }
 
       if (!memoryId) {
-        return textResult('Cannot determine target memory. Specify memoryId or ensure only one writable memory.');
+        return textResult('Cannot determine target memory. Set an active memory with h-set-active-memory, or ensure only one writable memory.');
       }
 
       if (!(await canWriteToMemory(auth, memoryId))) {
@@ -288,11 +301,11 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       }
 
       await db.node.upsert({
-        where: { loc_memoryId: { loc: resolved.loc ? `${resolved.loc}:${name}` : name, memoryId } },
+        where: { loc_memoryId: { loc, memoryId } },
         create: {
           id: generateId(),
           memoryId,
-          loc: resolved.loc ? `${resolved.loc}:${name}` : name,
+          loc,
           name,
           nodeType: 'info',
           description: description ?? null,
