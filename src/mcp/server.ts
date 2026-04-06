@@ -89,7 +89,12 @@ async function resolveLocFromUrn(
  * Resolve a memoryId that may be either a cuid (primary key) or a memory URN.
  * Returns the actual database ID, or null if not found.
  */
-async function resolveMemoryId(memoryIdOrName: string): Promise<string | null> {
+async function resolveMemoryId(rawInput: string): Promise<string | null> {
+  // Strip urn:memory: prefix if present
+  const parsed = parseUrnInput(rawInput);
+  const memoryIdOrName = parsed.type === 'memory' ? parsed.value : parsed.value;
+  // Always use the stripped value — parseUrnInput handles both prefixed and bare inputs
+
   // If it looks like a cuid (no colons, no slashes), try it directly
   if (!memoryIdOrName.includes(':') && !memoryIdOrName.includes('/')) {
     const exists = await db.memory.findUnique({ where: { id: memoryIdOrName }, select: { id: true } });
