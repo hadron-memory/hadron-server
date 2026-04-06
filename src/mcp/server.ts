@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
+import { parseUrnInput, formatUrn } from '../lib/urn.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
@@ -15,6 +16,18 @@ import type { SessionType } from '../generated/prisma/index.js';
 
 function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
+}
+
+/** Build a full urn:node: URN from a loc and memoryId. Caches memory URNs. */
+const memoryUrnCache = new Map<string, string>();
+async function nodeUrn(loc: string, memoryId: string): Promise<string> {
+  let memUrn = memoryUrnCache.get(memoryId);
+  if (!memUrn) {
+    const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+    memUrn = mem?.urn ?? memoryId;
+    memoryUrnCache.set(memoryId, memUrn);
+  }
+  return formatUrn('node', `${memUrn}:${loc}`);
 }
 
 function matchesQuery(
@@ -43,9 +56,13 @@ function validateLoc(loc: string): void {
  * Also returns the matched memoryId for scoping.
  */
 async function resolveLocFromUrn(
-  input: string,
+  rawInput: string,
   accessibleMemoryIds: string[] | null,
 ): Promise<{ loc: string; memoryId?: string }> {
+  // Strip urn:node: or loc: prefix if present
+  const parsed = parseUrnInput(rawInput);
+  const input = parsed.value;
+
   // First, try as-is — it might already be a valid loc
   const directWhere: Record<string, unknown> = { loc: input };
   if (accessibleMemoryIds) directWhere.memoryId = { in: accessibleMemoryIds };
@@ -199,7 +216,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
       const lines = memories.map((m) => {
         const level = access.get(m.id) === 'READ_WRITE' ? 'read-write' : 'read-only';
-        return `- **${m.urn}** — ${m.name} (${level})`;
+        return `- **${formatUrn('memory', m.urn)}** — ${m.name} (${level})`;
       });
 
       return textResult(`${memories.length} accessible memories:\n\n${lines.join('\n')}`);
@@ -344,8 +361,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult(`No nodes found matching "${query}".`);
       }
 
-      const lines = limited.map((n: any) => {
-        const parts = [`- **${n.loc}** — ${n.name}`];
+      const lines = await Promise.all(limited.map(async (n: any) => {
+        const urn = await nodeUrn(n.loc, n.memoryId);
+        const parts = [`- **${urn}** — ${n.name}`];
         if (n.description) parts.push(`  ${n.description}`);
         if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
         if (brief && n.outgoingEdges?.length) {
@@ -353,7 +371,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           parts.push(`  Edges: ${edges.join(', ')}`);
         }
         return parts.join('\n');
-      });
+      }));
 
       return textResult(`Found ${limited.length} node(s):\n\n${lines.join('\n')}`);
     },
@@ -398,8 +416,10 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         },
       }).catch(() => {});
 
+      const urn = await nodeUrn(node.loc, node.memoryId);
       const meta = [
         `**${node.name}**`,
+        urn,
         node.description ? `> ${node.description}` : '',
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',

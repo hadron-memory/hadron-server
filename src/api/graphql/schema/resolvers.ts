@@ -1,6 +1,7 @@
 import bcrypt from 'bcrypt';
 import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
+import { parseUrnInput, validateUrnType } from '../../../lib/urn.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
@@ -297,7 +298,12 @@ export const resolvers = {
   },
 
   Query: {
-    node: async (_: unknown, { loc }: { loc: string }, ctx: Context) => {
+    node: async (_: unknown, { loc: rawLoc }: { loc: string }, ctx: Context) => {
+      const parsed = parseUrnInput(rawLoc);
+      const typeErr = validateUrnType(parsed, 'node');
+      if (typeErr) throw new Error(typeErr);
+      const loc = parsed.value;
+
       const access = await memoryAccessFilter(ctx);
       const candidates = await ctx.db.node.findMany({
         where: { loc, ...access },
@@ -310,9 +316,10 @@ export const resolvers = {
 
     nodes: async (
       _: unknown,
-      { nodeType, tags, search, prefix, limit }: { nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number },
+      { nodeType, tags, search, prefix: rawPrefix, limit }: { nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number },
       ctx: Context,
     ) => {
+      const prefix = rawPrefix ? parseUrnInput(rawPrefix).value : undefined;
       const access = await memoryAccessFilter(ctx);
       const results = await ctx.db.node.findMany({
         where: {
@@ -336,7 +343,8 @@ export const resolvers = {
       return deduplicateNodes(results).slice(0, limit ?? 100);
     },
 
-    subtree: async (_: unknown, { prefix }: { prefix: string }, ctx: Context) => {
+    subtree: async (_: unknown, { prefix: rawPrefix }: { prefix: string }, ctx: Context) => {
+      const prefix = parseUrnInput(rawPrefix).value;
       const access = await memoryAccessFilter(ctx);
       const results = await ctx.db.node.findMany({
         where: { ...access, loc: { startsWith: prefix } },
@@ -699,13 +707,16 @@ export const resolvers = {
       return finalNode;
     },
 
-    deleteNode: async (_: unknown, { loc, memoryId }: { loc: string; memoryId: string }, ctx: Context) => {
+    deleteNode: async (_: unknown, { loc: rawLoc, memoryId }: { loc: string; memoryId: string }, ctx: Context) => {
+      const loc = parseUrnInput(rawLoc).value;
       await requireMemoryWriteAccess(ctx, memoryId);
       await ctx.db.node.delete({ where: { loc_memoryId: { loc, memoryId } } });
       return true;
     },
 
-    moveNode: async (_: unknown, { from, to, memoryId }: { from: string; to: string; memoryId: string }, ctx: Context) => {
+    moveNode: async (_: unknown, { from: rawFrom, to: rawTo, memoryId }: { from: string; to: string; memoryId: string }, ctx: Context) => {
+      const from = parseUrnInput(rawFrom).value;
+      const to = parseUrnInput(rawTo).value;
       await requireMemoryWriteAccess(ctx, memoryId);
       return ctx.db.node.update({
         where: { loc_memoryId: { loc: from, memoryId } },
