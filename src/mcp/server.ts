@@ -174,6 +174,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     { capabilities: { tools: {} } },
   );
 
+  // Per-session state
+  let activeMemoryUrn: string | undefined;
+
   // ── h-list-memories ──────────────────────────────────────────────────────
 
   server.tool(
@@ -203,18 +206,130 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     },
   );
 
-  // ── h-find-node ──────────────────────────────────────────────────────────
+  // ── h-set-active-memory ──────────────────────────────────────────────────
 
   server.tool(
-    'h-find-node',
-    'Search for nodes by name, tags, or description',
-    { query: z.string().describe('Search query'), limit: z.number().optional().describe('Max results (default 50)') },
-    async ({ query, limit }) => {
+    'h-set-active-memory',
+    'Set the active memory for this session. Subsequent tree tools will use this as the default scope.',
+    {
+      memoryUrn: z.string().describe('Memory URN, e.g. hadronmemory.com:dev'),
+    },
+    async ({ memoryUrn }) => {
+      activeMemoryUrn = memoryUrn;
+      return textResult(`Active memory set to: ${memoryUrn}`);
+    },
+  );
+
+  // ── h-add-parent-node ───────────────────────────────────────────────────
+
+  server.tool(
+    'h-add-parent-node',
+    'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes.',
+    {
+      parentRel: z.string().describe('Parent node rel path'),
+      name: z.string().describe('Node name'),
+      description: z.string().optional().describe('What this section contains'),
+      tags: z.array(z.string()).optional(),
+    },
+    async ({ parentRel, name, description, tags }) => {
+      const loc = `${parentRel}:${name}`;
+      const content = description ?? `Section: ${name}`;
+
+      try {
+        validateLoc(loc);
+      } catch (e) {
+        return textResult((e as Error).message);
+      }
+
+      // Resolve memory from parent
+      const memoryIds = await getAccessibleMemoryIds(auth);
+      const resolved = await resolveLocFromUrn(parentRel, memoryIds);
+      let memoryId = resolved.memoryId;
+
+      if (!memoryId) {
+        // Try to find parent node to get memoryId
+        const parentNode = await db.node.findFirst({
+          where: { loc: resolved.loc, ...(memoryIds ? { memoryId: { in: memoryIds } } : {}) },
+          select: { memoryId: true },
+        });
+        memoryId = parentNode?.memoryId ?? undefined;
+      }
+
+      if (!memoryId) {
+        // Fall back to single writable memory
+        const access = auth.clientId ? await getStationMemoryAccess(auth.clientId) : new Map();
+        const writableIds = [...access.entries()].filter(([, v]) => v === 'READ_WRITE').map(([k]) => k);
+        if (writableIds.length === 1) memoryId = writableIds[0];
+      }
+
+      if (!memoryId) {
+        return textResult('Cannot determine target memory. Specify memoryId or ensure only one writable memory.');
+      }
+
+      if (!(await canWriteToMemory(auth, memoryId))) {
+        return textResult('Write access denied for this memory.');
+      }
+
+      await db.node.upsert({
+        where: { loc_memoryId: { loc: resolved.loc ? `${resolved.loc}:${name}` : name, memoryId } },
+        create: {
+          id: generateId(),
+          memoryId,
+          loc: resolved.loc ? `${resolved.loc}:${name}` : name,
+          name,
+          nodeType: 'info',
+          description: description ?? null,
+          content,
+          tags: tags ?? [],
+          createdBy: auth.clientId ?? null,
+        },
+        update: {
+          name,
+          nodeType: 'info',
+          description: description ?? null,
+          content,
+          tags: tags ?? [],
+        },
+      });
+
+      return textResult(`Node saved: ${loc}`);
+    },
+  );
+
+  // ── h-find-nodes ─────────────────────────────────────────────────────────
+
+  server.tool(
+    'h-find-nodes',
+    'Search for nodes by name, tags, or description.',
+    {
+      query: z.string().describe('Search query'),
+      parentRel: z.string().optional().describe('Scope search to this subtree'),
+      memoryUrn: z.string().optional().describe('Scope search to this memory'),
+      brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
+      limit: z.number().optional().describe('Max results (default 50)'),
+    },
+    async ({ query, parentRel, memoryUrn, brief, limit }) => {
       const memoryIds = await getAccessibleMemoryIds(auth);
       const where: Record<string, unknown> = {};
       if (memoryIds) where.memoryId = { in: memoryIds };
 
-      const allNodes = await db.node.findMany({ where, take: 1000 });
+      // Scope to memory URN if provided (or active memory)
+      const urn = memoryUrn ?? activeMemoryUrn;
+      if (urn) {
+        const mem = await db.memory.findFirst({ where: { urn }, select: { id: true } });
+        if (mem) where.memoryId = mem.id;
+      }
+
+      // Scope to subtree if parentRel provided
+      if (parentRel) {
+        where.loc = { startsWith: parentRel };
+      }
+
+      const allNodes = await db.node.findMany({
+        where,
+        take: 1000,
+        include: brief ? { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } } : undefined,
+      });
       // Deduplicate by loc: prefer canonical (isLink=false) over link nodes
       const byLoc = new Map<string, typeof allNodes[0]>();
       for (const n of allNodes) {
@@ -228,10 +343,19 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       if (limited.length === 0) {
         return textResult(`No nodes found matching "${query}".`);
       }
-      const lines = limited.map((n) => {
-        return `- **${n.loc}** — ${n.description || n.name}`;
+
+      const lines = limited.map((n: any) => {
+        const parts = [`- **${n.loc}** — ${n.name}`];
+        if (n.description) parts.push(`  ${n.description}`);
+        if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
+        if (brief && n.outgoingEdges?.length) {
+          const edges = n.outgoingEdges.map((e: any) => `→ ${e.target.loc} (${e.label})`);
+          parts.push(`  Edges: ${edges.join(', ')}`);
+        }
+        return parts.join('\n');
       });
-      return textResult(lines.join('\n'));
+
+      return textResult(`Found ${limited.length} node(s):\n\n${lines.join('\n')}`);
     },
   );
 
@@ -366,60 +490,89 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     },
   );
 
-  // ── h-list-children ──────────────────────────────────────────────────────
+  // ── h-list-nodes ─────────────────────────────────────────────────────────
 
   server.tool(
-    'h-list-children',
-    'List direct child nodes under a parent, ordered by seq then loc. Returns loc, name, description, seq, and nodeType for each child.',
+    'h-list-nodes',
+    'Browse the tree structure of a Hadron memory. Returns an indented tree view.',
     {
-      parent: z.string().describe('Parent node loc path or full URN'),
+      parentRel: z.string().optional().describe('Parent node rel path; omit to list from memory root'),
+      memoryUrn: z.string().optional().describe('Memory URN; uses active memory if not provided'),
+      depth: z.number().optional().describe('Max depth to traverse (default: 1)'),
     },
-    async ({ parent: rawParent }) => {
+    async ({ parentRel, memoryUrn, depth }) => {
+      const urn = memoryUrn ?? activeMemoryUrn;
+      if (!urn && !parentRel) {
+        return textResult('Please provide a memoryUrn or parentRel, or set an active memory with h-set-active-memory.');
+      }
+
       const memoryIds = await getAccessibleMemoryIds(auth);
-      const resolved = await resolveLocFromUrn(rawParent, memoryIds);
-      const parent = resolved.loc;
-      const prefix = parent + ':';
-      const where: Record<string, unknown> = {
-        loc: { startsWith: prefix },
-      };
-      if (resolved.memoryId) where.memoryId = resolved.memoryId;
+      const maxDepth = depth ?? 1;
+
+      // Resolve the parent prefix
+      let prefix: string;
+      let memoryId: string | undefined;
+      if (parentRel) {
+        const resolved = await resolveLocFromUrn(parentRel, memoryIds);
+        prefix = resolved.loc;
+        memoryId = resolved.memoryId;
+      } else {
+        prefix = '';
+        // Find memory by URN
+        if (urn) {
+          const mem = await db.memory.findFirst({ where: { urn }, select: { id: true } });
+          if (mem) memoryId = mem.id;
+        }
+      }
+
+      const where: Record<string, unknown> = {};
+      if (prefix) where.loc = { startsWith: prefix + ':' };
+      if (memoryId) where.memoryId = memoryId;
       else if (memoryIds) where.memoryId = { in: memoryIds };
 
       const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
-      // Direct children only (no further colons after prefix)
-      const children = allNodes
-        .filter((n) => !n.loc.slice(prefix.length).includes(':'))
-        .sort((a, b) => {
-          if (a.seq !== null && b.seq !== null) return a.seq - b.seq;
-          if (a.seq !== null) return -1;
-          if (b.seq !== null) return 1;
-          return a.loc.localeCompare(b.loc);
-        });
 
-      if (children.length === 0) {
-        return textResult(`No children found under "${parent}".`);
+      // Deduplicate
+      const byLoc = new Map<string, typeof allNodes[0]>();
+      for (const n of allNodes) {
+        const existing = byLoc.get(n.loc);
+        if (!existing || (existing.isLink && !n.isLink)) byLoc.set(n.loc, n);
       }
+      const nodes = Array.from(byLoc.values());
 
-      const lines = children.map((n) => {
-        const parts = [
-          `- **${n.loc}**`,
-          n.name,
-        ];
-        if (n.seq !== null) parts.push(`(seq: ${n.seq})`);
-        if (n.nodeType !== 'info') parts.push(`[${n.nodeType}]`);
-        if (n.description) parts.push(`— ${n.description}`);
-        return parts.join(' ');
+      // Filter to requested depth
+      const prefixDepth = prefix ? prefix.split(':').length : 0;
+      const filtered = nodes.filter((n) => {
+        const nodeDepth = n.loc.split(':').length - prefixDepth;
+        return nodeDepth > 0 && nodeDepth <= maxDepth;
       });
 
-      return textResult(`${children.length} children under "${parent}":\n\n${lines.join('\n')}`);
+      if (filtered.length === 0) {
+        return textResult(`No child nodes found under "${prefix || urn}".`);
+      }
+
+      // Compute child counts and render tree
+      const lines = filtered.map((n) => {
+        const nodeDepth = n.loc.split(':').length - prefixDepth - 1;
+        const indent = '  '.repeat(nodeDepth);
+        const childCount = nodes.filter((c) =>
+          c.loc.startsWith(n.loc + ':') && c.loc.split(':').length === n.loc.split(':').length + 1
+        ).length;
+        const childInfo = childCount > 0 ? ` (${childCount} children)` : '';
+        const name = n.loc.split(':').pop() ?? n.name;
+        return `${indent}├── ${name}${childInfo}`;
+      });
+
+      const header = `Tree: ${prefix || urn}`;
+      return textResult(`${header}\n${lines.join('\n')}`);
     },
   );
 
-  // ── h-create-node ────────────────────────────────────────────────────────
+  // ── h-add-node ───────────────────────────────────────────────────────────
 
   server.tool(
-    'h-create-node',
-    'Create or update a node. Requires write access to the memory.',
+    'h-add-node',
+    'Add a new node to the memory graph (creates or updates). Requires write access to the memory.',
     {
       loc: z.string().describe('Node loc path or full URN (e.g. architecture or hadronmemory.com:dev:architecture)'),
       memoryId: z.string().optional().describe('Memory ID or URN. Omit to auto-detect from loc URN prefix, or uses the only writable memory.'),
@@ -632,7 +785,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           tags: nodeForGit.tags as string[],
           outgoingEdges: nodeForGit.outgoingEdges ?? [],
         }, '', auth.clientId, memoryId).catch((err) => {
-          console.error('[h-create-node] git write error:', err);
+          console.error('[h-add-node] git write error:', err);
         });
       }
 
