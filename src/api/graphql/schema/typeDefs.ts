@@ -204,6 +204,7 @@ export const typeDefs = `#graphql
     memories: [Memory!]!
     agents: [Agent!]!
     subscriptions: [MemorySubscription!]!
+    exchangeConnections: [ExchangeConnection!]!
     createdAt: String!
     updatedAt: String!
   }
@@ -275,6 +276,39 @@ export const typeDefs = `#graphql
     role: Role!
     activated: Boolean!
     createdAt: String!
+  }
+
+  # Microsoft Exchange connection for an organization (OAuth delegated).
+  type ExchangeConnection {
+    id: ID!
+    organizationId: String!
+    userId: String!
+    mailboxEmail: String!
+    displayName: String
+    syncEnabled: Boolean!
+    syncStatus: SyncStatus!
+    lastSyncAt: String
+    lastError: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type ExchangeMessage {
+    id: ID!
+    subject: String
+    from: String
+    receivedDateTime: String
+    isRead: Boolean
+    bodyPreview: String
+    body: String
+    hasAttachments: Boolean
+  }
+
+  type ExchangeFolder {
+    id: ID!
+    displayName: String!
+    totalItemCount: Int
+    unreadItemCount: Int
   }
 
   # Invitation to join the platform (and optionally an organization)
@@ -423,6 +457,11 @@ export const typeDefs = `#graphql
 
     # Memories the caller should sync (via bundle subscriptions)
     myMemories: [Memory!]!
+
+    # Exchange integration
+    exchangeConnections(orgId: ID!): [ExchangeConnection!]!
+    exchangeMessages(connectionId: ID!, top: Int, filter: String): [ExchangeMessage!]!
+    exchangeFolders(connectionId: ID!): [ExchangeFolder!]!
   }
 
   type Mutation {
@@ -519,6 +558,12 @@ export const typeDefs = `#graphql
 
     # Add a public memory to the current user's personal workspace
     addToMyMemories(memoryId: ID!): Boolean!
+
+    # Exchange integration (connection created via OAuth at /auth/microsoft)
+    deleteExchangeConnection(id: ID!): Boolean!
+    testExchangeConnection(id: ID!): Boolean!
+    exchangeReply(connectionId: ID!, messageId: ID!, body: String!): Boolean!
+    exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
 
     # Public mutations (no auth required)
     joinWaitingList(email: String!, requestedFeatures: String): Boolean!

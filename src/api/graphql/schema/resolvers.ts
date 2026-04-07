@@ -8,6 +8,13 @@ import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchC
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { createNode } from '../../../controller/operations/createNode.js';
+import {
+  listInboxMessages,
+  replyToMessage,
+  moveMessage,
+  listFolders,
+  extractErrorMessage,
+} from '../../../integrations/exchange/exchange.js';
 
 export interface Context {
   db: PrismaClient;
@@ -192,6 +199,7 @@ const ORG_INCLUDE = {
   memories: { include: MEMORY_INCLUDE, orderBy: { name: 'asc' as const } },
   agents: { include: { memoryItems: { include: { memory: true } } }, orderBy: { name: 'asc' as const } },
   subscriptions: { include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
+  exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
 };
 
 const AGENT_INCLUDE = {
@@ -233,6 +241,21 @@ function decryptToken(ciphertext: string): string {
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
 
+async function getExchangeRefreshToken(
+  ctx: Context,
+  connectionId: string,
+): Promise<{ refreshToken: string; connection: any }> {
+  const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({
+    where: { id: connectionId },
+  });
+  if (connection.deletedAt) throw new Error('Connection not found');
+  await requireOrgRole(ctx, connection.organizationId, 'READER');
+  return {
+    refreshToken: decryptToken(connection.refreshTokenEncrypted),
+    connection,
+  };
+}
+
 export const resolvers = {
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
@@ -267,6 +290,11 @@ export const resolvers = {
         orderBy: { name: 'asc' },
       });
     },
+  },
+  ExchangeConnection: {
+    lastSyncAt: (c: { lastSyncAt?: Date | string | null }) => toISO(c.lastSyncAt),
+    createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,
+    updatedAt: (c: { updatedAt: Date | string }) => toISO(c.updatedAt)!,
   },
   Station: {
     createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,
@@ -607,6 +635,41 @@ export const resolvers = {
         });
       }
       throw new Error('Unauthenticated');
+    },
+
+    // ── Exchange integration queries ────────────────────────────────────
+
+    exchangeConnections: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      return ctx.db.exchangeConnection.findMany({
+        where: { organizationId: orgId, deletedAt: null },
+        orderBy: { createdAt: 'asc' },
+      });
+    },
+
+    exchangeMessages: async (
+      _: unknown,
+      { connectionId, top, filter }: { connectionId: string; top?: number; filter?: string },
+      ctx: Context,
+    ) => {
+      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
+      const result = await listInboxMessages(refreshToken, { top: top ?? 25, filter: filter ?? undefined });
+      return result.data.map((m) => ({
+        id: m.id,
+        subject: m.subject,
+        from: m.from?.emailAddress?.address ?? null,
+        receivedDateTime: m.receivedDateTime,
+        isRead: m.isRead,
+        bodyPreview: m.bodyPreview,
+        body: m.body?.content ?? null,
+        hasAttachments: m.hasAttachments,
+      }));
+    },
+
+    exchangeFolders: async (_: unknown, { connectionId }: { connectionId: string }, ctx: Context) => {
+      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
+      const result = await listFolders(refreshToken);
+      return result.data;
     },
   },
 
@@ -1760,6 +1823,58 @@ export const resolvers = {
         update: {},
       });
 
+      return true;
+    },
+
+    // ── Exchange integration mutations ──────────────────────────────────
+    // Connection is created via OAuth at /auth/microsoft (no GraphQL mutation needed)
+
+    deleteExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
+      await ctx.db.exchangeConnection.update({
+        where: { id },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+      });
+      return true;
+    },
+
+    testExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const { refreshToken } = await getExchangeRefreshToken(ctx, id);
+      try {
+        await listInboxMessages(refreshToken, { top: 1 });
+        await ctx.db.exchangeConnection.update({
+          where: { id },
+          data: { syncStatus: 'OK', lastError: null, lastSyncAt: new Date() },
+        });
+        return true;
+      } catch (err: unknown) {
+        const errMsg = extractErrorMessage(err);
+        await ctx.db.exchangeConnection.update({
+          where: { id },
+          data: { syncStatus: 'ERROR', lastError: errMsg },
+        });
+        throw new Error(`Exchange connection test failed: ${errMsg}`);
+      }
+    },
+
+    exchangeReply: async (
+      _: unknown,
+      { connectionId, messageId, body }: { connectionId: string; messageId: string; body: string },
+      ctx: Context,
+    ) => {
+      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
+      await replyToMessage(refreshToken, messageId, body);
+      return true;
+    },
+
+    exchangeMoveMessage: async (
+      _: unknown,
+      { connectionId, messageId, folderId }: { connectionId: string; messageId: string; folderId: string },
+      ctx: Context,
+    ) => {
+      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
+      await moveMessage(refreshToken, messageId, folderId);
       return true;
     },
 
