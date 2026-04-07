@@ -32,12 +32,12 @@ beforeEach(async () => {
   await cleanDb(db);
 
   // Org A with graph A
-  const a = await createDbOrgAndGraph(db, { orgName: 'org-a', graphName: 'org-a/repo' });
+  const a = await createDbOrgAndGraph(db, { orgName: 'org-a', graphName: 'org-a/repo', visibility: 'ORGANIZATION' });
   orgA = a.org;
   graphA = a.graph;
 
   // Org B with graph B
-  const b = await createDbOrgAndGraph(db, { orgName: 'org-b', graphName: 'org-b/repo' });
+  const b = await createDbOrgAndGraph(db, { orgName: 'org-b', graphName: 'org-b/repo', visibility: 'ORGANIZATION' });
   orgB = b.org;
   graphB = b.graph;
 
