@@ -13,7 +13,7 @@ export function buildAuthUrl(state: string): string {
   const params = new URLSearchParams({
     client_id: process.env.GITHUB_OAUTH_APP_CLIENT_ID!,
     redirect_uri: process.env.GITHUB_OAUTH_APP_AUTH_CALLBACK_URL ?? getCallbackUrl(),
-    scope: 'read:org',
+    scope: 'read:user',
     state,
   });
   return `${GITHUB_AUTH_URL}?${params}`;
