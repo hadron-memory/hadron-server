@@ -791,13 +791,17 @@ export const resolvers = {
       return true;
     },
 
-    moveNode: async (_: unknown, { from: rawFrom, to: rawTo, memoryId }: { from: string; to: string; memoryId: string }, ctx: Context) => {
+    moveNode: async (_: unknown, { from: rawFrom, to: rawTo, memoryId, targetMemoryId }: { from: string; to: string; memoryId: string; targetMemoryId?: string }, ctx: Context) => {
       const from = parseUrnInput(rawFrom).value;
       const to = parseUrnInput(rawTo).value;
       await requireMemoryWriteAccess(ctx, memoryId);
+      if (targetMemoryId && targetMemoryId !== memoryId) {
+        await requireMemoryWriteAccess(ctx, targetMemoryId);
+      }
+      const destMemoryId = targetMemoryId ?? memoryId;
       return ctx.db.node.update({
         where: { loc_memoryId: { loc: from, memoryId } },
-        data: { loc: to },
+        data: { loc: to, memoryId: destMemoryId },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
     },

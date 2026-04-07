@@ -1004,12 +1004,13 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-move-node',
-    'Move or rename a node. The node keeps its stable ID so all edge references remain valid.',
+    'Move or rename a node, optionally across memories. The node keeps its stable ID so all edge references remain valid.',
     {
       from: z.string().describe('Current node loc path or full URN'),
       to: z.string().describe('New node loc path or full URN'),
+      targetMemoryUrn: z.string().optional().describe('Target memory URN for cross-memory moves'),
     },
-    async ({ from: rawFrom, to: rawTo }) => {
+    async ({ from: rawFrom, to: rawTo, targetMemoryUrn }) => {
       const memoryIds = await getAccessibleMemoryIds(auth);
       const resolvedFrom = await resolveLocFromUrn(rawFrom, memoryIds);
       const resolvedTo = await resolveLocFromUrn(rawTo, memoryIds);
@@ -1022,7 +1023,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult((e as Error).message);
       }
 
-      // Find the node — try accessible memories, prefer canonical
+      // Find the source node
       const moveWhere: Record<string, unknown> = { loc: fromLoc };
       if (resolvedFrom.memoryId) moveWhere.memoryId = resolvedFrom.memoryId;
       else if (memoryIds) moveWhere.memoryId = { in: memoryIds };
@@ -1031,18 +1032,35 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       if (!node) return textResult(`Node "${fromLoc}" not found.`);
 
       if (!(await canWriteToMemory(auth, node.memoryId))) {
-        return textResult('Write access denied for this memory.');
+        return textResult('Write access denied for source memory.');
+      }
+
+      // Resolve target memory for cross-memory moves
+      let destMemoryId = node.memoryId;
+      if (targetMemoryUrn) {
+        const targetMem = await db.memory.findFirst({ where: { urn: targetMemoryUrn, deletedAt: null } });
+        if (!targetMem) return textResult(`Target memory "${targetMemoryUrn}" not found.`);
+        if (!(await canWriteToMemory(auth, targetMem.id))) {
+          return textResult('Write access denied for target memory.');
+        }
+        destMemoryId = targetMem.id;
+      } else if (resolvedTo.memoryId && resolvedTo.memoryId !== node.memoryId) {
+        // Target URN resolved to a different memory
+        if (!(await canWriteToMemory(auth, resolvedTo.memoryId))) {
+          return textResult('Write access denied for target memory.');
+        }
+        destMemoryId = resolvedTo.memoryId;
       }
 
       const newName = toLoc.split(':').pop()!;
 
       await db.node.update({
         where: { loc_memoryId: { loc: fromLoc, memoryId: node.memoryId } },
-        data: { loc: toLoc, name: newName },
+        data: { loc: toLoc, name: newName, memoryId: destMemoryId },
       });
 
       const fromUrn = await nodeUrn(fromLoc, node.memoryId);
-      const toUrn = await nodeUrn(toLoc, node.memoryId);
+      const toUrn = await nodeUrn(toLoc, destMemoryId);
       return textResult(`Moved "${fromUrn}" → "${toUrn}"`);
     },
   );

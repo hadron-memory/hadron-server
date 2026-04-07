@@ -477,8 +477,8 @@ export const typeDefs = `#graphql
     # Restore a node to a previous version (creates a new version snapshot first)
     restoreNodeVersion(versionId: ID!): Node!
 
-    # Move a node to a new loc within a specific memory (keeps same id and all incoming edge references)
-    moveNode(from: String!, to: String!, memoryId: String!): Node!
+    # Move a node to a new loc, optionally across memories (keeps same id and all incoming edge references)
+    moveNode(from: String!, to: String!, memoryId: String!, targetMemoryId: String): Node!
 
     # Replace all nodes owned by a repo within a memory (collection tool)
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
