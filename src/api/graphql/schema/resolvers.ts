@@ -511,7 +511,7 @@ export const resolvers = {
         include: {
           outgoingEdges: { include: { target: true } },
           incomingEdges: { include: { source: true } },
-          memory: { select: { id: true, urn: true, name: true } },
+          memory: { select: { id: true, urn: true, name: true, organizationId: true } },
         },
       });
     },
