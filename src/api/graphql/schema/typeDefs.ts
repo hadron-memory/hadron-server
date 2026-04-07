@@ -396,6 +396,9 @@ export const typeDefs = `#graphql
     # Get a single node by its loc path
     node(loc: String!): Node
 
+    # Get a single node by its ID
+    nodeById(id: ID!): Node
+
     # List or search nodes; optionally filter by tags and nodeType
     nodes(
       nodeType: String
