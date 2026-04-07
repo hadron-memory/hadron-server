@@ -40,7 +40,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
  */
 export async function createDbOrgAndGraph(
   db: PrismaClient,
-  opts: { orgName?: string; graphName?: string } = {},
+  opts: { orgName?: string; graphName?: string; visibility?: string } = {},
 ) {
   const org = await db.organization.create({
     data: {
@@ -56,6 +56,7 @@ export async function createDbOrgAndGraph(
       organizationId: org.id,
       urn: `${opts.orgName ?? 'test-org'}:${memName}`,
       name: memName,
+      ...(opts.visibility ? { visibility: opts.visibility as any } : {}),
     },
   });
   return { org, graph };

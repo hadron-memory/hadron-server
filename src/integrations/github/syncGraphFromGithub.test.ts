@@ -51,6 +51,7 @@ function makeGraph(overrides?: Partial<MemoryWithOrg>): MemoryWithOrg {
   return {
     id: dbGraphId,
     organizationId: dbOrgId,
+    urn: 'test-org:test/repo',
     name: 'test/repo',
     source: 'git@github.com:test/repo.git',
     readBranch: null,
