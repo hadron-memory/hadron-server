@@ -97,6 +97,7 @@ model User {
   invitationActivations     UserInvitationActivation[]
   receivedMemberInvitations OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
   pendingSetup              PendingSetup?
+  exchangeConnections       ExchangeConnection[]
 
   @@map("users")
 }
@@ -116,12 +117,13 @@ model Organization {
   deletedAt                    DateTime? @map("deleted_at")
   deletedBy                    String?   @map("deleted_by")
 
-  members       OrgMember[]
-  memories      Memory[]
-  stations      Station[]
-  agents        Agent[]
-  subscriptions MemorySubscription[]
-  invitations   UserInvitation[]     @relation("OrgInvitations")
+  members              OrgMember[]
+  memories             Memory[]
+  stations             Station[]
+  agents               Agent[]
+  subscriptions        MemorySubscription[]
+  invitations          UserInvitation[]          @relation("OrgInvitations")
+  exchangeConnections  ExchangeConnection[]
 
   @@map("organizations")
 }
@@ -705,6 +707,34 @@ model PendingSetup {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("pending_setups")
+}
+
+model ExchangeConnection {
+  id                      String     @id @default(cuid())
+  organizationId          String     @map("organization_id")
+  userId                  String     @map("user_id")
+  mailboxEmail            String     @map("mailbox_email")
+  displayName             String?    @map("display_name")
+  refreshTokenEncrypted   String     @map("refresh_token_encrypted")
+  syncEnabled             Boolean    @default(true) @map("sync_enabled")
+  syncStatus              SyncStatus @default(PENDING) @map("sync_status")
+  lastSyncAt              DateTime?  @map("last_sync_at")
+  lastError               String?    @map("last_error")
+  webhookSubscriptionId   String?    @map("webhook_subscription_id")
+  webhookExpiresAt        DateTime?  @map("webhook_expires_at")
+  createdAt               DateTime   @default(now()) @map("created_at")
+  createdBy               String?    @map("created_by")
+  updatedAt               DateTime   @updatedAt @map("updated_at")
+  updatedBy               String?    @map("updated_by")
+  deletedAt               DateTime?  @map("deleted_at")
+  deletedBy               String?    @map("deleted_by")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, mailboxEmail])
+  @@index([userId])
+  @@map("exchange_connections")
 }
 
 model WaitingListItem {

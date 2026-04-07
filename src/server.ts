@@ -465,6 +465,214 @@ export async function createServer(): Promise<Express> {
   });
 
   // ---------------------------------------------------------------------------
+  // Microsoft OAuth (Exchange email integration — delegated permissions)
+  // ---------------------------------------------------------------------------
+
+  const pendingMsStates = new Map<
+    string,
+    { orgId: string; userId: string; redirect: string; expiresAt: number }
+  >();
+
+  app.get('/auth/microsoft', async (req, res) => {
+    // Token passed as query param (redirect-based flow, no Bearer header)
+    const token = req.query.token as string | undefined;
+    if (!token) {
+      res.status(401).json({ error: 'No token provided' });
+      return;
+    }
+
+    let userId: string;
+    try {
+      const payload = await verifyJwt(token);
+      userId = payload.sub;
+    } catch {
+      res.status(401).json({ error: 'Invalid or expired token' });
+      return;
+    }
+
+    const orgId = req.query.orgId as string;
+    const redirect = (req.query.redirect as string) || '/';
+    if (!orgId) {
+      res.status(400).json({ error: 'orgId is required' });
+      return;
+    }
+
+    const state = crypto.randomBytes(16).toString('hex');
+    pendingMsStates.set(state, {
+      orgId,
+      userId,
+      redirect,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    });
+
+    const { buildMicrosoftAuthUrl } = await import('./integrations/exchange/exchange.js');
+    res.redirect(buildMicrosoftAuthUrl(state));
+  });
+
+  app.get('/auth/microsoft/callback', async (req, res) => {
+    const { code, state, error: oauthError } = req.query as {
+      code?: string;
+      state?: string;
+      error?: string;
+    };
+
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+    if (oauthError) {
+      const errorUrl = new URL('/app/dashboard', frontendUrl);
+      errorUrl.searchParams.set('exchangeError', oauthError);
+      res.redirect(errorUrl.toString());
+      return;
+    }
+
+    if (!code || !state) {
+      res.status(400).json({ error: 'Missing code or state' });
+      return;
+    }
+
+    const pending = pendingMsStates.get(state);
+    pendingMsStates.delete(state);
+
+    if (!pending || pending.expiresAt < Date.now()) {
+      res.status(400).json({ error: 'Invalid or expired state' });
+      return;
+    }
+
+    try {
+      const { exchangeMicrosoftCode, fetchMicrosoftProfile } = await import('./integrations/exchange/exchange.js');
+
+      // Exchange code for tokens
+      const tokenRes = await exchangeMicrosoftCode(code);
+
+      // Fetch user's Microsoft profile to get their email
+      const profile = await fetchMicrosoftProfile(tokenRes.access_token);
+      const mailboxEmail = profile.mail || profile.userPrincipalName;
+
+      // Encrypt and store the refresh token
+      const { createCipheriv, randomBytes } = await import('crypto');
+      const encKey = Buffer.from(process.env.HADRON_ENCRYPTION_KEY ?? '', 'hex');
+      function encrypt(plaintext: string): string {
+        const iv = randomBytes(12);
+        const cipher = createCipheriv('aes-256-gcm', encKey, iv);
+        const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+        const tag = cipher.getAuthTag();
+        return Buffer.concat([iv, tag, encrypted]).toString('base64');
+      }
+
+      // Upsert the exchange connection
+      await db.exchangeConnection.upsert({
+        where: {
+          organizationId_mailboxEmail: {
+            organizationId: pending.orgId,
+            mailboxEmail,
+          },
+        },
+        create: {
+          organizationId: pending.orgId,
+          userId: pending.userId,
+          mailboxEmail,
+          displayName: profile.displayName,
+          refreshTokenEncrypted: encrypt(tokenRes.refresh_token),
+          syncStatus: 'OK',
+          lastSyncAt: new Date(),
+          createdBy: pending.userId,
+        },
+        update: {
+          refreshTokenEncrypted: encrypt(tokenRes.refresh_token),
+          displayName: profile.displayName,
+          syncStatus: 'OK',
+          lastSyncAt: new Date(),
+          lastError: null,
+          updatedBy: pending.userId,
+        },
+      });
+
+      console.log(`[microsoft-oauth] Connected Exchange for ${mailboxEmail} → org ${pending.orgId}`);
+
+      const successUrl = new URL(pending.redirect, frontendUrl);
+      successUrl.searchParams.set('exchangeConnected', '1');
+      res.redirect(successUrl.toString());
+    } catch (err) {
+      console.error('[microsoft-oauth] Callback error:', err);
+      const errorUrl = new URL(pending.redirect, frontendUrl);
+      errorUrl.searchParams.set('exchangeError', err instanceof Error ? err.message : 'Microsoft authentication failed');
+      res.redirect(errorUrl.toString());
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Exchange webhook (Microsoft Graph change notifications)
+  // ---------------------------------------------------------------------------
+
+  app.post('/exchange/webhook', async (req, res) => {
+    // Step 1: Validation handshake — Graph sends a validationToken on subscription creation
+    const validationToken = req.query.validationToken as string | undefined;
+    if (validationToken) {
+      res.set('Content-Type', 'text/plain');
+      res.status(200).send(validationToken);
+      return;
+    }
+
+    // Step 2: Process notifications — respond 202 quickly, process async
+    res.status(202).json({ ok: true });
+
+    const notifications = req.body?.value as Array<{
+      clientState?: string;
+      resourceData?: { id?: string };
+      resource?: string;
+    }> | undefined;
+
+    if (!notifications?.length) return;
+
+    for (const notification of notifications) {
+      const connectionId = notification.clientState;
+      if (!connectionId) continue;
+
+      try {
+        const connection = await db.exchangeConnection.findUnique({
+          where: { id: connectionId },
+        });
+        if (!connection || connection.deletedAt || !connection.syncEnabled) continue;
+
+        // Decrypt refresh token
+        const { createDecipheriv } = await import('crypto');
+        const keyBuf = Buffer.from(process.env.HADRON_ENCRYPTION_KEY ?? '', 'hex');
+        function decrypt(ciphertext: string): string {
+          const buf = Buffer.from(ciphertext, 'base64');
+          const iv = buf.subarray(0, 12);
+          const tag = buf.subarray(12, 28);
+          const data = buf.subarray(28);
+          const decipher = createDecipheriv('aes-256-gcm', keyBuf, iv);
+          decipher.setAuthTag(tag);
+          return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+        }
+
+        const refreshToken = decrypt(connection.refreshTokenEncrypted);
+
+        // Import exchange client functions
+        const { getMessage, replyToMessage } = await import('./integrations/exchange/exchange.js');
+
+        // Extract message ID from resource path (e.g. "Users/{id}/Messages/{messageId}")
+        const resourceParts = notification.resource?.split('/') ?? [];
+        const messageId = notification.resourceData?.id ?? resourceParts[resourceParts.length - 1];
+        if (!messageId) continue;
+
+        const msgResult = await getMessage(refreshToken, messageId);
+        const message = msgResult.data;
+        console.log(`[exchange-webhook] New email in ${connection.mailboxEmail}: "${message.subject}" from ${message.from?.emailAddress?.address}`);
+
+        // POC auto-reply: if subject is "Hadron respond test", reply with "Hadron test passed"
+        if (message.subject?.trim().toLowerCase() === 'hadron respond test') {
+          await replyToMessage(refreshToken, messageId, 'Hadron test passed');
+          console.log(`[exchange-webhook] Auto-replied to "${message.subject}" in ${connection.mailboxEmail}`);
+        }
+      } catch (err) {
+        console.error(`[exchange-webhook] Error processing notification for connection ${connectionId}:`, err);
+      }
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // MCP endpoint (Streamable HTTP transport)
   // ---------------------------------------------------------------------------
 
