@@ -314,6 +314,20 @@ export const resolvers = {
       return candidates.find((n) => !n.isLink) ?? candidates[0];
     },
 
+    nodeById: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const access = await memoryAccessFilter(ctx);
+      const node = await ctx.db.node.findUnique({
+        where: { id },
+        include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+      });
+      if (!node) return null;
+      // Verify access
+      if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
+        if (!(access.memoryId.in as string[]).includes(node.memoryId)) return null;
+      }
+      return node;
+    },
+
     nodes: async (
       _: unknown,
       { nodeType, tags, search, prefix: rawPrefix, limit }: { nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number },

@@ -327,7 +327,8 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         },
       });
 
-      return textResult(`Node saved: ${loc}`);
+      const urn = await nodeUrn(loc, memoryId);
+      return textResult(`Node saved: ${urn}`);
     },
   );
 
@@ -357,7 +358,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
       // Scope to subtree if parentRel provided
       if (parentRel) {
-        where.loc = { startsWith: parentRel };
+        const resolvedParent = await resolveLocFromUrn(parentRel, memoryIds);
+        where.loc = { startsWith: resolvedParent.loc };
+        if (resolvedParent.memoryId) where.memoryId = resolvedParent.memoryId;
       }
 
       const allNodes = await db.node.findMany({
@@ -385,8 +388,11 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         if (n.description) parts.push(`  ${n.description}`);
         if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
         if (brief && n.outgoingEdges?.length) {
-          const edges = n.outgoingEdges.map((e: any) => `→ ${e.target.loc} (${e.label})`);
-          parts.push(`  Edges: ${edges.join(', ')}`);
+          const edgeStrs = await Promise.all(n.outgoingEdges.map(async (e: any) => {
+            const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
+            return `→ ${targetUrn} (${e.label})`;
+          }));
+          parts.push(`  Edges: ${edgeStrs.join(', ')}`);
         }
         return parts.join('\n');
       }));
@@ -435,6 +441,14 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       }).catch(() => {});
 
       const urn = await nodeUrn(node.loc, node.memoryId);
+      const outgoingLines = await Promise.all(node.outgoingEdges.map(async (e) => {
+        const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
+        return `  - ${targetUrn} (${e.target.name}) — ${e.label}`;
+      }));
+      const incomingLines = await Promise.all(node.incomingEdges.map(async (e) => {
+        const sourceUrn = await nodeUrn(e.source.loc, (e.source as any).memoryId);
+        return `  - ${sourceUrn} (${e.source.name}) — ${e.label}`;
+      }));
       const meta = [
         `**${node.name}**`,
         urn,
@@ -442,12 +456,8 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',
         node.properties ? `Properties: ${JSON.stringify(node.properties)}` : '',
-        node.outgoingEdges.length
-          ? `Related:\n${node.outgoingEdges.map((e) => `  - ${e.target.loc} (${e.target.name}) — ${e.label}`).join('\n')}`
-          : '',
-        node.incomingEdges.length
-          ? `Referenced by:\n${node.incomingEdges.map((e) => `  - ${e.source.loc} (${e.source.name}) — ${e.label}`).join('\n')}`
-          : '',
+        outgoingLines.length ? `Related:\n${outgoingLines.join('\n')}` : '',
+        incomingLines.length ? `Referenced by:\n${incomingLines.join('\n')}` : '',
       ]
         .filter(Boolean)
         .join('\n');
@@ -462,16 +472,19 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-read-next-node',
     'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted.',
     {
-      parent: z.string().describe('Colon-delimited path of the parent node'),
-      current: z.string().optional().describe('Colon-delimited path of the current child node'),
+      parent: z.string().describe('Parent node loc path or full URN'),
+      current: z.string().optional().describe('Current child node loc path or full URN'),
     },
-    async ({ parent, current }) => {
-      const prefix = parent + ':';
+    async ({ parent: rawParent, current: rawCurrent }) => {
       const memoryIds = await getAccessibleMemoryIds(auth);
+      const resolvedParent = await resolveLocFromUrn(rawParent, memoryIds);
+      const parentLoc = resolvedParent.loc;
+      const prefix = parentLoc + ':';
       const where: Record<string, unknown> = {
         loc: { startsWith: prefix },
       };
-      if (memoryIds) where.memoryId = { in: memoryIds };
+      if (resolvedParent.memoryId) where.memoryId = resolvedParent.memoryId;
+      else if (memoryIds) where.memoryId = { in: memoryIds };
 
       const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
       // Direct children only (no further colons after prefix)
@@ -486,19 +499,21 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         });
 
       if (children.length === 0) {
-        return textResult(`No children found under "${parent}".`);
+        return textResult(`No children found under "${parentLoc}".`);
       }
 
       let next;
-      if (!current) {
+      if (!rawCurrent) {
         next = children[0];
       } else {
-        const idx = children.findIndex((n) => n.loc === current);
+        const resolvedCurrent = await resolveLocFromUrn(rawCurrent, memoryIds);
+        const currentLoc = resolvedCurrent.loc;
+        const idx = children.findIndex((n) => n.loc === currentLoc);
         if (idx === -1) {
-          return textResult(`Current node "${current}" not found among children of "${parent}".`);
+          return textResult(`Current node "${currentLoc}" not found among children of "${parentLoc}".`);
         }
         if (idx + 1 >= children.length) {
-          return textResult(`No more nodes after "${current}".`);
+          return textResult(`No more nodes after "${currentLoc}".`);
         }
         next = children[idx + 1];
       }
@@ -512,14 +527,18 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       });
       if (!node) return textResult('Node not found.');
 
+      const urn = await nodeUrn(node.loc, node.memoryId);
+      const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
+        const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
+        return `  - ${targetUrn} (${e.target.name}) — ${e.label}`;
+      }));
       const meta = [
         `**${node.name}**`,
+        urn,
         node.description ? `> ${node.description}` : '',
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',
-        node.outgoingEdges.length
-          ? `Related:\n${node.outgoingEdges.map((e) => `  - ${e.target.loc} (${e.target.name}) — ${e.label}`).join('\n')}`
-          : '',
+        outEdgeLines.length ? `Related:\n${outEdgeLines.join('\n')}` : '',
       ]
         .filter(Boolean)
         .join('\n');
@@ -590,16 +609,16 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       }
 
       // Compute child counts and render tree
-      const lines = filtered.map((n) => {
+      const lines = await Promise.all(filtered.map(async (n) => {
         const nodeDepth = n.loc.split(':').length - prefixDepth - 1;
         const indent = '  '.repeat(nodeDepth);
         const childCount = nodes.filter((c) =>
           c.loc.startsWith(n.loc + ':') && c.loc.split(':').length === n.loc.split(':').length + 1
         ).length;
         const childInfo = childCount > 0 ? ` (${childCount} children)` : '';
-        const name = n.loc.split(':').pop() ?? n.name;
-        return `${indent}├── ${name}${childInfo}`;
-      });
+        const nUrn = await nodeUrn(n.loc, n.memoryId);
+        return `${indent}├── ${nUrn} — ${n.name}${childInfo}`;
+      }));
 
       const header = `Tree: ${prefix || urn}`;
       return textResult(`${header}\n${lines.join('\n')}`);
@@ -827,7 +846,8 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         });
       }
 
-      return textResult(`Node saved: ${loc}`);
+      const savedUrn = await nodeUrn(loc, memoryId);
+      return textResult(`Node saved: ${savedUrn}`);
     },
   );
 
@@ -975,7 +995,8 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         });
       }
 
-      return textResult(`Node updated: ${loc}`);
+      const updatedUrn = await nodeUrn(loc, existing.memoryId);
+      return textResult(`Node updated: ${updatedUrn}`);
     },
   );
 
@@ -985,36 +1006,44 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-move-node',
     'Move or rename a node. The node keeps its stable ID so all edge references remain valid.',
     {
-      from: z.string().describe('Current colon-delimited path'),
-      to: z.string().describe('New colon-delimited path'),
+      from: z.string().describe('Current node loc path or full URN'),
+      to: z.string().describe('New node loc path or full URN'),
     },
-    async ({ from, to }) => {
+    async ({ from: rawFrom, to: rawTo }) => {
+      const memoryIds = await getAccessibleMemoryIds(auth);
+      const resolvedFrom = await resolveLocFromUrn(rawFrom, memoryIds);
+      const resolvedTo = await resolveLocFromUrn(rawTo, memoryIds);
+      const fromLoc = resolvedFrom.loc;
+      const toLoc = resolvedTo.loc;
+
       try {
-        validateLoc(to);
+        validateLoc(toLoc);
       } catch (e) {
         return textResult((e as Error).message);
       }
 
       // Find the node — try accessible memories, prefer canonical
-      const memoryIds = await getAccessibleMemoryIds(auth);
-      const moveWhere: Record<string, unknown> = { loc: from };
-      if (memoryIds) moveWhere.memoryId = { in: memoryIds };
+      const moveWhere: Record<string, unknown> = { loc: fromLoc };
+      if (resolvedFrom.memoryId) moveWhere.memoryId = resolvedFrom.memoryId;
+      else if (memoryIds) moveWhere.memoryId = { in: memoryIds };
       const candidates = await db.node.findMany({ where: moveWhere });
       const node = candidates.find((n) => !n.isLink) ?? candidates[0] ?? null;
-      if (!node) return textResult(`Node "${from}" not found.`);
+      if (!node) return textResult(`Node "${fromLoc}" not found.`);
 
       if (!(await canWriteToMemory(auth, node.memoryId))) {
         return textResult('Write access denied for this memory.');
       }
 
-      const newName = to.split(':').pop()!;
+      const newName = toLoc.split(':').pop()!;
 
       await db.node.update({
-        where: { loc_memoryId: { loc: from, memoryId: node.memoryId } },
-        data: { loc: to, name: newName },
+        where: { loc_memoryId: { loc: fromLoc, memoryId: node.memoryId } },
+        data: { loc: toLoc, name: newName },
       });
 
-      return textResult(`Moved "${from}" → "${to}"`);
+      const fromUrn = await nodeUrn(fromLoc, node.memoryId);
+      const toUrn = await nodeUrn(toLoc, node.memoryId);
+      return textResult(`Moved "${fromUrn}" → "${toUrn}"`);
     },
   );
 
@@ -1055,8 +1084,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       for (const edge of node.outgoingEdges) {
         const target = edge.target;
         if (target.content) {
+          const targetUrn = await nodeUrn(target.loc, (target as any).memoryId);
           topicSections.push(
-            `## Node: ${target.name} (${target.loc})\n\n${target.content}`,
+            `## Node: ${target.name} (${targetUrn})\n\n${target.content}`,
           );
         }
       }
@@ -1181,13 +1211,14 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const issues: string[] = [];
 
       for (const node of nodes) {
+        const nUrn = await nodeUrn(node.loc, node.memoryId);
         for (const edge of node.outgoingEdges) {
           if (!nodeIds.has(edge.targetId)) {
-            issues.push(`[broken-ref] ${node.loc} → id:${edge.targetId} (${edge.label})`);
+            issues.push(`[broken-ref] ${nUrn} → id:${edge.targetId} (${edge.label})`);
           }
         }
         if (!node.description && !node.content) {
-          issues.push(`[sparse] ${node.loc} — no description and no content`);
+          issues.push(`[sparse] ${nUrn} — no description and no content`);
         }
       }
 
