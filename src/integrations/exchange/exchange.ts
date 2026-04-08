@@ -3,6 +3,7 @@ export {
   exchangeMicrosoftCode,
   refreshAccessToken,
   fetchMicrosoftProfile,
+  decodeIdToken,
 } from './auth.js';
 export type { TokenResponse, MicrosoftProfile } from './auth.js';
 export {

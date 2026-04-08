@@ -330,6 +330,58 @@ export const typeDefs = `#graphql
     activationCount: Int!
   }
 
+  # ── Pong (AI email assistant) ──────────────────────────────────────────
+
+  enum PongDraftStatus {
+    PENDING
+    APPROVED
+    AUTO_SENT
+    EDITED
+    REJECTED
+  }
+
+  type PongSettings {
+    id: ID!
+    exchangeConnectionId: String!
+    userId: String!
+    autoSendEnabled: Boolean!
+    confidenceThreshold: Float!
+    replyTone: String
+    signatureText: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type KnowledgeDocument {
+    id: ID!
+    exchangeConnectionId: String!
+    userId: String!
+    title: String!
+    content: String!
+    docType: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type PongDraft {
+    id: ID!
+    exchangeConnectionId: String!
+    userId: String!
+    messageId: String!
+    messageSubject: String
+    messageFrom: String
+    messageReceivedAt: String
+    draftBody: String!
+    editedBody: String
+    confidence: Float!
+    status: PongDraftStatus!
+    sourceDocs: [String!]!
+    reasoning: String
+    sentAt: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
   # Outgoing edge on a node, used in NodeInput.edges
   input NodeEdgeInput {
     targetId: String!
@@ -462,9 +514,16 @@ export const typeDefs = `#graphql
     myMemories: [Memory!]!
 
     # Exchange integration
+    myExchangeConnections: [ExchangeConnection!]!
     exchangeConnections(orgId: ID!): [ExchangeConnection!]!
     exchangeMessages(connectionId: ID!, top: Int, filter: String): [ExchangeMessage!]!
     exchangeFolders(connectionId: ID!): [ExchangeFolder!]!
+
+    # Pong AI assistant
+    pongSettings(connectionId: ID!): PongSettings
+    knowledgeDocuments(connectionId: ID!): [KnowledgeDocument!]!
+    pongDrafts(connectionId: ID!, status: PongDraftStatus, limit: Int, offset: Int): [PongDraft!]!
+    pongDraft(id: ID!): PongDraft
   }
 
   type Mutation {
@@ -567,6 +626,15 @@ export const typeDefs = `#graphql
     testExchangeConnection(id: ID!): Boolean!
     exchangeReply(connectionId: ID!, messageId: ID!, body: String!): Boolean!
     exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
+
+    # Pong AI assistant
+    upsertPongSettings(connectionId: ID!, autoSendEnabled: Boolean, confidenceThreshold: Float, replyTone: String, signatureText: String): PongSettings!
+    addKnowledgeDocument(connectionId: ID!, title: String!, content: String!, docType: String): KnowledgeDocument!
+    updateKnowledgeDocument(id: ID!, title: String, content: String, docType: String): KnowledgeDocument!
+    deleteKnowledgeDocument(id: ID!): Boolean!
+    storePongDraft(connectionId: ID!, messageId: ID!, draftBody: String!, confidence: Float!, reasoning: String, sourceDocs: [String!], messageSubject: String, messageFrom: String): PongDraft!
+    approvePongDraft(id: ID!, editedBody: String): PongDraft!
+    rejectPongDraft(id: ID!): PongDraft!
 
     # Public mutations (no auth required)
     joinWaitingList(email: String!, requestedFeatures: String): Boolean!

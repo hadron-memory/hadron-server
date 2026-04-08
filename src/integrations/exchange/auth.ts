@@ -52,6 +52,7 @@ export function buildMicrosoftAuthUrl(state: string): string {
 export interface TokenResponse {
   access_token: string;
   refresh_token: string;
+  id_token?: string;
   expires_in: number;
   scope: string;
   token_type: string;
@@ -112,14 +113,31 @@ export interface MicrosoftProfile {
   displayName: string | null;
 }
 
-/** Fetch the signed-in user's profile from Graph API. */
+/**
+ * Decode the email and name from the ID token (JWT).
+ * Personal Microsoft accounts don't always support /me Graph endpoint,
+ * so we extract profile info from the token claims instead.
+ */
+export function decodeIdToken(idToken: string): { email: string | null; name: string | null } {
+  try {
+    const payload = JSON.parse(Buffer.from(idToken.split('.')[1], 'base64url').toString());
+    return {
+      email: payload.email ?? payload.preferred_username ?? null,
+      name: payload.name ?? null,
+    };
+  } catch {
+    return { email: null, name: null };
+  }
+}
+
+/** Fetch the signed-in user's profile from Graph API, with fallback for personal accounts. */
 export async function fetchMicrosoftProfile(accessToken: string): Promise<MicrosoftProfile> {
   const res = await fetch('https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,displayName', {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Failed to fetch Microsoft profile: ${err}`);
+    // Personal accounts may fail on /me — return null fields, caller uses ID token instead
+    return { mail: null, userPrincipalName: '', displayName: null };
   }
   return res.json() as Promise<MicrosoftProfile>;
 }

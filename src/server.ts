@@ -470,7 +470,7 @@ export async function createServer(): Promise<Express> {
 
   const pendingMsStates = new Map<
     string,
-    { orgId: string; userId: string; redirect: string; expiresAt: number }
+    { orgId?: string; userId: string; redirect: string; expiresAt: number }
   >();
 
   app.get('/auth/microsoft', async (req, res) => {
@@ -490,12 +490,8 @@ export async function createServer(): Promise<Express> {
       return;
     }
 
-    const orgId = req.query.orgId as string;
-    const redirect = (req.query.redirect as string) || '/';
-    if (!orgId) {
-      res.status(400).json({ error: 'orgId is required' });
-      return;
-    }
+    const orgId = (req.query.orgId as string) || undefined;
+    const redirect = (req.query.redirect as string) || '/app/account';
 
     const state = crypto.randomBytes(16).toString('hex');
     pendingMsStates.set(state, {
@@ -539,14 +535,41 @@ export async function createServer(): Promise<Express> {
     }
 
     try {
-      const { exchangeMicrosoftCode, fetchMicrosoftProfile } = await import('./integrations/exchange/exchange.js');
+      const { exchangeMicrosoftCode, fetchMicrosoftProfile, decodeIdToken } = await import('./integrations/exchange/exchange.js');
 
       // Exchange code for tokens
       const tokenRes = await exchangeMicrosoftCode(code);
 
-      // Fetch user's Microsoft profile to get their email
+      // Get user's email — try ID token first (works for personal accounts), fall back to /me
+      const idClaims = decodeIdToken(tokenRes.id_token ?? '');
       const profile = await fetchMicrosoftProfile(tokenRes.access_token);
-      const mailboxEmail = profile.mail || profile.userPrincipalName;
+      const mailboxEmail = idClaims.email || profile.mail || profile.userPrincipalName;
+      const displayName = profile.displayName || idClaims.name;
+
+      if (!mailboxEmail) {
+        throw new Error('Could not determine email address from Microsoft account');
+      }
+
+      // Resolve orgId — use provided orgId or fall back to user's personal workspace
+      let orgId = pending.orgId;
+      if (!orgId) {
+        const membership = await db.orgMember.findFirst({
+          where: { userId: pending.userId, organization: { isVisible: { not: true } } },
+          select: { organizationId: true },
+        });
+        if (membership) {
+          orgId = membership.organizationId;
+        } else {
+          // Auto-provision a personal workspace for users who don't have one yet
+          const user = await db.user.findUniqueOrThrow({ where: { id: pending.userId } });
+          const result = await provisionPersonalWorkspace(
+            db,
+            pending.userId,
+            user.name ?? user.githubUsername ?? 'My Workspace',
+          );
+          orgId = result.orgId;
+        }
+      }
 
       // Encrypt and store the refresh token
       const { createCipheriv, randomBytes } = await import('crypto');
@@ -563,15 +586,15 @@ export async function createServer(): Promise<Express> {
       await db.exchangeConnection.upsert({
         where: {
           organizationId_mailboxEmail: {
-            organizationId: pending.orgId,
+            organizationId: orgId,
             mailboxEmail,
           },
         },
         create: {
-          organizationId: pending.orgId,
+          organizationId: orgId,
           userId: pending.userId,
           mailboxEmail,
-          displayName: profile.displayName,
+          displayName,
           refreshTokenEncrypted: encrypt(tokenRes.refresh_token),
           syncStatus: 'OK',
           lastSyncAt: new Date(),
@@ -579,7 +602,7 @@ export async function createServer(): Promise<Express> {
         },
         update: {
           refreshTokenEncrypted: encrypt(tokenRes.refresh_token),
-          displayName: profile.displayName,
+          displayName,
           syncStatus: 'OK',
           lastSyncAt: new Date(),
           lastError: null,
@@ -661,11 +684,8 @@ export async function createServer(): Promise<Express> {
         const message = msgResult.data;
         console.log(`[exchange-webhook] New email in ${connection.mailboxEmail}: "${message.subject}" from ${message.from?.emailAddress?.address}`);
 
-        // POC auto-reply: if subject is "Hadron respond test", reply with "Hadron test passed"
-        if (message.subject?.trim().toLowerCase() === 'hadron respond test') {
-          await replyToMessage(refreshToken, messageId, 'Hadron test passed');
-          console.log(`[exchange-webhook] Auto-replied to "${message.subject}" in ${connection.mailboxEmail}`);
-        }
+        // Store message metadata so the portal can generate a draft when the professor opens the inbox
+        // AI draft generation is handled by the portal using the Vercel AI SDK
       } catch (err) {
         console.error(`[exchange-webhook] Error processing notification for connection ${connectionId}:`, err);
       }

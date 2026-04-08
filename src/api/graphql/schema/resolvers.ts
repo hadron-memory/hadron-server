@@ -249,7 +249,10 @@ async function getExchangeRefreshToken(
     where: { id: connectionId },
   });
   if (connection.deletedAt) throw new Error('Connection not found');
-  await requireOrgRole(ctx, connection.organizationId, 'READER');
+  // Allow connection owner or org admin
+  if (ctx.userId !== connection.userId) {
+    await requireOrgRole(ctx, connection.organizationId, 'READER');
+  }
   return {
     refreshToken: decryptToken(connection.refreshTokenEncrypted),
     connection,
@@ -653,6 +656,14 @@ export const resolvers = {
 
     // ── Exchange integration queries ────────────────────────────────────
 
+    myExchangeConnections: async (_: unknown, __: unknown, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      return ctx.db.exchangeConnection.findMany({
+        where: { userId: ctx.userId, deletedAt: null },
+        orderBy: { createdAt: 'asc' },
+      });
+    },
+
     exchangeConnections: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
       return ctx.db.exchangeConnection.findMany({
@@ -684,6 +695,45 @@ export const resolvers = {
       const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
       const result = await listFolders(refreshToken);
       return result.data;
+    },
+
+    // ── Pong AI assistant queries ───────────────────────────────────────
+
+    pongSettings: async (_: unknown, { connectionId }: { connectionId: string }, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      return ctx.db.pongSettings.findUnique({
+        where: { exchangeConnectionId: connectionId },
+      });
+    },
+
+    knowledgeDocuments: async (_: unknown, { connectionId }: { connectionId: string }, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      return ctx.db.knowledgeDocument.findMany({
+        where: { exchangeConnectionId: connectionId, deletedAt: null },
+        orderBy: { createdAt: 'desc' },
+      });
+    },
+
+    pongDrafts: async (
+      _: unknown,
+      { connectionId, status, limit, offset }: { connectionId: string; status?: string; limit?: number; offset?: number },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      return ctx.db.pongDraft.findMany({
+        where: {
+          exchangeConnectionId: connectionId,
+          ...(status ? { status: status as any } : {}),
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit ?? 50,
+        skip: offset ?? 0,
+      });
+    },
+
+    pongDraft: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      return ctx.db.pongDraft.findUnique({ where: { id } });
     },
   },
 
@@ -1894,6 +1944,163 @@ export const resolvers = {
       const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
       await moveMessage(refreshToken, messageId, folderId);
       return true;
+    },
+
+    // ── Pong AI assistant mutations ─────────────────────────────────────
+
+    upsertPongSettings: async (
+      _: unknown,
+      { connectionId, autoSendEnabled, confidenceThreshold, replyTone, signatureText }: {
+        connectionId: string; autoSendEnabled?: boolean; confidenceThreshold?: number;
+        replyTone?: string; signatureText?: string;
+      },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+
+      return ctx.db.pongSettings.upsert({
+        where: { exchangeConnectionId: connectionId },
+        create: {
+          exchangeConnectionId: connectionId,
+          userId: ctx.userId,
+          autoSendEnabled: autoSendEnabled ?? false,
+          confidenceThreshold: confidenceThreshold ?? 0.95,
+          replyTone: replyTone ?? null,
+          signatureText: signatureText ?? null,
+        },
+        update: {
+          ...(autoSendEnabled !== undefined ? { autoSendEnabled } : {}),
+          ...(confidenceThreshold !== undefined ? { confidenceThreshold } : {}),
+          ...(replyTone !== undefined ? { replyTone } : {}),
+          ...(signatureText !== undefined ? { signatureText } : {}),
+        },
+      });
+    },
+
+    addKnowledgeDocument: async (
+      _: unknown,
+      { connectionId, title, content, docType }: { connectionId: string; title: string; content: string; docType?: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+
+      return ctx.db.knowledgeDocument.create({
+        data: {
+          exchangeConnectionId: connectionId,
+          userId: ctx.userId,
+          title: title.trim(),
+          content,
+          docType: docType ?? null,
+        },
+      });
+    },
+
+    updateKnowledgeDocument: async (
+      _: unknown,
+      { id, title, content, docType }: { id: string; title?: string; content?: string; docType?: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const doc = await ctx.db.knowledgeDocument.findUniqueOrThrow({ where: { id } });
+      if (doc.userId !== ctx.userId) throw new Error('Forbidden');
+
+      return ctx.db.knowledgeDocument.update({
+        where: { id },
+        data: {
+          ...(title !== undefined ? { title: title.trim() } : {}),
+          ...(content !== undefined ? { content } : {}),
+          ...(docType !== undefined ? { docType } : {}),
+        },
+      });
+    },
+
+    deleteKnowledgeDocument: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const doc = await ctx.db.knowledgeDocument.findUniqueOrThrow({ where: { id } });
+      if (doc.userId !== ctx.userId) throw new Error('Forbidden');
+      await ctx.db.knowledgeDocument.update({
+        where: { id },
+        data: { deletedAt: new Date() },
+      });
+      return true;
+    },
+
+    storePongDraft: async (
+      _: unknown,
+      { connectionId, messageId, draftBody, confidence, reasoning, sourceDocs, messageSubject, messageFrom }: {
+        connectionId: string; messageId: string; draftBody: string; confidence: number;
+        reasoning?: string; sourceDocs?: string[]; messageSubject?: string; messageFrom?: string;
+      },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+
+      return ctx.db.pongDraft.upsert({
+        where: { exchangeConnectionId_messageId: { exchangeConnectionId: connectionId, messageId } },
+        create: {
+          exchangeConnectionId: connectionId,
+          userId: ctx.userId,
+          messageId,
+          messageSubject: messageSubject ?? null,
+          messageFrom: messageFrom ?? null,
+          draftBody,
+          confidence,
+          sourceDocs: sourceDocs ?? [],
+          reasoning: reasoning ?? null,
+          status: 'PENDING',
+        },
+        update: {
+          draftBody,
+          confidence,
+          sourceDocs: sourceDocs ?? [],
+          reasoning: reasoning ?? null,
+          status: 'PENDING',
+          editedBody: null,
+          sentAt: null,
+        },
+      });
+    },
+
+    approvePongDraft: async (
+      _: unknown,
+      { id, editedBody }: { id: string; editedBody?: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const draft = await ctx.db.pongDraft.findUniqueOrThrow({ where: { id } });
+      if (draft.userId !== ctx.userId) throw new Error('Forbidden');
+      if (draft.status !== 'PENDING') throw new Error(`Draft is already ${draft.status}`);
+
+      // Send the reply via Exchange
+      const { refreshToken } = await getExchangeRefreshToken(ctx, draft.exchangeConnectionId);
+      const bodyToSend = editedBody ?? draft.draftBody;
+      await replyToMessage(refreshToken, draft.messageId, bodyToSend);
+
+      // Update draft status
+      return ctx.db.pongDraft.update({
+        where: { id },
+        data: {
+          status: editedBody ? 'EDITED' : 'APPROVED',
+          editedBody: editedBody ?? null,
+          sentAt: new Date(),
+        },
+      });
+    },
+
+    rejectPongDraft: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const draft = await ctx.db.pongDraft.findUniqueOrThrow({ where: { id } });
+      if (draft.userId !== ctx.userId) throw new Error('Forbidden');
+      return ctx.db.pongDraft.update({
+        where: { id },
+        data: { status: 'REJECTED' },
+      });
     },
 
     joinWaitingList: async (
