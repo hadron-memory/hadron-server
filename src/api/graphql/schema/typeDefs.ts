@@ -255,6 +255,7 @@ export const typeDefs = `#graphql
     urn: String!
     name: String!
     description: String
+    systemPrompt: String
     visibility: MemoryVisibility!
     properties: JSON
     memoryItems: [AgentMemoryItem!]!
@@ -541,8 +542,8 @@ export const typeDefs = `#graphql
     setMemorySourceToken(id: ID!, token: String!, expiresAt: String): Memory!
 
     # Agent management (org ADMIN)
-    createAgent(orgId: ID!, name: String!, description: String, visibility: MemoryVisibility): Agent!
-    updateAgent(id: ID!, name: String, urn: String, description: String, visibility: MemoryVisibility): Agent!
+    createAgent(orgId: ID!, name: String!, description: String, systemPrompt: String, visibility: MemoryVisibility): Agent!
+    updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, visibility: MemoryVisibility): Agent!
     deleteAgent(id: ID!): Boolean!
     addMemoryToAgent(agentId: ID!, memoryId: ID!, role: String): Agent!
     updateAgentMemoryRole(agentId: ID!, memoryId: ID!, role: String!): Agent!

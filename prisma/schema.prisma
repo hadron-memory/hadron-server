@@ -430,6 +430,7 @@ model Agent {
   urn            String           @unique
   name           String
   description    String?
+  systemPrompt   String?          @map("system_prompt")
   visibility     MemoryVisibility @default(PRIVATE)
   properties     Json?
   createdAt      DateTime  @default(now()) @map("created_at")
