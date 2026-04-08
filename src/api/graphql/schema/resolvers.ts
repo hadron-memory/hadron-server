@@ -916,6 +916,7 @@ export const resolvers = {
         stationType,
         role,
         description,
+        systemPrompt,
         organizationId,
         userId,
         expiresAt,
@@ -928,6 +929,7 @@ export const resolvers = {
         stationType: string;
         role: string;
         description?: string;
+        systemPrompt?: string;
         organizationId?: string;
         userId?: string;
         expiresAt?: string;
@@ -956,6 +958,7 @@ export const resolvers = {
           keyHash,
           stationType: stationType as StationType,
           description: description ?? null,
+          systemPrompt: systemPrompt ?? null,
           role: role as Role,
           agentTools: agentTools ?? [],
           aiProvider: aiProvider ?? null,
@@ -976,8 +979,8 @@ export const resolvers = {
 
     updateStation: async (
       _: unknown,
-      { id, name, urn, stationType, description, agentTools, aiProvider, aiModel, aiApiKey }: {
-        id: string; name?: string; urn?: string; stationType?: string; description?: string; agentTools?: string[];
+      { id, name, urn, stationType, description, systemPrompt, agentTools, aiProvider, aiModel, aiApiKey }: {
+        id: string; name?: string; urn?: string; stationType?: string; description?: string; systemPrompt?: string; agentTools?: string[];
         aiProvider?: string; aiModel?: string; aiApiKey?: string;
       },
       ctx: Context,
@@ -992,6 +995,7 @@ export const resolvers = {
           ...(urn !== undefined ? { urn } : {}),
           ...(stationType !== undefined ? { stationType: stationType as any } : {}),
           ...(description !== undefined ? { description } : {}),
+          ...(systemPrompt !== undefined ? { systemPrompt } : {}),
           ...(agentTools !== undefined ? { agentTools } : {}),
           ...(aiProvider !== undefined ? { aiProvider } : {}),
           ...(aiModel !== undefined ? { aiModel } : {}),

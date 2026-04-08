@@ -161,6 +161,7 @@ model Station {
   apiKeyShown    Boolean     @default(false) @map("api_key_shown")
   role           Role        @default(READER)
   description    String?
+  systemPrompt   String?     @map("system_prompt")
   agentTools     String[]    @default([]) @map("agent_tools")
   aiProvider     String?     @map("ai_provider")
   aiModel        String?     @map("ai_model")

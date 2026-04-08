@@ -133,6 +133,7 @@ export const typeDefs = `#graphql
     name: String!
     stationType: StationType!
     description: String
+    systemPrompt: String
     role: Role!
     apiKeyShown: Boolean!
     agentTools: [String!]!
@@ -492,8 +493,8 @@ export const typeDefs = `#graphql
     recordUsage(event: UsageEventInput!): Boolean!
 
     # Station management
-    createStation(name: String!, stationType: StationType!, role: Role!, description: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): StationCreated!
-    updateStation(id: ID!, name: String, urn: String, stationType: StationType, description: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): Station!
+    createStation(name: String!, stationType: StationType!, role: Role!, description: String, systemPrompt: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): StationCreated!
+    updateStation(id: ID!, name: String, urn: String, stationType: StationType, description: String, systemPrompt: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): Station!
     regenerateApiKey(id: ID!): StationCreated!
     revokeStation(id: ID!): Boolean!
 
