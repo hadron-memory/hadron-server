@@ -482,6 +482,15 @@ export const resolvers = {
       return ctx.db.station.findUnique({ where: { id } });
     },
 
+    myStation: async (_: unknown, __: unknown, ctx: Context) => {
+      // Returns the station for the current API key (clientId = station ID)
+      if (!ctx.clientId) return null;
+      return ctx.db.station.findUnique({
+        where: { id: ctx.clientId, deletedAt: null },
+        include: STATION_INCLUDE,
+      });
+    },
+
     myStations: async (_: unknown, __: unknown, ctx: Context) => {
       if (!ctx.userId) return [];
       return ctx.db.station.findMany({

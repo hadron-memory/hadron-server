@@ -457,6 +457,9 @@ export const typeDefs = `#graphql
     # Invitation lookup (public — no auth required, used by invite acceptance page)
     invitation(slug: String!): UserInvitation
 
+    # The station authenticated by the current API key (null for JWT users)
+    myStation: Station
+
     # Public memory marketplace — any authenticated user
     publicMemories: [Memory!]!
 
