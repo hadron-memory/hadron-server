@@ -107,6 +107,20 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
   return publicMemories.map((g) => g.id);
 }
 
+/** Prisma `where` clause that restricts sessions to the caller's scope. */
+async function sessionScopeFilter(ctx: Context): Promise<Record<string, unknown>> {
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return {};
+  if (ctx.clientId && !ctx.userId) return { customerId: ctx.clientId };
+  if (ctx.userId) {
+    const stations = await ctx.db.station.findMany({
+      where: { userId: ctx.userId, deletedAt: null },
+      select: { id: true },
+    });
+    return { customerId: { in: stations.map((s) => s.id) } };
+  }
+  return { id: '__none__' }; // unauthenticated — no sessions
+}
+
 /** Prisma `where` clause that restricts nodes to accessible memories. */
 async function memoryAccessFilter(ctx: Context): Promise<Record<string, unknown>> {
   const ids = await getAccessibleMemoryIds(ctx);
@@ -438,8 +452,11 @@ export const resolvers = {
       { type, repo, customerId, limit, offset }: { type?: string; repo?: string; customerId?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
+      // ADMIN/OWNER see all; stations see their own; users see their stations' sessions
+      const scopeFilter = await sessionScopeFilter(ctx);
       return ctx.db.session.findMany({
         where: {
+          ...scopeFilter,
           ...(type ? { type: type as any } : {}),
           ...(repo ? { repo } : {}),
           ...(customerId ? { customerId } : {}),
@@ -452,7 +469,18 @@ export const resolvers = {
     },
 
     session: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      return ctx.db.session.findUnique({ where: { id }, include: SESSION_INCLUDE });
+      const session = await ctx.db.session.findUnique({ where: { id }, include: SESSION_INCLUDE });
+      if (!session) return null;
+      // ADMIN/OWNER can see any session
+      if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return session;
+      // Station can see its own sessions
+      if (ctx.clientId && session.customerId === ctx.clientId) return session;
+      // User can see sessions from their stations
+      if (ctx.userId) {
+        const station = session.customerId ? await ctx.db.station.findUnique({ where: { id: session.customerId } }) : null;
+        if (station?.userId === ctx.userId) return session;
+      }
+      return null;
     },
 
     usageEvents: async (
@@ -505,6 +533,14 @@ export const resolvers = {
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
+      // Verify caller owns this station or is ADMIN
+      if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
+        if (ctx.clientId && ctx.clientId !== stationId) throw new Error('Forbidden');
+        if (ctx.userId) {
+          const station = await ctx.db.station.findUnique({ where: { id: stationId } });
+          if (!station || station.userId !== ctx.userId) throw new Error('Forbidden');
+        }
+      }
       // Get all memory IDs accessible by this station
       const subs = await ctx.db.stationAgentSubscription.findMany({
         where: { stationId, deletedAt: null },
