@@ -660,8 +660,12 @@ export async function createServer(): Promise<Express> {
     if (!notifications?.length) return;
 
     for (const notification of notifications) {
-      const connectionId = notification.clientState;
-      if (!connectionId) continue;
+      const rawClientState = notification.clientState;
+      if (!rawClientState) continue;
+
+      // Determine if this is a sentItems notification (prefixed with "sent:")
+      const isSentItems = rawClientState.startsWith('sent:');
+      const connectionId = isSentItems ? rawClientState.slice(5) : rawClientState;
 
       try {
         const connection = await db.exchangeConnection.findUnique({
@@ -694,12 +698,21 @@ export async function createServer(): Promise<Express> {
 
         const msgResult = await getMessage(refreshToken, messageId);
         const message = msgResult.data;
-        console.log(`[exchange-webhook] New email in ${connection.mailboxEmail}: "${message.subject}" from ${message.from?.emailAddress?.address}`);
 
-        // Trigger Pong to auto-generate a draft reply (runs async, doesn't block webhook response)
-        processIncomingEmail(connectionId, refreshToken, message).catch((err) => {
-          console.error(`[pong] Draft generation failed for message ${messageId}:`, err);
-        });
+        if (isSentItems) {
+          // Sent-items notification: learn from professor's edits
+          const { processSentEmail } = await import('./integrations/pong/template-learning.js');
+          console.log(`[exchange-webhook] Sent email in ${connection.mailboxEmail}: "${message.subject}"`);
+          processSentEmail(connectionId, refreshToken, message).catch((err) => {
+            console.error(`[pong] Template learning failed for sent message ${messageId}:`, err);
+          });
+        } else {
+          // Inbox notification: auto-generate a draft reply
+          console.log(`[exchange-webhook] New email in ${connection.mailboxEmail}: "${message.subject}" from ${message.from?.emailAddress?.address}`);
+          processIncomingEmail(connectionId, refreshToken, message).catch((err) => {
+            console.error(`[pong] Draft generation failed for message ${messageId}:`, err);
+          });
+        }
       } catch (err) {
         console.error(`[exchange-webhook] Error processing notification for connection ${connectionId}:`, err);
       }

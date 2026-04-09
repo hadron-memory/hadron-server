@@ -12,6 +12,7 @@ export interface ListMessagesOptions {
 
 export interface GraphMessage {
   id: string;
+  conversationId?: string;
   subject: string | null;
   from: { emailAddress: { name: string; address: string } } | null;
   receivedDateTime: string;
@@ -269,6 +270,7 @@ export async function createWebhookSubscription(
   refreshToken: string,
   notificationUrl: string,
   clientState: string,
+  resource: string = '/me/mailFolders/inbox/messages',
 ): Promise<GraphCallResult<WebhookSubscription>> {
   const expiry = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000 - 60000);
 
@@ -276,7 +278,7 @@ export async function createWebhookSubscription(
     return client.api('/subscriptions').post({
       changeType: 'created',
       notificationUrl,
-      resource: '/me/mailFolders/inbox/messages',
+      resource,
       expirationDateTime: expiry.toISOString(),
       clientState,
     });

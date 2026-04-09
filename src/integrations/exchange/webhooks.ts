@@ -2,6 +2,7 @@
  * Exchange webhook subscription lifecycle management.
  *
  * - Creates subscriptions when a new Exchange connection is made
+ *   (inbox for new-email notifications, sentItems for learning from edits)
  * - Renews subscriptions before they expire (Graph has 3-day max TTL)
  * - Cleans up stale subscriptions
  */
@@ -35,7 +36,8 @@ function getWebhookUrl(): string {
 }
 
 /**
- * Create a webhook subscription for an Exchange connection.
+ * Create webhook subscriptions for an Exchange connection.
+ * Registers both inbox (new emails) and sentItems (for learning from edits).
  * Called after OAuth completes.
  */
 export async function registerWebhook(connectionId: string): Promise<void> {
@@ -45,25 +47,53 @@ export async function registerWebhook(connectionId: string): Promise<void> {
   const refreshToken = decryptToken(connection.refreshTokenEncrypted);
   const notificationUrl = getWebhookUrl();
 
-  try {
-    // clientState carries the connectionId so the handler can look it up
-    const { data: subscription } = await createWebhookSubscription(
-      refreshToken,
-      notificationUrl,
-      connectionId,
-    );
+  // Register inbox webhook
+  if (!connection.webhookSubscriptionId) {
+    try {
+      const { data: subscription } = await createWebhookSubscription(
+        refreshToken,
+        notificationUrl,
+        connectionId,
+        '/me/mailFolders/inbox/messages',
+      );
 
-    await db.exchangeConnection.update({
-      where: { id: connectionId },
-      data: {
-        webhookSubscriptionId: subscription.id,
-        webhookExpiresAt: new Date(subscription.expirationDateTime),
-      },
-    });
+      await db.exchangeConnection.update({
+        where: { id: connectionId },
+        data: {
+          webhookSubscriptionId: subscription.id,
+          webhookExpiresAt: new Date(subscription.expirationDateTime),
+        },
+      });
 
-    console.log(`[exchange-webhook] Subscription created for ${connection.mailboxEmail} (expires: ${subscription.expirationDateTime})`);
-  } catch (err) {
-    console.error(`[exchange-webhook] Failed to create subscription for ${connection.mailboxEmail}:`, err);
+      console.log(`[exchange-webhook] Inbox subscription created for ${connection.mailboxEmail} (expires: ${subscription.expirationDateTime})`);
+    } catch (err) {
+      console.error(`[exchange-webhook] Failed to create inbox subscription for ${connection.mailboxEmail}:`, err);
+    }
+  }
+
+  // Register sentItems webhook (for learning from professor edits)
+  if (!connection.sentWebhookSubscriptionId) {
+    try {
+      // Use a prefixed clientState so the handler can distinguish inbox vs sentItems
+      const { data: subscription } = await createWebhookSubscription(
+        refreshToken,
+        notificationUrl,
+        `sent:${connectionId}`,
+        '/me/mailFolders/sentItems/messages',
+      );
+
+      await db.exchangeConnection.update({
+        where: { id: connectionId },
+        data: {
+          sentWebhookSubscriptionId: subscription.id,
+          sentWebhookExpiresAt: new Date(subscription.expirationDateTime),
+        },
+      });
+
+      console.log(`[exchange-webhook] SentItems subscription created for ${connection.mailboxEmail} (expires: ${subscription.expirationDateTime})`);
+    } catch (err) {
+      console.error(`[exchange-webhook] Failed to create sentItems subscription for ${connection.mailboxEmail}:`, err);
+    }
   }
 }
 
@@ -74,7 +104,8 @@ export async function registerWebhook(connectionId: string): Promise<void> {
 export async function renewExpiringWebhooks(): Promise<void> {
   const cutoff = new Date(Date.now() + 12 * 60 * 60 * 1000); // 12 hours from now
 
-  const connections = await db.exchangeConnection.findMany({
+  // Renew inbox webhooks
+  const inboxConnections = await db.exchangeConnection.findMany({
     where: {
       deletedAt: null,
       syncEnabled: true,
@@ -83,9 +114,9 @@ export async function renewExpiringWebhooks(): Promise<void> {
     },
   });
 
-  console.log(`[exchange-webhook] Renewing ${connections.length} expiring subscriptions`);
+  console.log(`[exchange-webhook] Renewing ${inboxConnections.length} expiring inbox subscriptions`);
 
-  for (const connection of connections) {
+  for (const connection of inboxConnections) {
     try {
       const refreshToken = decryptToken(connection.refreshTokenEncrypted);
       const { data: renewed } = await renewWebhookSubscription(
@@ -98,22 +129,67 @@ export async function renewExpiringWebhooks(): Promise<void> {
         data: { webhookExpiresAt: new Date(renewed.expirationDateTime) },
       });
 
-      console.log(`[exchange-webhook] Renewed subscription for ${connection.mailboxEmail}`);
+      console.log(`[exchange-webhook] Renewed inbox subscription for ${connection.mailboxEmail}`);
     } catch (err) {
-      console.error(`[exchange-webhook] Failed to renew for ${connection.mailboxEmail}:`, err);
+      console.error(`[exchange-webhook] Failed to renew inbox for ${connection.mailboxEmail}:`, err);
 
       // If renewal fails (subscription deleted/expired), re-register
       try {
+        await db.exchangeConnection.update({
+          where: { id: connection.id },
+          data: { webhookSubscriptionId: null, webhookExpiresAt: null },
+        });
         await registerWebhook(connection.id);
       } catch {
-        console.error(`[exchange-webhook] Re-registration also failed for ${connection.mailboxEmail}`);
+        console.error(`[exchange-webhook] Inbox re-registration also failed for ${connection.mailboxEmail}`);
+      }
+    }
+  }
+
+  // Renew sentItems webhooks
+  const sentConnections = await db.exchangeConnection.findMany({
+    where: {
+      deletedAt: null,
+      syncEnabled: true,
+      sentWebhookSubscriptionId: { not: null },
+      sentWebhookExpiresAt: { lt: cutoff },
+    },
+  });
+
+  console.log(`[exchange-webhook] Renewing ${sentConnections.length} expiring sentItems subscriptions`);
+
+  for (const connection of sentConnections) {
+    try {
+      const refreshToken = decryptToken(connection.refreshTokenEncrypted);
+      const { data: renewed } = await renewWebhookSubscription(
+        refreshToken,
+        connection.sentWebhookSubscriptionId!,
+      );
+
+      await db.exchangeConnection.update({
+        where: { id: connection.id },
+        data: { sentWebhookExpiresAt: new Date(renewed.expirationDateTime) },
+      });
+
+      console.log(`[exchange-webhook] Renewed sentItems subscription for ${connection.mailboxEmail}`);
+    } catch (err) {
+      console.error(`[exchange-webhook] Failed to renew sentItems for ${connection.mailboxEmail}:`, err);
+
+      try {
+        await db.exchangeConnection.update({
+          where: { id: connection.id },
+          data: { sentWebhookSubscriptionId: null, sentWebhookExpiresAt: null },
+        });
+        await registerWebhook(connection.id);
+      } catch {
+        console.error(`[exchange-webhook] SentItems re-registration also failed for ${connection.mailboxEmail}`);
       }
     }
   }
 }
 
 /**
- * Ensure all active connections have webhook subscriptions.
+ * Ensure all active connections have webhook subscriptions (both inbox and sentItems).
  * Run at server startup.
  */
 export async function ensureAllWebhooks(): Promise<void> {
@@ -121,11 +197,14 @@ export async function ensureAllWebhooks(): Promise<void> {
     where: {
       deletedAt: null,
       syncEnabled: true,
-      webhookSubscriptionId: null,
+      OR: [
+        { webhookSubscriptionId: null },
+        { sentWebhookSubscriptionId: null },
+      ],
     },
   });
 
-  console.log(`[exchange-webhook] ${connections.length} connections without webhooks, registering...`);
+  console.log(`[exchange-webhook] ${connections.length} connections missing webhooks, registering...`);
 
   for (const connection of connections) {
     await registerWebhook(connection.id);

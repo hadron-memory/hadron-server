@@ -726,6 +726,8 @@ model ExchangeConnection {
   lastError               String?    @map("last_error")
   webhookSubscriptionId   String?    @map("webhook_subscription_id")
   webhookExpiresAt        DateTime?  @map("webhook_expires_at")
+  sentWebhookSubscriptionId String?  @map("sent_webhook_subscription_id")
+  sentWebhookExpiresAt      DateTime? @map("sent_webhook_expires_at")
   createdAt               DateTime   @default(now()) @map("created_at")
   createdBy               String?    @map("created_by")
   updatedAt               DateTime   @updatedAt @map("updated_at")
@@ -817,6 +819,7 @@ model PongDraft {
   status                  PongDraftStatus @default(PENDING)
   sourceDocs              String[]        @default([]) @map("source_docs") // IDs of knowledge docs used
   reasoning               String?         // why the AI chose this response
+  conversationId          String?         @map("conversation_id")  // Exchange conversation ID for matching sent items
   outlookDraftId          String?         @map("outlook_draft_id") // Outlook draft message ID
   sentAt                  DateTime?       @map("sent_at")
   createdAt               DateTime        @default(now()) @map("created_at")
