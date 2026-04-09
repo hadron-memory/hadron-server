@@ -21,11 +21,14 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.68",
+    "@ai-sdk/openai": "^3.0.52",
     "@apollo/server": "^4.11.0",
     "@azure/msal-node": "^5.1.2",
     "@microsoft/microsoft-graph-client": "^3.0.7",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@prisma/client": "^6.19.2",
+    "ai": "^6.0.154",
     "bcrypt": "^5.1.1",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",

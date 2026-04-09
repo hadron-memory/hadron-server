@@ -14,8 +14,14 @@ export {
   moveMessage,
   listFolders,
   createFolder,
+  createDraftReply,
+  sendDraft,
+  updateDraft,
+  flagMessage,
+  categorizeMessage,
+  setMessageReadStatus,
   createWebhookSubscription,
   renewWebhookSubscription,
   deleteWebhookSubscription,
 } from './client.js';
-export type { GraphMessage, GraphFolder, ListMessagesOptions, WebhookSubscription, GraphCallResult } from './client.js';
+export type { GraphMessage, GraphFolder, ListMessagesOptions, WebhookSubscription, GraphCallResult, MessageFlag } from './client.js';

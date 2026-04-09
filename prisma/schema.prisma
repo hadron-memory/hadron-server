@@ -184,6 +184,7 @@ model Station {
   sessions           Session[]
   usageEvents        UsageEvent[]
   logEntries         StationLogEntry[]
+  pongSettings       PongSettings[]
 
   @@map("stations")
 }
@@ -771,11 +772,13 @@ model PongSettings {
   confidenceThreshold     Float    @default(0.95) @map("confidence_threshold")
   replyTone               String?  @map("reply_tone")     // e.g. "formal", "friendly"
   signatureText           String?  @map("signature_text")
+  stationId               String?  @map("station_id")     // Station whose AI config powers Pong
   createdAt               DateTime @default(now()) @map("created_at")
   updatedAt               DateTime @updatedAt @map("updated_at")
 
   exchangeConnection ExchangeConnection @relation(fields: [exchangeConnectionId], references: [id], onDelete: Cascade)
   user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  station            Station?            @relation(fields: [stationId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@map("pong_settings")
@@ -814,6 +817,7 @@ model PongDraft {
   status                  PongDraftStatus @default(PENDING)
   sourceDocs              String[]        @default([]) @map("source_docs") // IDs of knowledge docs used
   reasoning               String?         // why the AI chose this response
+  outlookDraftId          String?         @map("outlook_draft_id") // Outlook draft message ID
   sentAt                  DateTime?       @map("sent_at")
   createdAt               DateTime        @default(now()) @map("created_at")
   updatedAt               DateTime        @updatedAt @map("updated_at")

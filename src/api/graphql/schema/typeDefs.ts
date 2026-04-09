@@ -348,6 +348,7 @@ export const typeDefs = `#graphql
     confidenceThreshold: Float!
     replyTone: String
     signatureText: String
+    stationId: String
     createdAt: String!
     updatedAt: String!
   }
@@ -377,6 +378,7 @@ export const typeDefs = `#graphql
     status: PongDraftStatus!
     sourceDocs: [String!]!
     reasoning: String
+    outlookDraftId: String
     sentAt: String
     createdAt: String!
     updatedAt: String!
@@ -626,9 +628,11 @@ export const typeDefs = `#graphql
     testExchangeConnection(id: ID!): Boolean!
     exchangeReply(connectionId: ID!, messageId: ID!, body: String!): Boolean!
     exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
+    exchangeFlagMessage(connectionId: ID!, messageId: ID!, flagStatus: String!): Boolean!
+    exchangeCategorizeMessage(connectionId: ID!, messageId: ID!, categories: [String!]!): Boolean!
 
     # Pong AI assistant
-    upsertPongSettings(connectionId: ID!, autoSendEnabled: Boolean, confidenceThreshold: Float, replyTone: String, signatureText: String): PongSettings!
+    upsertPongSettings(connectionId: ID!, autoSendEnabled: Boolean, confidenceThreshold: Float, replyTone: String, signatureText: String, stationId: String): PongSettings!
     addKnowledgeDocument(connectionId: ID!, title: String!, content: String!, docType: String): KnowledgeDocument!
     updateKnowledgeDocument(id: ID!, title: String, content: String, docType: String): KnowledgeDocument!
     deleteKnowledgeDocument(id: ID!): Boolean!

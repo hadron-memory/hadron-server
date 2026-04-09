@@ -14,6 +14,11 @@ import {
   moveMessage,
   listFolders,
   extractErrorMessage,
+  createDraftReply,
+  sendDraft,
+  updateDraft,
+  flagMessage,
+  categorizeMessage,
 } from '../../../integrations/exchange/exchange.js';
 
 export interface Context {
@@ -1946,19 +1951,45 @@ export const resolvers = {
       return true;
     },
 
+    exchangeFlagMessage: async (
+      _: unknown,
+      { connectionId, messageId, flagStatus }: { connectionId: string; messageId: string; flagStatus: string },
+      ctx: Context,
+    ) => {
+      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
+      await flagMessage(refreshToken, messageId, flagStatus as 'notFlagged' | 'flagged' | 'complete');
+      return true;
+    },
+
+    exchangeCategorizeMessage: async (
+      _: unknown,
+      { connectionId, messageId, categories }: { connectionId: string; messageId: string; categories: string[] },
+      ctx: Context,
+    ) => {
+      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
+      await categorizeMessage(refreshToken, messageId, categories);
+      return true;
+    },
+
     // ── Pong AI assistant mutations ─────────────────────────────────────
 
     upsertPongSettings: async (
       _: unknown,
-      { connectionId, autoSendEnabled, confidenceThreshold, replyTone, signatureText }: {
+      { connectionId, autoSendEnabled, confidenceThreshold, replyTone, signatureText, stationId }: {
         connectionId: string; autoSendEnabled?: boolean; confidenceThreshold?: number;
-        replyTone?: string; signatureText?: string;
+        replyTone?: string; signatureText?: string; stationId?: string;
       },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Authentication required');
       const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
       if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+
+      // Validate the station exists and belongs to the user
+      if (stationId) {
+        const station = await ctx.db.station.findUniqueOrThrow({ where: { id: stationId } });
+        if (station.userId !== ctx.userId) throw new Error('Station does not belong to you');
+      }
 
       return ctx.db.pongSettings.upsert({
         where: { exchangeConnectionId: connectionId },
@@ -1969,12 +2000,14 @@ export const resolvers = {
           confidenceThreshold: confidenceThreshold ?? 0.95,
           replyTone: replyTone ?? null,
           signatureText: signatureText ?? null,
+          stationId: stationId ?? null,
         },
         update: {
           ...(autoSendEnabled !== undefined ? { autoSendEnabled } : {}),
           ...(confidenceThreshold !== undefined ? { confidenceThreshold } : {}),
           ...(replyTone !== undefined ? { replyTone } : {}),
           ...(signatureText !== undefined ? { signatureText } : {}),
+          ...(stationId !== undefined ? { stationId } : {}),
         },
       });
     },
@@ -2041,7 +2074,20 @@ export const resolvers = {
       const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
       if (connection.userId !== ctx.userId) throw new Error('Forbidden');
 
-      return ctx.db.pongDraft.upsert({
+      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
+
+      // Create a real draft reply in Outlook so the professor sees it in their Drafts
+      const { data: outlookDraft } = await createDraftReply(refreshToken, messageId, draftBody);
+
+      // Categorize the original email so the professor can spot Pong-handled emails at a glance
+      await categorizeMessage(refreshToken, messageId, ['Pong Draft Ready']).catch(() => {
+        // Category may not exist yet in the mailbox — non-fatal
+      });
+
+      // Flag the original email for follow-up visibility
+      await flagMessage(refreshToken, messageId, 'flagged').catch(() => {});
+
+      const draft = await ctx.db.pongDraft.upsert({
         where: { exchangeConnectionId_messageId: { exchangeConnectionId: connectionId, messageId } },
         create: {
           exchangeConnectionId: connectionId,
@@ -2054,6 +2100,7 @@ export const resolvers = {
           sourceDocs: sourceDocs ?? [],
           reasoning: reasoning ?? null,
           status: 'PENDING',
+          outlookDraftId: outlookDraft.id,
         },
         update: {
           draftBody,
@@ -2063,8 +2110,21 @@ export const resolvers = {
           status: 'PENDING',
           editedBody: null,
           sentAt: null,
+          outlookDraftId: outlookDraft.id,
         },
       });
+
+      // Auto-send if confidence exceeds the user's threshold
+      const settings = await ctx.db.pongSettings.findUnique({ where: { exchangeConnectionId: connectionId } });
+      if (settings?.autoSendEnabled && confidence >= (settings.confidenceThreshold ?? 0.95)) {
+        await sendDraft(refreshToken, outlookDraft.id);
+        return ctx.db.pongDraft.update({
+          where: { id: draft.id },
+          data: { status: 'APPROVED', sentAt: new Date() },
+        });
+      }
+
+      return draft;
     },
 
     approvePongDraft: async (
@@ -2077,12 +2137,25 @@ export const resolvers = {
       if (draft.userId !== ctx.userId) throw new Error('Forbidden');
       if (draft.status !== 'PENDING') throw new Error(`Draft is already ${draft.status}`);
 
-      // Send the reply via Exchange
       const { refreshToken } = await getExchangeRefreshToken(ctx, draft.exchangeConnectionId);
-      const bodyToSend = editedBody ?? draft.draftBody;
-      await replyToMessage(refreshToken, draft.messageId, bodyToSend);
 
-      // Update draft status
+      // If the professor edited the body, update the Outlook draft first
+      if (editedBody && draft.outlookDraftId) {
+        await updateDraft(refreshToken, draft.outlookDraftId, editedBody);
+      }
+
+      // Send the Outlook draft (or fall back to direct reply if no draft ID)
+      if (draft.outlookDraftId) {
+        await sendDraft(refreshToken, draft.outlookDraftId);
+      } else {
+        // Legacy fallback for drafts created before Outlook draft integration
+        await replyToMessage(refreshToken, draft.messageId, editedBody ?? draft.draftBody);
+      }
+
+      // Remove the flag/category from the original message now that it's handled
+      await categorizeMessage(refreshToken, draft.messageId, []).catch(() => {});
+      await flagMessage(refreshToken, draft.messageId, 'complete').catch(() => {});
+
       return ctx.db.pongDraft.update({
         where: { id },
         data: {

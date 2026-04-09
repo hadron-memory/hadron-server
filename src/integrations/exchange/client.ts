@@ -164,6 +164,100 @@ export async function createFolder(
   });
 }
 
+// ── Draft & flagging operations (Pong agent) ─────────────────────────
+
+/**
+ * Create a draft reply to a message (does NOT send it).
+ * The professor sees it in Outlook as a draft they can review before sending.
+ */
+export async function createDraftReply(
+  refreshToken: string,
+  messageId: string,
+  body: string,
+): Promise<GraphCallResult<GraphMessage>> {
+  return withToken(refreshToken, async (client) => {
+    // createReply creates a draft reply in the Drafts folder
+    const draft = await client.api(`/me/messages/${messageId}/createReply`).post({
+      message: {
+        body: { contentType: 'html', content: body },
+      },
+    });
+    return draft as GraphMessage;
+  });
+}
+
+/**
+ * Send an existing draft message (e.g. auto-send when confidence >= threshold).
+ */
+export async function sendDraft(
+  refreshToken: string,
+  draftMessageId: string,
+): Promise<GraphCallResult<void>> {
+  return withToken(refreshToken, async (client) => {
+    await client.api(`/me/messages/${draftMessageId}/send`).post({});
+  });
+}
+
+/**
+ * Update a draft message body (e.g. regenerate reply before sending).
+ */
+export async function updateDraft(
+  refreshToken: string,
+  draftMessageId: string,
+  body: string,
+): Promise<GraphCallResult<GraphMessage>> {
+  return withToken(refreshToken, async (client) => {
+    return client.api(`/me/messages/${draftMessageId}`).patch({
+      body: { contentType: 'html', content: body },
+    });
+  });
+}
+
+export type MessageFlag = 'notFlagged' | 'flagged' | 'complete';
+
+/**
+ * Flag or unflag a message. Outlook shows flagged messages prominently.
+ * Pong uses this to mark emails it has drafted replies for.
+ */
+export async function flagMessage(
+  refreshToken: string,
+  messageId: string,
+  flagStatus: MessageFlag,
+): Promise<GraphCallResult<void>> {
+  return withToken(refreshToken, async (client) => {
+    await client.api(`/me/messages/${messageId}`).patch({
+      flag: { flagStatus },
+    });
+  });
+}
+
+/**
+ * Set categories on a message. Categories appear as color-coded labels in Outlook.
+ * Pong uses a "Pong Draft Ready" category so professors can filter at a glance.
+ */
+export async function categorizeMessage(
+  refreshToken: string,
+  messageId: string,
+  categories: string[],
+): Promise<GraphCallResult<void>> {
+  return withToken(refreshToken, async (client) => {
+    await client.api(`/me/messages/${messageId}`).patch({ categories });
+  });
+}
+
+/**
+ * Mark a message as read or unread.
+ */
+export async function setMessageReadStatus(
+  refreshToken: string,
+  messageId: string,
+  isRead: boolean,
+): Promise<GraphCallResult<void>> {
+  return withToken(refreshToken, async (client) => {
+    await client.api(`/me/messages/${messageId}`).patch({ isRead });
+  });
+}
+
 // ── Webhook subscription management ────────────────────────────────────
 
 export interface WebhookSubscription {

@@ -21,6 +21,8 @@ import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
+import { registerWebhook, startWebhookLifecycle } from './integrations/exchange/webhooks.js';
+import { processIncomingEmail } from './integrations/pong/generate.js';
 import {
   provisionPersonalWorkspace,
   hasPersonalWorkspace,
@@ -610,7 +612,17 @@ export async function createServer(): Promise<Express> {
         },
       });
 
-      console.log(`[microsoft-oauth] Connected Exchange for ${mailboxEmail} → org ${pending.orgId}`);
+      console.log(`[microsoft-oauth] Connected Exchange for ${mailboxEmail} → org ${orgId}`);
+
+      // Register webhook subscription so Pong can auto-process incoming emails
+      const newConnection = await db.exchangeConnection.findUnique({
+        where: { organizationId_mailboxEmail: { organizationId: orgId, mailboxEmail } },
+      });
+      if (newConnection) {
+        registerWebhook(newConnection.id).catch((err) => {
+          console.error(`[microsoft-oauth] Webhook registration failed:`, err);
+        });
+      }
 
       const successUrl = new URL(pending.redirect, frontendUrl);
       successUrl.searchParams.set('exchangeConnected', '1');
@@ -673,7 +685,7 @@ export async function createServer(): Promise<Express> {
         const refreshToken = decrypt(connection.refreshTokenEncrypted);
 
         // Import exchange client functions
-        const { getMessage, replyToMessage } = await import('./integrations/exchange/exchange.js');
+        const { getMessage } = await import('./integrations/exchange/exchange.js');
 
         // Extract message ID from resource path (e.g. "Users/{id}/Messages/{messageId}")
         const resourceParts = notification.resource?.split('/') ?? [];
@@ -684,8 +696,10 @@ export async function createServer(): Promise<Express> {
         const message = msgResult.data;
         console.log(`[exchange-webhook] New email in ${connection.mailboxEmail}: "${message.subject}" from ${message.from?.emailAddress?.address}`);
 
-        // Store message metadata so the portal can generate a draft when the professor opens the inbox
-        // AI draft generation is handled by the portal using the Vercel AI SDK
+        // Trigger Pong to auto-generate a draft reply (runs async, doesn't block webhook response)
+        processIncomingEmail(connectionId, refreshToken, message).catch((err) => {
+          console.error(`[pong] Draft generation failed for message ${messageId}:`, err);
+        });
       } catch (err) {
         console.error(`[exchange-webhook] Error processing notification for connection ${connectionId}:`, err);
       }
@@ -711,6 +725,9 @@ export async function createServer(): Promise<Express> {
   app.get('/health', (_req, res) => {
     res.json({ ok: true });
   });
+
+  // Start Exchange webhook lifecycle (register missing, renew expiring)
+  startWebhookLifecycle();
 
   return app;
 }
