@@ -63,16 +63,16 @@ export async function provisionPersonalWorkspace(
     },
   });
 
-  // 4. Create workstation station with API key
+  // 4. Create chatbot station with API key
   const rawKey = randomBytes(32).toString('hex');
   const keyHash = await bcrypt.hash(rawKey, 12);
   const station = await db.station.create({
     data: {
       id: generateId(),
-      name: 'My Workstation',
-      urn: `${urn}:my-workstation`,
+      name: 'My Chatbot',
+      urn: `${urn}:my-chatbot`,
       keyHash,
-      stationType: 'WORKSTATION',
+      stationType: 'CHATBOT',
       role: 'READER',
       organizationId: org.id,
       userId,
