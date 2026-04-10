@@ -17,6 +17,8 @@ export {
   createDraftReply,
   sendDraft,
   updateDraft,
+  deleteDraft,
+  listDraftMessages,
   flagMessage,
   categorizeMessage,
   setMessageReadStatus,

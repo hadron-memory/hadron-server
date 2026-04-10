@@ -20,6 +20,30 @@ import {
   flagMessage,
   categorizeMessage,
 } from '../../../integrations/exchange/exchange.js';
+import {
+  listPongKnowledge,
+  addPongKnowledge as addPongKnowledgeOp,
+  updatePongKnowledge as updatePongKnowledgeOp,
+  deletePongKnowledge as deletePongKnowledgeOp,
+} from '../../../integrations/pong/knowledge.js';
+import {
+  getPongSettings as getPongSettingsOp,
+  upsertPongSettings as upsertPongSettingsOp,
+  pausePong as pausePongOp,
+  resumePong as resumePongOp,
+  addPongExclusionRule as addPongExclusionRuleOp,
+  removePongExclusionRule as removePongExclusionRuleOp,
+  type PongSettings as PongSettingsRecord,
+} from '../../../integrations/pong/settings.js';
+import {
+  createPongDraft as createPongDraftOp,
+  listPongDrafts as listPongDraftsOp,
+  readPongDraft as readPongDraftOp,
+  editPongDraft as editPongDraftOp,
+  approvePongDraft as approvePongDraftOp,
+  rejectPongDraft as rejectPongDraftOp,
+  countCurrentPongDrafts,
+} from '../../../integrations/pong/drafts.js';
 
 export interface Context {
   db: PrismaClient;
@@ -225,6 +249,23 @@ const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, tak
 
 const toISO = (v: Date | string | null | undefined): string | null =>
   v == null ? null : v instanceof Date ? v.toISOString() : v;
+
+function formatPongSettings(settings: PongSettingsRecord) {
+  return {
+    id: settings.id,
+    exchangeConnectionId: settings.exchangeConnectionId,
+    userId: settings.userId,
+    autoSendEnabled: settings.autoSendEnabled,
+    confidenceThreshold: settings.confidenceThreshold,
+    replyTone: settings.replyTone,
+    signatureText: settings.signatureText,
+    stationId: settings.stationId,
+    pausedUntil: toISO(settings.pausedUntil),
+    exclusionRules: settings.exclusionRules,
+    createdAt: settings.createdAt.toISOString(),
+    updatedAt: settings.updatedAt.toISOString(),
+  };
+}
 
 function getEncryptionKey(): Buffer {
   const key = process.env.HADRON_ENCRYPTION_KEY;
@@ -729,39 +770,54 @@ export const resolvers = {
 
     pongSettings: async (_: unknown, { connectionId }: { connectionId: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Authentication required');
-      return ctx.db.pongSettings.findUnique({
-        where: { exchangeConnectionId: connectionId },
-      });
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+      const settings = await getPongSettingsOp(ctx.db, connectionId);
+      return settings ? formatPongSettings(settings) : null;
     },
 
-    knowledgeDocuments: async (_: unknown, { connectionId }: { connectionId: string }, ctx: Context) => {
+    pongKnowledge: async (_: unknown, { connectionId }: { connectionId: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Authentication required');
-      return ctx.db.knowledgeDocument.findMany({
-        where: { exchangeConnectionId: connectionId, deletedAt: null },
-        orderBy: { createdAt: 'desc' },
-      });
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+      const docs = await listPongKnowledge(ctx.db, connectionId);
+      return docs.map((d) => ({
+        ...d,
+        createdAt: d.createdAt.toISOString(),
+        updatedAt: d.updatedAt.toISOString(),
+      }));
     },
 
     pongDrafts: async (
       _: unknown,
-      { connectionId, status, limit, offset }: { connectionId: string; status?: string; limit?: number; offset?: number },
+      { connectionId, status, limit }: { connectionId: string; status?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Authentication required');
-      return ctx.db.pongDraft.findMany({
-        where: {
-          exchangeConnectionId: connectionId,
-          ...(status ? { status: status as any } : {}),
-        },
-        orderBy: { createdAt: 'desc' },
-        take: limit ?? 50,
-        skip: offset ?? 0,
-      });
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+      // Exchange is the source of truth — only PENDING drafts exist (if the
+      // draft is gone, it was sent or discarded). We ignore the status filter
+      // unless it asks for PENDING (or is omitted).
+      if (status && status !== 'PENDING') return [];
+      return listPongDraftsOp(ctx.db, connectionId, limit ?? 50);
     },
 
     pongDraft: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Authentication required');
-      return ctx.db.pongDraft.findUnique({ where: { id } });
+      // id here is the Outlook draft id. We need to know the connection to
+      // decrypt the refresh token. Since a user can have multiple connections,
+      // we try each of the user's connections until we find one that resolves
+      // the draft.
+      const connections = await ctx.db.exchangeConnection.findMany({
+        where: { userId: ctx.userId, deletedAt: null },
+        select: { id: true },
+      });
+      for (const conn of connections) {
+        const draft = await readPongDraftOp(ctx.db, conn.id, id).catch(() => null);
+        if (draft) return draft;
+      }
+      return null;
     },
 
     pongStatus: async (
@@ -774,28 +830,19 @@ export const resolvers = {
       if (connection.userId !== ctx.userId) throw new Error('Forbidden');
 
       const days = sinceDays ?? 7;
-      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-
-      const drafts = await ctx.db.pongDraft.findMany({
-        where: { exchangeConnectionId: connectionId, createdAt: { gte: since } },
-        select: { status: true },
-      });
-
-      const counts = { PENDING: 0, APPROVED: 0, AUTO_SENT: 0, EDITED: 0, REJECTED: 0 };
-      for (const d of drafts) {
-        counts[d.status as keyof typeof counts] = (counts[d.status as keyof typeof counts] ?? 0) + 1;
-      }
-
-      const settings = await ctx.db.pongSettings.findUnique({ where: { exchangeConnectionId: connectionId } });
+      // Without a DB there is no draft history. We report the current pending
+      // count and leave historical fields at zero. See Phase 3 notes.
+      const pending = await countCurrentPongDrafts(ctx.db, connectionId).catch(() => 0);
+      const settings = await getPongSettingsOp(ctx.db, connectionId).catch(() => null);
 
       return {
-        drafted: drafts.length,
-        autoSent: counts.AUTO_SENT,
-        approved: counts.APPROVED,
-        edited: counts.EDITED,
-        rejected: counts.REJECTED,
-        pending: counts.PENDING,
-        pausedUntil: settings?.pausedUntil?.toISOString() ?? null,
+        drafted: pending,
+        autoSent: 0,
+        approved: 0,
+        edited: 0,
+        rejected: 0,
+        pending,
+        pausedUntil: settings?.pausedUntil ? settings.pausedUntil.toISOString() : null,
         sinceDays: days,
       };
     },
@@ -2045,41 +2092,26 @@ export const resolvers = {
       const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
       if (connection.userId !== ctx.userId) throw new Error('Forbidden');
 
-      // Validate the station exists and belongs to the user
       if (stationId) {
         const station = await ctx.db.station.findUniqueOrThrow({ where: { id: stationId } });
         if (station.userId !== ctx.userId) throw new Error('Station does not belong to you');
       }
 
-      const pausedUntilDate = pausedUntil === null
-        ? null
-        : pausedUntil !== undefined
-          ? new Date(pausedUntil)
-          : undefined;
-
-      return ctx.db.pongSettings.upsert({
-        where: { exchangeConnectionId: connectionId },
-        create: {
-          exchangeConnectionId: connectionId,
-          userId: ctx.userId,
-          autoSendEnabled: autoSendEnabled ?? false,
-          confidenceThreshold: confidenceThreshold ?? 0.95,
-          replyTone: replyTone ?? null,
-          signatureText: signatureText ?? null,
-          stationId: stationId ?? null,
-          pausedUntil: pausedUntilDate ?? null,
-          exclusionRules: (exclusionRules ?? []) as unknown as Prisma.InputJsonValue,
+      const settings = await upsertPongSettingsOp(
+        ctx.db,
+        connectionId,
+        {
+          autoSendEnabled,
+          confidenceThreshold,
+          replyTone,
+          signatureText,
+          stationId,
+          pausedUntil,
+          exclusionRules,
         },
-        update: {
-          ...(autoSendEnabled !== undefined ? { autoSendEnabled } : {}),
-          ...(confidenceThreshold !== undefined ? { confidenceThreshold } : {}),
-          ...(replyTone !== undefined ? { replyTone } : {}),
-          ...(signatureText !== undefined ? { signatureText } : {}),
-          ...(stationId !== undefined ? { stationId } : {}),
-          ...(pausedUntilDate !== undefined ? { pausedUntil: pausedUntilDate } : {}),
-          ...(exclusionRules !== undefined ? { exclusionRules: exclusionRules as unknown as Prisma.InputJsonValue } : {}),
-        },
-      });
+        ctx.userId,
+      );
+      return formatPongSettings(settings);
     },
 
     pausePong: async (
@@ -2090,20 +2122,9 @@ export const resolvers = {
       if (!ctx.userId) throw new Error('Authentication required');
       const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
       if (connection.userId !== ctx.userId) throw new Error('Forbidden');
-
-      // Default: pause indefinitely (year 9999) if no until specified
-      const pausedUntilDate = until ? new Date(until) : new Date('9999-12-31T23:59:59Z');
-
-      return ctx.db.pongSettings.upsert({
-        where: { exchangeConnectionId: connectionId },
-        create: {
-          exchangeConnectionId: connectionId,
-          userId: ctx.userId,
-          pausedUntil: pausedUntilDate,
-          exclusionRules: [] as unknown as Prisma.InputJsonValue,
-        },
-        update: { pausedUntil: pausedUntilDate },
-      });
+      const pausedUntilIso = until ?? '9999-12-31T23:59:59.000Z';
+      const settings = await pausePongOp(ctx.db, connectionId, pausedUntilIso, ctx.userId);
+      return formatPongSettings(settings);
     },
 
     resumePong: async (
@@ -2114,17 +2135,8 @@ export const resolvers = {
       if (!ctx.userId) throw new Error('Authentication required');
       const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
       if (connection.userId !== ctx.userId) throw new Error('Forbidden');
-
-      return ctx.db.pongSettings.upsert({
-        where: { exchangeConnectionId: connectionId },
-        create: {
-          exchangeConnectionId: connectionId,
-          userId: ctx.userId,
-          pausedUntil: null,
-          exclusionRules: [] as unknown as Prisma.InputJsonValue,
-        },
-        update: { pausedUntil: null },
-      });
+      const settings = await resumePongOp(ctx.db, connectionId, ctx.userId);
+      return formatPongSettings(settings);
     },
 
     addPongExclusionRule: async (
@@ -2135,20 +2147,8 @@ export const resolvers = {
       if (!ctx.userId) throw new Error('Authentication required');
       const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
       if (connection.userId !== ctx.userId) throw new Error('Forbidden');
-
-      const existing = await ctx.db.pongSettings.findUnique({ where: { exchangeConnectionId: connectionId } });
-      const rules = (existing?.exclusionRules as unknown as PongExclusionRule[] | null) ?? [];
-      const next = [...rules, rule];
-
-      return ctx.db.pongSettings.upsert({
-        where: { exchangeConnectionId: connectionId },
-        create: {
-          exchangeConnectionId: connectionId,
-          userId: ctx.userId,
-          exclusionRules: next as unknown as Prisma.InputJsonValue,
-        },
-        update: { exclusionRules: next as unknown as Prisma.InputJsonValue },
-      });
+      const settings = await addPongExclusionRuleOp(ctx.db, connectionId, rule, ctx.userId);
+      return formatPongSettings(settings);
     },
 
     removePongExclusionRule: async (
@@ -2159,19 +2159,11 @@ export const resolvers = {
       if (!ctx.userId) throw new Error('Authentication required');
       const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
       if (connection.userId !== ctx.userId) throw new Error('Forbidden');
-
-      const existing = await ctx.db.pongSettings.findUniqueOrThrow({ where: { exchangeConnectionId: connectionId } });
-      const rules = (existing.exclusionRules as unknown as PongExclusionRule[] | null) ?? [];
-      if (index < 0 || index >= rules.length) throw new Error('Exclusion rule index out of range');
-      const next = rules.filter((_r, i) => i !== index);
-
-      return ctx.db.pongSettings.update({
-        where: { exchangeConnectionId: connectionId },
-        data: { exclusionRules: next as unknown as Prisma.InputJsonValue },
-      });
+      const settings = await removePongExclusionRuleOp(ctx.db, connectionId, index, ctx.userId);
+      return formatPongSettings(settings);
     },
 
-    addKnowledgeDocument: async (
+    addPongKnowledge: async (
       _: unknown,
       { connectionId, title, content, docType }: { connectionId: string; title: string; content: string; docType?: string },
       ctx: Context,
@@ -2179,46 +2171,44 @@ export const resolvers = {
       if (!ctx.userId) throw new Error('Authentication required');
       const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
       if (connection.userId !== ctx.userId) throw new Error('Forbidden');
-
-      return ctx.db.knowledgeDocument.create({
-        data: {
-          exchangeConnectionId: connectionId,
-          userId: ctx.userId,
-          title: title.trim(),
-          content,
-          docType: docType ?? null,
-        },
+      const doc = await addPongKnowledgeOp(ctx.db, {
+        connectionId,
+        title,
+        content,
+        docType: docType ?? null,
+        createdBy: ctx.userId,
       });
+      return { ...doc, createdAt: doc.createdAt.toISOString(), updatedAt: doc.updatedAt.toISOString() };
     },
 
-    updateKnowledgeDocument: async (
+    updatePongKnowledge: async (
       _: unknown,
-      { id, title, content, docType }: { id: string; title?: string; content?: string; docType?: string },
+      { connectionId, id, title, content, docType }: { connectionId: string; id: string; title?: string; content?: string; docType?: string },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Authentication required');
-      const doc = await ctx.db.knowledgeDocument.findUniqueOrThrow({ where: { id } });
-      if (doc.userId !== ctx.userId) throw new Error('Forbidden');
-
-      return ctx.db.knowledgeDocument.update({
-        where: { id },
-        data: {
-          ...(title !== undefined ? { title: title.trim() } : {}),
-          ...(content !== undefined ? { content } : {}),
-          ...(docType !== undefined ? { docType } : {}),
-        },
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+      const doc = await updatePongKnowledgeOp(ctx.db, {
+        connectionId,
+        id,
+        title,
+        content,
+        docType,
+        editedBy: ctx.userId,
       });
+      return { ...doc, createdAt: doc.createdAt.toISOString(), updatedAt: doc.updatedAt.toISOString() };
     },
 
-    deleteKnowledgeDocument: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    deletePongKnowledge: async (
+      _: unknown,
+      { connectionId, id }: { connectionId: string; id: string },
+      ctx: Context,
+    ) => {
       if (!ctx.userId) throw new Error('Authentication required');
-      const doc = await ctx.db.knowledgeDocument.findUniqueOrThrow({ where: { id } });
-      if (doc.userId !== ctx.userId) throw new Error('Forbidden');
-      await ctx.db.knowledgeDocument.update({
-        where: { id },
-        data: { deletedAt: new Date() },
-      });
-      return true;
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+      return deletePongKnowledgeOp(ctx.db, { connectionId, id });
     },
 
     storePongDraft: async (
@@ -2233,57 +2223,17 @@ export const resolvers = {
       const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
       if (connection.userId !== ctx.userId) throw new Error('Forbidden');
 
-      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
-
-      // Create a real draft reply in Outlook so the professor sees it in their Drafts
-      const { data: outlookDraft } = await createDraftReply(refreshToken, messageId, draftBody);
-
-      // Categorize the original email so the professor can spot Pong-handled emails at a glance
-      await categorizeMessage(refreshToken, messageId, ['Pong Draft Ready']).catch(() => {
-        // Category may not exist yet in the mailbox — non-fatal
+      return createPongDraftOp(ctx.db, {
+        connectionId,
+        userId: ctx.userId,
+        messageId,
+        messageSubject: messageSubject ?? null,
+        messageFrom: messageFrom ?? null,
+        draftBody,
+        confidence,
+        reasoning: reasoning ?? null,
+        sourceDocs: sourceDocs ?? [],
       });
-
-      // Flag the original email for follow-up visibility
-      await flagMessage(refreshToken, messageId, 'flagged').catch(() => {});
-
-      const draft = await ctx.db.pongDraft.upsert({
-        where: { exchangeConnectionId_messageId: { exchangeConnectionId: connectionId, messageId } },
-        create: {
-          exchangeConnectionId: connectionId,
-          userId: ctx.userId,
-          messageId,
-          messageSubject: messageSubject ?? null,
-          messageFrom: messageFrom ?? null,
-          draftBody,
-          confidence,
-          sourceDocs: sourceDocs ?? [],
-          reasoning: reasoning ?? null,
-          status: 'PENDING',
-          outlookDraftId: outlookDraft.id,
-        },
-        update: {
-          draftBody,
-          confidence,
-          sourceDocs: sourceDocs ?? [],
-          reasoning: reasoning ?? null,
-          status: 'PENDING',
-          editedBody: null,
-          sentAt: null,
-          outlookDraftId: outlookDraft.id,
-        },
-      });
-
-      // Auto-send if confidence exceeds the user's threshold
-      const settings = await ctx.db.pongSettings.findUnique({ where: { exchangeConnectionId: connectionId } });
-      if (settings?.autoSendEnabled && confidence >= (settings.confidenceThreshold ?? 0.95)) {
-        await sendDraft(refreshToken, outlookDraft.id);
-        return ctx.db.pongDraft.update({
-          where: { id: draft.id },
-          data: { status: 'APPROVED', sentAt: new Date() },
-        });
-      }
-
-      return draft;
     },
 
     editPongDraft: async (
@@ -2292,21 +2242,19 @@ export const resolvers = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Authentication required');
-      const draft = await ctx.db.pongDraft.findUniqueOrThrow({ where: { id } });
-      if (draft.userId !== ctx.userId) throw new Error('Forbidden');
-      if (draft.status !== 'PENDING') throw new Error(`Draft is already ${draft.status}`);
-
-      // If the draft has an Outlook draft id, update the Outlook copy too so the
-      // user sees the new body in their Drafts folder.
-      if (draft.outlookDraftId) {
-        const { refreshToken } = await getExchangeRefreshToken(ctx, draft.exchangeConnectionId);
-        await updateDraft(refreshToken, draft.outlookDraftId, body);
-      }
-
-      return ctx.db.pongDraft.update({
-        where: { id },
-        data: { editedBody: body },
+      // id is the Outlook draft id. Find which of the user's connections owns it.
+      const connections = await ctx.db.exchangeConnection.findMany({
+        where: { userId: ctx.userId, deletedAt: null },
+        select: { id: true },
       });
+      for (const conn of connections) {
+        const existing = await readPongDraftOp(ctx.db, conn.id, id).catch(() => null);
+        if (existing) {
+          await editPongDraftOp(ctx.db, conn.id, id, body);
+          return readPongDraftOp(ctx.db, conn.id, id);
+        }
+      }
+      throw new Error('Draft not found');
     },
 
     approvePongDraft: async (
@@ -2315,47 +2263,41 @@ export const resolvers = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Authentication required');
-      const draft = await ctx.db.pongDraft.findUniqueOrThrow({ where: { id } });
-      if (draft.userId !== ctx.userId) throw new Error('Forbidden');
-      if (draft.status !== 'PENDING') throw new Error(`Draft is already ${draft.status}`);
-
-      const { refreshToken } = await getExchangeRefreshToken(ctx, draft.exchangeConnectionId);
-
-      // If the professor edited the body, update the Outlook draft first
-      if (editedBody && draft.outlookDraftId) {
-        await updateDraft(refreshToken, draft.outlookDraftId, editedBody);
-      }
-
-      // Send the Outlook draft (or fall back to direct reply if no draft ID)
-      if (draft.outlookDraftId) {
-        await sendDraft(refreshToken, draft.outlookDraftId);
-      } else {
-        // Legacy fallback for drafts created before Outlook draft integration
-        await replyToMessage(refreshToken, draft.messageId, editedBody ?? draft.draftBody);
-      }
-
-      // Remove the flag/category from the original message now that it's handled
-      await categorizeMessage(refreshToken, draft.messageId, []).catch(() => {});
-      await flagMessage(refreshToken, draft.messageId, 'complete').catch(() => {});
-
-      return ctx.db.pongDraft.update({
-        where: { id },
-        data: {
-          status: editedBody ? 'EDITED' : 'APPROVED',
-          editedBody: editedBody ?? null,
-          sentAt: new Date(),
-        },
+      const connections = await ctx.db.exchangeConnection.findMany({
+        where: { userId: ctx.userId, deletedAt: null },
+        select: { id: true },
       });
+      for (const conn of connections) {
+        const existing = await readPongDraftOp(ctx.db, conn.id, id).catch(() => null);
+        if (existing) {
+          await approvePongDraftOp(ctx.db, conn.id, id, editedBody ?? null);
+          // After send the draft no longer exists in the Drafts folder, so
+          // return a synthetic record reflecting the sent state.
+          return {
+            ...existing,
+            status: 'APPROVED',
+            editedBody: editedBody ?? null,
+            sentAt: new Date().toISOString(),
+          };
+        }
+      }
+      throw new Error('Draft not found');
     },
 
     rejectPongDraft: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Authentication required');
-      const draft = await ctx.db.pongDraft.findUniqueOrThrow({ where: { id } });
-      if (draft.userId !== ctx.userId) throw new Error('Forbidden');
-      return ctx.db.pongDraft.update({
-        where: { id },
-        data: { status: 'REJECTED' },
+      const connections = await ctx.db.exchangeConnection.findMany({
+        where: { userId: ctx.userId, deletedAt: null },
+        select: { id: true },
       });
+      for (const conn of connections) {
+        const existing = await readPongDraftOp(ctx.db, conn.id, id).catch(() => null);
+        if (existing) {
+          await rejectPongDraftOp(ctx.db, conn.id, id);
+          return { ...existing, status: 'REJECTED' };
+        }
+      }
+      throw new Error('Draft not found');
     },
 
     joinWaitingList: async (

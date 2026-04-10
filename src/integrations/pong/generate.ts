@@ -10,13 +10,10 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createDecipheriv } from 'crypto';
 import { db } from '../db/client.js';
-import {
-  createDraftReply,
-  sendDraft,
-  flagMessage,
-  categorizeMessage,
-} from '../exchange/exchange.js';
 import type { GraphMessage } from '../exchange/exchange.js';
+import { listPongKnowledge } from './knowledge.js';
+import { getPongSettings, type PongExclusionRule } from './settings.js';
+import { createPongDraft } from './drafts.js';
 
 const PONG_SYSTEM_PROMPT = `You are Pong, an AI email assistant for a university professor. Your job is to draft replies to student emails using ONLY the professor's knowledge base documents provided below.
 
@@ -71,12 +68,6 @@ function createLanguageModel(provider: string, apiKey: string, model: string) {
  * Process an incoming email: generate a draft reply, flag/categorize, and
  * auto-send if confidence exceeds the user's threshold.
  */
-interface PongExclusionRule {
-  senderPattern?: string;
-  subjectPattern?: string;
-  reason?: string;
-}
-
 function matchesExclusionRule(
   rule: PongExclusionRule,
   fromAddress: string,
@@ -95,16 +86,13 @@ function matchesExclusionRule(
 
 export async function processIncomingEmail(
   connectionId: string,
-  refreshToken: string,
   message: GraphMessage,
 ): Promise<void> {
   const fromAddress = message.from?.emailAddress?.address ?? 'unknown';
   const subject = message.subject ?? '(no subject)';
 
-  // Load Pong settings for this connection
-  const settings = await db.pongSettings.findUnique({
-    where: { exchangeConnectionId: connectionId },
-  });
+  // Load Pong settings for this connection (from hadron memory)
+  const settings = await getPongSettings(db, connectionId).catch(() => null);
 
   if (!settings?.stationId) {
     console.log(`[pong] Skipping — no station linked for connection ${connectionId}`);
@@ -118,15 +106,7 @@ export async function processIncomingEmail(
   }
 
   // Exclusion rules: skip if any rule matches sender or subject
-  let exclusionRules: PongExclusionRule[] = [];
-  try {
-    const raw = settings.exclusionRules as unknown;
-    if (Array.isArray(raw)) exclusionRules = raw as PongExclusionRule[];
-    else if (typeof raw === 'string') exclusionRules = JSON.parse(raw);
-  } catch {
-    exclusionRules = [];
-  }
-  const matched = exclusionRules.find((r) => matchesExclusionRule(r, fromAddress, subject));
+  const matched = settings.exclusionRules.find((r) => matchesExclusionRule(r, fromAddress, subject));
   if (matched) {
     console.log(`[pong] Skipping "${subject}" from ${fromAddress} — exclusion rule matched (${matched.reason ?? 'no reason'})`);
     return;
@@ -146,10 +126,14 @@ export async function processIncomingEmail(
     return;
   }
 
-  // Load knowledge base documents
-  const knowledgeDocs = await db.knowledgeDocument.findMany({
-    where: { exchangeConnectionId: connectionId },
-  });
+  // Load knowledge base documents from hadron memory
+  let knowledgeDocs: Awaited<ReturnType<typeof listPongKnowledge>> = [];
+  try {
+    knowledgeDocs = await listPongKnowledge(db, connectionId);
+  } catch (err) {
+    console.log(`[pong] Skipping — knowledge lookup failed:`, err instanceof Error ? err.message : err);
+    return;
+  }
 
   if (knowledgeDocs.length === 0) {
     console.log(`[pong] Skipping — no knowledge documents for connection ${connectionId}`);
@@ -205,7 +189,7 @@ Generate a reply draft in JSON format.`;
 
   const confidence = Math.max(0, Math.min(1, parsed.confidence));
 
-  // Map source doc titles back to IDs
+  // Map source doc titles back to ids (node loc)
   const sourceDocIds = parsed.sourceDocs
     .map((title) => {
       const doc = knowledgeDocs.find((d) => d.title.toLowerCase() === title.toLowerCase());
@@ -213,60 +197,20 @@ Generate a reply draft in JSON format.`;
     })
     .filter((id): id is string => !!id);
 
-  // Create Outlook draft reply
-  const { data: outlookDraft } = await createDraftReply(refreshToken, message.id, parsed.draftBody);
-
-  // Flag and categorize the original email
-  await categorizeMessage(refreshToken, message.id, ['Pong Draft Ready']).catch(() => {});
-  await flagMessage(refreshToken, message.id, 'flagged').catch(() => {});
-
-  // Store draft in database
-  const draft = await db.pongDraft.upsert({
-    where: {
-      exchangeConnectionId_messageId: {
-        exchangeConnectionId: connectionId,
-        messageId: message.id,
-      },
-    },
-    create: {
-      exchangeConnectionId: connectionId,
-      userId: settings.userId,
-      messageId: message.id,
-      messageSubject: subject,
-      messageFrom: fromAddress,
-      conversationId: message.conversationId ?? null,
-      draftBody: parsed.draftBody,
-      confidence,
-      sourceDocs: sourceDocIds,
-      reasoning: parsed.reasoning,
-      status: 'PENDING',
-      outlookDraftId: outlookDraft.id,
-    },
-    update: {
-      draftBody: parsed.draftBody,
-      confidence,
-      sourceDocs: sourceDocIds,
-      reasoning: parsed.reasoning,
-      status: 'PENDING',
-      conversationId: message.conversationId ?? null,
-      editedBody: null,
-      sentAt: null,
-      outlookDraftId: outlookDraft.id,
-    },
+  // Create the Outlook draft with embedded meta-block. createPongDraft also
+  // handles categorizing, flagging, and auto-send based on the user's
+  // confidence threshold.
+  await createPongDraft(db, {
+    connectionId,
+    userId: settings.userId,
+    messageId: message.id,
+    messageSubject: subject,
+    messageFrom: fromAddress,
+    draftBody: parsed.draftBody,
+    confidence,
+    reasoning: parsed.reasoning,
+    sourceDocs: sourceDocIds,
   });
 
   console.log(`[pong] Draft created for "${subject}" — confidence: ${(confidence * 100).toFixed(0)}%`);
-
-  // Auto-send if confidence exceeds threshold
-  if (settings.autoSendEnabled && confidence >= (settings.confidenceThreshold ?? 0.95)) {
-    await sendDraft(refreshToken, outlookDraft.id);
-    await db.pongDraft.update({
-      where: { id: draft.id },
-      data: { status: 'APPROVED', sentAt: new Date() },
-    });
-    // Clear flag/category since it's been handled
-    await categorizeMessage(refreshToken, message.id, []).catch(() => {});
-    await flagMessage(refreshToken, message.id, 'complete').catch(() => {});
-    console.log(`[pong] Auto-sent reply for "${subject}" (confidence: ${(confidence * 100).toFixed(0)}%)`);
-  }
 }

@@ -98,9 +98,6 @@ model User {
   receivedMemberInvitations OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
   pendingSetup              PendingSetup?
   exchangeConnections       ExchangeConnection[]
-  pongSettings              PongSettings[]
-  knowledgeDocs             KnowledgeDocument[]
-  pongDrafts                PongDraft[]
 
   @@map("users")
 }
@@ -184,7 +181,7 @@ model Station {
   sessions           Session[]
   usageEvents        UsageEvent[]
   logEntries         StationLogEntry[]
-  pongSettings       PongSettings[]
+  pongExchangeConnections ExchangeConnection[]   @relation("PongStation")
 
   @@map("stations")
 }
@@ -728,6 +725,7 @@ model ExchangeConnection {
   webhookExpiresAt        DateTime?  @map("webhook_expires_at")
   sentWebhookSubscriptionId String?  @map("sent_webhook_subscription_id")
   sentWebhookExpiresAt      DateTime? @map("sent_webhook_expires_at")
+  pongStationId           String?    @map("pong_station_id") // Bootstrap pointer: which station's memory holds Pong settings/knowledge for this mailbox
   createdAt               DateTime   @default(now()) @map("created_at")
   createdBy               String?    @map("created_by")
   updatedAt               DateTime   @updatedAt @map("updated_at")
@@ -737,9 +735,7 @@ model ExchangeConnection {
 
   organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  pongSettings       PongSettings?
-  knowledgeDocs      KnowledgeDocument[]
-  pongDrafts         PongDraft[]
+  pongStation        Station?            @relation("PongStation", fields: [pongStationId], references: [id], onDelete: SetNull)
 
   @@unique([organizationId, mailboxEmail])
   @@index([userId])
@@ -756,83 +752,3 @@ model WaitingListItem {
   @@map("waiting_list")
 }
 
-// ─── Pong (AI email assistant) ────────────────────────────────────────
-
-enum PongDraftStatus {
-  PENDING    // awaiting professor approval
-  APPROVED   // professor approved & sent
-  AUTO_SENT  // confidence >= threshold, auto-sent
-  EDITED     // professor edited before sending
-  REJECTED   // professor dismissed the draft
-}
-
-model PongSettings {
-  id                      String    @id @default(cuid())
-  exchangeConnectionId    String    @unique @map("exchange_connection_id")
-  userId                  String    @map("user_id")
-  autoSendEnabled         Boolean   @default(false) @map("auto_send_enabled")
-  confidenceThreshold     Float     @default(0.95) @map("confidence_threshold")
-  replyTone               String?   @map("reply_tone")     // e.g. "formal", "friendly"
-  signatureText           String?   @map("signature_text")
-  stationId               String?   @map("station_id")     // Station whose AI config powers Pong
-  pausedUntil             DateTime? @map("paused_until")   // Pong skips inbound mail until this time (null = active)
-  exclusionRules          Json      @default("[]") @map("exclusion_rules") // Array of { senderPattern?, subjectPattern?, reason }
-  createdAt               DateTime  @default(now()) @map("created_at")
-  updatedAt               DateTime  @updatedAt @map("updated_at")
-
-  exchangeConnection ExchangeConnection @relation(fields: [exchangeConnectionId], references: [id], onDelete: Cascade)
-  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  station            Station?            @relation(fields: [stationId], references: [id], onDelete: SetNull)
-
-  @@index([userId])
-  @@map("pong_settings")
-}
-
-model KnowledgeDocument {
-  id                      String   @id @default(cuid())
-  exchangeConnectionId    String   @map("exchange_connection_id")
-  userId                  String   @map("user_id")
-  title                   String
-  content                 String   // extracted text content
-  docType                 String?  @map("doc_type") // syllabus, faq, policy, template, other
-  createdAt               DateTime @default(now()) @map("created_at")
-  updatedAt               DateTime @updatedAt @map("updated_at")
-  deletedAt               DateTime? @map("deleted_at")
-
-  exchangeConnection ExchangeConnection @relation(fields: [exchangeConnectionId], references: [id], onDelete: Cascade)
-  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([exchangeConnectionId])
-  @@index([userId])
-  @@map("knowledge_documents")
-}
-
-model PongDraft {
-  id                      String          @id @default(cuid())
-  exchangeConnectionId    String          @map("exchange_connection_id")
-  userId                  String          @map("user_id")
-  messageId               String          @map("message_id")     // Exchange message ID
-  messageSubject          String?         @map("message_subject")
-  messageFrom             String?         @map("message_from")
-  messageReceivedAt       DateTime?       @map("message_received_at")
-  draftBody               String          @map("draft_body")
-  editedBody              String?         @map("edited_body")    // professor's edits
-  confidence              Float           // 0.0 – 1.0
-  status                  PongDraftStatus @default(PENDING)
-  sourceDocs              String[]        @default([]) @map("source_docs") // IDs of knowledge docs used
-  reasoning               String?         // why the AI chose this response
-  conversationId          String?         @map("conversation_id")  // Exchange conversation ID for matching sent items
-  outlookDraftId          String?         @map("outlook_draft_id") // Outlook draft message ID
-  sentAt                  DateTime?       @map("sent_at")
-  createdAt               DateTime        @default(now()) @map("created_at")
-  updatedAt               DateTime        @updatedAt @map("updated_at")
-
-  exchangeConnection ExchangeConnection @relation(fields: [exchangeConnectionId], references: [id], onDelete: Cascade)
-  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([exchangeConnectionId, messageId])
-  @@index([userId])
-  @@index([status])
-  @@index([createdAt])
-  @@map("pong_drafts")
-}

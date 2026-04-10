@@ -378,10 +378,10 @@ export const typeDefs = `#graphql
     sinceDays: Int!
   }
 
-  type KnowledgeDocument {
-    id: ID!
-    exchangeConnectionId: String!
-    userId: String!
+  # Pong knowledge document, backed by a node in the station's hadron memory.
+  # The id is the node loc (e.g. "pong/knowledge/abc123"), unique per memory.
+  type PongKnowledge {
+    id: String!
     title: String!
     content: String!
     docType: String
@@ -548,7 +548,7 @@ export const typeDefs = `#graphql
 
     # Pong AI assistant
     pongSettings(connectionId: ID!): PongSettings
-    knowledgeDocuments(connectionId: ID!): [KnowledgeDocument!]!
+    pongKnowledge(connectionId: ID!): [PongKnowledge!]!
     pongDrafts(connectionId: ID!, status: PongDraftStatus, limit: Int, offset: Int): [PongDraft!]!
     pongDraft(id: ID!): PongDraft
     pongStatus(connectionId: ID!, sinceDays: Int): PongStatus!
@@ -663,9 +663,9 @@ export const typeDefs = `#graphql
     resumePong(connectionId: ID!): PongSettings!
     addPongExclusionRule(connectionId: ID!, rule: PongExclusionRuleInput!): PongSettings!
     removePongExclusionRule(connectionId: ID!, index: Int!): PongSettings!
-    addKnowledgeDocument(connectionId: ID!, title: String!, content: String!, docType: String): KnowledgeDocument!
-    updateKnowledgeDocument(id: ID!, title: String, content: String, docType: String): KnowledgeDocument!
-    deleteKnowledgeDocument(id: ID!): Boolean!
+    addPongKnowledge(connectionId: ID!, title: String!, content: String!, docType: String): PongKnowledge!
+    updatePongKnowledge(connectionId: ID!, id: String!, title: String, content: String, docType: String): PongKnowledge!
+    deletePongKnowledge(connectionId: ID!, id: String!): Boolean!
     storePongDraft(connectionId: ID!, messageId: ID!, draftBody: String!, confidence: Float!, reasoning: String, sourceDocs: [String!], messageSubject: String, messageFrom: String): PongDraft!
     editPongDraft(id: ID!, body: String!): PongDraft!
     approvePongDraft(id: ID!, editedBody: String): PongDraft!

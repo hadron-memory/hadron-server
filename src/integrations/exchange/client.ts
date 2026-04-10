@@ -214,6 +214,42 @@ export async function updateDraft(
   });
 }
 
+/**
+ * Permanently delete a draft message. Used when the professor rejects a
+ * Pong draft — the draft simply disappears from the Drafts folder.
+ */
+export async function deleteDraft(
+  refreshToken: string,
+  draftMessageId: string,
+): Promise<GraphCallResult<void>> {
+  return withToken(refreshToken, async (client) => {
+    await client.api(`/me/messages/${draftMessageId}`).delete();
+  });
+}
+
+/**
+ * List messages in the Drafts folder. Pong uses this to find its own drafts
+ * by conversationId (no stored draft id on our side).
+ */
+export async function listDraftMessages(
+  refreshToken: string,
+  options: ListMessagesOptions = {},
+): Promise<GraphCallResult<GraphMessage[]>> {
+  return withToken(refreshToken, async (client) => {
+    let request = client
+      .api('/me/mailFolders/drafts/messages')
+      .top(options.top ?? 50)
+      .orderby(options.orderby ?? 'lastModifiedDateTime DESC');
+
+    if (options.skip) request = request.skip(options.skip);
+    if (options.filter) request = request.filter(options.filter);
+    if (options.select) request = request.select(options.select);
+
+    const response = await request.get();
+    return response.value as GraphMessage[];
+  });
+}
+
 export type MessageFlag = 'notFlagged' | 'flagged' | 'complete';
 
 /**

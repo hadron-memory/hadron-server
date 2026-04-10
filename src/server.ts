@@ -703,13 +703,13 @@ export async function createServer(): Promise<Express> {
           // Sent-items notification: learn from professor's edits
           const { processSentEmail } = await import('./integrations/pong/template-learning.js');
           console.log(`[exchange-webhook] Sent email in ${connection.mailboxEmail}: "${message.subject}"`);
-          processSentEmail(connectionId, refreshToken, message).catch((err) => {
+          processSentEmail(connectionId, message).catch((err) => {
             console.error(`[pong] Template learning failed for sent message ${messageId}:`, err);
           });
         } else {
           // Inbox notification: auto-generate a draft reply
           console.log(`[exchange-webhook] New email in ${connection.mailboxEmail}: "${message.subject}" from ${message.from?.emailAddress?.address}`);
-          processIncomingEmail(connectionId, refreshToken, message).catch((err) => {
+          processIncomingEmail(connectionId, message).catch((err) => {
             console.error(`[pong] Draft generation failed for message ${messageId}:`, err);
           });
         }
