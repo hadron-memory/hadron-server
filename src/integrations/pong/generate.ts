@@ -71,6 +71,28 @@ function createLanguageModel(provider: string, apiKey: string, model: string) {
  * Process an incoming email: generate a draft reply, flag/categorize, and
  * auto-send if confidence exceeds the user's threshold.
  */
+interface PongExclusionRule {
+  senderPattern?: string;
+  subjectPattern?: string;
+  reason?: string;
+}
+
+function matchesExclusionRule(
+  rule: PongExclusionRule,
+  fromAddress: string,
+  subject: string,
+): boolean {
+  const senderMatches = rule.senderPattern
+    ? new RegExp(rule.senderPattern, 'i').test(fromAddress)
+    : true;
+  const subjectMatches = rule.subjectPattern
+    ? new RegExp(rule.subjectPattern, 'i').test(subject)
+    : true;
+  // Both conditions must match if both are set; an empty rule never matches.
+  if (!rule.senderPattern && !rule.subjectPattern) return false;
+  return senderMatches && subjectMatches;
+}
+
 export async function processIncomingEmail(
   connectionId: string,
   refreshToken: string,
@@ -86,6 +108,27 @@ export async function processIncomingEmail(
 
   if (!settings?.stationId) {
     console.log(`[pong] Skipping — no station linked for connection ${connectionId}`);
+    return;
+  }
+
+  // Pause: skip if Pong is paused and the pause hasn't expired
+  if (settings.pausedUntil && settings.pausedUntil > new Date()) {
+    console.log(`[pong] Skipping "${subject}" — Pong is paused until ${settings.pausedUntil.toISOString()}`);
+    return;
+  }
+
+  // Exclusion rules: skip if any rule matches sender or subject
+  let exclusionRules: PongExclusionRule[] = [];
+  try {
+    const raw = settings.exclusionRules as unknown;
+    if (Array.isArray(raw)) exclusionRules = raw as PongExclusionRule[];
+    else if (typeof raw === 'string') exclusionRules = JSON.parse(raw);
+  } catch {
+    exclusionRules = [];
+  }
+  const matched = exclusionRules.find((r) => matchesExclusionRule(r, fromAddress, subject));
+  if (matched) {
+    console.log(`[pong] Skipping "${subject}" from ${fromAddress} — exclusion rule matched (${matched.reason ?? 'no reason'})`);
     return;
   }
 

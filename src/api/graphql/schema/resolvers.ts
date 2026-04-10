@@ -29,6 +29,12 @@ export interface Context {
   organizationId?: string; // set when the Client is scoped to an organization
 }
 
+export interface PongExclusionRule {
+  senderPattern?: string;
+  subjectPattern?: string;
+  reason?: string;
+}
+
 const ROLE_ORDER: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2, OWNER: 3 };
 
 function requireRole(ctx: Context, required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER') {
@@ -331,6 +337,23 @@ export const resolvers = {
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
+  },
+  PongSettings: {
+    exclusionRules: (settings: { exclusionRules: unknown }) => {
+      const rules = settings.exclusionRules;
+      if (Array.isArray(rules)) return rules;
+      if (typeof rules === 'string') {
+        try {
+          const parsed = JSON.parse(rules);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      }
+      return [];
+    },
+    pausedUntil: (settings: { pausedUntil: Date | null }) =>
+      settings.pausedUntil ? settings.pausedUntil.toISOString() : null,
   },
 
   Query: {
@@ -739,6 +762,42 @@ export const resolvers = {
     pongDraft: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Authentication required');
       return ctx.db.pongDraft.findUnique({ where: { id } });
+    },
+
+    pongStatus: async (
+      _: unknown,
+      { connectionId, sinceDays }: { connectionId: string; sinceDays?: number },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+
+      const days = sinceDays ?? 7;
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+      const drafts = await ctx.db.pongDraft.findMany({
+        where: { exchangeConnectionId: connectionId, createdAt: { gte: since } },
+        select: { status: true },
+      });
+
+      const counts = { PENDING: 0, APPROVED: 0, AUTO_SENT: 0, EDITED: 0, REJECTED: 0 };
+      for (const d of drafts) {
+        counts[d.status as keyof typeof counts] = (counts[d.status as keyof typeof counts] ?? 0) + 1;
+      }
+
+      const settings = await ctx.db.pongSettings.findUnique({ where: { exchangeConnectionId: connectionId } });
+
+      return {
+        drafted: drafts.length,
+        autoSent: counts.AUTO_SENT,
+        approved: counts.APPROVED,
+        edited: counts.EDITED,
+        rejected: counts.REJECTED,
+        pending: counts.PENDING,
+        pausedUntil: settings?.pausedUntil?.toISOString() ?? null,
+        sinceDays: days,
+      };
     },
   },
 
@@ -1975,9 +2034,10 @@ export const resolvers = {
 
     upsertPongSettings: async (
       _: unknown,
-      { connectionId, autoSendEnabled, confidenceThreshold, replyTone, signatureText, stationId }: {
+      { connectionId, autoSendEnabled, confidenceThreshold, replyTone, signatureText, stationId, pausedUntil, exclusionRules }: {
         connectionId: string; autoSendEnabled?: boolean; confidenceThreshold?: number;
         replyTone?: string; signatureText?: string; stationId?: string;
+        pausedUntil?: string | null; exclusionRules?: PongExclusionRule[];
       },
       ctx: Context,
     ) => {
@@ -1991,6 +2051,12 @@ export const resolvers = {
         if (station.userId !== ctx.userId) throw new Error('Station does not belong to you');
       }
 
+      const pausedUntilDate = pausedUntil === null
+        ? null
+        : pausedUntil !== undefined
+          ? new Date(pausedUntil)
+          : undefined;
+
       return ctx.db.pongSettings.upsert({
         where: { exchangeConnectionId: connectionId },
         create: {
@@ -2001,6 +2067,8 @@ export const resolvers = {
           replyTone: replyTone ?? null,
           signatureText: signatureText ?? null,
           stationId: stationId ?? null,
+          pausedUntil: pausedUntilDate ?? null,
+          exclusionRules: (exclusionRules ?? []) as unknown as Prisma.InputJsonValue,
         },
         update: {
           ...(autoSendEnabled !== undefined ? { autoSendEnabled } : {}),
@@ -2008,7 +2076,98 @@ export const resolvers = {
           ...(replyTone !== undefined ? { replyTone } : {}),
           ...(signatureText !== undefined ? { signatureText } : {}),
           ...(stationId !== undefined ? { stationId } : {}),
+          ...(pausedUntilDate !== undefined ? { pausedUntil: pausedUntilDate } : {}),
+          ...(exclusionRules !== undefined ? { exclusionRules: exclusionRules as unknown as Prisma.InputJsonValue } : {}),
         },
+      });
+    },
+
+    pausePong: async (
+      _: unknown,
+      { connectionId, until }: { connectionId: string; until?: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+
+      // Default: pause indefinitely (year 9999) if no until specified
+      const pausedUntilDate = until ? new Date(until) : new Date('9999-12-31T23:59:59Z');
+
+      return ctx.db.pongSettings.upsert({
+        where: { exchangeConnectionId: connectionId },
+        create: {
+          exchangeConnectionId: connectionId,
+          userId: ctx.userId,
+          pausedUntil: pausedUntilDate,
+          exclusionRules: [] as unknown as Prisma.InputJsonValue,
+        },
+        update: { pausedUntil: pausedUntilDate },
+      });
+    },
+
+    resumePong: async (
+      _: unknown,
+      { connectionId }: { connectionId: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+
+      return ctx.db.pongSettings.upsert({
+        where: { exchangeConnectionId: connectionId },
+        create: {
+          exchangeConnectionId: connectionId,
+          userId: ctx.userId,
+          pausedUntil: null,
+          exclusionRules: [] as unknown as Prisma.InputJsonValue,
+        },
+        update: { pausedUntil: null },
+      });
+    },
+
+    addPongExclusionRule: async (
+      _: unknown,
+      { connectionId, rule }: { connectionId: string; rule: PongExclusionRule },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+
+      const existing = await ctx.db.pongSettings.findUnique({ where: { exchangeConnectionId: connectionId } });
+      const rules = (existing?.exclusionRules as unknown as PongExclusionRule[] | null) ?? [];
+      const next = [...rules, rule];
+
+      return ctx.db.pongSettings.upsert({
+        where: { exchangeConnectionId: connectionId },
+        create: {
+          exchangeConnectionId: connectionId,
+          userId: ctx.userId,
+          exclusionRules: next as unknown as Prisma.InputJsonValue,
+        },
+        update: { exclusionRules: next as unknown as Prisma.InputJsonValue },
+      });
+    },
+
+    removePongExclusionRule: async (
+      _: unknown,
+      { connectionId, index }: { connectionId: string; index: number },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      if (connection.userId !== ctx.userId) throw new Error('Forbidden');
+
+      const existing = await ctx.db.pongSettings.findUniqueOrThrow({ where: { exchangeConnectionId: connectionId } });
+      const rules = (existing.exclusionRules as unknown as PongExclusionRule[] | null) ?? [];
+      if (index < 0 || index >= rules.length) throw new Error('Exclusion rule index out of range');
+      const next = rules.filter((_r, i) => i !== index);
+
+      return ctx.db.pongSettings.update({
+        where: { exchangeConnectionId: connectionId },
+        data: { exclusionRules: next as unknown as Prisma.InputJsonValue },
       });
     },
 
@@ -2125,6 +2284,29 @@ export const resolvers = {
       }
 
       return draft;
+    },
+
+    editPongDraft: async (
+      _: unknown,
+      { id, body }: { id: string; body: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Authentication required');
+      const draft = await ctx.db.pongDraft.findUniqueOrThrow({ where: { id } });
+      if (draft.userId !== ctx.userId) throw new Error('Forbidden');
+      if (draft.status !== 'PENDING') throw new Error(`Draft is already ${draft.status}`);
+
+      // If the draft has an Outlook draft id, update the Outlook copy too so the
+      // user sees the new body in their Drafts folder.
+      if (draft.outlookDraftId) {
+        const { refreshToken } = await getExchangeRefreshToken(ctx, draft.exchangeConnectionId);
+        await updateDraft(refreshToken, draft.outlookDraftId, body);
+      }
+
+      return ctx.db.pongDraft.update({
+        where: { id },
+        data: { editedBody: body },
+      });
     },
 
     approvePongDraft: async (

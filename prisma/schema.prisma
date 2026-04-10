@@ -767,16 +767,18 @@ enum PongDraftStatus {
 }
 
 model PongSettings {
-  id                      String   @id @default(cuid())
-  exchangeConnectionId    String   @unique @map("exchange_connection_id")
-  userId                  String   @map("user_id")
-  autoSendEnabled         Boolean  @default(false) @map("auto_send_enabled")
-  confidenceThreshold     Float    @default(0.95) @map("confidence_threshold")
-  replyTone               String?  @map("reply_tone")     // e.g. "formal", "friendly"
-  signatureText           String?  @map("signature_text")
-  stationId               String?  @map("station_id")     // Station whose AI config powers Pong
-  createdAt               DateTime @default(now()) @map("created_at")
-  updatedAt               DateTime @updatedAt @map("updated_at")
+  id                      String    @id @default(cuid())
+  exchangeConnectionId    String    @unique @map("exchange_connection_id")
+  userId                  String    @map("user_id")
+  autoSendEnabled         Boolean   @default(false) @map("auto_send_enabled")
+  confidenceThreshold     Float     @default(0.95) @map("confidence_threshold")
+  replyTone               String?   @map("reply_tone")     // e.g. "formal", "friendly"
+  signatureText           String?   @map("signature_text")
+  stationId               String?   @map("station_id")     // Station whose AI config powers Pong
+  pausedUntil             DateTime? @map("paused_until")   // Pong skips inbound mail until this time (null = active)
+  exclusionRules          Json      @default("[]") @map("exclusion_rules") // Array of { senderPattern?, subjectPattern?, reason }
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
 
   exchangeConnection ExchangeConnection @relation(fields: [exchangeConnectionId], references: [id], onDelete: Cascade)
   user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)

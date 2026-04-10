@@ -349,8 +349,33 @@ export const typeDefs = `#graphql
     replyTone: String
     signatureText: String
     stationId: String
+    pausedUntil: String
+    exclusionRules: [PongExclusionRule!]!
     createdAt: String!
     updatedAt: String!
+  }
+
+  type PongExclusionRule {
+    senderPattern: String
+    subjectPattern: String
+    reason: String
+  }
+
+  input PongExclusionRuleInput {
+    senderPattern: String
+    subjectPattern: String
+    reason: String
+  }
+
+  type PongStatus {
+    drafted: Int!
+    autoSent: Int!
+    approved: Int!
+    edited: Int!
+    rejected: Int!
+    pending: Int!
+    pausedUntil: String
+    sinceDays: Int!
   }
 
   type KnowledgeDocument {
@@ -526,6 +551,7 @@ export const typeDefs = `#graphql
     knowledgeDocuments(connectionId: ID!): [KnowledgeDocument!]!
     pongDrafts(connectionId: ID!, status: PongDraftStatus, limit: Int, offset: Int): [PongDraft!]!
     pongDraft(id: ID!): PongDraft
+    pongStatus(connectionId: ID!, sinceDays: Int): PongStatus!
   }
 
   type Mutation {
@@ -632,11 +658,16 @@ export const typeDefs = `#graphql
     exchangeCategorizeMessage(connectionId: ID!, messageId: ID!, categories: [String!]!): Boolean!
 
     # Pong AI assistant
-    upsertPongSettings(connectionId: ID!, autoSendEnabled: Boolean, confidenceThreshold: Float, replyTone: String, signatureText: String, stationId: String): PongSettings!
+    upsertPongSettings(connectionId: ID!, autoSendEnabled: Boolean, confidenceThreshold: Float, replyTone: String, signatureText: String, stationId: String, pausedUntil: String, exclusionRules: [PongExclusionRuleInput!]): PongSettings!
+    pausePong(connectionId: ID!, until: String): PongSettings!
+    resumePong(connectionId: ID!): PongSettings!
+    addPongExclusionRule(connectionId: ID!, rule: PongExclusionRuleInput!): PongSettings!
+    removePongExclusionRule(connectionId: ID!, index: Int!): PongSettings!
     addKnowledgeDocument(connectionId: ID!, title: String!, content: String!, docType: String): KnowledgeDocument!
     updateKnowledgeDocument(id: ID!, title: String, content: String, docType: String): KnowledgeDocument!
     deleteKnowledgeDocument(id: ID!): Boolean!
     storePongDraft(connectionId: ID!, messageId: ID!, draftBody: String!, confidence: Float!, reasoning: String, sourceDocs: [String!], messageSubject: String, messageFrom: String): PongDraft!
+    editPongDraft(id: ID!, body: String!): PongDraft!
     approvePongDraft(id: ID!, editedBody: String): PongDraft!
     rejectPongDraft(id: ID!): PongDraft!
 
