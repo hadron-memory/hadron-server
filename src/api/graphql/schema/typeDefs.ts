@@ -578,8 +578,47 @@ export const typeDefs = `#graphql
     exchangeReply(connectionId: ID!, messageId: ID!, body: String!): Boolean!
     exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
 
+    # ── Chat API ──────────────────────────────────────────────────────
+    # Start a chat session (creates chat nodes, loads conversation, returns compiled prompt)
+    startChat(agentId: ID!, userId: String!, conversationName: String): ChatStartResult!
+    # Process a user message (saves message, builds context, returns next prompt)
+    sendChatMessage(chatId: String!, userMessage: String!): ChatPromptResult!
+    # Process the LLM's tool response (extract data, transition stage, save assistant message)
+    processChatResponse(chatId: String!, toolResponse: JSON!): ChatResponseResult!
+    # Save a chat summary
+    saveChatSummary(chatId: String!, summary: String!): Boolean!
+
     # Public mutations (no auth required)
     joinWaitingList(email: String!, requestedFeatures: String): Boolean!
     sendContactMessage(name: String!, email: String!, message: String!): Boolean!
+  }
+
+  # ── Chat types ──────────────────────────────────────────────────────
+  type ChatStartResult {
+    chatId: String!
+    systemMessage: String!
+    tools: JSON
+    conversationName: String
+    stageName: String
+  }
+
+  type ChatPromptResult {
+    systemMessage: String!
+    tools: JSON
+    messageHistory: JSON!
+    summarizationNeeded: SummarizationRequest
+  }
+
+  type SummarizationRequest {
+    messageCount: Int!
+    prompt: String!
+  }
+
+  type ChatResponseResult {
+    displayMessage: String!
+    stageTransitioned: Boolean!
+    newStageName: String
+    conversationHandoff: String
+    chatEnded: Boolean!
   }
 `;

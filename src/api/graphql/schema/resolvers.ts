@@ -2002,6 +2002,345 @@ export const resolvers = {
       });
       return true;
     },
+
+    // ── Chat API ────────────────────────────────────────────────────────
+
+    startChat: async (
+      _: unknown,
+      { agentId, userId, conversationName }: { agentId: string; userId: string; conversationName?: string },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'READER');
+
+      // Load agent with system memory
+      const agent = await ctx.db.agent.findUniqueOrThrow({
+        where: { id: agentId },
+        include: { memoryItems: { include: { memory: true } } },
+      });
+
+      const systemMemoryId = (agent as any).systemMemoryId as string | null;
+      if (!systemMemoryId) throw new Error('Agent has no system memory configured');
+
+      // Find the conversation (default to 'setup' if no name provided)
+      const convName = conversationName ?? 'setup';
+      const convNode = await ctx.db.node.findFirst({
+        where: { memoryId: systemMemoryId, loc: `conversations:${convName}`, deletedAt: null },
+      });
+      if (!convNode) throw new Error(`Conversation "${convName}" not found in agent's system memory`);
+
+      const convData = (convNode.data as Record<string, unknown>) ?? {};
+      const stageOrder = (convData.stageOrder as string[]) ?? [];
+      const firstStage = stageOrder[0];
+      if (!firstStage) throw new Error(`Conversation "${convName}" has no stages`);
+
+      // Load the first stage
+      const stageNode = await ctx.db.node.findFirst({
+        where: { memoryId: systemMemoryId, loc: `conversations:${convName}:${firstStage}`, deletedAt: null },
+      });
+      const stageData = (stageNode?.data as Record<string, unknown>) ?? {};
+
+      // Load the prompt
+      const promptRef = stageData.promptRef as string | undefined;
+      let promptContent = '';
+      if (promptRef) {
+        const promptNode = await ctx.db.node.findFirst({
+          where: { memoryId: systemMemoryId, loc: promptRef, deletedAt: null },
+        });
+        promptContent = promptNode?.content ?? '';
+      } else if (stageNode?.content) {
+        promptContent = stageNode.content;
+      }
+
+      // Compile the prompt with Mustache (using agent's writable memory data)
+      const writableMemory = agent.memoryItems.find((m) => m.role === 'read-write');
+      const writableMemoryId = writableMemory?.memory.id;
+      let systemMessage = promptContent;
+      if (promptContent.includes('{{') && writableMemoryId) {
+        const access = await memoryAccessFilter(ctx);
+        systemMessage = await compileTemplate(promptContent, null, writableMemoryId, ctx.db, access);
+      }
+
+      // Build tool schema from extraction spec
+      const extractionSpec = stageData.extractionSpec as Array<{ field: string; description?: string; shape?: string }> | undefined;
+      let tools = null;
+      if (extractionSpec?.length) {
+        const dataProps: Record<string, unknown> = {};
+        for (const spec of extractionSpec) {
+          const fieldName = spec.field.split('.').pop() ?? spec.field;
+          dataProps[fieldName] = { type: spec.shape ?? 'string', description: spec.description ?? fieldName };
+        }
+        tools = [{
+          name: 'respond',
+          description: 'Respond to the user and extract data',
+          parameters: {
+            type: 'object',
+            properties: {
+              message: { type: 'string', description: 'Your response to the user' },
+              data: { type: 'object', properties: dataProps },
+              next_stage: { type: 'string', description: 'Stage to transition to (null to stay)' },
+            },
+            required: ['message'],
+          },
+        }];
+      }
+
+      // Create chat node in writable memory
+      const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+      const chatName = `${ts}-${userId}-${convName}`;
+      const chatLoc = `chats:${chatName}`;
+
+      if (writableMemoryId) {
+        // Ensure chats parent
+        try {
+          await ctx.db.node.upsert({
+            where: { loc_memoryId: { loc: 'chats', memoryId: writableMemoryId } },
+            create: { id: generateId(), memoryId: writableMemoryId, loc: 'chats', name: 'chats', nodeType: 'record' },
+            update: {},
+          });
+        } catch { /* exists */ }
+
+        // Create chat node
+        await ctx.db.node.create({
+          data: {
+            id: generateId(), memoryId: writableMemoryId, loc: chatLoc, name: chatName,
+            nodeType: 'record', description: `Chat: ${convName}`,
+            data: { conversationName: convName, stageName: firstStage, userId, messageCount: 0 },
+          },
+        });
+
+        // Create messages parent
+        await ctx.db.node.create({
+          data: {
+            id: generateId(), memoryId: writableMemoryId, loc: `${chatLoc}:messages`, name: 'messages', nodeType: 'record',
+          },
+        });
+      }
+
+      // Prepend agent system prompt
+      if (agent.systemPrompt) {
+        systemMessage = agent.systemPrompt + '\n\n' + systemMessage;
+      }
+
+      return { chatId: chatLoc, systemMessage, tools, conversationName: convName, stageName: firstStage };
+    },
+
+    sendChatMessage: async (
+      _: unknown,
+      { chatId, userMessage }: { chatId: string; userMessage: string },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'READER');
+
+      // Find the chat node
+      const chatNode = await ctx.db.node.findFirst({
+        where: { loc: chatId, deletedAt: null },
+      });
+      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+
+      const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+      const messageCount = ((chatData.messageCount as number) ?? 0) + 1;
+      const convName = chatData.conversationName as string;
+      const stageName = chatData.stageName as string;
+
+      // Save user message
+      const msgNum = String(messageCount).padStart(3, '0');
+      const userId = chatData.userId as string ?? 'user';
+      await ctx.db.node.create({
+        data: {
+          id: generateId(), memoryId: chatNode.memoryId,
+          loc: `${chatId}:messages:${msgNum}-${userId}`, name: `${msgNum}-${userId}`,
+          nodeType: 'record', content: userMessage, seq: messageCount,
+        },
+      });
+
+      // Update message count
+      await ctx.db.node.update({
+        where: { id: chatNode.id },
+        data: { data: { ...(chatData as any), messageCount } },
+      });
+
+      // Load the agent to get system memory
+      // Find the agent via the writable memory's subscriptions
+      const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
+      if (!memory) throw new Error('Memory not found');
+
+      // Find agent with systemMemoryId
+      const agents = await ctx.db.agent.findMany({
+        where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
+      });
+      const agent = agents.find((a) => (a as any).systemMemoryId);
+      const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
+
+      // Load current stage
+      let systemMessage = '';
+      let tools = null;
+
+      if (systemMemoryId && convName && stageName) {
+        const stageNode = await ctx.db.node.findFirst({
+          where: { memoryId: systemMemoryId, loc: `conversations:${convName}:${stageName}`, deletedAt: null },
+        });
+        const stageData = (stageNode?.data as Record<string, unknown>) ?? {};
+
+        // Load prompt
+        const promptRef = stageData.promptRef as string | undefined;
+        let promptContent = '';
+        if (promptRef) {
+          const promptNode = await ctx.db.node.findFirst({
+            where: { memoryId: systemMemoryId, loc: promptRef, deletedAt: null },
+          });
+          promptContent = promptNode?.content ?? '';
+        } else if (stageNode?.content) {
+          promptContent = stageNode.content;
+        }
+
+        // Compile with data
+        const access = await memoryAccessFilter(ctx);
+        if (promptContent.includes('{{')) {
+          systemMessage = await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access);
+        } else {
+          systemMessage = promptContent;
+        }
+
+        // Prepend agent system prompt
+        if (agent?.systemPrompt) {
+          systemMessage = agent.systemPrompt + '\n\n' + systemMessage;
+        }
+
+        // Build tools from extraction spec
+        const extractionSpec = stageData.extractionSpec as Array<{ field: string; description?: string; shape?: string }> | undefined;
+        if (extractionSpec?.length) {
+          const dataProps: Record<string, unknown> = {};
+          for (const spec of extractionSpec) {
+            const fieldName = spec.field.split('.').pop() ?? spec.field;
+            dataProps[fieldName] = { type: spec.shape ?? 'string', description: spec.description ?? fieldName };
+          }
+          tools = [{
+            name: 'respond',
+            description: 'Respond to the user and extract data',
+            parameters: {
+              type: 'object', properties: {
+                message: { type: 'string', description: 'Your response to the user' },
+                data: { type: 'object', properties: dataProps },
+                next_stage: { type: 'string', description: 'Stage to transition to (null to stay)' },
+              },
+              required: ['message'],
+            },
+          }];
+        }
+      }
+
+      // Build message history (recent messages)
+      const messages = await ctx.db.node.findMany({
+        where: { loc: { startsWith: `${chatId}:messages:` }, memoryId: chatNode.memoryId, deletedAt: null },
+        orderBy: { seq: 'asc' },
+        take: 50,
+        select: { loc: true, content: true, seq: true, nodeType: true },
+      });
+
+      const messageHistory = messages.map((m) => {
+        const name = m.loc.split(':').pop() ?? '';
+        const isUser = !name.includes('assistant') && !name.includes('juno') && !name.includes('ai');
+        return { role: isUser ? 'user' : 'assistant', content: m.content ?? '' };
+      });
+
+      return { systemMessage, tools, messageHistory, summarizationNeeded: null };
+    },
+
+    processChatResponse: async (
+      _: unknown,
+      { chatId, toolResponse }: { chatId: string; toolResponse: Record<string, unknown> },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'READER');
+
+      const chatNode = await ctx.db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+
+      const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+      const messageCount = ((chatData.messageCount as number) ?? 0) + 1;
+
+      const message = (toolResponse.message as string) ?? '';
+      const data = toolResponse.data as Record<string, unknown> | undefined;
+      const nextStage = toolResponse.next_stage as string | undefined;
+
+      // Save assistant message
+      const msgNum = String(messageCount).padStart(3, '0');
+      await ctx.db.node.create({
+        data: {
+          id: generateId(), memoryId: chatNode.memoryId,
+          loc: `${chatId}:messages:${msgNum}-assistant`, name: `${msgNum}-assistant`,
+          nodeType: 'record', content: message, seq: messageCount,
+        },
+      });
+
+      // Save extracted data to memory's default data node
+      if (data && Object.keys(data).length > 0) {
+        const dataNode = await ctx.db.node.findFirst({
+          where: { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null },
+        });
+        if (dataNode) {
+          const existingData = (dataNode.data as Record<string, unknown>) ?? {};
+          await ctx.db.node.update({
+            where: { id: dataNode.id },
+            data: { data: { ...existingData, ...data } as any },
+          });
+        } else {
+          await ctx.db.node.create({
+            data: {
+              id: generateId(), memoryId: chatNode.memoryId,
+              loc: 'data', name: 'data', nodeType: 'info', data: data as any,
+            },
+          });
+        }
+      }
+
+      // Handle stage transition
+      let stageTransitioned = false;
+      let newStageName: string | null = null;
+      const updatedData: Record<string, unknown> = { ...(chatData as any), messageCount };
+
+      if (nextStage && nextStage !== chatData.stageName) {
+        updatedData.stageName = nextStage;
+        stageTransitioned = true;
+        newStageName = nextStage;
+      }
+
+      await ctx.db.node.update({ where: { id: chatNode.id }, data: { data: updatedData as any } });
+
+      return {
+        displayMessage: message,
+        stageTransitioned,
+        newStageName,
+        conversationHandoff: null,
+        chatEnded: false,
+      };
+    },
+
+    saveChatSummary: async (
+      _: unknown,
+      { chatId, summary }: { chatId: string; summary: string },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'READER');
+
+      const chatNode = await ctx.db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+
+      const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+      const messageCount = (chatData.messageCount as number) ?? 0;
+      const summaryName = `${String(messageCount).padStart(3, '0')}a-summary`;
+
+      await ctx.db.node.create({
+        data: {
+          id: generateId(), memoryId: chatNode.memoryId,
+          loc: `${chatId}:messages:${summaryName}`, name: summaryName,
+          nodeType: 'abstract', content: summary, seq: messageCount + 1,
+          tags: ['summary'],
+        },
+      });
+
+      return true;
+    },
   },
 };
 
