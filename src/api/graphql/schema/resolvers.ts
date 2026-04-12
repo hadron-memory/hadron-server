@@ -1514,9 +1514,17 @@ export const resolvers = {
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
-      // Generate memory URN from org + name
       const memOrg = await ctx.db.organization.findUniqueOrThrow({ where: { id: orgId }, select: { urn: true } });
       const memoryUrn = `${memOrg.urn}:${name}`;
+      // Check for existing memory with the same URN
+      const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
+      if (existing) {
+        if (existing.deletedAt) {
+          await ctx.db.memory.delete({ where: { id: existing.id } });
+        } else {
+          throw new Error(`A memory with URN "${memoryUrn}" already exists`);
+        }
+      }
       const memory = await ctx.db.memory.create({
         data: {
           id: generateId(),
@@ -1655,9 +1663,17 @@ export const resolvers = {
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
-      // Generate agent URN from org + name
       const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: orgId }, select: { urn: true } });
       const agentUrn = `${org.urn}:${name}`;
+      // Check for existing agent with the same URN
+      const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
+      if (existing) {
+        if (existing.deletedAt) {
+          await ctx.db.agent.delete({ where: { id: existing.id } });
+        } else {
+          throw new Error(`An agent with URN "${agentUrn}" already exists`);
+        }
+      }
       return ctx.db.agent.create({
         data: {
           organizationId: orgId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: systemMemoryId ?? null,
