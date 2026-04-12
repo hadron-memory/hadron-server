@@ -210,10 +210,10 @@ const MEMORY_INCLUDE = {
 };
 
 const ORG_INCLUDE = {
-  members: { include: { user: true }, orderBy: { createdAt: 'asc' as const } },
-  memories: { include: MEMORY_INCLUDE, orderBy: { name: 'asc' as const } },
-  agents: { include: { memoryItems: { include: { memory: true } } }, orderBy: { name: 'asc' as const } },
-  subscriptions: { include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
+  members: { where: { deletedAt: null }, include: { user: true }, orderBy: { createdAt: 'asc' as const } },
+  memories: { where: { deletedAt: null }, include: MEMORY_INCLUDE, orderBy: { name: 'asc' as const } },
+  agents: { where: { deletedAt: null }, include: { memoryItems: { where: { deletedAt: null }, include: { memory: true } } }, orderBy: { name: 'asc' as const } },
+  subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
   exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
 };
 
