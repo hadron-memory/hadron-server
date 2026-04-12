@@ -2,6 +2,7 @@ import bcrypt from 'bcrypt';
 import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
 import { parseUrnInput, validateUrnType } from '../../../lib/urn.js';
+import { compileTemplate } from '../../../lib/template.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
@@ -340,7 +341,7 @@ export const resolvers = {
   },
 
   Query: {
-    node: async (_: unknown, { loc: rawLoc }: { loc: string }, ctx: Context) => {
+    node: async (_: unknown, { loc: rawLoc, raw }: { loc: string; raw?: boolean }, ctx: Context) => {
       const parsed = parseUrnInput(rawLoc);
       const typeErr = validateUrnType(parsed, 'node');
       if (typeErr) throw new Error(typeErr);
@@ -352,27 +353,41 @@ export const resolvers = {
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
       if (candidates.length === 0) return null;
-      // Prefer canonical (isLink=false) over link nodes
-      return candidates.find((n) => !n.isLink) ?? candidates[0];
+      const node = candidates.find((n) => !n.isLink) ?? candidates[0];
+
+      // Compile Mustache templates unless raw: true
+      if (!raw && node.content?.includes('{{')) {
+        const compiled = await compileTemplate(
+          node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
+        );
+        return { ...node, content: compiled };
+      }
+      return node;
     },
 
-    nodeById: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    nodeById: async (_: unknown, { id, raw }: { id: string; raw?: boolean }, ctx: Context) => {
       const access = await memoryAccessFilter(ctx);
       const node = await ctx.db.node.findUnique({
         where: { id },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
       if (!node) return null;
-      // Verify access
       if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
         if (!(access.memoryId.in as string[]).includes(node.memoryId)) return null;
+      }
+
+      if (!raw && node.content?.includes('{{')) {
+        const compiled = await compileTemplate(
+          node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
+        );
+        return { ...node, content: compiled };
       }
       return node;
     },
 
     nodes: async (
       _: unknown,
-      { nodeType, tags, search, prefix: rawPrefix, limit }: { nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number },
+      { nodeType, tags, search, prefix: rawPrefix, limit, offset }: { nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       const prefix = rawPrefix ? parseUrnInput(rawPrefix).value : undefined;
@@ -380,7 +395,8 @@ export const resolvers = {
       const results = await ctx.db.node.findMany({
         where: {
           ...access,
-          ...(nodeType ? { nodeType } : {}),
+          // Exclude system nodes from search by default (unless explicitly requested)
+          ...(nodeType ? { nodeType } : search ? { nodeType: { not: 'system' } } : {}),
           ...(tags?.length ? tagsFilter(tags) : {}),
           ...(prefix ? { loc: { startsWith: prefix } } : {}),
           ...(search
@@ -396,7 +412,12 @@ export const resolvers = {
         orderBy: { loc: 'asc' },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
-      return deduplicateNodes(results).slice(0, limit ?? 100);
+      // Sort by nodeType priority: abstract first, then info/reference, then record
+      const typePriority: Record<string, number> = { abstract: 0, info: 1, reference: 1, record: 2, system: 3 };
+      const sorted = deduplicateNodes(results).sort((a, b) =>
+        (typePriority[a.nodeType] ?? 1) - (typePriority[b.nodeType] ?? 1)
+      );
+      return sorted.slice(offset ?? 0, (offset ?? 0) + (limit ?? 100));
     },
 
     subtree: async (_: unknown, { prefix: rawPrefix }: { prefix: string }, ctx: Context) => {

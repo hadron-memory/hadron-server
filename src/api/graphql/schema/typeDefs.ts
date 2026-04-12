@@ -399,11 +399,11 @@ export const typeDefs = `#graphql
   scalar JSON
 
   type Query {
-    # Get a single node by its loc path
-    node(loc: String!): Node
+    # Get a single node by its loc path (raw: true to skip template compilation)
+    node(loc: String!, raw: Boolean): Node
 
-    # Get a single node by its ID
-    nodeById(id: ID!): Node
+    # Get a single node by its ID (raw: true to skip template compilation)
+    nodeById(id: ID!, raw: Boolean): Node
 
     # List or search nodes; optionally filter by tags and nodeType
     nodes(
@@ -412,6 +412,7 @@ export const typeDefs = `#graphql
       search: String
       prefix: String
       limit: Int
+      offset: Int
     ): [Node!]!
 
     # All nodes whose loc starts with the given prefix
