@@ -212,13 +212,13 @@ const MEMORY_INCLUDE = {
 const ORG_INCLUDE = {
   members: { where: { deletedAt: null }, include: { user: true }, orderBy: { createdAt: 'asc' as const } },
   memories: { where: { deletedAt: null }, include: MEMORY_INCLUDE, orderBy: { name: 'asc' as const } },
-  agents: { where: { deletedAt: null }, include: { memoryItems: { where: { deletedAt: null }, include: { memory: true } } }, orderBy: { name: 'asc' as const } },
+  agents: { where: { deletedAt: null }, include: { memoryItems: { where: { deletedAt: null, memory: { deletedAt: null } }, include: { memory: true } } }, orderBy: { name: 'asc' as const } },
   subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
   exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
 };
 
 const AGENT_INCLUDE = {
-  memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
+  memoryItems: { where: { deletedAt: null, memory: { deletedAt: null } }, include: { memory: true } },
 };
 
 const STATION_INCLUDE = {
@@ -301,7 +301,7 @@ export const resolvers = {
       }
       return ctx.db.agent.findMany({
         where,
-        include: { memoryItems: { include: { memory: true } } },
+        include: { memoryItems: { where: { deletedAt: null, memory: { deletedAt: null } }, include: { memory: true } } },
         orderBy: { name: 'asc' },
       });
     },
