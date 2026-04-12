@@ -46,6 +46,7 @@ export const typeDefs = `#graphql
     tokens: Int
     tags: [String!]!
     properties: JSON
+    data: JSON
     seq: Int
     ownerRepo: String
     isRunnable: Boolean
@@ -63,6 +64,7 @@ export const typeDefs = `#graphql
     source: Node!
     target: Node!
     label: String!
+    condition: String
   }
 
   type Session {
@@ -257,6 +259,7 @@ export const typeDefs = `#graphql
     name: String!
     description: String
     systemPrompt: String
+    systemMemoryId: String
     visibility: MemoryVisibility!
     properties: JSON
     memoryItems: [AgentMemoryItem!]!
@@ -350,6 +353,7 @@ export const typeDefs = `#graphql
     seq: Int
     tags: [String!]
     properties: JSON
+    data: JSON
     ownerRepo: String
     llmModel: String
     aiAgent: String
@@ -546,8 +550,8 @@ export const typeDefs = `#graphql
     setMemorySourceToken(id: ID!, token: String!, expiresAt: String): Memory!
 
     # Agent management (org ADMIN)
-    createAgent(orgId: ID!, name: String!, description: String, systemPrompt: String, visibility: MemoryVisibility): Agent!
-    updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, visibility: MemoryVisibility): Agent!
+    createAgent(orgId: ID!, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: MemoryVisibility): Agent!
+    updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: MemoryVisibility): Agent!
     deleteAgent(id: ID!): Boolean!
     addMemoryToAgent(agentId: ID!, memoryId: ID!, role: String): Agent!
     updateAgentMemoryRole(agentId: ID!, memoryId: ID!, role: String!): Agent!

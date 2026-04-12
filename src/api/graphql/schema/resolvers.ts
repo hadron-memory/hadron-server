@@ -1630,7 +1630,7 @@ export const resolvers = {
 
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, visibility }: { orgId: string; name: string; description?: string; systemPrompt?: string; visibility?: string },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility }: { orgId: string; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
@@ -1639,7 +1639,7 @@ export const resolvers = {
       const agentUrn = `${org.urn}:${name}`;
       return ctx.db.agent.create({
         data: {
-          organizationId: orgId, urn: agentUrn, name, description, systemPrompt,
+          organizationId: orgId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: systemMemoryId ?? null,
           visibility: (visibility as MemoryVisibility) ?? 'PRIVATE',
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
@@ -1649,7 +1649,7 @@ export const resolvers = {
 
     updateAgent: async (
       _: unknown,
-      { id, name, urn, description, systemPrompt, visibility }: { id: string; name?: string; urn?: string; description?: string; systemPrompt?: string; visibility?: string },
+      { id, name, urn, description, systemPrompt, systemMemoryId, visibility }: { id: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string },
       ctx: Context,
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
@@ -1666,6 +1666,7 @@ export const resolvers = {
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(description !== undefined ? { description } : {}),
           ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+          ...(systemMemoryId !== undefined ? { systemMemoryId } : {}),
           ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
         },
         include: AGENT_INCLUDE,

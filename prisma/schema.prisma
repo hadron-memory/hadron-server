@@ -283,6 +283,7 @@ model Node {
   tokens      Int?
   tags        String[]
   properties  Json?
+  data        Json?
   seq         Int?
   ownerRepo   String?   @map("owner_repo")
   isRunnable  Boolean?  @map("is_runnable")
@@ -313,6 +314,7 @@ model Edge {
   sourceId  String    @map("source_id")
   targetId  String    @map("target_id")
   label     String
+  condition String?
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
   updatedAt DateTime? @map("updated_at")
@@ -432,6 +434,7 @@ model Agent {
   name           String
   description    String?
   systemPrompt   String?          @map("system_prompt")
+  systemMemoryId String?          @map("system_memory_id")
   visibility     MemoryVisibility @default(PRIVATE)
   properties     Json?
   createdAt      DateTime  @default(now()) @map("created_at")
