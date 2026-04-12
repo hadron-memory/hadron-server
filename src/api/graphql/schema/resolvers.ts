@@ -2243,7 +2243,17 @@ export const resolvers = {
         return { role: isUser ? 'user' : 'assistant', content: m.content ?? '' };
       });
 
-      return { systemMessage, tools, messageHistory, summarizationNeeded: null };
+      // Check if summarization is needed
+      const triggerCount = 20; // TODO: read from agent/conversation config
+      let summarizationNeeded = null;
+      if (messageCount > 0 && messageCount % triggerCount === 0) {
+        summarizationNeeded = {
+          messageCount: triggerCount,
+          prompt: 'Summarize the following conversation messages. Focus on key facts, decisions made, and any action items. Keep the summary concise but include all important details.',
+        };
+      }
+
+      return { systemMessage, tools, messageHistory, summarizationNeeded };
     },
 
     processChatResponse: async (
