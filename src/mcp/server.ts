@@ -9,6 +9,7 @@ import { db } from '../integrations/db/client.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import type { SessionType } from '../generated/prisma/index.js';
+import { registerPongTools } from './tools/pong.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1277,6 +1278,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       return textResult(`Synced ${result.nodeCount ?? 0} nodes.`);
     },
   );
+
+  // ── Pong tools ────────────────────────────────────────────────────────────
+  registerPongTools(server, auth);
 
   return server;
 }

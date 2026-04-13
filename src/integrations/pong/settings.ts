@@ -32,6 +32,7 @@ export interface PongSettings {
   stationId: string | null;
   pausedUntil: Date | null;
   exclusionRules: PongExclusionRule[];
+  allowMcpSend: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -43,6 +44,7 @@ interface SettingsBlob {
   signatureText?: string | null;
   pausedUntil?: string | null;
   exclusionRules?: PongExclusionRule[];
+  allowMcpSend?: boolean;
 }
 
 const DEFAULT_BLOB: Required<Omit<SettingsBlob, 'replyTone' | 'signatureText' | 'pausedUntil'>> & {
@@ -56,6 +58,7 @@ const DEFAULT_BLOB: Required<Omit<SettingsBlob, 'replyTone' | 'signatureText' | 
   signatureText: null,
   pausedUntil: null,
   exclusionRules: [],
+  allowMcpSend: false,
 };
 
 function parseBlob(content: string | null): SettingsBlob {
@@ -88,6 +91,7 @@ function blobToSettings(
     stationId: ctx.stationId,
     pausedUntil: blob.pausedUntil ? new Date(blob.pausedUntil) : null,
     exclusionRules: blob.exclusionRules ?? [],
+    allowMcpSend: blob.allowMcpSend ?? DEFAULT_BLOB.allowMcpSend,
     createdAt: ctx.createdAt,
     updatedAt: ctx.updatedAt,
   };
@@ -231,6 +235,7 @@ export interface UpsertSettingsInput {
   stationId?: string | null;
   pausedUntil?: string | null;
   exclusionRules?: PongExclusionRule[];
+  allowMcpSend?: boolean;
 }
 
 /**
@@ -260,7 +265,8 @@ export async function upsertPongSettings(
     input.replyTone !== undefined ||
     input.signatureText !== undefined ||
     input.pausedUntil !== undefined ||
-    input.exclusionRules !== undefined;
+    input.exclusionRules !== undefined ||
+    input.allowMcpSend !== undefined;
 
   if (!memoryFieldsProvided) {
     return getPongSettings(db, connectionId) as Promise<PongSettings>;
@@ -283,6 +289,7 @@ export async function upsertPongSettings(
     ...(input.signatureText !== undefined && { signatureText: input.signatureText }),
     ...(input.pausedUntil !== undefined && { pausedUntil: input.pausedUntil }),
     ...(input.exclusionRules !== undefined && { exclusionRules: input.exclusionRules }),
+    ...(input.allowMcpSend !== undefined && { allowMcpSend: input.allowMcpSend }),
   };
   const updatedAt = await writeSettingsBlob(db, memoryId, next, editedBy);
 

@@ -76,7 +76,7 @@ export function decodeMetaBlock(body: string): { meta: PongMeta | null; bodyWith
   };
 }
 
-async function getRefreshToken(db: PrismaClient, connectionId: string): Promise<string> {
+export async function getRefreshToken(db: PrismaClient, connectionId: string): Promise<string> {
   // Minimal inline version of the resolver's getExchangeRefreshToken helper —
   // imports the decrypt function locally to avoid a cross-module dependency.
   const { createDecipheriv } = await import('crypto');
