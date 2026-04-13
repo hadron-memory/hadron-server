@@ -2,6 +2,16 @@ import bcrypt from 'bcrypt';
 import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
+import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import {
+  encryptNodeFields,
+  encryptNodeFieldsWithKey,
+  decryptNodeFields,
+  decryptNodesBatch,
+  getMemoryEncryptionInfo,
+  type MemoryEncryptionInfo,
+} from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, validateUrnType } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -437,6 +447,8 @@ export const resolvers = {
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
       if (candidates.length === 0) return null;
+      // Decrypt any nodes that come from encrypted memories (in place).
+      await decryptNodesBatch(ctx.db, candidates);
       const node = candidates.find((n) => !n.isLink) ?? candidates[0];
 
       // Compile Mustache templates unless raw: true
@@ -459,6 +471,7 @@ export const resolvers = {
       if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
         if (!(access.memoryId.in as string[]).includes(node.memoryId)) return null;
       }
+      await decryptNodesBatch(ctx.db, [node]);
 
       if (!raw && node.content?.includes('{{')) {
         const compiled = await compileTemplate(
@@ -496,6 +509,10 @@ export const resolvers = {
         orderBy: { loc: 'asc' },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
+      // Decrypt in place before sorting/slicing — the priority sort doesn't
+      // touch content, and the slice is a small window, so decrypting the
+      // whole result set is correct.
+      await decryptNodesBatch(ctx.db, results);
       // Sort by nodeType priority: abstract first, then info/reference, then record
       const typePriority: Record<string, number> = { abstract: 0, info: 1, reference: 1, record: 2, system: 3 };
       const sorted = deduplicateNodes(results).sort((a, b) =>
@@ -512,6 +529,7 @@ export const resolvers = {
         orderBy: { loc: 'asc' },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
+      await decryptNodesBatch(ctx.db, results);
       return deduplicateNodes(results);
     },
 
@@ -654,7 +672,7 @@ export const resolvers = {
       const memoryIds = [...new Set(subs.flatMap((s: any) => s.agent.memoryItems.map((m: any) => m.memoryId)))];
       if (memoryIds.length === 0) return [];
 
-      return ctx.db.node.findMany({
+      const results = await ctx.db.node.findMany({
         where: { memoryId: { in: memoryIds }, deletedAt: null },
         orderBy: { loc: 'asc' },
         take: limit ?? 500,
@@ -664,6 +682,8 @@ export const resolvers = {
           memory: { select: { id: true, urn: true, name: true, organizationId: true } },
         },
       });
+      await decryptNodesBatch(ctx.db, results);
+      return results;
     },
 
     stationAIConfig: async (_: unknown, { stationId }: { stationId: string }, ctx: Context) => {
@@ -902,12 +922,34 @@ export const resolvers = {
       const id = input.id ?? generateId();
       const { edges, ...nodeFields } = input;
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
+
+      // If the target memory is encrypted, encrypt content and data before
+      // writing. Throws SESSION_EXPIRED if no session key is cached.
+      const memEncInfo = await getMemoryEncryptionInfo(ctx.db, input.memoryId);
+      if (memEncInfo.isEncrypted) {
+        const key = sessionKeyCache.getByMemoryId(memEncInfo.id);
+        if (!key) {
+          throw new Error('SESSION_EXPIRED: memory is encrypted but no active session key is available');
+        }
+        const enc = encryptNodeFieldsWithKey(
+          { content: nodeFields.content ?? null, data: nodeFields.data ?? null },
+          key,
+        );
+        (nodeFields as Record<string, unknown>).content = enc.content ?? undefined;
+        (nodeFields as Record<string, unknown>).data = enc.data ?? undefined;
+      }
+
       const node = await ctx.db.node.upsert({
         where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-        create: { ...nodeFields, id, tags, createdBy },
-        update: { ...nodeFields, tags },
+        create: { ...nodeFields, id, tags, createdBy } as Prisma.NodeUncheckedCreateInput,
+        update: { ...nodeFields, tags } as Prisma.NodeUncheckedUpdateInput,
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
+
+      // For the return value, decrypt the result back so callers see plaintext.
+      if (memEncInfo.isEncrypted) {
+        decryptNodeFields(node, memEncInfo);
+      }
 
       let finalNode = node;
       if (edges !== undefined) {
@@ -933,6 +975,9 @@ export const resolvers = {
           where: { id: node.id },
           include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
         }))!;
+        if (memEncInfo.isEncrypted) {
+          decryptNodeFields(finalNode, memEncInfo);
+        }
       }
 
       writeNodeToGit({
@@ -994,7 +1039,7 @@ export const resolvers = {
               id: input.id ?? generateId(),
               ...input,
               tags: serializeTags(input.tags ?? []) as string[],
-            },
+            } as Prisma.NodeUncheckedCreateInput,
           });
         }
 
@@ -2261,26 +2306,38 @@ export const resolvers = {
       });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
 
+      // Decrypt the chat node's metadata (it holds conversationName, stageName,
+      // messageCount in `data`) if the memory is encrypted.
+      const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
+      if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
+
       const chatData = (chatNode.data as Record<string, unknown>) ?? {};
       const messageCount = ((chatData.messageCount as number) ?? 0) + 1;
       const convName = chatData.conversationName as string;
       const stageName = chatData.stageName as string;
 
-      // Save user message
+      // Save user message. When the memory is encrypted we need to encrypt
+      // the message content AND the chat node's updated `data`.
       const msgNum = String(messageCount).padStart(3, '0');
       const userId = chatData.userId as string ?? 'user';
+      const newMsgFields = encryptNodeFields(
+        { content: userMessage, data: null },
+        memEncInfo,
+      );
       await ctx.db.node.create({
         data: {
           id: generateId(), memoryId: chatNode.memoryId,
           loc: `${chatId}:messages:${msgNum}-${userId}`, name: `${msgNum}-${userId}`,
-          nodeType: 'record', content: userMessage, seq: messageCount,
+          nodeType: 'record', content: newMsgFields.content ?? null, seq: messageCount,
         },
       });
 
       // Update message count
+      const newChatData = { ...(chatData as Record<string, unknown>), messageCount };
+      const encUpdate = encryptNodeFields({ content: null, data: newChatData }, memEncInfo);
       await ctx.db.node.update({
         where: { id: chatNode.id },
-        data: { data: { ...(chatData as any), messageCount } },
+        data: { data: (encUpdate.data ?? null) as InputJsonValue },
       });
 
       // Load the agent to get system memory
@@ -2353,13 +2410,17 @@ export const resolvers = {
         }
       }
 
-      // Build message history (recent messages)
+      // Build message history (recent messages). For encrypted memories,
+      // decrypt each message's content before formatting.
       const messages = await ctx.db.node.findMany({
         where: { loc: { startsWith: `${chatId}:messages:` }, memoryId: chatNode.memoryId, deletedAt: null },
         orderBy: { seq: 'asc' },
         take: 50,
-        select: { loc: true, content: true, seq: true, nodeType: true },
+        select: { loc: true, content: true, data: true, seq: true, nodeType: true, memoryId: true },
       });
+      if (memEncInfo.isEncrypted) {
+        for (const m of messages) decryptNodeFields(m, memEncInfo);
+      }
 
       const messageHistory = messages.map((m) => {
         const name = m.loc.split(':').pop() ?? '';
@@ -2390,6 +2451,9 @@ export const resolvers = {
       const chatNode = await ctx.db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
 
+      const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
+      if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
+
       const chatData = (chatNode.data as Record<string, unknown>) ?? {};
       const messageCount = ((chatData.messageCount as number) ?? 0) + 1;
 
@@ -2397,13 +2461,14 @@ export const resolvers = {
       const data = toolResponse.data as Record<string, unknown> | undefined;
       const nextStage = toolResponse.next_stage as string | undefined;
 
-      // Save assistant message
+      // Save assistant message (encrypted when memory is encrypted)
       const msgNum = String(messageCount).padStart(3, '0');
+      const encMsg = encryptNodeFields({ content: message, data: null }, memEncInfo);
       await ctx.db.node.create({
         data: {
           id: generateId(), memoryId: chatNode.memoryId,
           loc: `${chatId}:messages:${msgNum}-assistant`, name: `${msgNum}-assistant`,
-          nodeType: 'record', content: message, seq: messageCount,
+          nodeType: 'record', content: encMsg.content ?? null, seq: messageCount,
         },
       });
 
@@ -2413,16 +2478,21 @@ export const resolvers = {
           where: { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null },
         });
         if (dataNode) {
+          if (memEncInfo.isEncrypted) decryptNodeFields(dataNode, memEncInfo);
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
+          const merged = { ...existingData, ...data };
+          const encData = encryptNodeFields({ content: null, data: merged }, memEncInfo);
           await ctx.db.node.update({
             where: { id: dataNode.id },
-            data: { data: { ...existingData, ...data } as any },
+            data: { data: (encData.data ?? null) as InputJsonValue },
           });
         } else {
+          const encNew = encryptNodeFields({ content: null, data }, memEncInfo);
           await ctx.db.node.create({
             data: {
               id: generateId(), memoryId: chatNode.memoryId,
-              loc: 'data', name: 'data', nodeType: 'info', data: data as any,
+              loc: 'data', name: 'data', nodeType: 'info',
+              data: (encNew.data ?? null) as InputJsonValue,
             },
           });
         }
@@ -2431,7 +2501,7 @@ export const resolvers = {
       // Handle stage transition
       let stageTransitioned = false;
       let newStageName: string | null = null;
-      const updatedData: Record<string, unknown> = { ...(chatData as any), messageCount };
+      const updatedData: Record<string, unknown> = { ...(chatData as Record<string, unknown>), messageCount };
 
       if (nextStage && nextStage !== chatData.stageName) {
         updatedData.stageName = nextStage;
@@ -2439,7 +2509,11 @@ export const resolvers = {
         newStageName = nextStage;
       }
 
-      await ctx.db.node.update({ where: { id: chatNode.id }, data: { data: updatedData as any } });
+      const encUpdate = encryptNodeFields({ content: null, data: updatedData }, memEncInfo);
+      await ctx.db.node.update({
+        where: { id: chatNode.id },
+        data: { data: (encUpdate.data ?? null) as InputJsonValue },
+      });
 
       return {
         displayMessage: message,
@@ -2460,15 +2534,19 @@ export const resolvers = {
       const chatNode = await ctx.db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
 
+      const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
+      if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
+
       const chatData = (chatNode.data as Record<string, unknown>) ?? {};
       const messageCount = (chatData.messageCount as number) ?? 0;
       const summaryName = `${String(messageCount).padStart(3, '0')}a-summary`;
 
+      const encSummary = encryptNodeFields({ content: summary, data: null }, memEncInfo);
       await ctx.db.node.create({
         data: {
           id: generateId(), memoryId: chatNode.memoryId,
           loc: `${chatId}:messages:${summaryName}`, name: summaryName,
-          nodeType: 'abstract', content: summary, seq: messageCount + 1,
+          nodeType: 'abstract', content: encSummary.content ?? null, seq: messageCount + 1,
           tags: ['summary'],
         },
       });
@@ -2637,10 +2715,11 @@ export const resolvers = {
 
     startAgentSession: async (
       _: unknown,
-      { agentId, externalUserId, sessionTimeoutSeconds }: {
+      { agentId, externalUserId, sessionTimeoutSeconds, dataKey }: {
         agentId: string;
         externalUserId?: string;
         sessionTimeoutSeconds?: number;
+        dataKey?: string;
       },
       ctx: Context,
     ) => {
@@ -2655,6 +2734,16 @@ export const resolvers = {
 
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
       if (agent.deletedAt) throw new Error('Agent not found');
+
+      // SECRET mode requires a data key; USER_ID mode rejects it.
+      if (app.identifyUserMethod === 'SECRET' && !dataKey) {
+        throw new Error('dataKey is required when the app uses identifyUserMethod: SECRET');
+      }
+      if (app.identifyUserMethod === 'USER_ID' && dataKey) {
+        throw new Error('dataKey is only accepted when the app uses identifyUserMethod: SECRET');
+      }
+
+      const parsedKey: EncryptionKey | null = dataKey ? parseDataKey(dataKey) : null;
 
       // Resolve user (optional — null means anonymous session)
       let userId: string | null = null;
@@ -2680,12 +2769,14 @@ export const resolvers = {
 
       // Find or lazily provision the user memory for (agent, user)
       let memoryId: string;
+      let memoryIsEncrypted = false;
       if (userId) {
         const existing = await ctx.db.memory.findFirst({
           where: { userMemoryOfAgentId: agentId, createdBy: userId, deletedAt: null },
         });
         if (existing) {
           memoryId = existing.id;
+          memoryIsEncrypted = existing.isEncrypted;
         } else {
           const org = await ctx.db.organization.findUniqueOrThrow({
             where: { id: agent.organizationId }, select: { urn: true },
@@ -2699,13 +2790,17 @@ export const resolvers = {
               name: `User memory (${agent.name})`,
               visibility: 'PRIVATE',
               userMemoryOfAgentId: agentId,
+              // New user memories in SECRET mode are encrypted from creation.
+              isEncrypted: parsedKey !== null,
               createdBy: userId,
             },
           });
           memoryId = created.id;
+          memoryIsEncrypted = parsedKey !== null;
         }
       } else {
-        // Anonymous session — create a scratch memory with expiry
+        // Anonymous session — create a scratch memory with expiry. Anonymous
+        // memories are always plaintext until linkMemoryToUser promotes them.
         const org = await ctx.db.organization.findUniqueOrThrow({
           where: { id: agent.organizationId }, select: { urn: true },
         });
@@ -2725,6 +2820,14 @@ export const resolvers = {
           },
         });
         memoryId = created.id;
+        memoryIsEncrypted = false;
+      }
+
+      // If the memory is encrypted, the caller must provide a matching key.
+      // (In SECRET mode we already required a dataKey above; this check also
+      // handles a later call with USER_ID mode on an already-encrypted mem.)
+      if (memoryIsEncrypted && !parsedKey) {
+        throw new Error('Memory is encrypted; dataKey is required');
       }
 
       // Clamp session timeout to the app's configured maximum (ceiling)
@@ -2746,6 +2849,13 @@ export const resolvers = {
           createdBy: ctx.appId,
         },
       });
+
+      // Register the key in the session key cache so this session (and any
+      // concurrent one for the same memory) can decrypt content.
+      if (parsedKey) {
+        sessionKeyCache.set(session.id, memoryId, parsedKey);
+      }
+
       return session;
     },
 
@@ -2755,17 +2865,23 @@ export const resolvers = {
       if (!session || session.appId !== ctx.appId) {
         throw new Error('Session not found');
       }
-      if (session.endedAt) return true; // idempotent
+      if (session.endedAt) {
+        sessionKeyCache.evict(sessionId); // defensive — idempotent
+        return true;
+      }
       await ctx.db.session.update({
         where: { id: sessionId },
         data: { endedAt: new Date() },
       });
+      // Evict the data key from the in-memory cache. Ref counting means the
+      // key stays available to any other active session on the same memory.
+      sessionKeyCache.evict(sessionId);
       return true;
     },
 
     linkMemoryToUser: async (
       _: unknown,
-      { memoryId, externalUserId }: { memoryId: string; externalUserId: string },
+      { memoryId, externalUserId, dataKey }: { memoryId: string; externalUserId: string; dataKey?: string },
       ctx: Context,
     ) => {
       if (!ctx.appId) throw new Error('Forbidden: App Key required');
@@ -2796,7 +2912,7 @@ export const resolvers = {
         });
       }
 
-      // Update memory: assign to user, clear anonymous expiry, update URN
+      // Rewrite the URN from anon → user
       const agent = await ctx.db.agent.findUniqueOrThrow({
         where: { id: memory.userMemoryOfAgentId },
       });
@@ -2807,6 +2923,43 @@ export const resolvers = {
       const agentSlug = agent.urn.split(':').slice(1).join(':');
       const newUrn = `${org.urn}:${agentSlug}:user:${opaqueId}`;
 
+      // If a dataKey is provided and the memory isn't already encrypted,
+      // encrypt every node in a single transaction, then flip isEncrypted.
+      // This is the anonymous → registered promotion path.
+      if (dataKey && !memory.isEncrypted) {
+        const key = parseDataKey(dataKey);
+        const nodes = await ctx.db.node.findMany({
+          where: { memoryId, deletedAt: null },
+          select: { id: true, content: true, data: true },
+        });
+        await ctx.db.$transaction(async (tx) => {
+          for (const node of nodes) {
+            const encrypted = encryptNodeFieldsWithKey(
+              { content: node.content, data: node.data },
+              key,
+            );
+            await tx.node.update({
+              where: { id: node.id },
+              data: {
+                content: encrypted.content ?? null,
+                data: (encrypted.data ?? null) as InputJsonValue,
+              },
+            });
+          }
+          await tx.memory.update({
+            where: { id: memoryId },
+            data: {
+              urn: newUrn,
+              createdBy: user.id,
+              anonymousExpiresAt: null,
+              isEncrypted: true,
+              updatedBy: ctx.appId,
+            },
+          });
+        });
+        return ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      }
+
       return ctx.db.memory.update({
         where: { id: memoryId },
         data: {
@@ -2816,6 +2969,47 @@ export const resolvers = {
           updatedBy: ctx.appId,
         },
       });
+    },
+
+    encryptMemory: async (
+      _: unknown,
+      { memoryId, dataKey }: { memoryId: string; dataKey: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      if (memory.organizationId !== app.organizationId) {
+        throw new Error('Forbidden: memory does not belong to this app\'s organization');
+      }
+      if (memory.isEncrypted) {
+        throw new Error('Memory is already encrypted');
+      }
+      const key = parseDataKey(dataKey);
+      const nodes = await ctx.db.node.findMany({
+        where: { memoryId, deletedAt: null },
+        select: { id: true, content: true, data: true },
+      });
+      await ctx.db.$transaction(async (tx) => {
+        for (const node of nodes) {
+          const encrypted = encryptNodeFieldsWithKey(
+            { content: node.content, data: node.data },
+            key,
+          );
+          await tx.node.update({
+            where: { id: node.id },
+            data: {
+              content: encrypted.content ?? null,
+              data: (encrypted.data ?? null) as InputJsonValue,
+            },
+          });
+        }
+        await tx.memory.update({
+          where: { id: memoryId },
+          data: { isEncrypted: true, updatedBy: ctx.appId },
+        });
+      });
+      return ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     },
   },
 };
@@ -2828,13 +3022,18 @@ interface NodeEdgeInput {
 interface NodeInput {
   id?: string;
   memoryId: string;
+  nodeType?: string;
   loc: string;
   name: string;
   alias?: string;
   description?: string;
   content?: string;
+  data?: Record<string, unknown>;
   seq?: number;
   tags?: string[];
+  properties?: Record<string, unknown>;
+  llmModel?: string;
+  aiAgent?: string;
   ownerRepo?: string;
   edges?: NodeEdgeInput[];
 }

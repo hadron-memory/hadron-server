@@ -301,6 +301,7 @@ export const typeDefs = `#graphql
     readBranch: String
     writeBranch: String
     visibility: MemoryVisibility!
+    isEncrypted: Boolean!
     userMemoryOfAgentId: String
     anonymousExpiresAt: String
     syncStatus: SyncStatus!
@@ -690,12 +691,26 @@ export const typeDefs = `#graphql
     createAppUser(externalId: String!, handle: String, name: String, email: String): User!
 
     # Multi-user-agent session lifecycle (renamed to avoid collision with
-    # the developer/guided startSession and endSession mutations)
-    startAgentSession(agentId: ID!, externalUserId: String, sessionTimeoutSeconds: Int): Session!
+    # the developer/guided startSession and endSession mutations).
+    # dataKey is base64-encoded, 32 bytes, required when the app is
+    # configured with identifyUserMethod: SECRET and the target memory is
+    # (or will become) encrypted.
+    startAgentSession(
+      agentId: ID!
+      externalUserId: String
+      sessionTimeoutSeconds: Int
+      dataKey: String
+    ): Session!
     endAgentSession(sessionId: ID!): Boolean!
 
-    # Link an anonymous memory to a real user (converts session memory ownership)
-    linkMemoryToUser(memoryId: ID!, externalUserId: String!): Memory!
+    # Link an anonymous memory to a real user (converts session memory ownership).
+    # Providing dataKey encrypts the memory in place atomically with the link.
+    linkMemoryToUser(memoryId: ID!, externalUserId: String!, dataKey: String): Memory!
+
+    # Convert an existing plaintext memory to an encrypted one. The caller
+    # provides the data key; all existing node content/data is re-written as
+    # ciphertext in a single transaction.
+    encryptMemory(memoryId: ID!, dataKey: String!): Memory!
   }
 
   # ── Chat types ──────────────────────────────────────────────────────

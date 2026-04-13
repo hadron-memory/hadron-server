@@ -272,6 +272,7 @@ model Memory {
   readBranch           String?          @map("read_branch")
   writeBranch          String?          @map("write_branch")
   visibility           MemoryVisibility @default(PRIVATE)
+  isEncrypted          Boolean          @default(false) @map("is_encrypted")
   userMemoryOfAgentId  String?          @map("user_memory_of_agent_id")
   anonymousExpiresAt   DateTime?        @map("anonymous_expires_at")
   requiresLicense      Boolean          @default(false) @map("requires_license")
