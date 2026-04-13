@@ -606,6 +606,40 @@ describe('cleanupAnonymousMemories', () => {
 // Agent type + surfaces
 // ---------------------------------------------------------------------------
 
+describe('Organization memory listing', () => {
+  it('excludes user memories from the org memories list', async () => {
+    // Create a regular org memory
+    await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgA.id,
+        urn: 'org-a:knowledge',
+        name: 'knowledge',
+      },
+    });
+    // Create a user memory (via startAgentSession)
+    await resolvers.Mutation.createAppUser(
+      {},
+      { externalId: 'mm-42' },
+      appCtx(app.id),
+    );
+    await resolvers.Mutation.startAgentSession(
+      {},
+      { agentId: agent.id, externalUserId: 'mm-42' },
+      appCtx(app.id),
+    );
+
+    // Query the organization — should show the regular memory but not the user one
+    const org = await resolvers.Query.organization(
+      {},
+      { id: orgA.id },
+      adminCtx(),
+    );
+    expect(org?.memories.map((m: { urn: string }) => m.urn)).toContain('org-a:knowledge');
+    expect(org?.memories.find((m: { urn: string }) => m.urn.includes(':user:'))).toBeUndefined();
+  });
+});
+
 describe('Agent type + surfaces', () => {
   it('creates an ASSISTANT with mcp surface by default', async () => {
     const created = await resolvers.Mutation.createAgent(
