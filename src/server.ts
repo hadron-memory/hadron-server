@@ -25,6 +25,7 @@ import {
   provisionPersonalWorkspace,
   hasPersonalWorkspace,
 } from './provisioning/personal-workspace.js';
+import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 
 export async function createServer(): Promise<Express> {
   const app = express();
@@ -691,6 +692,12 @@ export async function createServer(): Promise<Express> {
   app.get('/health', (_req, res) => {
     res.json({ ok: true });
   });
+
+  // Background job: purge expired anonymous memories hourly.
+  // Skipped in test environments to avoid leaking timers.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_ANON_CLEANUP !== 'true') {
+    startAnonymousMemoryCleanupLoop(db);
+  }
 
   return app;
 }

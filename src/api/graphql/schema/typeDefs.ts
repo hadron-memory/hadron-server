@@ -33,6 +33,22 @@ export const typeDefs = `#graphql
     ORGANIZATION
   }
 
+  enum CreateUserPermission {
+    DENY
+    EXPLICIT
+    IMPLICIT
+  }
+
+  enum IdentifyUserMethod {
+    USER_ID
+    SECRET
+  }
+
+  enum AgentType {
+    ASSISTANT
+    CHATBOT
+  }
+
   type Node {
     id: ID!
     memoryId: String!
@@ -71,6 +87,11 @@ export const typeDefs = `#graphql
     id: ID!
     type: String!
     stationId: String
+    appId: String
+    userId: String
+    agentId: String
+    memoryId: String
+    expiresAt: String
     repo: String
     branch: String
     prNumber: Int
@@ -187,11 +208,48 @@ export const typeDefs = `#graphql
     githubId: Int
     githubUsername: String
     identityProvider: String
+    externalId: String
+    externalAppId: String
+    linkedAt: String
     name: String
     email: String
     avatarUrl: String
     roles: [Role!]!
     maxReferrals: Int
+  }
+
+  # A third-party application (e.g. Micromentor's backend) that calls Hadron on
+  # behalf of its own users. Owns long-lived App Keys and a set of agents it may
+  # operate.
+  type App {
+    id: ID!
+    name: String!
+    organizationId: String!
+    organization: Organization
+    createUserPermission: CreateUserPermission!
+    identifyUserMethod: IdentifyUserMethod!
+    sessionTimeoutSeconds: Int!
+    anonymousTtlDays: Int!
+    agents: [Agent!]!
+    keys: [AppKey!]!
+    createdAt: String!
+    updatedAt: String
+  }
+
+  type AppKey {
+    id: ID!
+    appId: String!
+    keyPreview: String!
+    label: String
+    createdAt: String!
+    lastUsedAt: String
+    revokedAt: String
+  }
+
+  # Returned once at creation — the raw key is never stored
+  type AppKeyCreated {
+    key: AppKey!
+    rawKey: String!
   }
 
   # A company or team that owns one or more Hadron memories.
@@ -206,6 +264,7 @@ export const typeDefs = `#graphql
     members: [OrgMember!]!
     memories: [Memory!]!
     agents: [Agent!]!
+    apps: [App!]!
     subscriptions: [MemorySubscription!]!
     exchangeConnections: [ExchangeConnection!]!
     createdAt: String!
@@ -242,6 +301,8 @@ export const typeDefs = `#graphql
     readBranch: String
     writeBranch: String
     visibility: MemoryVisibility!
+    userMemoryOfAgentId: String
+    anonymousExpiresAt: String
     syncStatus: SyncStatus!
     syncError: String
     pendingEdgeCount: Int!
@@ -261,6 +322,8 @@ export const typeDefs = `#graphql
     systemPrompt: String
     systemMemoryId: String
     visibility: MemoryVisibility!
+    type: AgentType!
+    surfaces: [String!]!
     properties: JSON
     memoryItems: [AgentMemoryItem!]!
     createdAt: String!
@@ -475,6 +538,10 @@ export const typeDefs = `#graphql
     exchangeConnections(orgId: ID!): [ExchangeConnection!]!
     exchangeMessages(connectionId: ID!, top: Int, filter: String): [ExchangeMessage!]!
     exchangeFolders(connectionId: ID!): [ExchangeFolder!]!
+
+    # Apps (org ADMIN)
+    apps(orgId: ID!): [App!]!
+    app(id: ID!): App
   }
 
   type Mutation {
@@ -551,8 +618,8 @@ export const typeDefs = `#graphql
     setMemorySourceToken(id: ID!, token: String!, expiresAt: String): Memory!
 
     # Agent management (org ADMIN)
-    createAgent(orgId: ID!, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: MemoryVisibility): Agent!
-    updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: MemoryVisibility): Agent!
+    createAgent(orgId: ID!, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: MemoryVisibility, type: AgentType, surfaces: [String!]): Agent!
+    updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: MemoryVisibility, type: AgentType, surfaces: [String!]): Agent!
     deleteAgent(id: ID!): Boolean!
     addMemoryToAgent(agentId: ID!, memoryId: ID!, role: String): Agent!
     updateAgentMemoryRole(agentId: ID!, memoryId: ID!, role: String!): Agent!
@@ -591,6 +658,44 @@ export const typeDefs = `#graphql
     # Public mutations (no auth required)
     joinWaitingList(email: String!, requestedFeatures: String): Boolean!
     sendContactMessage(name: String!, email: String!, message: String!): Boolean!
+
+    # ── Apps and multi-user-agent sessions ────────────────────────────
+
+    # App management (org ADMIN) — third-party applications calling Hadron
+    # on behalf of their own users.
+    createApp(
+      orgId: ID!
+      name: String!
+      createUserPermission: CreateUserPermission
+      identifyUserMethod: IdentifyUserMethod
+      sessionTimeoutSeconds: Int
+      anonymousTtlDays: Int
+    ): App!
+    updateApp(
+      id: ID!
+      name: String
+      createUserPermission: CreateUserPermission
+      identifyUserMethod: IdentifyUserMethod
+      sessionTimeoutSeconds: Int
+      anonymousTtlDays: Int
+    ): App!
+    deleteApp(id: ID!): Boolean!
+    addAgentToApp(appId: ID!, agentId: ID!): App!
+    removeAgentFromApp(appId: ID!, agentId: ID!): App!
+    createAppKey(appId: ID!, label: String): AppKeyCreated!
+    revokeAppKey(id: ID!): Boolean!
+
+    # App Key callers only: vouch for a user and manage sessions.
+    # Identity lifecycle
+    createAppUser(externalId: String!, handle: String, name: String, email: String): User!
+
+    # Multi-user-agent session lifecycle (renamed to avoid collision with
+    # the developer/guided startSession and endSession mutations)
+    startAgentSession(agentId: ID!, externalUserId: String, sessionTimeoutSeconds: Int): Session!
+    endAgentSession(sessionId: ID!): Boolean!
+
+    # Link an anonymous memory to a real user (converts session memory ownership)
+    linkMemoryToUser(memoryId: ID!, externalUserId: String!): Memory!
   }
 
   # ── Chat types ──────────────────────────────────────────────────────

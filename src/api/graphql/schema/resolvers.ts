@@ -1,6 +1,7 @@
 import bcrypt from 'bcrypt';
 import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
+import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { parseUrnInput, validateUrnType } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -21,6 +22,8 @@ export interface Context {
   db: PrismaClient;
   clientId?: string;       // Station.id or "github:<username>"
   userId?: string;         // User.id — only set for OAuth/JWT users
+  appId?: string;          // App.id — set when caller authenticated via an App Key
+  sessionId?: string;      // Session.id — set when operating inside an active session
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
 }
@@ -59,6 +62,30 @@ async function requireOrgRole(
  */
 async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return null;
+
+  // App Key with an active session — hard-isolate to the session's memory
+  // plus the agent's system memory. Even if an LLM asks to read a different
+  // memory by ID, this filter denies it. This is THE security boundary for
+  // multi-user agents.
+  if (ctx.appId && ctx.sessionId) {
+    const session = await ctx.db.session.findUnique({
+      where: { id: ctx.sessionId },
+      select: {
+        memoryId: true,
+        agent: { select: { systemMemoryId: true } },
+      },
+    });
+    const ids: string[] = [];
+    if (session?.memoryId) ids.push(session.memoryId);
+    if (session?.agent?.systemMemoryId) ids.push(session.agent.systemMemoryId);
+    return ids;
+  }
+
+  // App Key without an active session — management-only context, no memory
+  // access at all.
+  if (ctx.appId) {
+    return [];
+  }
 
   // API-key client — memories from agent subscriptions
   if (ctx.clientId && !ctx.userId) {
@@ -227,6 +254,11 @@ const STATION_INCLUDE = {
 
 const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
 
+const APP_INCLUDE = {
+  keys: { where: { revokedAt: null }, orderBy: { createdAt: 'desc' as const } },
+  appAgents: { include: { agent: true } },
+};
+
 const toISO = (v: Date | string | null | undefined): string | null =>
   v == null ? null : v instanceof Date ? v.toISOString() : v;
 
@@ -283,10 +315,57 @@ export const resolvers = {
       (g as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: g.organizationId } }),
   },
+  App: {
+    createdAt: (a: { createdAt: Date | string }) => toISO(a.createdAt)!,
+    updatedAt: (a: { updatedAt?: Date | string | null }) => toISO(a.updatedAt ?? null),
+    organization: (a: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
+      (a as Record<string, unknown>).organization ??
+      ctx.db.organization.findUnique({ where: { id: a.organizationId } }),
+    agents: async (a: { id: string; appAgents?: Array<{ agent: unknown }> }, _: unknown, ctx: Context) => {
+      if (a.appAgents) {
+        return a.appAgents.map((aa) => aa.agent).filter((g) => g && !(g as { deletedAt?: Date | null }).deletedAt);
+      }
+      const rows = await ctx.db.appAgent.findMany({
+        where: { appId: a.id },
+        include: { agent: true },
+      });
+      return rows.map((r) => r.agent).filter((g) => !g.deletedAt);
+    },
+    keys: async (a: { id: string; keys?: unknown[] }, _: unknown, ctx: Context) => {
+      if (a.keys) return a.keys;
+      return ctx.db.appKey.findMany({
+        where: { appId: a.id, revokedAt: null },
+        orderBy: { createdAt: 'desc' },
+      });
+    },
+  },
+  AppKey: {
+    createdAt: (k: { createdAt: Date | string }) => toISO(k.createdAt)!,
+    lastUsedAt: (k: { lastUsedAt?: Date | string | null }) => toISO(k.lastUsedAt ?? null),
+    revokedAt: (k: { revokedAt?: Date | string | null }) => toISO(k.revokedAt ?? null),
+  },
+  User: {
+    linkedAt: (u: { linkedAt?: Date | string | null }) => toISO(u.linkedAt ?? null),
+  },
+  Session: {
+    startedAt: (s: { startedAt: Date | string }) => toISO(s.startedAt)!,
+    endedAt: (s: { endedAt?: Date | string | null }) => toISO(s.endedAt ?? null),
+    expiresAt: (s: { expiresAt?: Date | string | null }) => toISO(s.expiresAt ?? null),
+    autoExpiredAt: (s: { autoExpiredAt?: Date | string | null }) => toISO(s.autoExpiredAt ?? null),
+    outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
+  },
   Organization: {
     createdAt: (o: { createdAt: Date | string }) => toISO(o.createdAt)!,
     updatedAt: (o: { updatedAt: Date | string }) => toISO(o.updatedAt)!,
     hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
+    apps: async (org: { id: string; apps?: unknown[] }, _: unknown, ctx: Context) => {
+      if (org.apps) return org.apps;
+      return ctx.db.app.findMany({
+        where: { organizationId: org.id, deletedAt: null },
+        include: APP_INCLUDE,
+        orderBy: { name: 'asc' },
+      });
+    },
     agents: async (org: { id: string }, _: unknown, ctx: Context) => {
       const where: Record<string, unknown> = { organizationId: org.id, deletedAt: null };
       if (ctx.userId) {
@@ -332,9 +411,6 @@ export const resolvers = {
   },
   Agent: {
     createdAt: (b: { createdAt: Date | string }) => toISO(b.createdAt)!,
-  },
-  Session: {
-    outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
@@ -750,6 +826,23 @@ export const resolvers = {
       const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
       const result = await listFolders(refreshToken);
       return result.data;
+    },
+
+    // ── Apps (multi-user agent callers) ─────────────────────────────
+    apps: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      return ctx.db.app.findMany({
+        where: { organizationId: orgId, deletedAt: null },
+        include: APP_INCLUDE,
+        orderBy: { name: 'asc' },
+      });
+    },
+
+    app: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const app = await ctx.db.app.findUnique({ where: { id }, include: APP_INCLUDE });
+      if (!app || app.deletedAt) return null;
+      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      return app;
     },
   },
 
@@ -1659,7 +1752,7 @@ export const resolvers = {
 
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility }: { orgId: string; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces }: { orgId: string; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
@@ -1674,10 +1767,15 @@ export const resolvers = {
           throw new Error(`An agent with URN "${agentUrn}" already exists`);
         }
       }
+      // Defaults: CHATBOT when systemMemoryId is set (wizard flow), otherwise ASSISTANT.
+      const inferredType = type ?? (systemMemoryId ? 'CHATBOT' : 'ASSISTANT');
+      const defaultSurfaces = inferredType === 'CHATBOT' ? ['api'] : ['mcp'];
       return ctx.db.agent.create({
         data: {
           organizationId: orgId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: systemMemoryId ?? null,
           visibility: (visibility as MemoryVisibility) ?? 'PRIVATE',
+          type: inferredType,
+          surfaces: surfaces ?? defaultSurfaces,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
         include: AGENT_INCLUDE,
@@ -1686,7 +1784,7 @@ export const resolvers = {
 
     updateAgent: async (
       _: unknown,
-      { id, name, urn, description, systemPrompt, systemMemoryId, visibility }: { id: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string },
+      { id, name, urn, description, systemPrompt, systemMemoryId, visibility, type, surfaces }: { id: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
       ctx: Context,
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
@@ -1705,6 +1803,8 @@ export const resolvers = {
           ...(systemPrompt !== undefined ? { systemPrompt } : {}),
           ...(systemMemoryId !== undefined ? { systemMemoryId } : {}),
           ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
+          ...(type !== undefined ? { type } : {}),
+          ...(surfaces !== undefined ? { surfaces } : {}),
         },
         include: AGENT_INCLUDE,
       });
@@ -2366,6 +2466,348 @@ export const resolvers = {
       });
 
       return true;
+    },
+
+    // ── App management (org ADMIN) ──────────────────────────────────
+
+    createApp: async (
+      _: unknown,
+      { orgId, name, createUserPermission, identifyUserMethod, sessionTimeoutSeconds, anonymousTtlDays }: {
+        orgId: string; name: string;
+        createUserPermission?: 'DENY' | 'EXPLICIT' | 'IMPLICIT';
+        identifyUserMethod?: 'USER_ID' | 'SECRET';
+        sessionTimeoutSeconds?: number;
+        anonymousTtlDays?: number;
+      },
+      ctx: Context,
+    ) => {
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      return ctx.db.app.create({
+        data: {
+          organizationId: orgId,
+          name,
+          createUserPermission: createUserPermission ?? 'EXPLICIT',
+          identifyUserMethod: identifyUserMethod ?? 'USER_ID',
+          sessionTimeoutSeconds: sessionTimeoutSeconds ?? 900,
+          anonymousTtlDays: anonymousTtlDays ?? 7,
+          createdBy: ctx.userId ?? null,
+        },
+        include: APP_INCLUDE,
+      });
+    },
+
+    updateApp: async (
+      _: unknown,
+      { id, name, createUserPermission, identifyUserMethod, sessionTimeoutSeconds, anonymousTtlDays }: {
+        id: string; name?: string;
+        createUserPermission?: 'DENY' | 'EXPLICIT' | 'IMPLICIT';
+        identifyUserMethod?: 'USER_ID' | 'SECRET';
+        sessionTimeoutSeconds?: number;
+        anonymousTtlDays?: number;
+      },
+      ctx: Context,
+    ) => {
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      return ctx.db.app.update({
+        where: { id },
+        data: {
+          ...(name !== undefined ? { name } : {}),
+          ...(createUserPermission !== undefined ? { createUserPermission } : {}),
+          ...(identifyUserMethod !== undefined ? { identifyUserMethod } : {}),
+          ...(sessionTimeoutSeconds !== undefined ? { sessionTimeoutSeconds } : {}),
+          ...(anonymousTtlDays !== undefined ? { anonymousTtlDays } : {}),
+          updatedBy: ctx.userId ?? null,
+        },
+        include: APP_INCLUDE,
+      });
+    },
+
+    deleteApp: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      await ctx.db.app.update({ where: { id }, data: { deletedAt: new Date() } });
+      return true;
+    },
+
+    addAgentToApp: async (
+      _: unknown,
+      { appId, agentId }: { appId: string; agentId: string },
+      ctx: Context,
+    ) => {
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      // Agent must belong to the same org
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      if (agent.organizationId !== app.organizationId) {
+        throw new Error('Agent must belong to the same organization as the App');
+      }
+      await ctx.db.appAgent.upsert({
+        where: { appId_agentId: { appId, agentId } },
+        create: { appId, agentId },
+        update: {},
+      });
+      return ctx.db.app.findUniqueOrThrow({ where: { id: appId }, include: APP_INCLUDE });
+    },
+
+    removeAgentFromApp: async (
+      _: unknown,
+      { appId, agentId }: { appId: string; agentId: string },
+      ctx: Context,
+    ) => {
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      await ctx.db.appAgent
+        .delete({ where: { appId_agentId: { appId, agentId } } })
+        .catch(() => {}); // idempotent
+      return ctx.db.app.findUniqueOrThrow({ where: { id: appId }, include: APP_INCLUDE });
+    },
+
+    createAppKey: async (
+      _: unknown,
+      { appId, label }: { appId: string; label?: string },
+      ctx: Context,
+    ) => {
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
+      const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
+      const keyHash = hashAppKey(rawKey);
+      const keyPreview = rawKey.slice(0, 12) + '...' + rawKey.slice(-4);
+      const appKey = await ctx.db.appKey.create({
+        data: {
+          appId,
+          keyHash,
+          keyPreview,
+          label: label ?? null,
+          createdBy: ctx.userId ?? null,
+        },
+      });
+      return { key: appKey, rawKey };
+    },
+
+    revokeAppKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const key = await ctx.db.appKey.findUniqueOrThrow({
+        where: { id },
+        include: { app: true },
+      });
+      await requireOrgRole(ctx, key.app.organizationId, 'ADMIN');
+      await ctx.db.appKey.update({ where: { id }, data: { revokedAt: new Date() } });
+      return true;
+    },
+
+    // ── Multi-user-agent: identity and sessions (App Key auth) ──────
+
+    createAppUser: async (
+      _: unknown,
+      { externalId, handle, name, email }: { externalId: string; handle?: string; name?: string; email?: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
+      if (app.createUserPermission === 'DENY') {
+        throw new Error('Forbidden: this app cannot create users');
+      }
+      // Idempotent: return existing user if already created under this app
+      const existing = await ctx.db.user.findFirst({
+        where: { externalAppId: ctx.appId, externalId, deletedAt: null },
+      });
+      if (existing) return existing;
+
+      return ctx.db.user.create({
+        data: {
+          externalAppId: ctx.appId,
+          externalId,
+          identityProvider: 'APP',
+          handle: handle ?? null,
+          name: name ?? null,
+          email: email ?? null,
+          createdBy: ctx.appId,
+        },
+      });
+    },
+
+    startAgentSession: async (
+      _: unknown,
+      { agentId, externalUserId, sessionTimeoutSeconds }: {
+        agentId: string;
+        externalUserId?: string;
+        sessionTimeoutSeconds?: number;
+      },
+      ctx: Context,
+    ) => {
+      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
+
+      // App must be allowed to operate this agent
+      const allowed = await ctx.db.appAgent.findUnique({
+        where: { appId_agentId: { appId: ctx.appId, agentId } },
+      });
+      if (!allowed) throw new Error('Forbidden: App is not allowed to operate this agent');
+
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      if (agent.deletedAt) throw new Error('Agent not found');
+
+      // Resolve user (optional — null means anonymous session)
+      let userId: string | null = null;
+      if (externalUserId) {
+        let user = await ctx.db.user.findFirst({
+          where: { externalAppId: ctx.appId, externalId: externalUserId, deletedAt: null },
+        });
+        if (!user) {
+          if (app.createUserPermission !== 'IMPLICIT') {
+            throw new Error('User not found. Call createAppUser first or set createUserPermission=IMPLICIT.');
+          }
+          user = await ctx.db.user.create({
+            data: {
+              externalAppId: ctx.appId,
+              externalId: externalUserId,
+              identityProvider: 'APP',
+              createdBy: ctx.appId,
+            },
+          });
+        }
+        userId = user.id;
+      }
+
+      // Find or lazily provision the user memory for (agent, user)
+      let memoryId: string;
+      if (userId) {
+        const existing = await ctx.db.memory.findFirst({
+          where: { userMemoryOfAgentId: agentId, createdBy: userId, deletedAt: null },
+        });
+        if (existing) {
+          memoryId = existing.id;
+        } else {
+          const org = await ctx.db.organization.findUniqueOrThrow({
+            where: { id: agent.organizationId }, select: { urn: true },
+          });
+          const opaqueId = generateId();
+          const memoryUrn = `${org.urn}:${agent.urn.split(':').slice(1).join(':')}:user:${opaqueId}`;
+          const created = await ctx.db.memory.create({
+            data: {
+              organizationId: agent.organizationId,
+              urn: memoryUrn,
+              name: `User memory (${agent.name})`,
+              visibility: 'PRIVATE',
+              userMemoryOfAgentId: agentId,
+              createdBy: userId,
+            },
+          });
+          memoryId = created.id;
+        }
+      } else {
+        // Anonymous session — create a scratch memory with expiry
+        const org = await ctx.db.organization.findUniqueOrThrow({
+          where: { id: agent.organizationId }, select: { urn: true },
+        });
+        const opaqueId = generateId();
+        const agentSlug = agent.urn.split(':').slice(1).join(':');
+        const memoryUrn = `${org.urn}:${agentSlug}:anon:${opaqueId}`;
+        const expires = new Date(Date.now() + app.anonymousTtlDays * 24 * 60 * 60 * 1000);
+        const created = await ctx.db.memory.create({
+          data: {
+            organizationId: agent.organizationId,
+            urn: memoryUrn,
+            name: `Anonymous session (${agent.name})`,
+            visibility: 'PRIVATE',
+            userMemoryOfAgentId: agentId,
+            anonymousExpiresAt: expires,
+            createdBy: ctx.appId,
+          },
+        });
+        memoryId = created.id;
+      }
+
+      // Clamp session timeout to the app's configured maximum (ceiling)
+      const ttl = Math.min(
+        sessionTimeoutSeconds ?? app.sessionTimeoutSeconds,
+        app.sessionTimeoutSeconds,
+      );
+      const expiresAt = new Date(Date.now() + ttl * 1000);
+
+      const session = await ctx.db.session.create({
+        data: {
+          id: generateId(),
+          type: 'CHATBOT',
+          appId: ctx.appId,
+          userId: userId ?? null,
+          agentId,
+          memoryId,
+          expiresAt,
+          createdBy: ctx.appId,
+        },
+      });
+      return session;
+    },
+
+    endAgentSession: async (_: unknown, { sessionId }: { sessionId: string }, ctx: Context) => {
+      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      const session = await ctx.db.session.findUnique({ where: { id: sessionId } });
+      if (!session || session.appId !== ctx.appId) {
+        throw new Error('Session not found');
+      }
+      if (session.endedAt) return true; // idempotent
+      await ctx.db.session.update({
+        where: { id: sessionId },
+        data: { endedAt: new Date() },
+      });
+      return true;
+    },
+
+    linkMemoryToUser: async (
+      _: unknown,
+      { memoryId, externalUserId }: { memoryId: string; externalUserId: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      if (memory.organizationId !== app.organizationId) {
+        throw new Error('Forbidden: memory does not belong to this app\'s organization');
+      }
+      if (!memory.userMemoryOfAgentId) {
+        throw new Error('Only user/anonymous memories can be linked');
+      }
+
+      // Resolve or create user
+      let user = await ctx.db.user.findFirst({
+        where: { externalAppId: ctx.appId, externalId: externalUserId, deletedAt: null },
+      });
+      if (!user) {
+        if (app.createUserPermission === 'DENY') {
+          throw new Error('User not found and createUserPermission=DENY');
+        }
+        user = await ctx.db.user.create({
+          data: {
+            externalAppId: ctx.appId,
+            externalId: externalUserId,
+            identityProvider: 'APP',
+            createdBy: ctx.appId,
+          },
+        });
+      }
+
+      // Update memory: assign to user, clear anonymous expiry, update URN
+      const agent = await ctx.db.agent.findUniqueOrThrow({
+        where: { id: memory.userMemoryOfAgentId },
+      });
+      const org = await ctx.db.organization.findUniqueOrThrow({
+        where: { id: agent.organizationId }, select: { urn: true },
+      });
+      const opaqueId = generateId();
+      const agentSlug = agent.urn.split(':').slice(1).join(':');
+      const newUrn = `${org.urn}:${agentSlug}:user:${opaqueId}`;
+
+      return ctx.db.memory.update({
+        where: { id: memoryId },
+        data: {
+          urn: newUrn,
+          createdBy: user.id,
+          anonymousExpiresAt: null,
+          updatedBy: ctx.appId,
+        },
+      });
     },
   },
 };

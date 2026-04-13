@@ -1,0 +1,57 @@
+import type { PrismaClient } from '../generated/prisma/index.js';
+
+/**
+ * Deletes expired anonymous memories. A memory is "anonymous" when it was
+ * created for a session that never resolved to a real user, and has an
+ * `anonymousExpiresAt` timestamp in the past.
+ *
+ * Returns the number of rows deleted.
+ */
+export async function cleanupAnonymousMemories(db: PrismaClient): Promise<number> {
+  const result = await db.memory.deleteMany({
+    where: {
+      anonymousExpiresAt: { lt: new Date() },
+      userMemoryOfAgentId: { not: null },
+    },
+  });
+  return result.count;
+}
+
+/**
+ * Starts a recurring cleanup loop. Returns a handle that can be cleared to
+ * stop the loop (e.g. during tests or graceful shutdown).
+ *
+ * Defaults: runs once per hour, with an initial delay of 60s so it doesn't
+ * pile onto startup.
+ */
+export function startAnonymousMemoryCleanupLoop(
+  db: PrismaClient,
+  options: { intervalMs?: number; initialDelayMs?: number } = {},
+): NodeJS.Timeout {
+  const intervalMs = options.intervalMs ?? 60 * 60 * 1000; // 1 hour
+  const initialDelayMs = options.initialDelayMs ?? 60 * 1000; // 60s
+
+  const run = async () => {
+    try {
+      const count = await cleanupAnonymousMemories(db);
+      if (count > 0) {
+        console.log(`[cleanup] deleted ${count} expired anonymous memories`);
+      }
+    } catch (err) {
+      console.error('[cleanup] anonymous memory cleanup failed:', err);
+    }
+  };
+
+  // Schedule first run after the initial delay, then interval after.
+  let timer: NodeJS.Timeout;
+  const initial = setTimeout(() => {
+    run();
+    timer = setInterval(run, intervalMs);
+  }, initialDelayMs);
+
+  // Return the initial timer so callers can clearTimeout() it; the interval
+  // timer replaces it in the closure and leaks intentionally for the server
+  // lifetime. Tests that need to stop the loop should use
+  // cleanupAnonymousMemories() directly rather than the loop.
+  return initial;
+}

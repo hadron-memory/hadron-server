@@ -48,6 +48,25 @@ enum SyncStatus {
 enum IdentityProvider {
   GITHUB
   EMAIL
+  APP
+  GOOGLE
+  MICROSOFT
+}
+
+enum CreateUserPermission {
+  DENY
+  EXPLICIT
+  IMPLICIT
+}
+
+enum IdentifyUserMethod {
+  USER_ID
+  SECRET
+}
+
+enum AgentType {
+  ASSISTANT
+  CHATBOT
 }
 
 enum LogLevel {
@@ -78,6 +97,9 @@ model User {
   githubId         Int?              @unique @map("github_id")
   githubUsername   String?           @unique @map("github_username")
   identityProvider IdentityProvider? @map("identity_provider")
+  externalId       String?           @map("external_id")
+  externalAppId    String?           @map("external_app_id")
+  linkedAt         DateTime?         @map("linked_at")
   name             String?
   email            String?           @unique
   avatarUrl        String?           @map("avatar_url")
@@ -98,7 +120,10 @@ model User {
   receivedMemberInvitations OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
   pendingSetup              PendingSetup?
   exchangeConnections       ExchangeConnection[]
+  externalApp               App?                       @relation(fields: [externalAppId], references: [id], onDelete: SetNull)
+  sessions                  Session[]                  @relation("SessionUser")
 
+  @@unique([externalAppId, externalId])
   @@map("users")
 }
 
@@ -117,13 +142,14 @@ model Organization {
   deletedAt                    DateTime? @map("deleted_at")
   deletedBy                    String?   @map("deleted_by")
 
-  members              OrgMember[]
-  memories             Memory[]
-  stations             Station[]
-  agents               Agent[]
-  subscriptions        MemorySubscription[]
-  invitations          UserInvitation[]          @relation("OrgInvitations")
-  exchangeConnections  ExchangeConnection[]
+  members             OrgMember[]
+  memories            Memory[]
+  stations            Station[]
+  agents              Agent[]
+  subscriptions       MemorySubscription[]
+  invitations         UserInvitation[]     @relation("OrgInvitations")
+  exchangeConnections ExchangeConnection[]
+  apps                App[]
 
   @@map("organizations")
 }
@@ -151,29 +177,29 @@ model OrgMember {
 }
 
 model Station {
-  id             String      @id @default(cuid())
-  userId         String?     @map("user_id")
-  organizationId String?     @map("organization_id")
-  stationType    StationType @default(WORKSTATION) @map("station_type")
-  urn            String      @unique
-  name           String
-  keyHash        String      @map("key_hash")
-  apiKeyShown    Boolean     @default(false) @map("api_key_shown")
-  role           Role        @default(READER)
-  description    String?
-  systemPrompt   String?     @map("system_prompt")
-  agentTools     String[]    @default([]) @map("agent_tools")
-  aiProvider     String?     @map("ai_provider")
-  aiModel        String?     @map("ai_model")
-  aiApiKeyEncrypted String?  @map("ai_api_key_encrypted")
-  expiresAt      DateTime?   @map("expires_at")
-  lastUsedAt     DateTime?   @map("last_used_at")
-  createdAt      DateTime    @default(now()) @map("created_at")
-  createdBy      String?     @map("created_by")
-  updatedAt      DateTime?   @map("updated_at")
-  updatedBy      String?     @map("updated_by")
-  deletedAt      DateTime?   @map("deleted_at")
-  deletedBy      String?     @map("deleted_by")
+  id                String      @id @default(cuid())
+  userId            String?     @map("user_id")
+  organizationId    String?     @map("organization_id")
+  stationType       StationType @default(WORKSTATION) @map("station_type")
+  urn               String      @unique
+  name              String
+  keyHash           String      @map("key_hash")
+  apiKeyShown       Boolean     @default(false) @map("api_key_shown")
+  role              Role        @default(READER)
+  description       String?
+  systemPrompt      String?     @map("system_prompt")
+  agentTools        String[]    @default([]) @map("agent_tools")
+  aiProvider        String?     @map("ai_provider")
+  aiModel           String?     @map("ai_model")
+  aiApiKeyEncrypted String?     @map("ai_api_key_encrypted")
+  expiresAt         DateTime?   @map("expires_at")
+  lastUsedAt        DateTime?   @map("last_used_at")
+  createdAt         DateTime    @default(now()) @map("created_at")
+  createdBy         String?     @map("created_by")
+  updatedAt         DateTime?   @map("updated_at")
+  updatedBy         String?     @map("updated_by")
+  deletedAt         DateTime?   @map("deleted_at")
+  deletedBy         String?     @map("deleted_by")
 
   user               User?                      @relation(fields: [userId], references: [id], onDelete: SetNull)
   organization       Organization?              @relation(fields: [organizationId], references: [id], onDelete: SetNull)
@@ -226,46 +252,52 @@ model StationAgentSubscription {
 }
 
 model Memory {
-  id                   String     @id @default(cuid())
-  organizationId       String     @map("organization_id")
-  urn                  String     @unique
+  id                   String           @id @default(cuid())
+  organizationId       String           @map("organization_id")
+  urn                  String           @unique
   name                 String
-  shortDescription     String?    @map("short_description")
+  shortDescription     String?          @map("short_description")
   description          String?
   tags                 String[]
   license              String?
-  category0            String?    @map("category_0")
-  category1            String?    @map("category_1")
-  category2            String?    @map("category_2")
-  iconUrl              String?    @map("icon_url")
-  heroUrl              String?    @map("hero_url")
-  homeUrl              String?    @map("home_url")
+  category0            String?          @map("category_0")
+  category1            String?          @map("category_1")
+  category2            String?          @map("category_2")
+  iconUrl              String?          @map("icon_url")
+  heroUrl              String?          @map("hero_url")
+  homeUrl              String?          @map("home_url")
   source               String?
-  sourceTokenEncrypted String?    @map("source_token_encrypted")
-  sourceTokenExpiresAt DateTime?  @map("source_token_expires_at")
-  readBranch           String?    @map("read_branch")
-  writeBranch          String?    @map("write_branch")
+  sourceTokenEncrypted String?          @map("source_token_encrypted")
+  sourceTokenExpiresAt DateTime?        @map("source_token_expires_at")
+  readBranch           String?          @map("read_branch")
+  writeBranch          String?          @map("write_branch")
   visibility           MemoryVisibility @default(PRIVATE)
-  requiresLicense      Boolean    @default(false) @map("requires_license")
-  lastSyncedAt         DateTime?  @map("last_synced_at")
-  syncStatus           SyncStatus @default(PENDING) @map("sync_status")
-  syncError            String?    @map("sync_error")
-  pendingEdgeCount     Int        @default(0) @map("pending_edge_count")
-  createdAt            DateTime   @default(now()) @map("created_at")
-  createdBy            String?    @map("created_by")
-  updatedAt            DateTime   @updatedAt @map("updated_at")
-  updatedBy            String?    @map("updated_by")
-  deletedAt            DateTime?  @map("deleted_at")
-  deletedBy            String?    @map("deleted_by")
+  userMemoryOfAgentId  String?          @map("user_memory_of_agent_id")
+  anonymousExpiresAt   DateTime?        @map("anonymous_expires_at")
+  requiresLicense      Boolean          @default(false) @map("requires_license")
+  lastSyncedAt         DateTime?        @map("last_synced_at")
+  syncStatus           SyncStatus       @default(PENDING) @map("sync_status")
+  syncError            String?          @map("sync_error")
+  pendingEdgeCount     Int              @default(0) @map("pending_edge_count")
+  createdAt            DateTime         @default(now()) @map("created_at")
+  createdBy            String?          @map("created_by")
+  updatedAt            DateTime         @updatedAt @map("updated_at")
+  updatedBy            String?          @map("updated_by")
+  deletedAt            DateTime?        @map("deleted_at")
+  deletedBy            String?          @map("deleted_by")
 
-  organization  Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  nodes         Node[]
-  subscriptions MemorySubscription[]
-  agentItems    AgentMemoryItem[]
-  licenses      MemoryLicense[]
-  logEntries    MemoryLogEntry[]
+  organization      Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  nodes             Node[]
+  subscriptions     MemorySubscription[]
+  agentItems        AgentMemoryItem[]
+  licenses          MemoryLicense[]
+  logEntries        MemoryLogEntry[]
+  userMemoryOfAgent Agent?               @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
+  sessions          Session[]            @relation("SessionMemory")
 
   @@index([organizationId])
+  @@index([userMemoryOfAgentId])
+  @@index([anonymousExpiresAt])
   @@map("memories")
 }
 
@@ -353,6 +385,11 @@ model Session {
   id              String      @id // caller-generated (e.g. UUID from h-start-session)
   type            SessionType @default(DEVELOPER)
   stationId       String?     @map("station_id")
+  appId           String?     @map("app_id")
+  userId          String?     @map("user_id")
+  agentId         String?     @map("agent_id")
+  memoryId        String?     @map("memory_id")
+  expiresAt       DateTime?   @map("expires_at")
   repo            String?
   branch          String?
   prNumber        Int?        @map("pr_number")
@@ -386,6 +423,10 @@ model Session {
   subSessions  Session[]    @relation("SubAgentSessions")
   prev         Session?     @relation("SessionChain", fields: [prevSessionId], references: [id], onDelete: SetNull)
   nextSessions Session[]    @relation("SessionChain")
+  app          App?         @relation(fields: [appId], references: [id], onDelete: SetNull)
+  user         User?        @relation("SessionUser", fields: [userId], references: [id], onDelete: SetNull)
+  agent        Agent?       @relation("SessionAgent", fields: [agentId], references: [id], onDelete: SetNull)
+  memory       Memory?      @relation("SessionMemory", fields: [memoryId], references: [id], onDelete: SetNull)
 
   @@index([type])
   @@index([repo])
@@ -394,6 +435,8 @@ model Session {
   @@index([parentSessionId])
   @@index([prevSessionId])
   @@index([stationId])
+  @@index([appId, userId])
+  @@index([expiresAt])
   @@map("sessions")
 }
 
@@ -436,17 +479,22 @@ model Agent {
   systemPrompt   String?          @map("system_prompt")
   systemMemoryId String?          @map("system_memory_id")
   visibility     MemoryVisibility @default(PRIVATE)
+  type           AgentType        @default(ASSISTANT)
+  surfaces       String[]         @default([])
   properties     Json?
-  createdAt      DateTime  @default(now()) @map("created_at")
-  createdBy      String?   @map("created_by")
-  updatedAt      DateTime? @map("updated_at")
-  updatedBy      String?   @map("updated_by")
-  deletedAt      DateTime? @map("deleted_at")
-  deletedBy      String?   @map("deleted_by")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  createdBy      String?          @map("created_by")
+  updatedAt      DateTime?        @map("updated_at")
+  updatedBy      String?          @map("updated_by")
+  deletedAt      DateTime?        @map("deleted_at")
+  deletedBy      String?          @map("deleted_by")
 
-  organization        Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  memoryItems         AgentMemoryItem[]
+  organization         Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  memoryItems          AgentMemoryItem[]
   stationSubscriptions StationAgentSubscription[]
+  userMemories         Memory[]                   @relation("UserMemoriesOfAgent")
+  sessions             Session[]                  @relation("SessionAgent")
+  appAgents            AppAgent[]
 
   @@map("agents")
 }
@@ -715,24 +763,24 @@ model PendingSetup {
 }
 
 model ExchangeConnection {
-  id                      String     @id @default(cuid())
-  organizationId          String     @map("organization_id")
-  userId                  String     @map("user_id")
-  mailboxEmail            String     @map("mailbox_email")
-  displayName             String?    @map("display_name")
-  refreshTokenEncrypted   String     @map("refresh_token_encrypted")
-  syncEnabled             Boolean    @default(true) @map("sync_enabled")
-  syncStatus              SyncStatus @default(PENDING) @map("sync_status")
-  lastSyncAt              DateTime?  @map("last_sync_at")
-  lastError               String?    @map("last_error")
-  webhookSubscriptionId   String?    @map("webhook_subscription_id")
-  webhookExpiresAt        DateTime?  @map("webhook_expires_at")
-  createdAt               DateTime   @default(now()) @map("created_at")
-  createdBy               String?    @map("created_by")
-  updatedAt               DateTime   @updatedAt @map("updated_at")
-  updatedBy               String?    @map("updated_by")
-  deletedAt               DateTime?  @map("deleted_at")
-  deletedBy               String?    @map("deleted_by")
+  id                    String     @id @default(cuid())
+  organizationId        String     @map("organization_id")
+  userId                String     @map("user_id")
+  mailboxEmail          String     @map("mailbox_email")
+  displayName           String?    @map("display_name")
+  refreshTokenEncrypted String     @map("refresh_token_encrypted")
+  syncEnabled           Boolean    @default(true) @map("sync_enabled")
+  syncStatus            SyncStatus @default(PENDING) @map("sync_status")
+  lastSyncAt            DateTime?  @map("last_sync_at")
+  lastError             String?    @map("last_error")
+  webhookSubscriptionId String?    @map("webhook_subscription_id")
+  webhookExpiresAt      DateTime?  @map("webhook_expires_at")
+  createdAt             DateTime   @default(now()) @map("created_at")
+  createdBy             String?    @map("created_by")
+  updatedAt             DateTime   @updatedAt @map("updated_at")
+  updatedBy             String?    @map("updated_by")
+  deletedAt             DateTime?  @map("deleted_at")
+  deletedBy             String?    @map("deleted_by")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -750,4 +798,61 @@ model WaitingListItem {
 
   @@index([email])
   @@map("waiting_list")
+}
+
+// ─── Multi-user agent: Apps ────────────────────────────────────────────
+
+model App {
+  id                    String               @id @default(cuid())
+  name                  String
+  organizationId        String               @map("organization_id")
+  createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
+  identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")
+  sessionTimeoutSeconds Int                  @default(900) @map("session_timeout_seconds")
+  anonymousTtlDays      Int                  @default(7) @map("anonymous_ttl_days")
+  createdAt             DateTime             @default(now()) @map("created_at")
+  createdBy             String?              @map("created_by")
+  updatedAt             DateTime?            @map("updated_at")
+  updatedBy             String?              @map("updated_by")
+  deletedAt             DateTime?            @map("deleted_at")
+  deletedBy             String?              @map("deleted_by")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  keys         AppKey[]
+  appAgents    AppAgent[]
+  users        User[]
+  sessions     Session[]
+
+  @@index([organizationId])
+  @@map("apps")
+}
+
+model AppKey {
+  id         String    @id @default(cuid())
+  appId      String    @map("app_id")
+  keyHash    String    @unique @map("key_hash")
+  keyPreview String    @map("key_preview")
+  label      String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  createdBy  String?   @map("created_by")
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId])
+  @@map("app_keys")
+}
+
+model AppAgent {
+  appId     String   @map("app_id")
+  agentId   String   @map("agent_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([appId, agentId])
+  @@index([agentId])
+  @@map("app_agents")
 }
