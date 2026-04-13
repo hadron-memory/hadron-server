@@ -52,23 +52,18 @@ function buildTags(docType?: string | null): string[] {
 }
 
 /**
- * Resolve the memory id where Pong should store knowledge for an Exchange
- * connection. Goes connection → ExchangeConnection.pongStationId → first agent
- * subscription → first memory. Throws a clear error if any link is missing.
+ * Resolve the memory id, returning null when any link in the chain is missing.
+ * Callers that need a hard guarantee (writes) should throw on null themselves.
  */
-export async function resolvePongMemoryId(
+async function resolvePongMemoryIdOptional(
   db: PrismaClient,
   connectionId: string,
-): Promise<string> {
+): Promise<string | null> {
   const connection = await db.exchangeConnection.findUnique({
     where: { id: connectionId },
     select: { pongStationId: true },
   });
-  if (!connection?.pongStationId) {
-    throw new Error(
-      'Pong is not linked to a station. Pick a station in Pong settings first.',
-    );
-  }
+  if (!connection?.pongStationId) return null;
   const sub = await db.stationAgentSubscription.findFirst({
     where: { stationId: connection.pongStationId, deletedAt: null },
     orderBy: { createdAt: 'asc' },
@@ -80,10 +75,21 @@ export async function resolvePongMemoryId(
       },
     },
   });
-  const memoryId = sub?.agent.memoryItems[0]?.memoryId;
+  return sub?.agent.memoryItems[0]?.memoryId ?? null;
+}
+
+/**
+ * Strict variant — throws a clear error when the memory chain is incomplete.
+ * Used by write operations (add/update/delete) that cannot proceed without it.
+ */
+export async function resolvePongMemoryId(
+  db: PrismaClient,
+  connectionId: string,
+): Promise<string> {
+  const memoryId = await resolvePongMemoryIdOptional(db, connectionId);
   if (!memoryId) {
     throw new Error(
-      'The linked station has no memory subscription. Subscribe the station to an agent with at least one memory.',
+      'Pong is not linked to a station with memory. Pick a station and ensure it has an agent with at least one memory.',
     );
   }
   return memoryId;
@@ -93,7 +99,8 @@ export async function listPongKnowledge(
   db: PrismaClient,
   connectionId: string,
 ): Promise<PongKnowledge[]> {
-  const memoryId = await resolvePongMemoryId(db, connectionId);
+  const memoryId = await resolvePongMemoryIdOptional(db, connectionId);
+  if (!memoryId) return [];
   const nodes = await db.node.findMany({
     where: { memoryId, nodeType: NODE_TYPE, deletedAt: null },
     orderBy: { createdAt: 'desc' },
@@ -115,7 +122,8 @@ export async function findPongKnowledgeByTitleContains(
   connectionId: string,
   needle: string,
 ): Promise<PongKnowledge | null> {
-  const memoryId = await resolvePongMemoryId(db, connectionId);
+  const memoryId = await resolvePongMemoryIdOptional(db, connectionId);
+  if (!memoryId) return null;
   const node = await db.node.findFirst({
     where: {
       memoryId,
