@@ -248,11 +248,17 @@ const MEMORY_INCLUDE = {
 
 const ORG_INCLUDE = {
   members: { where: { deletedAt: null }, include: { user: true }, orderBy: { createdAt: 'asc' as const } },
-  // User memories (per-user, per-agent) are excluded from the org listing —
-  // they live in a separate "Users" view to avoid cluttering the main memory
-  // list when an app has thousands of users.
+  // User memories (per-user, per-agent) and agent system memories are
+  // excluded from the org memories listing. User memories live in a
+  // separate "Users" view; system memories are surfaced through the
+  // agent detail page. This keeps the main memory list focused on
+  // regular knowledge memories.
   memories: {
-    where: { deletedAt: null, userMemoryOfAgentId: null },
+    where: {
+      deletedAt: null,
+      userMemoryOfAgentId: null,
+      type: { not: 'AGENT_SYSTEM' as const },
+    },
     include: MEMORY_INCLUDE,
     orderBy: { name: 'asc' as const },
   },
@@ -332,6 +338,17 @@ export const resolvers = {
     organization: (g: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
       (g as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: g.organizationId } }),
+    // For AGENT_SYSTEM memories, find the agent that owns this memory.
+    // Returns null for regular knowledge memories. We use a findFirst because
+    // there's no FK from Memory → Agent — the relationship is expressed on
+    // the Agent side via Agent.systemMemoryId.
+    agent: async (g: { id: string; type?: string }, _: unknown, ctx: Context) => {
+      if (g.type !== 'AGENT_SYSTEM') return null;
+      return ctx.db.agent.findFirst({
+        where: { systemMemoryId: g.id, deletedAt: null },
+        include: AGENT_INCLUDE,
+      });
+    },
   },
   App: {
     createdAt: (a: { createdAt: Date | string }) => toISO(a.createdAt)!,
@@ -783,7 +800,18 @@ export const resolvers = {
       });
     },
 
-    myMemories: async (_: unknown, __: unknown, ctx: Context) => {
+    myMemories: async (
+      _: unknown,
+      { includeAgentSystem }: { includeAgentSystem?: boolean },
+      ctx: Context,
+    ) => {
+      // Agent system memories are hidden by default on listing pages. The
+      // portal passes includeAgentSystem: true only when the user toggles
+      // "Show system memories" at the top of /app/memories.
+      const typeFilter = includeAgentSystem
+        ? {}
+        : { type: { not: 'AGENT_SYSTEM' as const } };
+
       // API-key client — return memories from agent subscriptions
       if (ctx.clientId && !ctx.userId) {
         const subs = await ctx.db.stationAgentSubscription.findMany({
@@ -793,6 +821,7 @@ export const resolvers = {
         const memoryMap = new Map<string, any>();
         for (const sub of subs) {
           for (const item of sub.agent.memoryItems) {
+            if (!includeAgentSystem && item.memory.type === 'AGENT_SYSTEM') continue;
             memoryMap.set(item.memory.id, item.memory);
           }
         }
@@ -809,6 +838,10 @@ export const resolvers = {
         return ctx.db.memory.findMany({
           where: {
             deletedAt: null,
+            ...typeFilter,
+            // Also exclude per-user memories — they belong to the chatbot
+            // flow, not the user's regular memory list.
+            userMemoryOfAgentId: null,
             OR: [
               { organizationId: { in: orgIds } },
               { subscriptions: { some: { organizationId: { in: orgIds } } } },
@@ -1650,12 +1683,14 @@ export const resolvers = {
         readBranch,
         writeBranch,
         visibility,
+        type,
       }: {
         orgId: string; name: string;
         shortDescription?: string; description?: string; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
+        type?: 'KNOWLEDGE' | 'AGENT_SYSTEM';
       },
       ctx: Context,
     ) => {
@@ -1691,6 +1726,7 @@ export const resolvers = {
           readBranch,
           writeBranch,
           visibility: (visibility as MemoryVisibility) ?? 'PRIVATE',
+          type: type ?? 'KNOWLEDGE',
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
         include: MEMORY_INCLUDE,
@@ -1779,6 +1815,12 @@ export const resolvers = {
     deleteMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      // AGENT_SYSTEM memories are owned by their agent and can only be
+      // removed by deleting the agent. This prevents the agent from ending
+      // up with no brain via a stray deleteMemory call.
+      if (memory.type === 'AGENT_SYSTEM') {
+        throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
+      }
       await ctx.db.memory.update({ where: { id }, data: { deletedAt: new Date() } });
       return true;
     },
@@ -1823,10 +1865,37 @@ export const resolvers = {
       // Defaults: CHATBOT when systemMemoryId is set (wizard flow), otherwise ASSISTANT.
       const inferredType = type ?? (systemMemoryId ? 'CHATBOT' : 'ASSISTANT');
       const defaultSurfaces = inferredType === 'CHATBOT' ? ['api'] : ['mcp'];
+      const agentVisibility = (visibility as MemoryVisibility) ?? 'PRIVATE';
+
+      // If a systemMemoryId is provided at create time, validate the target
+      // and mark it as AGENT_SYSTEM with the synced name and visibility.
+      // This is the wizard's primary entry point.
+      if (systemMemoryId) {
+        const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
+        if (target.organizationId !== orgId) {
+          throw new Error('System memory must belong to the same organization as the agent');
+        }
+        const otherAgent = await ctx.db.agent.findFirst({
+          where: { systemMemoryId, deletedAt: null },
+          select: { id: true },
+        });
+        if (otherAgent) {
+          throw new Error('This memory is already the system memory of another agent');
+        }
+        await ctx.db.memory.update({
+          where: { id: systemMemoryId },
+          data: {
+            type: 'AGENT_SYSTEM',
+            name: `${name} System`,
+            visibility: agentVisibility,
+          },
+        });
+      }
+
       return ctx.db.agent.create({
         data: {
           organizationId: orgId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: systemMemoryId ?? null,
-          visibility: (visibility as MemoryVisibility) ?? 'PRIVATE',
+          visibility: agentVisibility,
           type: inferredType,
           surfaces: surfaces ?? defaultSurfaces,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
@@ -1847,6 +1916,63 @@ export const resolvers = {
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: agent.organizationId }, select: { urn: true } });
         newUrn = `${org.urn}:${urn}`;
       }
+
+      // ── systemMemoryId: first-attach is allowed, but unset/change are not.
+      // Rationale: once an agent has a brain, swapping it destroys the
+      // scaffold and confuses the UX. Users who want a different brain
+      // should delete the agent and create a new one.
+      if (systemMemoryId !== undefined) {
+        const incoming = systemMemoryId === '' ? null : systemMemoryId;
+        if (agent.systemMemoryId && incoming !== agent.systemMemoryId) {
+          throw new Error('Cannot unset or change an agent\'s system memory. Delete the agent to replace it.');
+        }
+        if (!agent.systemMemoryId && incoming) {
+          // First-attach: verify the target memory exists, belongs to this
+          // org, isn't already another agent's system memory, and mark it
+          // as AGENT_SYSTEM.
+          const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: incoming } });
+          if (target.organizationId !== agent.organizationId) {
+            throw new Error('System memory must belong to the same organization as the agent');
+          }
+          const otherAgent = await ctx.db.agent.findFirst({
+            where: { systemMemoryId: incoming, deletedAt: null, id: { not: id } },
+            select: { id: true },
+          });
+          if (otherAgent) {
+            throw new Error('This memory is already the system memory of another agent');
+          }
+          await ctx.db.memory.update({
+            where: { id: incoming },
+            data: {
+              type: 'AGENT_SYSTEM',
+              // Sync name + visibility immediately to the target memory.
+              name: `${name ?? agent.name} System`,
+              visibility: (visibility as MemoryVisibility) ?? agent.visibility,
+            },
+          });
+        }
+      }
+
+      // ── Name / visibility sync for existing system memory.
+      // If the agent already has a system memory and the caller is updating
+      // name or visibility on the agent, propagate to the memory so they
+      // stay in lockstep.
+      if (agent.systemMemoryId && (name !== undefined || visibility !== undefined)) {
+        await ctx.db.memory.update({
+          where: { id: agent.systemMemoryId },
+          data: {
+            ...(name !== undefined ? { name: `${name} System` } : {}),
+            ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
+            updatedBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+        }).catch((err) => {
+          // Log but don't block the agent update — if the system memory
+          // has been manually renamed or deleted, we don't want to fail
+          // the whole operation.
+          console.warn('[updateAgent] system memory sync failed:', err);
+        });
+      }
+
       return ctx.db.agent.update({
         where: { id },
         data: {
@@ -1866,7 +1992,15 @@ export const resolvers = {
     deleteAgent: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      // Soft-delete the agent and its owned system memory (if any) in the
+      // same pass. System memories are owned by the agent and cannot be
+      // detached, so deleting the agent is the only way they get cleaned up.
       await ctx.db.agent.update({ where: { id }, data: { deletedAt: new Date() } });
+      if (agent.systemMemoryId) {
+        await ctx.db.memory
+          .update({ where: { id: agent.systemMemoryId }, data: { deletedAt: new Date() } })
+          .catch((err) => console.warn('[deleteAgent] system memory cleanup failed:', err));
+      }
       return true;
     },
 
@@ -1877,6 +2011,16 @@ export const resolvers = {
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      // AGENT_SYSTEM memories can only be linked via Agent.systemMemoryId.
+      // Attaching them as regular memory items would allow access patterns
+      // we don't want (e.g. another agent reading Juno's prompts).
+      const memory = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: memoryId },
+        select: { type: true },
+      });
+      if (memory.type === 'AGENT_SYSTEM') {
+        throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
+      }
       await ctx.db.agentMemoryItem.create({ data: { agentId, memoryId, role: role ?? 'read', createdBy: ctx.userId ?? ctx.clientId ?? null } });
       return ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, include: AGENT_INCLUDE });
     },

@@ -33,6 +33,11 @@ export const typeDefs = `#graphql
     ORGANIZATION
   }
 
+  enum MemoryType {
+    KNOWLEDGE
+    AGENT_SYSTEM
+  }
+
   enum CreateUserPermission {
     DENY
     EXPLICIT
@@ -302,9 +307,13 @@ export const typeDefs = `#graphql
     readBranch: String
     writeBranch: String
     visibility: MemoryVisibility!
+    type: MemoryType!
     isEncrypted: Boolean!
     userMemoryOfAgentId: String
     anonymousExpiresAt: String
+    # Populated only for type = AGENT_SYSTEM — the agent this memory is
+    # the system memory of. Null for regular knowledge memories.
+    agent: Agent
     syncStatus: SyncStatus!
     syncError: String
     pendingEdgeCount: Int!
@@ -534,7 +543,10 @@ export const typeDefs = `#graphql
     publicMemories: [Memory!]!
 
     # Memories the caller should sync (via bundle subscriptions)
-    myMemories: [Memory!]!
+    # Memories accessible to the caller. Agent system memories are hidden
+    # by default; pass includeAgentSystem: true on the memories list page
+    # to surface them.
+    myMemories(includeAgentSystem: Boolean): [Memory!]!
 
     # Exchange integration
     exchangeConnections(orgId: ID!): [ExchangeConnection!]!
@@ -613,7 +625,7 @@ export const typeDefs = `#graphql
     removeOrgMember(orgId: ID!, userId: ID!): Boolean!
 
     # Memory management (org ADMIN)
-    createMemory(orgId: ID!, name: String!, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility): Memory!
+    createMemory(orgId: ID!, name: String!, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, type: MemoryType): Memory!
     updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility): Memory!
     deleteMemory(id: ID!): Boolean!
     # Set encrypted source token for non-GitHub-App repos
