@@ -224,6 +224,7 @@ export const typeDefs = `#graphql
   type App {
     id: ID!
     name: String!
+    urn: String!
     organizationId: String!
     organization: Organization
     createUserPermission: CreateUserPermission!
@@ -667,6 +668,7 @@ export const typeDefs = `#graphql
     createApp(
       orgId: ID!
       name: String!
+      urn: String
       createUserPermission: CreateUserPermission
       identifyUserMethod: IdentifyUserMethod
       sessionTimeoutSeconds: Int
@@ -675,6 +677,7 @@ export const typeDefs = `#graphql
     updateApp(
       id: ID!
       name: String
+      urn: String
       createUserPermission: CreateUserPermission
       identifyUserMethod: IdentifyUserMethod
       sessionTimeoutSeconds: Int

@@ -123,6 +123,7 @@ describe('resolveAuthContext', () => {
           id: 'app-1',
           organizationId: org.id,
           name: 'Test App',
+          urn: 'org-app-test:test-app',
         },
       });
       // Generate a raw key and its SHA-256 hash — mirrors the createAppKey resolver
@@ -227,7 +228,7 @@ describe('resolveAuthContext', () => {
         data: { id: 'org-other', name: 'other', urn: 'other' },
       });
       await db.app.create({
-        data: { id: 'app-other', organizationId: 'org-other', name: 'Other' },
+        data: { id: 'app-other', organizationId: 'org-other', name: 'Other', urn: 'other:other' },
       });
       await db.agent.create({
         data: { id: 'agent-other', organizationId: 'org-other', urn: 'other:a', name: 'a' },

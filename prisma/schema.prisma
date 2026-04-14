@@ -806,6 +806,7 @@ model WaitingListItem {
 model App {
   id                    String               @id @default(cuid())
   name                  String
+  urn                   String               @unique
   organizationId        String               @map("organization_id")
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
   identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")

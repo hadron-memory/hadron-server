@@ -2558,8 +2558,9 @@ export const resolvers = {
 
     createApp: async (
       _: unknown,
-      { orgId, name, createUserPermission, identifyUserMethod, sessionTimeoutSeconds, anonymousTtlDays }: {
+      { orgId, name, urn, createUserPermission, identifyUserMethod, sessionTimeoutSeconds, anonymousTtlDays }: {
         orgId: string; name: string;
+        urn?: string;
         createUserPermission?: 'DENY' | 'EXPLICIT' | 'IMPLICIT';
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
@@ -2568,10 +2569,34 @@ export const resolvers = {
       ctx: Context,
     ) => {
       await requireOrgRole(ctx, orgId, 'ADMIN');
+      // URN format matches memories and agents: "{org.urn}:{slug}".
+      // If the caller provides an explicit slug use it; otherwise derive from
+      // the name (lowercase, non-alphanum → hyphens, trimmed).
+      const org = await ctx.db.organization.findUniqueOrThrow({
+        where: { id: orgId }, select: { urn: true },
+      });
+      const slug = (urn ?? name)
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      if (!slug) throw new Error('App URN slug cannot be empty');
+      const appUrn = `${org.urn}:${slug}`;
+      // Hard-delete a soft-deleted collision so the URN can be reused
+      // (same pattern as createAgent/createMemory)
+      const existing = await ctx.db.app.findUnique({ where: { urn: appUrn } });
+      if (existing) {
+        if (existing.deletedAt) {
+          await ctx.db.app.delete({ where: { id: existing.id } });
+        } else {
+          throw new Error(`An app with URN "${appUrn}" already exists`);
+        }
+      }
       return ctx.db.app.create({
         data: {
           organizationId: orgId,
           name,
+          urn: appUrn,
           createUserPermission: createUserPermission ?? 'EXPLICIT',
           identifyUserMethod: identifyUserMethod ?? 'USER_ID',
           sessionTimeoutSeconds: sessionTimeoutSeconds ?? 900,
@@ -2584,8 +2609,8 @@ export const resolvers = {
 
     updateApp: async (
       _: unknown,
-      { id, name, createUserPermission, identifyUserMethod, sessionTimeoutSeconds, anonymousTtlDays }: {
-        id: string; name?: string;
+      { id, name, urn, createUserPermission, identifyUserMethod, sessionTimeoutSeconds, anonymousTtlDays }: {
+        id: string; name?: string; urn?: string;
         createUserPermission?: 'DENY' | 'EXPLICIT' | 'IMPLICIT';
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
@@ -2595,10 +2620,26 @@ export const resolvers = {
     ) => {
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      // URN updates: accept a new slug and rebuild the full URN against the
+      // app's current org.
+      let newUrn: string | undefined;
+      if (urn !== undefined) {
+        const org = await ctx.db.organization.findUniqueOrThrow({
+          where: { id: app.organizationId }, select: { urn: true },
+        });
+        const slug = urn
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        if (!slug) throw new Error('App URN slug cannot be empty');
+        newUrn = `${org.urn}:${slug}`;
+      }
       return ctx.db.app.update({
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
+          ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(createUserPermission !== undefined ? { createUserPermission } : {}),
           ...(identifyUserMethod !== undefined ? { identifyUserMethod } : {}),
           ...(sessionTimeoutSeconds !== undefined ? { sessionTimeoutSeconds } : {}),

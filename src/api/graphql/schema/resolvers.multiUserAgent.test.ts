@@ -70,6 +70,7 @@ beforeEach(async () => {
       id: generateId(),
       organizationId: orgA.id,
       name: 'Test App',
+      urn: 'org-a:test-app',
       createUserPermission: 'EXPLICIT',
       identifyUserMethod: 'USER_ID',
       sessionTimeoutSeconds: 900,
@@ -82,6 +83,7 @@ beforeEach(async () => {
       id: generateId(),
       organizationId: orgB.id,
       name: 'Other App',
+      urn: 'org-b:other-app',
     },
   });
 
@@ -102,9 +104,34 @@ describe('App CRUD', () => {
     );
     expect(result.name).toBe('Wizard App');
     expect(result.organizationId).toBe(orgA.id);
+    expect(result.urn).toBe('org-a:wizard-app');
     expect(result.createUserPermission).toBe('EXPLICIT');
     expect(result.identifyUserMethod).toBe('USER_ID');
     expect(result.sessionTimeoutSeconds).toBe(900);
+  });
+
+  it('accepts an explicit URN slug', async () => {
+    const result = await resolvers.Mutation.createApp(
+      {},
+      { orgId: orgA.id, name: 'Custom', urn: 'my-custom-slug' },
+      adminCtx(),
+    );
+    expect(result.urn).toBe('org-a:my-custom-slug');
+  });
+
+  it('rejects duplicate URNs', async () => {
+    await resolvers.Mutation.createApp(
+      {},
+      { orgId: orgA.id, name: 'Dup' },
+      adminCtx(),
+    );
+    await expect(
+      resolvers.Mutation.createApp(
+        {},
+        { orgId: orgA.id, name: 'Dup' },
+        adminCtx(),
+      ),
+    ).rejects.toThrow(/already exists/);
   });
 
   it('requires admin role to create an app', async () => {
