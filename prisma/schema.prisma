@@ -488,6 +488,9 @@ model Agent {
   visibility     MemoryVisibility @default(PRIVATE)
   type           AgentType        @default(ASSISTANT)
   surfaces       String[]         @default([])
+  aiProvider     String?          @map("ai_provider")
+  aiModel        String?          @map("ai_model")
+  aiApiKeyEncrypted String?       @map("ai_api_key_encrypted")
   properties     Json?
   createdAt      DateTime         @default(now()) @map("created_at")
   createdBy      String?          @map("created_by")

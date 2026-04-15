@@ -335,8 +335,39 @@ export const typeDefs = `#graphql
     visibility: MemoryVisibility!
     type: AgentType!
     surfaces: [String!]!
+    aiProvider: String
+    aiModel: String
+    hasAiApiKey: Boolean!
     properties: JSON
     memoryItems: [AgentMemoryItem!]!
+    createdAt: String!
+  }
+
+  # Decrypted AI config for an agent. Only returned to org admins — the
+  # portal backend uses it to make LLM calls on behalf of the logged-in user.
+  type AgentAIConfig {
+    provider: String!
+    apiKey: String!
+    model: String!
+  }
+
+  # A saved chat in a user's personal memory for an agent.
+  type Chat {
+    id: ID!
+    loc: String!
+    title: String!
+    conversationName: String
+    stageName: String
+    messageCount: Int!
+    createdAt: String!
+    lastMessageAt: String
+  }
+
+  # One chat message in history, as returned by chatHistory.
+  type ChatMessage {
+    role: String!
+    content: String!
+    seq: Int
     createdAt: String!
   }
 
@@ -556,6 +587,18 @@ export const typeDefs = `#graphql
     # Apps (org ADMIN)
     apps(orgId: ID!): [App!]!
     app(id: ID!): App
+
+    # Agent AI config (org ADMIN) — returns the decrypted API key so the
+    # portal backend can make LLM calls on behalf of the user.
+    agentAIConfig(agentId: ID!): AgentAIConfig
+
+    # Saved chats for the current user in their personal memory for an
+    # agent. Newest first.
+    myChats(agentId: ID!, limit: Int, offset: Int): [Chat!]!
+
+    # Message history for a saved chat. Returns plain role/content pairs
+    # suitable for feeding back into an LLM.
+    chatHistory(chatId: String!, limit: Int): [ChatMessage!]!
   }
 
   type Mutation {
@@ -660,14 +703,24 @@ export const typeDefs = `#graphql
     exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
 
     # ── Chat API ──────────────────────────────────────────────────────
-    # Start a chat session (creates chat nodes, loads conversation, returns compiled prompt)
-    startChat(agentId: ID!, userId: String!, conversationName: String): ChatStartResult!
+    # Start a chat session (creates chat nodes, loads conversation, returns compiled prompt).
+    # When called by a JWT user, the chat is created in that user's
+    # personal memory for the agent (provisioned lazily if needed).
+    startChat(agentId: ID!, userId: String, conversationName: String): ChatStartResult!
     # Process a user message (saves message, builds context, returns next prompt)
     sendChatMessage(chatId: String!, userMessage: String!): ChatPromptResult!
     # Process the LLM's tool response (extract data, transition stage, save assistant message)
     processChatResponse(chatId: String!, toolResponse: JSON!): ChatResponseResult!
     # Save a chat summary
     saveChatSummary(chatId: String!, summary: String!): Boolean!
+    # Rename a saved chat (user must own it)
+    updateChatTitle(chatId: String!, title: String!): Boolean!
+    # Soft-delete a saved chat and all its messages
+    deleteChat(chatId: String!): Boolean!
+
+    # Agent AI config (org ADMIN). Key is encrypted at rest.
+    updateAgentAIConfig(agentId: ID!, provider: String!, apiKey: String!, model: String!): Agent!
+    clearAgentAIConfig(agentId: ID!): Agent!
 
     # Public mutations (no auth required)
     joinWaitingList(email: String!, requestedFeatures: String): Boolean!

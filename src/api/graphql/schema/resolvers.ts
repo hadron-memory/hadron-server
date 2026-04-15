@@ -286,6 +286,29 @@ const APP_INCLUDE = {
 const toISO = (v: Date | string | null | undefined): string | null =>
   v == null ? null : v instanceof Date ? v.toISOString() : v;
 
+/**
+ * Derive a human-readable title for a saved chat. Priority:
+ * 1. User-set title (`data.title`)
+ * 2. LLM-extracted title (`data.llmTitle`)
+ * 3. First user message, truncated to 60 chars
+ * 4. Fallback: "Untitled chat"
+ */
+function deriveChatTitle(
+  _node: { loc: string },
+  data: Record<string, unknown>,
+  firstMessage: string | null,
+): string {
+  const explicit = typeof data.title === 'string' ? data.title.trim() : '';
+  if (explicit) return explicit;
+  const llm = typeof data.llmTitle === 'string' ? data.llmTitle.trim() : '';
+  if (llm) return llm;
+  if (firstMessage) {
+    const trimmed = firstMessage.trim().replace(/\s+/g, ' ');
+    return trimmed.length > 60 ? trimmed.slice(0, 57) + '…' : trimmed;
+  }
+  return 'Untitled chat';
+}
+
 function getEncryptionKey(): Buffer {
   const key = process.env.HADRON_ENCRYPTION_KEY;
   if (!key) throw new Error('HADRON_ENCRYPTION_KEY env var is required');
@@ -446,6 +469,8 @@ export const resolvers = {
   },
   Agent: {
     createdAt: (b: { createdAt: Date | string }) => toISO(b.createdAt)!,
+    // Never return the encrypted API key itself — only whether one exists.
+    hasAiApiKey: (a: { aiApiKeyEncrypted?: string | null }) => !!a.aiApiKeyEncrypted,
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
@@ -713,6 +738,122 @@ export const resolvers = {
         apiKey: decryptToken(station.aiApiKeyEncrypted),
         model: station.aiModel,
       };
+    },
+
+    agentAIConfig: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // Org ADMIN on the agent's org can read the decrypted key.
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      if (!agent.aiProvider || !agent.aiModel || !agent.aiApiKeyEncrypted) return null;
+      return {
+        provider: agent.aiProvider,
+        apiKey: decryptToken(agent.aiApiKeyEncrypted),
+        model: agent.aiModel,
+      };
+    },
+
+    myChats: async (
+      _: unknown,
+      { agentId, limit, offset }: { agentId: string; limit?: number; offset?: number },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      // Find the user memory for (agent, current user). No auto-create
+      // here — the list is empty until the user starts their first chat.
+      const userMemory = await ctx.db.memory.findFirst({
+        where: {
+          userMemoryOfAgentId: agentId,
+          createdBy: ctx.userId,
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (!userMemory) return [];
+      // Top-level chat nodes live at loc "chats:<id>" (depth 2)
+      const chatNodes = await ctx.db.node.findMany({
+        where: {
+          memoryId: userMemory.id,
+          loc: { startsWith: 'chats:' },
+          deletedAt: null,
+        },
+      });
+      const tops = chatNodes.filter((n) => n.loc.split(':').length === 2);
+      // Pre-fetch first user message per chat for title fallback
+      const firstMessagesByChat = new Map<string, string>();
+      for (const top of tops) {
+        const firstMsg = await ctx.db.node.findFirst({
+          where: {
+            memoryId: userMemory.id,
+            loc: { startsWith: `${top.loc}:messages:` },
+            deletedAt: null,
+          },
+          orderBy: { seq: 'asc' as const },
+          select: { loc: true, content: true },
+        });
+        if (firstMsg?.content) firstMessagesByChat.set(top.loc, firstMsg.content);
+      }
+      const chats = tops.map((node) => {
+        const data = (node.data as Record<string, unknown>) ?? {};
+        const title = deriveChatTitle(node, data, firstMessagesByChat.get(node.loc) ?? null);
+        return {
+          id: node.id,
+          loc: node.loc,
+          title,
+          conversationName: (data.conversationName as string) ?? null,
+          stageName: (data.stageName as string) ?? null,
+          messageCount: (data.messageCount as number) ?? 0,
+          createdAt: node.createdAt,
+          lastMessageAt: (data.lastMessageAt as string) ?? null,
+        };
+      });
+      chats.sort((a, b) => {
+        const ta = a.lastMessageAt ? Date.parse(a.lastMessageAt) : Date.parse(String(a.createdAt));
+        const tb = b.lastMessageAt ? Date.parse(b.lastMessageAt) : Date.parse(String(b.createdAt));
+        return tb - ta;
+      });
+      return chats.slice(offset ?? 0, (offset ?? 0) + (limit ?? 100));
+    },
+
+    chatHistory: async (
+      _: unknown,
+      { chatId, limit }: { chatId: string; limit?: number },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const chatNode = await ctx.db.node.findFirst({
+        where: { loc: chatId, deletedAt: null },
+        select: { id: true, memoryId: true, createdBy: true },
+      });
+      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      // Ownership check: the user must own the memory the chat lives in.
+      const mem = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: chatNode.memoryId },
+        select: { createdBy: true },
+      });
+      if (mem.createdBy !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
+        throw new Error('Forbidden');
+      }
+      const rows = await ctx.db.node.findMany({
+        where: {
+          memoryId: chatNode.memoryId,
+          loc: { startsWith: `${chatId}:messages:` },
+          deletedAt: null,
+        },
+        orderBy: { seq: 'asc' as const },
+        take: limit ?? 100,
+        select: { loc: true, content: true, seq: true, createdAt: true },
+      });
+      return rows.map((m) => {
+        const name = m.loc.split(':').pop() ?? '';
+        const isUser = !name.includes('assistant') && !name.includes('a-summary');
+        return {
+          role: isUser ? 'user' : 'assistant',
+          content: m.content ?? '',
+          seq: m.seq,
+          createdAt: m.createdAt,
+        };
+      });
     },
 
     stationKeys: async (_: unknown, { stationId }: { stationId: string }, ctx: Context) => {
@@ -2320,10 +2461,15 @@ export const resolvers = {
 
     startChat: async (
       _: unknown,
-      { agentId, userId, conversationName }: { agentId: string; userId: string; conversationName?: string },
+      { agentId, userId, conversationName }: { agentId: string; userId?: string; conversationName?: string },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
+
+      // Resolve effective user id. The portal calls with userId omitted and
+      // we use ctx.userId. The App Key path can pass an externalUserId.
+      // Legacy callers with no user get "anonymous".
+      const effectiveUserId = userId ?? ctx.userId ?? 'anonymous';
 
       // Load agent with system memory
       const agent = await ctx.db.agent.findUniqueOrThrow({
@@ -2334,8 +2480,33 @@ export const resolvers = {
       const systemMemoryId = (agent as any).systemMemoryId as string | null;
       if (!systemMemoryId) throw new Error('Agent has no system memory configured');
 
-      // Find the conversation (default to 'setup' if no name provided)
-      const convName = conversationName ?? 'setup';
+      // ── Conversation selection ───────────────────────────────────────
+      // If the caller named a conversation, use it. Otherwise scan the
+      // system memory for conversations:* (depth 2) and pick the first
+      // one whose data.isSetup is NOT true — the "real" research/chat
+      // conversation, skipping the wizard's onboard conversation.
+      let convName: string;
+      if (conversationName) {
+        convName = conversationName;
+      } else {
+        const allConvs = await ctx.db.node.findMany({
+          where: {
+            memoryId: systemMemoryId,
+            loc: { startsWith: 'conversations:' },
+            deletedAt: null,
+          },
+          select: { loc: true, data: true },
+        });
+        const topLevel = allConvs.filter((n) => n.loc.split(':').length === 2);
+        const nonSetup = topLevel.find((n) => {
+          const d = (n.data as Record<string, unknown>) ?? {};
+          return d.isSetup !== true;
+        });
+        const chosen = nonSetup ?? topLevel[0];
+        if (!chosen) throw new Error('Agent has no conversations configured');
+        convName = chosen.loc.split(':')[1];
+      }
+
       const convNode = await ctx.db.node.findFirst({
         where: { memoryId: systemMemoryId, loc: `conversations:${convName}`, deletedAt: null },
       });
@@ -2364,13 +2535,64 @@ export const resolvers = {
         promptContent = stageNode.content;
       }
 
-      // Compile the prompt with Mustache (using agent's writable memory data)
-      const writableMemory = agent.memoryItems.find((m) => m.role === 'read-write');
-      const writableMemoryId = writableMemory?.memory.id;
+      // ── Target memory selection ──────────────────────────────────────
+      // The chat (and its future messages + extracted data) get stored
+      // in a user-scoped memory. Three auth paths:
+      //   1. App Key session with an active sessionId → use session.memoryId
+      //   2. JWT user → find-or-create a per-user memory for (agent, ctx.userId)
+      //   3. Legacy fallback → first writable memory attached to the agent
+      let targetMemoryId: string | null = null;
+      if (ctx.appId && ctx.sessionId) {
+        const session = await ctx.db.session.findUnique({
+          where: { id: ctx.sessionId },
+          select: { memoryId: true },
+        });
+        targetMemoryId = session?.memoryId ?? null;
+      } else if (ctx.userId) {
+        const existing = await ctx.db.memory.findFirst({
+          where: {
+            userMemoryOfAgentId: agentId,
+            createdBy: ctx.userId,
+            deletedAt: null,
+          },
+          select: { id: true },
+        });
+        if (existing) {
+          targetMemoryId = existing.id;
+        } else {
+          // Lazily provision a per-user memory for this (agent, user).
+          const org = await ctx.db.organization.findUniqueOrThrow({
+            where: { id: agent.organizationId }, select: { urn: true },
+          });
+          const opaqueId = generateId();
+          const agentSlug = agent.urn.split(':').slice(1).join(':');
+          const memoryUrn = `${org.urn}:${agentSlug}:user:${opaqueId}`;
+          const created = await ctx.db.memory.create({
+            data: {
+              organizationId: agent.organizationId,
+              urn: memoryUrn,
+              name: `${agent.name} — ${ctx.userId}`,
+              visibility: 'PRIVATE',
+              userMemoryOfAgentId: agentId,
+              createdBy: ctx.userId,
+            },
+          });
+          targetMemoryId = created.id;
+        }
+      } else {
+        // Legacy: use the agent's first writable attached memory.
+        targetMemoryId = agent.memoryItems.find((m) => m.role === 'read-write')?.memory.id ?? null;
+      }
+
+      if (!targetMemoryId) {
+        throw new Error('No target memory available for this chat');
+      }
+
+      // Compile the prompt with Mustache against the target memory's data
       let systemMessage = promptContent;
-      if (promptContent.includes('{{') && writableMemoryId) {
+      if (promptContent.includes('{{')) {
         const access = await memoryAccessFilter(ctx);
-        systemMessage = await compileTemplate(promptContent, null, writableMemoryId, ctx.db, access);
+        systemMessage = await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access);
       }
 
       // Build tool schema from extraction spec
@@ -2397,39 +2619,53 @@ export const resolvers = {
         }];
       }
 
-      // Create chat node in writable memory
+      // Create chat node in the target memory. The loc needs a unique
+      // suffix since two chats started in the same minute by the same user
+      // on the same conversation would otherwise collide on (loc, memoryId).
+      // Use the last 8 chars of a UUIDv7 (the random portion — the first
+      // bytes are a timestamp and collide for calls in the same second).
       const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const chatName = `${ts}-${userId}-${convName}`;
+      const shortId = generateId().slice(-8);
+      const chatName = `${ts}-${shortId}-${convName}`;
       const chatLoc = `chats:${chatName}`;
 
-      if (writableMemoryId) {
-        // Ensure chats parent
-        try {
-          await ctx.db.node.upsert({
-            where: { loc_memoryId: { loc: 'chats', memoryId: writableMemoryId } },
-            create: { id: generateId(), memoryId: writableMemoryId, loc: 'chats', name: 'chats', nodeType: 'record' },
-            update: {},
-          });
-        } catch { /* exists */ }
-
-        // Create chat node
-        await ctx.db.node.create({
-          data: {
-            id: generateId(), memoryId: writableMemoryId, loc: chatLoc, name: chatName,
-            nodeType: 'record', description: `Chat: ${convName}`,
-            data: { conversationName: convName, stageName: firstStage, userId, messageCount: 0 },
+      // Ensure the chats parent exists
+      try {
+        await ctx.db.node.upsert({
+          where: { loc_memoryId: { loc: 'chats', memoryId: targetMemoryId } },
+          create: {
+            id: generateId(), memoryId: targetMemoryId, loc: 'chats',
+            name: 'chats', nodeType: 'record',
           },
+          update: {},
         });
+      } catch { /* exists */ }
 
-        // Create messages parent
-        await ctx.db.node.create({
+      // Create the chat node itself
+      await ctx.db.node.create({
+        data: {
+          id: generateId(), memoryId: targetMemoryId, loc: chatLoc, name: chatName,
+          nodeType: 'record',
+          description: `Chat: ${convName}`,
           data: {
-            id: generateId(), memoryId: writableMemoryId, loc: `${chatLoc}:messages`, name: 'messages', nodeType: 'record',
+            conversationName: convName,
+            stageName: firstStage,
+            userId: effectiveUserId,
+            messageCount: 0,
+            createdAt: new Date().toISOString(),
           },
-        });
-      }
+        },
+      });
 
-      // Prepend agent system prompt
+      // Create the messages parent (so the chat subtree is well-formed)
+      await ctx.db.node.create({
+        data: {
+          id: generateId(), memoryId: targetMemoryId, loc: `${chatLoc}:messages`,
+          name: 'messages', nodeType: 'record',
+        },
+      });
+
+      // Prepend the agent's system prompt to the compiled stage prompt
       if (agent.systemPrompt) {
         systemMessage = agent.systemPrompt + '\n\n' + systemMessage;
       }
@@ -2476,24 +2712,36 @@ export const resolvers = {
         },
       });
 
-      // Update message count
-      const newChatData = { ...(chatData as Record<string, unknown>), messageCount };
+      // Update message count + lastMessageAt
+      const newChatData = {
+        ...(chatData as Record<string, unknown>),
+        messageCount,
+        lastMessageAt: new Date().toISOString(),
+      };
       const encUpdate = encryptNodeFields({ content: null, data: newChatData }, memEncInfo);
       await ctx.db.node.update({
         where: { id: chatNode.id },
         data: { data: (encUpdate.data ?? null) as InputJsonValue },
       });
 
-      // Load the agent to get system memory
-      // Find the agent via the writable memory's subscriptions
+      // Find the agent that owns this chat. Two ways a memory can belong
+      // to an agent: (1) it's a user memory via userMemoryOfAgentId, or
+      // (2) legacy — it's attached as a regular memoryItem with role
+      // read-write. Check the user-memory path first since that's the
+      // canonical portal chat path.
       const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
       if (!memory) throw new Error('Memory not found');
-
-      // Find agent with systemMemoryId
-      const agents = await ctx.db.agent.findMany({
-        where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
-      });
-      const agent = agents.find((a) => (a as any).systemMemoryId);
+      let agent = null;
+      if (memory.userMemoryOfAgentId) {
+        agent = await ctx.db.agent.findUnique({
+          where: { id: memory.userMemoryOfAgentId },
+        });
+      } else {
+        const legacyAgents = await ctx.db.agent.findMany({
+          where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
+        });
+        agent = legacyAgents.find((a) => (a as any).systemMemoryId) ?? null;
+      }
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
       // Load current stage
@@ -2645,7 +2893,11 @@ export const resolvers = {
       // Handle stage transition
       let stageTransitioned = false;
       let newStageName: string | null = null;
-      const updatedData: Record<string, unknown> = { ...(chatData as Record<string, unknown>), messageCount };
+      const updatedData: Record<string, unknown> = {
+        ...(chatData as Record<string, unknown>),
+        messageCount,
+        lastMessageAt: new Date().toISOString(),
+      };
 
       if (nextStage && nextStage !== chatData.stageName) {
         updatedData.stageName = nextStage;
@@ -2695,6 +2947,100 @@ export const resolvers = {
         },
       });
 
+      return true;
+    },
+
+    // ── Agent AI config (org ADMIN) ─────────────────────────────────
+
+    updateAgentAIConfig: async (
+      _: unknown,
+      { agentId, provider, apiKey, model }: { agentId: string; provider: string; apiKey: string; model: string },
+      ctx: Context,
+    ) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      return ctx.db.agent.update({
+        where: { id: agentId },
+        data: {
+          aiProvider: provider,
+          aiModel: model,
+          aiApiKeyEncrypted: encryptToken(apiKey),
+          updatedBy: ctx.userId ?? null,
+        },
+        include: AGENT_INCLUDE,
+      });
+    },
+
+    clearAgentAIConfig: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      return ctx.db.agent.update({
+        where: { id: agentId },
+        data: {
+          aiProvider: null,
+          aiModel: null,
+          aiApiKeyEncrypted: null,
+          updatedBy: ctx.userId ?? null,
+        },
+        include: AGENT_INCLUDE,
+      });
+    },
+
+    // ── Chat ownership mutations ────────────────────────────────────
+
+    updateChatTitle: async (
+      _: unknown,
+      { chatId, title }: { chatId: string; title: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const chatNode = await ctx.db.node.findFirst({
+        where: { loc: chatId, deletedAt: null },
+      });
+      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      const mem = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: chatNode.memoryId },
+        select: { createdBy: true },
+      });
+      if (mem.createdBy !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
+        throw new Error('Forbidden');
+      }
+      const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
+      if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
+      const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+      const updated = { ...chatData, title: title.trim() };
+      const enc = encryptNodeFields({ content: null, data: updated }, memEncInfo);
+      await ctx.db.node.update({
+        where: { id: chatNode.id },
+        data: { data: (enc.data ?? null) as InputJsonValue },
+      });
+      return true;
+    },
+
+    deleteChat: async (_: unknown, { chatId }: { chatId: string }, ctx: Context) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const chatNode = await ctx.db.node.findFirst({
+        where: { loc: chatId, deletedAt: null },
+      });
+      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      const mem = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: chatNode.memoryId },
+        select: { createdBy: true },
+      });
+      if (mem.createdBy !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
+        throw new Error('Forbidden');
+      }
+      // Soft-delete the chat node and all its message children by loc prefix
+      await ctx.db.node.updateMany({
+        where: {
+          memoryId: chatNode.memoryId,
+          OR: [
+            { id: chatNode.id },
+            { loc: { startsWith: `${chatId}:` } },
+          ],
+        },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId },
+      });
       return true;
     },
 
