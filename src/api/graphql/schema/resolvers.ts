@@ -3001,17 +3001,26 @@ export const resolvers = {
 
     updateAgentAIConfig: async (
       _: unknown,
-      { agentId, provider, apiKey, model }: { agentId: string; provider: string; apiKey: string; model: string },
+      { agentId, provider, apiKey, model }: { agentId: string; provider: string; apiKey?: string | null; model: string },
       ctx: Context,
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      // If apiKey is provided, encrypt it and store a preview (last 4 chars).
+      // If omitted/blank, keep the existing encrypted key.
+      const keyData: Record<string, unknown> = {};
+      if (apiKey) {
+        keyData.aiApiKeyEncrypted = encryptToken(apiKey);
+        keyData.aiApiKeyPreview = apiKey.length >= 4 ? '…' + apiKey.slice(-4) : '…';
+      } else if (!agent.aiApiKeyEncrypted) {
+        throw new Error('API key is required when no key is saved yet');
+      }
       return ctx.db.agent.update({
         where: { id: agentId },
         data: {
           aiProvider: provider,
           aiModel: model,
-          aiApiKeyEncrypted: encryptToken(apiKey),
+          ...keyData,
           updatedBy: ctx.userId ?? null,
         },
         include: AGENT_INCLUDE,
@@ -3027,6 +3036,7 @@ export const resolvers = {
           aiProvider: null,
           aiModel: null,
           aiApiKeyEncrypted: null,
+          aiApiKeyPreview: null,
           updatedBy: ctx.userId ?? null,
         },
         include: AGENT_INCLUDE,

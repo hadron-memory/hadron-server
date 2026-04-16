@@ -491,6 +491,7 @@ model Agent {
   aiProvider     String?          @map("ai_provider")
   aiModel        String?          @map("ai_model")
   aiApiKeyEncrypted String?       @map("ai_api_key_encrypted")
+  aiApiKeyPreview   String?       @map("ai_api_key_preview")
   properties     Json?
   createdAt      DateTime         @default(now()) @map("created_at")
   createdBy      String?          @map("created_by")

@@ -338,6 +338,7 @@ export const typeDefs = `#graphql
     aiProvider: String
     aiModel: String
     hasAiApiKey: Boolean!
+    aiApiKeyPreview: String
     properties: JSON
     memoryItems: [AgentMemoryItem!]!
     createdAt: String!
@@ -724,7 +725,7 @@ export const typeDefs = `#graphql
     deleteChat(chatId: String!): Boolean!
 
     # Agent AI config (org ADMIN). Key is encrypted at rest.
-    updateAgentAIConfig(agentId: ID!, provider: String!, apiKey: String!, model: String!): Agent!
+    updateAgentAIConfig(agentId: ID!, provider: String!, model: String!, apiKey: String): Agent!
     clearAgentAIConfig(agentId: ID!): Agent!
 
     # Public mutations (no auth required)
