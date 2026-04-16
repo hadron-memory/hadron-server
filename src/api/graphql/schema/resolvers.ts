@@ -941,6 +941,53 @@ export const resolvers = {
       });
     },
 
+    memory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const memory = await ctx.db.memory.findUnique({
+        where: { id },
+        include: MEMORY_INCLUDE,
+      });
+      if (!memory || memory.deletedAt) return null;
+      // Authorization: platform ADMIN or member of the memory's org
+      if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
+        if (!ctx.userId) throw new Error('Forbidden');
+        const member = await ctx.db.orgMember.findUnique({
+          where: {
+            organizationId_userId: {
+              organizationId: memory.organizationId,
+              userId: ctx.userId,
+            },
+          },
+        });
+        if (!member) throw new Error('Forbidden');
+      }
+      return memory;
+    },
+
+    orgSystemMemories: async (
+      _: unknown,
+      { orgId }: { orgId: string },
+      ctx: Context,
+    ) => {
+      // Authorization: platform ADMIN or member of the org
+      if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
+        if (!ctx.userId) throw new Error('Forbidden');
+        const member = await ctx.db.orgMember.findUnique({
+          where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+        });
+        if (!member) throw new Error('Forbidden');
+      }
+      return ctx.db.memory.findMany({
+        where: {
+          organizationId: orgId,
+          deletedAt: null,
+          type: 'AGENT_SYSTEM',
+          userMemoryOfAgentId: null,
+        },
+        include: MEMORY_INCLUDE,
+        orderBy: { name: 'asc' },
+      });
+    },
+
     myMemories: async (
       _: unknown,
       { includeAgentSystem }: { includeAgentSystem?: boolean },

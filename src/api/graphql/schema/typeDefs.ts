@@ -573,7 +573,12 @@ export const typeDefs = `#graphql
     # Public memory marketplace — any authenticated user
     publicMemories: [Memory!]!
 
-    # Memories the caller should sync (via bundle subscriptions)
+    # Fetch a single memory by ID (org member or platform ADMIN)
+    memory(id: ID!): Memory
+
+    # System memories belonging to an org (org member or platform ADMIN)
+    orgSystemMemories(orgId: ID!): [Memory!]!
+
     # Memories accessible to the caller. Agent system memories are hidden
     # by default; pass includeAgentSystem: true on the memories list page
     # to surface them.
