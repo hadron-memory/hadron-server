@@ -8,6 +8,7 @@ import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
+import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { SessionType } from '../generated/prisma/index.js';
 
 // ---------------------------------------------------------------------------
@@ -1275,6 +1276,101 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
       if (result.error) return textResult(`Sync failed: ${result.error}`);
       return textResult(`Synced ${result.nodeCount ?? 0} nodes.`);
+    },
+  );
+
+  // ── Chat tools ───────────────────────────────────────────────────────────
+  // These call the GraphQL mutation resolvers directly with a constructed
+  // Context. The MCP station auth maps to ctx.clientId; the userId param
+  // identifies the persona being tested.
+
+  function gqlCtx(userIdOverride?: string): Context {
+    return {
+      db,
+      clientId: auth.clientId ?? undefined,
+      userId: userIdOverride ?? auth.userId ?? undefined,
+      roles: auth.roles as Context['roles'],
+      organizationId: auth.organizationId ?? undefined,
+    };
+  }
+
+  // ── h-start-chat ──────────────────────────────────────────────────────
+
+  server.tool(
+    'h-start-chat',
+    'Start a new chat session with an agent. Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call h-process-chat-response with the result.',
+    {
+      agentId: z.string().describe('ID of the agent to chat with'),
+      userId: z.string().optional().describe('User/persona identifier (e.g. "alex-chen"). Used to scope the per-user memory. If omitted, uses the authenticated user.'),
+      conversationName: z.string().optional().describe('Specific conversation to start (e.g. "onboarding"). If omitted, picks the first non-setup conversation.'),
+    },
+    async ({ agentId, userId, conversationName }) => {
+      try {
+        const ctx = gqlCtx(userId);
+        const result = await resolvers.Mutation.startChat(
+          null,
+          { agentId, userId, conversationName },
+          ctx,
+        );
+        return textResult(JSON.stringify(result, null, 2));
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'startChat failed'}`);
+      }
+    },
+  );
+
+  // ── h-send-chat-message ───────────────────────────────────────────────
+
+  server.tool(
+    'h-send-chat-message',
+    "Send a user message in an existing chat. Returns the recompiled system prompt for the current stage, tool schema, message history, and whether summarization is needed. Use the returned prompt + tools to generate the assistant's response, then call h-process-chat-response.",
+    {
+      chatId: z.string().describe('Chat ID returned by h-start-chat (e.g. "chats:20260417-abc12345-onboarding")'),
+      userMessage: z.string().describe("The user's message text"),
+    },
+    async ({ chatId, userMessage }) => {
+      try {
+        const ctx = gqlCtx();
+        const result = await resolvers.Mutation.sendChatMessage(
+          null,
+          { chatId, userMessage },
+          ctx,
+        );
+        return textResult(JSON.stringify(result, null, 2));
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'sendChatMessage failed'}`);
+      }
+    },
+  );
+
+  // ── h-process-chat-response ───────────────────────────────────────────
+
+  server.tool(
+    'h-process-chat-response',
+    "Process the LLM's structured response for a chat turn. The toolResponse must match the respond() tool schema: { message, data, next_stage }. Hadron saves the assistant message, extracts data into user memory, and handles stage transitions. Returns the display message, whether a stage transition occurred, and the new stage name.",
+    {
+      chatId: z.string().describe('Chat ID'),
+      message: z.string().describe("The assistant's response message to display to the user"),
+      data: z.record(z.string(), z.unknown()).optional().describe('Extracted data fields matching the stage extractionSpec (e.g. { "memory.name": "Alex Chen" })'),
+      next_stage: z.string().nullable().optional().describe('Stage to transition to (null or omitted to stay in current stage)'),
+    },
+    async ({ chatId, message, data, next_stage }) => {
+      try {
+        const ctx = gqlCtx();
+        const toolResponse = {
+          message,
+          ...(data !== undefined ? { data } : {}),
+          ...(next_stage !== undefined ? { next_stage } : {}),
+        };
+        const result = await resolvers.Mutation.processChatResponse(
+          null,
+          { chatId, toolResponse },
+          ctx,
+        );
+        return textResult(JSON.stringify(result, null, 2));
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'processChatResponse failed'}`);
+      }
     },
   );
 
