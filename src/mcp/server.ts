@@ -1607,6 +1607,229 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     },
   );
 
+  // ── h-chat-define-persona ───────────────────────────────────────────
+
+  server.tool(
+    'h-chat-define-persona',
+    'Define a test persona for automated chatbot testing. The persona has a name, description, opening message, and optionally an expected conversation path. Stored in the system memory under test-personas:*.',
+    {
+      agentId: z.string().describe('ID of the agent'),
+      name: z.string().describe('Persona name (e.g. "Maria Santos")'),
+      description: z.string().describe('Brief description: who they are, what they want (e.g. "Freelance designer in Austin, wants to find a mentor")'),
+      openingMessage: z.string().describe('The first message the persona sends to start the chat'),
+      conversationName: z.string().optional().describe('Which conversation to start with (omit to let routing decide)'),
+      followUpMessages: z.array(z.string()).optional().describe('Subsequent messages the persona sends, in order. If omitted, the LLM improvises based on the persona description.'),
+      expectedConversations: z.array(z.string()).optional().describe('Expected conversation path for validation (e.g. ["onboarding", "strategy"])'),
+    },
+    async ({ agentId, name, description, openingMessage, conversationName, followUpMessages, expectedConversations }) => {
+      try {
+        const agent = await db.agent.findUnique({ where: { id: agentId } });
+        if (!agent) return textResult('Agent not found.');
+        const sysMemId = (agent as any).systemMemoryId as string | null;
+        if (!sysMemId) return textResult('Agent has no system memory.');
+
+        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+        const personaLoc = `test-personas:${slug}`;
+
+        // Ensure parent exists
+        try {
+          await db.node.upsert({
+            where: { loc_memoryId: { loc: 'test-personas', memoryId: sysMemId } },
+            create: { id: generateId(), memoryId: sysMemId, loc: 'test-personas', name: 'test-personas', nodeType: 'system', description: 'Test personas for automated chatbot testing' },
+            update: {},
+          });
+        } catch { /* exists */ }
+
+        await db.node.upsert({
+          where: { loc_memoryId: { loc: personaLoc, memoryId: sysMemId } },
+          create: {
+            id: generateId(), memoryId: sysMemId, loc: personaLoc, name: slug,
+            nodeType: 'system', description: name,
+            data: {
+              personaName: name, description, openingMessage,
+              conversationName: conversationName ?? null,
+              followUpMessages: followUpMessages ?? [],
+              expectedConversations: expectedConversations ?? [],
+              createdAt: new Date().toISOString(),
+            } as InputJsonValue,
+          },
+          update: {
+            description: name,
+            data: {
+              personaName: name, description, openingMessage,
+              conversationName: conversationName ?? null,
+              followUpMessages: followUpMessages ?? [],
+              expectedConversations: expectedConversations ?? [],
+              updatedAt: new Date().toISOString(),
+            } as InputJsonValue,
+            deletedAt: null,
+          },
+        });
+
+        return textResult(`Persona "${name}" saved at ${personaLoc}.\nOpening: "${openingMessage}"\nFollow-ups: ${(followUpMessages ?? []).length}`);
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to define persona'}`);
+      }
+    },
+  );
+
+  // ── h-chat-list-personas ──────────────────────────────────────────
+
+  server.tool(
+    'h-chat-list-personas',
+    'List all test personas defined for an agent.',
+    {
+      agentId: z.string().describe('ID of the agent'),
+    },
+    async ({ agentId }) => {
+      try {
+        const agent = await db.agent.findUnique({ where: { id: agentId } });
+        if (!agent) return textResult('Agent not found.');
+        const sysMemId = (agent as any).systemMemoryId as string | null;
+        if (!sysMemId) return textResult('Agent has no system memory.');
+
+        const personas = await db.node.findMany({
+          where: { memoryId: sysMemId, loc: { startsWith: 'test-personas:' }, deletedAt: null },
+          select: { loc: true, description: true, data: true },
+          orderBy: { loc: 'asc' },
+        });
+
+        if (personas.length === 0) return textResult('No test personas defined. Use h-chat-define-persona to create one.');
+
+        const lines = personas.map((p) => {
+          const d = (p.data as Record<string, unknown>) ?? {};
+          return `- ${d.personaName ?? p.description ?? p.loc}: "${d.openingMessage ?? ''}"${d.conversationName ? ` (starts: ${d.conversationName})` : ''}`;
+        });
+        return textResult(`${personas.length} persona(s):\n${lines.join('\n')}`);
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to list personas'}`);
+      }
+    },
+  );
+
+  // ── h-chat-run-persona ────────────────────────────────────────────
+
+  server.tool(
+    'h-chat-run-persona',
+    'Run a test persona through the chatbot in "dry run" mode. This starts a chat as the persona, sends their opening message, and returns the chatbot\'s compiled prompt + tool schema so the client LLM can generate the response. Call h-chat-process with the response, then call this tool again with the next follow-up message. Use this iteratively to walk through the full conversation.\n\nWorkflow:\n1. Call h-chat-run-persona to start (sets up chat, sends opening message)\n2. Read the returned prompt, generate a chatbot response as the client LLM\n3. Call h-chat-process with the response\n4. Call h-chat-run-persona again with step=1 (next follow-up)\n5. Repeat until all follow-ups are done or the conversation ends\n\nAt the end, call h-chat-get-route-history to see the full path taken.',
+    {
+      agentId: z.string().describe('ID of the agent'),
+      personaLoc: z.string().describe('Loc of the persona (e.g. "test-personas:maria-santos")'),
+      step: z.number().optional().describe('Follow-up message index (0 = opening message, 1 = first follow-up, etc.). Defaults to 0.'),
+      chatId: z.string().optional().describe('Chat ID from a previous step. Omit on step 0 to start a new chat.'),
+    },
+    async ({ agentId, personaLoc, step, chatId }) => {
+      try {
+        const agent = await db.agent.findUnique({ where: { id: agentId } });
+        if (!agent) return textResult('Agent not found.');
+        const sysMemId = (agent as any).systemMemoryId as string | null;
+        if (!sysMemId) return textResult('Agent has no system memory.');
+
+        const personaNode = await db.node.findFirst({
+          where: { memoryId: sysMemId, loc: personaLoc, deletedAt: null },
+        });
+        if (!personaNode) return textResult(`Persona "${personaLoc}" not found.`);
+        const persona = (personaNode.data as Record<string, unknown>) ?? {};
+        const followUps = (persona.followUpMessages as string[]) ?? [];
+        const currentStep = step ?? 0;
+
+        const ctx = gqlCtx(persona.personaName as string ?? 'test-persona');
+
+        if (currentStep === 0) {
+          // Start a new chat
+          const startResult = await resolvers.Mutation.startChat(
+            null,
+            {
+              agentId,
+              userId: persona.personaName as string,
+              conversationName: (persona.conversationName as string) ?? undefined,
+            },
+            ctx,
+          );
+
+          // Send the opening message
+          const sendResult = await resolvers.Mutation.sendChatMessage(
+            null,
+            { chatId: startResult.chatId, userMessage: persona.openingMessage as string },
+            ctx,
+          );
+
+          return textResult(JSON.stringify({
+            chatId: startResult.chatId,
+            step: 0,
+            personaMessage: persona.openingMessage,
+            totalFollowUps: followUps.length,
+            conversationName: startResult.conversationName,
+            stageName: startResult.stageName,
+            systemMessage: sendResult.systemMessage,
+            tools: sendResult.tools,
+            messageHistory: sendResult.messageHistory,
+            instruction: 'Generate a chatbot response based on the systemMessage and tools above. Then call h-chat-process with chatId, message, data, and next_stage. After that, call h-chat-run-persona with step=1 to send the next follow-up.',
+          }, null, 2));
+        }
+
+        // Follow-up steps
+        if (!chatId) return textResult('chatId is required for follow-up steps.');
+        const followUpIdx = currentStep - 1;
+
+        if (followUpIdx >= followUps.length) {
+          // All follow-ups done — generate the test report
+          const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+          const chatData = (chatNode?.data as Record<string, unknown>) ?? {};
+          const expected = (persona.expectedConversations as string[]) ?? [];
+          const routeHistory = (chatData.routeHistory as Array<Record<string, unknown>>) ?? [];
+          const visitedConvs = [...new Set(routeHistory.filter((r) => r.conversationUrn).map((r) => (r.conversationUrn as string).replace('conversations:', '')))];
+
+          let pass = true;
+          const issues: string[] = [];
+          if (expected.length > 0) {
+            for (const exp of expected) {
+              if (!visitedConvs.includes(exp)) {
+                pass = false;
+                issues.push(`Expected conversation "${exp}" was not visited.`);
+              }
+            }
+          }
+
+          return textResult(JSON.stringify({
+            chatId,
+            step: currentStep,
+            status: 'COMPLETE',
+            pass,
+            issues,
+            visitedConversations: visitedConvs,
+            totalTurns: (chatData.messageCount as number) ?? 0,
+            routeHistory,
+            goalStack: chatData.goalStack ?? [],
+            instruction: 'Test complete. Review the results above.',
+          }, null, 2));
+        }
+
+        const userMessage = followUps[followUpIdx];
+
+        // Send the follow-up message
+        const sendResult = await resolvers.Mutation.sendChatMessage(
+          null,
+          { chatId, userMessage },
+          ctx,
+        );
+
+        return textResult(JSON.stringify({
+          chatId,
+          step: currentStep,
+          personaMessage: userMessage,
+          remainingFollowUps: followUps.length - followUpIdx - 1,
+          systemMessage: sendResult.systemMessage,
+          tools: sendResult.tools,
+          messageHistory: sendResult.messageHistory,
+          instruction: `Generate a chatbot response for: "${userMessage}". Then call h-chat-process, then h-chat-run-persona with step=${currentStep + 1}.`,
+        }, null, 2));
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to run persona'}`);
+      }
+    },
+  );
+
   return server;
 }
 
