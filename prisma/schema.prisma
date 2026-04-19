@@ -492,7 +492,10 @@ model Agent {
   aiProvider     String?          @map("ai_provider")
   aiModel        String?          @map("ai_model")
   aiApiKeyEncrypted String?       @map("ai_api_key_encrypted")
-  aiApiKeyPreview   String?       @map("ai_api_key_preview")
+  aiApiKeyPreview      String?       @map("ai_api_key_preview")
+  publishedRevisionLoc String?      @map("published_revision_loc")
+  editorLockUserId     String?      @map("editor_lock_user_id")
+  editorLockExpiresAt  DateTime?    @map("editor_lock_expires_at")
   properties     Json?
   createdAt      DateTime         @default(now()) @map("created_at")
   createdBy      String?          @map("created_by")

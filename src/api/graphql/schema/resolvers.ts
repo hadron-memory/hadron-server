@@ -3357,6 +3357,234 @@ export const resolvers = {
       });
     },
 
+    // ── Chatbot revisions ─────────────────────────────────────────────
+
+    createRevision: async (
+      _: unknown,
+      { agentId, description }: { agentId: string; description?: string },
+      ctx: Context,
+    ) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      const sysMemId = (agent as any).systemMemoryId as string;
+      if (!sysMemId) throw new Error('Agent has no system memory');
+
+      // Snapshot all non-revision nodes + edges in the system memory
+      const nodes = await ctx.db.node.findMany({
+        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+        select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true, tags: true },
+      });
+      const nodeIds = (await ctx.db.node.findMany({
+        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+        select: { id: true },
+      })).map((n) => n.id);
+      const edges = await ctx.db.edge.findMany({
+        where: { sourceId: { in: nodeIds }, deletedAt: null },
+        include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+      });
+      const edgeSnapshots = edges.map((e) => ({
+        sourceLoc: e.source.loc,
+        targetLoc: e.target.loc,
+        label: e.label,
+        data: e.data,
+      }));
+
+      // Count existing revisions to auto-increment
+      const existingRevisions = await ctx.db.node.count({
+        where: { memoryId: sysMemId, loc: { startsWith: 'revisions:' }, deletedAt: null },
+      });
+      const revNum = existingRevisions + 1;
+      const label = `rev-${revNum}`;
+      const revLoc = `revisions:${label}`;
+
+      // Ensure revisions parent exists
+      try {
+        await ctx.db.node.upsert({
+          where: { loc_memoryId: { loc: 'revisions', memoryId: sysMemId } },
+          create: { id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' },
+          update: {},
+        });
+      } catch { /* exists */ }
+
+      await ctx.db.node.create({
+        data: {
+          id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
+          nodeType: 'system',
+          description: description ?? `Revision ${revNum}`,
+          data: {
+            revision: revNum,
+            label,
+            published: false,
+            createdBy: ctx.userId ?? null,
+            snapshot: { nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
+          } as InputJsonValue,
+        },
+      });
+
+      return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
+    },
+
+    publishRevision: async (
+      _: unknown,
+      { agentId, revisionLoc, versionLabel }: { agentId: string; revisionLoc: string; versionLabel?: string },
+      ctx: Context,
+    ) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      const sysMemId = (agent as any).systemMemoryId as string;
+      if (!sysMemId) throw new Error('Agent has no system memory');
+
+      const revNode = await ctx.db.node.findFirst({
+        where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
+      });
+      if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
+
+      const revData = (revNode.data as Record<string, unknown>) ?? {};
+      const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
+
+      // Mark as published
+      await ctx.db.node.update({
+        where: { id: revNode.id },
+        data: { data: { ...revData, published: true, publishedAt: new Date().toISOString(), versionLabel: label } as InputJsonValue },
+      });
+
+      // Update agent to point to this revision
+      await ctx.db.agent.update({
+        where: { id: agentId },
+        data: { publishedRevisionLoc: revisionLoc },
+      });
+
+      return { revisionLoc, label, published: true, createdAt: new Date().toISOString() };
+    },
+
+    restoreRevision: async (
+      _: unknown,
+      { agentId, revisionLoc }: { agentId: string; revisionLoc: string },
+      ctx: Context,
+    ) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      const sysMemId = (agent as any).systemMemoryId as string;
+      if (!sysMemId) throw new Error('Agent has no system memory');
+
+      const revNode = await ctx.db.node.findFirst({
+        where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
+      });
+      if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
+
+      const revData = (revNode.data as Record<string, unknown>) ?? {};
+      const snapshot = revData.snapshot as { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | undefined;
+      if (!snapshot) throw new Error('Revision has no snapshot data');
+
+      // Auto-save current state before restoring
+      await resolvers.Mutation.createRevision({}, { agentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
+
+      // Delete all current non-revision nodes in the system memory
+      await ctx.db.node.updateMany({
+        where: {
+          memoryId: sysMemId,
+          deletedAt: null,
+          NOT: { loc: { startsWith: 'revisions' } },
+        },
+        data: { deletedAt: new Date() },
+      });
+
+      // Delete all edges in the system memory
+      const currentNodeIds = (await ctx.db.node.findMany({
+        where: { memoryId: sysMemId },
+        select: { id: true },
+      })).map((n) => n.id);
+      await ctx.db.edge.updateMany({
+        where: { sourceId: { in: currentNodeIds }, deletedAt: null },
+        data: { deletedAt: new Date() },
+      });
+
+      // Restore nodes from snapshot (upsert to handle soft-deleted rows
+      // that still hold the unique (loc, memoryId) constraint)
+      const locToId = new Map<string, string>();
+      for (const n of snapshot.nodes) {
+        const loc = n.loc as string;
+        const nodeData = {
+          name: n.name as string,
+          nodeType: (n.nodeType as string) ?? 'system',
+          description: (n.description as string) ?? null,
+          content: (n.content as string) ?? null,
+          data: (n.data ?? null) as InputJsonValue,
+          tags: (n.tags as string[]) ?? [],
+          deletedAt: null,
+        };
+        const upserted = await ctx.db.node.upsert({
+          where: { loc_memoryId: { loc, memoryId: sysMemId } },
+          create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData },
+          update: nodeData,
+        });
+        locToId.set(loc, upserted.id);
+      }
+
+      // Restore edges from snapshot
+      for (const e of snapshot.edges) {
+        const sourceId = locToId.get(e.sourceLoc as string);
+        const targetId = locToId.get(e.targetLoc as string);
+        if (sourceId && targetId) {
+          await ctx.db.edge.create({
+            data: {
+              id: generateId(),
+              sourceId,
+              targetId,
+              label: (e.label as string) ?? '',
+              data: (e.data ?? null) as InputJsonValue,
+            },
+          });
+        }
+      }
+
+      return { revisionLoc, label: (revData.label as string) ?? revisionLoc, published: false, createdAt: new Date().toISOString() };
+    },
+
+    // ── Editor lock ────────────────────────────────────────────────────
+
+    acquireEditorLock: async (
+      _: unknown,
+      { agentId }: { agentId: string },
+      ctx: Context,
+    ) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+
+      const now = new Date();
+      const lockExpiry = (agent as any).editorLockExpiresAt as Date | null;
+      const lockUser = (agent as any).editorLockUserId as string | null;
+
+      // If locked by someone else and not expired, reject
+      if (lockUser && lockUser !== ctx.userId && lockExpiry && lockExpiry > now) {
+        return { locked: false, lockedBy: lockUser, expiresAt: lockExpiry.toISOString() };
+      }
+
+      // Acquire or renew lock (5 minutes)
+      const expiresAt = new Date(now.getTime() + 5 * 60 * 1000);
+      await ctx.db.agent.update({
+        where: { id: agentId },
+        data: { editorLockUserId: ctx.userId, editorLockExpiresAt: expiresAt },
+      });
+
+      return { locked: true, lockedBy: ctx.userId, expiresAt: expiresAt.toISOString() };
+    },
+
+    releaseEditorLock: async (
+      _: unknown,
+      { agentId }: { agentId: string },
+      ctx: Context,
+    ) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+
+      await ctx.db.agent.update({
+        where: { id: agentId },
+        data: { editorLockUserId: null, editorLockExpiresAt: null },
+      });
+      return true;
+    },
+
     // ── Chat ownership mutations ────────────────────────────────────
 
     updateChatTitle: async (

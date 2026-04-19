@@ -728,6 +728,15 @@ export const typeDefs = `#graphql
     updateAgentAIConfig(agentId: ID!, provider: String!, model: String!, apiKey: String): Agent!
     clearAgentAIConfig(agentId: ID!): Agent!
 
+    # Chatbot revisions (org ADMIN)
+    createRevision(agentId: ID!, description: String): RevisionResult!
+    publishRevision(agentId: ID!, revisionLoc: String!, versionLabel: String): RevisionResult!
+    restoreRevision(agentId: ID!, revisionLoc: String!): RevisionResult!
+
+    # Editor lock (org ADMIN)
+    acquireEditorLock(agentId: ID!): EditorLockResult!
+    releaseEditorLock(agentId: ID!): Boolean!
+
     # Public mutations (no auth required)
     joinWaitingList(email: String!, requestedFeatures: String): Boolean!
     sendContactMessage(name: String!, email: String!, message: String!): Boolean!
@@ -816,5 +825,18 @@ export const typeDefs = `#graphql
     chatEnded: Boolean!
     onTrack: Boolean!
     offTrackReason: String
+  }
+
+  type RevisionResult {
+    revisionLoc: String!
+    label: String!
+    published: Boolean!
+    createdAt: String!
+  }
+
+  type EditorLockResult {
+    locked: Boolean!
+    lockedBy: String
+    expiresAt: String
   }
 `;
