@@ -86,6 +86,7 @@ export const typeDefs = `#graphql
     target: Node!
     label: String!
     condition: String
+    data: JSON
   }
 
   type Session {
@@ -622,6 +623,11 @@ export const typeDefs = `#graphql
 
     # Replace all nodes owned by a repo within a memory (collection tool)
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
+
+    # Edge CRUD
+    createEdge(sourceNodeId: ID!, targetNodeId: ID!, label: String!, data: JSON): Edge!
+    updateEdge(edgeId: ID!, label: String, data: JSON): Edge!
+    deleteEdge(edgeId: ID!): Boolean!
 
     # Session lifecycle
     startSession(input: SessionInput!): Session!

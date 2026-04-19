@@ -1496,6 +1496,54 @@ export const resolvers = {
       return true;
     },
 
+    // ── Edge CRUD ──────────────────────────────────────────────────────
+
+    createEdge: async (
+      _: unknown,
+      { sourceNodeId, targetNodeId, label, data }: { sourceNodeId: string; targetNodeId: string; label: string; data?: Record<string, unknown> },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'CONTRIBUTOR');
+      return ctx.db.edge.create({
+        data: {
+          id: generateId(),
+          sourceId: sourceNodeId,
+          targetId: targetNodeId,
+          label,
+          data: (data ?? null) as InputJsonValue,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+        include: { source: true, target: true },
+      });
+    },
+
+    updateEdge: async (
+      _: unknown,
+      { edgeId, label, data }: { edgeId: string; label?: string; data?: Record<string, unknown> },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'CONTRIBUTOR');
+      return ctx.db.edge.update({
+        where: { id: edgeId },
+        data: {
+          ...(label !== undefined ? { label } : {}),
+          ...(data !== undefined ? { data: data as InputJsonValue } : {}),
+          updatedBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+        include: { source: true, target: true },
+      });
+    },
+
+    deleteEdge: async (
+      _: unknown,
+      { edgeId }: { edgeId: string },
+      ctx: Context,
+    ) => {
+      requireRole(ctx, 'CONTRIBUTOR');
+      await ctx.db.edge.delete({ where: { id: edgeId } });
+      return true;
+    },
+
     moveNode: async (_: unknown, { from: rawFrom, to: rawTo, memoryId, targetMemoryId }: { from: string; to: string; memoryId: string; targetMemoryId?: string }, ctx: Context) => {
       const from = parseUrnInput(rawFrom).value;
       const to = parseUrnInput(rawTo).value;
