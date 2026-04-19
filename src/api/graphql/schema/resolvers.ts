@@ -426,6 +426,157 @@ async function buildRespondToolSchema(
   }];
 }
 
+// ---------------------------------------------------------------------------
+// Goal stack helpers
+// ---------------------------------------------------------------------------
+
+interface GoalStackEntry {
+  description: string;
+  language?: string;
+  createdAt: string;
+  createdBy: 'ASSISTANT' | 'USER';
+  topicUrn?: string;
+  conversationUrn?: string;
+  nodeUrn?: string;
+  edgeUrn?: string;
+  status: 'ACTIVE' | 'COMPLETED' | 'ABANDONED';
+  completedAt?: string;
+}
+
+function getGoalStack(chatData: Record<string, unknown>): GoalStackEntry[] {
+  return (chatData.goalStack as GoalStackEntry[]) ?? [];
+}
+
+function pushGoal(
+  chatData: Record<string, unknown>,
+  goal: Omit<GoalStackEntry, 'status' | 'createdAt'>,
+): GoalStackEntry[] {
+  const stack = getGoalStack(chatData);
+  stack.push({
+    ...goal,
+    status: 'ACTIVE',
+    createdAt: new Date().toISOString(),
+  });
+  chatData.goalStack = stack;
+  return stack;
+}
+
+function popGoal(chatData: Record<string, unknown>): GoalStackEntry | null {
+  const stack = getGoalStack(chatData);
+  // Find the topmost ACTIVE entry and mark it COMPLETED
+  for (let i = stack.length - 1; i >= 0; i--) {
+    if (stack[i].status === 'ACTIVE') {
+      stack[i].status = 'COMPLETED';
+      stack[i].completedAt = new Date().toISOString();
+      chatData.goalStack = stack;
+      return stack[i];
+    }
+  }
+  return null;
+}
+
+function currentGoal(chatData: Record<string, unknown>): GoalStackEntry | null {
+  const stack = getGoalStack(chatData);
+  for (let i = stack.length - 1; i >= 0; i--) {
+    if (stack[i].status === 'ACTIVE') return stack[i];
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Route history helpers
+// ---------------------------------------------------------------------------
+
+interface RouteHistoryEntry {
+  nodeUrn?: string;
+  topicUrn?: string;
+  conversationUrn?: string;
+  action: 'ENTER' | 'EXIT' | 'COMPLETED' | 'FOLLOWED';
+  trigger?: { type: string; content?: string };
+  edgeUrn?: string;
+  timestamp: string;
+}
+
+function getRouteHistory(chatData: Record<string, unknown>): RouteHistoryEntry[] {
+  return (chatData.routeHistory as RouteHistoryEntry[]) ?? [];
+}
+
+function appendRouteEntry(
+  chatData: Record<string, unknown>,
+  entry: Omit<RouteHistoryEntry, 'timestamp'>,
+): void {
+  const history = getRouteHistory(chatData);
+  history.push({ ...entry, timestamp: new Date().toISOString() });
+  chatData.routeHistory = history;
+}
+
+/**
+ * Check if a conversation was recently visited (within the last N entries)
+ * and left — used for loop prevention.
+ */
+function wasRecentlyVisited(
+  chatData: Record<string, unknown>,
+  conversationName: string,
+  lookback = 3,
+): boolean {
+  const history = getRouteHistory(chatData);
+  const recentExits = history
+    .slice(-lookback * 2)  // each visit is ENTER + EXIT, so look back 2x
+    .filter((e) =>
+      e.action === 'EXIT' &&
+      e.conversationUrn?.endsWith(`:${conversationName}`),
+    );
+  return recentExits.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Edge evaluation helpers
+// ---------------------------------------------------------------------------
+
+interface EdgeCondition {
+  field: string;
+  operator: 'missing' | 'exists' | 'equals' | 'notEquals' | 'contains';
+  value?: unknown;
+}
+
+/**
+ * Evaluate an edge condition against the user's memory data.
+ */
+async function evaluateCondition(
+  db: PrismaClient,
+  condition: EdgeCondition,
+  userMemoryId: string,
+): Promise<boolean> {
+  // Load the user's data node
+  const dataNode = await db.node.findFirst({
+    where: { loc: 'data', memoryId: userMemoryId, deletedAt: null },
+    select: { data: true },
+  });
+  const userData = (dataNode?.data as Record<string, unknown>) ?? {};
+
+  // Resolve the field value. Fields like "memory.name" → look for "name"
+  const fieldName = condition.field.includes('.')
+    ? condition.field.split('.').pop()!
+    : condition.field;
+  const fieldValue = userData[fieldName];
+
+  switch (condition.operator) {
+    case 'missing':
+      return fieldValue === undefined || fieldValue === null || fieldValue === '';
+    case 'exists':
+      return fieldValue !== undefined && fieldValue !== null && fieldValue !== '';
+    case 'equals':
+      return fieldValue === condition.value;
+    case 'notEquals':
+      return fieldValue !== condition.value;
+    case 'contains':
+      return typeof fieldValue === 'string' && typeof condition.value === 'string'
+        && fieldValue.includes(condition.value);
+    default:
+      return false;
+  }
+}
+
 export const resolvers = {
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
@@ -2744,19 +2895,40 @@ export const resolvers = {
         });
       } catch { /* exists */ }
 
-      // Create the chat node itself
+      // Look up the conversation's goal for the initial goal stack entry
+      const convGoals = (convData.goalDescriptions as string[]) ?? [];
+      const initialGoal = convGoals[0] ?? `${convName} conversation`;
+
+      // Create the chat node with initial goal stack and route history
+      const initialChatData: Record<string, unknown> = {
+        conversationName: convName,
+        stageName: firstStage,
+        userId: effectiveUserId,
+        messageCount: 0,
+        createdAt: new Date().toISOString(),
+        goalStack: [{
+          description: initialGoal,
+          createdBy: 'USER',
+          createdAt: new Date().toISOString(),
+          conversationUrn: `conversations:${convName}`,
+          nodeUrn: `conversations:${convName}:${firstStage}`,
+          status: 'ACTIVE',
+        }],
+        routeHistory: [{
+          conversationUrn: `conversations:${convName}`,
+          nodeUrn: `conversations:${convName}:${firstStage}`,
+          action: 'ENTER',
+          trigger: { type: 'CHAT_START', content: convName },
+          timestamp: new Date().toISOString(),
+        }],
+      };
+
       await ctx.db.node.create({
         data: {
           id: generateId(), memoryId: targetMemoryId, loc: chatLoc, name: chatName,
           nodeType: 'record',
           description: `Chat: ${convName}`,
-          data: {
-            conversationName: convName,
-            stageName: firstStage,
-            userId: effectiveUserId,
-            messageCount: 0,
-            createdAt: new Date().toISOString(),
-          },
+          data: initialChatData as InputJsonValue,
         },
       });
 
