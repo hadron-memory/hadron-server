@@ -1424,7 +1424,13 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           data: e.data,
         }));
 
-        return textResult(JSON.stringify({ topics, conversations, stages, edges: edgeList }, null, 2));
+        // Include training entries if they exist
+        const trainingNode = nodes.find((n) => n.loc === 'goals:training');
+        const trainingEntries = trainingNode
+          ? ((trainingNode.data as Record<string, unknown>)?.entries as unknown[]) ?? []
+          : [];
+
+        return textResult(JSON.stringify({ topics, conversations, stages, edges: edgeList, trainingEntries }, null, 2));
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to get routing map'}`);
       }
@@ -1533,6 +1539,70 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult('No active goals to complete.');
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to pop goal'}`);
+      }
+    },
+  );
+
+  // ── h-chat-add-training-entry ───────────────────────────────────────
+
+  server.tool(
+    'h-chat-add-training-entry',
+    'Add a user statement to the agent-wide routing training set. These entries help the routing engine match future user messages to the right conversation. Stored in the system memory (not encrypted user memory).',
+    {
+      agentId: z.string().describe('ID of the agent'),
+      userStatement: z.string().describe('The user statement that should route here (e.g. "Is Nina back in town?")'),
+      matchedConversation: z.string().describe('The conversation name this statement should route to (e.g. "class-schedule")'),
+      language: z.string().optional().describe('Language code (e.g. "en", "es"). Defaults to "en".'),
+    },
+    async ({ agentId, userStatement, matchedConversation, language }) => {
+      try {
+        const agent = await db.agent.findUnique({ where: { id: agentId } });
+        if (!agent) return textResult('Agent not found.');
+        const sysMemId = (agent as any).systemMemoryId as string | null;
+        if (!sysMemId) return textResult('Agent has no system memory.');
+
+        // Ensure the training node exists
+        const trainingLoc = 'goals:training';
+        let trainingNode = await db.node.findFirst({
+          where: { memoryId: sysMemId, loc: trainingLoc, deletedAt: null },
+        });
+
+        if (!trainingNode) {
+          // Create parent + training node
+          try {
+            await db.node.upsert({
+              where: { loc_memoryId: { loc: 'goals', memoryId: sysMemId } },
+              create: { id: generateId(), memoryId: sysMemId, loc: 'goals', name: 'goals', nodeType: 'system' },
+              update: {},
+            });
+          } catch { /* exists */ }
+          trainingNode = await db.node.create({
+            data: {
+              id: generateId(), memoryId: sysMemId, loc: trainingLoc, name: 'training',
+              nodeType: 'system', data: { entries: [] } as InputJsonValue,
+            },
+          });
+        }
+
+        const trainingData = (trainingNode.data as Record<string, unknown>) ?? {};
+        const entries = (trainingData.entries as Array<Record<string, unknown>>) ?? [];
+
+        entries.push({
+          userStatement,
+          matchedConversation,
+          language: language ?? 'en',
+          addedAt: new Date().toISOString(),
+          addedBy: auth.userId ?? auth.clientId ?? 'system',
+        });
+
+        await db.node.update({
+          where: { id: trainingNode.id },
+          data: { data: { ...trainingData, entries } as InputJsonValue },
+        });
+
+        return textResult(`Training entry added: "${userStatement}" → ${matchedConversation}. Total entries: ${entries.length}`);
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to add training entry'}`);
       }
     },
   );
