@@ -10,6 +10,7 @@ import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { SessionType } from '../generated/prisma/index.js';
+import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1370,6 +1371,168 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult(JSON.stringify(result, null, 2));
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'processChatResponse failed'}`);
+      }
+    },
+  );
+
+  // ── h-chat-get-routing-map ───────────────────────────────────────────
+
+  server.tool(
+    'h-chat-get-routing-map',
+    "Download the full routing map for an agent: topics, conversations (with goals/signals), stages, and edges. Use this to understand the chatbot's conversation structure before routing.",
+    {
+      agentId: z.string().describe('ID of the agent'),
+    },
+    async ({ agentId }) => {
+      try {
+        const agent = await db.agent.findUnique({ where: { id: agentId } });
+        if (!agent) return textResult('Agent not found.');
+        const sysMemId = (agent as any).systemMemoryId as string | null;
+        if (!sysMemId) return textResult('Agent has no system memory.');
+
+        // Load all conversation-related nodes from the system memory
+        const nodes = await db.node.findMany({
+          where: { memoryId: sysMemId, deletedAt: null },
+          select: { id: true, loc: true, name: true, description: true, data: true, nodeType: true },
+          orderBy: { loc: 'asc' },
+        });
+
+        const topics = nodes
+          .filter((n) => n.loc.startsWith('topics:') && n.loc.split(':').length === 2)
+          .map((n) => ({ loc: n.loc, name: n.name, data: n.data }));
+
+        const conversations = nodes
+          .filter((n) => n.loc.startsWith('conversations:') && n.loc.split(':').length === 2)
+          .map((n) => ({ loc: n.loc, name: n.name, description: n.description, data: n.data }));
+
+        const stages = nodes
+          .filter((n) => n.loc.startsWith('conversations:') && n.loc.split(':').length === 3)
+          .map((n) => ({ loc: n.loc, name: n.name, description: n.description, data: n.data }));
+
+        // Load edges between these nodes
+        const nodeIds = nodes.map((n) => n.id);
+        const edges = await db.edge.findMany({
+          where: { sourceId: { in: nodeIds }, deletedAt: null },
+          include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+        });
+
+        const edgeList = edges.map((e) => ({
+          id: e.id,
+          sourceLoc: e.source.loc,
+          targetLoc: e.target.loc,
+          label: e.label,
+          data: e.data,
+        }));
+
+        return textResult(JSON.stringify({ topics, conversations, stages, edges: edgeList }, null, 2));
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to get routing map'}`);
+      }
+    },
+  );
+
+  // ── h-chat-get-route-history ──────────────────────────────────────────
+
+  server.tool(
+    'h-chat-get-route-history',
+    'Get the route history and goal stack for a chat. Shows where the chat has been and what goals are active.',
+    {
+      chatId: z.string().describe('Chat ID'),
+    },
+    async ({ chatId }) => {
+      try {
+        const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+        if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
+        const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+        return textResult(JSON.stringify({
+          conversationName: chatData.conversationName,
+          stageName: chatData.stageName,
+          goalStack: chatData.goalStack ?? [],
+          routeHistory: chatData.routeHistory ?? [],
+        }, null, 2));
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to get route history'}`);
+      }
+    },
+  );
+
+  // ── h-chat-push-goal ──────────────────────────────────────────────────
+
+  server.tool(
+    'h-chat-push-goal',
+    'Push a new goal onto the goal stack. Use this when the user mentions something they want to do later, or when a detour is needed.',
+    {
+      chatId: z.string().describe('Chat ID'),
+      description: z.string().describe('Description of the goal'),
+      createdBy: z.enum(['ASSISTANT', 'USER']).optional().describe('Who identified this goal (default: ASSISTANT)'),
+    },
+    async ({ chatId, description, createdBy }) => {
+      try {
+        const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+        if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
+        const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+        const stack = (chatData.goalStack as Array<Record<string, unknown>>) ?? [];
+        stack.push({
+          description,
+          createdBy: createdBy ?? 'ASSISTANT',
+          createdAt: new Date().toISOString(),
+          conversationUrn: chatData.conversationName ? `conversations:${chatData.conversationName}` : undefined,
+          nodeUrn: chatData.stageName && chatData.conversationName
+            ? `conversations:${chatData.conversationName}:${chatData.stageName}`
+            : undefined,
+          status: 'ACTIVE',
+        });
+        chatData.goalStack = stack;
+        await db.node.update({
+          where: { id: chatNode.id },
+          data: { data: chatData as InputJsonValue },
+        });
+        return textResult(`Goal pushed: "${description}". Stack depth: ${stack.filter((g: any) => g.status === 'ACTIVE').length}`);
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to push goal'}`);
+      }
+    },
+  );
+
+  // ── h-chat-pop-goal ───────────────────────────────────────────────────
+
+  server.tool(
+    'h-chat-pop-goal',
+    'Complete the current goal and return to the previous one. Use this when a detour conversation has finished its purpose.',
+    {
+      chatId: z.string().describe('Chat ID'),
+    },
+    async ({ chatId }) => {
+      try {
+        const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+        if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
+        const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+        const stack = (chatData.goalStack as Array<Record<string, unknown>>) ?? [];
+
+        // Find and complete the topmost ACTIVE goal
+        let completed: Record<string, unknown> | null = null;
+        for (let i = stack.length - 1; i >= 0; i--) {
+          if (stack[i].status === 'ACTIVE') {
+            stack[i].status = 'COMPLETED';
+            stack[i].completedAt = new Date().toISOString();
+            completed = stack[i];
+            break;
+          }
+        }
+
+        chatData.goalStack = stack;
+        await db.node.update({
+          where: { id: chatNode.id },
+          data: { data: chatData as InputJsonValue },
+        });
+
+        if (completed) {
+          const remaining = stack.filter((g: any) => g.status === 'ACTIVE').length;
+          return textResult(`Goal completed: "${completed.description}". ${remaining} active goal(s) remaining.`);
+        }
+        return textResult('No active goals to complete.');
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to pop goal'}`);
       }
     },
   );
