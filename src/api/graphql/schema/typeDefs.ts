@@ -814,5 +814,7 @@ export const typeDefs = `#graphql
     newStageName: String
     conversationHandoff: String
     chatEnded: Boolean!
+    onTrack: Boolean!
+    offTrackReason: String
   }
 `;

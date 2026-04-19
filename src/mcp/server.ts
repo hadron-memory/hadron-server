@@ -1294,11 +1294,11 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     };
   }
 
-  // ── h-start-chat ──────────────────────────────────────────────────────
+  // ── h-chat-start ─────────────────────────────────────────────────────
 
   server.tool(
-    'h-start-chat',
-    'Start a new chat session with an agent. Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call h-process-chat-response with the result.',
+    'h-chat-start',
+    'Start a new chat session with an agent. Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call h-chat-process with the result.',
     {
       agentId: z.string().describe('ID of the agent to chat with'),
       userId: z.string().optional().describe('User/persona identifier (e.g. "alex-chen"). Used to scope the per-user memory. If omitted, uses the authenticated user.'),
@@ -1319,13 +1319,13 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     },
   );
 
-  // ── h-send-chat-message ───────────────────────────────────────────────
+  // ── h-chat-send ──────────────────────────────────────────────────────
 
   server.tool(
-    'h-send-chat-message',
-    "Send a user message in an existing chat. Returns the recompiled system prompt for the current stage, tool schema, message history, and whether summarization is needed. Use the returned prompt + tools to generate the assistant's response, then call h-process-chat-response.",
+    'h-chat-send',
+    "Send a user message in an existing chat. Returns the recompiled system prompt for the current stage, tool schema, message history, and whether summarization is needed. Use the returned prompt + tools to generate the assistant's response, then call h-chat-process.",
     {
-      chatId: z.string().describe('Chat ID returned by h-start-chat (e.g. "chats:20260417-abc12345-onboarding")'),
+      chatId: z.string().describe('Chat ID returned by h-chat-start (e.g. "chats:20260417-abc12345-onboarding")'),
       userMessage: z.string().describe("The user's message text"),
     },
     async ({ chatId, userMessage }) => {
@@ -1343,10 +1343,10 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     },
   );
 
-  // ── h-process-chat-response ───────────────────────────────────────────
+  // ── h-chat-process ───────────────────────────────────────────────────
 
   server.tool(
-    'h-process-chat-response',
+    'h-chat-process',
     "Process the LLM's structured response for a chat turn. The toolResponse must match the respond() tool schema: { message, data, next_stage }. Hadron saves the assistant message, extracts data into user memory, and handles stage transitions. Returns the display message, whether a stage transition occurred, and the new stage name.",
     {
       chatId: z.string().describe('Chat ID'),

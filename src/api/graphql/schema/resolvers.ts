@@ -350,6 +350,82 @@ async function getExchangeRefreshToken(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Chat helpers (used by startChat, sendChatMessage, processChatResponse)
+// ---------------------------------------------------------------------------
+
+type ExtractionSpecEntry = { field: string; description?: string; shape?: string };
+
+/**
+ * Build the respond() tool schema by merging extractionSpec from three
+ * levels: agent (config node) → conversation → stage. Stage-level fields
+ * win on conflict. Always includes onTrack + offTrackReason fields for
+ * continuous routing.
+ */
+async function buildRespondToolSchema(
+  db: PrismaClient,
+  systemMemoryId: string,
+  convName: string | null,
+  stageData: Record<string, unknown>,
+): Promise<Array<{ name: string; description: string; parameters: unknown }> | null> {
+  const allSpecs: ExtractionSpecEntry[] = [];
+
+  // 1. Agent-level: config node with agentExtractionSpec
+  const configNode = await db.node.findFirst({
+    where: { memoryId: systemMemoryId, loc: 'config', deletedAt: null },
+    select: { data: true },
+  });
+  const agentSpec = (configNode?.data as Record<string, unknown>)?.agentExtractionSpec as ExtractionSpecEntry[] | undefined;
+  if (agentSpec?.length) allSpecs.push(...agentSpec);
+
+  // 2. Conversation-level
+  if (convName) {
+    const convNode = await db.node.findFirst({
+      where: { memoryId: systemMemoryId, loc: `conversations:${convName}`, deletedAt: null },
+      select: { data: true },
+    });
+    const convSpec = (convNode?.data as Record<string, unknown>)?.extractionSpec as ExtractionSpecEntry[] | undefined;
+    if (convSpec?.length) allSpecs.push(...convSpec);
+  }
+
+  // 3. Stage-level
+  const stageSpec = stageData.extractionSpec as ExtractionSpecEntry[] | undefined;
+  if (stageSpec?.length) allSpecs.push(...stageSpec);
+
+  // De-duplicate by field name (stage wins — added last, scanned last)
+  const seen = new Set<string>();
+  const deduped: ExtractionSpecEntry[] = [];
+  for (let i = allSpecs.length - 1; i >= 0; i--) {
+    const fieldName = allSpecs[i].field.split('.').pop() ?? allSpecs[i].field;
+    if (!seen.has(fieldName)) {
+      seen.add(fieldName);
+      deduped.unshift(allSpecs[i]);
+    }
+  }
+
+  const dataProps: Record<string, unknown> = {};
+  for (const spec of deduped) {
+    const fieldName = spec.field.split('.').pop() ?? spec.field;
+    dataProps[fieldName] = { type: spec.shape ?? 'string', description: spec.description ?? fieldName };
+  }
+
+  return [{
+    name: 'respond',
+    description: 'Respond to the user and extract data',
+    parameters: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', description: 'Your response to the user' },
+        data: { type: 'object', properties: dataProps },
+        next_stage: { type: ['string', 'null'], description: 'Stage to transition to (null to stay in current stage)' },
+        onTrack: { type: 'boolean', description: 'Is the current conversation/stage still the right fit for what the user is asking?' },
+        offTrackReason: { type: 'string', description: 'If onTrack is false, explain why the conversation seems off-track' },
+      },
+      required: ['message', 'onTrack'],
+    },
+  }];
+}
+
 export const resolvers = {
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
@@ -2642,29 +2718,9 @@ export const resolvers = {
         systemMessage = await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access);
       }
 
-      // Build tool schema from extraction spec
-      const extractionSpec = stageData.extractionSpec as Array<{ field: string; description?: string; shape?: string }> | undefined;
-      let tools = null;
-      if (extractionSpec?.length) {
-        const dataProps: Record<string, unknown> = {};
-        for (const spec of extractionSpec) {
-          const fieldName = spec.field.split('.').pop() ?? spec.field;
-          dataProps[fieldName] = { type: spec.shape ?? 'string', description: spec.description ?? fieldName };
-        }
-        tools = [{
-          name: 'respond',
-          description: 'Respond to the user and extract data',
-          parameters: {
-            type: 'object',
-            properties: {
-              message: { type: 'string', description: 'Your response to the user' },
-              data: { type: 'object', properties: dataProps },
-              next_stage: { type: 'string', description: 'Stage to transition to (null to stay)' },
-            },
-            required: ['message'],
-          },
-        }];
-      }
+      // Build tool schema from hierarchical extraction spec
+      // (agent-level config node + conversation-level + stage-level)
+      const tools = await buildRespondToolSchema(ctx.db, systemMemoryId, convName, stageData);
 
       // Create chat node in the target memory. The loc needs a unique
       // suffix since two chats started in the same minute by the same user
@@ -2826,27 +2882,8 @@ export const resolvers = {
           systemMessage = agent.systemPrompt + '\n\n' + systemMessage;
         }
 
-        // Build tools from extraction spec
-        const extractionSpec = stageData.extractionSpec as Array<{ field: string; description?: string; shape?: string }> | undefined;
-        if (extractionSpec?.length) {
-          const dataProps: Record<string, unknown> = {};
-          for (const spec of extractionSpec) {
-            const fieldName = spec.field.split('.').pop() ?? spec.field;
-            dataProps[fieldName] = { type: spec.shape ?? 'string', description: spec.description ?? fieldName };
-          }
-          tools = [{
-            name: 'respond',
-            description: 'Respond to the user and extract data',
-            parameters: {
-              type: 'object', properties: {
-                message: { type: 'string', description: 'Your response to the user' },
-                data: { type: 'object', properties: dataProps },
-                next_stage: { type: 'string', description: 'Stage to transition to (null to stay)' },
-              },
-              required: ['message'],
-            },
-          }];
-        }
+        // Build tools from hierarchical extraction spec
+        tools = await buildRespondToolSchema(ctx.db, systemMemoryId, convName, stageData);
       }
 
       // Build message history (recent messages). For encrypted memories,
@@ -2899,6 +2936,8 @@ export const resolvers = {
       const message = (toolResponse.message as string) ?? '';
       const data = toolResponse.data as Record<string, unknown> | undefined;
       const nextStage = toolResponse.next_stage as string | undefined;
+      const onTrack = toolResponse.onTrack as boolean | undefined;
+      const offTrackReason = toolResponse.offTrackReason as string | undefined;
 
       // Save assistant message (encrypted when memory is encrypted)
       const msgNum = String(messageCount).padStart(3, '0');
@@ -2952,6 +2991,25 @@ export const resolvers = {
         newStageName = nextStage;
       }
 
+      // Append to route history
+      const routeHistory = (updatedData.routeHistory as Array<Record<string, unknown>>) ?? [];
+      if (stageTransitioned) {
+        routeHistory.push({
+          nodeUrn: `conversations:${chatData.conversationName}:${nextStage}`,
+          conversationUrn: `conversations:${chatData.conversationName}`,
+          action: 'ENTER',
+          trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${nextStage}` },
+          timestamp: new Date().toISOString(),
+        });
+        updatedData.routeHistory = routeHistory;
+      }
+
+      // Track onTrack status for future routing decisions
+      if (onTrack === false) {
+        updatedData.lastOffTrackReason = offTrackReason ?? 'unspecified';
+        updatedData.lastOffTrackAt = new Date().toISOString();
+      }
+
       const encUpdate = encryptNodeFields({ content: null, data: updatedData }, memEncInfo);
       await ctx.db.node.update({
         where: { id: chatNode.id },
@@ -2964,6 +3022,8 @@ export const resolvers = {
         newStageName,
         conversationHandoff: null,
         chatEnded: false,
+        onTrack: onTrack ?? true,
+        offTrackReason: offTrackReason ?? null,
       };
     },
 
