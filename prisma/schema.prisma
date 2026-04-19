@@ -354,6 +354,7 @@ model Edge {
   targetId  String    @map("target_id")
   label     String
   condition String?
+  data      Json?
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
   updatedAt DateTime? @map("updated_at")

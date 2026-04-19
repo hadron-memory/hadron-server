@@ -3148,35 +3148,117 @@ export const resolvers = {
         }
       }
 
-      // Handle stage transition
+      // Handle stage transition + edge evaluation
       let stageTransitioned = false;
       let newStageName: string | null = null;
+      let conversationHandoff: string | null = null;
       const updatedData: Record<string, unknown> = {
         ...(chatData as Record<string, unknown>),
         messageCount,
         lastMessageAt: new Date().toISOString(),
       };
 
+      // 1. Explicit stage transition from the LLM
       if (nextStage && nextStage !== chatData.stageName) {
         updatedData.stageName = nextStage;
         stageTransitioned = true;
         newStageName = nextStage;
-      }
-
-      // Append to route history
-      const routeHistory = (updatedData.routeHistory as Array<Record<string, unknown>>) ?? [];
-      if (stageTransitioned) {
-        routeHistory.push({
+        appendRouteEntry(updatedData, {
           nodeUrn: `conversations:${chatData.conversationName}:${nextStage}`,
           conversationUrn: `conversations:${chatData.conversationName}`,
           action: 'ENTER',
           trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${nextStage}` },
-          timestamp: new Date().toISOString(),
         });
-        updatedData.routeHistory = routeHistory;
       }
 
-      // Track onTrack status for future routing decisions
+      // 2. Evaluate on_complete edges when the conversation ends
+      //    (next_stage is null and we're at the last stage)
+      if (!nextStage || nextStage === null) {
+        // Find the agent's system memory to look up edges
+        const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
+        const agentId = memory?.userMemoryOfAgentId;
+        if (agentId) {
+          const agent = await ctx.db.agent.findUnique({ where: { id: agentId } });
+          const sysMemId = (agent as any)?.systemMemoryId as string | null;
+          if (sysMemId) {
+            // Find the current stage node and look for outgoing edges
+            const currentStageLoc = `conversations:${chatData.conversationName}:${chatData.stageName}`;
+            const stageNode = await ctx.db.node.findFirst({
+              where: { memoryId: sysMemId, loc: currentStageLoc, deletedAt: null },
+              select: { id: true },
+            });
+            if (stageNode) {
+              const edges = await ctx.db.edge.findMany({
+                where: { sourceId: stageNode.id, deletedAt: null },
+                include: { target: { select: { loc: true, data: true } } },
+              });
+              for (const edge of edges) {
+                const edgeData = (edge.data as Record<string, unknown>) ?? {};
+                const timing = edgeData.timing as string ?? 'on_complete';
+                if (timing !== 'on_complete' && timing !== 'always') continue;
+
+                // Evaluate condition from edge.data
+                const condition = edgeData.condition as EdgeCondition | undefined;
+                if (condition) {
+                  const met = await evaluateCondition(ctx.db, condition, chatNode.memoryId);
+                  if (!met) continue;
+                }
+
+                // Edge fires! Check behavior
+                const targetLoc = edge.target?.loc;
+                if (!targetLoc) continue;
+
+                const behavior = edgeData.behavior as string ?? 'transition';
+
+                if (targetLoc.startsWith('conversations:') && targetLoc.split(':').length === 2) {
+                  // Target is a conversation — conversation handoff
+                  const targetConvName = targetLoc.split(':')[1];
+
+                  if (behavior === 'detour') {
+                    // Push current goal, transition to the detour conversation
+                    pushGoal(updatedData, {
+                      description: (edgeData.label as string) ?? `Detour to ${targetConvName}`,
+                      createdBy: 'ASSISTANT',
+                      conversationUrn: targetLoc,
+                    });
+                  }
+
+                  // Switch to the target conversation's first stage
+                  const targetConv = await ctx.db.node.findFirst({
+                    where: { memoryId: sysMemId, loc: targetLoc, deletedAt: null },
+                    select: { data: true },
+                  });
+                  const targetConvData = (targetConv?.data as Record<string, unknown>) ?? {};
+                  const targetStages = (targetConvData.stageOrder as string[]) ?? [];
+                  const targetFirstStage = targetStages[0];
+
+                  if (targetFirstStage) {
+                    updatedData.conversationName = targetConvName;
+                    updatedData.stageName = targetFirstStage;
+                    conversationHandoff = targetConvName;
+                    stageTransitioned = true;
+                    newStageName = targetFirstStage;
+
+                    appendRouteEntry(updatedData, {
+                      conversationUrn: targetLoc,
+                      nodeUrn: `${targetLoc}:${targetFirstStage}`,
+                      action: 'ENTER',
+                      edgeUrn: edge.id,
+                      trigger: {
+                        type: behavior === 'detour' ? 'DETOUR_EDGE' : 'TRANSITION_EDGE',
+                        content: (edgeData.label as string) ?? undefined,
+                      },
+                    });
+                  }
+                  break; // Only follow one edge
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // 3. Track onTrack status
       if (onTrack === false) {
         updatedData.lastOffTrackReason = offTrackReason ?? 'unspecified';
         updatedData.lastOffTrackAt = new Date().toISOString();
@@ -3192,7 +3274,7 @@ export const resolvers = {
         displayMessage: message,
         stageTransitioned,
         newStageName,
-        conversationHandoff: null,
+        conversationHandoff,
         chatEnded: false,
         onTrack: onTrack ?? true,
         offTrackReason: offTrackReason ?? null,
