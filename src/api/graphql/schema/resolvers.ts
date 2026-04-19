@@ -577,6 +577,51 @@ async function evaluateCondition(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Snapshot reader: reads nodes from a published revision snapshot instead
+// of the live database. Used by startChat/sendChatMessage when the agent
+// has a publishedRevisionLoc set.
+// ---------------------------------------------------------------------------
+
+interface SnapshotNode {
+  loc: string;
+  name: string;
+  nodeType?: string;
+  description?: string | null;
+  content?: string | null;
+  data?: unknown;
+}
+
+/**
+ * Load a published revision's snapshot and return a lookup function
+ * that mimics db.node.findFirst for the system memory. Returns null
+ * if no published revision exists (caller should fall back to live DB).
+ */
+async function loadPublishedSnapshot(
+  db: PrismaClient,
+  systemMemoryId: string,
+  publishedRevisionLoc: string | null,
+): Promise<((loc: string) => SnapshotNode | null) | null> {
+  if (!publishedRevisionLoc) return null;
+
+  const revNode = await db.node.findFirst({
+    where: { memoryId: systemMemoryId, loc: publishedRevisionLoc, deletedAt: null },
+    select: { data: true },
+  });
+  if (!revNode) return null;
+
+  const revData = (revNode.data as Record<string, unknown>) ?? {};
+  const snapshot = revData.snapshot as { nodes: SnapshotNode[] } | undefined;
+  if (!snapshot?.nodes) return null;
+
+  const nodesByLoc = new Map<string, SnapshotNode>();
+  for (const n of snapshot.nodes) {
+    nodesByLoc.set(n.loc, n);
+  }
+
+  return (loc: string) => nodesByLoc.get(loc) ?? null;
+}
+
 export const resolvers = {
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
@@ -2754,36 +2799,57 @@ export const resolvers = {
       const systemMemoryId = (agent as any).systemMemoryId as string | null;
       if (!systemMemoryId) throw new Error('Agent has no system memory configured');
 
+      // If the agent has a published revision, read conversation structure
+      // from the snapshot (pin-to-version). Otherwise read from live nodes.
+      const publishedLoc = (agent as any).publishedRevisionLoc as string | null;
+      const snapshotLookup = await loadPublishedSnapshot(ctx.db, systemMemoryId, publishedLoc);
+
+      // Helper: find a node either from snapshot or live DB
+      async function findSystemNode(loc: string): Promise<SnapshotNode | null> {
+        if (snapshotLookup) return snapshotLookup(loc);
+        const n = await ctx.db.node.findFirst({
+          where: { memoryId: systemMemoryId!, loc, deletedAt: null },
+          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
+        });
+        return n as SnapshotNode | null;
+      }
+
+      // Helper: find all nodes matching a prefix (for conversation selection)
+      async function findSystemNodesByPrefix(prefix: string): Promise<SnapshotNode[]> {
+        if (snapshotLookup) {
+          // Scan the snapshot — loadPublishedSnapshot builds a Map, but
+          // we need prefix matching. Re-load the snapshot nodes.
+          const revNode = await ctx.db.node.findFirst({
+            where: { memoryId: systemMemoryId!, loc: publishedLoc!, deletedAt: null },
+            select: { data: true },
+          });
+          const snap = ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[]) ?? [];
+          return snap.filter((n) => n.loc.startsWith(prefix));
+        }
+        const nodes = await ctx.db.node.findMany({
+          where: { memoryId: systemMemoryId!, loc: { startsWith: prefix }, deletedAt: null },
+          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
+        });
+        return nodes as SnapshotNode[];
+      }
+
       // ── Conversation selection ───────────────────────────────────────
-      // If the caller named a conversation, use it. Otherwise scan the
-      // system memory for conversations:* (depth 2) and pick the first
-      // one whose data.isSetup is NOT true — the "real" research/chat
-      // conversation, skipping the wizard's onboard conversation.
       let convName: string;
       if (conversationName) {
         convName = conversationName;
       } else {
-        const allConvs = await ctx.db.node.findMany({
-          where: {
-            memoryId: systemMemoryId,
-            loc: { startsWith: 'conversations:' },
-            deletedAt: null,
-          },
-          select: { loc: true, data: true },
-        });
+        const allConvs = await findSystemNodesByPrefix('conversations:');
         const topLevel = allConvs.filter((n) => n.loc.split(':').length === 2);
         const nonSetup = topLevel.find((n) => {
           const d = (n.data as Record<string, unknown>) ?? {};
-          return d.isSetup !== true;
+          return d.isSetup !== true && d.isFallback !== true;
         });
         const chosen = nonSetup ?? topLevel[0];
         if (!chosen) throw new Error('Agent has no conversations configured');
         convName = chosen.loc.split(':')[1];
       }
 
-      const convNode = await ctx.db.node.findFirst({
-        where: { memoryId: systemMemoryId, loc: `conversations:${convName}`, deletedAt: null },
-      });
+      const convNode = await findSystemNode(`conversations:${convName}`);
       if (!convNode) throw new Error(`Conversation "${convName}" not found in agent's system memory`);
 
       const convData = (convNode.data as Record<string, unknown>) ?? {};
@@ -2792,18 +2858,14 @@ export const resolvers = {
       if (!firstStage) throw new Error(`Conversation "${convName}" has no stages`);
 
       // Load the first stage
-      const stageNode = await ctx.db.node.findFirst({
-        where: { memoryId: systemMemoryId, loc: `conversations:${convName}:${firstStage}`, deletedAt: null },
-      });
+      const stageNode = await findSystemNode(`conversations:${convName}:${firstStage}`);
       const stageData = (stageNode?.data as Record<string, unknown>) ?? {};
 
       // Load the prompt
       const promptRef = stageData.promptRef as string | undefined;
       let promptContent = '';
       if (promptRef) {
-        const promptNode = await ctx.db.node.findFirst({
-          where: { memoryId: systemMemoryId, loc: promptRef, deletedAt: null },
-        });
+        const promptNode = await findSystemNode(promptRef);
         promptContent = promptNode?.content ?? '';
       } else if (stageNode?.content) {
         promptContent = stageNode.content;
@@ -2904,6 +2966,7 @@ export const resolvers = {
         conversationName: convName,
         stageName: firstStage,
         userId: effectiveUserId,
+        startedWithRevision: publishedLoc ?? null,
         messageCount: 0,
         createdAt: new Date().toISOString(),
         goalStack: [{
@@ -3019,23 +3082,37 @@ export const resolvers = {
       }
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
+      // Pin to version: if the chat was started with a published revision,
+      // read from that snapshot so mid-conversation publishes don't change
+      // the prompts/stages under the user.
+      const startedWithRevision = chatData.startedWithRevision as string | null;
+      const snapshotLookup = systemMemoryId
+        ? await loadPublishedSnapshot(ctx.db, systemMemoryId, startedWithRevision)
+        : null;
+
+      async function findSystemNode(loc: string): Promise<SnapshotNode | null> {
+        if (snapshotLookup) return snapshotLookup(loc);
+        if (!systemMemoryId) return null;
+        const n = await ctx.db.node.findFirst({
+          where: { memoryId: systemMemoryId, loc, deletedAt: null },
+          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
+        });
+        return n as SnapshotNode | null;
+      }
+
       // Load current stage
       let systemMessage = '';
       let tools = null;
 
       if (systemMemoryId && convName && stageName) {
-        const stageNode = await ctx.db.node.findFirst({
-          where: { memoryId: systemMemoryId, loc: `conversations:${convName}:${stageName}`, deletedAt: null },
-        });
+        const stageNode = await findSystemNode(`conversations:${convName}:${stageName}`);
         const stageData = (stageNode?.data as Record<string, unknown>) ?? {};
 
         // Load prompt
         const promptRef = stageData.promptRef as string | undefined;
         let promptContent = '';
         if (promptRef) {
-          const promptNode = await ctx.db.node.findFirst({
-            where: { memoryId: systemMemoryId, loc: promptRef, deletedAt: null },
-          });
+          const promptNode = await findSystemNode(promptRef);
           promptContent = promptNode?.content ?? '';
         } else if (stageNode?.content) {
           promptContent = stageNode.content;
