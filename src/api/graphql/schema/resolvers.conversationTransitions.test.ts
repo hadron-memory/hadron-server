@@ -643,3 +643,97 @@ describe('Goal descriptions on conversations', () => {
     expect(goalStack[0].description).toBe('simple conversation');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fallback re-routing
+// ---------------------------------------------------------------------------
+
+describe('Fallback re-routing', () => {
+  it('re-routes from fallback to a matching conversation on sendChatMessage', async () => {
+    await seedNodes([
+      { loc: 'conversations', name: 'conversations' },
+      {
+        loc: 'conversations:fallback',
+        name: 'fallback',
+        data: { stageOrder: ['no-match'], isFallback: true, isSetup: false },
+      },
+      { loc: 'conversations:fallback:no-match', name: 'no-match', data: {} },
+      {
+        loc: 'conversations:mentoring',
+        name: 'mentoring',
+        data: {
+          stageOrder: ['start'],
+          isSetup: false,
+          goalDescriptions: ['Help the user find a mentor'],
+          goalSignals: ['I need a mentor', 'find someone to help me'],
+        },
+      },
+      { loc: 'conversations:mentoring:start', name: 'start', data: { promptRef: 'prompts:mentoring:start' } },
+      { loc: 'prompts', name: 'prompts' },
+      { loc: 'prompts:mentoring', name: 'mentoring' },
+      { loc: 'prompts:mentoring:start', name: 'start', content: 'Help the user find a mentor.' },
+    ]);
+
+    // Start a chat — should land in fallback (no conversationName specified,
+    // but fallback is skipped so it should find mentoring... unless mentoring
+    // is the only non-setup conversation. Let's force fallback by specifying it.)
+    const chat = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, conversationName: 'fallback' },
+      userCtx(adminUser.id),
+    );
+    expect(chat.conversationName).toBe('fallback');
+
+    // Send a message that matches mentoring's goalSignals
+    const sendResult = await resolvers.Mutation.sendChatMessage(
+      {},
+      { chatId: chat.chatId, userMessage: 'I need a mentor to help me grow' },
+      userCtx(adminUser.id),
+    );
+
+    // The system prompt should now be from the mentoring conversation,
+    // not the fallback
+    expect(sendResult.systemMessage).toContain('mentor');
+
+    // The chat node should have been updated to mentoring
+    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatData = chatNode?.data as Record<string, unknown>;
+    expect(chatData.conversationName).toBe('mentoring');
+    expect(chatData.stageName).toBe('start');
+
+    // Route history should show the re-route
+    const history = chatData.routeHistory as Array<Record<string, unknown>>;
+    const reroute = history.find((h) => (h.trigger as any)?.type === 'FALLBACK_REROUTE');
+    expect(reroute).toBeTruthy();
+  });
+
+  it('stays in fallback when no conversation matches', async () => {
+    await seedNodes([
+      { loc: 'conversations', name: 'conversations' },
+      {
+        loc: 'conversations:fallback',
+        name: 'fallback',
+        data: { stageOrder: ['no-match'], isFallback: true, isSetup: false },
+      },
+      { loc: 'conversations:fallback:no-match', name: 'no-match', data: {} },
+    ]);
+
+    const chat = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, conversationName: 'fallback' },
+      userCtx(adminUser.id),
+    );
+
+    // Send a short message — too short to trigger the "substantive" fallback
+    const sendResult = await resolvers.Mutation.sendChatMessage(
+      {},
+      { chatId: chat.chatId, userMessage: 'hi' },
+      userCtx(adminUser.id),
+    );
+
+    // Should still be in fallback
+    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatData = chatNode?.data as Record<string, unknown>;
+    expect(chatData.conversationName).toBe('fallback');
+  });
+});

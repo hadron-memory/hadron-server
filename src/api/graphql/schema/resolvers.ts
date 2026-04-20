@@ -3148,12 +3148,100 @@ export const resolvers = {
         return n as SnapshotNode | null;
       }
 
+      // If the chat is in a fallback conversation, try to re-route on
+      // every turn. The user may have clarified their intent — check if
+      // any non-fallback conversation's goalSignals match the message.
+      let activeConvName = convName;
+      let activeStageName = stageName;
+
+      if (systemMemoryId) {
+        const currentConv = await findSystemNode(`conversations:${convName}`);
+        const currentConvData = (currentConv?.data as Record<string, unknown>) ?? {};
+        if (currentConvData.isFallback === true) {
+          // Scan all conversations for a goal match
+          const allConvNodes = await (async () => {
+            if (snapshotLookup) {
+              const revNode = await ctx.db.node.findFirst({
+                where: { memoryId: systemMemoryId, loc: startedWithRevision!, deletedAt: null },
+                select: { data: true },
+              });
+              return ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[] ?? [])
+                .filter((n: SnapshotNode) => n.loc.startsWith('conversations:') && n.loc.split(':').length === 2);
+            }
+            const nodes = await ctx.db.node.findMany({
+              where: { memoryId: systemMemoryId, loc: { startsWith: 'conversations:' }, deletedAt: null },
+              select: { loc: true, name: true, data: true, nodeType: true, description: true, content: true },
+            });
+            return nodes.filter((n) => n.loc.split(':').length === 2) as SnapshotNode[];
+          })();
+
+          const msgLower = userMessage.toLowerCase();
+          let bestMatch: { convName: string; firstStage: string } | null = null;
+
+          for (const conv of allConvNodes) {
+            const cd = (conv.data as Record<string, unknown>) ?? {};
+            if (cd.isSetup === true || cd.isFallback === true) continue;
+            const signals = (cd.goalSignals as string[]) ?? [];
+            const goals = (cd.goalDescriptions as string[]) ?? [];
+            // Simple keyword matching: check if any signal appears in the message
+            const matched = signals.some((s) => msgLower.includes(s.toLowerCase())) ||
+              goals.some((g) => msgLower.includes(g.toLowerCase().split(' ').slice(0, 3).join(' ')));
+            if (matched) {
+              const stages = (cd.stageOrder as string[]) ?? [];
+              if (stages[0]) {
+                bestMatch = { convName: conv.loc.split(':')[1], firstStage: stages[0] };
+                break;
+              }
+            }
+          }
+
+          // If no signal matched but the message is substantive (more than
+          // a greeting), try picking the first non-setup, non-fallback
+          // conversation as a reasonable default.
+          if (!bestMatch && userMessage.trim().split(/\s+/).length >= 4) {
+            for (const conv of allConvNodes) {
+              const cd = (conv.data as Record<string, unknown>) ?? {};
+              if (cd.isSetup === true || cd.isFallback === true) continue;
+              const stages = (cd.stageOrder as string[]) ?? [];
+              if (stages[0]) {
+                bestMatch = { convName: conv.loc.split(':')[1], firstStage: stages[0] };
+                break;
+              }
+            }
+          }
+
+          if (bestMatch) {
+            activeConvName = bestMatch.convName;
+            activeStageName = bestMatch.firstStage;
+            // Update the chat node to reflect the re-route
+            const updatedChatData = {
+              ...(chatData as Record<string, unknown>),
+              conversationName: activeConvName,
+              stageName: activeStageName,
+              messageCount,
+              lastMessageAt: new Date().toISOString(),
+            };
+            appendRouteEntry(updatedChatData, {
+              conversationUrn: `conversations:${activeConvName}`,
+              nodeUrn: `conversations:${activeConvName}:${activeStageName}`,
+              action: 'ENTER',
+              trigger: { type: 'FALLBACK_REROUTE', content: userMessage.slice(0, 100) },
+            });
+            const encReroute = encryptNodeFields({ content: null, data: updatedChatData }, memEncInfo);
+            await ctx.db.node.update({
+              where: { id: chatNode.id },
+              data: { data: (encReroute.data ?? null) as InputJsonValue },
+            });
+          }
+        }
+      }
+
       // Load current stage
       let systemMessage = '';
       let tools = null;
 
-      if (systemMemoryId && convName && stageName) {
-        const stageNode = await findSystemNode(`conversations:${convName}:${stageName}`);
+      if (systemMemoryId && activeConvName && activeStageName) {
+        const stageNode = await findSystemNode(`conversations:${activeConvName}:${activeStageName}`);
         const stageData = (stageNode?.data as Record<string, unknown>) ?? {};
 
         // Load prompt
@@ -3180,7 +3268,7 @@ export const resolvers = {
         }
 
         // Build tools from hierarchical extraction spec
-        tools = await buildRespondToolSchema(ctx.db, systemMemoryId, convName, stageData);
+        tools = await buildRespondToolSchema(ctx.db, systemMemoryId, activeConvName, stageData);
       }
 
       // Build message history (recent messages). For encrypted memories,
