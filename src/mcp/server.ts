@@ -272,11 +272,19 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult((e as Error).message);
       }
 
-      // Determine target memory
+      // Determine target memory. Priority:
+      // 1. Resolved from the parentRel URN
+      // 2. Active memory (set via h-set-active-memory)
+      // 3. Parent node's memory
+      // 4. Single writable memory fallback
       let memoryId = resolved.memoryId;
 
+      if (!memoryId && activeMemoryUrn) {
+        const mem = await db.memory.findFirst({ where: { urn: activeMemoryUrn }, select: { id: true } });
+        if (mem) memoryId = mem.id;
+      }
+
       if (!memoryId && parentLoc) {
-        // Try to find parent node to get memoryId
         const parentNode = await db.node.findFirst({
           where: { loc: parentLoc, ...(memoryIds ? { memoryId: { in: memoryIds } } : {}) },
           select: { memoryId: true },
@@ -285,15 +293,6 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       }
 
       if (!memoryId) {
-        // Try active memory URN
-        if (activeMemoryUrn) {
-          const mem = await db.memory.findFirst({ where: { urn: activeMemoryUrn }, select: { id: true } });
-          if (mem) memoryId = mem.id;
-        }
-      }
-
-      if (!memoryId) {
-        // Fall back to single writable memory
         const access = auth.clientId ? await getStationMemoryAccess(auth.clientId) : new Map();
         const writableIds = [...access.entries()].filter(([, v]) => v === 'READ_WRITE').map(([k]) => k);
         if (writableIds.length === 1) memoryId = writableIds[0];
@@ -654,8 +653,13 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const memoryIds = await getAccessibleMemoryIds(auth);
       const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
       const loc = resolved.loc;
-      // If URN resolution found a memory, use it (unless explicitly provided)
+      // If URN resolution found a memory, use it. If not, fall back to
+      // the session's active memory. Explicit inputMemoryId wins.
       let rawMemoryId = inputMemoryId ?? resolved.memoryId ?? undefined;
+      if (!rawMemoryId && activeMemoryUrn) {
+        const activeMem = await db.memory.findFirst({ where: { urn: activeMemoryUrn }, select: { id: true } });
+        if (activeMem) rawMemoryId = activeMem.id;
+      }
 
       try {
         validateLoc(loc);
