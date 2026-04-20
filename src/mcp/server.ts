@@ -140,6 +140,18 @@ async function getStationMemoryAccess(
 
   const access = new Map<string, string>();
   for (const sub of subs) {
+    // Include the agent's system memory (linked via systemMemoryId,
+    // not as a memoryItem). Station READ_WRITE grants read-write to
+    // the system memory so builders can create conversations/stages.
+    const systemMemoryId = (sub.agent as any).systemMemoryId as string | null;
+    if (systemMemoryId) {
+      const effective = sub.subscriptionType === 'READ_WRITE' ? 'READ_WRITE' : 'READ_ONLY';
+      const existing = access.get(systemMemoryId);
+      if (!existing || effective === 'READ_WRITE') {
+        access.set(systemMemoryId, effective);
+      }
+    }
+
     for (const item of sub.agent.memoryItems) {
       // Effective access = min(station subscription type, agent memory item role)
       // Station READ_ONLY → always read-only regardless of agent role
