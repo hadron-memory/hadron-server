@@ -469,6 +469,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',
         node.properties ? `Properties: ${JSON.stringify(node.properties)}` : '',
+        node.data ? `Data: ${JSON.stringify(node.data)}` : '',
         outgoingLines.length ? `Related:\n${outgoingLines.join('\n')}` : '',
         incomingLines.length ? `Referenced by:\n${incomingLines.join('\n')}` : '',
       ]
@@ -653,6 +654,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
       tags: z.array(z.string()).optional().describe('Tags'),
       properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
+      data: z.record(z.string(), z.unknown()).optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config)'),
       llmModel: z.string().optional().describe('LLM model used (e.g. claude-opus-4-6)'),
       aiAgent: z.string().optional().describe('AI agent tool used (e.g. claude-code, cursor)'),
       edges: z.array(z.object({
@@ -660,7 +662,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
-    async ({ loc: rawLoc, memoryId: inputMemoryId, name, nodeType, description, content, seq, tags, properties, llmModel, aiAgent, edges }) => {
+    async ({ loc: rawLoc, memoryId: inputMemoryId, name, nodeType, description, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
       // Resolve URN to loc + memoryId if a full URN was passed
       const memoryIds = await getAccessibleMemoryIds(auth);
       const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
@@ -760,6 +762,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           seq: seq ?? null,
           tags: tags ?? [],
           properties: properties as any ?? undefined,
+          data: nodeData as any ?? undefined,
           llmModel: llmModel ?? null,
           aiAgent: aiAgent ?? null,
           createdBy: auth.clientId ?? null,
@@ -772,6 +775,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           seq: seq ?? null,
           tags: tags ?? [],
           ...(properties !== undefined ? { properties: properties as any } : {}),
+          ...(nodeData !== undefined ? { data: nodeData as any } : {}),
           ...(llmModel ? { llmModel } : {}),
           ...(aiAgent ? { aiAgent } : {}),
         } as any,
@@ -883,6 +887,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       seq: z.number().optional().describe('New sort order among siblings'),
       tags: z.array(z.string()).optional().describe('Replace tags'),
       properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
+      data: z.record(z.string(), z.unknown()).optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config)'),
       llmModel: z.string().optional().describe('LLM model used'),
       aiAgent: z.string().optional().describe('AI agent tool used'),
       edges: z.array(z.object({
@@ -891,7 +896,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       })).optional().describe('Replace outgoing edges'),
       reason: z.string().optional().describe('Why this change was made (stored in version history)'),
     },
-    async ({ loc: rawLoc, name, nodeType, description, content, seq, tags, properties, llmModel, aiAgent, edges, reason }) => {
+    async ({ loc: rawLoc, name, nodeType, description, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Resolve URN to loc if needed
       const memoryIds = await getAccessibleMemoryIds(auth);
       const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
@@ -934,6 +939,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       if (seq !== undefined) data.seq = seq;
       if (tags !== undefined) data.tags = tags;
       if (properties !== undefined) data.properties = properties as any;
+      if (nodeData !== undefined) data.data = nodeData as any;
       if (llmModel !== undefined) data.llmModel = llmModel;
       if (aiAgent !== undefined) data.aiAgent = aiAgent;
 
