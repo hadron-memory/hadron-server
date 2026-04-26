@@ -538,6 +538,117 @@ describe('Edge evaluation in processChatResponse', () => {
     expect(result.conversationHandoff).toBeNull();
   });
 
+  it('JSONLogic condition mixing message.data and chat scopes (Pong-shaped)', async () => {
+    // Models the spec User Story 2 acceptance scenario: an automation
+    // gates an "escalate" edge on a per-message field plus chat state.
+    // Even though the resolver path is chatbot-shaped, this exercises
+    // the same scopes Pong uses on email events: message.data (the
+    // extracted payload) + chat (the running thread).
+    const nodeIds = await seedNodes([
+      { loc: 'conversations', name: 'conversations' },
+      {
+        loc: 'conversations:thread',
+        name: 'thread',
+        data: { stageOrder: ['triage'], isSetup: false },
+      },
+      { loc: 'conversations:thread:triage', name: 'triage', data: {} },
+      {
+        loc: 'conversations:escalate',
+        name: 'escalate',
+        data: { stageOrder: ['handoff'], isSetup: false },
+      },
+      { loc: 'conversations:escalate:handoff', name: 'handoff', data: {} },
+    ]);
+
+    // Edge fires when the LLM extracts urgency=high AND the chat has
+    // had at least one prior message (proxy for the thread.auto_reply_count
+    // semantics in Pong's actual condition).
+    await db.edge.create({
+      data: {
+        id: generateId(),
+        sourceId: nodeIds['conversations:thread:triage'],
+        targetId: nodeIds['conversations:escalate'],
+        label: 'Escalate to handoff',
+        condition: {
+          and: [
+            { '==': [{ var: 'message.data.urgency' }, 'high'] },
+            { '>=': [{ var: 'chat.message_count' }, 1] },
+          ],
+        },
+        data: { timing: 'on_complete', behavior: 'transition' },
+      },
+    });
+
+    const chat = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, conversationName: 'thread' },
+      userCtx(adminUser.id),
+    );
+
+    // First turn: message.data.urgency = 'high', should fire the edge.
+    const fired = await resolvers.Mutation.processChatResponse(
+      {},
+      {
+        chatId: chat.chatId,
+        toolResponse: {
+          message: 'Caller flagged this as urgent',
+          next_stage: null,
+          data: { urgency: 'high' },
+          onTrack: true,
+        },
+      },
+      userCtx(adminUser.id),
+    );
+    expect(fired.conversationHandoff).toBe('escalate');
+    expect(fired.newStageName).toBe('handoff');
+  });
+
+  it('JSONLogic condition does NOT fire when message.data is unset', async () => {
+    const nodeIds = await seedNodes([
+      { loc: 'conversations', name: 'conversations' },
+      {
+        loc: 'conversations:thread',
+        name: 'thread',
+        data: { stageOrder: ['triage'], isSetup: false },
+      },
+      { loc: 'conversations:thread:triage', name: 'triage', data: {} },
+      {
+        loc: 'conversations:escalate',
+        name: 'escalate',
+        data: { stageOrder: ['handoff'], isSetup: false },
+      },
+      { loc: 'conversations:escalate:handoff', name: 'handoff', data: {} },
+    ]);
+
+    await db.edge.create({
+      data: {
+        id: generateId(),
+        sourceId: nodeIds['conversations:thread:triage'],
+        targetId: nodeIds['conversations:escalate'],
+        label: 'Escalate to handoff',
+        condition: { '==': [{ var: 'message.data.urgency' }, 'high'] },
+        data: { timing: 'on_complete', behavior: 'transition' },
+      },
+    });
+
+    const chat = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, conversationName: 'thread' },
+      userCtx(adminUser.id),
+    );
+
+    // No urgency in the extracted data → condition fails → no handoff.
+    const result = await resolvers.Mutation.processChatResponse(
+      {},
+      {
+        chatId: chat.chatId,
+        toolResponse: { message: 'Routine check-in', next_stage: null, onTrack: true },
+      },
+      userCtx(adminUser.id),
+    );
+    expect(result.conversationHandoff).toBeNull();
+  });
+
   it('does not evaluate edges when next_stage is set (normal transition)', async () => {
     const nodeIds = await seedNodes([
       { loc: 'conversations', name: 'conversations' },

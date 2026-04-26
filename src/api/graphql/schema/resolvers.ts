@@ -17,6 +17,7 @@ import { compileTemplate } from '../../../lib/template.js';
 import {
   validateEdgeCondition,
   evaluateEdgeCondition,
+  validateNodeDataExtractionSpecs,
   type EvaluationError,
   type MemoryLayerHandle,
 } from '../../../lib/edge-conditions/index.js';
@@ -64,6 +65,25 @@ function throwOnInvalidCondition(condition: unknown): void {
   throw new GraphQLError(err.message, {
     extensions: {
       code: 'INVALID_EDGE_CONDITION',
+      reason: err.code,
+      detail: err.detail,
+    },
+  });
+}
+
+/**
+ * Validate any extraction-spec arrays carried inside a node-data payload.
+ * Rejects writes that try to land an extraction under
+ * `message.data.exception(s)` (reserved per spec FR-013 for the future
+ * agent-exceptions feature).
+ */
+function throwOnReservedExtractionSpec(data: unknown): void {
+  const result = validateNodeDataExtractionSpecs(data);
+  if (result.ok) return;
+  const err: EvaluationError = result.error;
+  throw new GraphQLError(err.message, {
+    extensions: {
+      code: 'INVALID_EXTRACTION_SPEC',
       reason: err.code,
       detail: err.detail,
     },
@@ -1429,6 +1449,10 @@ export const resolvers = {
         }
       }
       await requireMemoryWriteAccess(ctx, input.memoryId);
+
+      // Reject saves whose extraction-spec arrays would write into the
+      // reserved exception namespace (spec 001-edge-condition-spec FR-013).
+      throwOnReservedExtractionSpec(input.data);
 
       // Snapshot current state before update (for version history)
       const existing = await ctx.db.node.findUnique({

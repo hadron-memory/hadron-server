@@ -25,3 +25,9 @@ export {
   VALID_BUILTINS,
   RESERVED_VAR_PATHS,
 } from './operators.js';
+export {
+  validateExtractionSpec,
+  validateNodeDataExtractionSpecs,
+  type ExtractionSpecEntry,
+  type ExtractionSpecValidateResult,
+} from './reserved-names.js';
