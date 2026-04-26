@@ -429,17 +429,19 @@ describe('Edge evaluation in processChatResponse', () => {
       { loc: 'conversations:profile:fill', name: 'fill', data: {} },
     ]);
 
-    // Conditional edge: if business_type is missing, detour to profile
+    // Conditional edge: if business_type is missing, detour to profile.
+    // Uses the JSONLogic shape on Edge.condition (the column), not the
+    // legacy {field, operator, value} stored in edge.data.condition.
     await db.edge.create({
       data: {
         id: generateId(),
         sourceId: nodeIds['conversations:main:check'],
         targetId: nodeIds['conversations:profile'],
         label: 'Fill profile if missing',
+        condition: { missing: ['memory.business_type'] },
         data: {
           timing: 'on_complete',
           behavior: 'detour',
-          condition: { field: 'memory.business_type', operator: 'missing' },
         },
       },
     });
@@ -494,10 +496,10 @@ describe('Edge evaluation in processChatResponse', () => {
         sourceId: nodeIds['conversations:main:check'],
         targetId: nodeIds['conversations:profile'],
         label: 'Fill profile if missing',
+        condition: { missing: ['memory.business_type'] },
         data: {
           timing: 'on_complete',
           behavior: 'detour',
-          condition: { field: 'memory.business_type', operator: 'missing' },
         },
       },
     });
