@@ -14,6 +14,13 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, validateUrnType } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
+import {
+  validateEdgeCondition,
+  evaluateEdgeCondition,
+  type EvaluationError,
+  type MemoryLayerHandle,
+} from '../../../lib/edge-conditions/index.js';
+import { GraphQLError } from 'graphql';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
@@ -43,6 +50,24 @@ const ROLE_ORDER: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2
 function requireRole(ctx: Context, required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER') {
   const highest = ctx.roles ? Math.max(...ctx.roles.map((r) => ROLE_ORDER[r] ?? -1)) : -1;
   if (highest < ROLE_ORDER[required]) throw new Error('Forbidden');
+}
+
+/**
+ * Validate an edge-condition payload at GraphQL save-time. Throws a
+ * GraphQLError with the contract's named extension codes on failure.
+ * See specs/001-edge-condition-spec/contracts/graphql-edge-condition.md.
+ */
+function throwOnInvalidCondition(condition: unknown): void {
+  const result = validateEdgeCondition(condition);
+  if (result.ok) return;
+  const err: EvaluationError = result.error;
+  throw new GraphQLError(err.message, {
+    extensions: {
+      code: 'INVALID_EDGE_CONDITION',
+      reason: err.code,
+      detail: err.detail,
+    },
+  });
 }
 
 async function requireOrgRole(
@@ -530,51 +555,65 @@ function wasRecentlyVisited(
 }
 
 // ---------------------------------------------------------------------------
-// Edge evaluation helpers
+// Edge-condition memory layer
 // ---------------------------------------------------------------------------
 
-interface EdgeCondition {
-  field: string;
-  operator: 'missing' | 'exists' | 'equals' | 'notEquals' | 'contains';
-  value?: unknown;
+/**
+ * Build a MemoryLayerHandle that resolves memory.* paths against a single
+ * memory's node tree. Walks the source-node's parent chain from root
+ * toward the source loc, reading each ancestor's `data` field; deeper-
+ * in-tree wins (CSS cascade per spec FR-009).
+ *
+ * US1 scope: single-layer cascade, no encryption handling. US4 adds the
+ * encrypted-memory error path; US3 layers user-memory atop edge-memory.
+ */
+async function buildEdgeMemoryLayer(
+  db: PrismaClient,
+  layerName: string,
+  memoryId: string,
+  sourceLoc: string,
+): Promise<MemoryLayerHandle> {
+  // Build the ordered ancestor loc list from root toward source. The
+  // bare `data` node is always at the root — matches the legacy behavior
+  // where conditions read from `loc: 'data'`.
+  const ancestors: string[] = ['data'];
+  if (sourceLoc) {
+    const parts = sourceLoc.split(':');
+    for (let i = 1; i <= parts.length; i++) {
+      ancestors.push(parts.slice(0, i).join(':'));
+    }
+  }
+  const nodes = await db.node.findMany({
+    where: { memoryId, loc: { in: ancestors }, deletedAt: null },
+    select: { loc: true, data: true },
+  });
+  const orderedData: Array<Record<string, unknown> | null> = ancestors.map((loc) => {
+    const n = nodes.find((x) => x.loc === loc);
+    return (n?.data as Record<string, unknown> | null) ?? null;
+  });
+
+  return {
+    layerName,
+    async read(path: string) {
+      let value: unknown = undefined;
+      for (const data of orderedData) {
+        if (data === null) continue;
+        const v = readDottedPathLocal(data, path);
+        if (v !== undefined) value = v;
+      }
+      return { ok: true, value };
+    },
+  };
 }
 
-/**
- * Evaluate an edge condition against the user's memory data.
- */
-async function evaluateCondition(
-  db: PrismaClient,
-  condition: EdgeCondition,
-  userMemoryId: string,
-): Promise<boolean> {
-  // Load the user's data node
-  const dataNode = await db.node.findFirst({
-    where: { loc: 'data', memoryId: userMemoryId, deletedAt: null },
-    select: { data: true },
-  });
-  const userData = (dataNode?.data as Record<string, unknown>) ?? {};
-
-  // Resolve the field value. Fields like "memory.name" → look for "name"
-  const fieldName = condition.field.includes('.')
-    ? condition.field.split('.').pop()!
-    : condition.field;
-  const fieldValue = userData[fieldName];
-
-  switch (condition.operator) {
-    case 'missing':
-      return fieldValue === undefined || fieldValue === null || fieldValue === '';
-    case 'exists':
-      return fieldValue !== undefined && fieldValue !== null && fieldValue !== '';
-    case 'equals':
-      return fieldValue === condition.value;
-    case 'notEquals':
-      return fieldValue !== condition.value;
-    case 'contains':
-      return typeof fieldValue === 'string' && typeof condition.value === 'string'
-        && fieldValue.includes(condition.value);
-    default:
-      return false;
+function readDottedPathLocal(obj: Record<string, unknown>, path: string): unknown {
+  const parts = path.split('.');
+  let cur: unknown = obj;
+  for (const part of parts) {
+    if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+    cur = (cur as Record<string, unknown>)[part];
   }
+  return cur;
 }
 
 // ---------------------------------------------------------------------------
@@ -1500,16 +1539,28 @@ export const resolvers = {
 
     createEdge: async (
       _: unknown,
-      { sourceNodeId, targetNodeId, label, data }: { sourceNodeId: string; targetNodeId: string; label: string; data?: Record<string, unknown> },
+      { sourceNodeId, targetNodeId, label, condition, priority, data }: {
+        sourceNodeId: string;
+        targetNodeId: string;
+        label: string;
+        condition?: unknown;
+        priority?: number;
+        data?: Record<string, unknown>;
+      },
       ctx: Context,
     ) => {
       requireRole(ctx, 'CONTRIBUTOR');
+      if (condition !== undefined && condition !== null) {
+        throwOnInvalidCondition(condition);
+      }
       return ctx.db.edge.create({
         data: {
           id: generateId(),
           sourceId: sourceNodeId,
           targetId: targetNodeId,
           label,
+          condition: (condition ?? null) as InputJsonValue,
+          ...(priority !== undefined ? { priority } : {}),
           data: (data ?? null) as InputJsonValue,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
@@ -1519,14 +1570,25 @@ export const resolvers = {
 
     updateEdge: async (
       _: unknown,
-      { edgeId, label, data }: { edgeId: string; label?: string; data?: Record<string, unknown> },
+      { edgeId, label, condition, priority, data }: {
+        edgeId: string;
+        label?: string;
+        condition?: unknown;
+        priority?: number;
+        data?: Record<string, unknown>;
+      },
       ctx: Context,
     ) => {
       requireRole(ctx, 'CONTRIBUTOR');
+      if (condition !== undefined && condition !== null) {
+        throwOnInvalidCondition(condition);
+      }
       return ctx.db.edge.update({
         where: { id: edgeId },
         data: {
           ...(label !== undefined ? { label } : {}),
+          ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
+          ...(priority !== undefined ? { priority } : {}),
           ...(data !== undefined ? { data: data as InputJsonValue } : {}),
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
         },
@@ -3403,18 +3465,54 @@ export const resolvers = {
             if (stageNode) {
               const edges = await ctx.db.edge.findMany({
                 where: { sourceId: stageNode.id, deletedAt: null },
+                orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
                 include: { target: { select: { loc: true, data: true } } },
               });
+              // Load agent config once for the agent.* scope.
+              const agentConfigNode = await ctx.db.node.findFirst({
+                where: { memoryId: sysMemId, loc: 'config', deletedAt: null },
+                select: { data: true },
+              });
+              const agentBag: Record<string, unknown> = {
+                config: (agentConfigNode?.data as Record<string, unknown> | null) ?? {},
+              };
+              // Build the user-memory layer once; the same layer answers
+              // every edge's memory.* lookups during this turn.
+              const userMemoryLayer = await buildEdgeMemoryLayer(
+                ctx.db, 'edge-memory', chatNode.memoryId, currentStageLoc,
+              );
               for (const edge of edges) {
                 const edgeData = (edge.data as Record<string, unknown>) ?? {};
                 const timing = edgeData.timing as string ?? 'on_complete';
                 if (timing !== 'on_complete' && timing !== 'always') continue;
 
-                // Evaluate condition from edge.data
-                const condition = edgeData.condition as EdgeCondition | undefined;
-                if (condition) {
-                  const met = await evaluateCondition(ctx.db, condition, chatNode.memoryId);
-                  if (!met) continue;
+                // Evaluate the JSONLogic condition (Edge.condition column).
+                // null = always fires.
+                if (edge.condition !== null && edge.condition !== undefined) {
+                  const evalResult = await evaluateEdgeCondition({
+                    condition: edge.condition,
+                    edge: {
+                      id: edge.id,
+                      sourceNodeUrn: `urn:memory:${sysMemId}:${currentStageLoc}`,
+                    },
+                    memoryLayers: [userMemoryLayer],
+                    chat: {
+                      message_count: messageCount,
+                      conversation_name: chatData.conversationName,
+                      stage: chatData.stageName,
+                    },
+                    agent: agentBag,
+                    messageData: data ?? undefined,
+                  });
+                  if (!evalResult.ok) {
+                    // US1: log and skip. US4 will surface MEMORY_ENCRYPTED_NO_KEY
+                    // through the user-facing message mapping.
+                    console.warn(
+                      `[edge-conditions] evaluation failed for edge ${edge.id}: ${evalResult.error.code} — ${evalResult.error.message}`,
+                    );
+                    continue;
+                  }
+                  if (!evalResult.fired) continue;
                 }
 
                 // Edge fires! Check behavior
