@@ -18,9 +18,11 @@ import {
   validateEdgeCondition,
   evaluateEdgeCondition,
   validateNodeDataExtractionSpecs,
+  userMessageFor,
   type EvaluationError,
   type MemoryLayerHandle,
 } from '../../../lib/edge-conditions/index.js';
+import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
 import { GraphQLError } from 'graphql';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
@@ -574,67 +576,9 @@ function wasRecentlyVisited(
   return recentExits.length > 0;
 }
 
-// ---------------------------------------------------------------------------
-// Edge-condition memory layer
-// ---------------------------------------------------------------------------
-
-/**
- * Build a MemoryLayerHandle that resolves memory.* paths against a single
- * memory's node tree. Walks the source-node's parent chain from root
- * toward the source loc, reading each ancestor's `data` field; deeper-
- * in-tree wins (CSS cascade per spec FR-009).
- *
- * US1 scope: single-layer cascade, no encryption handling. US4 adds the
- * encrypted-memory error path; US3 layers user-memory atop edge-memory.
- */
-async function buildEdgeMemoryLayer(
-  db: PrismaClient,
-  layerName: string,
-  memoryId: string,
-  sourceLoc: string,
-): Promise<MemoryLayerHandle> {
-  // Build the ordered ancestor loc list from root toward source. The
-  // bare `data` node is always at the root — matches the legacy behavior
-  // where conditions read from `loc: 'data'`.
-  const ancestors: string[] = ['data'];
-  if (sourceLoc) {
-    const parts = sourceLoc.split(':');
-    for (let i = 1; i <= parts.length; i++) {
-      ancestors.push(parts.slice(0, i).join(':'));
-    }
-  }
-  const nodes = await db.node.findMany({
-    where: { memoryId, loc: { in: ancestors }, deletedAt: null },
-    select: { loc: true, data: true },
-  });
-  const orderedData: Array<Record<string, unknown> | null> = ancestors.map((loc) => {
-    const n = nodes.find((x) => x.loc === loc);
-    return (n?.data as Record<string, unknown> | null) ?? null;
-  });
-
-  return {
-    layerName,
-    async read(path: string) {
-      let value: unknown = undefined;
-      for (const data of orderedData) {
-        if (data === null) continue;
-        const v = readDottedPathLocal(data, path);
-        if (v !== undefined) value = v;
-      }
-      return { ok: true, value };
-    },
-  };
-}
-
-function readDottedPathLocal(obj: Record<string, unknown>, path: string): unknown {
-  const parts = path.split('.');
-  let cur: unknown = obj;
-  for (const part of parts) {
-    if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
-    cur = (cur as Record<string, unknown>)[part];
-  }
-  return cur;
-}
+// Edge-condition memory layer construction lives in
+// `lib/edge-conditions/prisma-memory-layer.ts` (the Prisma adapter).
+// It's imported above as `buildPrismaMemoryLayer`.
 
 // ---------------------------------------------------------------------------
 // Snapshot reader: reads nodes from a published revision snapshot instead
@@ -3511,11 +3455,11 @@ export const resolvers = {
               //     chat memory IS the system memory, we skip the
               //     duplicate layer.
               const memoryLayers: MemoryLayerHandle[] = [];
-              memoryLayers.push(await buildEdgeMemoryLayer(
+              memoryLayers.push(await buildPrismaMemoryLayer(
                 ctx.db, 'edge-memory', sysMemId, currentStageLoc,
               ));
               if (chatNode.memoryId !== sysMemId) {
-                memoryLayers.push(await buildEdgeMemoryLayer(
+                memoryLayers.push(await buildPrismaMemoryLayer(
                   ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc,
                 ));
               }
@@ -3543,12 +3487,28 @@ export const resolvers = {
                     messageData: data ?? undefined,
                   });
                   if (!evalResult.ok) {
-                    // US1: log and skip. US4 will surface MEMORY_ENCRYPTED_NO_KEY
-                    // through the user-facing message mapping.
-                    console.warn(
-                      `[edge-conditions] evaluation failed for edge ${edge.id}: ${evalResult.error.code} — ${evalResult.error.message}`,
+                    // FR-014/FR-015/FR-016: fail loud rather than silently
+                    // firing or skipping the edge. Structured log carries
+                    // edge id, field, memory URN, etc.; the user-facing
+                    // message comes from the i18n-ready mapping.
+                    console.error(
+                      `[edge-conditions] evaluation failed`,
+                      {
+                        edgeId: edge.id,
+                        code: evalResult.error.code,
+                        message: evalResult.error.message,
+                        detail: evalResult.error.detail,
+                      },
                     );
-                    continue;
+                    const userMsg = userMessageFor(evalResult.error);
+                    throw new GraphQLError(userMsg.text, {
+                      extensions: {
+                        code: 'EDGE_CONDITION_FAILED',
+                        reason: evalResult.error.code,
+                        messageId: userMsg.id,
+                        detail: evalResult.error.detail,
+                      },
+                    });
                   }
                   if (!evalResult.fired) continue;
                 }

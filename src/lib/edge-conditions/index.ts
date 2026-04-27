@@ -31,3 +31,4 @@ export {
   type ExtractionSpecEntry,
   type ExtractionSpecValidateResult,
 } from './reserved-names.js';
+export { userMessageFor, type UserMessage } from './user-messages.js';
