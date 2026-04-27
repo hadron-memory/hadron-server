@@ -13,6 +13,10 @@ export interface GraphEdge {
   sourceId: string;
   targetId: string;
   label: string;
+  /** JSONLogic gating expression preserved through .node/ import. Null/undefined = always fires. */
+  condition?: unknown;
+  /** Edge resolution-order hook (lower fires first). */
+  priority?: number;
 }
 
 /**
@@ -79,6 +83,8 @@ export const loadGraphFromFs = async (
           sourceId: result.node.id!,
           targetId: edge.targetId,
           label: edge.label,
+          ...(edge.condition !== undefined ? { condition: edge.condition } : {}),
+          ...(edge.priority !== undefined ? { priority: edge.priority } : {}),
         });
       }
     } catch (err) {
