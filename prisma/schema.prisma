@@ -353,7 +353,14 @@ model Edge {
   sourceId  String    @map("source_id")
   targetId  String    @map("target_id")
   label     String
-  condition String?
+  // Edge-condition spec: JSONLogic gating expression. Null = always fires.
+  // Validated server-side at save and evaluate time. See
+  // src/lib/edge-conditions/.
+  condition Json?
+  // Stable ordering hook (lower = earlier). Future agent-exceptions
+  // feature uses this so handler edges can sit at the top of the
+  // resolution order without re-architecting.
+  priority  Int       @default(0)
   data      Json?
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")

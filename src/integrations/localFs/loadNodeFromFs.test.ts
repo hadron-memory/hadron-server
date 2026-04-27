@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join } from 'path';
-import { mkdirSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
+import { stringify } from 'yaml';
 import { makeTmpDir, writeNodeFiles, writeFrontmatterNode } from '../../test/helpers.js';
 import { loadNodeFromFs } from './loadNodeFromFs.js';
 
@@ -196,5 +197,62 @@ describe('loadNodeFromFs — frontmatter format', () => {
     const { edges } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
     expect(edges).toHaveLength(1);
     expect(edges[0]).toEqual({ targetId: 'aaa111', label: 'Related' });
+  });
+
+  it('preserves JSONLogic condition and priority on edges (Invariant 10)', async () => {
+    // Write a legacy node with edges that carry condition + priority,
+    // then verify the loader surfaces them on the LoadedEdge result.
+    // This is the load half of the .node/ round-trip; the save side
+    // doesn't currently emit edges (pre-existing gap, tracked
+    // separately).
+    const nodeDir = join(graphRoot, 'flow', 'check');
+    const dotNode = join(nodeDir, '.node');
+    mkdirSync(dotNode, { recursive: true });
+    writeFileSync(
+      join(dotNode, 'node.yaml'),
+      stringify({
+        id: 'check-node',
+        name: 'check',
+        nodes: [
+          {
+            id: 'force-profile',
+            rel: 'force-profile',
+            priority: 5,
+            condition: {
+              and: [
+                { missing: ['memory.business_type'] },
+                { '>': [{ var: 'chat.message_count' }, 20] },
+              ],
+            },
+          },
+        ],
+      }),
+      'utf-8',
+    );
+
+    const { edges } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect(edges).toHaveLength(1);
+    expect(edges[0].targetId).toBe('force-profile');
+    expect(edges[0].label).toBe('force-profile');
+    expect(edges[0].priority).toBe(5);
+    expect(edges[0].condition).toEqual({
+      and: [
+        { missing: ['memory.business_type'] },
+        { '>': [{ var: 'chat.message_count' }, 20] },
+      ],
+    });
+  });
+
+  it('omits condition and priority on edges that have neither', async () => {
+    const mdPath = join(graphRoot, 'simple.md');
+    writeFrontmatterNode(mdPath, {
+      name: 'Simple',
+      nodes: [{ id: 'plain-target', rel: 'goes-to' }],
+    });
+    const { edges } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
+    expect(edges).toHaveLength(1);
+    expect(edges[0]).toEqual({ targetId: 'plain-target', label: 'goes-to' });
+    expect(edges[0]).not.toHaveProperty('condition');
+    expect(edges[0]).not.toHaveProperty('priority');
   });
 });

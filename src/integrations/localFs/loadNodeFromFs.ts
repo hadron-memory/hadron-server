@@ -18,9 +18,19 @@ interface NodeYaml {
 }
 
 interface EdgeEntry {
-  target: string;
+  /** Either `target` or `id` identifies the target node. */
+  target?: string;
   rel: string;
   id?: string;
+  /**
+   * JSONLogic gating expression. Null/undefined means the edge always
+   * fires. The server validates the shape on import (no separate
+   * portability check at load time — invalid conditions are rejected
+   * when the import path persists them).
+   */
+  condition?: unknown;
+  /** Edge resolution-order hook (lower fires first). Default 0. */
+  priority?: number;
   [key: string]: unknown;
 }
 
@@ -35,11 +45,18 @@ interface EdgeEntry {
  * @param graphRoot Absolute path to the graph root (for deriving loc)
  * @param ownerRepo GitHub repo slug, e.g. "micromentor/mmdata"
  */
+export interface LoadedEdge {
+  targetId: string;
+  label: string;
+  condition?: unknown;
+  priority?: number;
+}
+
 export const loadNodeFromFs = async (
   source: string,
   graphRoot: string,
   ownerRepo: string,
-): Promise<{ node: Partial<Node>; edges: Array<{ targetId: string; label: string }> }> => {
+): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> => {
   if (source.endsWith('.md')) {
     return loadFrontmatterNode(source, graphRoot, ownerRepo);
   }
@@ -53,13 +70,13 @@ async function loadFrontmatterNode(
   mdPath: string,
   graphRoot: string,
   ownerRepo: string,
-): Promise<{ node: Partial<Node>; edges: Array<{ targetId: string; label: string }> }> {
+): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> {
   const raw = readFileSync(mdPath, 'utf-8');
 
   const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!fmMatch) throw new Error(`No frontmatter found in ${mdPath}`);
 
-  const meta = parse(fmMatch[1]) as NodeYaml;
+  const meta = parse(fmMatch[1]) as NodeYaml & { nodes?: EdgeEntry[] };
   const content = fmMatch[2]?.trim() || null;
   const loc = deriveLoc(mdPath, graphRoot, true);
 
@@ -67,7 +84,7 @@ async function loadFrontmatterNode(
   const sidecarEdges = loadSidecarEdges(mdPath);
   const fmEdges = (meta.nodes ?? [])
     .filter((e) => !!e.id)
-    .map((e) => ({ targetId: e.id, label: e.rel }));
+    .map((e) => normalizeEdgeEntry(e));
   const edges = sidecarEdges.length > 0 ? sidecarEdges : fmEdges;
 
   return {
@@ -94,17 +111,17 @@ async function loadLegacyNode(
   dirPath: string,
   graphRoot: string,
   ownerRepo: string,
-): Promise<{ node: Partial<Node>; edges: Array<{ targetId: string; label: string }> }> {
+): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> {
   const yamlPath = join(dirPath, '.node', 'node.yaml');
   const mdPath = join(dirPath, '.node', 'topic.md');
 
-  const meta = parse(readFileSync(yamlPath, 'utf-8')) as NodeYaml;
+  const meta = parse(readFileSync(yamlPath, 'utf-8')) as NodeYaml & { nodes?: EdgeEntry[] };
   const content = existsSync(mdPath) ? readFileSync(mdPath, 'utf-8') : null;
   const loc = deriveLoc(dirPath, graphRoot, false);
 
   const edges = (meta.nodes ?? [])
     .filter((e) => !!e.id)
-    .map((e) => ({ targetId: e.id, label: e.rel }));
+    .map((e) => normalizeEdgeEntry(e));
 
   return {
     node: {
@@ -157,7 +174,7 @@ function deriveLoc(path: string, graphRoot: string, isMdFile: boolean): string {
  * architecture.md → .architecture/edges.yaml
  * server/README.md → .server/edges.yaml
  */
-function loadSidecarEdges(mdPath: string): Array<{ targetId: string; label: string }> {
+function loadSidecarEdges(mdPath: string): Array<LoadedEdge> {
   const fileName = basename(mdPath, '.md');
   const dir = dirname(mdPath);
 
@@ -173,8 +190,25 @@ function loadSidecarEdges(mdPath: string): Array<{ targetId: string; label: stri
 
   return entries
     .filter((e) => e.rel)
-    .map((e) => ({
-      targetId: e.id ?? e.target,
-      label: e.rel,
-    }));
+    .map((e) => normalizeEdgeEntry(e));
+}
+
+/**
+ * Normalize a YAML edge entry into the LoadedEdge shape, preserving
+ * `condition` (JSONLogic JSON) and `priority` when present so that
+ * memories can round-trip through the on-disk format losslessly per
+ * Invariant 10 (memory portability).
+ */
+function normalizeEdgeEntry(e: EdgeEntry): LoadedEdge {
+  const out: LoadedEdge = {
+    targetId: (e.id ?? e.target) as string,
+    label: e.rel,
+  };
+  if (e.condition !== undefined && e.condition !== null) {
+    out.condition = e.condition;
+  }
+  if (typeof e.priority === 'number') {
+    out.priority = e.priority;
+  }
+  return out;
 }

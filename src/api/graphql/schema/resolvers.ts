@@ -14,6 +14,16 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, validateUrnType } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
+import {
+  validateEdgeCondition,
+  evaluateEdgeCondition,
+  validateNodeDataExtractionSpecs,
+  userMessageFor,
+  type EvaluationError,
+  type MemoryLayerHandle,
+} from '../../../lib/edge-conditions/index.js';
+import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
+import { GraphQLError } from 'graphql';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
@@ -43,6 +53,43 @@ const ROLE_ORDER: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2
 function requireRole(ctx: Context, required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER') {
   const highest = ctx.roles ? Math.max(...ctx.roles.map((r) => ROLE_ORDER[r] ?? -1)) : -1;
   if (highest < ROLE_ORDER[required]) throw new Error('Forbidden');
+}
+
+/**
+ * Validate an edge-condition payload at GraphQL save-time. Throws a
+ * GraphQLError with the contract's named extension codes on failure.
+ * See specs/001-edge-condition-spec/contracts/graphql-edge-condition.md.
+ */
+function throwOnInvalidCondition(condition: unknown): void {
+  const result = validateEdgeCondition(condition);
+  if (result.ok) return;
+  const err: EvaluationError = result.error;
+  throw new GraphQLError(err.message, {
+    extensions: {
+      code: 'INVALID_EDGE_CONDITION',
+      reason: err.code,
+      detail: err.detail,
+    },
+  });
+}
+
+/**
+ * Validate any extraction-spec arrays carried inside a node-data payload.
+ * Rejects writes that try to land an extraction under
+ * `message.data.exception(s)` (reserved per spec FR-013 for the future
+ * agent-exceptions feature).
+ */
+function throwOnReservedExtractionSpec(data: unknown): void {
+  const result = validateNodeDataExtractionSpecs(data);
+  if (result.ok) return;
+  const err: EvaluationError = result.error;
+  throw new GraphQLError(err.message, {
+    extensions: {
+      code: 'INVALID_EXTRACTION_SPEC',
+      reason: err.code,
+      detail: err.detail,
+    },
+  });
 }
 
 async function requireOrgRole(
@@ -529,53 +576,9 @@ function wasRecentlyVisited(
   return recentExits.length > 0;
 }
 
-// ---------------------------------------------------------------------------
-// Edge evaluation helpers
-// ---------------------------------------------------------------------------
-
-interface EdgeCondition {
-  field: string;
-  operator: 'missing' | 'exists' | 'equals' | 'notEquals' | 'contains';
-  value?: unknown;
-}
-
-/**
- * Evaluate an edge condition against the user's memory data.
- */
-async function evaluateCondition(
-  db: PrismaClient,
-  condition: EdgeCondition,
-  userMemoryId: string,
-): Promise<boolean> {
-  // Load the user's data node
-  const dataNode = await db.node.findFirst({
-    where: { loc: 'data', memoryId: userMemoryId, deletedAt: null },
-    select: { data: true },
-  });
-  const userData = (dataNode?.data as Record<string, unknown>) ?? {};
-
-  // Resolve the field value. Fields like "memory.name" → look for "name"
-  const fieldName = condition.field.includes('.')
-    ? condition.field.split('.').pop()!
-    : condition.field;
-  const fieldValue = userData[fieldName];
-
-  switch (condition.operator) {
-    case 'missing':
-      return fieldValue === undefined || fieldValue === null || fieldValue === '';
-    case 'exists':
-      return fieldValue !== undefined && fieldValue !== null && fieldValue !== '';
-    case 'equals':
-      return fieldValue === condition.value;
-    case 'notEquals':
-      return fieldValue !== condition.value;
-    case 'contains':
-      return typeof fieldValue === 'string' && typeof condition.value === 'string'
-        && fieldValue.includes(condition.value);
-    default:
-      return false;
-  }
-}
+// Edge-condition memory layer construction lives in
+// `lib/edge-conditions/prisma-memory-layer.ts` (the Prisma adapter).
+// It's imported above as `buildPrismaMemoryLayer`.
 
 // ---------------------------------------------------------------------------
 // Snapshot reader: reads nodes from a published revision snapshot instead
@@ -1391,6 +1394,10 @@ export const resolvers = {
       }
       await requireMemoryWriteAccess(ctx, input.memoryId);
 
+      // Reject saves whose extraction-spec arrays would write into the
+      // reserved exception namespace (spec 001-edge-condition-spec FR-013).
+      throwOnReservedExtractionSpec(input.data);
+
       // Snapshot current state before update (for version history)
       const existing = await ctx.db.node.findUnique({
         where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
@@ -1500,16 +1507,28 @@ export const resolvers = {
 
     createEdge: async (
       _: unknown,
-      { sourceNodeId, targetNodeId, label, data }: { sourceNodeId: string; targetNodeId: string; label: string; data?: Record<string, unknown> },
+      { sourceNodeId, targetNodeId, label, condition, priority, data }: {
+        sourceNodeId: string;
+        targetNodeId: string;
+        label: string;
+        condition?: unknown;
+        priority?: number;
+        data?: Record<string, unknown>;
+      },
       ctx: Context,
     ) => {
       requireRole(ctx, 'CONTRIBUTOR');
+      if (condition !== undefined && condition !== null) {
+        throwOnInvalidCondition(condition);
+      }
       return ctx.db.edge.create({
         data: {
           id: generateId(),
           sourceId: sourceNodeId,
           targetId: targetNodeId,
           label,
+          condition: (condition ?? null) as InputJsonValue,
+          ...(priority !== undefined ? { priority } : {}),
           data: (data ?? null) as InputJsonValue,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
@@ -1519,14 +1538,25 @@ export const resolvers = {
 
     updateEdge: async (
       _: unknown,
-      { edgeId, label, data }: { edgeId: string; label?: string; data?: Record<string, unknown> },
+      { edgeId, label, condition, priority, data }: {
+        edgeId: string;
+        label?: string;
+        condition?: unknown;
+        priority?: number;
+        data?: Record<string, unknown>;
+      },
       ctx: Context,
     ) => {
       requireRole(ctx, 'CONTRIBUTOR');
+      if (condition !== undefined && condition !== null) {
+        throwOnInvalidCondition(condition);
+      }
       return ctx.db.edge.update({
         where: { id: edgeId },
         data: {
           ...(label !== undefined ? { label } : {}),
+          ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
+          ...(priority !== undefined ? { priority } : {}),
           ...(data !== undefined ? { data: data as InputJsonValue } : {}),
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
         },
@@ -3403,18 +3433,84 @@ export const resolvers = {
             if (stageNode) {
               const edges = await ctx.db.edge.findMany({
                 where: { sourceId: stageNode.id, deletedAt: null },
+                orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
                 include: { target: { select: { loc: true, data: true } } },
               });
+              // Load agent config once for the agent.* scope.
+              const agentConfigNode = await ctx.db.node.findFirst({
+                where: { memoryId: sysMemId, loc: 'config', deletedAt: null },
+                select: { data: true },
+              });
+              const agentBag: Record<string, unknown> = {
+                config: (agentConfigNode?.data as Record<string, unknown> | null) ?? {},
+              };
+              // Build the memory cascade for this turn:
+              //   Layer A (defaults): agent's system memory — holds
+              //     conversation/stage definitions and any agent-wide
+              //     defaults under `loc: 'data'`. The source node lives
+              //     here, so its parent-chain walk also happens here.
+              //   Layer B (overrides): the user's per-user memory.
+              //     Wins over Layer A on conflict (CSS cascade per spec
+              //     FR-008/FR-009). For single-memory cases where the
+              //     chat memory IS the system memory, we skip the
+              //     duplicate layer.
+              const memoryLayers: MemoryLayerHandle[] = [];
+              memoryLayers.push(await buildPrismaMemoryLayer(
+                ctx.db, 'edge-memory', sysMemId, currentStageLoc,
+              ));
+              if (chatNode.memoryId !== sysMemId) {
+                memoryLayers.push(await buildPrismaMemoryLayer(
+                  ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc,
+                ));
+              }
               for (const edge of edges) {
                 const edgeData = (edge.data as Record<string, unknown>) ?? {};
                 const timing = edgeData.timing as string ?? 'on_complete';
                 if (timing !== 'on_complete' && timing !== 'always') continue;
 
-                // Evaluate condition from edge.data
-                const condition = edgeData.condition as EdgeCondition | undefined;
-                if (condition) {
-                  const met = await evaluateCondition(ctx.db, condition, chatNode.memoryId);
-                  if (!met) continue;
+                // Evaluate the JSONLogic condition (Edge.condition column).
+                // null = always fires.
+                if (edge.condition !== null && edge.condition !== undefined) {
+                  const evalResult = await evaluateEdgeCondition({
+                    condition: edge.condition,
+                    edge: {
+                      id: edge.id,
+                      sourceNodeUrn: `urn:memory:${sysMemId}:${currentStageLoc}`,
+                    },
+                    memoryLayers,
+                    chat: {
+                      message_count: messageCount,
+                      conversation_name: chatData.conversationName,
+                      stage: chatData.stageName,
+                    },
+                    agent: agentBag,
+                    messageData: data ?? undefined,
+                  });
+                  if (!evalResult.ok) {
+                    // FR-014/FR-015/FR-016: fail loud rather than silently
+                    // firing or skipping the edge. Structured log carries
+                    // edge id, field, memory URN, etc.; the user-facing
+                    // message comes from the i18n-ready mapping.
+                    console.error(
+                      `[edge-conditions] evaluation failed`,
+                      {
+                        edgeId: edge.id,
+                        code: evalResult.error.code,
+                        message: evalResult.error.message,
+                        detail: evalResult.error.detail,
+                      },
+                    );
+                    const userMsg = userMessageFor(evalResult.error);
+                    throw new GraphQLError(userMsg.text, {
+                      extensions: {
+                        code: 'EDGE_CONDITION_FAILED',
+                        reason: evalResult.error.code,
+                        messageId: userMsg.id,
+                        detail: evalResult.error.detail,
+                      },
+                    });
+                  }
+                  if (!evalResult.fired) continue;
                 }
 
                 // Edge fires! Check behavior

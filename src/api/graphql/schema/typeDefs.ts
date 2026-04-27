@@ -85,7 +85,14 @@ export const typeDefs = `#graphql
     source: Node!
     target: Node!
     label: String!
-    condition: String
+    # JSONLogic gating expression. Null = always fires. Validated against
+    # the v1 operator subset and the five variable scopes (memory.*,
+    # chat.*, agent.*, message.data.*, now()/today()).
+    # See hadron-docs/docs/reference/edge-conditions.md.
+    condition: JSON
+    # Resolution-order hook (lower = earlier; default 0). When two edges
+    # share a priority, fall back to insertion order.
+    priority: Int!
     data: JSON
   }
 
@@ -625,8 +632,8 @@ export const typeDefs = `#graphql
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
 
     # Edge CRUD
-    createEdge(sourceNodeId: ID!, targetNodeId: ID!, label: String!, data: JSON): Edge!
-    updateEdge(edgeId: ID!, label: String, data: JSON): Edge!
+    createEdge(sourceNodeId: ID!, targetNodeId: ID!, label: String!, condition: JSON, priority: Int, data: JSON): Edge!
+    updateEdge(edgeId: ID!, label: String, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeId: ID!): Boolean!
 
     # Session lifecycle
