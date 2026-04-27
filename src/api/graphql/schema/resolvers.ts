@@ -3500,11 +3500,25 @@ export const resolvers = {
               const agentBag: Record<string, unknown> = {
                 config: (agentConfigNode?.data as Record<string, unknown> | null) ?? {},
               };
-              // Build the user-memory layer once; the same layer answers
-              // every edge's memory.* lookups during this turn.
-              const userMemoryLayer = await buildEdgeMemoryLayer(
-                ctx.db, 'edge-memory', chatNode.memoryId, currentStageLoc,
-              );
+              // Build the memory cascade for this turn:
+              //   Layer A (defaults): agent's system memory — holds
+              //     conversation/stage definitions and any agent-wide
+              //     defaults under `loc: 'data'`. The source node lives
+              //     here, so its parent-chain walk also happens here.
+              //   Layer B (overrides): the user's per-user memory.
+              //     Wins over Layer A on conflict (CSS cascade per spec
+              //     FR-008/FR-009). For single-memory cases where the
+              //     chat memory IS the system memory, we skip the
+              //     duplicate layer.
+              const memoryLayers: MemoryLayerHandle[] = [];
+              memoryLayers.push(await buildEdgeMemoryLayer(
+                ctx.db, 'edge-memory', sysMemId, currentStageLoc,
+              ));
+              if (chatNode.memoryId !== sysMemId) {
+                memoryLayers.push(await buildEdgeMemoryLayer(
+                  ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc,
+                ));
+              }
               for (const edge of edges) {
                 const edgeData = (edge.data as Record<string, unknown>) ?? {};
                 const timing = edgeData.timing as string ?? 'on_complete';
@@ -3519,7 +3533,7 @@ export const resolvers = {
                       id: edge.id,
                       sourceNodeUrn: `urn:memory:${sysMemId}:${currentStageLoc}`,
                     },
-                    memoryLayers: [userMemoryLayer],
+                    memoryLayers,
                     chat: {
                       message_count: messageCount,
                       conversation_name: chatData.conversationName,

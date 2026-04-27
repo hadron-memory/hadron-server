@@ -192,6 +192,64 @@ describe('edge-conditions / evaluateEdgeCondition', () => {
     });
   });
 
+  describe('two-layer cascade (US3)', () => {
+    it('user-memory layer overrides edge-memory layer when both have the field', async () => {
+      const result = await evaluateEdgeCondition(baseRequest({
+        condition: { '<': [{ var: 'memory.threshold' }, 5] },
+        memoryLayers: [
+          inMemoryLayer('edge', { threshold: 6 }),  // default = 6 (would not satisfy <5)
+          inMemoryLayer('user', { threshold: 3 }),  // override = 3 (satisfies <5)
+        ],
+      }));
+      expect(result).toEqual({ ok: true, fired: true });
+    });
+
+    it('falls back to edge-memory when user-memory does not have the field', async () => {
+      const result = await evaluateEdgeCondition(baseRequest({
+        condition: { '==': [{ var: 'memory.greeting' }, 'hello'] },
+        memoryLayers: [
+          inMemoryLayer('edge', { greeting: 'hello' }),
+          inMemoryLayer('user', {}),                // user has nothing
+        ],
+      }));
+      expect(result).toEqual({ ok: true, fired: true });
+    });
+
+    it('user-memory completely missing the path leaves edge-memory value intact', async () => {
+      const result = await evaluateEdgeCondition(baseRequest({
+        condition: { '==': [{ var: 'memory.locale' }, 'en'] },
+        memoryLayers: [
+          inMemoryLayer('edge', { locale: 'en' }),
+          inMemoryLayer('user', { other_field: 'unrelated' }),
+        ],
+      }));
+      expect(result).toEqual({ ok: true, fired: true });
+    });
+
+    it('three-layer cascade: deepest wins', async () => {
+      // Models the future case where additional layers (e.g., per-team
+      // overrides) might be inserted between edge-memory and user-memory.
+      // The contract guarantees later layers win.
+      const result = await evaluateEdgeCondition(baseRequest({
+        condition: { '==': [{ var: 'memory.role' }, 'owner'] },
+        memoryLayers: [
+          inMemoryLayer('edge', { role: 'reader' }),
+          inMemoryLayer('team', { role: 'contributor' }),
+          inMemoryLayer('user', { role: 'owner' }),
+        ],
+      }));
+      expect(result).toEqual({ ok: true, fired: true });
+    });
+
+    it('single-layer (no user memory) still works for single-user agents', async () => {
+      const result = await evaluateEdgeCondition(baseRequest({
+        condition: { '==': [{ var: 'memory.greeting' }, 'hi'] },
+        memoryLayers: [inMemoryLayer('edge', { greeting: 'hi' })],
+      }));
+      expect(result).toEqual({ ok: true, fired: true });
+    });
+  });
+
   describe('encrypted memory', () => {
     it('surfaces MEMORY_ENCRYPTED_NO_KEY when a layer cannot read', async () => {
       const result = await evaluateEdgeCondition(baseRequest({
