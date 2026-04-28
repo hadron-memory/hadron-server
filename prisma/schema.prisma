@@ -10,6 +10,7 @@ datasource db {
 
 // ─── Enums ─────────────────────────────────────────────────────────────
 
+// DEPRECATED — removed in 003-station-to-app Phase 4. Use AppMembershipRole.
 enum Role {
   OWNER
   ADMIN
@@ -17,6 +18,14 @@ enum Role {
   READER
 }
 
+enum AppMembershipRole {
+  OWNER
+  ADMIN
+  CONTRIBUTOR
+  READER
+}
+
+// DEPRECATED — removed in 003-station-to-app Phase 4. Use AppType.
 enum StationType {
   WORKSTATION
   CHATBOT
@@ -24,6 +33,20 @@ enum StationType {
   AUTOMATION
   CLOUD
   IOT
+}
+
+enum AppType {
+  WORKSTATION
+  CHATBOT
+  AGENT
+  AUTOMATION
+  CLOUD
+  IOT
+}
+
+enum AppAgentRole {
+  OPERATE
+  DEVELOP
 }
 
 enum SubscriptionType {
@@ -486,30 +509,30 @@ model UsageEvent {
 }
 
 model Agent {
-  id             String           @id @default(cuid())
-  organizationId String           @map("organization_id")
-  urn            String           @unique
-  name           String
-  description    String?
-  systemPrompt   String?          @map("system_prompt")
-  systemMemoryId String?          @map("system_memory_id")
-  visibility     MemoryVisibility @default(PRIVATE)
-  type           AgentType        @default(ASSISTANT)
-  surfaces       String[]         @default([])
-  aiProvider     String?          @map("ai_provider")
-  aiModel        String?          @map("ai_model")
-  aiApiKeyEncrypted String?       @map("ai_api_key_encrypted")
-  aiApiKeyPreview      String?       @map("ai_api_key_preview")
-  publishedRevisionLoc String?      @map("published_revision_loc")
-  editorLockUserId     String?      @map("editor_lock_user_id")
-  editorLockExpiresAt  DateTime?    @map("editor_lock_expires_at")
-  properties     Json?
-  createdAt      DateTime         @default(now()) @map("created_at")
-  createdBy      String?          @map("created_by")
-  updatedAt      DateTime?        @map("updated_at")
-  updatedBy      String?          @map("updated_by")
-  deletedAt      DateTime?        @map("deleted_at")
-  deletedBy      String?          @map("deleted_by")
+  id                   String           @id @default(cuid())
+  organizationId       String           @map("organization_id")
+  urn                  String           @unique
+  name                 String
+  description          String?
+  systemPrompt         String?          @map("system_prompt")
+  systemMemoryId       String?          @map("system_memory_id")
+  visibility           MemoryVisibility @default(PRIVATE)
+  type                 AgentType        @default(ASSISTANT)
+  surfaces             String[]         @default([])
+  aiProvider           String?          @map("ai_provider")
+  aiModel              String?          @map("ai_model")
+  aiApiKeyEncrypted    String?          @map("ai_api_key_encrypted")
+  aiApiKeyPreview      String?          @map("ai_api_key_preview")
+  publishedRevisionLoc String?          @map("published_revision_loc")
+  editorLockUserId     String?          @map("editor_lock_user_id")
+  editorLockExpiresAt  DateTime?        @map("editor_lock_expires_at")
+  properties           Json?
+  createdAt            DateTime         @default(now()) @map("created_at")
+  createdBy            String?          @map("created_by")
+  updatedAt            DateTime?        @map("updated_at")
+  updatedBy            String?          @map("updated_by")
+  deletedAt            DateTime?        @map("deleted_at")
+  deletedBy            String?          @map("deleted_by")
 
   organization         Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   memoryItems          AgentMemoryItem[]
@@ -833,6 +856,17 @@ model App {
   identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")
   sessionTimeoutSeconds Int                  @default(900) @map("session_timeout_seconds")
   anonymousTtlDays      Int                  @default(7) @map("anonymous_ttl_days")
+  // Fields absorbed from Station in 003-station-to-app Phase 1
+  appType               AppType              @default(WORKSTATION) @map("app_type")
+  role                  AppMembershipRole    @default(READER)
+  description           String?
+  systemPrompt          String?              @map("system_prompt")
+  agentTools            String[]             @default([]) @map("agent_tools")
+  aiProvider            String?              @map("ai_provider")
+  aiModel               String?              @map("ai_model")
+  aiApiKeyEncrypted     String?              @map("ai_api_key_encrypted")
+  expiresAt             DateTime?            @map("expires_at")
+  // Standard audit fields
   createdAt             DateTime             @default(now()) @map("created_at")
   createdBy             String?              @map("created_by")
   updatedAt             DateTime?            @map("updated_at")
@@ -840,11 +874,12 @@ model App {
   deletedAt             DateTime?            @map("deleted_at")
   deletedBy             String?              @map("deleted_by")
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   keys         AppKey[]
   appAgents    AppAgent[]
   users        User[]
   sessions     Session[]
+  logEntries   AppLogEntry[]
 
   @@index([organizationId])
   @@map("apps")
@@ -868,9 +903,17 @@ model AppKey {
 }
 
 model AppAgent {
-  appId     String   @map("app_id")
-  agentId   String   @map("agent_id")
-  createdAt DateTime @default(now()) @map("created_at")
+  appId            String           @map("app_id")
+  agentId          String           @map("agent_id")
+  role             AppAgentRole     @default(OPERATE)
+  subscriptionType SubscriptionType @default(READ_ONLY) @map("subscription_type")
+  trainingMode     Boolean          @default(false) @map("training_mode")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  createdBy        String?          @map("created_by")
+  updatedAt        DateTime?        @map("updated_at")
+  updatedBy        String?          @map("updated_by")
+  deletedAt        DateTime?        @map("deleted_at")
+  deletedBy        String?          @map("deleted_by")
 
   app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
   agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
@@ -878,4 +921,26 @@ model AppAgent {
   @@id([appId, agentId])
   @@index([agentId])
   @@map("app_agents")
+}
+
+model AppLogEntry {
+  id        String    @id @default(cuid())
+  appId     String    @map("app_id")
+  level     LogLevel
+  memoryId  String?   @map("memory_id")
+  sessionId String?   @map("session_id")
+  message   String
+  detail    Json?
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @map("updated_at")
+  updatedBy String?   @map("updated_by")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId])
+  @@index([appId, createdAt])
+  @@index([level])
+  @@index([createdAt])
+  @@map("app_log")
 }

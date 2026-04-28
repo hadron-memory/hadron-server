@@ -25,6 +25,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.node.deleteMany();
   await db.stationAgentSubscription.deleteMany();
   await db.agentMemoryItem.deleteMany();
+  await db.appLogEntry.deleteMany();
   await db.appKey.deleteMany();
   await db.appAgent.deleteMany();
   await db.app.deleteMany();
