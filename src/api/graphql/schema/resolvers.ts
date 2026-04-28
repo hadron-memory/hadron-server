@@ -204,14 +204,35 @@ async function requireAssetCaller(
   if (!agent) {
     throw new GraphQLError('agent not found', { extensions: { code: 'NOT_FOUND' } });
   }
-  const app = await ctx.db.app.findFirst({
-    where: { urn: agent.urn, organizationId: agent.organizationId, deletedAt: null },
-    select: { id: true },
+  // Portal user must be an org member of the agent's organization.
+  const member = await ctx.db.orgMember.findUnique({
+    where: {
+      organizationId_userId: {
+        organizationId: agent.organizationId,
+        userId: ctx.userId,
+      },
+    },
+    select: { role: true },
   });
-  if (!app) {
-    throw new GraphQLError('no app backs this agent', { extensions: { code: 'NOT_FOUND' } });
+  if (!member) {
+    throw new GraphQLError('not a member of this agent\'s organization', {
+      extensions: { code: 'PERMISSION_DENIED' },
+    });
   }
-  return { appId: app.id, userId: ctx.userId };
+  // Pick any App linked to this agent via AppAgent. Most chatbot agents
+  // have exactly one. The appId is used for record-keeping (registry,
+  // audit logging, per-agent property overrides) — the security boundary
+  // for portal user actions is the per-user filter (FR-014).
+  const link = await ctx.db.appAgent.findFirst({
+    where: { agentId: agent.id, app: { deletedAt: null } },
+    select: { appId: true },
+  });
+  if (!link) {
+    throw new GraphQLError('no app linked to this agent', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+  return { appId: link.appId, userId: ctx.userId };
 }
 
 function formatAssetNode(node: {
