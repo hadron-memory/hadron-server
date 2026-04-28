@@ -84,7 +84,13 @@ export async function beginAssetUpload(
   if (app.organizationId !== agent.organizationId) {
     throw new AssetUploadError('PERMISSION_DENIED', 'app not in agent organization');
   }
-  if (!app.agentTools.includes('asset:upload')) {
+  // Spec FR-009: agent-initiated requests need the explicit asset:upload
+  // opt-in. User-initiated uploads (paperclip composer) are always allowed
+  // for the calling user — they're attaching to their own per-user memory.
+  if (
+    input.uploadIntent === 'AGENT_REQUEST' &&
+    !app.agentTools.includes('asset:upload')
+  ) {
     throw new AssetUploadError(
       'PERMISSION_DENIED',
       'asset:upload not enabled for this agent',

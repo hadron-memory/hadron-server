@@ -36,6 +36,7 @@ import {
   type UploadIntent,
 } from '../../../controller/operations/beginAssetUpload.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
+import { peekUpload } from '../../../lib/asset/uploadRegistry.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
 import { mintAssetDownloadUrl } from '../../../controller/operations/mintAssetDownloadUrl.js';
 import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.js';
@@ -165,14 +166,52 @@ function rethrowAsset(err: unknown): never {
   throw err as Error;
 }
 
-function requireAssetCaller(ctx: Context): { appId: string; userId: string } {
-  if (!ctx.appId) {
-    throw new GraphQLError('asset upload requires an app context', {
+async function requireAssetCaller(
+  ctx: Context,
+  source: { agentUrn?: string; assetId?: string },
+): Promise<{ appId: string; userId: string }> {
+  if (ctx.appId) {
+    return { appId: ctx.appId, userId: ctx.userId ?? ctx.appId };
+  }
+  if (!ctx.userId) {
+    throw new GraphQLError('asset operation requires authentication', {
       extensions: { code: 'UNAUTHENTICATED' },
     });
   }
-  const userId = ctx.userId ?? ctx.appId;
-  return { appId: ctx.appId, userId };
+  let agentUrn = source.agentUrn ?? null;
+  if (!agentUrn && source.assetId) {
+    const asset = await ctx.db.node.findUnique({
+      where: { id: source.assetId },
+      select: {
+        memory: {
+          select: {
+            userMemoryOfAgent: { select: { urn: true } },
+          },
+        },
+      },
+    });
+    agentUrn = asset?.memory?.userMemoryOfAgent?.urn ?? null;
+  }
+  if (!agentUrn) {
+    throw new GraphQLError('cannot resolve agent for asset', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+  const agent = await ctx.db.agent.findUnique({
+    where: { urn: agentUrn },
+    select: { id: true, urn: true, organizationId: true },
+  });
+  if (!agent) {
+    throw new GraphQLError('agent not found', { extensions: { code: 'NOT_FOUND' } });
+  }
+  const app = await ctx.db.app.findFirst({
+    where: { urn: agent.urn, organizationId: agent.organizationId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!app) {
+    throw new GraphQLError('no app backs this agent', { extensions: { code: 'NOT_FOUND' } });
+  }
+  return { appId: app.id, userId: ctx.userId };
 }
 
 function formatAssetNode(node: {
@@ -1484,7 +1523,7 @@ export const resolvers = {
       args: { agentUrn: string; mimeType?: string; skip?: number; count?: number },
       ctx: Context,
     ) => {
-      const caller = requireAssetCaller(ctx);
+      const caller = await requireAssetCaller(ctx, { agentUrn: args.agentUrn });
       try {
         const result = await listAgentAssets(
           ctx.db,
@@ -1517,7 +1556,7 @@ export const resolvers = {
       args: { assetId: string; ttlSeconds?: number },
       ctx: Context,
     ) => {
-      const caller = requireAssetCaller(ctx);
+      const caller = await requireAssetCaller(ctx, { assetId: args.assetId });
       try {
         const result = await mintAssetDownloadUrl(ctx.db, caller, args);
         return { ...result, expiresAt: result.expiresAt.toISOString() };
@@ -4621,7 +4660,7 @@ export const resolvers = {
       },
       ctx: Context,
     ) => {
-      const caller = requireAssetCaller(ctx);
+      const caller = await requireAssetCaller(ctx, { agentUrn: args.agentUrn });
       try {
         const ticket = await beginAssetUpload(
           ctx.db,
@@ -4641,7 +4680,20 @@ export const resolvers = {
       { uploadId }: { uploadId: string },
       ctx: Context,
     ) => {
-      const caller = requireAssetCaller(ctx);
+      if (!ctx.userId && !ctx.appId) {
+        throw new GraphQLError('asset operation requires authentication', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      const entry = peekUpload(uploadId);
+      if (!entry) {
+        throw new GraphQLError('upload ticket expired or unknown', {
+          extensions: { code: 'NOT_FOUND' },
+        });
+      }
+      const caller = ctx.appId
+        ? { appId: ctx.appId, userId: ctx.userId ?? ctx.appId }
+        : { appId: entry.appId, userId: ctx.userId! };
       try {
         const node = await completeAssetUpload(ctx.db, caller, { uploadId });
         const memory = await ctx.db.memory.findUniqueOrThrow({
@@ -4659,7 +4711,7 @@ export const resolvers = {
       { assetId }: { assetId: string },
       ctx: Context,
     ) => {
-      const caller = requireAssetCaller(ctx);
+      const caller = await requireAssetCaller(ctx, { assetId });
       try {
         const node = await softDeleteAsset(
           ctx.db,
@@ -4682,7 +4734,7 @@ export const resolvers = {
       { assetId }: { assetId: string },
       ctx: Context,
     ) => {
-      const caller = requireAssetCaller(ctx);
+      const caller = await requireAssetCaller(ctx, { assetId });
       try {
         const node = await restoreAsset(
           ctx.db,
@@ -4706,7 +4758,7 @@ export const resolvers = {
       args: { agentUrn: string; enable: boolean },
       ctx: Context,
     ) => {
-      const caller = requireAssetCaller(ctx);
+      const caller = await requireAssetCaller(ctx, { agentUrn: args.agentUrn });
       try {
         return await setAgentAssetUploadEnabled(
           ctx.db,

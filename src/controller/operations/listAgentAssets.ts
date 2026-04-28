@@ -44,15 +44,14 @@ export async function listAgentAssets(
 
   const app = await db.app.findUnique({
     where: { id: caller.appId },
-    select: { organizationId: true, agentTools: true },
+    select: { organizationId: true },
   });
   if (!app) throw new AssetUploadError('UNAUTHENTICATED', 'app not found');
   if (app.organizationId !== agent.organizationId) {
     throw new AssetUploadError('PERMISSION_DENIED', 'app not in agent organization');
   }
-  if (!app.agentTools.includes('asset:upload')) {
-    throw new AssetUploadError('PERMISSION_DENIED', 'asset:upload not enabled');
-  }
+  // Per-user filter (FR-014) is the security boundary; the asset:upload
+  // gate is for agent-initiated requests only.
 
   const { memoryId } = await resolveTargetMemoryId(db, agent.id, caller.userId);
   const memoryEnc = await getMemoryEncryptionInfo(db, memoryId);
