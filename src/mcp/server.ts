@@ -11,6 +11,9 @@ import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { SessionType } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
+import { listAgentAssets } from '../controller/operations/listAgentAssets.js';
+import { mintAssetDownloadUrl } from '../controller/operations/mintAssetDownloadUrl.js';
+import { AssetUploadError } from '../controller/operations/beginAssetUpload.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1848,6 +1851,162 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         }, null, 2));
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to run persona'}`);
+      }
+    },
+  );
+
+  // ── h-asset-* (spec: hadron-portal/specs/001-asset-upload) ────────────
+
+  async function callerForAssetTool(): Promise<{ appId: string; userId: string } | null> {
+    if (!auth.appId || !auth.sessionId) return null;
+    const session = await db.session.findUnique({
+      where: { id: auth.sessionId },
+      select: {
+        memoryId: true,
+        memory: { select: { createdBy: true, urn: true } },
+        agent: { select: { urn: true } },
+      },
+    });
+    if (!session?.memory?.createdBy || !session.agent) return null;
+    return { appId: auth.appId, userId: session.memory.createdBy };
+  }
+
+  async function activeAgentUrn(): Promise<string | null> {
+    if (!auth.sessionId) return null;
+    const session = await db.session.findUnique({
+      where: { id: auth.sessionId },
+      select: { agent: { select: { urn: true } } },
+    });
+    return session?.agent?.urn ?? null;
+  }
+
+  function assetErrorReply(e: unknown): ReturnType<typeof textResult> {
+    if (e instanceof AssetUploadError) {
+      return textResult(`Error (${e.code}): ${e.message}`);
+    }
+    return textResult(`Error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // ── h-asset-request-upload ────────────────────────────────────────────
+
+  server.tool(
+    'h-asset-request-upload',
+    [
+      'Ask the user to upload a document or image during this chat session.',
+      'The portal renders a file picker labeled with the prompt; the user',
+      'either uploads (returns assetId) or declines/times out. v1 surface:',
+      'the tool emits a request marker; the portal completes the upload via',
+      'GraphQL beginAssetUpload + completeAssetUpload and the asset becomes',
+      'visible to subsequent turns through h-asset-list. If your client has',
+      'no portal companion, instruct the user to upload via the portal',
+      'manually and use h-asset-list to find the result.',
+    ].join(' '),
+    {
+      prompt: z.string().describe('Human-readable explanation of what to upload'),
+      allowedMimeTypes: z.array(z.string()).optional(),
+      maxSizeBytes: z.number().int().positive().optional(),
+    },
+    async ({ prompt, allowedMimeTypes, maxSizeBytes }) => {
+      const caller = await callerForAssetTool();
+      if (!caller) {
+        return textResult('Error (UNAUTHENTICATED): asset upload requires an active app session.');
+      }
+      const requestId = randomUUID();
+      // TODO(chat-stream): emit an `asset.requested` event into the active
+      // chat stream so the portal renders the picker. Until that wiring is
+      // in place, return a marker the LLM can show the user, then poll
+      // h-asset-list to detect when the user has uploaded the asset.
+      return textResult(JSON.stringify({
+        status: 'requested',
+        requestId,
+        instruction: `Display this prompt to the user: ${prompt}`,
+        allowedMimeTypes: allowedMimeTypes ?? null,
+        maxSizeBytes: maxSizeBytes ?? null,
+        nextStep: 'Ask the user to use the portal upload UI; then call h-asset-list to find the new asset.',
+      }, null, 2));
+    },
+  );
+
+  // ── h-asset-list ──────────────────────────────────────────────────────
+
+  server.tool(
+    'h-asset-list',
+    'List assets uploaded by the current user under this agent. Most recent first. Pagination via skip/count.',
+    {
+      mimeType: z.string().optional(),
+      skip: z.number().int().nonnegative().optional(),
+      count: z.number().int().positive().max(100).optional(),
+    },
+    async ({ mimeType, skip, count }) => {
+      const caller = await callerForAssetTool();
+      const agentUrn = await activeAgentUrn();
+      if (!caller || !agentUrn) {
+        return textResult('Error (UNAUTHENTICATED): no active app session for asset list.');
+      }
+      try {
+        const result = await listAgentAssets(
+          db,
+          caller,
+          { agentUrn, mimeType, skip, count },
+          async (_db, _agentId, _userId) => {
+            const session = await db.session.findUnique({
+              where: { id: auth.sessionId! },
+              select: { memoryId: true },
+            });
+            if (!session?.memoryId) throw new AssetUploadError('NOT_FOUND', 'no session memory');
+            return { memoryId: session.memoryId };
+          },
+        );
+        const summary = result.assets.map((node) => {
+          const data = (typeof node.data === 'string'
+            ? JSON.parse(node.data)
+            : node.data) ?? {};
+          return {
+            assetId: node.id,
+            filename: (data as Record<string, unknown>).filename ?? node.name,
+            mimeType: (data as Record<string, unknown>).mimeType ?? 'application/octet-stream',
+            sizeBytes: (data as Record<string, unknown>).sizeBytes ?? 0,
+            uploadedAt: (data as Record<string, unknown>).uploadedAt ?? node.createdAt,
+            scanStatus: (data as Record<string, unknown>).scanStatus ?? 'pending',
+            description: (data as Record<string, unknown>).description ?? null,
+          };
+        });
+        return textResult(JSON.stringify({
+          assets: summary,
+          total: result.total,
+          hasMore: result.hasMore,
+        }, null, 2));
+      } catch (e) {
+        return assetErrorReply(e);
+      }
+    },
+  );
+
+  // ── h-asset-get-url ───────────────────────────────────────────────────
+
+  server.tool(
+    'h-asset-get-url',
+    'Mint a short-TTL presigned download URL for an asset. Default TTL: 5 minutes. Refuses if the asset is pending scan or blocked.',
+    {
+      assetId: z.string().describe('Asset id from h-asset-list'),
+      ttlSeconds: z.number().int().positive().max(300).optional(),
+    },
+    async ({ assetId, ttlSeconds }) => {
+      const caller = await callerForAssetTool();
+      if (!caller) {
+        return textResult('Error (UNAUTHENTICATED): no active app session for asset download.');
+      }
+      try {
+        const result = await mintAssetDownloadUrl(db, caller, { assetId, ttlSeconds });
+        return textResult(JSON.stringify({
+          url: result.url,
+          expiresAt: result.expiresAt,
+          filename: result.filename,
+          mimeType: result.mimeType,
+          sizeBytes: result.sizeBytes,
+        }, null, 2));
+      } catch (e) {
+        return assetErrorReply(e);
       }
     },
   );

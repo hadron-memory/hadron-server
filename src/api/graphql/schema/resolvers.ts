@@ -31,6 +31,17 @@ import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 import {
+  beginAssetUpload,
+  AssetUploadError,
+  type UploadIntent,
+} from '../../../controller/operations/beginAssetUpload.js';
+import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
+import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
+import { mintAssetDownloadUrl } from '../../../controller/operations/mintAssetDownloadUrl.js';
+import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.js';
+import { restoreAsset } from '../../../controller/operations/restoreAsset.js';
+import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
+import {
   listInboxMessages,
   replyToMessage,
   moveMessage,
@@ -105,6 +116,105 @@ async function requireOrgRole(
   if (!member || (ROLE_ORDER[member.role] ?? -1) < ROLE_ORDER[required]) {
     throw new Error('Forbidden');
   }
+}
+
+// ── Asset upload helpers (spec: hadron-portal/specs/001-asset-upload) ──
+
+async function resolveAssetTargetMemoryId(
+  db: PrismaClient,
+  agentId: string,
+  userId: string,
+  ctx: Context,
+): Promise<{ memoryId: string }> {
+  if (ctx.sessionId) {
+    const session = await db.session.findUnique({
+      where: { id: ctx.sessionId },
+      select: { memoryId: true },
+    });
+    if (session?.memoryId) return { memoryId: session.memoryId };
+  }
+  const userMemory = await db.memory.findFirst({
+    where: { userMemoryOfAgentId: agentId, createdBy: userId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!userMemory) {
+    throw new GraphQLError(
+      'no user memory yet — start a chat with this agent before uploading',
+      { extensions: { code: 'NOT_FOUND' } },
+    );
+  }
+  return { memoryId: userMemory.id };
+}
+
+async function isAdminForOrg(
+  db: PrismaClient,
+  userId: string,
+  organizationId: string,
+): Promise<boolean> {
+  const member = await db.orgMember.findUnique({
+    where: { organizationId_userId: { organizationId, userId } },
+  });
+  if (!member) return false;
+  return member.role === 'ADMIN' || member.role === 'OWNER';
+}
+
+function rethrowAsset(err: unknown): never {
+  if (err instanceof AssetUploadError) {
+    throw new GraphQLError(err.message, { extensions: { code: err.code } });
+  }
+  throw err as Error;
+}
+
+function requireAssetCaller(ctx: Context): { appId: string; userId: string } {
+  if (!ctx.appId) {
+    throw new GraphQLError('asset upload requires an app context', {
+      extensions: { code: 'UNAUTHENTICATED' },
+    });
+  }
+  const userId = ctx.userId ?? ctx.appId;
+  return { appId: ctx.appId, userId };
+}
+
+function formatAssetNode(node: {
+  id: string;
+  loc: string;
+  memoryId: string;
+  name: string;
+  description: string | null;
+  data: unknown;
+  createdAt: Date;
+  deletedAt: Date | null;
+}, memoryUrn: string): {
+  id: string;
+  assetId: string;
+  loc: string;
+  urn: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  uploadedBy: string;
+  description: string | null;
+  scanStatus: string;
+  deletedAt: string | null;
+} {
+  const data = (typeof node.data === 'string'
+    ? JSON.parse(node.data)
+    : (node.data as Record<string, unknown>)) ?? {};
+  return {
+    id: node.id,
+    assetId: node.id,
+    loc: node.loc,
+    urn: `${memoryUrn}:${node.loc}`,
+    filename: String(data.filename ?? node.name),
+    mimeType: String(data.mimeType ?? 'application/octet-stream'),
+    sizeBytes: Number(data.sizeBytes ?? 0),
+    uploadedAt: String(data.uploadedAt ?? node.createdAt.toISOString()),
+    uploadedBy: String(data.uploadedBy ?? ''),
+    description: node.description ?? (typeof data.description === 'string' ? data.description : null),
+    scanStatus: String(data.scanStatus ?? 'pending').toUpperCase(),
+    deletedAt: typeof data.deletedAt === 'string' ? data.deletedAt : null,
+  };
 }
 
 // ── Memory access control ──────────────────────────────────────────────
@@ -1367,6 +1477,53 @@ export const resolvers = {
       if (!app || app.deletedAt) return null;
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
       return app;
+    },
+
+    agentAssets: async (
+      _: unknown,
+      args: { agentUrn: string; mimeType?: string; skip?: number; count?: number },
+      ctx: Context,
+    ) => {
+      const caller = requireAssetCaller(ctx);
+      try {
+        const result = await listAgentAssets(
+          ctx.db,
+          caller,
+          args,
+          (db, agentId, userId) => resolveAssetTargetMemoryId(db, agentId, userId, ctx),
+        );
+        const memoryUrns = new Map<string, string>();
+        const memoryIds = [...new Set(result.assets.map((a) => a.memoryId))];
+        if (memoryIds.length > 0) {
+          const mems = await ctx.db.memory.findMany({
+            where: { id: { in: memoryIds } },
+            select: { id: true, urn: true },
+          });
+          for (const m of mems) memoryUrns.set(m.id, m.urn);
+        }
+        return {
+          ...result,
+          assets: result.assets.map((n) =>
+            formatAssetNode(n, memoryUrns.get(n.memoryId) ?? ''),
+          ),
+        };
+      } catch (e) {
+        rethrowAsset(e);
+      }
+    },
+
+    assetDownloadUrl: async (
+      _: unknown,
+      args: { assetId: string; ttlSeconds?: number },
+      ctx: Context,
+    ) => {
+      const caller = requireAssetCaller(ctx);
+      try {
+        const result = await mintAssetDownloadUrl(ctx.db, caller, args);
+        return { ...result, expiresAt: result.expiresAt.toISOString() };
+      } catch (e) {
+        rethrowAsset(e);
+      }
     },
   },
 
@@ -4449,6 +4606,117 @@ export const resolvers = {
         });
       });
       return ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    },
+
+    beginAssetUpload: async (
+      _: unknown,
+      args: {
+        agentUrn: string;
+        filename: string;
+        mimeType: string;
+        sizeBytes: number;
+        description?: string;
+        uploadIntent: UploadIntent;
+        uploadRequestId?: string;
+      },
+      ctx: Context,
+    ) => {
+      const caller = requireAssetCaller(ctx);
+      try {
+        const ticket = await beginAssetUpload(
+          ctx.db,
+          caller,
+          args,
+          (db, agentId, userId) =>
+            resolveAssetTargetMemoryId(db, agentId, userId, ctx),
+        );
+        return { ...ticket, expiresAt: ticket.expiresAt.toISOString() };
+      } catch (e) {
+        rethrowAsset(e);
+      }
+    },
+
+    completeAssetUpload: async (
+      _: unknown,
+      { uploadId }: { uploadId: string },
+      ctx: Context,
+    ) => {
+      const caller = requireAssetCaller(ctx);
+      try {
+        const node = await completeAssetUpload(ctx.db, caller, { uploadId });
+        const memory = await ctx.db.memory.findUniqueOrThrow({
+          where: { id: node.memoryId },
+          select: { urn: true },
+        });
+        return formatAssetNode(node, memory.urn);
+      } catch (e) {
+        rethrowAsset(e);
+      }
+    },
+
+    softDeleteAsset: async (
+      _: unknown,
+      { assetId }: { assetId: string },
+      ctx: Context,
+    ) => {
+      const caller = requireAssetCaller(ctx);
+      try {
+        const node = await softDeleteAsset(
+          ctx.db,
+          caller,
+          { assetId },
+          isAdminForOrg,
+        );
+        const memory = await ctx.db.memory.findUniqueOrThrow({
+          where: { id: node.memoryId },
+          select: { urn: true },
+        });
+        return formatAssetNode(node, memory.urn);
+      } catch (e) {
+        rethrowAsset(e);
+      }
+    },
+
+    restoreAsset: async (
+      _: unknown,
+      { assetId }: { assetId: string },
+      ctx: Context,
+    ) => {
+      const caller = requireAssetCaller(ctx);
+      try {
+        const node = await restoreAsset(
+          ctx.db,
+          caller,
+          { assetId },
+          isAdminForOrg,
+        );
+        if (!node) return null;
+        const memory = await ctx.db.memory.findUniqueOrThrow({
+          where: { id: node.memoryId },
+          select: { urn: true },
+        });
+        return formatAssetNode(node, memory.urn);
+      } catch (e) {
+        rethrowAsset(e);
+      }
+    },
+
+    setAgentAssetUploadEnabled: async (
+      _: unknown,
+      args: { agentUrn: string; enable: boolean },
+      ctx: Context,
+    ) => {
+      const caller = requireAssetCaller(ctx);
+      try {
+        return await setAgentAssetUploadEnabled(
+          ctx.db,
+          caller,
+          args,
+          isAdminForOrg,
+        );
+      } catch (e) {
+        rethrowAsset(e);
+      }
     },
   },
 };

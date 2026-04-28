@@ -852,4 +852,98 @@ export const typeDefs = `#graphql
     lockedBy: String
     expiresAt: String
   }
+
+  # ── Asset upload (spec: hadron-portal/specs/001-asset-upload) ─────────
+
+  enum AssetScanStatus {
+    PENDING
+    CLEAN
+    BLOCKED
+  }
+
+  enum AssetUploadIntent {
+    USER
+    AGENT_REQUEST
+  }
+
+  type Asset {
+    id: ID!
+    assetId: String!
+    loc: String!
+    urn: String!
+    filename: String!
+    mimeType: String!
+    sizeBytes: Int!
+    uploadedAt: String!
+    uploadedBy: String!
+    description: String
+    scanStatus: AssetScanStatus!
+    deletedAt: String
+  }
+
+  type HttpHeader {
+    name: String!
+    value: String!
+  }
+
+  type AssetUploadTicket {
+    uploadId: String!
+    putUrl: String!
+    putHeaders: [HttpHeader!]!
+    expiresAt: String!
+    storageKey: String!
+    maxSizeBytes: Int!
+    allowedMimeType: String!
+  }
+
+  type AssetDownloadUrl {
+    url: String!
+    expiresAt: String!
+    filename: String!
+    mimeType: String!
+    sizeBytes: Int!
+  }
+
+  type AssetListResult {
+    assets: [Asset!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  extend type Query {
+    agentAssets(
+      agentUrn: String!
+      mimeType: String
+      skip: Int = 0
+      count: Int = 20
+    ): AssetListResult!
+
+    assetDownloadUrl(
+      assetId: String!
+      ttlSeconds: Int = 300
+    ): AssetDownloadUrl!
+  }
+
+  extend type Mutation {
+    beginAssetUpload(
+      agentUrn: String!
+      filename: String!
+      mimeType: String!
+      sizeBytes: Int!
+      description: String
+      uploadIntent: AssetUploadIntent!
+      uploadRequestId: String
+    ): AssetUploadTicket!
+
+    completeAssetUpload(uploadId: String!): Asset!
+
+    softDeleteAsset(assetId: String!): Asset!
+
+    restoreAsset(assetId: String!): Asset
+
+    setAgentAssetUploadEnabled(
+      agentUrn: String!
+      enable: Boolean!
+    ): App!
+  }
 `;

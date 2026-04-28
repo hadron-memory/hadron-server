@@ -311,7 +311,7 @@ model Memory {
 model Node {
   id          String    @id @default(cuid()) // UUIDv7 from node.yaml — stable across moves
   memoryId    String    @map("memory_id")
-  nodeType    String    @default("info") @map("node_type") // "info", "data", "task", "record", "chat", "plan", "parent"
+  nodeType    String    @default("info") @map("node_type") // "abstract", "asset", "info", "reference", "record", "system" — canonical list at hadron-concept/hadron-specs/Features/Node-Types.md
   name        String
   alias       String?
   loc         String
