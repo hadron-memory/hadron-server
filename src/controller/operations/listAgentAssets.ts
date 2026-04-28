@@ -42,16 +42,18 @@ export async function listAgentAssets(
   });
   if (!agent) throw new AssetUploadError('NOT_FOUND', 'agent not found');
 
-  const app = await db.app.findUnique({
-    where: { id: caller.appId },
-    select: { organizationId: true },
-  });
-  if (!app) throw new AssetUploadError('UNAUTHENTICATED', 'app not found');
-  if (app.organizationId !== agent.organizationId) {
-    throw new AssetUploadError('PERMISSION_DENIED', 'app not in agent organization');
+  if (caller.appId) {
+    const app = await db.app.findUnique({
+      where: { id: caller.appId },
+      select: { organizationId: true },
+    });
+    if (!app) throw new AssetUploadError('UNAUTHENTICATED', 'app not found');
+    if (app.organizationId !== agent.organizationId) {
+      throw new AssetUploadError('PERMISSION_DENIED', 'app not in agent organization');
+    }
   }
-  // Per-user filter (FR-014) is the security boundary; the asset:upload
-  // gate is for agent-initiated requests only.
+  // Per-user filter (FR-014) is the security boundary. Resolver-level
+  // org-membership check covers JWT users without an app.
 
   const { memoryId } = await resolveTargetMemoryId(db, agent.id, caller.userId);
   const memoryEnc = await getMemoryEncryptionInfo(db, memoryId);

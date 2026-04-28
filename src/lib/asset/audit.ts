@@ -23,10 +23,10 @@ export type AssetOperation =
 export interface AssetAuditEvent {
   operation: AssetOperation;
   assetId?: string;
-  agentId?: string;
-  memoryId?: string;
-  userId?: string;
-  appId?: string;
+  agentId?: string | null;
+  memoryId?: string | null;
+  userId?: string | null;
+  appId?: string | null;
   bytes?: number;
   ttlSeconds?: number;
   reason?: string;

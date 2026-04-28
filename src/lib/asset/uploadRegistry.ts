@@ -17,7 +17,7 @@ export interface UploadRegistryEntry {
   description?: string;
   agentId: string;
   memoryId: string;
-  appId: string;
+  appId: string | null;
   userId: string;
   uploadIntent: 'USER' | 'AGENT_REQUEST';
   uploadRequestId?: string;

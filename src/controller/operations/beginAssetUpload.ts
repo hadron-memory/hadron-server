@@ -28,7 +28,7 @@ export interface BeginAssetUploadInput {
 }
 
 export interface AppContext {
-  appId: string;
+  appId: string | null;
   userId: string;
 }
 
@@ -76,28 +76,39 @@ export async function beginAssetUpload(
   });
   if (!agent) throw new AssetUploadError('NOT_FOUND', 'agent not found');
 
-  const app = await db.app.findUnique({
-    where: { id: caller.appId },
-    select: { id: true, organizationId: true, agentTools: true, properties: true },
-  });
-  if (!app) throw new AssetUploadError('UNAUTHENTICATED', 'app not found');
-  if (app.organizationId !== agent.organizationId) {
-    throw new AssetUploadError('PERMISSION_DENIED', 'app not in agent organization');
-  }
-  // Spec FR-009: agent-initiated requests need the explicit asset:upload
-  // opt-in. User-initiated uploads (paperclip composer) are always allowed
-  // for the calling user — they're attaching to their own per-user memory.
-  if (
-    input.uploadIntent === 'AGENT_REQUEST' &&
-    !app.agentTools.includes('asset:upload')
-  ) {
+  // App is optional for portal user-initiated uploads (no AppAgent link
+  // for portal-only chatbot agents). When present, it gates AGENT_REQUEST
+  // calls and supplies per-agent overrides; when absent, platform defaults
+  // apply and AGENT_REQUEST is rejected (an agent without an App can't
+  // initiate uploads).
+  let appProperties: unknown = null;
+  if (caller.appId) {
+    const app = await db.app.findUnique({
+      where: { id: caller.appId },
+      select: { id: true, organizationId: true, agentTools: true, properties: true },
+    });
+    if (!app) throw new AssetUploadError('UNAUTHENTICATED', 'app not found');
+    if (app.organizationId !== agent.organizationId) {
+      throw new AssetUploadError('PERMISSION_DENIED', 'app not in agent organization');
+    }
+    if (
+      input.uploadIntent === 'AGENT_REQUEST' &&
+      !app.agentTools.includes('asset:upload')
+    ) {
+      throw new AssetUploadError(
+        'PERMISSION_DENIED',
+        'asset:upload not enabled for this agent',
+      );
+    }
+    appProperties = app.properties;
+  } else if (input.uploadIntent === 'AGENT_REQUEST') {
     throw new AssetUploadError(
       'PERMISSION_DENIED',
-      'asset:upload not enabled for this agent',
+      'agent-initiated upload requires an app context',
     );
   }
 
-  const limits = getEffectiveLimits(app.properties);
+  const limits = getEffectiveLimits(appProperties);
   if (input.sizeBytes > limits.maxBytes) {
     throw new AssetUploadError(
       'SIZE_EXCEEDED',

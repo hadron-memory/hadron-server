@@ -169,7 +169,7 @@ function rethrowAsset(err: unknown): never {
 async function requireAssetCaller(
   ctx: Context,
   source: { agentUrn?: string; assetId?: string },
-): Promise<{ appId: string; userId: string }> {
+): Promise<{ appId: string | null; userId: string }> {
   if (ctx.appId) {
     return { appId: ctx.appId, userId: ctx.userId ?? ctx.appId };
   }
@@ -199,12 +199,11 @@ async function requireAssetCaller(
   }
   const agent = await ctx.db.agent.findUnique({
     where: { urn: agentUrn },
-    select: { id: true, urn: true, organizationId: true },
+    select: { id: true, organizationId: true },
   });
   if (!agent) {
     throw new GraphQLError('agent not found', { extensions: { code: 'NOT_FOUND' } });
   }
-  // Portal user must be an org member of the agent's organization.
   const member = await ctx.db.orgMember.findUnique({
     where: {
       organizationId_userId: {
@@ -219,20 +218,16 @@ async function requireAssetCaller(
       extensions: { code: 'PERMISSION_DENIED' },
     });
   }
-  // Pick any App linked to this agent via AppAgent. Most chatbot agents
-  // have exactly one. The appId is used for record-keeping (registry,
-  // audit logging, per-agent property overrides) — the security boundary
-  // for portal user actions is the per-user filter (FR-014).
+  // Best-effort: pick any App linked to this agent via AppAgent so we can
+  // honor per-agent override properties + record an appId in the audit
+  // trail. Portal-only chatbot agents may not have any AppAgent row yet —
+  // that's fine, we proceed without an app context. The per-user filter
+  // (FR-014) is the security boundary for portal user actions.
   const link = await ctx.db.appAgent.findFirst({
     where: { agentId: agent.id, app: { deletedAt: null } },
     select: { appId: true },
   });
-  if (!link) {
-    throw new GraphQLError('no app linked to this agent', {
-      extensions: { code: 'NOT_FOUND' },
-    });
-  }
-  return { appId: link.appId, userId: ctx.userId };
+  return { appId: link?.appId ?? null, userId: ctx.userId };
 }
 
 function formatAssetNode(node: {
