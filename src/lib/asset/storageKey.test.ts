@@ -61,6 +61,19 @@ describe('buildStorageKey', () => {
       'baragaun.com/notes/01900000-0000-7000-8000-000000000002',
     );
   });
+
+  it('explodes per-user memory URN colons into directory segments', () => {
+    const key = buildStorageKey({
+      orgUrn: 'baragaun.com',
+      memoryUrn: 'baragaun.com:juno:user:019dd3cfdc43783e827690ee7e0c85dd',
+      assetId: '019dd446b8d472e5bd2d2e55b96416e9',
+      filename: 'photo.jpeg',
+    });
+    expect(key).toBe(
+      'baragaun.com/juno/user/019dd3cfdc43783e827690ee7e0c85dd/019dd446b8d472e5bd2d2e55b96416e9.jpeg',
+    );
+    expect(validateStorageKey(key)).toBe(true);
+  });
 });
 
 describe('validateStorageKey', () => {
