@@ -909,6 +909,11 @@ model AppAgent {
   subscriptionType SubscriptionType @default(READ_ONLY) @map("subscription_type")
   trainingMode     Boolean          @default(false) @map("training_mode")
   createdAt        DateTime         @default(now()) @map("created_at")
+  createdBy        String?          @map("created_by")
+  updatedAt        DateTime?        @map("updated_at")
+  updatedBy        String?          @map("updated_by")
+  deletedAt        DateTime?        @map("deleted_at")
+  deletedBy        String?          @map("deleted_by")
 
   app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
   agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
@@ -930,8 +935,6 @@ model AppLogEntry {
   createdBy String?   @map("created_by")
   updatedAt DateTime? @map("updated_at")
   updatedBy String?   @map("updated_by")
-  deletedAt DateTime? @map("deleted_at")
-  deletedBy String?   @map("deleted_by")
 
   app App @relation(fields: [appId], references: [id], onDelete: Cascade)
 
