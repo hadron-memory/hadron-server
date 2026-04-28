@@ -33,6 +33,12 @@ export function getR2Client(): S3Client {
     endpoint,
     forcePathStyle: !!process.env.R2_ENDPOINT_OVERRIDE,
     credentials: { accessKeyId, secretAccessKey },
+    // AWS SDK v3 adds flexible-checksum headers by default
+    // (x-amz-checksum-crc32 etc.) that MinIO and some R2 path-style
+    // configurations reject with ERR_CONNECTION_RESET on presigned PUT.
+    // Compute checksums only when the operation actually requires them.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
   });
   return cached;
 }
