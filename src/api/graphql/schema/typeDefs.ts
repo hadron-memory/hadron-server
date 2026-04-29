@@ -133,7 +133,10 @@ export const typeDefs = `#graphql
     type: String!
     nodeLoc: String
     actionArgs: JSON
-    stationId: String
+    # Caller identity. The legacy stationId field was removed in
+    # 003-station-to-app Phase 3a-2 (2026-04-29) — App-keyed events
+    # attribute via appId. The Prisma column survives until Phase 4.
+    appId: String
     sessionId: String
     model: String
     tokensIn: Int
@@ -154,66 +157,12 @@ export const typeDefs = `#graphql
     createdAt: String!
   }
 
-  # A station's subscription to an agent.
-  type StationAgentSub {
-    id: ID!
-    agent: Agent!
-    subscriptionType: SubscriptionType!
-    trainingMode: Boolean!
-    createdAt: String!
-  }
-
-  type Station {
-    id: ID!
-    urn: String!
-    name: String!
-    stationType: StationType!
-    description: String
-    systemPrompt: String
-    role: Role!
-    apiKeyShown: Boolean!
-    agentTools: [String!]!
-    aiProvider: String
-    aiModel: String
-    hasAiApiKey: Boolean!
-    organizationId: String
-    userId: String
-    user: User
-    agentSubscriptions: [StationAgentSub!]!
-    expiresAt: String
-    createdAt: String!
-    lastUsedAt: String
-  }
-
-  # Returned once at creation — the raw key is never stored
-  type StationCreated {
-    station: Station!
-    rawKey: String!
-  }
-
-  type StationKey {
-    id: ID!
-    stationId: String!
-    userId: String!
-    label: String
-    keyPreview: String
-    lastUsedAt: String
-    createdAt: String!
-    revokedAt: String
-  }
-
-  # Returned once at key creation — the raw key is never stored
-  type StationKeyCreated {
-    key: StationKey!
-    rawKey: String!
-  }
-
-  # Decrypted AI config for chatbot use (only returned to station owner)
-  type StationAIConfig {
-    provider: String!
-    apiKey: String!
-    model: String!
-  }
+  # The legacy Station / StationKey / StationAgentSub / StationCreated /
+  # StationKeyCreated / StationAIConfig GraphQL types were removed in
+  # 003-station-to-app Phase 3a-2 (2026-04-29). The Station Prisma model
+  # still exists and is dropped in Phase 4; until then the auth resolver
+  # falls back to it for any in-flight legacy bearer tokens. No GraphQL
+  # surface accesses Station-shaped data — callers should use App.
 
   type User {
     id: ID!
@@ -240,14 +189,63 @@ export const typeDefs = `#graphql
     urn: String!
     organizationId: String!
     organization: Organization
+    # Absorbed from Station in 003-station-to-app Phase 1 (2026-04-28).
+    # appType replaces Station.stationType; role replaces Station.role.
+    appType: AppType!
+    role: AppMembershipRole!
+    description: String
+    systemPrompt: String
+    agentTools: [String!]!
+    aiProvider: String
+    aiModel: String
+    hasAiApiKey: Boolean!
+    expiresAt: String
+    # App-original fields
     createUserPermission: CreateUserPermission!
     identifyUserMethod: IdentifyUserMethod!
     sessionTimeoutSeconds: Int!
     anonymousTtlDays: Int!
     agents: [Agent!]!
+    # Membership rows linking this App to agents — replaces
+    # Station.agentSubscriptions with the AppAgent model. Each row carries
+    # the AppAgentRole (operate | develop, per Constitution Invariant #6),
+    # the (carried-over) subscriptionType, and trainingMode.
+    agentSubscriptions: [AppAgentSub!]!
     keys: [AppKey!]!
     createdAt: String!
     updatedAt: String
+  }
+
+  enum AppType {
+    WORKSTATION
+    CHATBOT
+    AGENT
+    AUTOMATION
+    CLOUD
+    IOT
+  }
+
+  enum AppMembershipRole {
+    OWNER
+    ADMIN
+    CONTRIBUTOR
+    READER
+  }
+
+  enum AppAgentRole {
+    OPERATE
+    DEVELOP
+  }
+
+  # An App's link to an Agent — mirrors StationAgentSub (which is deprecated).
+  type AppAgentSub {
+    appId: String!
+    agentId: String!
+    agent: Agent!
+    role: AppAgentRole!
+    subscriptionType: SubscriptionType!
+    trainingMode: Boolean!
+    createdAt: String!
   }
 
   type AppKey {
@@ -264,6 +262,19 @@ export const typeDefs = `#graphql
   type AppKeyCreated {
     key: AppKey!
     rawKey: String!
+  }
+
+  # Returned once at App creation / regenerateAppKey — the raw key is never stored
+  type AppCreated {
+    app: App!
+    rawKey: String!
+  }
+
+  # Decrypted AI config for an App (owner / org admin only) — mirrors StationAIConfig.
+  type AppAIConfig {
+    provider: String!
+    apiKey: String!
+    model: String!
   }
 
   # A company or team that owns one or more Hadron memories.
@@ -627,17 +638,9 @@ export const typeDefs = `#graphql
     sessions(type: String, repo: String, customerId: String, limit: Int, offset: Int): [Session!]!
     session(id: ID!): Session
 
-    # Stations (admin only)
-    stations: [Station!]!
-    station(id: ID!): Station
-    # Stations owned by the current user
-    myStations: [Station!]!
-    # All nodes accessible by a station (across all subscribed memories)
-    stationNodes(stationId: ID!, limit: Int): [Node!]!
-    # Decrypted AI config for a station (owner only)
-    stationAIConfig(stationId: ID!): StationAIConfig
-    # List keys for a station (current user's keys; org admins see all)
-    stationKeys(stationId: ID!): [StationKey!]!
+    # The Station-shaped queries (stations, station, myStations, stationNodes,
+    # stationAIConfig, stationKeys) were removed in 003-station-to-app
+    # Phase 3a-2 (2026-04-29). Use the App-shaped equivalents below.
 
     # Users (admin only)
     users: [User!]!
@@ -655,8 +658,7 @@ export const typeDefs = `#graphql
     # Invitation lookup (public — no auth required, used by invite acceptance page)
     invitation(slug: String!): UserInvitation
 
-    # The station authenticated by the current API key (null for JWT users)
-    myStation: Station
+    # myStation was removed in 003-station-to-app Phase 3a-2 — use myApp.
 
     # Public memory marketplace — any authenticated user
     publicMemories: [Memory!]!
@@ -680,6 +682,16 @@ export const typeDefs = `#graphql
     # Apps (org ADMIN)
     apps(orgId: ID!): [App!]!
     app(id: ID!): App
+    # The App authenticated by the current AppKey (null for JWT users without an App)
+    myApp: App
+    # Apps where the current user is a member of the App's org
+    myApps: [App!]!
+    # All nodes accessible by an App (across all subscribed memories)
+    appNodes(appId: ID!, limit: Int): [Node!]!
+    # Decrypted AI config for an App (org ADMIN of the App's org)
+    appAIConfig(appId: ID!): AppAIConfig
+    # List keys for an App (org ADMIN of the App's org)
+    appKeys(appId: ID!): [AppKey!]!
 
     # Agent AI config (org ADMIN) — returns the decrypted API key so the
     # portal backend can make LLM calls on behalf of the user.
@@ -744,19 +756,19 @@ export const typeDefs = `#graphql
     # Record a usage event
     recordUsage(event: UsageEventInput!): Boolean!
 
-    # Station management
-    createStation(name: String!, stationType: StationType!, role: Role!, description: String, systemPrompt: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): StationCreated!
-    updateStation(id: ID!, name: String, urn: String, stationType: StationType, description: String, systemPrompt: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): Station!
-    regenerateApiKey(id: ID!): StationCreated!
-    revokeStation(id: ID!): Boolean!
+    # The Station-shaped mutations (createStation, updateStation,
+    # regenerateApiKey, revokeStation, createStationKey, revokeStationKey,
+    # subscribeStationToAgent, unsubscribeStationFromAgent) were removed
+    # in 003-station-to-app Phase 3a-2 (2026-04-29). Use the App-shaped
+    # mutations: createApp + createAppKey, updateApp, regenerateAppKey,
+    # deleteApp, revokeAppKey, addAgentToApp (with role / subscriptionType
+    # / trainingMode args), removeAgentFromApp.
 
-    # Station key management
-    createStationKey(stationId: ID!, label: String): StationKeyCreated!
-    revokeStationKey(keyId: ID!): Boolean!
-
-    # Station agent subscriptions (org ADMIN or platform ADMIN)
-    subscribeStationToAgent(stationId: ID!, agentId: ID!, subscriptionType: SubscriptionType, trainingMode: Boolean): Station!
-    unsubscribeStationFromAgent(stationId: ID!, agentId: ID!): Station!
+    # App key management beyond what's already declared in the Apps section
+    # below — adds the regenerate path that the deprecated regenerateApiKey
+    # mirrors. The basic createAppKey / revokeAppKey / deleteApp are
+    # declared with the other App mutations.
+    regenerateAppKey(id: ID!): AppCreated!
 
     # User management
     updateMyProfile(name: String, handle: String, email: String): User!
@@ -857,12 +869,25 @@ export const typeDefs = `#graphql
 
     # ── Apps and multi-user-agent sessions ────────────────────────────
 
-    # App management (org ADMIN) — third-party applications calling Hadron
-    # on behalf of their own users.
+    # App management (org ADMIN) — the unified caller-identity entity per
+    # Constitution Invariant #6. Absorbs the legacy Station entity; the
+    # *appType, role, description, systemPrompt, agentTools, aiProvider,
+    # aiModel, aiApiKey, expiresAt* fields below were absorbed from
+    # Station in 003-station-to-app Phase 1 (2026-04-28) and exposed on
+    # this surface in Phase 3a-2.
     createApp(
       orgId: ID!
       name: String!
       urn: String
+      appType: AppType
+      role: AppMembershipRole
+      description: String
+      systemPrompt: String
+      agentTools: [String!]
+      aiProvider: String
+      aiModel: String
+      aiApiKey: String
+      expiresAt: String
       createUserPermission: CreateUserPermission
       identifyUserMethod: IdentifyUserMethod
       sessionTimeoutSeconds: Int
@@ -872,13 +897,32 @@ export const typeDefs = `#graphql
       id: ID!
       name: String
       urn: String
+      appType: AppType
+      role: AppMembershipRole
+      description: String
+      systemPrompt: String
+      agentTools: [String!]
+      aiProvider: String
+      aiModel: String
+      aiApiKey: String
+      expiresAt: String
       createUserPermission: CreateUserPermission
       identifyUserMethod: IdentifyUserMethod
       sessionTimeoutSeconds: Int
       anonymousTtlDays: Int
     ): App!
     deleteApp(id: ID!): Boolean!
-    addAgentToApp(appId: ID!, agentId: ID!): App!
+    # Add an Agent to an App's membership graph. role / subscriptionType /
+    # trainingMode were added in Phase 3a-2 (per Constitution Invariant #6
+    # for AppAgent.role; subscriptionType + trainingMode carried over from
+    # the legacy StationAgentSubscription).
+    addAgentToApp(
+      appId: ID!
+      agentId: ID!
+      role: AppAgentRole
+      subscriptionType: SubscriptionType
+      trainingMode: Boolean
+    ): App!
     removeAgentFromApp(appId: ID!, agentId: ID!): App!
     createAppKey(appId: ID!, label: String): AppKeyCreated!
     revokeAppKey(id: ID!): Boolean!
