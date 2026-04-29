@@ -80,13 +80,17 @@ describe('provisionPersonalWorkspace', () => {
     expect(appAgent!.trainingMode).toBe(false);
   });
 
-  it('writes a PendingSetup record carrying appId (not stationId)', async () => {
+  it('writes a PendingSetup record carrying appId', async () => {
     const { appId, rawKey } = await provisionPersonalWorkspace(db, userId, 'Test User');
 
     const setup = await db.pendingSetup.findUnique({ where: { userId } });
     expect(setup).toBeDefined();
     expect(setup!.appId).toBe(appId);
-    expect(setup!.stationId).toBeNull();
+    // PendingSetup.stationId was dropped in Phase 3a-1 — the only writer
+    // is App-only and rows are ephemeral, so the legacy column had no
+    // remaining purpose. (Verified by the type system: the field no
+    // longer exists on the row.)
+    expect('stationId' in setup!).toBe(false);
     expect(setup!.consumed).toBe(false);
     expect(setup!.rawKeyEncrypted).toBe(rawKey); // TODO: encrypt at rest
   });
