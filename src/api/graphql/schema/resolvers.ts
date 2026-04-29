@@ -1,5 +1,5 @@
 import bcrypt from 'bcrypt';
-import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
@@ -32,7 +32,17 @@ import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.
 import { restoreAsset } from '../../../controller/operations/restoreAsset.js';
 import { GraphQLError } from 'graphql';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
-import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
+import type {
+  PrismaClient,
+  Role,
+  StationType,
+  AppType,
+  AppMembershipRole,
+  AppAgentRole,
+  SubscriptionType,
+  MemoryVisibility,
+  Prisma,
+} from '../../../generated/prisma/index.js';
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
@@ -334,7 +344,11 @@ const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, tak
 
 const APP_INCLUDE = {
   keys: { where: { revokedAt: null }, orderBy: { createdAt: 'desc' as const } },
-  appAgents: { include: { agent: true } },
+  appAgents: {
+    where: { deletedAt: null },
+    include: { agent: { include: AGENT_INCLUDE } },
+    orderBy: { createdAt: 'asc' as const },
+  },
 };
 
 const toISO = (v: Date | string | null | undefined): string | null =>
@@ -728,6 +742,8 @@ export const resolvers = {
   App: {
     createdAt: (a: { createdAt: Date | string }) => toISO(a.createdAt)!,
     updatedAt: (a: { updatedAt?: Date | string | null }) => toISO(a.updatedAt ?? null),
+    expiresAt: (a: { expiresAt?: Date | string | null }) => toISO(a.expiresAt ?? null),
+    hasAiApiKey: (a: { aiApiKeyEncrypted?: string | null }) => !!a.aiApiKeyEncrypted,
     organization: (a: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
       (a as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: a.organizationId } }),
@@ -736,10 +752,18 @@ export const resolvers = {
         return a.appAgents.map((aa) => aa.agent).filter((g) => g && !(g as { deletedAt?: Date | null }).deletedAt);
       }
       const rows = await ctx.db.appAgent.findMany({
-        where: { appId: a.id },
+        where: { appId: a.id, deletedAt: null },
         include: { agent: true },
       });
       return rows.map((r) => r.agent).filter((g) => !g.deletedAt);
+    },
+    agentSubscriptions: async (a: { id: string; appAgents?: unknown[] }, _: unknown, ctx: Context) => {
+      if (a.appAgents) return a.appAgents;
+      return ctx.db.appAgent.findMany({
+        where: { appId: a.id, deletedAt: null },
+        include: { agent: { include: AGENT_INCLUDE } },
+        orderBy: { createdAt: 'asc' },
+      });
     },
     keys: async (a: { id: string; keys?: unknown[] }, _: unknown, ctx: Context) => {
       if (a.keys) return a.keys;
@@ -748,6 +772,11 @@ export const resolvers = {
         orderBy: { createdAt: 'desc' },
       });
     },
+  },
+  AppAgentSub: {
+    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    agent: async (s: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) =>
+      s.agent ?? ctx.db.agent.findUnique({ where: { id: s.agentId } }),
   },
   AppKey: {
     createdAt: (k: { createdAt: Date | string }) => toISO(k.createdAt)!,
@@ -1492,6 +1521,102 @@ export const resolvers = {
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
       return app;
     },
+
+    // ── App-shaped queries (Phase 3a-2 of 003-station-to-app) ──────────
+    // Mirror the Station-shaped queries that today live in the Station
+    // section (myStation, myStations, stationNodes, stationAIConfig,
+    // stationKeys). Storage routes through App / AppKey / AppAgent.
+
+    myApp: async (_: unknown, __: unknown, ctx: Context) => {
+      // Returns the App for the current AppKey (ctx.appId set by auth middleware).
+      if (!ctx.appId) return null;
+      return ctx.db.app.findUnique({
+        where: { id: ctx.appId, deletedAt: null },
+        include: APP_INCLUDE,
+      });
+    },
+
+    myApps: async (_: unknown, __: unknown, ctx: Context) => {
+      // Apps where the current user is a member of the App's org. Mirrors
+      // the user-scoped semantics of myStations (which used Station.userId
+      // directly); App doesn't carry userId, so org membership is the
+      // routing.
+      if (!ctx.userId) return [];
+      const memberships = await ctx.db.orgMember.findMany({
+        where: { userId: ctx.userId, deletedAt: null },
+        select: { organizationId: true },
+      });
+      const orgIds = memberships.map((m) => m.organizationId);
+      if (orgIds.length === 0) return [];
+      return ctx.db.app.findMany({
+        where: { organizationId: { in: orgIds }, deletedAt: null },
+        include: APP_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+      });
+    },
+
+    appNodes: async (
+      _: unknown,
+      { appId, limit }: { appId: string; limit?: number },
+      ctx: Context,
+    ) => {
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      // Org-scoped auth: anyone with org membership at READER+ on the App's
+      // org may read its accessible nodes; platform ADMIN/OWNER bypasses.
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      if (!isPlatformAdmin) {
+        await requireOrgRole(ctx, app.organizationId, 'READER');
+      }
+      const subs = await ctx.db.appAgent.findMany({
+        where: { appId, deletedAt: null },
+        include: { agent: { include: { memoryItems: true } } },
+      });
+      const memoryIds = [
+        ...new Set(subs.flatMap((s) => s.agent.memoryItems.map((m) => m.memoryId))),
+      ];
+      if (memoryIds.length === 0) return [];
+
+      const results = await ctx.db.node.findMany({
+        where: { memoryId: { in: memoryIds }, deletedAt: null },
+        orderBy: { loc: 'asc' },
+        take: limit ?? 500,
+        include: {
+          outgoingEdges: { include: { target: true } },
+          incomingEdges: { include: { source: true } },
+          memory: { select: { id: true, urn: true, name: true, organizationId: true } },
+        },
+      });
+      await decryptNodesBatch(ctx.db, results);
+      return results;
+    },
+
+    appAIConfig: async (_: unknown, { appId }: { appId: string }, ctx: Context) => {
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      // Org-scoped auth: ADMIN of the App's org (or platform ADMIN) sees the
+      // decrypted key. Mirrors stationAIConfig's gate but routed via org.
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      if (!isPlatformAdmin) {
+        await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      }
+      if (!app.aiProvider || !app.aiModel || !app.aiApiKeyEncrypted) return null;
+      return {
+        provider: app.aiProvider,
+        apiKey: decryptToken(app.aiApiKeyEncrypted),
+        model: app.aiModel,
+      };
+    },
+
+    appKeys: async (_: unknown, { appId }: { appId: string }, ctx: Context) => {
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      if (!isPlatformAdmin) {
+        await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      }
+      return ctx.db.appKey.findMany({
+        where: { appId, revokedAt: null },
+        orderBy: { createdAt: 'desc' },
+      });
+    },
   },
 
   Mutation: {
@@ -2108,6 +2233,35 @@ export const resolvers = {
         where: { stationId_agentId: { stationId, agentId } },
       });
       return ctx.db.station.findUniqueOrThrow({ where: { id: stationId }, include: STATION_INCLUDE });
+    },
+
+    regenerateAppKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const existing = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      if (!isPlatformAdmin) await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
+
+      // Revoke all active keys, then create a fresh one.
+      await ctx.db.appKey.updateMany({
+        where: { appId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+      const keyHash = createHash('sha256').update(rawKey).digest('hex');
+      await ctx.db.appKey.create({
+        data: {
+          id: generateId(),
+          appId: id,
+          keyHash,
+          keyPreview: rawKey.slice(-4),
+          label: 'Regenerated key',
+          createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+        },
+      });
+      const fresh = await ctx.db.app.findUniqueOrThrow({
+        where: { id },
+        include: APP_INCLUDE,
+      });
+      return { app: fresh, rawKey };
     },
 
     updateMyProfile: async (
@@ -4160,9 +4314,37 @@ export const resolvers = {
 
     createApp: async (
       _: unknown,
-      { orgId, name, urn, createUserPermission, identifyUserMethod, sessionTimeoutSeconds, anonymousTtlDays }: {
+      {
+        orgId,
+        name,
+        urn,
+        // Absorbed Station fields (Phase 3a-2 of 003-station-to-app)
+        appType,
+        role,
+        description,
+        systemPrompt,
+        agentTools,
+        aiProvider,
+        aiModel,
+        aiApiKey,
+        expiresAt,
+        // App-original fields
+        createUserPermission,
+        identifyUserMethod,
+        sessionTimeoutSeconds,
+        anonymousTtlDays,
+      }: {
         orgId: string; name: string;
         urn?: string;
+        appType?: AppType;
+        role?: AppMembershipRole;
+        description?: string;
+        systemPrompt?: string;
+        agentTools?: string[];
+        aiProvider?: string;
+        aiModel?: string;
+        aiApiKey?: string;
+        expiresAt?: string;
         createUserPermission?: 'DENY' | 'EXPLICIT' | 'IMPLICIT';
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
@@ -4199,6 +4381,15 @@ export const resolvers = {
           organizationId: orgId,
           name,
           urn: appUrn,
+          appType: appType ?? 'WORKSTATION',
+          role: role ?? 'READER',
+          description: description ?? null,
+          systemPrompt: systemPrompt ?? null,
+          agentTools: agentTools ?? [],
+          aiProvider: aiProvider ?? null,
+          aiModel: aiModel ?? null,
+          aiApiKeyEncrypted: aiApiKey ? encryptToken(aiApiKey) : null,
+          expiresAt: expiresAt ? new Date(expiresAt) : undefined,
           createUserPermission: createUserPermission ?? 'EXPLICIT',
           identifyUserMethod: identifyUserMethod ?? 'USER_ID',
           sessionTimeoutSeconds: sessionTimeoutSeconds ?? 900,
@@ -4211,8 +4402,36 @@ export const resolvers = {
 
     updateApp: async (
       _: unknown,
-      { id, name, urn, createUserPermission, identifyUserMethod, sessionTimeoutSeconds, anonymousTtlDays }: {
+      {
+        id,
+        name,
+        urn,
+        // Absorbed Station fields (Phase 3a-2 of 003-station-to-app)
+        appType,
+        role,
+        description,
+        systemPrompt,
+        agentTools,
+        aiProvider,
+        aiModel,
+        aiApiKey,
+        expiresAt,
+        // App-original fields
+        createUserPermission,
+        identifyUserMethod,
+        sessionTimeoutSeconds,
+        anonymousTtlDays,
+      }: {
         id: string; name?: string; urn?: string;
+        appType?: AppType;
+        role?: AppMembershipRole;
+        description?: string;
+        systemPrompt?: string;
+        agentTools?: string[];
+        aiProvider?: string;
+        aiModel?: string;
+        aiApiKey?: string;
+        expiresAt?: string;
         createUserPermission?: 'DENY' | 'EXPLICIT' | 'IMPLICIT';
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
@@ -4242,6 +4461,15 @@ export const resolvers = {
         data: {
           ...(name !== undefined ? { name } : {}),
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
+          ...(appType !== undefined ? { appType } : {}),
+          ...(role !== undefined ? { role } : {}),
+          ...(description !== undefined ? { description } : {}),
+          ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+          ...(agentTools !== undefined ? { agentTools } : {}),
+          ...(aiProvider !== undefined ? { aiProvider } : {}),
+          ...(aiModel !== undefined ? { aiModel } : {}),
+          ...(aiApiKey !== undefined ? { aiApiKeyEncrypted: aiApiKey ? encryptToken(aiApiKey) : null } : {}),
+          ...(expiresAt !== undefined ? { expiresAt: expiresAt ? new Date(expiresAt) : null } : {}),
           ...(createUserPermission !== undefined ? { createUserPermission } : {}),
           ...(identifyUserMethod !== undefined ? { identifyUserMethod } : {}),
           ...(sessionTimeoutSeconds !== undefined ? { sessionTimeoutSeconds } : {}),
@@ -4261,7 +4489,23 @@ export const resolvers = {
 
     addAgentToApp: async (
       _: unknown,
-      { appId, agentId }: { appId: string; agentId: string },
+      {
+        appId,
+        agentId,
+        // Phase 3a-2 (003-station-to-app): role per Constitution Invariant
+        // #6; subscriptionType + trainingMode carried over from
+        // StationAgentSubscription. Optional — defaults match the schema
+        // defaults (OPERATE / READ_ONLY / false).
+        role,
+        subscriptionType,
+        trainingMode,
+      }: {
+        appId: string;
+        agentId: string;
+        role?: AppAgentRole;
+        subscriptionType?: SubscriptionType;
+        trainingMode?: boolean;
+      },
       ctx: Context,
     ) => {
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
@@ -4273,8 +4517,20 @@ export const resolvers = {
       }
       await ctx.db.appAgent.upsert({
         where: { appId_agentId: { appId, agentId } },
-        create: { appId, agentId },
-        update: {},
+        create: {
+          appId,
+          agentId,
+          role: role ?? 'OPERATE',
+          subscriptionType: subscriptionType ?? 'READ_ONLY',
+          trainingMode: trainingMode ?? false,
+          createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+        },
+        update: {
+          ...(role !== undefined ? { role } : {}),
+          ...(subscriptionType !== undefined ? { subscriptionType } : {}),
+          ...(trainingMode !== undefined ? { trainingMode } : {}),
+          updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+        },
       });
       return ctx.db.app.findUniqueOrThrow({ where: { id: appId }, include: APP_INCLUDE });
     },
