@@ -28,6 +28,8 @@ import { completeAssetUpload } from '../../../controller/operations/completeAsse
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
 import { mintAssetDownloadUrl } from '../../../controller/operations/mintAssetDownloadUrl.js';
+import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.js';
+import { restoreAsset } from '../../../controller/operations/restoreAsset.js';
 import { GraphQLError } from 'graphql';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
@@ -1744,6 +1746,34 @@ export const resolvers = {
         ctx.db,
         { userId: ctx.userId },
         input,
+        isOrgAdminFor,
+      );
+    },
+
+    softDeleteAsset: async (
+      _: unknown,
+      { assetId }: { assetId: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      return softDeleteAsset(
+        ctx.db,
+        { userId: ctx.userId, appId: ctx.appId },
+        { assetId },
+        isOrgAdminFor,
+      );
+    },
+
+    restoreAsset: async (
+      _: unknown,
+      { assetId }: { assetId: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      return restoreAsset(
+        ctx.db,
+        { userId: ctx.userId, appId: ctx.appId },
+        { assetId },
         isOrgAdminFor,
       );
     },
