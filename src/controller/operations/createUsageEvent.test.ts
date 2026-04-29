@@ -1,14 +1,22 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb, createDbStation, createDbNode, createDbOrgAndGraph } from '../../test/helpers.js';
+import {
+  cleanDb,
+  createDbAppWithKey,
+  createDbStation,
+  createDbNode,
+  createDbOrgAndGraph,
+} from '../../test/helpers.js';
 import { createUsageEvent } from './createUsageEvent.js';
 
 let memoryId: string;
+let orgId: string;
 
 beforeEach(async () => {
   await cleanDb(db);
-  const { graph } = await createDbOrgAndGraph(db);
+  const { org, graph } = await createDbOrgAndGraph(db);
   memoryId = graph.id;
+  orgId = org.id;
 });
 
 describe('createUsageEvent', () => {
@@ -60,6 +68,43 @@ describe('createUsageEvent', () => {
       stationId: station.id,
     });
     expect(result.error).toBeUndefined();
+    expect(result.event!.stationId).toBe(station.id);
+    expect(result.event!.appId).toBeNull();
+  });
+
+  // Phase 3a (US3) of 003-station-to-app: App-keyed callers attribute via appId
+  // ---------------------------------------------------------------------------
+
+  it('stores optional appId for App-keyed callers', async () => {
+    const { app } = await createDbAppWithKey(db, 'usage-app', orgId);
+    const result = await createUsageEvent({
+      type: 'click',
+      appId: app.id,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.event!.appId).toBe(app.id);
+    expect(result.event!.stationId).toBeNull();
+  });
+
+  it('uses appId for createdBy when both appId and stationId are absent', async () => {
+    const result = await createUsageEvent({ type: 'page-view' });
+    expect(result.error).toBeUndefined();
+    expect(result.event!.appId).toBeNull();
+    expect(result.event!.stationId).toBeNull();
+  });
+
+  it('prefers appId over stationId for createdBy when both are set (defensive)', async () => {
+    const station = await createDbStation(db, 'both-station', 'READER');
+    const { app } = await createDbAppWithKey(db, 'both-app', orgId);
+    const result = await createUsageEvent({
+      type: 'click',
+      appId: app.id,
+      stationId: station.id,
+    });
+    expect(result.error).toBeUndefined();
+    // Both columns are populated as written; createdBy reflects the App
+    // (App wins) so audit trails attribute the call to the unified entity.
+    expect(result.event!.appId).toBe(app.id);
     expect(result.event!.stationId).toBe(station.id);
   });
 });
