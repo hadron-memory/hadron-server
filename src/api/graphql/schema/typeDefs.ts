@@ -133,8 +133,10 @@ export const typeDefs = `#graphql
     type: String!
     nodeLoc: String
     actionArgs: JSON
+    # Caller identity. The legacy stationId field was removed in
+    # 003-station-to-app Phase 3a-2 (2026-04-29) — App-keyed events
+    # attribute via appId. The Prisma column survives until Phase 4.
     appId: String
-    stationId: String @deprecated(reason: "Use appId. Removed in 003-station-to-app Phase 4.")
     sessionId: String
     model: String
     tokensIn: Int
@@ -155,72 +157,12 @@ export const typeDefs = `#graphql
     createdAt: String!
   }
 
-  # A station's subscription to an agent.
-  # DEPRECATED — use AppAgentSub. Removed in 003-station-to-app Phase 4.
-  type StationAgentSub {
-    id: ID!
-    agent: Agent!
-    subscriptionType: SubscriptionType!
-    trainingMode: Boolean!
-    createdAt: String!
-  }
-
-  # DEPRECATED — use App. Removed in 003-station-to-app Phase 4.
-  type Station {
-    id: ID!
-    urn: String!
-    name: String!
-    stationType: StationType!
-    description: String
-    systemPrompt: String
-    role: Role!
-    apiKeyShown: Boolean!
-    agentTools: [String!]!
-    aiProvider: String
-    aiModel: String
-    hasAiApiKey: Boolean!
-    organizationId: String
-    userId: String
-    user: User
-    agentSubscriptions: [StationAgentSub!]!
-    expiresAt: String
-    createdAt: String!
-    lastUsedAt: String
-  }
-
-  # Returned once at creation — the raw key is never stored
-  # DEPRECATED — use AppCreated. Removed in 003-station-to-app Phase 4.
-  type StationCreated {
-    station: Station!
-    rawKey: String!
-  }
-
-  # DEPRECATED — use AppKey. Removed in 003-station-to-app Phase 4.
-  type StationKey {
-    id: ID!
-    stationId: String!
-    userId: String!
-    label: String
-    keyPreview: String
-    lastUsedAt: String
-    createdAt: String!
-    revokedAt: String
-  }
-
-  # Returned once at key creation — the raw key is never stored
-  # DEPRECATED — use AppKeyCreated. Removed in 003-station-to-app Phase 4.
-  type StationKeyCreated {
-    key: StationKey!
-    rawKey: String!
-  }
-
-  # Decrypted AI config for chatbot use (only returned to station owner)
-  # DEPRECATED — use AppAIConfig. Removed in 003-station-to-app Phase 4.
-  type StationAIConfig {
-    provider: String!
-    apiKey: String!
-    model: String!
-  }
+  # The legacy Station / StationKey / StationAgentSub / StationCreated /
+  # StationKeyCreated / StationAIConfig GraphQL types were removed in
+  # 003-station-to-app Phase 3a-2 (2026-04-29). The Station Prisma model
+  # still exists and is dropped in Phase 4; until then the auth resolver
+  # falls back to it for any in-flight legacy bearer tokens. No GraphQL
+  # surface accesses Station-shaped data — callers should use App.
 
   type User {
     id: ID!
@@ -696,14 +638,9 @@ export const typeDefs = `#graphql
     sessions(type: String, repo: String, customerId: String, limit: Int, offset: Int): [Session!]!
     session(id: ID!): Session
 
-    # Stations (admin only) — DEPRECATED, use App-shaped queries below.
-    # Removed in 003-station-to-app Phase 4.
-    stations: [Station!]! @deprecated(reason: "Use apps. Removed in 003-station-to-app Phase 4.")
-    station(id: ID!): Station @deprecated(reason: "Use app(id). Removed in 003-station-to-app Phase 4.")
-    myStations: [Station!]! @deprecated(reason: "Use myApps. Removed in 003-station-to-app Phase 4.")
-    stationNodes(stationId: ID!, limit: Int): [Node!]! @deprecated(reason: "Use appNodes. Removed in 003-station-to-app Phase 4.")
-    stationAIConfig(stationId: ID!): StationAIConfig @deprecated(reason: "Use appAIConfig. Removed in 003-station-to-app Phase 4.")
-    stationKeys(stationId: ID!): [StationKey!]! @deprecated(reason: "Use appKeys. Removed in 003-station-to-app Phase 4.")
+    # The Station-shaped queries (stations, station, myStations, stationNodes,
+    # stationAIConfig, stationKeys) were removed in 003-station-to-app
+    # Phase 3a-2 (2026-04-29). Use the App-shaped equivalents below.
 
     # Users (admin only)
     users: [User!]!
@@ -721,8 +658,7 @@ export const typeDefs = `#graphql
     # Invitation lookup (public — no auth required, used by invite acceptance page)
     invitation(slug: String!): UserInvitation
 
-    # The station authenticated by the current API key (null for JWT users)
-    myStation: Station @deprecated(reason: "Use myApp. Removed in 003-station-to-app Phase 4.")
+    # myStation was removed in 003-station-to-app Phase 3a-2 — use myApp.
 
     # Public memory marketplace — any authenticated user
     publicMemories: [Memory!]!
@@ -820,21 +756,13 @@ export const typeDefs = `#graphql
     # Record a usage event
     recordUsage(event: UsageEventInput!): Boolean!
 
-    # Station management — DEPRECATED, use the App-shaped mutations
-    # (createApp, updateApp, regenerateAppKey, deleteApp / revokeApp).
-    # Removed in 003-station-to-app Phase 4.
-    createStation(name: String!, stationType: StationType!, role: Role!, description: String, systemPrompt: String, organizationId: String, userId: String, expiresAt: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): StationCreated! @deprecated(reason: "Use createApp + createAppKey. Removed in 003-station-to-app Phase 4.")
-    updateStation(id: ID!, name: String, urn: String, stationType: StationType, description: String, systemPrompt: String, agentTools: [String!], aiProvider: String, aiModel: String, aiApiKey: String): Station! @deprecated(reason: "Use updateApp. Removed in 003-station-to-app Phase 4.")
-    regenerateApiKey(id: ID!): StationCreated! @deprecated(reason: "Use regenerateAppKey. Removed in 003-station-to-app Phase 4.")
-    revokeStation(id: ID!): Boolean! @deprecated(reason: "Use deleteApp. Removed in 003-station-to-app Phase 4.")
-
-    # Station key management — DEPRECATED.
-    createStationKey(stationId: ID!, label: String): StationKeyCreated! @deprecated(reason: "Use createAppKey. Removed in 003-station-to-app Phase 4.")
-    revokeStationKey(keyId: ID!): Boolean! @deprecated(reason: "Use revokeAppKey. Removed in 003-station-to-app Phase 4.")
-
-    # Station agent subscriptions — DEPRECATED.
-    subscribeStationToAgent(stationId: ID!, agentId: ID!, subscriptionType: SubscriptionType, trainingMode: Boolean): Station! @deprecated(reason: "Use addAgentToApp (with role / subscriptionType / trainingMode args). Removed in 003-station-to-app Phase 4.")
-    unsubscribeStationFromAgent(stationId: ID!, agentId: ID!): Station! @deprecated(reason: "Use removeAgentFromApp. Removed in 003-station-to-app Phase 4.")
+    # The Station-shaped mutations (createStation, updateStation,
+    # regenerateApiKey, revokeStation, createStationKey, revokeStationKey,
+    # subscribeStationToAgent, unsubscribeStationFromAgent) were removed
+    # in 003-station-to-app Phase 3a-2 (2026-04-29). Use the App-shaped
+    # mutations: createApp + createAppKey, updateApp, regenerateAppKey,
+    # deleteApp, revokeAppKey, addAgentToApp (with role / subscriptionType
+    # / trainingMode args), removeAgentFromApp.
 
     # App key management beyond what's already declared in the Apps section
     # below — adds the regenerate path that the deprecated regenerateApiKey
