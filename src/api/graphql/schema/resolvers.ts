@@ -26,6 +26,8 @@ import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memo
 import { beginAssetUpload, type BeginAssetUploadInput as AssetUploadInput } from '../../../controller/operations/beginAssetUpload.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
+import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
+import { mintAssetDownloadUrl } from '../../../controller/operations/mintAssetDownloadUrl.js';
 import { GraphQLError } from 'graphql';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
@@ -1202,6 +1204,53 @@ export const resolvers = {
           createdAt: m.createdAt,
         };
       });
+    },
+
+    // ── Asset queries (spec 004-asset-upload) ─────────────────────────
+
+    agentAssets: async (
+      _: unknown,
+      input: {
+        agentUrn: string;
+        mimeType?: string;
+        skip?: number;
+        count?: number;
+        includeDeleted?: boolean;
+      },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const result = await listAgentAssets(
+        ctx.db,
+        { userId: ctx.userId, appId: ctx.appId },
+        input,
+        resolveAssetTargetMemoryId,
+      );
+      return {
+        assets: result.assets,
+        total: result.total,
+        hasMore: result.hasMore,
+      };
+    },
+
+    assetDownloadUrl: async (
+      _: unknown,
+      { assetId, ttlSeconds }: { assetId: string; ttlSeconds?: number },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const result = await mintAssetDownloadUrl(
+        ctx.db,
+        { userId: ctx.userId, appId: ctx.appId },
+        { assetId, ttlSeconds },
+      );
+      return {
+        url: result.url,
+        expiresAt: result.expiresAt.toISOString(),
+        filename: result.filename,
+        mimeType: result.mimeType,
+        sizeBytes: result.sizeBytes,
+      };
     },
 
     stationKeys: async (_: unknown, { stationId }: { stationId: string }, ctx: Context) => {

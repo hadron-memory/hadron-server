@@ -577,6 +577,20 @@ export const typeDefs = `#graphql
     enabled:  Boolean!
   }
 
+  type AssetListResult {
+    assets:  [Asset!]!
+    total:   Int!
+    hasMore: Boolean!
+  }
+
+  type AssetDownloadUrl {
+    url:       String!
+    expiresAt: String!
+    filename:  String!
+    mimeType:  String!
+    sizeBytes: Int!
+  }
+
   type Query {
     # Get a single node by its loc path (raw: true to skip template compilation)
     node(loc: String!, raw: Boolean): Node
@@ -678,6 +692,21 @@ export const typeDefs = `#graphql
     # Message history for a saved chat. Returns plain role/content pairs
     # suitable for feeding back into an LLM.
     chatHistory(chatId: String!, limit: Int): [ChatMessage!]!
+
+    # ── Assets (spec 004-asset-upload) ────────────────────────────────
+    # List the calling user's assets in their per-agent memory,
+    # paginated, optionally filtered by MIME.
+    agentAssets(
+      agentUrn:       String!
+      mimeType:       String
+      skip:           Int = 0
+      count:          Int = 20
+      includeDeleted: Boolean = false
+    ): AssetListResult!
+
+    # Mint a short-TTL presigned GET URL for an asset. Default TTL
+    # 5 minutes; ceiling 1 hour. Gated on scan_status = CLEAN.
+    assetDownloadUrl(assetId: ID!, ttlSeconds: Int = 300): AssetDownloadUrl!
   }
 
   type Mutation {
