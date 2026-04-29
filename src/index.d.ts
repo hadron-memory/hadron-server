@@ -28,6 +28,7 @@ export interface Edge {
 export interface Session {
   id: string;
   type: string;
+  appId: string | null;
   stationId: string | null;
   repo: string | null;
   branch: string | null;
@@ -58,12 +59,31 @@ export interface UsageEvent {
   nodeLoc: string | null;
   nodeId: string | null;
   actionArgs: Record<string, unknown> | null;
+  /** Caller identity. Set exactly one of appId / stationId. Phase 4 drops stationId. */
+  appId: string | null;
   stationId: string | null;
   sessionId: string | null;
   model: string | null;
   tokensIn: number | null;
   tokensOut: number | null;
   createdAt: string;
+}
+
+export interface App {
+  id: string;
+  urn: string;
+  name: string;
+  appType: AppType;
+  description: string | null;
+  role: AppMembershipRole;
+  organizationId: string;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+export interface AppCreated {
+  app: App;
+  rawKey: string;
 }
 
 export interface Station {
@@ -101,4 +121,7 @@ export interface User {
 
 export type Role = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
 export type StationType = 'WORKSTATION' | 'AGENT' | 'AUTOMATION' | 'CLOUD' | 'IOT';
+export type AppMembershipRole = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
+export type AppType = 'WORKSTATION' | 'CHATBOT' | 'AGENT' | 'AUTOMATION' | 'CLOUD' | 'IOT';
+export type AppAgentRole = 'OPERATE' | 'DEVELOP';
 export type IdentityProvider = 'GITHUB';

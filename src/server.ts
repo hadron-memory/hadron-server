@@ -307,6 +307,11 @@ export async function createServer(): Promise<Express> {
       res.json({
         hasSetup: true,
         apiKey: setup.rawKeyEncrypted, // TODO: decrypt when encryption is added
+        // Caller identity: exactly one of appId / stationId is populated
+        // depending on whether the workspace was App- or legacy-Station-
+        // provisioned. Phase 3a of 003-station-to-app provisions Apps;
+        // older setups still have stationId. Phase 4 drops stationId.
+        appId: setup.appId,
         stationId: setup.stationId,
         orgId: membership?.organization.id,
         orgName: membership?.organization.name,

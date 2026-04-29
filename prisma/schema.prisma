@@ -516,6 +516,11 @@ model UsageEvent {
   nodeLoc    String?   @map("node_loc")
   nodeId     String?   @map("node_id")
   sessionId  String?   @map("session_id")
+  // Caller identity: appId for App-keyed callers; stationId for legacy
+  // Station-keyed callers. Both nullable. Set exactly one of the two
+  // depending on the resolved AuthContext (Phase 3a of 003-station-to-app).
+  // Phase 4 drops stationId.
+  appId      String?   @map("app_id")
   stationId  String?   @map("station_id")
   actionArgs Json?     @map("action_args")
   model      String?
@@ -530,6 +535,7 @@ model UsageEvent {
 
   node    Node?    @relation(fields: [nodeId], references: [id], onDelete: SetNull)
   session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  app     App?     @relation(fields: [appId], references: [id], onDelete: SetNull)
   station Station? @relation(fields: [stationId], references: [id], onDelete: SetNull)
 
   @@index([nodeLoc])
@@ -537,6 +543,7 @@ model UsageEvent {
   @@index([createdAt])
   @@index([sessionId])
   @@index([stationId])
+  @@index([appId])
   @@map("usage_events")
 }
 
@@ -828,13 +835,20 @@ model NodeVersion {
 model PendingSetup {
   id              String   @id @default(cuid())
   userId          String   @unique @map("user_id")
-  stationId       String   @map("station_id")
+  // Caller identity: appId for App-provisioned setups; stationId for legacy
+  // Station-provisioned ones. Both nullable until Phase 4 drops stationId.
+  // Phase 3a of 003-station-to-app populates appId for every new
+  // provisionPersonalWorkspace call so the setup page can hand the user
+  // an App key.
+  appId           String?  @map("app_id")
+  stationId       String?  @map("station_id")
   rawKeyEncrypted String   @map("raw_key_encrypted")
   consumed        Boolean  @default(false)
   createdBy       String?  @map("created_by")
   createdAt       DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  app  App? @relation(fields: [appId], references: [id], onDelete: SetNull)
 
   @@map("pending_setups")
 }
@@ -906,12 +920,14 @@ model App {
   deletedAt             DateTime?            @map("deleted_at")
   deletedBy             String?              @map("deleted_by")
 
-  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  keys         AppKey[]
-  appAgents    AppAgent[]
-  users        User[]
-  sessions     Session[]
-  logEntries   AppLogEntry[]
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  keys          AppKey[]
+  appAgents     AppAgent[]
+  users         User[]
+  sessions      Session[]
+  logEntries    AppLogEntry[]
+  usageEvents   UsageEvent[]
+  pendingSetups PendingSetup[]
 
   @@index([organizationId])
   @@map("apps")
