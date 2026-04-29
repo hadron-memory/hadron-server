@@ -512,6 +512,71 @@ export const typeDefs = `#graphql
 
   scalar JSON
 
+  # ─── Assets ──────────────────────────────────────────────────────
+  # Per spec 004-asset-upload. Assets live in a dedicated Asset
+  # entity (NOT a nodeType) FK-related to Memory. URN form:
+  #   <memory.urn>:assets:<asset.id>
+
+  enum AssetScanStatus {
+    PENDING
+    CLEAN
+    BLOCKED
+  }
+
+  type Asset {
+    id:          ID!
+    memoryId:    ID!
+    filename:    String!
+    mimeType:    String!
+    sizeBytes:   Int!
+    scanStatus:  AssetScanStatus!
+    description: String
+    uploadedAt:  String!
+    uploadedBy:  ID!
+    deletedAt:   String
+    """The asset's URN: <memory.urn>:assets:<asset.id>."""
+    urn:         String!
+  }
+
+  enum UploadIntent {
+    USER
+    AGENT_REQUEST
+  }
+
+  input BeginAssetUploadInput {
+    agentUrn:        String!
+    filename:        String!
+    mimeType:        String!
+    sizeBytes:       Int!
+    description:     String
+    uploadIntent:    UploadIntent!
+    uploadRequestId: String
+  }
+
+  type AssetPutHeader {
+    name:  String!
+    value: String!
+  }
+
+  type BeginAssetUploadResult {
+    uploadId:        ID!
+    putUrl:          String!
+    putHeaders:      [AssetPutHeader!]!
+    expiresAt:       String!
+    storageKey:      String!
+    maxSizeBytes:    Int!
+    allowedMimeType: String!
+  }
+
+  input CompleteAssetUploadInput {
+    uploadId: ID!
+  }
+
+  input SetAgentAssetUploadEnabledInput {
+    agentUrn: String!
+    enabled:  Boolean!
+  }
+
   type Query {
     # Get a single node by its loc path (raw: true to skip template compilation)
     node(loc: String!, raw: Boolean): Node
@@ -635,6 +700,11 @@ export const typeDefs = `#graphql
     createEdge(sourceNodeId: ID!, targetNodeId: ID!, label: String!, condition: JSON, priority: Int, data: JSON): Edge!
     updateEdge(edgeId: ID!, label: String, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeId: ID!): Boolean!
+
+    # Asset upload (spec 004-asset-upload)
+    beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!
+    completeAssetUpload(input: CompleteAssetUploadInput!): Asset!
+    setAgentAssetUploadEnabled(input: SetAgentAssetUploadEnabledInput!): App!
 
     # Session lifecycle
     startSession(input: SessionInput!): Session!

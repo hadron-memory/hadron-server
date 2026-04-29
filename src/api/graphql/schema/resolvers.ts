@@ -23,6 +23,9 @@ import {
   type MemoryLayerHandle,
 } from '../../../lib/edge-conditions/index.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
+import { beginAssetUpload, type BeginAssetUploadInput as AssetUploadInput } from '../../../controller/operations/beginAssetUpload.js';
+import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
+import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { GraphQLError } from 'graphql';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { PrismaClient, Role, StationType, MemoryVisibility, Prisma } from '../../../generated/prisma/index.js';
@@ -580,6 +583,65 @@ function wasRecentlyVisited(
 // `lib/edge-conditions/prisma-memory-layer.ts` (the Prisma adapter).
 // It's imported above as `buildPrismaMemoryLayer`.
 
+// ── Asset upload helpers (spec 004-asset-upload) ──────────────────────────
+
+/**
+ * Resolve the memory the caller's asset should land in. Picks the
+ * existing per-user memory for (agent, user) when present, or returns
+ * the first writable memory attached to the agent as a fallback.
+ */
+async function resolveAssetTargetMemoryId(
+  db: PrismaClient,
+  agentId: string,
+  userId: string,
+): Promise<{ memoryId: string }> {
+  const userMemory = await db.memory.findFirst({
+    where: {
+      userMemoryOfAgentId: agentId,
+      createdBy: userId,
+      deletedAt: null,
+    },
+    select: { id: true },
+  });
+  if (userMemory) return { memoryId: userMemory.id };
+
+  // Fallback: first agent-attached memory (single-user agent case).
+  const agentMemory = await db.agentMemoryItem.findFirst({
+    where: { agentId, deletedAt: null, role: 'read-write' },
+    select: { memoryId: true },
+  });
+  if (agentMemory) return { memoryId: agentMemory.memoryId };
+
+  throw new Error('NO_TARGET_MEMORY: no writable memory available for this agent');
+}
+
+/**
+ * Pluggable admin check used by `setAgentAssetUploadEnabled`. Returns
+ * true for platform-level ADMIN/OWNER roles or for org-level ADMIN/OWNER
+ * via OrgMember.
+ */
+async function isOrgAdminFor(
+  db: PrismaClient,
+  userId: string,
+  organizationId: string,
+): Promise<boolean> {
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: { roles: true },
+  });
+  if (user && (user.roles.includes('ADMIN') || user.roles.includes('OWNER'))) {
+    return true;
+  }
+  const member = await db.orgMember.findUnique({
+    where: { organizationId_userId: { organizationId, userId } },
+  });
+  return !!member && (member.role === 'ADMIN' || member.role === 'OWNER');
+}
+
+function assetUrn(memoryUrn: string, assetId: string): string {
+  return `${memoryUrn}:assets:${assetId}`;
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot reader: reads nodes from a published revision snapshot instead
 // of the live database. Used by startChat/sendChatMessage when the agent
@@ -628,6 +690,17 @@ async function loadPublishedSnapshot(
 export const resolvers = {
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
+  },
+  Asset: {
+    uploadedAt: (a: { uploadedAt: Date | string }) => toISO(a.uploadedAt)!,
+    deletedAt: (a: { deletedAt?: Date | string | null }) => toISO(a.deletedAt),
+    urn: async (a: { id: string; memoryId: string }, _: unknown, ctx: Context) => {
+      const memory = await ctx.db.memory.findUnique({
+        where: { id: a.memoryId },
+        select: { urn: true },
+      });
+      return memory ? assetUrn(memory.urn, a.id) : `unknown:assets:${a.id}`;
+    },
   },
   Memory: {
     lastSyncedAt: (g: { lastSyncedAt?: Date | string | null }) => toISO(g.lastSyncedAt),
@@ -1572,6 +1645,58 @@ export const resolvers = {
       requireRole(ctx, 'CONTRIBUTOR');
       await ctx.db.edge.delete({ where: { id: edgeId } });
       return true;
+    },
+
+    // ── Asset upload (spec 004-asset-upload) ───────────────────────────
+
+    beginAssetUpload: async (
+      _: unknown,
+      { input }: { input: AssetUploadInput },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const ticket = await beginAssetUpload(
+        ctx.db,
+        { userId: ctx.userId, appId: ctx.appId },
+        input,
+        resolveAssetTargetMemoryId,
+      );
+      return {
+        uploadId: ticket.uploadId,
+        putUrl: ticket.putUrl,
+        putHeaders: ticket.putHeaders,
+        expiresAt: ticket.expiresAt.toISOString(),
+        storageKey: ticket.storageKey,
+        maxSizeBytes: ticket.maxSizeBytes,
+        allowedMimeType: ticket.allowedMimeType,
+      };
+    },
+
+    completeAssetUpload: async (
+      _: unknown,
+      { input }: { input: { uploadId: string } },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      return completeAssetUpload(
+        ctx.db,
+        { userId: ctx.userId, appId: ctx.appId },
+        input,
+      );
+    },
+
+    setAgentAssetUploadEnabled: async (
+      _: unknown,
+      { input }: { input: { agentUrn: string; enabled: boolean } },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      return setAgentAssetUploadEnabled(
+        ctx.db,
+        { userId: ctx.userId },
+        input,
+        isOrgAdminFor,
+      );
     },
 
     moveNode: async (_: unknown, { from: rawFrom, to: rawTo, memoryId, targetMemoryId }: { from: string; to: string; memoryId: string; targetMemoryId?: string }, ctx: Context) => {
