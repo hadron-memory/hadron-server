@@ -7,6 +7,11 @@ import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
+import {
+  canWriteToMemory,
+  getAccessibleMemoryIds,
+  getMemoryAccess,
+} from './access-control.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { SessionType } from '../generated/prisma/index.js';
@@ -116,89 +121,9 @@ async function resolveMemoryId(rawInput: string): Promise<string | null> {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Access control: check if a station can access/write to a memory
-// ---------------------------------------------------------------------------
-
-/**
- * Get the memory IDs accessible to a station through agent subscriptions.
- * Returns a map of memoryId → subscriptionType.
- */
-async function getStationMemoryAccess(
-  stationId: string,
-): Promise<Map<string, string>> {
-  const subs = await db.stationAgentSubscription.findMany({
-    where: { stationId, deletedAt: null },
-    include: {
-      agent: {
-        include: {
-          memoryItems: { include: { memory: true } },
-        },
-      },
-    },
-  });
-
-  const access = new Map<string, string>();
-  for (const sub of subs) {
-    // Include the agent's system memory (linked via systemMemoryId,
-    // not as a memoryItem). Station READ_WRITE grants read-write to
-    // the system memory so builders can create conversations/stages.
-    const systemMemoryId = (sub.agent as any).systemMemoryId as string | null;
-    if (systemMemoryId) {
-      const effective = sub.subscriptionType === 'READ_WRITE' ? 'READ_WRITE' : 'READ_ONLY';
-      const existing = access.get(systemMemoryId);
-      if (!existing || effective === 'READ_WRITE') {
-        access.set(systemMemoryId, effective);
-      }
-    }
-
-    for (const item of sub.agent.memoryItems) {
-      // Effective access = min(station subscription type, agent memory item role)
-      // Station READ_ONLY → always read-only regardless of agent role
-      // Station READ_WRITE + agent role "read" → read-only
-      // Station READ_WRITE + agent role "read-write" → read-write
-      const agentRole = (item as any).role ?? 'read';
-      const effective = sub.subscriptionType === 'READ_WRITE' && agentRole === 'read-write'
-        ? 'READ_WRITE'
-        : 'READ_ONLY';
-      // If multiple subs include the same memory, READ_WRITE wins
-      const existing = access.get(item.memoryId);
-      if (!existing || effective === 'READ_WRITE') {
-        access.set(item.memoryId, effective);
-      }
-    }
-  }
-  return access;
-}
-
-/**
- * Check if a station has write access to a specific memory.
- * Platform ADMINs and OWNERs bypass subscription checks.
- */
-async function canWriteToMemory(
-  auth: AuthContext,
-  memoryId: string,
-): Promise<boolean> {
-  if (!auth.clientId) return false;
-  if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
-
-  const access = await getStationMemoryAccess(auth.clientId);
-  return access.get(memoryId) === 'READ_WRITE';
-}
-
-/**
- * Get the set of memory IDs the client can see (via bundle subscriptions).
- * Returns null to mean "all" (for ADMIN/OWNER).
- */
-async function getAccessibleMemoryIds(
-  auth: AuthContext,
-): Promise<string[] | null> {
-  if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return null;
-  if (!auth.clientId) return [];
-
-  const access = await getStationMemoryAccess(auth.clientId);
-  return [...access.keys()];
-}
+// Access control lives in ./access-control.ts — extracted in Phase 2 of
+// spec-kits/specs/003-station-to-app/ so the App-key and Station-key paths
+// can be unit-tested directly.
 
 // ---------------------------------------------------------------------------
 // MCP Server factory — one McpServer per transport session
@@ -217,12 +142,12 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-list-memories',
-    'List all memories this station has access to, with URN and access level (read-only or read-write).',
+    'List all memories this caller has access to, with URN and access level (read-only or read-write).',
     {},
     async () => {
-      if (!auth.clientId) return textResult('Not authenticated.');
+      if (!auth.clientId && !auth.appId) return textResult('Not authenticated.');
 
-      const access = await getStationMemoryAccess(auth.clientId);
+      const access = await getMemoryAccess(db, auth);
       if (access.size === 0) {
         return textResult('No memories accessible. Subscribe to an agent with memories first.');
       }
@@ -271,7 +196,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const content = description ?? `Section: ${name}`;
 
       // Resolve parent: strip URN prefixes, find memory
-      const memoryIds = await getAccessibleMemoryIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(db, auth);
       const resolved = parentRel ? await resolveLocFromUrn(parentRel, memoryIds) : { loc: '', memoryId: undefined };
       const parentLoc = resolved.loc;
 
@@ -305,7 +230,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       }
 
       if (!memoryId) {
-        const access = auth.clientId ? await getStationMemoryAccess(auth.clientId) : new Map();
+        const access = await getMemoryAccess(db, auth);
         const writableIds = [...access.entries()].filter(([, v]) => v === 'READ_WRITE').map(([k]) => k);
         if (writableIds.length === 1) memoryId = writableIds[0];
       }
@@ -314,7 +239,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult('Cannot determine target memory. Set an active memory with h-set-active-memory, or ensure only one writable memory.');
       }
 
-      if (!(await canWriteToMemory(auth, memoryId))) {
+      if (!(await canWriteToMemory(db, auth,memoryId))) {
         return textResult('Write access denied for this memory.');
       }
 
@@ -358,7 +283,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       limit: z.number().optional().describe('Max results (default 50)'),
     },
     async ({ query, parentRel, memoryUrn, brief, limit }) => {
-      const memoryIds = await getAccessibleMemoryIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(db, auth);
       const where: Record<string, unknown> = {};
       if (memoryIds) where.memoryId = { in: memoryIds };
 
@@ -421,7 +346,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'Read a node by its loc path (e.g. architecture) or full URN (e.g. hadronmemory.com:dev:architecture)',
     { loc: z.string().describe('Node loc path or full URN') },
     async ({ loc: rawLoc }) => {
-      const memoryIds = await getAccessibleMemoryIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(db, auth);
       const { loc, memoryId } = await resolveLocFromUrn(rawLoc, memoryIds);
       const where: Record<string, unknown> = { loc };
       if (memoryId) where.memoryId = memoryId;
@@ -490,7 +415,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       current: z.string().optional().describe('Current child node loc path or full URN'),
     },
     async ({ parent: rawParent, current: rawCurrent }) => {
-      const memoryIds = await getAccessibleMemoryIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(db, auth);
       const resolvedParent = await resolveLocFromUrn(rawParent, memoryIds);
       const parentLoc = resolvedParent.loc;
       const prefix = parentLoc + ':';
@@ -577,7 +502,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult('Please provide a memoryUrn or parentRel, or set an active memory with h-set-active-memory.');
       }
 
-      const memoryIds = await getAccessibleMemoryIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(db, auth);
       const maxDepth = depth ?? 1;
 
       // Resolve the parent prefix
@@ -664,7 +589,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     },
     async ({ loc: rawLoc, memoryId: inputMemoryId, name, nodeType, description, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
       // Resolve URN to loc + memoryId if a full URN was passed
-      const memoryIds = await getAccessibleMemoryIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(db, auth);
       const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
       const loc = resolved.loc;
       // If URN resolution found a memory, use it. If not, fall back to
@@ -691,7 +616,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         }
       } else {
         // Infer memoryId
-        const access = auth.clientId ? await getStationMemoryAccess(auth.clientId) : new Map();
+        const access = await getMemoryAccess(db, auth);
         const writableIds = [...access.entries()].filter(([, v]) => v === 'READ_WRITE').map(([k]) => k);
 
         if (writableIds.length === 1) {
@@ -743,7 +668,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         }
       }
 
-      if (!(await canWriteToMemory(auth, memoryId))) {
+      if (!(await canWriteToMemory(db, auth,memoryId))) {
         return textResult('Write access denied for this memory.');
       }
 
@@ -898,7 +823,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     },
     async ({ loc: rawLoc, name, nodeType, description, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Resolve URN to loc if needed
-      const memoryIds = await getAccessibleMemoryIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(db, auth);
       const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
       const loc = resolved.loc;
       const where: Record<string, unknown> = { loc };
@@ -910,7 +835,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult(`Node not found: "${loc}"`);
       }
 
-      if (!(await canWriteToMemory(auth, existing.memoryId))) {
+      if (!(await canWriteToMemory(db, auth,existing.memoryId))) {
         return textResult('Write access denied for this memory.');
       }
 
@@ -1035,7 +960,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       targetMemoryUrn: z.string().optional().describe('Target memory URN for cross-memory moves'),
     },
     async ({ from: rawFrom, to: rawTo, targetMemoryUrn }) => {
-      const memoryIds = await getAccessibleMemoryIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(db, auth);
       const resolvedFrom = await resolveLocFromUrn(rawFrom, memoryIds);
       const resolvedTo = await resolveLocFromUrn(rawTo, memoryIds);
       const fromLoc = resolvedFrom.loc;
@@ -1055,7 +980,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const node = candidates.find((n) => !n.isLink) ?? candidates[0] ?? null;
       if (!node) return textResult(`Node "${fromLoc}" not found.`);
 
-      if (!(await canWriteToMemory(auth, node.memoryId))) {
+      if (!(await canWriteToMemory(db, auth,node.memoryId))) {
         return textResult('Write access denied for source memory.');
       }
 
@@ -1064,13 +989,13 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       if (targetMemoryUrn) {
         const targetMem = await db.memory.findFirst({ where: { urn: targetMemoryUrn, deletedAt: null } });
         if (!targetMem) return textResult(`Target memory "${targetMemoryUrn}" not found.`);
-        if (!(await canWriteToMemory(auth, targetMem.id))) {
+        if (!(await canWriteToMemory(db, auth,targetMem.id))) {
           return textResult('Write access denied for target memory.');
         }
         destMemoryId = targetMem.id;
       } else if (resolvedTo.memoryId && resolvedTo.memoryId !== node.memoryId) {
         // Target URN resolved to a different memory
-        if (!(await canWriteToMemory(auth, resolvedTo.memoryId))) {
+        if (!(await canWriteToMemory(db, auth,resolvedTo.memoryId))) {
           return textResult('Write access denied for target memory.');
         }
         destMemoryId = resolvedTo.memoryId;
@@ -1099,7 +1024,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       args: z.record(z.string(), z.string()).optional().describe('Action arguments as key-value pairs'),
     },
     async ({ loc: rawLoc, args }) => {
-      const memoryIds = await getAccessibleMemoryIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(db, auth);
       const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
       const loc = resolved.loc;
       const actionWhere: Record<string, unknown> = { loc };
@@ -1241,7 +1166,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'Check the memory for broken edge references and nodes with missing content',
     {},
     async () => {
-      const memoryIds = await getAccessibleMemoryIds(auth);
+      const memoryIds = await getAccessibleMemoryIds(db, auth);
       const where: Record<string, unknown> = {};
       if (memoryIds) where.memoryId = { in: memoryIds };
 
@@ -1282,7 +1207,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       memoryId: z.string().describe('ID of the memory to sync'),
     },
     async ({ memoryId }) => {
-      if (!(await canWriteToMemory(auth, memoryId))) {
+      if (!(await canWriteToMemory(db, auth,memoryId))) {
         return textResult('Access denied.');
       }
 

@@ -4,10 +4,18 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { stringify } from 'yaml';
 import bcrypt from 'bcrypt';
+import { createHash, randomBytes } from 'crypto';
+import { APP_KEY_PREFIX } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 
 // Known raw API key used in auth tests (64 hex-like chars, no dots)
 export const TEST_RAW_KEY = 'a'.repeat(64);
+
+/** Build a deterministic test App key with the canonical `hdr_app_` prefix. */
+export function buildAppKey(suffix?: string): string {
+  const body = suffix ?? randomBytes(32).toString('hex');
+  return `${APP_KEY_PREFIX}${body}`;
+}
 
 // ---------------------------------------------------------------------------
 // Database helpers
@@ -116,6 +124,67 @@ export async function createDbStation(
       expiresAt: opts.expiresAt ?? null,
       organizationId: opts.organizationId ?? null,
       userId: opts.userId ?? null,
+    },
+  });
+}
+
+/**
+ * Insert a test App + AppKey, returning both plus the raw key. The raw key
+ * is what callers send in the Authorization: Bearer header during tests;
+ * the stored hash is SHA-256 of the raw key (matching the resolver).
+ */
+export async function createDbAppWithKey(
+  db: PrismaClient,
+  name: string,
+  organizationId: string,
+  opts: { rawKey?: string } = {},
+): Promise<{
+  app: Awaited<ReturnType<PrismaClient['app']['create']>>;
+  appKey: Awaited<ReturnType<PrismaClient['appKey']['create']>>;
+  rawKey: string;
+}> {
+  const rawKey = opts.rawKey ?? buildAppKey();
+  const keyHash = createHash('sha256').update(rawKey).digest('hex');
+  const app = await db.app.create({
+    data: {
+      id: generateId(),
+      name,
+      urn: `${organizationId}:${name}`,
+      organizationId,
+    },
+  });
+  const appKey = await db.appKey.create({
+    data: {
+      id: generateId(),
+      appId: app.id,
+      keyHash,
+      keyPreview: rawKey.slice(-4),
+    },
+  });
+  return { app, appKey, rawKey };
+}
+
+/**
+ * Link an App to an Agent through an AppAgent join row.
+ * Defaults match the schema (role=OPERATE, subscription_type=READ_ONLY).
+ */
+export async function createDbAppAgent(
+  db: PrismaClient,
+  appId: string,
+  agentId: string,
+  opts: {
+    role?: 'OPERATE' | 'DEVELOP';
+    subscriptionType?: 'READ_ONLY' | 'READ_WRITE';
+    trainingMode?: boolean;
+  } = {},
+) {
+  return db.appAgent.create({
+    data: {
+      appId,
+      agentId,
+      role: opts.role ?? 'OPERATE',
+      subscriptionType: opts.subscriptionType ?? 'READ_ONLY',
+      trainingMode: opts.trainingMode ?? false,
     },
   });
 }
