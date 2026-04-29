@@ -10,7 +10,6 @@ datasource db {
 
 // ─── Enums ─────────────────────────────────────────────────────────────
 
-// DEPRECATED — removed in 003-station-to-app Phase 4. Use AppMembershipRole.
 enum Role {
   OWNER
   ADMIN
@@ -23,16 +22,6 @@ enum AppMembershipRole {
   ADMIN
   CONTRIBUTOR
   READER
-}
-
-// DEPRECATED — removed in 003-station-to-app Phase 4. Use AppType.
-enum StationType {
-  WORKSTATION
-  CHATBOT
-  AGENT
-  AUTOMATION
-  CLOUD
-  IOT
 }
 
 enum AppType {
@@ -147,8 +136,6 @@ model User {
   deletedBy        String?           @map("deleted_by")
 
   memberships               OrgMember[]
-  stations                  Station[]
-  stationKeys               StationKey[]
   sentInvitations           UserInvitation[]           @relation("SentInvitations")
   invitationActivations     UserInvitationActivation[]
   receivedMemberInvitations OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
@@ -178,7 +165,6 @@ model Organization {
 
   members             OrgMember[]
   memories            Memory[]
-  stations            Station[]
   agents              Agent[]
   subscriptions       MemorySubscription[]
   invitations         UserInvitation[]     @relation("OrgInvitations")
@@ -208,81 +194,6 @@ model OrgMember {
   @@unique([organizationId, userId])
   @@index([userId])
   @@map("org_members")
-}
-
-model Station {
-  id                String      @id @default(cuid())
-  userId            String?     @map("user_id")
-  organizationId    String?     @map("organization_id")
-  stationType       StationType @default(WORKSTATION) @map("station_type")
-  urn               String      @unique
-  name              String
-  keyHash           String      @map("key_hash")
-  apiKeyShown       Boolean     @default(false) @map("api_key_shown")
-  role              Role        @default(READER)
-  description       String?
-  systemPrompt      String?     @map("system_prompt")
-  agentTools        String[]    @default([]) @map("agent_tools")
-  aiProvider        String?     @map("ai_provider")
-  aiModel           String?     @map("ai_model")
-  aiApiKeyEncrypted String?     @map("ai_api_key_encrypted")
-  expiresAt         DateTime?   @map("expires_at")
-  lastUsedAt        DateTime?   @map("last_used_at")
-  createdAt         DateTime    @default(now()) @map("created_at")
-  createdBy         String?     @map("created_by")
-  updatedAt         DateTime?   @map("updated_at")
-  updatedBy         String?     @map("updated_by")
-  deletedAt         DateTime?   @map("deleted_at")
-  deletedBy         String?     @map("deleted_by")
-
-  user               User?                      @relation(fields: [userId], references: [id], onDelete: SetNull)
-  organization       Organization?              @relation(fields: [organizationId], references: [id], onDelete: SetNull)
-  keys               StationKey[]
-  agentSubscriptions StationAgentSubscription[]
-  sessions           Session[]
-  usageEvents        UsageEvent[]
-  logEntries         StationLogEntry[]
-
-  @@map("stations")
-}
-
-model StationKey {
-  id         String    @id @default(cuid())
-  stationId  String    @map("station_id")
-  userId     String    @map("user_id")
-  keyHash    String    @map("key_hash")
-  keyPreview String?   @map("key_preview")
-  label      String?
-  lastUsedAt DateTime? @map("last_used_at")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  createdBy  String?   @map("created_by")
-  revokedAt  DateTime? @map("revoked_at")
-
-  station Station @relation(fields: [stationId], references: [id], onDelete: Cascade)
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([stationId])
-  @@map("station_keys")
-}
-
-model StationAgentSubscription {
-  id               String           @id @default(cuid())
-  stationId        String           @map("station_id")
-  agentId          String           @map("agent_id")
-  subscriptionType SubscriptionType @default(READ_ONLY) @map("subscription_type")
-  trainingMode     Boolean          @default(false) @map("training_mode")
-  createdAt        DateTime         @default(now()) @map("created_at")
-  createdBy        String?          @map("created_by")
-  updatedAt        DateTime?        @map("updated_at")
-  updatedBy        String?          @map("updated_by")
-  deletedAt        DateTime?        @map("deleted_at")
-  deletedBy        String?          @map("deleted_by")
-
-  station Station @relation(fields: [stationId], references: [id], onDelete: Cascade)
-  agent   Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
-
-  @@unique([stationId, agentId])
-  @@map("station_agent_subscriptions")
 }
 
 model Memory {
@@ -454,7 +365,6 @@ model PendingEdge {
 model Session {
   id              String      @id // caller-generated (e.g. UUID from h-start-session)
   type            SessionType @default(DEVELOPER)
-  stationId       String?     @map("station_id")
   appId           String?     @map("app_id")
   userId          String?     @map("user_id")
   agentId         String?     @map("agent_id")
@@ -487,7 +397,6 @@ model Session {
   deletedAt       DateTime?   @map("deleted_at")
   deletedBy       String?     @map("deleted_by")
 
-  station      Station?     @relation(fields: [stationId], references: [id], onDelete: SetNull)
   events       UsageEvent[]
   parent       Session?     @relation("SubAgentSessions", fields: [parentSessionId], references: [id], onDelete: SetNull)
   subSessions  Session[]    @relation("SubAgentSessions")
@@ -504,7 +413,6 @@ model Session {
   @@index([startedAt])
   @@index([parentSessionId])
   @@index([prevSessionId])
-  @@index([stationId])
   @@index([appId, userId])
   @@index([expiresAt])
   @@map("sessions")
@@ -516,12 +424,7 @@ model UsageEvent {
   nodeLoc    String?   @map("node_loc")
   nodeId     String?   @map("node_id")
   sessionId  String?   @map("session_id")
-  // Caller identity: appId for App-keyed callers; stationId for legacy
-  // Station-keyed callers. Both nullable. Set exactly one of the two
-  // depending on the resolved AuthContext (Phase 3a of 003-station-to-app).
-  // Phase 4 drops stationId.
   appId      String?   @map("app_id")
-  stationId  String?   @map("station_id")
   actionArgs Json?     @map("action_args")
   model      String?
   tokensIn   Int?      @map("tokens_in")
@@ -536,13 +439,11 @@ model UsageEvent {
   node    Node?    @relation(fields: [nodeId], references: [id], onDelete: SetNull)
   session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   app     App?     @relation(fields: [appId], references: [id], onDelete: SetNull)
-  station Station? @relation(fields: [stationId], references: [id], onDelete: SetNull)
 
   @@index([nodeLoc])
   @@index([type])
   @@index([createdAt])
   @@index([sessionId])
-  @@index([stationId])
   @@index([appId])
   @@map("usage_events")
 }
@@ -575,7 +476,6 @@ model Agent {
 
   organization         Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   memoryItems          AgentMemoryItem[]
-  stationSubscriptions StationAgentSubscription[]
   userMemories         Memory[]                   @relation("UserMemoriesOfAgent")
   sessions             Session[]                  @relation("SessionAgent")
   appAgents            AppAgent[]
@@ -687,29 +587,6 @@ model ServerLogEntry {
   @@index([level])
   @@index([createdAt])
   @@map("server_log")
-}
-
-model StationLogEntry {
-  id        String    @id @default(cuid())
-  stationId String    @map("station_id")
-  level     LogLevel
-  memoryId  String?   @map("memory_id")
-  sessionId String?   @map("session_id")
-  message   String
-  detail    Json?
-  createdAt DateTime  @default(now()) @map("created_at")
-  createdBy String?   @map("created_by")
-  updatedAt DateTime? @map("updated_at")
-  updatedBy String?   @map("updated_by")
-  deletedAt DateTime? @map("deleted_at")
-  deletedBy String?   @map("deleted_by")
-
-  station Station @relation(fields: [stationId], references: [id], onDelete: Cascade)
-
-  @@index([stationId])
-  @@index([level])
-  @@index([createdAt])
-  @@map("station_log")
 }
 
 model MemoryLogEntry {
@@ -835,11 +712,6 @@ model NodeVersion {
 model PendingSetup {
   id              String   @id @default(cuid())
   userId          String   @unique @map("user_id")
-  // App-keyed identity for the new workspace. Phase 3a-1 of
-  // 003-station-to-app made this required: provisionPersonalWorkspace
-  // always creates an App now, and PendingSetup rows are ephemeral
-  // (consumed on first /setup/info read) so there is no legacy
-  // Station-keyed path that can still produce rows.
   appId           String   @map("app_id")
   rawKeyEncrypted String   @map("raw_key_encrypted")
   consumed        Boolean  @default(false)
@@ -901,7 +773,6 @@ model App {
   identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")
   sessionTimeoutSeconds Int                  @default(900) @map("session_timeout_seconds")
   anonymousTtlDays      Int                  @default(7) @map("anonymous_ttl_days")
-  // Fields absorbed from Station in 003-station-to-app Phase 1
   appType               AppType              @default(WORKSTATION) @map("app_type")
   role                  AppMembershipRole    @default(READER)
   description           String?

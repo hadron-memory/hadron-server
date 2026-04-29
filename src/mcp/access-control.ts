@@ -1,14 +1,10 @@
 /**
  * MCP access-control: which memories can the caller read/write?
  *
- * Two principal types resolve through this module:
- *   - App-key (AppAgent membership) — the App-keyed path established in
- *     Phase 2 of spec-kits/specs/003-station-to-app/.
- *   - Station-key (StationAgentSubscription) — the legacy path; kept as
- *     a transition-only fallback. Removed in Phase 4.
- *
- * Per Constitution Principle V (Zero-Trust Apps), every read and write
- * is checked server-side here. Apps cannot self-attest access.
+ * Callers authenticate via an App Key and resolve to an `appId`; access
+ * is gated by the AppAgent rows attached to that App. Per Constitution
+ * Principle V (Zero-Trust Apps), every read and write is checked
+ * server-side here — Apps cannot self-attest access.
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
@@ -19,10 +15,8 @@ import type { AuthContext } from '../middleware/auth.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Shared algorithm for combining a subscription's memories with its agent's
- * `memoryItems` into an effective `memoryId → READ_ONLY|READ_WRITE` map.
- * Used by both the App-key path (AppAgent membership) and the legacy
- * Station-key path (StationAgentSubscription); the data shape is parallel.
+ * Fold AppAgent membership rows into an effective
+ * `memoryId → READ_ONLY|READ_WRITE` map.
  */
 type SubscriptionLike = {
   subscriptionType: 'READ_ONLY' | 'READ_WRITE';
@@ -70,13 +64,12 @@ export function foldSubscriptionsIntoAccessMap(
 }
 
 // ---------------------------------------------------------------------------
-// Per-principal-type resolvers
+// App-keyed resolver
 // ---------------------------------------------------------------------------
 
 /**
  * Memory access for an App principal — walks AppAgent rows for the App,
  * then folds the agent's memoryItems + system memory into the access map.
- * Established in US2 of spec-kits/specs/003-station-to-app.
  */
 export async function getAppMemoryAccess(
   db: PrismaClient,
@@ -106,53 +99,15 @@ export async function getAppMemoryAccess(
   );
 }
 
-/**
- * Memory access for a legacy Station principal — kept as a transition-only
- * fallback. Removed in Phase 4 of 003-station-to-app.
- */
-export async function getStationMemoryAccess(
-  db: PrismaClient,
-  stationId: string,
-): Promise<Map<string, string>> {
-  const subs = await db.stationAgentSubscription.findMany({
-    where: { stationId, deletedAt: null },
-    include: {
-      agent: {
-        include: {
-          memoryItems: { include: { memory: true } },
-        },
-      },
-    },
-  });
-  return foldSubscriptionsIntoAccessMap(
-    subs.map((sub) => ({
-      subscriptionType: sub.subscriptionType as 'READ_ONLY' | 'READ_WRITE',
-      agent: {
-        systemMemoryId: sub.agent.systemMemoryId,
-        memoryItems: sub.agent.memoryItems.map((item) => ({
-          memoryId: item.memoryId,
-          role: (item as { role?: string | null }).role ?? 'read',
-        })),
-      },
-    })),
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Public API used by MCP tool handlers
 // ---------------------------------------------------------------------------
 
-/**
- * Resolve memory access for any principal — App-key, Station-key, or
- * neither. App principals win when present; Station fallback is kept for
- * the Phase 2 transition window and removed in Phase 4.
- */
 export async function getMemoryAccess(
   db: PrismaClient,
   auth: AuthContext,
 ): Promise<Map<string, string>> {
   if (auth.appId) return getAppMemoryAccess(db, auth.appId);
-  if (auth.clientId) return getStationMemoryAccess(db, auth.clientId);
   return new Map();
 }
 
@@ -166,7 +121,7 @@ export async function canWriteToMemory(
   memoryId: string,
 ): Promise<boolean> {
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
-  if (!auth.appId && !auth.clientId) return false;
+  if (!auth.appId) return false;
 
   const access = await getMemoryAccess(db, auth);
   return access.get(memoryId) === 'READ_WRITE';
@@ -181,7 +136,7 @@ export async function getAccessibleMemoryIds(
   auth: AuthContext,
 ): Promise<string[] | null> {
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return null;
-  if (!auth.appId && !auth.clientId) return [];
+  if (!auth.appId) return [];
 
   const access = await getMemoryAccess(db, auth);
   return [...access.keys()];

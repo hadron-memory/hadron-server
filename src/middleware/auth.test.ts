@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { SignJWT } from 'jose';
 import type { Request } from 'express';
 import { db } from '../integrations/db/client.js';
-import { cleanDb, createDbStation, TEST_RAW_KEY } from '../test/helpers.js';
+import { cleanDb } from '../test/helpers.js';
 import { resolveAuthContext } from './auth.js';
 
 // JWT_SECRET is set in vitest.config.ts env
@@ -78,37 +78,13 @@ describe('resolveAuthContext', () => {
     expect(ctx).toEqual({});
   });
 
-  it('resolves a valid API key to station context', async () => {
-    const station = await createDbStation(db, 'my-service', 'CONTRIBUTOR');
-
-    const ctx = await resolveAuthContext(makeReq(`Bearer ${TEST_RAW_KEY}`), db);
-    expect(ctx.clientId).toBe(station.id);
-    expect(ctx.roles).toEqual(['CONTRIBUTOR']);
-    expect(ctx.userId).toBeUndefined();
-  });
-
-  it('returns empty context for an invalid API key', async () => {
-    await createDbStation(db, 'my-service', 'READER');
-
+  it('returns empty context for a non-prefixed bearer token', async () => {
+    // After 003-station-to-app Phase 4, the only accepted bearer-token
+    // shapes are JWTs (three dot-separated base64url segments) and
+    // App Keys (`hdr_app_…` prefix). A 64-char hex token that fits
+    // neither matches no auth path.
     const ctx = await resolveAuthContext(makeReq(`Bearer ${'z'.repeat(64)}`), db);
     expect(ctx).toEqual({});
-  });
-
-  it('returns empty context for an expired Station', async () => {
-    const past = new Date(Date.now() - 1000);
-    await createDbStation(db, 'expired-station', 'READER', { expiresAt: past });
-
-    const ctx = await resolveAuthContext(makeReq(`Bearer ${TEST_RAW_KEY}`), db);
-    expect(ctx).toEqual({});
-  });
-
-  it('updates lastUsedAt in DB when API key is valid', async () => {
-    await createDbStation(db, 'tracking-station', 'ADMIN');
-
-    await resolveAuthContext(makeReq(`Bearer ${TEST_RAW_KEY}`), db);
-
-    const station = await db.station.findFirst({ where: { name: 'tracking-station' } });
-    expect(station!.lastUsedAt).not.toBeNull();
   });
 
   // ── App Key auth ────────────────────────────────────────────────
