@@ -117,6 +117,12 @@ enum MemoryType {
   AGENT_SYSTEM
 }
 
+enum AssetScanStatus {
+  PENDING
+  CLEAN
+  BLOCKED
+}
+
 // ─── Models ────────────────────────────────────────────────────────────
 
 model User {
@@ -318,6 +324,7 @@ model Memory {
 
   organization      Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   nodes             Node[]
+  assets            Asset[]
   subscriptions     MemorySubscription[]
   agentItems        AgentMemoryItem[]
   licenses          MemoryLicense[]
@@ -329,6 +336,31 @@ model Memory {
   @@index([userMemoryOfAgentId])
   @@index([anonymousExpiresAt])
   @@map("memories")
+}
+
+// User-uploaded files (documents, images). Bytes live in object
+// storage (R2 / MinIO). This row carries metadata, the storage
+// pointer, and virus-scan state. See spec 004-asset-upload.
+model Asset {
+  id          String          @id @default(cuid())
+  memoryId    String          @map("memory_id")
+  filename    String
+  mimeType    String          @map("mime_type")
+  sizeBytes   Int             @map("size_bytes")
+  // Object-store key. Encrypted at rest (AES-256-GCM under
+  // HADRON_ENCRYPTION_KEY) when the memory is encrypted; plaintext
+  // otherwise. See src/lib/asset/encryption.ts.
+  storageKey  String          @unique @map("storage_key")
+  scanStatus  AssetScanStatus @default(PENDING) @map("scan_status")
+  description String?
+  uploadedAt  DateTime        @default(now()) @map("uploaded_at")
+  uploadedBy  String          @map("uploaded_by")
+  deletedAt   DateTime?       @map("deleted_at")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([memoryId, scanStatus, uploadedAt(sort: Desc)])
+  @@map("assets")
 }
 
 model Node {
