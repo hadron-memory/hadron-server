@@ -734,6 +734,8 @@ export const typeDefs = `#graphql
     beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!
     completeAssetUpload(input: CompleteAssetUploadInput!): Asset!
     setAgentAssetUploadEnabled(input: SetAgentAssetUploadEnabledInput!): App!
+    softDeleteAsset(assetId: ID!): Asset!
+    restoreAsset(assetId: ID!): Asset!
 
     # Session lifecycle
     startSession(input: SessionInput!): Session!
