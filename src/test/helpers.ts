@@ -3,13 +3,9 @@ import { generateId } from '../lib/id.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { stringify } from 'yaml';
-import bcrypt from 'bcrypt';
 import { createHash, randomBytes } from 'crypto';
 import { APP_KEY_PREFIX } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
-
-// Known raw API key used in auth tests (64 hex-like chars, no dots)
-export const TEST_RAW_KEY = 'a'.repeat(64);
 
 /** Build a deterministic test App key with the canonical `hdr_app_` prefix. */
 export function buildAppKey(suffix?: string): string {
@@ -31,7 +27,6 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.pendingEdge.deleteMany();
   await db.session.deleteMany();
   await db.node.deleteMany();
-  await db.stationAgentSubscription.deleteMany();
   await db.agentMemoryItem.deleteMany();
   await db.appLogEntry.deleteMany();
   await db.appKey.deleteMany();
@@ -40,7 +35,6 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.agent.deleteMany();
   await db.memorySubscription.deleteMany();
   await db.memoryLicense.deleteMany();
-  await db.station.deleteMany();
   await db.orgMember.deleteMany();
   await db.memory.deleteMany();
   await db.organization.deleteMany();
@@ -99,31 +93,6 @@ export async function createDbNode(
       ownerRepo: fields.ownerRepo ?? 'test/repo',
       tags: fields.tags ?? [],
       content: fields.content ?? null,
-    },
-  });
-}
-
-/**
- * Insert a test Station record with a known raw key + bcrypt hash.
- */
-export async function createDbStation(
-  db: PrismaClient,
-  name: string,
-  role: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' = 'READER',
-  opts: { expiresAt?: Date; organizationId?: string; userId?: string } = {},
-) {
-  const keyHash = await bcrypt.hash(TEST_RAW_KEY, 4); // low cost for speed
-  return db.station.create({
-    data: {
-      id: generateId(),
-      name,
-      urn: name,
-      keyHash,
-      role,
-      stationType: 'WORKSTATION',
-      expiresAt: opts.expiresAt ?? null,
-      organizationId: opts.organizationId ?? null,
-      userId: opts.userId ?? null,
     },
   });
 }

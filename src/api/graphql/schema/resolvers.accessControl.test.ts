@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb, createDbOrgAndGraph, createDbNode } from '../../../test/helpers.js';
+import {
+  cleanDb,
+  createDbOrgAndGraph,
+  createDbNode,
+  createDbAppWithKey,
+  createDbAppAgent,
+} from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 
 // Prevent git writes
@@ -21,8 +27,8 @@ let graphA: { id: string };
 let graphB: { id: string };
 let userA: { id: string };
 let userB: { id: string };
-let stationReader: { id: string };
-let stationContributor: { id: string };
+let appReader: { id: string };
+let appContributor: { id: string };
 
 function ctx(overrides: Partial<Context> = {}): Context {
   return { db, ...overrides };
@@ -62,38 +68,18 @@ beforeEach(async () => {
     data: { organizationId: orgA.id, urn: 'org-a:default-agent', name: 'default-agent' },
   });
   await db.agentMemoryItem.create({
-    data: { agentId: agent.id, memoryId: graphA.id },
+    data: { agentId: agent.id, memoryId: graphA.id, role: 'read-write' },
   });
 
-  // Station with READER role subscribed to agent (READ_ONLY)
-  stationReader = await db.station.create({
-    data: {
-      name: 'reader-station',
-      urn: 'org-a:reader-station',
-      keyHash: 'not-used-in-resolver-tests',
-      role: 'READER',
-      stationType: 'WORKSTATION',
-      organizationId: orgA.id,
-    },
-  });
-  await db.stationAgentSubscription.create({
-    data: { stationId: stationReader.id, agentId: agent.id, subscriptionType: 'READ_ONLY' },
-  });
+  // App with READ_ONLY AppAgent membership
+  const readerApp = await createDbAppWithKey(db, 'reader-app', orgA.id);
+  appReader = readerApp.app;
+  await createDbAppAgent(db, appReader.id, agent.id, { subscriptionType: 'READ_ONLY' });
 
-  // Station with CONTRIBUTOR role subscribed to agent (READ_WRITE)
-  stationContributor = await db.station.create({
-    data: {
-      name: 'contributor-station',
-      urn: 'org-a:contributor-station',
-      keyHash: 'not-used-in-resolver-tests',
-      role: 'CONTRIBUTOR',
-      stationType: 'AGENT',
-      organizationId: orgA.id,
-    },
-  });
-  await db.stationAgentSubscription.create({
-    data: { stationId: stationContributor.id, agentId: agent.id, subscriptionType: 'READ_WRITE' },
-  });
+  // App with READ_WRITE AppAgent membership
+  const contribApp = await createDbAppWithKey(db, 'contributor-app', orgA.id);
+  appContributor = contribApp.app;
+  await createDbAppAgent(db, appContributor.id, agent.id, { subscriptionType: 'READ_WRITE' });
 
   // Seed nodes
   await createDbNode(db, { loc: 'org-a.repo.nodeA', memoryId: graphA.id });
@@ -128,32 +114,14 @@ describe('Query.nodes access control', () => {
     expect(nodes[0].loc).toBe('org-b.repo.nodeB');
   });
 
-  it('station with agent subscription sees only subscribed graphs', async () => {
+  it('App-keyed caller (no session) sees no nodes via GraphQL — Query.nodes is a management-only path; App memory reads go through MCP', async () => {
     const nodes = await resolvers.Query.nodes(
-      null, {}, ctx({ clientId: stationReader.id, roles: ['READER'] }),
-    );
-    expect(nodes).toHaveLength(1);
-    expect(nodes[0].loc).toBe('org-a.repo.nodeA');
-  });
-
-  it('station with no subscriptions sees nothing', async () => {
-    const noSubStation = await db.station.create({
-      data: {
-        name: 'no-sub-station',
-        urn: 'no-sub-station',
-        keyHash: 'not-used',
-        role: 'READER',
-        stationType: 'WORKSTATION',
-      },
-    });
-    const nodes = await resolvers.Query.nodes(
-      null, {}, ctx({ clientId: noSubStation.id, roles: ['READER'] }),
+      null, {}, ctx({ appId: appReader.id }),
     );
     expect(nodes).toHaveLength(0);
   });
 
-  it('unauthenticated sees only public graph nodes', async () => {
-    // Make graph B public
+  it('unauthenticated sees only public memory nodes', async () => {
     await db.memory.update({ where: { id: graphB.id }, data: { visibility: 'PUBLIC' } });
     const nodes = await resolvers.Query.nodes(null, {}, ctx());
     expect(nodes).toHaveLength(1);
@@ -166,27 +134,19 @@ describe('Query.nodes access control', () => {
 // ---------------------------------------------------------------------------
 
 describe('Query.node access control', () => {
-  it('returns node when caller has access', async () => {
+  it('returns node for ADMIN', async () => {
     const node = await resolvers.Query.node(
       null, { loc: 'org-a.repo.nodeA' },
-      ctx({ clientId: stationReader.id, roles: ['READER'] }),
+      ctx({ roles: ['ADMIN'] }),
     );
     expect(node).not.toBeNull();
     expect(node!.loc).toBe('org-a.repo.nodeA');
   });
 
-  it('returns null when caller lacks access', async () => {
-    const node = await resolvers.Query.node(
-      null, { loc: 'org-b.repo.nodeB' },
-      ctx({ clientId: stationReader.id, roles: ['READER'] }),
-    );
-    expect(node).toBeNull();
-  });
-
   it('returns null for non-existent node', async () => {
     const node = await resolvers.Query.node(
       null, { loc: 'does.not.exist' },
-      ctx({ clientId: stationReader.id, roles: ['READER'] }),
+      ctx({ roles: ['ADMIN'] }),
     );
     expect(node).toBeNull();
   });
@@ -197,7 +157,7 @@ describe('Query.node access control', () => {
 // ---------------------------------------------------------------------------
 
 describe('Query.subtree access control', () => {
-  it('filters subtree results by accessible graphs', async () => {
+  it('filters subtree results by accessible memories', async () => {
     const nodes = await resolvers.Query.subtree(
       null, { prefix: 'org-' },
       ctx({ clientId: `github:${userA.id}`, userId: userA.id, roles: ['READER'] }),
@@ -212,8 +172,8 @@ describe('Query.subtree access control', () => {
 // Cross-org subscriptions
 // ---------------------------------------------------------------------------
 
-describe('cross-org graph subscription access', () => {
-  it('user sees nodes from subscribed cross-org graphs', async () => {
+describe('cross-org memory subscription access', () => {
+  it('user sees nodes from subscribed cross-org memories', async () => {
     // Org B subscribes to graph A
     await db.memorySubscription.create({
       data: { memoryId: graphA.id, organizationId: orgB.id, role: 'READER' },
@@ -233,49 +193,31 @@ describe('cross-org graph subscription access', () => {
 // ---------------------------------------------------------------------------
 
 describe('Mutation.upsertNode access control', () => {
-  it('station with READ_WRITE subscription can write', async () => {
+  it('App with READ_WRITE AppAgent can write', async () => {
     const node = await resolvers.Mutation.upsertNode(
       null,
       { input: { memoryId: graphA.id, loc: 'org-a.repo.new', name: 'new' } },
-      ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
+      ctx({ appId: appContributor.id }),
     );
     expect(node.loc).toBe('org-a.repo.new');
   });
 
-  it('station with READ_ONLY subscription is rejected', async () => {
+  it('App with READ_ONLY AppAgent is rejected', async () => {
     await expect(
       resolvers.Mutation.upsertNode(
         null,
         { input: { memoryId: graphA.id, loc: 'org-a.repo.new2', name: 'new2' } },
-        ctx({ clientId: stationReader.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ appId: appReader.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
-  it('station with READER role is rejected even with READ_WRITE subscription', async () => {
-    // Create a READER station with READ_WRITE agent subscription
-    const agent = await db.agent.findFirst({ where: { organizationId: orgA.id } });
-    const readerStation = await db.station.create({
-      data: { name: 'reader-rw', urn: 'reader-rw', keyHash: 'x', role: 'READER', stationType: 'WORKSTATION' },
-    });
-    await db.stationAgentSubscription.create({
-      data: { stationId: readerStation.id, agentId: agent!.id, subscriptionType: 'READ_WRITE' },
-    });
-    await expect(
-      resolvers.Mutation.upsertNode(
-        null,
-        { input: { memoryId: graphA.id, loc: 'org-a.repo.rdr', name: 'rdr' } },
-        ctx({ clientId: readerStation.id, roles: ['READER'] }),
-      ),
-    ).rejects.toThrow('Forbidden');
-  });
-
-  it('station cannot write to graph outside its subscriptions', async () => {
+  it('App cannot write to memory outside its AppAgent rows', async () => {
     await expect(
       resolvers.Mutation.upsertNode(
         null,
         { input: { memoryId: graphB.id, loc: 'org-b.repo.hack', name: 'hack' } },
-        ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ appId: appContributor.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
@@ -298,7 +240,6 @@ describe('Mutation.upsertNode access control', () => {
       ),
     ).rejects.toThrow('Forbidden');
   });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -306,31 +247,31 @@ describe('Mutation.upsertNode access control', () => {
 // ---------------------------------------------------------------------------
 
 describe('Mutation.deleteNode access control', () => {
-  it('station with write access can delete', async () => {
+  it('App with write access can delete', async () => {
     const result = await resolvers.Mutation.deleteNode(
       null,
       { loc: 'org-a.repo.nodeA', memoryId: graphA.id },
-      ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
+      ctx({ appId: appContributor.id }),
     );
     expect(result).toBe(true);
   });
 
-  it('station without write access is rejected', async () => {
+  it('App without write access is rejected', async () => {
     await expect(
       resolvers.Mutation.deleteNode(
         null,
         { loc: 'org-a.repo.nodeA', memoryId: graphA.id },
-        ctx({ clientId: stationReader.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ appId: appReader.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
-  it('station cannot delete nodes in other graphs', async () => {
+  it('App cannot delete nodes in inaccessible memories', async () => {
     await expect(
       resolvers.Mutation.deleteNode(
         null,
         { loc: 'org-b.repo.nodeB', memoryId: graphB.id },
-        ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ appId: appContributor.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
@@ -341,25 +282,24 @@ describe('Mutation.deleteNode access control', () => {
 // ---------------------------------------------------------------------------
 
 describe('Mutation.moveNode access control', () => {
-  it('station with write access can move', async () => {
+  it('App with write access can move', async () => {
     const node = await resolvers.Mutation.moveNode(
       null,
       { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedNode', memoryId: graphA.id },
-      ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
+      ctx({ appId: appContributor.id }),
     );
     expect(node.loc).toBe('org-a.repo.movedNode');
   });
 
-  it('station cannot move nodes in inaccessible graphs', async () => {
+  it('App cannot move nodes in inaccessible memories', async () => {
     await expect(
       resolvers.Mutation.moveNode(
         null,
         { from: 'org-b.repo.nodeB', to: 'org-b.repo.moved', memoryId: graphB.id },
-        ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ appId: appContributor.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -367,7 +307,7 @@ describe('Mutation.moveNode access control', () => {
 // ---------------------------------------------------------------------------
 
 describe('Mutation.replaceSubtree access control', () => {
-  it('station with write access can replace', async () => {
+  it('App with write access can replace', async () => {
     const count = await resolvers.Mutation.replaceSubtree(
       null,
       {
@@ -378,12 +318,12 @@ describe('Mutation.replaceSubtree access control', () => {
         ],
         edges: [],
       },
-      ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
+      ctx({ appId: appContributor.id }),
     );
     expect(count).toBe(1);
   });
 
-  it('station without write access is rejected', async () => {
+  it('App without write access is rejected', async () => {
     await expect(
       resolvers.Mutation.replaceSubtree(
         null,
@@ -393,12 +333,12 @@ describe('Mutation.replaceSubtree access control', () => {
           nodes: [],
           edges: [],
         },
-        ctx({ clientId: stationReader.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ appId: appReader.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
-  it('station cannot replace subtree in other graph', async () => {
+  it('App cannot replace subtree in other memory', async () => {
     await expect(
       resolvers.Mutation.replaceSubtree(
         null,
@@ -408,7 +348,7 @@ describe('Mutation.replaceSubtree access control', () => {
           nodes: [],
           edges: [],
         },
-        ctx({ clientId: stationContributor.id, roles: ['CONTRIBUTOR'] }),
+        ctx({ appId: appContributor.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
@@ -426,7 +366,7 @@ describe('global ADMIN bypass', () => {
     expect(nodes).toHaveLength(2);
   });
 
-  it('ADMIN can write to any graph', async () => {
+  it('ADMIN can write to any memory', async () => {
     const node = await resolvers.Mutation.upsertNode(
       null,
       { input: { memoryId: graphB.id, loc: 'org-b.repo.admin-node', name: 'admin' } },

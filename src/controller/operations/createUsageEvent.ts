@@ -17,11 +17,6 @@ export const createUsageEvent = async (
         ?? await db.node.findFirst({ where: { loc: event.nodeLoc } })
       : null;
 
-    // Caller identity: appId for App-keyed callers; stationId for the
-    // legacy Station-keyed fallback. Phase 3a of 003-station-to-app
-    // populates appId for every new App-provisioned workspace.
-    // createdBy carries whichever identity is set (App wins when both).
-    const callerId = event.appId ?? event.stationId ?? null;
     const savedEvent = await db.usageEvent.create({
       data: {
         id: generateId(),
@@ -30,8 +25,7 @@ export const createUsageEvent = async (
         nodeId: node?.id,
         actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
         appId: event.appId ?? null,
-        stationId: event.stationId ?? null,
-        createdBy: callerId,
+        createdBy: event.appId ?? null,
         sessionId: event.sessionId ?? null,
       },
     });

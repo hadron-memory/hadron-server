@@ -1,0 +1,40 @@
+name: No Station Refs
+
+# Per spec 003-station-to-app, Phase 4: the legacy `Station` /
+# `stationId` / `station_id` identifiers were retired. This gate fails
+# the build if any non-test, non-migration source file mentions them
+# again — preventing a quiet reintroduction.
+#
+# Excludes:
+#   - `**/*.test.ts(x)` — test files reference `Station` only when
+#     covering the migration's own behavior.
+#   - `**/__fixtures__/**` — historical fixture data may still mention
+#     it for replay scenarios.
+#   - `prisma/migrations/**` — past migrations literally contain
+#     `CREATE TABLE stations` etc. and must remain readable as history.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  no-station-refs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: git grep — Station / stationId / station_id in src/
+        run: |
+          set +e
+          MATCHES=$(git grep -nE '\bStation\b|\bstationId\b|\bstation_id\b' -- \
+            'src/' \
+            ':!**/*.test.ts' \
+            ':!**/*.test.tsx' \
+            ':!**/__fixtures__/**')
+          set -e
+          if [ -n "$MATCHES" ]; then
+            echo "::error::Found Station references in src/ (Phase 4 of spec 003-station-to-app retired this terminology):"
+            echo "$MATCHES"
+            exit 1
+          fi
+          echo "OK — no Station references in src/."

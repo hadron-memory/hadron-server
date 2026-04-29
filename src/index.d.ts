@@ -29,7 +29,6 @@ export interface Session {
   id: string;
   type: string;
   appId: string | null;
-  stationId: string | null;
   repo: string | null;
   branch: string | null;
   prNumber: number | null;
@@ -59,9 +58,8 @@ export interface UsageEvent {
   nodeLoc: string | null;
   nodeId: string | null;
   actionArgs: Record<string, unknown> | null;
-  /** Caller identity. Set exactly one of appId / stationId. Phase 4 drops stationId. */
+  /** Caller identity — the App that authored this event. */
   appId: string | null;
-  stationId: string | null;
   sessionId: string | null;
   model: string | null;
   tokensIn: number | null;
@@ -86,26 +84,6 @@ export interface AppCreated {
   rawKey: string;
 }
 
-export interface Station {
-  id: string;
-  urn: string;
-  name: string;
-  stationType: StationType;
-  description: string | null;
-  role: Role;
-  apiKeyShown: boolean;
-  userId: string | null;
-  organizationId: string | null;
-  expiresAt: string | null;
-  createdAt: string;
-  lastUsedAt: string | null;
-}
-
-export interface StationCreated {
-  station: Station;
-  rawKey: string;
-}
-
 export interface User {
   id: string;
   handle: string | null;
@@ -120,7 +98,6 @@ export interface User {
 }
 
 export type Role = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
-export type StationType = 'WORKSTATION' | 'AGENT' | 'AUTOMATION' | 'CLOUD' | 'IOT';
 export type AppMembershipRole = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
 export type AppType = 'WORKSTATION' | 'CHATBOT' | 'AGENT' | 'AUTOMATION' | 'CLOUD' | 'IOT';
 export type AppAgentRole = 'OPERATE' | 'DEVELOP';

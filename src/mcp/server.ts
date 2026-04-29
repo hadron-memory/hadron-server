@@ -121,9 +121,7 @@ async function resolveMemoryId(rawInput: string): Promise<string | null> {
   return null;
 }
 
-// Access control lives in ./access-control.ts — extracted in Phase 2 of
-// spec-kits/specs/003-station-to-app/ so the App-key and Station-key paths
-// can be unit-tested directly.
+// Access control lives in ./access-control.ts.
 
 // ---------------------------------------------------------------------------
 // MCP Server factory — one McpServer per transport session
@@ -372,7 +370,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           type: 'read',
           nodeLoc: loc,
           nodeId: node.id,
-          stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          appId: auth.appId ?? null,
           createdBy: auth.clientId ?? null,
           sessionId: null,
         },
@@ -767,7 +765,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           type: 'write',
           nodeLoc: loc,
           nodeId: upserted.id,
-          stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          appId: auth.appId ?? null,
           createdBy: auth.clientId ?? null,
           sessionId: null,
         },
@@ -918,7 +916,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           type: 'write',
           nodeLoc: loc,
           nodeId: existing.id,
-          stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          appId: auth.appId ?? null,
           createdBy: auth.clientId ?? null,
           sessionId: null,
         },
@@ -1065,7 +1063,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           type: 'action-run',
           nodeLoc: loc,
           nodeId: node.id,
-          stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          appId: auth.appId ?? null,
           createdBy: auth.clientId ?? null,
           sessionId: null,
           actionArgs: (args ?? undefined) as Record<string, string> | undefined,
@@ -1107,7 +1105,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
           id: sessionId,
           type: (type || 'DEVELOPER') as SessionType,
           plan: description,
-          stationId: auth.clientId?.startsWith('github:') ? null : auth.clientId ?? null,
+          appId: auth.appId ?? null,
           createdBy: auth.clientId ?? null,
           repo: repo ?? null,
           branch: branch ?? null,
@@ -1229,7 +1227,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   // ── Chat tools ───────────────────────────────────────────────────────────
   // These call the GraphQL mutation resolvers directly with a constructed
-  // Context. The MCP station auth maps to ctx.clientId; the userId param
+  // Context. The MCP App-key auth maps to ctx.appId; the userId param
   // identifies the persona being tested.
 
   function gqlCtx(userIdOverride?: string): Context {

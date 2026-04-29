@@ -1,7 +1,7 @@
-import bcrypt from 'bcrypt';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
+import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import {
@@ -56,7 +56,7 @@ import {
 
 export interface Context {
   db: PrismaClient;
-  clientId?: string;       // Station.id or "github:<username>"
+  clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
   sessionId?: string;      // Session.id — set when operating inside an active session
@@ -160,19 +160,6 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
     return [];
   }
 
-  // API-key client — memories from agent subscriptions
-  if (ctx.clientId && !ctx.userId) {
-    const subs = await ctx.db.stationAgentSubscription.findMany({
-      where: { stationId: ctx.clientId, deletedAt: null },
-      include: { agent: { include: { memoryItems: { select: { memoryId: true } } } } },
-    });
-    const ids: string[] = [];
-    for (const sub of subs) {
-      for (const item of sub.agent.memoryItems) ids.push(item.memoryId);
-    }
-    return ids;
-  }
-
   // JWT user — org memories (respecting visibility) + subscribed memories + public memories
   if (ctx.userId) {
     const memberships = await ctx.db.orgMember.findMany({
@@ -211,13 +198,21 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
 /** Prisma `where` clause that restricts sessions to the caller's scope. */
 async function sessionScopeFilter(ctx: Context): Promise<Record<string, unknown>> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return {};
-  if (ctx.clientId && !ctx.userId) return { customerId: ctx.clientId };
+  // App Key path — sessions belonging to the authenticated App.
+  if (ctx.appId) return { appId: ctx.appId };
+  // JWT user — sessions for Apps in any org the user is a member of.
   if (ctx.userId) {
-    const stations = await ctx.db.station.findMany({
+    const memberships = await ctx.db.orgMember.findMany({
       where: { userId: ctx.userId, deletedAt: null },
+      select: { organizationId: true },
+    });
+    const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
+    if (orgIds.length === 0) return { id: '__none__' };
+    const apps = await ctx.db.app.findMany({
+      where: { organizationId: { in: orgIds }, deletedAt: null },
       select: { id: true },
     });
-    return { customerId: { in: stations.map((s) => s.id) } };
+    return { appId: { in: apps.map((a) => a.id) } };
   }
   return { id: '__none__' }; // unauthenticated — no sessions
 }
@@ -248,28 +243,16 @@ function deduplicateNodes<T extends { loc: string; isLink: boolean }>(nodes: T[]
  *
  * Checks (most restrictive wins):
  * 1. Global ADMIN/OWNER — always allowed
- * 2. Clients: role >= CONTRIBUTOR, bundle subscription is READ_WRITE
+ * 2. App-keyed callers: an AppAgent with subscriptionType READ_WRITE that
+ *    transitively grants write on the memory (delegated to canWriteToMemory)
  * 3. Users: org member with CONTRIBUTOR+, or cross-org subscription with CONTRIBUTOR role
  */
 async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
 
-  // API-key client path
-  if (ctx.clientId && !ctx.userId) {
-    const highestRole = Math.max(...(ctx.roles ?? []).map((r) => ROLE_ORDER[r] ?? -1));
-    if (highestRole < ROLE_ORDER['CONTRIBUTOR']) {
-      throw new Error('Forbidden: station role insufficient for writes');
-    }
-    const sub = await ctx.db.stationAgentSubscription.findFirst({
-      where: {
-        stationId: ctx.clientId,
-        deletedAt: null,
-        subscriptionType: 'READ_WRITE',
-        agent: { memoryItems: { some: { memoryId } } },
-      },
-    });
-    if (!sub) throw new Error('Forbidden: no write access to this memory');
-    return;
+  if (ctx.appId) {
+    if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
+    throw new Error('Forbidden: no write access to this memory');
   }
 
   // JWT user path
@@ -808,9 +791,6 @@ export const resolvers = {
           { visibility: { not: 'PRIVATE' as MemoryVisibility } },
           { visibility: 'PRIVATE' as MemoryVisibility, createdBy: ctx.userId },
         ];
-      } else if (ctx.clientId) {
-        // Station access: only ORGANIZATION and PUBLIC agents
-        where.visibility = { not: 'PRIVATE' as MemoryVisibility };
       }
       return ctx.db.agent.findMany({
         where,
@@ -974,7 +954,8 @@ export const resolvers = {
       { type, repo, customerId, limit, offset }: { type?: string; repo?: string; customerId?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
-      // ADMIN/OWNER see all; stations see their own; users see their stations' sessions
+      // ADMIN/OWNER see all; App-keyed callers see their own sessions;
+      // users see sessions for any App in an org they belong to.
       const scopeFilter = await sessionScopeFilter(ctx);
       return ctx.db.session.findMany({
         where: {
@@ -995,12 +976,22 @@ export const resolvers = {
       if (!session) return null;
       // ADMIN/OWNER can see any session
       if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return session;
-      // Station can see its own sessions
-      if (ctx.clientId && session.customerId === ctx.clientId) return session;
-      // User can see sessions from their stations
-      if (ctx.userId) {
-        const station = session.customerId ? await ctx.db.station.findUnique({ where: { id: session.customerId } }) : null;
-        if (station?.userId === ctx.userId) return session;
+      // App-keyed caller can see sessions belonging to their App
+      if (ctx.appId && session.appId === ctx.appId) return session;
+      // User can see sessions from Apps in any org they belong to
+      if (ctx.userId && session.appId) {
+        const app = await ctx.db.app.findUnique({
+          where: { id: session.appId },
+          select: { organizationId: true },
+        });
+        if (app) {
+          const member = await ctx.db.orgMember.findUnique({
+            where: {
+              organizationId_userId: { organizationId: app.organizationId, userId: ctx.userId },
+            },
+          });
+          if (member && !member.deletedAt) return session;
+        }
       }
       return null;
     },
@@ -1021,12 +1012,6 @@ export const resolvers = {
         skip: offset ?? 0,
       });
     },
-
-    // The Station-shaped query resolvers (stations, station, myStation,
-    // myStations, stationNodes, stationAIConfig, stationKeys) were
-    // removed in 003-station-to-app Phase 3a-2 (2026-04-29). Use the
-    // App-shaped equivalents (apps, app, myApp, myApps, appNodes,
-    // appAIConfig, appKeys).
 
     agentAIConfig: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
@@ -1325,14 +1310,14 @@ export const resolvers = {
         ? {}
         : { type: { not: 'AGENT_SYSTEM' as const } };
 
-      // API-key client — return memories from agent subscriptions
-      if (ctx.clientId && !ctx.userId) {
-        const subs = await ctx.db.stationAgentSubscription.findMany({
-          where: { stationId: ctx.clientId, deletedAt: null },
+      // App-keyed caller — return memories from AppAgent membership
+      if (ctx.appId) {
+        const appAgents = await ctx.db.appAgent.findMany({
+          where: { appId: ctx.appId, deletedAt: null },
           include: { agent: { include: { memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } } } } },
         });
         const memoryMap = new Map<string, any>();
-        for (const sub of subs) {
+        for (const sub of appAgents) {
           for (const item of sub.agent.memoryItems) {
             if (!includeAgentSystem && item.memory.type === 'AGENT_SYSTEM') continue;
             memoryMap.set(item.memory.id, item.memory);
@@ -1419,11 +1404,6 @@ export const resolvers = {
       return app;
     },
 
-    // ── App-shaped queries (Phase 3a-2 of 003-station-to-app) ──────────
-    // Mirror the Station-shaped queries that today live in the Station
-    // section (myStation, myStations, stationNodes, stationAIConfig,
-    // stationKeys). Storage routes through App / AppKey / AppAgent.
-
     myApp: async (_: unknown, __: unknown, ctx: Context) => {
       // Returns the App for the current AppKey (ctx.appId set by auth middleware).
       if (!ctx.appId) return null;
@@ -1434,10 +1414,8 @@ export const resolvers = {
     },
 
     myApps: async (_: unknown, __: unknown, ctx: Context) => {
-      // Apps where the current user is a member of the App's org. Mirrors
-      // the user-scoped semantics of myStations (which used Station.userId
-      // directly); App doesn't carry userId, so org membership is the
-      // routing.
+      // Apps where the current user is a member of the App's org. App doesn't
+      // carry userId, so org membership is the routing.
       if (!ctx.userId) return [];
       const memberships = await ctx.db.orgMember.findMany({
         where: { userId: ctx.userId, deletedAt: null },
@@ -1490,7 +1468,7 @@ export const resolvers = {
     appAIConfig: async (_: unknown, { appId }: { appId: string }, ctx: Context) => {
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
       // Org-scoped auth: ADMIN of the App's org (or platform ADMIN) sees the
-      // decrypted key. Mirrors stationAIConfig's gate but routed via org.
+      // decrypted key.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) {
         await requireOrgRole(ctx, app.organizationId, 'ADMIN');
@@ -1861,7 +1839,7 @@ export const resolvers = {
         data: {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
-          stationId: ctx.clientId?.startsWith('github:') ? undefined : ctx.clientId,
+          appId: ctx.appId,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
           repo: input.repo,
           branch: input.branch,
@@ -1907,7 +1885,7 @@ export const resolvers = {
           nodeLoc: event.nodeLoc,
           nodeId: node?.id,
           actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
-          stationId: ctx.clientId?.startsWith('github:') ? undefined : ctx.clientId,
+          appId: ctx.appId,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
           sessionId: event.sessionId,
           model: event.model,
@@ -1917,14 +1895,6 @@ export const resolvers = {
       });
       return true;
     },
-
-    // The Station-shaped mutation resolvers (createStation, updateStation,
-    // regenerateApiKey, revokeStation, createStationKey, revokeStationKey,
-    // subscribeStationToAgent, unsubscribeStationFromAgent) were removed
-    // in 003-station-to-app Phase 3a-2 (2026-04-29). New code uses the
-    // App-shaped equivalents (createApp + createAppKey, updateApp,
-    // regenerateAppKey, deleteApp, revokeAppKey, addAgentToApp /
-    // removeAgentFromApp).
 
     regenerateAppKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       const existing = await ctx.db.app.findUniqueOrThrow({ where: { id } });
@@ -4009,7 +3979,6 @@ export const resolvers = {
         orgId,
         name,
         urn,
-        // Absorbed Station fields (Phase 3a-2 of 003-station-to-app)
         appType,
         role,
         description,
@@ -4097,7 +4066,6 @@ export const resolvers = {
         id,
         name,
         urn,
-        // Absorbed Station fields (Phase 3a-2 of 003-station-to-app)
         appType,
         role,
         description,
@@ -4183,10 +4151,6 @@ export const resolvers = {
       {
         appId,
         agentId,
-        // Phase 3a-2 (003-station-to-app): role per Constitution Invariant
-        // #6; subscriptionType + trainingMode carried over from
-        // StationAgentSubscription. Optional — defaults match the schema
-        // defaults (OPERATE / READ_ONLY / false).
         role,
         subscriptionType,
         trainingMode,

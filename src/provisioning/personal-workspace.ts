@@ -6,11 +6,7 @@ import { generateId } from '../lib/id.js';
 interface ProvisionResult {
   orgId: string;
   agentId: string;
-  /**
-   * App-keyed identity for this workspace. Phase 3a of 003-station-to-app
-   * provisions an App as the canonical caller-identity record; new users
-   * authenticate through `appKey` (not the legacy Station key).
-   */
+  /** App-keyed identity for this workspace. */
   appId: string;
   /** Raw `hdr_app_<…>` API key — shown once, never persisted in plaintext. */
   rawKey: string;
@@ -19,8 +15,6 @@ interface ProvisionResult {
 /**
  * Provision a personal workspace for a new user.
  *
- * After Phase 3a of 003-station-to-app, the workspace is **App-keyed**:
- *
  * 1. A personal organization (hidden from the user)
  * 2. The user as OWNER of that org
  * 3. A default "My Memories" agent
@@ -28,10 +22,6 @@ interface ProvisionResult {
  * 5. An AppAgent membership (role=OPERATE, subscriptionType=READ_WRITE) so
  *    the App can write to its agent's memories
  * 6. A PendingSetup record so the raw API key can be shown once
- *
- * No Station is provisioned — the legacy code path is gone for new users.
- * Existing Stations continue to authenticate via the temporary fallback in
- * the auth resolver until Phase 4 removes it.
  */
 export async function provisionPersonalWorkspace(
   db: PrismaClient,
@@ -136,24 +126,17 @@ export async function provisionPersonalWorkspace(
 }
 
 /**
- * Check if a user already has a personal workspace provisioned,
- * or already has any App or Station (e.g. from seed data or a pre-Phase-3a
- * sign-up).
+ * Check if a user already has a personal workspace provisioned.
  */
 export async function hasPersonalWorkspace(
   db: PrismaClient,
   userId: string,
 ): Promise<boolean> {
-  const [membership, station] = await Promise.all([
-    db.orgMember.findFirst({
-      where: {
-        userId,
-        organization: { isVisible: { not: true } },
-      },
-    }),
-    db.station.findFirst({
-      where: { userId, deletedAt: null },
-    }),
-  ]);
-  return !!membership || !!station;
+  const membership = await db.orgMember.findFirst({
+    where: {
+      userId,
+      organization: { isVisible: { not: true } },
+    },
+  });
+  return !!membership;
 }

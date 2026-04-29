@@ -1,24 +1,13 @@
 /**
- * Phase 2 access-control tests for the Station -> App migration
- * (spec-kits/specs/003-station-to-app, US2, T018).
- *
- * Verifies that the access-control layer used by every MCP tool
- * correctly handles three principal kinds:
- *   - App-keyed (AppAgent membership) — the new path established here
- *   - Station-keyed (StationAgentSubscription) — the legacy path,
- *     kept as a transition fallback through Phase 4
- *   - Neither / ADMIN-OWNER bypass
- *
- * Tests both the per-principal helpers (getAppMemoryAccess,
- * getStationMemoryAccess) and the dispatch helpers (getMemoryAccess,
- * canWriteToMemory, getAccessibleMemoryIds).
+ * Access-control tests. The only principal kind this layer resolves is
+ * App-keyed (via AppAgent membership); ADMIN/OWNER roles bypass
+ * subscription checks in the dispatch helpers.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import {
   cleanDb,
-  createDbStation,
   createDbAppWithKey,
   createDbAppAgent,
 } from '../test/helpers.js';
@@ -29,7 +18,6 @@ import {
   getAccessibleMemoryIds,
   getAppMemoryAccess,
   getMemoryAccess,
-  getStationMemoryAccess,
 } from './access-control.js';
 
 // ---------------------------------------------------------------------------
@@ -147,31 +135,7 @@ describe('getAppMemoryAccess (App-key principal)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// getStationMemoryAccess (legacy path — kept as fallback through Phase 4)
-// ---------------------------------------------------------------------------
-
-describe('getStationMemoryAccess (Station-key principal, legacy fallback)', () => {
-  it('still resolves the same access map for Station-keyed callers', async () => {
-    const station = await createDbStation(db, 'st-1', 'READER', { organizationId: orgId });
-    await db.stationAgentSubscription.create({
-      data: {
-        id: generateId(),
-        stationId: station.id,
-        agentId,
-        subscriptionType: 'READ_ONLY',
-      },
-    });
-
-    const access = await getStationMemoryAccess(db, station.id);
-
-    expect(access.size).toBe(2);
-    expect(access.get(systemMemoryId)).toBe('READ_ONLY');
-    expect(access.get(knowledgeMemoryId)).toBe('READ_ONLY');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// getMemoryAccess — dispatches based on principal kind (T018)
+// getMemoryAccess — dispatches based on principal kind
 // ---------------------------------------------------------------------------
 
 describe('getMemoryAccess (dispatch by principal kind)', () => {
@@ -186,36 +150,7 @@ describe('getMemoryAccess (dispatch by principal kind)', () => {
     expect(access.has(systemMemoryId)).toBe(true);
   });
 
-  it('dispatches to the Station path when only auth.clientId is set', async () => {
-    const station = await createDbStation(db, 'st-d', 'READER', { organizationId: orgId });
-    await db.stationAgentSubscription.create({
-      data: { id: generateId(), stationId: station.id, agentId, subscriptionType: 'READ_ONLY' },
-    });
-
-    const auth: AuthContext = { clientId: station.id, organizationId: orgId };
-    const access = await getMemoryAccess(db, auth);
-
-    expect(access.size).toBe(2);
-  });
-
-  it('prefers the App path when both appId and clientId are set (App wins)', async () => {
-    const { app } = await createDbAppWithKey(db, 'app-prefer', orgId);
-    await createDbAppAgent(db, app.id, agentId);
-    const station = await createDbStation(db, 'st-prefer', 'READER', { organizationId: orgId });
-    // Station has NO subscriptions — if the dispatcher fell through to Station,
-    // we'd get an empty map.
-
-    const auth: AuthContext = {
-      appId: app.id,
-      clientId: station.id,
-      organizationId: orgId,
-    };
-    const access = await getMemoryAccess(db, auth);
-
-    expect(access.size).toBe(2);
-  });
-
-  it('returns empty when neither appId nor clientId is set', async () => {
+  it('returns empty when no appId is set', async () => {
     const auth: AuthContext = {};
     const access = await getMemoryAccess(db, auth);
     expect(access.size).toBe(0);
