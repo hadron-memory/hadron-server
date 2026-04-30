@@ -63,23 +63,34 @@ beforeEach(async () => {
     data: { organizationId: orgB.id, userId: userB.id, role: 'READER' },
   });
 
-  // Create an agent in org A and add graph A
-  const agent = await db.agent.create({
-    data: { organizationId: orgA.id, urn: 'org-a:default-agent', name: 'default-agent' },
+  // Create two agents in org A, each attached to graph A — one with
+  // read-only AgentMemoryItem.role (for the "reader" app), one with
+  // read-write (for the "contributor" app). After spec 005, AppAgent
+  // doesn't cap per-attached-memory writes; the cap lives on
+  // AgentMemoryItem.role, so the two-agent fixture is what produces
+  // the observable "one can write, one can't" distinction.
+  const readerAgent = await db.agent.create({
+    data: { organizationId: orgA.id, urn: 'org-a:reader-agent', name: 'reader-agent' },
   });
   await db.agentMemoryItem.create({
-    data: { agentId: agent.id, memoryId: graphA.id, role: 'read-write' },
+    data: { agentId: readerAgent.id, memoryId: graphA.id, role: 'read' },
+  });
+  const contribAgent = await db.agent.create({
+    data: { organizationId: orgA.id, urn: 'org-a:contrib-agent', name: 'contrib-agent' },
+  });
+  await db.agentMemoryItem.create({
+    data: { agentId: contribAgent.id, memoryId: graphA.id, role: 'read-write' },
   });
 
-  // App with READ_ONLY AppAgent membership
+  // App wired to the read-only agent
   const readerApp = await createDbAppWithKey(db, 'reader-app', orgA.id);
   appReader = readerApp.app;
-  await createDbAppAgent(db, appReader.id, agent.id, { subscriptionType: 'READ_ONLY' });
+  await createDbAppAgent(db, appReader.id, readerAgent.id);
 
-  // App with READ_WRITE AppAgent membership
+  // App wired to the read-write agent
   const contribApp = await createDbAppWithKey(db, 'contributor-app', orgA.id);
   appContributor = contribApp.app;
-  await createDbAppAgent(db, appContributor.id, agent.id, { subscriptionType: 'READ_WRITE' });
+  await createDbAppAgent(db, appContributor.id, contribAgent.id);
 
   // Seed nodes
   await createDbNode(db, { loc: 'org-a.repo.nodeA', memoryId: graphA.id });

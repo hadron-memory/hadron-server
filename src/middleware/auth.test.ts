@@ -145,7 +145,8 @@ describe('resolveAuthContext', () => {
         data: { id: 'agent-1', organizationId: 'org-app-test', urn: 'org-app-test:a', name: 'a' },
       });
       await db.memory.create({
-        data: { id: 'mem-1', organizationId: 'org-app-test', urn: 'org-app-test:m', name: 'm' },
+        data: {
+      class: 'knowledge', id: 'mem-1', organizationId: 'org-app-test', urn: 'org-app-test:m', name: 'm' },
       });
       await db.session.create({
         data: {
@@ -174,7 +175,8 @@ describe('resolveAuthContext', () => {
         data: { id: 'agent-2', organizationId: 'org-app-test', urn: 'org-app-test:b', name: 'b' },
       });
       await db.memory.create({
-        data: { id: 'mem-2', organizationId: 'org-app-test', urn: 'org-app-test:m2', name: 'm2' },
+        data: {
+      class: 'knowledge', id: 'mem-2', organizationId: 'org-app-test', urn: 'org-app-test:m2', name: 'm2' },
       });
       await db.session.create({
         data: {
@@ -210,7 +212,8 @@ describe('resolveAuthContext', () => {
         data: { id: 'agent-other', organizationId: 'org-other', urn: 'other:a', name: 'a' },
       });
       await db.memory.create({
-        data: { id: 'mem-other', organizationId: 'org-other', urn: 'other:m', name: 'm' },
+        data: {
+      class: 'knowledge', id: 'mem-other', organizationId: 'org-other', urn: 'other:m', name: 'm' },
       });
       await db.session.create({
         data: {

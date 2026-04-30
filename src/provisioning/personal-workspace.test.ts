@@ -70,7 +70,6 @@ describe('provisionPersonalWorkspace', () => {
     });
     expect(appAgent).toBeDefined();
     expect(appAgent!.role).toBe('OPERATE');
-    expect(appAgent!.subscriptionType).toBe('READ_WRITE');
     expect(appAgent!.trainingMode).toBe(false);
   });
 

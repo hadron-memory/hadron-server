@@ -9,6 +9,10 @@ export default defineConfig({
     exclude: ['dist/**', 'node_modules/**'],
     pool: 'forks',
     fileParallelism: false,
+    // CHECK constraints declared in migrations don't survive `prisma db push`
+    // (which is what tests use to set up a fresh schema). Apply them once
+    // here, before any test file runs. Per spec 005-agent-subscription FR-014.
+    globalSetup: ['./src/test/globalSetup.ts'],
     env: {
       DATABASE_URL:
         process.env.TEST_DATABASE_URL ?? 'postgresql://holger@localhost:5432/hadron_test',

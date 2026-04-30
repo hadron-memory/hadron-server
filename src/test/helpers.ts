@@ -62,6 +62,7 @@ export async function createDbOrgAndGraph(
       organizationId: org.id,
       urn: `${opts.orgName ?? 'test-org'}:${memName}`,
       name: memName,
+      class: 'knowledge',
       ...(opts.visibility ? { visibility: opts.visibility as any } : {}),
     },
   });
@@ -135,7 +136,10 @@ export async function createDbAppWithKey(
 
 /**
  * Link an App to an Agent through an AppAgent join row.
- * Defaults match the schema (role=OPERATE, subscription_type=READ_ONLY).
+ * Defaults match the schema (role=OPERATE, training_mode=false).
+ *
+ * 005-agent-subscription dropped subscription_type — per-attached-memory
+ * write caps are governed by AgentMemoryItem.role.
  */
 export async function createDbAppAgent(
   db: PrismaClient,
@@ -143,7 +147,6 @@ export async function createDbAppAgent(
   agentId: string,
   opts: {
     role?: 'OPERATE' | 'DEVELOP';
-    subscriptionType?: 'READ_ONLY' | 'READ_WRITE';
     trainingMode?: boolean;
   } = {},
 ) {
@@ -152,8 +155,61 @@ export async function createDbAppAgent(
       appId,
       agentId,
       role: opts.role ?? 'OPERATE',
-      subscriptionType: opts.subscriptionType ?? 'READ_ONLY',
       trainingMode: opts.trainingMode ?? false,
+    },
+  });
+}
+
+/**
+ * Insert a test AgentSubscription. Defaults match the v1 lifecycle
+ * (activated immediately on creation; no expiry; not revoked).
+ */
+export async function createDbAgentSubscription(
+  db: PrismaClient,
+  userId: string,
+  agentId: string,
+  opts: {
+    activatedAt?: Date | null;
+    expiresAt?: Date | null;
+    revokedAt?: Date | null;
+  } = {},
+) {
+  return db.agentSubscription.create({
+    data: {
+      user: { connect: { id: userId } },
+      agent: { connect: { id: agentId } },
+      activatedAt: opts.activatedAt === undefined ? new Date() : opts.activatedAt,
+      expiresAt: opts.expiresAt ?? null,
+      revokedAt: opts.revokedAt ?? null,
+    },
+  });
+}
+
+/**
+ * Insert a test personal-class Memory owned by a User. Sets the
+ * required class+visibility+userId combo per the bidirectional
+ * invariant.
+ */
+export async function createDbPersonalMemory(
+  db: PrismaClient,
+  opts: {
+    userId: string;
+    organizationId: string;
+    agentId: string;
+    name?: string;
+  },
+) {
+  const name = opts.name ?? `personal-${opts.userId}-${opts.agentId}`;
+  return db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: opts.organizationId,
+      urn: `${opts.organizationId}:${name}`,
+      name,
+      userId: opts.userId,
+      userMemoryOfAgentId: opts.agentId,
+      class: 'personal',
+      visibility: 'PERSONAL',
     },
   });
 }

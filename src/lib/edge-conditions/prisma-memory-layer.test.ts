@@ -22,6 +22,7 @@ let org: { id: string; urn: string };
 async function makeMemory(name: string, isEncrypted: boolean) {
   return db.memory.create({
     data: {
+      class: 'knowledge',
       organizationId: org.id,
       urn: `${org.urn}:${name}`,
       name,

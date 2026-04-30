@@ -111,7 +111,6 @@ describe('Phase 1 — AppAgent defaults', () => {
     });
 
     expect(appAgent.role).toBe('OPERATE');
-    expect(appAgent.subscriptionType).toBe('READ_ONLY');
     expect(appAgent.trainingMode).toBe(false);
   });
 
@@ -133,13 +132,11 @@ describe('Phase 1 — AppAgent defaults', () => {
         appId: app.id,
         agentId: agent.id,
         role: 'DEVELOP',
-        subscriptionType: 'READ_WRITE',
         trainingMode: true,
       },
     });
 
     expect(appAgent.role).toBe('DEVELOP');
-    expect(appAgent.subscriptionType).toBe('READ_WRITE');
     expect(appAgent.trainingMode).toBe(true);
   });
 });

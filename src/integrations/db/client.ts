@@ -2,7 +2,7 @@ import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 
 // Models with composite primary keys and no `id` column.
-const MODELS_WITHOUT_ID = new Set<string>(['AppAgent']);
+const MODELS_WITHOUT_ID = new Set<string>(['AppAgent', 'AgentSubscription']);
 
 const basePrisma = new PrismaClient();
 

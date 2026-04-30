@@ -19,8 +19,8 @@ interface ProvisionResult {
  * 2. The user as OWNER of that org
  * 3. A default "My Memories" agent
  * 4. A workstation App with an AppKey (raw key prefixed `hdr_app_`)
- * 5. An AppAgent membership (role=OPERATE, subscriptionType=READ_WRITE) so
- *    the App can write to its agent's memories
+ * 5. An AppAgent membership (role=OPERATE) — per-attached-memory write
+ *    caps come from AgentMemoryItem.role per spec 005-agent-subscription
  * 6. A PendingSetup record so the raw API key can be shown once
  */
 export async function provisionPersonalWorkspace(
@@ -94,14 +94,14 @@ export async function provisionPersonalWorkspace(
     },
   });
 
-  // 5. AppAgent membership: workstation gets READ_WRITE on its own agent
-  //    so the user can write to "My Memories" out of the box.
+  // 5. AppAgent membership: workstation gets the OPERATE role on its own
+  //    agent. Per-attached-memory write access is governed by
+  //    AgentMemoryItem.role (read-write for "My Memories").
   await db.appAgent.create({
     data: {
       appId: app.id,
       agentId: agent.id,
       role: 'OPERATE',
-      subscriptionType: 'READ_WRITE',
       createdBy: userId,
     },
   });

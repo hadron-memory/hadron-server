@@ -277,7 +277,7 @@ describe('startAgentSession', () => {
 
     const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
     expect(mem?.userMemoryOfAgentId).toBe(agent.id);
-    expect(mem?.visibility).toBe('PRIVATE');
+    expect(mem?.visibility).toBe('PERSONAL');
     expect(mem?.urn).toContain(':user:');
   });
 
@@ -476,6 +476,7 @@ describe('linkMemoryToUser', () => {
         organizationId: orgB.id,
         urn: 'org-b:x:anon:zzz',
         name: 'foreign',
+            class: 'knowledge',
         userMemoryOfAgentId: foreignAgent.id,
         anonymousExpiresAt: new Date(Date.now() + 86400000),
       },
@@ -503,6 +504,7 @@ describe('memoryAccessFilter (App Key session scoping)', () => {
         organizationId: orgA.id,
         urn: 'org-a:juno-system',
         name: 'juno-system',
+            class: 'knowledge',
         visibility: 'ORGANIZATION',
       },
     });
@@ -518,6 +520,7 @@ describe('memoryAccessFilter (App Key session scoping)', () => {
         organizationId: orgA.id,
         urn: 'org-a:secret',
         name: 'secret',
+            class: 'knowledge',
         visibility: 'ORGANIZATION',
       },
     });
@@ -567,6 +570,7 @@ describe('memoryAccessFilter (App Key session scoping)', () => {
         organizationId: orgA.id,
         urn: 'org-a:other',
         name: 'other',
+            class: 'knowledge',
       },
     });
     await db.node.create({
@@ -595,6 +599,7 @@ describe('cleanupAnonymousMemories', () => {
         organizationId: orgA.id,
         urn: 'org-a:juno:anon:expired',
         name: 'expired',
+            class: 'knowledge',
         userMemoryOfAgentId: agent.id,
         anonymousExpiresAt: new Date(Date.now() - 86400000),
       },
@@ -606,6 +611,7 @@ describe('cleanupAnonymousMemories', () => {
         organizationId: orgA.id,
         urn: 'org-a:juno:anon:fresh',
         name: 'fresh',
+            class: 'knowledge',
         userMemoryOfAgentId: agent.id,
         anonymousExpiresAt: new Date(Date.now() + 86400000),
       },
@@ -617,6 +623,7 @@ describe('cleanupAnonymousMemories', () => {
         organizationId: orgA.id,
         urn: 'org-a:regular',
         name: 'regular',
+            class: 'knowledge',
       },
     });
 
@@ -642,6 +649,7 @@ describe('Organization memory listing', () => {
         organizationId: orgA.id,
         urn: 'org-a:knowledge',
         name: 'knowledge',
+            class: 'knowledge',
       },
     });
     // Create a user memory (via startAgentSession)
@@ -685,6 +693,7 @@ describe('Agent type + surfaces', () => {
         organizationId: orgA.id,
         urn: 'org-a:sys',
         name: 'sys',
+            class: 'knowledge',
       },
     });
     const created = await resolvers.Mutation.createAgent(

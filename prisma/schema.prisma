@@ -99,11 +99,22 @@ enum MemoryVisibility {
   PUBLIC
   PRIVATE
   ORGANIZATION
+  PERSONAL
 }
 
 enum MemoryType {
   KNOWLEDGE
   AGENT_SYSTEM
+}
+
+// Per-Agent memory typology — formalized in 005-agent-subscription
+// (2026-04-30). PERSONAL-class memories MUST have Memory.userId set
+// (enforced by a Postgres CHECK constraint added in the migration).
+enum MemoryClass {
+  system
+  app
+  knowledge
+  personal
 }
 
 enum AssetScanStatus {
@@ -120,6 +131,15 @@ model User {
   githubId         Int?              @unique @map("github_id")
   githubUsername   String?           @unique @map("github_username")
   identityProvider IdentityProvider? @map("identity_provider")
+  // 005-agent-subscription discovery (2026-04-30): R-5 in research.md
+  // proposed dropping `externalId`, but the implementation found that
+  // `createAppUser` and `startAgentSession` use it as the lookup key
+  // for "find the existing User this chatbot already provisioned for
+  // external-7." Dropping it would force every chatbot call to create
+  // a new User row (no idempotency) or require the chatbot to track
+  // the hadron user-id itself on every call. That requires a separate
+  // design discussion — restored `externalId` for now; deferred the
+  // drop. See spec.md §"Assumptions" for the deferral note.
   externalId       String?           @map("external_id")
   externalAppId    String?           @map("external_app_id")
   linkedAt         DateTime?         @map("linked_at")
@@ -143,6 +163,8 @@ model User {
   exchangeConnections       ExchangeConnection[]
   externalApp               App?                       @relation(fields: [externalAppId], references: [id], onDelete: SetNull)
   sessions                  Session[]                  @relation("SessionUser")
+  ownedMemories             Memory[]                   @relation("UserMemoriesOwned")
+  agentSubscriptions        AgentSubscription[]        @relation("UserAgentSubscriptions")
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -220,6 +242,13 @@ model Memory {
   type                 MemoryType       @default(KNOWLEDGE)
   isEncrypted          Boolean          @default(false) @map("is_encrypted")
   userMemoryOfAgentId  String?          @map("user_memory_of_agent_id")
+  // 005-agent-subscription (2026-04-30): explicit User owner for personal-class
+  // memories. NULL for non-personal memories. Postgres CHECK constraint
+  // enforces the bidirectional invariant: visibility=PERSONAL ⇔ userId IS NOT NULL.
+  userId               String?          @map("user_id")
+  // 005-agent-subscription (2026-04-30): four-way memory typology. Required
+  // post-migration; backfilled by the migration's UPDATE statements.
+  class                MemoryClass
   anonymousExpiresAt   DateTime?        @map("anonymous_expires_at")
   requiresLicense      Boolean          @default(false) @map("requires_license")
   lastSyncedAt         DateTime?        @map("last_synced_at")
@@ -241,11 +270,13 @@ model Memory {
   licenses          MemoryLicense[]
   logEntries        MemoryLogEntry[]
   userMemoryOfAgent Agent?               @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
+  user              User?                @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
   sessions          Session[]            @relation("SessionMemory")
 
   @@index([organizationId])
   @@index([userMemoryOfAgentId])
   @@index([anonymousExpiresAt])
+  @@index([userId])
   @@map("memories")
 }
 
@@ -479,6 +510,7 @@ model Agent {
   userMemories         Memory[]                   @relation("UserMemoriesOfAgent")
   sessions             Session[]                  @relation("SessionAgent")
   appAgents            AppAgent[]
+  userSubscriptions    AgentSubscription[]        @relation("AgentUserSubscriptions")
 
   @@map("agents")
 }
@@ -824,7 +856,9 @@ model AppAgent {
   appId            String           @map("app_id")
   agentId          String           @map("agent_id")
   role             AppAgentRole     @default(OPERATE)
-  subscriptionType SubscriptionType @default(READ_ONLY) @map("subscription_type")
+  // 005-agent-subscription (2026-04-30): subscription_type was dropped.
+  // The cap previously enforced by it is now exclusively governed by
+  // AgentMemoryItem.role (per-attached-memory).
   trainingMode     Boolean          @default(false) @map("training_mode")
   createdAt        DateTime         @default(now()) @map("created_at")
   createdBy        String?          @map("created_by")
@@ -839,6 +873,38 @@ model AppAgent {
   @@id([appId, agentId])
   @@index([agentId])
   @@map("app_agents")
+}
+
+// User-side license expressing "this user is authorized to use this agent."
+// Auto-provisioned on first user-attributed contact (per
+// `controller/operations/ensureAgentSubscription.ts`); revocable by an
+// ADMIN/OWNER of the Agent's owning org. Spec: 005-agent-subscription
+// (2026-04-30). Authorizes the cross-org write from the Agent into the
+// user's personal-class Memory.
+model AgentSubscription {
+  userId       String    @map("user_id")
+  agentId      String    @map("agent_id")
+  // Lifecycle. v1 default: activatedAt = now() on creation. Future billing
+  // work introduces a deferred-activation path (activatedAt = null until
+  // payment confirms).
+  activatedAt  DateTime? @map("activated_at")
+  expiresAt    DateTime? @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+  revokedBy    String?   @map("revoked_by")
+  // Standard audit fields. (No deletedAt — soft-delete is redundant with
+  // the revokedAt lifecycle; if a row needs to truly disappear it's a
+  // hard delete.)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  createdBy    String?   @map("created_by")
+  updatedAt    DateTime? @map("updated_at")
+  updatedBy    String?   @map("updated_by")
+
+  user         User      @relation("UserAgentSubscriptions", fields: [userId],  references: [id], onDelete: Cascade)
+  agent        Agent     @relation("AgentUserSubscriptions", fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([userId, agentId])
+  @@index([agentId])
+  @@map("agent_subscriptions")
 }
 
 model AppLogEntry {

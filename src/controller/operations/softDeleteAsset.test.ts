@@ -46,6 +46,7 @@ beforeEach(async () => {
   });
   memory = await db.memory.create({
     data: {
+      class: 'knowledge',
       id: generateId(),
       organizationId: org.id,
       urn: `${org.urn}:buno:user:${generateId()}`,
