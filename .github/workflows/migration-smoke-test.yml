@@ -1,0 +1,114 @@
+name: Migration Smoke Test
+
+# Catches the failure mode that bit spec 005-agent-subscription:
+# a migration that *looks* fine when applied via `prisma db push`
+# (which bypasses the migration engine) but fails under the actual
+# `prisma migrate deploy` path that production runs.
+#
+# Strategy: simulate a real prod-like apply by setting up a DB
+# matching `origin/main` (via db push + marking main's migrations
+# applied), then running `prisma migrate deploy` to apply only
+# the *new* migrations introduced in this PR.
+
+on:
+  pull_request:
+    paths:
+      - 'prisma/migrations/**'
+      - 'prisma/schema.prisma'
+  push:
+    branches: [main]
+    paths:
+      - 'prisma/migrations/**'
+      - 'prisma/schema.prisma'
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_smoke
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hadron_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need history so we can checkout origin/main
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Stash PR's prisma/ and apply main's schema
+        id: baseline
+        run: |
+          # Save PR state, restore main's prisma/ for baseline setup.
+          mkdir -p /tmp/pr-prisma
+          cp -r prisma /tmp/pr-prisma/
+          git checkout origin/main -- prisma/
+          pnpm prisma db push --skip-generate --accept-data-loss
+
+          # Seed `_prisma_migrations` with main's migration list so
+          # Prisma considers them already-applied. PSQL is available
+          # via the postgres service.
+          psql "$DATABASE_URL" -c "
+            CREATE TABLE IF NOT EXISTS \"_prisma_migrations\" (
+              id VARCHAR(36) PRIMARY KEY NOT NULL,
+              checksum VARCHAR(64) NOT NULL,
+              finished_at TIMESTAMPTZ,
+              migration_name VARCHAR(255) NOT NULL,
+              logs TEXT,
+              rolled_back_at TIMESTAMPTZ,
+              started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+              applied_steps_count INTEGER NOT NULL DEFAULT 0
+            );"
+          for m in prisma/migrations/*/; do
+            name=$(basename "$m")
+            [ "$name" = "migration_lock.toml" ] && continue
+            checksum=$(sha256sum "$m/migration.sql" | awk '{print $1}')
+            psql "$DATABASE_URL" -c \
+              "INSERT INTO \"_prisma_migrations\" (id, checksum, finished_at, migration_name, applied_steps_count)
+               VALUES (gen_random_uuid()::text, '$checksum', now(), '$name', 1);" >/dev/null
+          done
+
+          # Restore PR's prisma/ for the deploy step
+          rm -rf prisma
+          mv /tmp/pr-prisma/prisma .
+
+      - name: Apply PR's new migrations via prisma migrate deploy
+        run: pnpm prisma migrate deploy
+
+      - name: Verify migrations and schema.prisma agree
+        run: |
+          # The migrations directory and schema.prisma must agree:
+          # applying all migrations should produce exactly the schema
+          # described by schema.prisma. Any non-empty diff means
+          # someone updated schema.prisma without generating a matching
+          # migration (or vice versa) — the kind of drift that quietly
+          # breaks production deploys.
+          DIFF=$(pnpm prisma migrate diff \
+            --from-url "$DATABASE_URL" \
+            --to-schema-datamodel prisma/schema.prisma \
+            --script 2>&1 | grep -vE "^Loaded|^Prisma config|^$")
+          if [ -n "$DIFF" ] && [ "$DIFF" != "-- This is an empty migration." ]; then
+            echo "::error::Schema drift between migrations and schema.prisma:"
+            echo "$DIFF"
+            exit 1
+          fi
+          echo "OK — migrations produce schema.prisma."
