@@ -97,12 +97,12 @@ describe('provisionPersonalWorkspace', () => {
     expect(member!.canInvite).toBe(true);
   });
 
-  it('creates the default agent named "My Memories"', async () => {
+  it('creates the default agent named "My Agent"', async () => {
     const { agentId, orgId } = await provisionPersonalWorkspace(db, userId, 'Test User');
 
     const agent = await db.agent.findUnique({ where: { id: agentId } });
     expect(agent).toBeDefined();
-    expect(agent!.name).toBe('My Memories');
+    expect(agent!.name).toBe('My Agent');
     expect(agent!.organizationId).toBe(orgId);
   });
 });
