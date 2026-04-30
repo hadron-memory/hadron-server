@@ -1798,9 +1798,15 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     return;
   }
 
-  // New session — authenticate
+  // New session — authenticate. Accept JWT users (userId/clientId set by
+  // resolveAuthContext) OR App Keys (appId set). App Keys are the canonical
+  // way for hadron-client / Claude Code MCP / Cursor / etc. to authenticate;
+  // omitting `appId` from this check rejected every valid App Key with 401.
   const auth = await resolveAuthContext(req, db);
-  if (!auth.clientId && !auth.userId) {
+  if (!auth.appId && !auth.userId && !auth.clientId) {
+    // Signal Bearer-only auth so MCP/LLM SDKs don't probe for OAuth dynamic
+    // client registration (which would 404 at /register). Per RFC 6750 §3.
+    res.setHeader('WWW-Authenticate', 'Bearer realm="hadron", error="invalid_token"');
     res.status(401).json({ error: 'Authentication required' });
     return;
   }

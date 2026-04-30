@@ -17,7 +17,7 @@ interface ProvisionResult {
  *
  * 1. A personal organization (hidden from the user)
  * 2. The user as OWNER of that org
- * 3. A default "My Memories" agent
+ * 3. A default "My Agent" agent
  * 4. A workstation App with an AppKey (raw key prefixed `hdr_app_`)
  * 5. An AppAgent membership (role=OPERATE) — per-attached-memory write
  *    caps come from AgentMemoryItem.role per spec 005-agent-subscription
@@ -59,8 +59,8 @@ export async function provisionPersonalWorkspace(
     data: {
       id: generateId(),
       organizationId: org.id,
-      urn: `${urn}:my-memories`,
-      name: 'My Memories',
+      urn: `${urn}:my-agent`,
+      name: 'My Agent',
       createdBy: userId,
     },
   });
@@ -96,7 +96,7 @@ export async function provisionPersonalWorkspace(
 
   // 5. AppAgent membership: workstation gets the OPERATE role on its own
   //    agent. Per-attached-memory write access is governed by
-  //    AgentMemoryItem.role (read-write for "My Memories").
+  //    AgentMemoryItem.role (read-write for "My Agent").
   await db.appAgent.create({
     data: {
       appId: app.id,

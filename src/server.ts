@@ -692,6 +692,20 @@ export async function createServer(): Promise<Express> {
     await handleMcpDelete(req, res);
   });
 
+  // OAuth dynamic client registration is not supported. MCP/LLM SDKs that
+  // probe RFC 7591's /register endpoint when they see a 401 from /mcp expect
+  // a JSON error (RFC 6749 §5.2 shape) — Express's default HTML 404 makes
+  // them blow up with "JSON Parse error: Unrecognized token '<'". Return a
+  // valid OAuth-shaped JSON error instead so the SDK surfaces a useful
+  // message, and tell the caller to use Bearer auth with an App Key.
+  app.all('/register', (_req, res) => {
+    res.status(404).json({
+      error: 'unsupported_grant_type',
+      error_description:
+        'OAuth dynamic client registration is not supported. Authenticate to /mcp with an App Key via the Authorization: Bearer hdr_app_… header.',
+    });
+  });
+
   app.get('/health', (_req, res) => {
     res.json({ ok: true });
   });
