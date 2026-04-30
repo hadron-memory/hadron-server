@@ -22,6 +22,7 @@ export const typeDefs = `#graphql
     PUBLIC
     PRIVATE
     ORGANIZATION
+    PERSONAL
   }
 
   enum MemoryType {
@@ -186,8 +187,9 @@ export const typeDefs = `#graphql
     anonymousTtlDays: Int!
     agents: [Agent!]!
     # Membership rows linking this App to agents. Each row carries the
-    # AppAgentRole (operate | develop, per Constitution Invariant #6),
-    # the subscriptionType, and trainingMode.
+    # AppAgentRole (operate | develop, per Constitution Invariant #6) and
+    # trainingMode. Per-attached-memory write caps live on
+    # AgentMemoryItem.role (per spec 005-agent-subscription).
     agentSubscriptions: [AppAgentSub!]!
     keys: [AppKey!]!
     createdAt: String!
@@ -221,8 +223,31 @@ export const typeDefs = `#graphql
     agentId: String!
     agent: Agent!
     role: AppAgentRole!
-    subscriptionType: SubscriptionType!
     trainingMode: Boolean!
+    createdAt: String!
+  }
+
+  # 005-agent-subscription: User-side license expressing "this user is
+  # authorized to use this agent." Auto-provisioned on first user-attributed
+  # contact (server-side, not via a public mutation in v1); revocable by an
+  # ADMIN/OWNER of the Agent's owning org.
+  enum MemoryClass {
+    system
+    app
+    knowledge
+    personal
+  }
+
+  type AgentSubscription {
+    userId: ID!
+    agentId: ID!
+    user: User
+    agent: Agent
+    activatedAt: String
+    expiresAt: String
+    revokedAt: String
+    revokedBy: ID
+    isActive: Boolean!
     createdAt: String!
   }
 
@@ -305,6 +330,12 @@ export const typeDefs = `#graphql
     writeBranch: String
     visibility: MemoryVisibility!
     type: MemoryType!
+    # 005-agent-subscription: four-way memory typology
+    class: MemoryClass!
+    # 005-agent-subscription: User owner for personal-class memories.
+    # Resolves to null for non-personal memories or when the caller is
+    # not the memory owner / not ADMIN/OWNER of the memory's org.
+    userId: ID
     isEncrypted: Boolean!
     userMemoryOfAgentId: String
     anonymousExpiresAt: String
@@ -658,6 +689,12 @@ export const typeDefs = `#graphql
     myApp: App
     # Apps where the current user is a member of the App's org
     myApps: [App!]!
+    # 005-agent-subscription FR-005: AgentSubscriptions held by the
+    # authenticated user. Read-only in v1.
+    myAgentSubscriptions: [AgentSubscription!]!
+    # 005-agent-subscription FR-022: list all AgentSubscriptions for an
+    # Agent. Authorized for ADMIN/OWNER of the Agent's owning org.
+    agentSubscriptions(agentId: ID!): [AgentSubscription!]!
     # All nodes accessible by an App (across all subscribed memories)
     appNodes(appId: ID!, limit: Int): [Node!]!
     # Decrypted AI config for an App (org ADMIN of the App's org)
@@ -875,12 +912,17 @@ export const typeDefs = `#graphql
       appId: ID!
       agentId: ID!
       role: AppAgentRole
-      subscriptionType: SubscriptionType
       trainingMode: Boolean
     ): App!
     removeAgentFromApp(appId: ID!, agentId: ID!): App!
     createAppKey(appId: ID!, label: String): AppKeyCreated!
     revokeAppKey(id: ID!): Boolean!
+
+    # 005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's
+    # AgentSubscription. Authorized for ADMIN/OWNER of the Agent's owning
+    # org. Side effect: empty personal Memory of (user, agent) is hard-
+    # deleted; non-empty is retained with userMemoryOfAgentId preserved.
+    revokeAgentSubscription(userId: ID!, agentId: ID!): AgentSubscription!
 
     # App Key callers only: vouch for a user and manage sessions.
     # Identity lifecycle

@@ -186,7 +186,6 @@ describe('addAgentToApp accepts AppAgent fields', () => {
         appId: created.id,
         agentId,
         role: 'DEVELOP',
-        subscriptionType: 'READ_WRITE',
         trainingMode: true,
       },
       adminCtx(),
@@ -195,7 +194,6 @@ describe('addAgentToApp accepts AppAgent fields', () => {
       where: { appId_agentId: { appId: created.id, agentId } },
     });
     expect(link.role).toBe('DEVELOP');
-    expect(link.subscriptionType).toBe('READ_WRITE');
     expect(link.trainingMode).toBe(true);
   });
 
@@ -214,7 +212,6 @@ describe('addAgentToApp accepts AppAgent fields', () => {
       where: { appId_agentId: { appId: created.id, agentId } },
     });
     expect(link.role).toBe('OPERATE');
-    expect(link.subscriptionType).toBe('READ_ONLY');
     expect(link.trainingMode).toBe(false);
   });
 
@@ -341,7 +338,7 @@ describe('appNodes', () => {
   it('returns nodes from memories accessible via AppAgent membership', async () => {
     const { app } = await createDbAppWithKey(db, 'app-nodes', orgId);
     await db.appAgent.create({
-      data: { appId: app.id, agentId, role: 'OPERATE', subscriptionType: 'READ_ONLY' },
+      data: { appId: app.id, agentId, role: 'OPERATE' },
     });
     const nodes = await resolvers.Query.appNodes({}, { appId: app.id }, adminCtx());
     expect(nodes.length).toBe(1);

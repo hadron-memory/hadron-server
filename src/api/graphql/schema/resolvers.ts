@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypt
 import { generateId } from '../../../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { canWriteToMemory } from '../../../mcp/access-control.js';
+import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import {
@@ -242,9 +243,10 @@ function deduplicateNodes<T extends { loc: string; isLink: boolean }>(nodes: T[]
  * Verify the caller has write access to a specific memory.
  *
  * Checks (most restrictive wins):
- * 1. Global ADMIN/OWNER — always allowed
- * 2. App-keyed callers: an AppAgent with subscriptionType READ_WRITE that
- *    transitively grants write on the memory (delegated to canWriteToMemory)
+ * 1. Global ADMIN/OWNER — always allowed (except for PERSONAL memories,
+ *    where strict ownership applies per FR-016)
+ * 2. App-keyed callers: write resolved by canWriteToMemory which folds
+ *    AppAgent.role + AgentMemoryItem.role + AgentSubscription gates
  * 3. Users: org member with CONTRIBUTOR+, or cross-org subscription with CONTRIBUTOR role
  */
 async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
@@ -705,6 +707,31 @@ export const resolvers = {
     organization: (g: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
       (g as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: g.organizationId } }),
+    // 005-agent-subscription FR-024: userId is gated. Resolves to the
+    // actual User.id only for the memory owner or ADMIN/OWNER of the
+    // memory's organization. End users querying other users' memories
+    // get null even when the underlying value is non-null.
+    userId: (
+      g: { userId?: string | null; organizationId: string },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!g.userId) return null;
+      // Memory owner can always see
+      if (ctx.userId === g.userId) return g.userId;
+      // ADMIN/OWNER of the memory's org can see (for governance)
+      if (
+        ctx.organizationId === g.organizationId &&
+        (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))
+      ) {
+        return g.userId;
+      }
+      // Platform ADMIN/OWNER also see
+      if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
+        return g.userId;
+      }
+      return null;
+    },
     // For AGENT_SYSTEM memories, find the agent that owns this memory.
     // Returns null for regular knowledge memories. We use a findFirst because
     // there's no FK from Memory → Agent — the relationship is expressed on
@@ -753,6 +780,22 @@ export const resolvers = {
   },
   AppAgentSub: {
     createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    agent: async (s: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) =>
+      s.agent ?? ctx.db.agent.findUnique({ where: { id: s.agentId } }),
+  },
+  AgentSubscription: {
+    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    activatedAt: (s: { activatedAt?: Date | string | null }) => toISO(s.activatedAt ?? null),
+    expiresAt: (s: { expiresAt?: Date | string | null }) => toISO(s.expiresAt ?? null),
+    revokedAt: (s: { revokedAt?: Date | string | null }) => toISO(s.revokedAt ?? null),
+    isActive: (s: { activatedAt?: Date | null; revokedAt?: Date | null; expiresAt?: Date | null }) => {
+      if (!s.activatedAt) return false;
+      if (s.revokedAt) return false;
+      if (s.expiresAt && new Date(s.expiresAt) <= new Date()) return false;
+      return true;
+    },
+    user: async (s: { userId: string; user?: unknown }, _: unknown, ctx: Context) =>
+      s.user ?? ctx.db.user.findUnique({ where: { id: s.userId } }),
     agent: async (s: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) =>
       s.agent ?? ctx.db.agent.findUnique({ where: { id: s.agentId } }),
   },
@@ -1426,6 +1469,31 @@ export const resolvers = {
       return ctx.db.app.findMany({
         where: { organizationId: { in: orgIds }, deletedAt: null },
         include: APP_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+      });
+    },
+
+    // 005-agent-subscription FR-005: AgentSubscriptions held by the
+    // authenticated user.
+    myAgentSubscriptions: async (_: unknown, __: unknown, ctx: Context) => {
+      if (!ctx.userId) return [];
+      return ctx.db.agentSubscription.findMany({
+        where: { userId: ctx.userId },
+        orderBy: { createdAt: 'desc' },
+      });
+    },
+
+    // 005-agent-subscription FR-022: list all AgentSubscriptions to an Agent.
+    // Authorized for ADMIN/OWNER of the Agent's owning org.
+    agentSubscriptions: async (
+      _: unknown,
+      { agentId }: { agentId: string },
+      ctx: Context,
+    ) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      return ctx.db.agentSubscription.findMany({
+        where: { agentId },
         orderBy: { createdAt: 'desc' },
       });
     },
@@ -2284,6 +2352,11 @@ export const resolvers = {
           writeBranch,
           visibility: (visibility as MemoryVisibility) ?? 'PRIVATE',
           type: type ?? 'KNOWLEDGE',
+          // 005-agent-subscription: explicit user-driven createMemory
+          // creates a knowledge-class memory by default. Personal-class
+          // memories are auto-provisioned via the AgentSubscription
+          // path; system-class via Agent.systemMemoryId.
+          class: 'knowledge',
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
         include: MEMORY_INCLUDE,
@@ -2887,6 +2960,13 @@ export const resolvers = {
       // Legacy callers with no user get "anonymous".
       const effectiveUserId = userId ?? ctx.userId ?? 'anonymous';
 
+      // 005-agent-subscription FR-002: auto-provision an AgentSubscription
+      // on the first user-attributed contact for (user, agent). Idempotent.
+      // Skip for the "anonymous" sentinel — there is no User row.
+      if (effectiveUserId !== 'anonymous') {
+        await ensureAgentSubscription(ctx.db, effectiveUserId, agentId);
+      }
+
       // Load agent with system memory
       const agent = await ctx.db.agent.findUniqueOrThrow({
         where: { id: agentId },
@@ -3005,7 +3085,16 @@ export const resolvers = {
               organizationId: agent.organizationId,
               urn: memoryUrn,
               name: `${agent.name} — ${ctx.userId}`,
-              visibility: 'PRIVATE',
+              // 005-agent-subscription: personal-class memory; userId
+              // owner-pivot is required by the bidirectional CHECK
+              // constraint (PERSONAL ⇔ userId IS NOT NULL). Note:
+              // organizationId stays at agent.organizationId here for
+              // the legacy JWT-user path; the spec's FR-015 (use
+              // user's personal org) applies to the new App-keyed
+              // AgentSubscription auto-provisioning path.
+              userId: ctx.userId,
+              class: 'personal',
+              visibility: 'PERSONAL',
               userMemoryOfAgentId: agentId,
               createdBy: ctx.userId,
             },
@@ -4152,13 +4241,11 @@ export const resolvers = {
         appId,
         agentId,
         role,
-        subscriptionType,
         trainingMode,
       }: {
         appId: string;
         agentId: string;
         role?: AppAgentRole;
-        subscriptionType?: SubscriptionType;
         trainingMode?: boolean;
       },
       ctx: Context,
@@ -4170,19 +4257,20 @@ export const resolvers = {
       if (agent.organizationId !== app.organizationId) {
         throw new Error('Agent must belong to the same organization as the App');
       }
+      // 005-agent-subscription: subscription_type was dropped; the cap
+      // it used to enforce is governed by AgentMemoryItem.role per-attached
+      // memory.
       await ctx.db.appAgent.upsert({
         where: { appId_agentId: { appId, agentId } },
         create: {
           appId,
           agentId,
           role: role ?? 'OPERATE',
-          subscriptionType: subscriptionType ?? 'READ_ONLY',
           trainingMode: trainingMode ?? false,
           createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
         },
         update: {
           ...(role !== undefined ? { role } : {}),
-          ...(subscriptionType !== undefined ? { subscriptionType } : {}),
           ...(trainingMode !== undefined ? { trainingMode } : {}),
           updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
         },
@@ -4234,6 +4322,44 @@ export const resolvers = {
       await requireOrgRole(ctx, key.app.organizationId, 'ADMIN');
       await ctx.db.appKey.update({ where: { id }, data: { revokedAt: new Date() } });
       return true;
+    },
+
+    // 005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's
+    // AgentSubscription. ADMIN/OWNER of the Agent's owning org only.
+    // Side effect: if the user's personal Memory of the Agent has zero
+    // nodes, hard-delete it alongside the revocation (FR-029); otherwise
+    // retain it (FR-028).
+    revokeAgentSubscription: async (
+      _: unknown,
+      { userId, agentId }: { userId: string; agentId: string },
+      ctx: Context,
+    ) => {
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+
+      const updated = await ctx.db.agentSubscription.update({
+        where: { userId_agentId: { userId, agentId } },
+        data: {
+          revokedAt: new Date(),
+          revokedBy: ctx.userId ?? null,
+        },
+      });
+
+      // FR-029: empty personal Memory at revocation time → hard-delete.
+      const personalMemory = await ctx.db.memory.findFirst({
+        where: {
+          userId,
+          userMemoryOfAgentId: agentId,
+          class: 'personal',
+          deletedAt: null,
+        },
+        include: { _count: { select: { nodes: true } } },
+      });
+      if (personalMemory && personalMemory._count.nodes === 0) {
+        await ctx.db.memory.delete({ where: { id: personalMemory.id } });
+      }
+
+      return updated;
     },
 
     // ── Multi-user-agent: identity and sessions (App Key auth) ──────
@@ -4321,6 +4447,12 @@ export const resolvers = {
         userId = user.id;
       }
 
+      // 005-agent-subscription FR-002: auto-provision an AgentSubscription
+      // on the first user-attributed contact for (user, agent). Idempotent.
+      if (userId) {
+        await ensureAgentSubscription(ctx.db, userId, agentId);
+      }
+
       // Find or lazily provision the user memory for (agent, user)
       let memoryId: string;
       let memoryIsEncrypted = false;
@@ -4342,7 +4474,12 @@ export const resolvers = {
               organizationId: agent.organizationId,
               urn: memoryUrn,
               name: `User memory (${agent.name})`,
-              visibility: 'PRIVATE',
+              // 005-agent-subscription: per-user memory keyed on userId.
+              // Bidirectional CHECK constraint requires PERSONAL ⇔ userId
+              // IS NOT NULL.
+              userId,
+              class: 'personal',
+              visibility: 'PERSONAL',
               userMemoryOfAgentId: agentId,
               // New user memories in SECRET mode are encrypted from creation.
               isEncrypted: parsedKey !== null,
@@ -4367,6 +4504,10 @@ export const resolvers = {
             organizationId: agent.organizationId,
             urn: memoryUrn,
             name: `Anonymous session (${agent.name})`,
+            // Anonymous: no userId yet (linkMemoryToUser later may set
+            // it); class is 'app' since the data belongs to the App's
+            // bucket of records-through-this-agent until promoted.
+            class: 'app',
             visibility: 'PRIVATE',
             userMemoryOfAgentId: agentId,
             anonymousExpiresAt: expires,

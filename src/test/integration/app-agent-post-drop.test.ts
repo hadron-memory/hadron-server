@@ -1,0 +1,97 @@
+/**
+ * US2 verification (per spec 005-agent-subscription / SC-005):
+ * AppAgent.subscription_type was dropped; the cap previously enforced
+ * by it is now exclusively governed by AgentMemoryItem.role. This
+ * test confirms parity — the same set of (App, Agent, Memory, op)
+ * attempts that were valid before the drop remain valid after.
+ *
+ * Approach: replay a fixture matrix of role × per-attached-memory-role
+ * combinations and assert each effective access matches the expected
+ * post-spec semantics.
+ */
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { db } from '../../integrations/db/client.js';
+import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../helpers.js';
+import { generateId } from '../../lib/id.js';
+import type { AuthContext } from '../../middleware/auth.js';
+import { canWriteToMemory } from '../../mcp/access-control.js';
+
+beforeEach(async () => {
+  await cleanDb(db);
+});
+
+describe('AppAgent post-subscription_type-drop parity (SC-005)', () => {
+  it('AgentMemoryItem.role=read-write allows writes regardless of AppAgent.role', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'pd-org-1', urn: 'pd-org-1' },
+    });
+    const memory = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m`, name: 'm', class: 'knowledge' },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:a`, name: 'a' },
+    });
+    await db.agentMemoryItem.create({
+      data: { agentId: agent.id, memoryId: memory.id, role: 'read-write' },
+    });
+
+    // Both roles can write — AppAgent.role doesn't cap per-attached-memory writes
+    for (const role of ['OPERATE', 'DEVELOP'] as const) {
+      const { app } = await createDbAppWithKey(db, `pd-app-${role}`, org.id);
+      await createDbAppAgent(db, app.id, agent.id, { role });
+      const ctx: AuthContext = { appId: app.id, organizationId: org.id };
+      expect(await canWriteToMemory(db, ctx, memory.id)).toBe(true);
+    }
+  });
+
+  it('AgentMemoryItem.role=read denies writes regardless of AppAgent.role', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'pd-org-2', urn: 'pd-org-2' },
+    });
+    const memory = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m`, name: 'm', class: 'knowledge' },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:a`, name: 'a' },
+    });
+    await db.agentMemoryItem.create({
+      data: { agentId: agent.id, memoryId: memory.id, role: 'read' },
+    });
+
+    for (const role of ['OPERATE', 'DEVELOP'] as const) {
+      const { app } = await createDbAppWithKey(db, `pd-app-${role}`, org.id);
+      await createDbAppAgent(db, app.id, agent.id, { role });
+      const ctx: AuthContext = { appId: app.id, organizationId: org.id };
+      expect(await canWriteToMemory(db, ctx, memory.id)).toBe(false);
+    }
+  });
+
+  it('AppAgent.role=DEVELOP unlocks system memory writes; OPERATE does not', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'pd-org-3', urn: 'pd-org-3' },
+    });
+    const sysMemory = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:sys`, name: 'sys', class: 'system' },
+    });
+    const agent = await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:a`,
+        name: 'a',
+        systemMemoryId: sysMemory.id,
+      },
+    });
+
+    const { app: opApp } = await createDbAppWithKey(db, 'pd-op-app', org.id);
+    await createDbAppAgent(db, opApp.id, agent.id, { role: 'OPERATE' });
+    const opCtx: AuthContext = { appId: opApp.id, organizationId: org.id };
+    expect(await canWriteToMemory(db, opCtx, sysMemory.id)).toBe(false);
+
+    const { app: devApp } = await createDbAppWithKey(db, 'pd-dev-app', org.id);
+    await createDbAppAgent(db, devApp.id, agent.id, { role: 'DEVELOP' });
+    const devCtx: AuthContext = { appId: devApp.id, organizationId: org.id };
+    expect(await canWriteToMemory(db, devCtx, sysMemory.id)).toBe(true);
+  });
+});

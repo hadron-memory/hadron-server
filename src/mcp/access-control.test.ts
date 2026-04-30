@@ -31,10 +31,12 @@ let knowledgeMemoryId: string;
 
 async function buildAgentWithMemories(opts: { agentMemoryRole?: string } = {}) {
   const sysMemory = await db.memory.create({
-    data: { id: generateId(), name: 'sys', urn: `${orgId}:sys`, organizationId: orgId },
+    data: {
+      class: 'knowledge', id: generateId(), name: 'sys', urn: `${orgId}:sys`, organizationId: orgId },
   });
   const knMemory = await db.memory.create({
-    data: { id: generateId(), name: 'kn', urn: `${orgId}:kn`, organizationId: orgId },
+    data: {
+      class: 'knowledge', id: generateId(), name: 'kn', urn: `${orgId}:kn`, organizationId: orgId },
   });
   const agent = await db.agent.create({
     data: {
@@ -74,7 +76,7 @@ beforeEach(async () => {
 describe('getAppMemoryAccess (App-key principal)', () => {
   it('returns the agent system memory + memoryItems for a READ_ONLY AppAgent', async () => {
     const { app } = await createDbAppWithKey(db, 'app-ro', orgId);
-    await createDbAppAgent(db, app.id, agentId, { subscriptionType: 'READ_ONLY' });
+    await createDbAppAgent(db, app.id, agentId, {  });
 
     const access = await getAppMemoryAccess(db, app.id);
 
@@ -83,15 +85,16 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     expect(access.get(knowledgeMemoryId)).toBe('READ_ONLY');
   });
 
-  it('grants READ_WRITE on the system memory when AppAgent.subscriptionType=READ_WRITE', async () => {
+  it('grants READ_WRITE on the system memory when AppAgent.role=DEVELOP', async () => {
     const { app } = await createDbAppWithKey(db, 'app-rw', orgId);
-    await createDbAppAgent(db, app.id, agentId, { subscriptionType: 'READ_WRITE' });
+    await createDbAppAgent(db, app.id, agentId, { role: 'DEVELOP' });
 
     const access = await getAppMemoryAccess(db, app.id);
 
     expect(access.get(systemMemoryId)).toBe('READ_WRITE');
-    // The knowledge memory's agentMemoryItem role defaults to 'read', so even
-    // with READ_WRITE subscription it stays READ_ONLY.
+    // The knowledge memory's agentMemoryItem role defaults to 'read'.
+    // Per 005-agent-subscription, AppAgent.role no longer caps per-attached-memory
+    // writes; only AgentMemoryItem.role does. Default 'read' → READ_ONLY.
     expect(access.get(knowledgeMemoryId)).toBe('READ_ONLY');
   });
 
@@ -105,7 +108,7 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     const localAgentId = built.agent.id;
     const localKnId = built.knMemory.id;
     const { app } = await createDbAppWithKey(db, 'app-rw', orgId);
-    await createDbAppAgent(db, app.id, localAgentId, { subscriptionType: 'READ_WRITE' });
+    await createDbAppAgent(db, app.id, localAgentId, {  });
 
     const access = await getAppMemoryAccess(db, app.id);
 
@@ -162,18 +165,18 @@ describe('getMemoryAccess (dispatch by principal kind)', () => {
 // ---------------------------------------------------------------------------
 
 describe('canWriteToMemory', () => {
-  it('returns true for an App with READ_WRITE subscription on the system memory', async () => {
+  it('returns true for an App with role=DEVELOP on the system memory', async () => {
     const { app } = await createDbAppWithKey(db, 'app-w', orgId);
-    await createDbAppAgent(db, app.id, agentId, { subscriptionType: 'READ_WRITE' });
+    await createDbAppAgent(db, app.id, agentId, { role: 'DEVELOP' });
 
     const auth: AuthContext = { appId: app.id, organizationId: orgId };
 
     expect(await canWriteToMemory(db, auth, systemMemoryId)).toBe(true);
   });
 
-  it('returns false for an App with READ_ONLY subscription', async () => {
+  it('returns false for an App with role=OPERATE on the system memory', async () => {
     const { app } = await createDbAppWithKey(db, 'app-ro', orgId);
-    await createDbAppAgent(db, app.id, agentId, { subscriptionType: 'READ_ONLY' });
+    await createDbAppAgent(db, app.id, agentId, { role: 'OPERATE' });
 
     const auth: AuthContext = { appId: app.id, organizationId: orgId };
 
@@ -197,10 +200,11 @@ describe('canWriteToMemory', () => {
 
   it('returns false for a memoryId outside the App\'s subscriptions', async () => {
     const { app } = await createDbAppWithKey(db, 'app-w', orgId);
-    await createDbAppAgent(db, app.id, agentId, { subscriptionType: 'READ_WRITE' });
+    await createDbAppAgent(db, app.id, agentId, { role: 'DEVELOP' });
 
     const otherMem = await db.memory.create({
-      data: { id: generateId(), name: 'unrelated', urn: `${orgId}:unrelated`, organizationId: orgId },
+      data: {
+      class: 'knowledge', id: generateId(), name: 'unrelated', urn: `${orgId}:unrelated`, organizationId: orgId },
     });
 
     const auth: AuthContext = { appId: app.id, organizationId: orgId };

@@ -105,6 +105,7 @@ describe('updateAgent first-attach of systemMemoryId', () => {
         organizationId: otherOrg.id,
         urn: 'org-b:foreign',
         name: 'foreign',
+            class: 'knowledge',
       },
     });
     await expect(

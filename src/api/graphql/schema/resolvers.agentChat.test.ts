@@ -194,7 +194,7 @@ describe('startChat (JWT user)', () => {
       where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id },
     });
     expect(mem).not.toBeNull();
-    expect(mem?.visibility).toBe('PRIVATE');
+    expect(mem?.visibility).toBe('PERSONAL');
     expect(mem?.urn).toContain(':user:');
 
     // Verify the chat node exists inside that memory
