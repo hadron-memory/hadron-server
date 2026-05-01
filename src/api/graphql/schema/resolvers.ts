@@ -1728,8 +1728,10 @@ export const resolvers = {
 
     deleteNode: async (_: unknown, { loc: rawLoc, memoryId }: { loc: string; memoryId: string }, ctx: Context) => {
       const loc = parseUrnInput(rawLoc).value;
-      await requireMemoryWriteAccess(ctx, memoryId);
-      await ctx.db.node.delete({ where: { loc_memoryId: { loc, memoryId } } });
+      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      await requireMemoryWriteAccess(ctx, resolvedMemoryId);
+      await ctx.db.node.delete({ where: { loc_memoryId: { loc, memoryId: resolvedMemoryId } } });
       return true;
     },
 
@@ -1915,13 +1917,19 @@ export const resolvers = {
     moveNode: async (_: unknown, { from: rawFrom, to: rawTo, memoryId, targetMemoryId }: { from: string; to: string; memoryId: string; targetMemoryId?: string }, ctx: Context) => {
       const from = parseUrnInput(rawFrom).value;
       const to = parseUrnInput(rawTo).value;
-      await requireMemoryWriteAccess(ctx, memoryId);
-      if (targetMemoryId && targetMemoryId !== memoryId) {
-        await requireMemoryWriteAccess(ctx, targetMemoryId);
+      // 007-entity-id-or-urn: memoryId and targetMemoryId may be IDs,
+      // bare URNs, or prefixed URNs.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      const resolvedTargetMemoryId = targetMemoryId
+        ? (await resolveMemoryRef(ctx.db, targetMemoryId)).id
+        : undefined;
+      await requireMemoryWriteAccess(ctx, resolvedMemoryId);
+      if (resolvedTargetMemoryId && resolvedTargetMemoryId !== resolvedMemoryId) {
+        await requireMemoryWriteAccess(ctx, resolvedTargetMemoryId);
       }
-      const destMemoryId = targetMemoryId ?? memoryId;
+      const destMemoryId = resolvedTargetMemoryId ?? resolvedMemoryId;
       return ctx.db.node.update({
-        where: { loc_memoryId: { loc: from, memoryId } },
+        where: { loc_memoryId: { loc: from, memoryId: resolvedMemoryId } },
         data: { loc: to, memoryId: destMemoryId },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
@@ -1937,10 +1945,12 @@ export const resolvers = {
       }: { ownerRepo: string; memoryId: string; nodes: NodeInput[]; edges: EdgeInput[] },
       ctx: Context,
     ) => {
-      await requireMemoryWriteAccess(ctx, memoryId);
+      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      await requireMemoryWriteAccess(ctx, resolvedMemoryId);
 
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
-        await tx.node.deleteMany({ where: { ownerRepo, memoryId } });
+        await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
 
         for (const input of nodes) {
           await tx.node.create({
@@ -1953,7 +1963,7 @@ export const resolvers = {
         }
 
         for (const edge of edges) {
-          const source = await tx.node.findUnique({ where: { loc_memoryId: { loc: edge.sourceLoc, memoryId } } });
+          const source = await tx.node.findUnique({ where: { loc_memoryId: { loc: edge.sourceLoc, memoryId: resolvedMemoryId } } });
           const target = await tx.node.findFirst({ where: { loc: edge.targetLoc } });
           if (source && target) {
             await tx.edge.upsert({
