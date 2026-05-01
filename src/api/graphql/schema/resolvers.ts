@@ -24,7 +24,13 @@ import {
   type MemoryLayerHandle,
 } from '../../../lib/edge-conditions/index.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
-import { beginAssetUpload, type BeginAssetUploadInput as AssetUploadInput } from '../../../controller/operations/beginAssetUpload.js';
+import {
+  beginAssetUpload,
+  beginAssetUploadV2,
+  type BeginAssetUploadInput as AssetUploadInput,
+  type BeginAssetUploadV2Input,
+} from '../../../controller/operations/beginAssetUpload.js';
+import { listMemoryAssets } from '../../../controller/operations/listMemoryAssets.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
@@ -1199,6 +1205,36 @@ export const resolvers = {
       };
     },
 
+    // v2 (spec 006): memory-addressed listing.
+    memoryAssets: async (
+      _: unknown,
+      input: {
+        memoryId: string;
+        mimeType?: string;
+        skip?: number;
+        count?: number;
+        includeDeleted?: boolean;
+      },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const result = await listMemoryAssets(
+        ctx.db,
+        {
+          userId: ctx.userId,
+          appId: ctx.appId,
+          roles: ctx.roles,
+          organizationId: ctx.organizationId,
+        },
+        input,
+      );
+      return {
+        assets: result.assets,
+        total: result.total,
+        hasMore: result.hasMore,
+      };
+    },
+
     assetDownloadUrl: async (
       _: unknown,
       { assetId, ttlSeconds }: { assetId: string; ttlSeconds?: number },
@@ -1779,6 +1815,34 @@ export const resolvers = {
         { userId: ctx.userId, appId: ctx.appId },
         input,
         resolveAssetTargetMemoryId,
+      );
+      return {
+        uploadId: ticket.uploadId,
+        putUrl: ticket.putUrl,
+        putHeaders: ticket.putHeaders,
+        expiresAt: ticket.expiresAt.toISOString(),
+        storageKey: ticket.storageKey,
+        maxSizeBytes: ticket.maxSizeBytes,
+        allowedMimeType: ticket.allowedMimeType,
+      };
+    },
+
+    // v2 (spec 006): memory-addressed begin.
+    beginAssetUploadV2: async (
+      _: unknown,
+      { input }: { input: BeginAssetUploadV2Input },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      const ticket = await beginAssetUploadV2(
+        ctx.db,
+        {
+          userId: ctx.userId,
+          appId: ctx.appId,
+          roles: ctx.roles,
+          organizationId: ctx.organizationId,
+        },
+        input,
       );
       return {
         uploadId: ticket.uploadId,

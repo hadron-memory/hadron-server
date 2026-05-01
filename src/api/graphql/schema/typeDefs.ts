@@ -578,6 +578,19 @@ export const typeDefs = `#graphql
     uploadRequestId: String
   }
 
+  # v2 (spec 006-asset-upload-redesign): memory-addressed input.
+  # memoryId is required for the attached upload path. The staging
+  # path (memoryId omitted) is added in US4.
+  input BeginAssetUploadV2Input {
+    memoryId:        ID!
+    filename:        String!
+    mimeType:        String!
+    sizeBytes:       Int!
+    description:     String
+    uploadIntent:    UploadIntent!
+    uploadRequestId: String
+  }
+
   type AssetPutHeader {
     name:  String!
     value: String!
@@ -719,11 +732,21 @@ export const typeDefs = `#graphql
     # suitable for feeding back into an LLM.
     chatHistory(chatId: String!, limit: Int): [ChatMessage!]!
 
-    # ── Assets (spec 004-asset-upload) ────────────────────────────────
-    # List the calling user's assets in their per-agent memory,
-    # paginated, optionally filtered by MIME.
+    # ── Assets (spec 004-asset-upload + 006-asset-upload-redesign) ────
+    # v1 — agent-addressed listing. Deprecated; use memoryAssets.
     agentAssets(
       agentUrn:       String!
+      mimeType:       String
+      skip:           Int = 0
+      count:          Int = 20
+      includeDeleted: Boolean = false
+    ): AssetListResult!
+
+    # v2 (spec 006) — memory-addressed listing. Returns assets for a
+    # specific memory; caller must have read access. The replacement
+    # for agentAssets in the v2 surface.
+    memoryAssets(
+      memoryId:       ID!
       mimeType:       String
       skip:           Int = 0
       count:          Int = 20
@@ -756,12 +779,18 @@ export const typeDefs = `#graphql
     updateEdge(edgeId: ID!, label: String, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeId: ID!): Boolean!
 
-    # Asset upload (spec 004-asset-upload)
+    # Asset upload — v1 (spec 004)
     beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!
     completeAssetUpload(input: CompleteAssetUploadInput!): Asset!
     setAgentAssetUploadEnabled(input: SetAgentAssetUploadEnabledInput!): App!
     softDeleteAsset(assetId: ID!): Asset!
     restoreAsset(assetId: ID!): Asset!
+
+    # Asset upload — v2 (spec 006-asset-upload-redesign)
+    # Memory-addressed begin: the caller specifies the destination
+    # memory directly, no agent traversal. Replaces agent-addressed
+    # beginAssetUpload during the deprecation window.
+    beginAssetUploadV2(input: BeginAssetUploadV2Input!): BeginAssetUploadResult!
 
     # Session lifecycle
     startSession(input: SessionInput!): Session!

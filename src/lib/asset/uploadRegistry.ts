@@ -15,8 +15,14 @@ export interface UploadRegistryEntry {
   mimeType: string;
   expectedSizeBytes: number;
   description?: string;
-  agentId: string;
-  memoryId: string;
+  // 006-asset-upload-redesign: nullable on the v2 memory-addressed path
+  // (the caller doesn't traverse an agent) and on the staging path
+  // (uploaded but no memory yet).
+  agentId: string | null;
+  // 006-asset-upload-redesign: nullable on the v2 staging path (uploaded
+  // without a memoryId; assets persist with memory_id = NULL until
+  // attached). On the v1 and v2-attached paths this is always set.
+  memoryId: string | null;
   appId: string | null;
   userId: string;
   uploadIntent: 'USER' | 'AGENT_REQUEST';

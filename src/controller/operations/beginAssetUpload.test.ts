@@ -11,6 +11,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import {
   beginAssetUpload,
+  beginAssetUploadV2,
   AssetUploadError,
 } from './beginAssetUpload.js';
 
@@ -207,5 +208,175 @@ describe('beginAssetUpload', () => {
         resolveTargetMemoryId,
       ),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  // 006-asset-upload-redesign FR-009: enforce per-Memory acceptance
+  // gate on v1 paths too. A v1 caller targeting a memory whose
+  // acceptsUploads=false must be rejected.
+  it('rejects v1 path when target memory acceptsUploads=false', async () => {
+    await db.memory.update({
+      where: { id: memory.id },
+      data: { acceptsUploads: false },
+    });
+    await expect(
+      beginAssetUpload(
+        db,
+        { userId: user.id },
+        {
+          agentUrn: agent.urn,
+          filename: 'x.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 1024,
+          uploadIntent: 'USER',
+        },
+        resolveTargetMemoryId,
+      ),
+    ).rejects.toMatchObject({ code: 'MEMORY_NOT_ACCEPTING_UPLOADS' });
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// v2 (spec 006-asset-upload-redesign): memory-addressed begin.
+// ──────────────────────────────────────────────────────────────────────
+
+describe('beginAssetUploadV2', () => {
+  // For v2 tests we want a memory the caller has write access to.
+  // Personal-class with userId set hits the strict-ownership branch
+  // in canWriteToMemory and accepts the JWT-style caller (no appId).
+  let v2Memory: { id: string; urn: string };
+
+  beforeEach(async () => {
+    v2Memory = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:v2mem:${generateId()}`,
+        name: 'v2-personal-memory',
+        class: 'personal',
+        visibility: 'PERSONAL',
+        userId: user.id,
+      },
+    });
+  });
+
+  it('mints a presigned PUT URL for a valid v2 USER intent upload', async () => {
+    const ticket = await beginAssetUploadV2(
+      db,
+      { userId: user.id },
+      {
+        memoryId: v2Memory.id,
+        filename: 'recipe.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 2048,
+        uploadIntent: 'USER',
+      },
+    );
+    expect(ticket.putUrl).toBe('https://r2.example/presigned-put');
+    expect(ticket.uploadId).toBeTruthy();
+    expect(ticket.storageKey).toMatch(/\.pdf$/);
+    expect(ticket.allowedMimeType).toBe('application/pdf');
+  });
+
+  it('rejects unknown memoryId with NOT_FOUND', async () => {
+    await expect(
+      beginAssetUploadV2(
+        db,
+        { userId: user.id },
+        {
+          memoryId: 'no-such-memory-id',
+          filename: 'x.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 1024,
+          uploadIntent: 'USER',
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('rejects MEMORY_NOT_ACCEPTING_UPLOADS when memory has acceptsUploads=false', async () => {
+    await db.memory.update({
+      where: { id: v2Memory.id },
+      data: { acceptsUploads: false },
+    });
+    await expect(
+      beginAssetUploadV2(
+        db,
+        { userId: user.id },
+        {
+          memoryId: v2Memory.id,
+          filename: 'x.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 1024,
+          uploadIntent: 'USER',
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'MEMORY_NOT_ACCEPTING_UPLOADS' });
+  });
+
+  it('rejects PERMISSION_DENIED when caller is not the personal-memory owner', async () => {
+    const otherUser = await db.user.create({
+      data: { githubId: 9402, githubUsername: 'asset-other', roles: ['READER'] },
+    });
+    await expect(
+      beginAssetUploadV2(
+        db,
+        { userId: otherUser.id },
+        {
+          memoryId: v2Memory.id,
+          filename: 'x.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 1024,
+          uploadIntent: 'USER',
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  it('rejects oversized files with SIZE_EXCEEDED', async () => {
+    await expect(
+      beginAssetUploadV2(
+        db,
+        { userId: user.id },
+        {
+          memoryId: v2Memory.id,
+          filename: 'huge.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 5_000_000_000,
+          uploadIntent: 'USER',
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'SIZE_EXCEEDED' });
+  });
+
+  it('rejects disallowed MIME types with MIME_NOT_ALLOWED', async () => {
+    await expect(
+      beginAssetUploadV2(
+        db,
+        { userId: user.id },
+        {
+          memoryId: v2Memory.id,
+          filename: 'malware.exe',
+          mimeType: 'application/x-msdownload',
+          sizeBytes: 1024,
+          uploadIntent: 'USER',
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'MIME_NOT_ALLOWED' });
+  });
+
+  it('AGENT_REQUEST without uploadRequestId is INVALID_INPUT', async () => {
+    await expect(
+      beginAssetUploadV2(
+        db,
+        { userId: user.id },
+        {
+          memoryId: v2Memory.id,
+          filename: 'x.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 1024,
+          uploadIntent: 'AGENT_REQUEST',
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 });

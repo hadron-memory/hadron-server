@@ -14,7 +14,14 @@ import { buildStorageKey } from '../../lib/asset/storageKey.js';
 import { getEffectiveLimits } from '../../lib/asset/limits.js';
 import { recordUpload } from '../../lib/asset/uploadRegistry.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
-import { assertAssetToolEnabled } from '../../lib/asset/gate.js';
+import {
+  assertAssetToolEnabled,
+  assertMemoryAcceptsUploads,
+  MemoryNotAcceptingUploadsError,
+  MemoryNotFoundError,
+} from '../../lib/asset/gate.js';
+import { canWriteToMemory } from '../../mcp/access-control.js';
+import type { AuthContext } from '../../middleware/auth.js';
 import { mintPutUrl } from '../../integrations/r2/client.js';
 
 const PRESIGN_TTL_SECONDS = 5 * 60;
@@ -149,6 +156,22 @@ export async function beginAssetUpload(
   }
 
   const { memoryId } = await resolveTargetMemoryId(db, agent.id, caller.userId);
+
+  // 006-asset-upload-redesign FR-009: enforce per-Memory acceptance gate
+  // on v1 paths too. Memories with acceptsUploads=false reject uploads
+  // regardless of which agent the caller is invoking.
+  try {
+    await assertMemoryAcceptsUploads(db, memoryId);
+  } catch (e) {
+    if (e instanceof MemoryNotAcceptingUploadsError) {
+      throw new AssetUploadError('MEMORY_NOT_ACCEPTING_UPLOADS', e.message);
+    }
+    if (e instanceof MemoryNotFoundError) {
+      throw new AssetUploadError('NOT_FOUND', 'target memory not found');
+    }
+    throw e;
+  }
+
   const memory = await db.memory.findUniqueOrThrow({
     where: { id: memoryId },
     select: { urn: true },
@@ -194,6 +217,172 @@ export async function beginAssetUpload(
     assetId,
     agentId: agent.id,
     memoryId,
+    userId: caller.userId,
+    appId: caller.appId ?? null,
+    bytes: input.sizeBytes,
+  });
+
+  return {
+    uploadId,
+    putUrl,
+    putHeaders: [
+      { name: 'Content-Type', value: input.mimeType },
+      { name: 'Content-Length', value: String(input.sizeBytes) },
+    ],
+    expiresAt,
+    storageKey,
+    maxSizeBytes: limits.maxBytes,
+    allowedMimeType: input.mimeType,
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// v2 — memory-addressed surface (spec 006).
+// ──────────────────────────────────────────────────────────────────────
+
+export interface BeginAssetUploadV2Input {
+  memoryId: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  description?: string;
+  uploadIntent: UploadIntent;
+  uploadRequestId?: string;
+}
+
+/**
+ * v2 caller context — extended with the fields canWriteToMemory needs
+ * (roles + organizationId) so the controller can check write access
+ * against the memory directly, without traversing an agent's gate.
+ */
+export interface AssetCallerContextV2 extends AssetCallerContext {
+  roles?: AuthContext['roles'];
+  organizationId?: string;
+}
+
+/**
+ * beginAssetUploadV2 — memory-addressed begin per spec 006.
+ *
+ * Caller specifies the destination memory directly. The controller:
+ *   1. Validates the memory exists.
+ *   2. Validates the caller has write access to it (zero-trust check
+ *      per Constitution Principle V).
+ *   3. Validates the memory accepts uploads (`Memory.acceptsUploads = true`).
+ *   4. Validates size + MIME against effective limits.
+ *   5. Builds the storage key, mints the presigned PUT, records the
+ *      upload registry, returns the ticket.
+ *
+ * No agent traversal — v2's whole point is decoupling from agents.
+ * `agentId` on the registry entry is null on this path.
+ */
+export async function beginAssetUploadV2(
+  db: PrismaClient,
+  caller: AssetCallerContextV2,
+  input: BeginAssetUploadV2Input,
+): Promise<AssetUploadTicket> {
+  if (input.uploadIntent === 'AGENT_REQUEST' && !input.uploadRequestId) {
+    throw new AssetUploadError(
+      'INVALID_INPUT',
+      'uploadRequestId required when uploadIntent=AGENT_REQUEST',
+    );
+  }
+
+  // 1. Memory existence + 2. write access + 3. acceptsUploads.
+  const memory = await db.memory.findUnique({
+    where: { id: input.memoryId },
+    select: {
+      id: true,
+      urn: true,
+      organizationId: true,
+      acceptsUploads: true,
+      deletedAt: true,
+      organization: { select: { urn: true } },
+    },
+  });
+  if (!memory || memory.deletedAt) {
+    throw new AssetUploadError('NOT_FOUND', 'memory not found');
+  }
+
+  const writeOk = await canWriteToMemory(
+    db,
+    {
+      userId: caller.userId,
+      appId: caller.appId,
+      roles: caller.roles,
+      organizationId: caller.organizationId,
+    },
+    input.memoryId,
+  );
+  if (!writeOk) {
+    throw new AssetUploadError(
+      'PERMISSION_DENIED',
+      'caller does not have write access to target memory',
+    );
+  }
+
+  if (!memory.acceptsUploads) {
+    throw new AssetUploadError(
+      'MEMORY_NOT_ACCEPTING_UPLOADS',
+      `memory ${input.memoryId} does not accept uploads`,
+    );
+  }
+
+  // 4. Size + MIME limits — same as v1.
+  const limits = getEffectiveLimits(null);
+  if (input.sizeBytes > limits.maxBytes) {
+    throw new AssetUploadError(
+      'SIZE_EXCEEDED',
+      `sizeBytes ${input.sizeBytes} exceeds cap ${limits.maxBytes}`,
+    );
+  }
+  if (!limits.allowedMimeTypes.includes(input.mimeType)) {
+    throw new AssetUploadError(
+      'MIME_NOT_ALLOWED',
+      `mimeType "${input.mimeType}" not in allowlist`,
+    );
+  }
+
+  // 5. Build storage key + presign + record.
+  const assetId = generateId();
+  const storageKey = buildStorageKey({
+    orgUrn: memory.organization.urn,
+    memoryUrn: memory.urn,
+    assetId,
+    filename: input.filename,
+  });
+
+  const putUrl = await mintPutUrl({
+    key: storageKey,
+    contentType: input.mimeType,
+    contentLength: input.sizeBytes,
+    ttlSeconds: PRESIGN_TTL_SECONDS,
+  });
+
+  const uploadId = generateId();
+  const expiresAt = new Date(Date.now() + PRESIGN_TTL_SECONDS * 1000);
+
+  recordUpload({
+    uploadId,
+    assetId,
+    storageKey,
+    filename: input.filename,
+    mimeType: input.mimeType,
+    expectedSizeBytes: input.sizeBytes,
+    description: input.description,
+    agentId: null,                   // v2 path has no agent
+    memoryId: input.memoryId,
+    appId: caller.appId ?? null,
+    userId: caller.userId,
+    uploadIntent: input.uploadIntent,
+    uploadRequestId: input.uploadRequestId,
+    expiresAt: expiresAt.getTime(),
+  });
+
+  logAssetEvent({
+    operation: 'upload-requested',
+    assetId,
+    agentId: null,
+    memoryId: input.memoryId,
     userId: caller.userId,
     appId: caller.appId ?? null,
     bytes: input.sizeBytes,

@@ -80,6 +80,19 @@ export async function completeAssetUpload(
   }
 
   // FR-014 — encrypt storage_key at rest for encrypted memories.
+  // 006-asset-upload-redesign: entry.memoryId is nullable for the
+  // staging path (US4), but on the v1 and v2-attached paths it's
+  // always set. completeAssetUpload runs the same encryption logic
+  // for both v1 and v2-attached. Staging path is rejected here for
+  // now; US4 will add a staging-aware completion that skips the
+  // encryption step (staged assets carry no memory, so no tier).
+  if (!entry.memoryId) {
+    await deleteObject(entry.storageKey).catch(() => {});
+    throw new AssetUploadError(
+      'INVALID_INPUT',
+      'staging-path completion not yet supported (US4)',
+    );
+  }
   const memory = await db.memory.findUniqueOrThrow({
     where: { id: entry.memoryId },
     select: { id: true, isEncrypted: true },
