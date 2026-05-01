@@ -31,6 +31,8 @@ import {
   type BeginAssetUploadV2Input,
 } from '../../../controller/operations/beginAssetUpload.js';
 import { listMemoryAssets } from '../../../controller/operations/listMemoryAssets.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
@@ -2703,20 +2705,25 @@ export const resolvers = {
       { agentId, memoryId, role }: { agentId: string; memoryId: string; role?: string },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // 007-entity-id-or-urn: agentId and memoryId may be IDs, bare URNs,
+      // or prefixed URNs. Resolve both to definite IDs before any
+      // subsequent checks.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       // AGENT_SYSTEM memories can only be linked via Agent.systemMemoryId.
       // Attaching them as regular memory items would allow access patterns
       // we don't want (e.g. another agent reading Juno's prompts).
       const memory = await ctx.db.memory.findUniqueOrThrow({
-        where: { id: memoryId },
+        where: { id: resolvedMemoryId },
         select: { type: true },
       });
       if (memory.type === 'AGENT_SYSTEM') {
         throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
       }
-      await ctx.db.agentMemoryItem.create({ data: { agentId, memoryId, role: role ?? 'read', createdBy: ctx.userId ?? ctx.clientId ?? null } });
-      return ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, include: AGENT_INCLUDE });
+      await ctx.db.agentMemoryItem.create({ data: { agentId: resolvedAgentId, memoryId: resolvedMemoryId, role: role ?? 'read', createdBy: ctx.userId ?? ctx.clientId ?? null } });
+      return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },
 
     updateAgentMemoryRole: async (
@@ -2724,13 +2731,15 @@ export const resolvers = {
       { agentId, memoryId, role }: { agentId: string; memoryId: string; role: string },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       await ctx.db.agentMemoryItem.update({
-        where: { agentId_memoryId: { agentId, memoryId } },
+        where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
         data: { role },
       });
-      return ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, include: AGENT_INCLUDE });
+      return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },
 
     removeMemoryFromAgent: async (
@@ -2738,12 +2747,14 @@ export const resolvers = {
       { agentId, memoryId }: { agentId: string; memoryId: string },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       await ctx.db.agentMemoryItem.delete({
-        where: { agentId_memoryId: { agentId, memoryId } },
+        where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
       });
-      return ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, include: AGENT_INCLUDE });
+      return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },
 
     // ── Memory subscriptions ─────────────────────────────────────────────

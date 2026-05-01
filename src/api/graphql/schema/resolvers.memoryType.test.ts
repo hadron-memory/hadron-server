@@ -318,6 +318,88 @@ describe('AGENT_SYSTEM memory guards', () => {
     ).rejects.toThrow(/system memory/);
   });
 
+  // 007-entity-id-or-urn: addMemoryToAgent / updateAgentMemoryRole /
+  // removeMemoryFromAgent now accept ID or URN for both agentId and
+  // memoryId arguments. Paired tests below exercise both input shapes.
+
+  it('addMemoryToAgent accepts URN for both agentId and memoryId', async () => {
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'agent-urn-input' },
+      adminCtx(),
+    );
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'mem-urn-input' },
+      adminCtx(),
+    );
+    await resolvers.Mutation.addMemoryToAgent(
+      {},
+      { agentId: agent.urn, memoryId: mem.urn, role: 'read' },
+      adminCtx(),
+    );
+    const items = await db.agentMemoryItem.findMany({
+      where: { agentId: agent.id, memoryId: mem.id },
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]!.role).toBe('read');
+  });
+
+  it('updateAgentMemoryRole accepts URN for both agentId and memoryId', async () => {
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'agent-update-urn' },
+      adminCtx(),
+    );
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'mem-update-urn' },
+      adminCtx(),
+    );
+    await resolvers.Mutation.addMemoryToAgent(
+      {},
+      { agentId: agent.id, memoryId: mem.id, role: 'read' },
+      adminCtx(),
+    );
+    // Update by URN.
+    await resolvers.Mutation.updateAgentMemoryRole(
+      {},
+      { agentId: agent.urn, memoryId: mem.urn, role: 'read-write' },
+      adminCtx(),
+    );
+    const item = await db.agentMemoryItem.findUniqueOrThrow({
+      where: { agentId_memoryId: { agentId: agent.id, memoryId: mem.id } },
+    });
+    expect(item.role).toBe('read-write');
+  });
+
+  it('removeMemoryFromAgent accepts URN for both agentId and memoryId', async () => {
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'agent-remove-urn' },
+      adminCtx(),
+    );
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'mem-remove-urn' },
+      adminCtx(),
+    );
+    await resolvers.Mutation.addMemoryToAgent(
+      {},
+      { agentId: agent.id, memoryId: mem.id, role: 'read' },
+      adminCtx(),
+    );
+    await resolvers.Mutation.removeMemoryFromAgent(
+      {},
+      { agentId: agent.urn, memoryId: mem.urn },
+      adminCtx(),
+    );
+    const items = await db.agentMemoryItem.findMany({
+      where: { agentId: agent.id, memoryId: mem.id },
+    });
+    expect(items).toHaveLength(0);
+  });
+
   it('cascades system memory deletion when the agent is deleted', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
