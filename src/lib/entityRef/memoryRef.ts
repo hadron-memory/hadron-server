@@ -1,0 +1,38 @@
+/**
+ * resolveMemoryRef — convert an inbound entity-reference string
+ * (ID, bare URN, or prefixed URN) to a definite memory ID.
+ *
+ * Spec: 007-entity-id-or-urn / contracts/resolution-helpers.md.
+ *
+ * Three input forms all resolve to the same row:
+ *   - "abc123…"                          (raw 32-hex-char ID)
+ *   - "org-foo:family-mealplan"          (bare URN, DB form)
+ *   - "urn:memory:org-foo:family-mealplan" (prefixed URN, external form)
+ *
+ * Soft-deleted memories return MemoryNotFoundError, matching the
+ * existing convention.
+ */
+
+import type { PrismaClient } from '../../generated/prisma/index.js';
+import { isUrn } from './shape.js';
+import { parseUrnInput } from '../urn.js';
+import { MemoryNotFoundError } from '../asset/gate.js';
+
+export async function resolveMemoryRef(
+  db: Pick<PrismaClient, 'memory'>,
+  urn: string,
+): Promise<{ id: string }> {
+  // Strip a `urn:<type>:` prefix if present. parseUrnInput returns
+  // the bare value; for already-bare input it returns the input
+  // unchanged.
+  const normalized = parseUrnInput(urn).value;
+  const where = isUrn(normalized) ? { urn: normalized } : { id: normalized };
+  const memory = await db.memory.findUnique({
+    where,
+    select: { id: true, deletedAt: true },
+  });
+  if (!memory || memory.deletedAt) {
+    throw new MemoryNotFoundError(urn);
+  }
+  return { id: memory.id };
+}
