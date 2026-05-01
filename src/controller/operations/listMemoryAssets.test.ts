@@ -59,7 +59,7 @@ beforeEach(async () => {
 });
 
 describe('listMemoryAssets', () => {
-  it('returns the calling user\'s assets in the memory, newest first', async () => {
+  it('returns the calling user\'s assets in the memory, newest first (input by ID)', async () => {
     const old = new Date(Date.now() - 60_000);
     const recent = new Date(Date.now() - 1_000);
     await makeAsset({ filename: 'older.pdf', uploadedAt: old });
@@ -75,6 +75,41 @@ describe('listMemoryAssets', () => {
     expect(result.assets[0]!.filename).toBe('newer.pdf');
     expect(result.assets[1]!.filename).toBe('older.pdf');
     expect(result.hasMore).toBe(false);
+  });
+
+  // 007-entity-id-or-urn: paired URN-input case — same memory, same
+  // result. Asserts identical effect for the two input shapes.
+  it('returns the calling user\'s assets in the memory (input by URN)', async () => {
+    await makeAsset({ filename: 'one.pdf' });
+    await makeAsset({ filename: 'two.pdf' });
+
+    const memoryRow = await db.memory.findUniqueOrThrow({
+      where: { id: memory.id },
+      select: { urn: true },
+    });
+    const result = await listMemoryAssets(
+      db,
+      { userId: user.id },
+      { memoryId: memoryRow.urn },
+    );
+    expect(result.total).toBe(2);
+    expect(result.assets).toHaveLength(2);
+    expect(result.hasMore).toBe(false);
+  });
+
+  it('returns the calling user\'s assets in the memory (input by prefixed URN)', async () => {
+    await makeAsset({ filename: 'one.pdf' });
+
+    const memoryRow = await db.memory.findUniqueOrThrow({
+      where: { id: memory.id },
+      select: { urn: true },
+    });
+    const result = await listMemoryAssets(
+      db,
+      { userId: user.id },
+      { memoryId: `urn:memory:${memoryRow.urn}` },
+    );
+    expect(result.total).toBe(1);
   });
 
   it('paginates via skip + count and reports hasMore correctly', async () => {

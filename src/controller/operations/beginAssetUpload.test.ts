@@ -259,7 +259,7 @@ describe('beginAssetUploadV2', () => {
     });
   });
 
-  it('mints a presigned PUT URL for a valid v2 USER intent upload', async () => {
+  it('mints a presigned PUT URL for a valid v2 USER intent upload (input by ID)', async () => {
     const ticket = await beginAssetUploadV2(
       db,
       { userId: user.id },
@@ -275,6 +275,43 @@ describe('beginAssetUploadV2', () => {
     expect(ticket.uploadId).toBeTruthy();
     expect(ticket.storageKey).toMatch(/\.pdf$/);
     expect(ticket.allowedMimeType).toBe('application/pdf');
+  });
+
+  // 007-entity-id-or-urn: paired URN-input case asserts the operation
+  // accepts the memory's URN identically to its ID. The storage key
+  // resolves to the same memory regardless of input shape.
+  it('mints a presigned PUT URL for a valid v2 USER intent upload (input by URN)', async () => {
+    const ticket = await beginAssetUploadV2(
+      db,
+      { userId: user.id },
+      {
+        memoryId: v2Memory.urn,
+        filename: 'recipe.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 2048,
+        uploadIntent: 'USER',
+      },
+    );
+    expect(ticket.putUrl).toBe('https://r2.example/presigned-put');
+    expect(ticket.uploadId).toBeTruthy();
+    expect(ticket.storageKey).toMatch(/\.pdf$/);
+    expect(ticket.allowedMimeType).toBe('application/pdf');
+  });
+
+  it('mints a presigned PUT URL for a valid v2 USER intent upload (input by prefixed URN)', async () => {
+    const ticket = await beginAssetUploadV2(
+      db,
+      { userId: user.id },
+      {
+        memoryId: `urn:memory:${v2Memory.urn}`,
+        filename: 'recipe.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 2048,
+        uploadIntent: 'USER',
+      },
+    );
+    expect(ticket.putUrl).toBe('https://r2.example/presigned-put');
+    expect(ticket.uploadId).toBeTruthy();
   });
 
   it('rejects unknown memoryId with NOT_FOUND', async () => {
