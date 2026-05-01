@@ -1,6 +1,7 @@
-// 003-station-to-app: 'station' removed (Station→App migration cutover).
-// 007-entity-id-or-urn: 'app' registered so resolveAppRef accepts the
-// prefixed form `urn:app:<bare-urn>` consistently with the other helpers.
+// Spec 003 (003-station-to-app) retired the legacy 'station' type;
+// spec 007 (007-entity-id-or-urn) registered 'app' so resolveAppRef
+// accepts the prefixed form `urn:app:<bare-urn>` consistently with
+// the other helpers.
 const URN_TYPES = ['org', 'memory', 'agent', 'app', 'node'] as const;
 export type UrnType = typeof URN_TYPES[number] | 'loc' | 'unknown';
 
