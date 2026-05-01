@@ -38,6 +38,13 @@ export async function softDeleteAsset(
   if (!asset || asset.deletedAt) {
     throw new AssetUploadError('NOT_FOUND', 'asset not found');
   }
+  // 006-asset-upload-redesign: Asset.memory is nullable to support
+  // staging. softDelete only applies to attached assets — staged
+  // assets are managed via the staging-TTL janitor sweep, not soft
+  // delete. Reject explicitly to give a clear error.
+  if (!asset.memory) {
+    throw new AssetUploadError('INVALID_INPUT', 'cannot soft-delete a staged (unattached) asset');
+  }
 
   const isUploader = asset.uploadedBy === caller.userId;
   const isAdmin = isUploader

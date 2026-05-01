@@ -41,6 +41,13 @@ export async function restoreAsset(
   if (!asset) {
     throw new AssetUploadError('NOT_FOUND', 'asset not found');
   }
+  // 006-asset-upload-redesign: Asset.memory is nullable to support
+  // staging. Restore only applies to soft-deleted *attached* assets;
+  // staged assets that were swept by the staging-TTL janitor cannot
+  // be restored (their bytes are gone, same as ASSET_BYTES_GONE).
+  if (!asset.memory) {
+    throw new AssetUploadError('NOT_FOUND', 'asset has no memory to restore to');
+  }
   if (!asset.deletedAt) {
     throw new AssetUploadError('ASSET_NOT_DELETED', 'asset is not soft-deleted');
   }

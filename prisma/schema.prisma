@@ -255,6 +255,11 @@ model Memory {
   syncStatus           SyncStatus       @default(PENDING) @map("sync_status")
   syncError            String?          @map("sync_error")
   pendingEdgeCount     Int              @default(0) @map("pending_edge_count")
+  // 006-asset-upload-redesign (2026-05-01): per-memory upload acceptance
+  // flag. Default true at the column level; system-class memories must
+  // opt out explicitly at creation time. Migration backfilled existing
+  // rows by class (system → false; app/knowledge/personal → true).
+  acceptsUploads       Boolean          @default(true) @map("accepts_uploads")
   createdAt            DateTime         @default(now()) @map("created_at")
   createdBy            String?          @map("created_by")
   updatedAt            DateTime         @updatedAt @map("updated_at")
@@ -285,7 +290,10 @@ model Memory {
 // pointer, and virus-scan state. See spec 004-asset-upload.
 model Asset {
   id          String          @id @default(cuid())
-  memoryId    String          @map("memory_id")
+  // 006-asset-upload-redesign (2026-05-01): nullable to support staging.
+  // An asset with memoryId IS NULL is "staged" — uploaded but not yet
+  // attached to a memory. Janitor sweeps staged assets past the 24h TTL.
+  memoryId    String?         @map("memory_id")
   filename    String
   mimeType    String          @map("mime_type")
   sizeBytes   Int             @map("size_bytes")
@@ -299,9 +307,15 @@ model Asset {
   uploadedBy  String          @map("uploaded_by")
   deletedAt   DateTime?       @map("deleted_at")
 
-  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  memory Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
   @@index([memoryId, scanStatus, uploadedAt(sort: Desc)])
+  // 006-asset-upload-redesign: two partial indexes for staged assets
+  // (WHERE memory_id IS NULL) live in the migration SQL only — Prisma
+  // schema syntax can't express WHERE clauses on @@index. See
+  // prisma/migrations/20260501000000_memory_uploads_and_staged_assets/migration.sql:
+  //   - assets_uploaded_by_staged_idx (per-user staged listing)
+  //   - assets_staged_uploaded_at_idx (janitor TTL sweep)
   @@map("assets")
 }
 
@@ -505,12 +519,12 @@ model Agent {
   deletedAt            DateTime?        @map("deleted_at")
   deletedBy            String?          @map("deleted_by")
 
-  organization         Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  memoryItems          AgentMemoryItem[]
-  userMemories         Memory[]                   @relation("UserMemoriesOfAgent")
-  sessions             Session[]                  @relation("SessionAgent")
-  appAgents            AppAgent[]
-  userSubscriptions    AgentSubscription[]        @relation("AgentUserSubscriptions")
+  organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  memoryItems       AgentMemoryItem[]
+  userMemories      Memory[]            @relation("UserMemoriesOfAgent")
+  sessions          Session[]           @relation("SessionAgent")
+  appAgents         AppAgent[]
+  userSubscriptions AgentSubscription[] @relation("AgentUserSubscriptions")
 
   @@map("agents")
 }
@@ -853,19 +867,19 @@ model AppKey {
 }
 
 model AppAgent {
-  appId            String           @map("app_id")
-  agentId          String           @map("agent_id")
-  role             AppAgentRole     @default(OPERATE)
+  appId        String       @map("app_id")
+  agentId      String       @map("agent_id")
+  role         AppAgentRole @default(OPERATE)
   // 005-agent-subscription (2026-04-30): subscription_type was dropped.
   // The cap previously enforced by it is now exclusively governed by
   // AgentMemoryItem.role (per-attached-memory).
-  trainingMode     Boolean          @default(false) @map("training_mode")
-  createdAt        DateTime         @default(now()) @map("created_at")
-  createdBy        String?          @map("created_by")
-  updatedAt        DateTime?        @map("updated_at")
-  updatedBy        String?          @map("updated_by")
-  deletedAt        DateTime?        @map("deleted_at")
-  deletedBy        String?          @map("deleted_by")
+  trainingMode Boolean      @default(false) @map("training_mode")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  createdBy    String?      @map("created_by")
+  updatedAt    DateTime?    @map("updated_at")
+  updatedBy    String?      @map("updated_by")
+  deletedAt    DateTime?    @map("deleted_at")
+  deletedBy    String?      @map("deleted_by")
 
   app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
   agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
@@ -882,25 +896,25 @@ model AppAgent {
 // (2026-04-30). Authorizes the cross-org write from the Agent into the
 // user's personal-class Memory.
 model AgentSubscription {
-  userId       String    @map("user_id")
-  agentId      String    @map("agent_id")
+  userId      String    @map("user_id")
+  agentId     String    @map("agent_id")
   // Lifecycle. v1 default: activatedAt = now() on creation. Future billing
   // work introduces a deferred-activation path (activatedAt = null until
   // payment confirms).
-  activatedAt  DateTime? @map("activated_at")
-  expiresAt    DateTime? @map("expires_at")
-  revokedAt    DateTime? @map("revoked_at")
-  revokedBy    String?   @map("revoked_by")
+  activatedAt DateTime? @map("activated_at")
+  expiresAt   DateTime? @map("expires_at")
+  revokedAt   DateTime? @map("revoked_at")
+  revokedBy   String?   @map("revoked_by")
   // Standard audit fields. (No deletedAt — soft-delete is redundant with
   // the revokedAt lifecycle; if a row needs to truly disappear it's a
   // hard delete.)
-  createdAt    DateTime  @default(now()) @map("created_at")
-  createdBy    String?   @map("created_by")
-  updatedAt    DateTime? @map("updated_at")
-  updatedBy    String?   @map("updated_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  createdBy   String?   @map("created_by")
+  updatedAt   DateTime? @map("updated_at")
+  updatedBy   String?   @map("updated_by")
 
-  user         User      @relation("UserAgentSubscriptions", fields: [userId],  references: [id], onDelete: Cascade)
-  agent        Agent     @relation("AgentUserSubscriptions", fields: [agentId], references: [id], onDelete: Cascade)
+  user  User  @relation("UserAgentSubscriptions", fields: [userId], references: [id], onDelete: Cascade)
+  agent Agent @relation("AgentUserSubscriptions", fields: [agentId], references: [id], onDelete: Cascade)
 
   @@id([userId, agentId])
   @@index([agentId])
