@@ -286,6 +286,20 @@ describe('Mutation.deleteNode access control', () => {
       ),
     ).rejects.toThrow('Forbidden');
   });
+
+  // 007-entity-id-or-urn: deleteNode accepts memoryId as ID or URN.
+  it('accepts a URN as memoryId input', async () => {
+    const memoryRow = await db.memory.findUniqueOrThrow({
+      where: { id: graphA.id },
+      select: { urn: true },
+    });
+    const result = await resolvers.Mutation.deleteNode(
+      null,
+      { loc: 'org-a.repo.nodeA', memoryId: memoryRow.urn },
+      ctx({ appId: appContributor.id }),
+    );
+    expect(result).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -311,6 +325,20 @@ describe('Mutation.moveNode access control', () => {
       ),
     ).rejects.toThrow('Forbidden');
   });
+
+  // 007-entity-id-or-urn: moveNode accepts memoryId as ID or URN.
+  it('accepts a URN as memoryId input', async () => {
+    const memoryRow = await db.memory.findUniqueOrThrow({
+      where: { id: graphA.id },
+      select: { urn: true },
+    });
+    const node = await resolvers.Mutation.moveNode(
+      null,
+      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedByUrn', memoryId: memoryRow.urn },
+      ctx({ appId: appContributor.id }),
+    );
+    expect(node.loc).toBe('org-a.repo.movedByUrn');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -326,6 +354,30 @@ describe('Mutation.replaceSubtree access control', () => {
         memoryId: graphA.id,
         nodes: [
           { memoryId: graphA.id, loc: 'org-a.repo.replaced', name: 'replaced' },
+        ],
+        edges: [],
+      },
+      ctx({ appId: appContributor.id }),
+    );
+    expect(count).toBe(1);
+  });
+
+  // 007-entity-id-or-urn: replaceSubtree accepts memoryId as ID or URN.
+  // (The nested NodeInput.memoryId is data shape for the new nodes —
+  // also used via the same helper internally — but the top-level
+  // memoryId is the convention's gating arg.)
+  it('accepts a URN as the top-level memoryId input', async () => {
+    const memoryRow = await db.memory.findUniqueOrThrow({
+      where: { id: graphA.id },
+      select: { urn: true },
+    });
+    const count = await resolvers.Mutation.replaceSubtree(
+      null,
+      {
+        ownerRepo: 'org-a/repo',
+        memoryId: memoryRow.urn,
+        nodes: [
+          { memoryId: graphA.id, loc: 'org-a.repo.replaced-by-urn', name: 'replaced-by-urn' },
         ],
         edges: [],
       },
