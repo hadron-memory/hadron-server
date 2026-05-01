@@ -71,6 +71,14 @@ export async function mintAssetDownloadUrl(
     throw new AssetUploadError('SCAN_BLOCKED', 'asset blocked by scan');
   }
 
+  // 006-asset-upload-redesign: Asset.memoryId is nullable for staged
+  // assets. Mint-download-url is meaningful only for attached assets;
+  // a staged asset has bytes but the encryption tier follows the
+  // attached memory, so a staged asset's URL is not yet defined.
+  if (!asset.memoryId) {
+    throw new AssetUploadError('NOT_FOUND', 'asset is staged (not attached to a memory)');
+  }
+
   // FR-014 / FR-015 / FR-016 — decrypt storage_key on the request
   // stack for encrypted memories. Returns the typed error matching
   // spec 001's pattern when the session key is missing.

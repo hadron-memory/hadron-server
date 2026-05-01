@@ -332,6 +332,11 @@ export const typeDefs = `#graphql
     type: MemoryType!
     # 005-agent-subscription: four-way memory typology
     class: MemoryClass!
+    # 006-asset-upload-redesign: per-memory upload-acceptance gate.
+    # Default true for app/knowledge/personal-class memories; false for
+    # system-class. Org admins or memory owners can flip via the
+    # setMemoryAcceptsUploads mutation (added in v2 story phases).
+    acceptsUploads: Boolean!
     # 005-agent-subscription: User owner for personal-class memories.
     # Resolves to null for non-personal memories or when the caller is
     # not the memory owner / not ADMIN/OWNER of the memory's org.

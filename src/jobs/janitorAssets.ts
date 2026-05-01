@@ -47,6 +47,21 @@ export async function runAssetJanitor(
   for (const asset of candidates) {
     scanned += 1;
     try {
+      // 006-asset-upload-redesign: Asset.memory is nullable for staged
+      // assets, but the soft-delete sweep above only matches attached
+      // assets (staged assets are deleted via the staging-TTL janitor
+      // path, which lives elsewhere). The null check is a defensive
+      // assertion — in practice this branch is unreachable.
+      if (!asset.memory) {
+        errors += 1;
+        logAssetEvent({
+          operation: 'purged',
+          assetId: asset.id,
+          memoryId: asset.memoryId,
+          error: 'janitor saw a staged-but-soft-deleted asset (unexpected state)',
+        });
+        continue;
+      }
       // Decrypt storage_key if needed — janitor needs the plaintext
       // key to delete the R2 object. If the memory is encrypted and
       // we lack the session key, skip this row (we can't safely
