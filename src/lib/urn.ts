@@ -1,4 +1,7 @@
-const URN_TYPES = ['org', 'memory', 'agent', 'station', 'node'] as const;
+// 003-station-to-app: 'station' removed (Station→App migration cutover).
+// 007-entity-id-or-urn: 'app' registered so resolveAppRef accepts the
+// prefixed form `urn:app:<bare-urn>` consistently with the other helpers.
+const URN_TYPES = ['org', 'memory', 'agent', 'app', 'node'] as const;
 export type UrnType = typeof URN_TYPES[number] | 'loc' | 'unknown';
 
 export interface ParsedUrn {
@@ -12,7 +15,7 @@ export interface ParsedUrn {
  * for backwards compatibility.
  */
 export function parseUrnInput(input: string): ParsedUrn {
-  const match = input.match(/^urn:(org|memory|agent|station|node):(.+)$/);
+  const match = input.match(/^urn:(org|memory|agent|app|node):(.+)$/);
   if (match) return { type: match[1] as UrnType, value: match[2] };
   const locMatch = input.match(/^loc:(.+)$/);
   if (locMatch) return { type: 'loc', value: locMatch[1] };
