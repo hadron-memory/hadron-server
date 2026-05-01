@@ -26,9 +26,9 @@ describe('parseUrnInput', () => {
     });
   });
 
-  it('parses urn:station: prefix', () => {
-    expect(parseUrnInput('urn:station:hadronmemory.com:dev-ws')).toEqual({
-      type: 'station', value: 'hadronmemory.com:dev-ws',
+  it('parses urn:app: prefix', () => {
+    expect(parseUrnInput('urn:app:hadronmemory.com:dev-ws')).toEqual({
+      type: 'app', value: 'hadronmemory.com:dev-ws',
     });
   });
 

@@ -47,7 +47,7 @@ describe('resolveAppRef', () => {
     expect(await resolveAppRef(db, app.urn)).toEqual({ id: app.id });
   });
 
-  it('resolves a prefixed URN', async () => {
+  it('resolves a prefixed URN (urn:app: prefix stripped)', async () => {
     const app = await db.app.create({
       data: {
         organizationId: orgId,
@@ -55,13 +55,7 @@ describe('resolveAppRef', () => {
         name: 'appref-test-app-prefixed',
       },
     });
-    // Note: parseUrnInput accepts urn:app:..., not urn:application:...
-    // so the prefix used here matches the existing utility's accepted types.
-    // Apps don't currently have a registered URN type prefix. parseUrnInput
-    // will treat 'urn:app:...' as type:'unknown' and return the full input
-    // as `value`, which doesn't match the bare urn. Use bare URN here as
-    // the canonical input form for Apps.
-    expect(await resolveAppRef(db, app.urn)).toEqual({ id: app.id });
+    expect(await resolveAppRef(db, `urn:app:${app.urn}`)).toEqual({ id: app.id });
   });
 
   it('throws AppNotFoundError on miss (ID)', async () => {
