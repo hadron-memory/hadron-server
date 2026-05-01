@@ -345,6 +345,36 @@ describe('encryptMemory', () => {
       ),
     ).rejects.toThrow(/already encrypted/);
   });
+
+  // 007-entity-id-or-urn: encryptMemory accepts memoryId as ID or URN.
+  it('accepts a URN as memoryId input', async () => {
+    const session = await resolvers.Mutation.startAgentSession(
+      {},
+      { agentId: agent.id, externalUserId: 'urn-input-user' },
+      appCtx(plaintextApp.id),
+    );
+    const sessionCtx = appCtx(plaintextApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    await resolvers.Mutation.upsertNode(
+      {},
+      { input: { memoryId: session.memoryId!, loc: 'x', name: 'x', content: 'gamma' } },
+      sessionCtx,
+    );
+
+    // Look up the memory's URN; pass that instead of the ID.
+    const memoryRow = await db.memory.findUniqueOrThrow({
+      where: { id: session.memoryId! },
+      select: { urn: true },
+    });
+
+    const key = generateDataKey().raw.toString('base64');
+    const encrypted = await resolvers.Mutation.encryptMemory(
+      {},
+      { memoryId: memoryRow.urn, dataKey: key },
+      appCtx(plaintextApp.id),
+    );
+    expect(encrypted.isEncrypted).toBe(true);
+    expect(encrypted.id).toBe(session.memoryId);
+  });
 });
 
 // ---------------------------------------------------------------------------

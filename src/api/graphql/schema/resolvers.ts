@@ -4747,8 +4747,10 @@ export const resolvers = {
       ctx: Context,
     ) => {
       if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
-      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       if (memory.organizationId !== app.organizationId) {
         throw new Error('Forbidden: memory does not belong to this app\'s organization');
       }
@@ -4757,7 +4759,7 @@ export const resolvers = {
       }
       const key = parseDataKey(dataKey);
       const nodes = await ctx.db.node.findMany({
-        where: { memoryId, deletedAt: null },
+        where: { memoryId: resolvedMemoryId, deletedAt: null },
         select: { id: true, content: true, data: true },
       });
       await ctx.db.$transaction(async (tx) => {
@@ -4775,11 +4777,11 @@ export const resolvers = {
           });
         }
         await tx.memory.update({
-          where: { id: memoryId },
+          where: { id: resolvedMemoryId },
           data: { isEncrypted: true, updatedBy: ctx.appId },
         });
       });
-      return ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
     },
   },
 };
