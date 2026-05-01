@@ -22,6 +22,7 @@ import {
 } from '../../lib/asset/gate.js';
 import { canWriteToMemory } from '../../mcp/access-control.js';
 import type { AuthContext } from '../../middleware/auth.js';
+import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
 import { mintPutUrl } from '../../integrations/r2/client.js';
 
 const PRESIGN_TTL_SECONDS = 5 * 60;
@@ -287,9 +288,20 @@ export async function beginAssetUploadV2(
     );
   }
 
-  // 1. Memory existence + 2. write access + 3. acceptsUploads.
+  // 007-entity-id-or-urn: input.memoryId may be a raw ID, a bare URN,
+  // or a prefixed URN. Resolve to a definite ID before any subsequent
+  // checks so all branches operate on a consistent shape.
+  let memoryId: string;
+  try {
+    ({ id: memoryId } = await resolveMemoryRef(db, input.memoryId));
+  } catch {
+    throw new AssetUploadError('NOT_FOUND', 'memory not found');
+  }
+
+  // 1. Memory existence (already verified by resolveMemoryRef) +
+  //    2. write access + 3. acceptsUploads.
   const memory = await db.memory.findUnique({
-    where: { id: input.memoryId },
+    where: { id: memoryId },
     select: {
       id: true,
       urn: true,
@@ -311,7 +323,7 @@ export async function beginAssetUploadV2(
       roles: caller.roles,
       organizationId: caller.organizationId,
     },
-    input.memoryId,
+    memoryId,
   );
   if (!writeOk) {
     throw new AssetUploadError(
@@ -323,7 +335,7 @@ export async function beginAssetUploadV2(
   if (!memory.acceptsUploads) {
     throw new AssetUploadError(
       'MEMORY_NOT_ACCEPTING_UPLOADS',
-      `memory ${input.memoryId} does not accept uploads`,
+      `memory ${memoryId} does not accept uploads`,
     );
   }
 
@@ -370,7 +382,7 @@ export async function beginAssetUploadV2(
     expectedSizeBytes: input.sizeBytes,
     description: input.description,
     agentId: null,                   // v2 path has no agent
-    memoryId: input.memoryId,
+    memoryId: memoryId,
     appId: caller.appId ?? null,
     userId: caller.userId,
     uploadIntent: input.uploadIntent,
@@ -382,7 +394,7 @@ export async function beginAssetUploadV2(
     operation: 'upload-requested',
     assetId,
     agentId: null,
-    memoryId: input.memoryId,
+    memoryId: memoryId,
     userId: caller.userId,
     appId: caller.appId ?? null,
     bytes: input.sizeBytes,

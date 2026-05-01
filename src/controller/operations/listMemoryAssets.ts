@@ -13,6 +13,7 @@
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
 import { canReadMemory } from '../../mcp/access-control.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
+import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
 import { AssetUploadError } from './beginAssetUpload.js';
 
 const DEFAULT_COUNT = 20;
@@ -47,12 +48,13 @@ export async function listMemoryAssets(
   const skip = Math.max(0, input.skip ?? 0);
   const count = Math.min(MAX_COUNT, Math.max(1, input.count ?? DEFAULT_COUNT));
 
-  // Memory must exist + caller must have read access.
-  const memory = await db.memory.findUnique({
-    where: { id: input.memoryId },
-    select: { id: true, deletedAt: true },
-  });
-  if (!memory || memory.deletedAt) {
+  // 007-entity-id-or-urn: input.memoryId may be a raw ID, a bare URN,
+  // or a prefixed URN. Resolve to a definite ID first so all
+  // subsequent checks operate on a consistent shape.
+  let memoryId: string;
+  try {
+    ({ id: memoryId } = await resolveMemoryRef(db, input.memoryId));
+  } catch {
     throw new AssetUploadError('NOT_FOUND', 'memory not found');
   }
 
@@ -64,7 +66,7 @@ export async function listMemoryAssets(
       roles: caller.roles,
       organizationId: caller.organizationId,
     },
-    input.memoryId,
+    memoryId,
   );
   if (!readOk) {
     throw new AssetUploadError(
@@ -74,7 +76,7 @@ export async function listMemoryAssets(
   }
 
   const where = {
-    memoryId: input.memoryId,
+    memoryId: memoryId,
     uploadedBy: caller.userId,
     ...(input.includeDeleted ? {} : { deletedAt: null }),
     ...(input.mimeType ? { mimeType: input.mimeType } : {}),
@@ -93,7 +95,7 @@ export async function listMemoryAssets(
   logAssetEvent({
     operation: 'listed',
     agentId: null,
-    memoryId: input.memoryId,
+    memoryId: memoryId,
     userId: caller.userId,
     appId: caller.appId ?? null,
     count: assets.length,
