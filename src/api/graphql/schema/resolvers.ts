@@ -33,6 +33,7 @@ import {
 import { listMemoryAssets } from '../../../controller/operations/listMemoryAssets.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
@@ -2774,24 +2775,28 @@ export const resolvers = {
       { memoryId, orgId, role }: { memoryId: string; orgId: string; role: string },
       ctx: Context,
     ) => {
-      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      // 007-entity-id-or-urn: memoryId and orgId may be IDs, bare URNs,
+      // or prefixed URNs.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
 
       if (memory.visibility === 'ORGANIZATION' || memory.visibility === 'PRIVATE') {
         throw new Error('Only public memories can be subscribed to by other organizations');
       }
 
       if (memory.visibility === 'PUBLIC') {
-        await requireOrgRole(ctx, orgId, 'ADMIN');
+        await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       } else {
         await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
       }
 
-      if (memory.organizationId === orgId) {
+      if (memory.organizationId === resolvedOrgId) {
         throw new Error('Owner organization has implicit access and cannot subscribe');
       }
 
       return ctx.db.memorySubscription.create({
-        data: { id: generateId(), memoryId, organizationId: orgId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
+        data: { id: generateId(), memoryId: resolvedMemoryId, organizationId: resolvedOrgId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: { memory: { include: MEMORY_INCLUDE }, organization: { include: ORG_INCLUDE } },
       });
     },
@@ -2801,10 +2806,12 @@ export const resolvers = {
       { memoryId, orgId, role }: { memoryId: string; orgId: string; role: string },
       ctx: Context,
     ) => {
-      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
       return ctx.db.memorySubscription.update({
-        where: { memoryId_organizationId: { memoryId, organizationId: orgId } },
+        where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
         data: { role: role as Role },
         include: { memory: { include: MEMORY_INCLUDE }, organization: { include: ORG_INCLUDE } },
       });
@@ -2815,7 +2822,9 @@ export const resolvers = {
       { memoryId, orgId }: { memoryId: string; orgId: string },
       ctx: Context,
     ) => {
-      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       const isOwnerAdmin = async () => {
         if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
         if (!ctx.userId) return false;
@@ -2827,7 +2836,7 @@ export const resolvers = {
       const isSubscriberAdmin = async () => {
         if (!ctx.userId) return false;
         const m = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: ctx.userId } },
         });
         return m?.role === 'ADMIN' || m?.role === 'OWNER';
       };
@@ -2835,7 +2844,7 @@ export const resolvers = {
         throw new Error('Forbidden');
       }
       await ctx.db.memorySubscription.delete({
-        where: { memoryId_organizationId: { memoryId, organizationId: orgId } },
+        where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
       });
       return true;
     },
