@@ -489,6 +489,28 @@ describe('linkMemoryToUser', () => {
       ),
     ).rejects.toThrow(/organization/);
   });
+
+  // 007-entity-id-or-urn: linkMemoryToUser accepts memoryId as ID or URN.
+  it('accepts a URN as memoryId input', async () => {
+    const session = await resolvers.Mutation.startAgentSession(
+      {},
+      { agentId: agent.id },
+      appCtx(app.id),
+    );
+    // Look up the memory's URN; pass that instead of the ID.
+    const memoryRow = await db.memory.findUniqueOrThrow({
+      where: { id: session.memoryId! },
+      select: { urn: true },
+    });
+    const linked = await resolvers.Mutation.linkMemoryToUser(
+      {},
+      { memoryId: memoryRow.urn, externalUserId: 'mm-urn-input' },
+      appCtx(app.id),
+    );
+    expect(linked.id).toBe(session.memoryId);
+    expect(linked.anonymousExpiresAt).toBeNull();
+    expect(linked.urn).toContain(':user:');
+  });
 });
 
 // ---------------------------------------------------------------------------
