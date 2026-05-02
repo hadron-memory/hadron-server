@@ -569,6 +569,7 @@ export const typeDefs = `#graphql
   }
 
   input BeginAssetUploadInput {
+    """Accepts the entity's ID or URN."""
     agentUrn:        String!
     filename:        String!
     mimeType:        String!
@@ -582,6 +583,7 @@ export const typeDefs = `#graphql
   # memoryId is required for the attached upload path. The staging
   # path (memoryId omitted) is added in US4.
   input BeginAssetUploadV2Input {
+    """Accepts the entity's ID or URN."""
     memoryId:        ID!
     filename:        String!
     mimeType:        String!
@@ -611,6 +613,7 @@ export const typeDefs = `#graphql
   }
 
   input SetAgentAssetUploadEnabledInput {
+    """Accepts the entity's ID or URN."""
     agentUrn: String!
     enabled:  Boolean!
   }
@@ -658,7 +661,11 @@ export const typeDefs = `#graphql
     # Version history for a node
     nodeVersions(nodeId: ID!, limit: Int): [NodeVersion!]!
 
-    # Aggregated usage counts per node and type for a memory
+    """
+    Aggregated usage counts per node and type for a memory.
+
+    Accepts the entity's ID or URN.
+    """
     memoryUsageSummary(memoryId: ID!): [UsageSummaryEntry!]!
 
     # Sessions, most recent first
@@ -676,7 +683,12 @@ export const typeDefs = `#graphql
     # Organizations
     organizations: [Organization!]!       # platform ADMIN: all orgs
     myOrganizations: [Organization!]!     # authenticated user: their memberships
-    organization(id: ID!): Organization   # org member or platform ADMIN
+    """
+    Fetch an Organization by id (org member or platform ADMIN).
+
+    Accepts the entity's ID or URN.
+    """
+    organization(id: ID!): Organization
 
     # Invitation lookup (public — no auth required, used by invite acceptance page)
     invitation(slug: String!): UserInvitation
@@ -684,10 +696,18 @@ export const typeDefs = `#graphql
     # Public memory marketplace — any authenticated user
     publicMemories: [Memory!]!
 
-    # Fetch a single memory by ID (org member or platform ADMIN)
+    """
+    Fetch a single Memory (org member or platform ADMIN).
+
+    Accepts the entity's ID or URN.
+    """
     memory(id: ID!): Memory
 
-    # System memories belonging to an org (org member or platform ADMIN)
+    """
+    System memories belonging to an org (org member or platform ADMIN).
+
+    Accepts the entity's ID or URN.
+    """
     orgSystemMemories(orgId: ID!): [Memory!]!
 
     # Memories accessible to the caller. Agent system memories are hidden
@@ -695,13 +715,27 @@ export const typeDefs = `#graphql
     # to surface them.
     myMemories(includeAgentSystem: Boolean): [Memory!]!
 
-    # Exchange integration
+    """
+    Exchange connections for an org.
+
+    Accepts the entity's ID or URN.
+    """
     exchangeConnections(orgId: ID!): [ExchangeConnection!]!
     exchangeMessages(connectionId: ID!, top: Int, filter: String): [ExchangeMessage!]!
     exchangeFolders(connectionId: ID!): [ExchangeFolder!]!
 
-    # Apps (org ADMIN)
+    """
+    Apps in an organization (org ADMIN).
+
+    Accepts the entity's ID or URN.
+    """
     apps(orgId: ID!): [App!]!
+
+    """
+    Fetch an App.
+
+    Accepts the entity's ID or URN.
+    """
     app(id: ID!): App
     # The App authenticated by the current AppKey (null for JWT users without an App)
     myApp: App
@@ -710,22 +744,50 @@ export const typeDefs = `#graphql
     # 005-agent-subscription FR-005: AgentSubscriptions held by the
     # authenticated user. Read-only in v1.
     myAgentSubscriptions: [AgentSubscription!]!
-    # 005-agent-subscription FR-022: list all AgentSubscriptions for an
-    # Agent. Authorized for ADMIN/OWNER of the Agent's owning org.
+
+    """
+    005-agent-subscription FR-022: list all AgentSubscriptions for an
+    Agent. Authorized for ADMIN/OWNER of the Agent's owning org.
+
+    Accepts the entity's ID or URN.
+    """
     agentSubscriptions(agentId: ID!): [AgentSubscription!]!
-    # All nodes accessible by an App (across all subscribed memories)
+
+    """
+    All nodes accessible by an App (across all subscribed memories).
+
+    Accepts the entity's ID or URN.
+    """
     appNodes(appId: ID!, limit: Int): [Node!]!
-    # Decrypted AI config for an App (org ADMIN of the App's org)
+
+    """
+    Decrypted AI config for an App (org ADMIN of the App's org).
+
+    Accepts the entity's ID or URN.
+    """
     appAIConfig(appId: ID!): AppAIConfig
-    # List keys for an App (org ADMIN of the App's org)
+
+    """
+    List keys for an App (org ADMIN of the App's org).
+
+    Accepts the entity's ID or URN.
+    """
     appKeys(appId: ID!): [AppKey!]!
 
-    # Agent AI config (org ADMIN) — returns the decrypted API key so the
-    # portal backend can make LLM calls on behalf of the user.
+    """
+    Agent AI config (org ADMIN) — returns the decrypted API key so the
+    portal backend can make LLM calls on behalf of the user.
+
+    Accepts the entity's ID or URN.
+    """
     agentAIConfig(agentId: ID!): AgentAIConfig
 
-    # Saved chats for the current user in their personal memory for an
-    # agent. Newest first.
+    """
+    Saved chats for the current user in their personal memory for an
+    agent. Newest first.
+
+    Accepts the entity's ID or URN.
+    """
     myChats(agentId: ID!, limit: Int, offset: Int): [Chat!]!
 
     # Message history for a saved chat. Returns plain role/content pairs
@@ -742,9 +804,13 @@ export const typeDefs = `#graphql
       includeDeleted: Boolean = false
     ): AssetListResult!
 
-    # v2 (spec 006) — memory-addressed listing. Returns assets for a
-    # specific memory; caller must have read access. The replacement
-    # for agentAssets in the v2 surface.
+    """
+    v2 (spec 006) — memory-addressed listing. Returns assets for a
+    specific memory; caller must have read access. The replacement
+    for agentAssets in the v2 surface.
+
+    Accepts the entity's ID or URN.
+    """
     memoryAssets(
       memoryId:       ID!
       mimeType:       String
@@ -799,8 +865,12 @@ export const typeDefs = `#graphql
     # Record a usage event
     recordUsage(event: UsageEventInput!): Boolean!
 
-    # App key management — basic createAppKey / revokeAppKey / deleteApp are
-    # declared with the other App mutations below.
+    """
+    App key management — revoke all active keys for an App and mint a
+    fresh one. (See createAppKey / revokeAppKey / deleteApp below.)
+
+    Accepts the entity's ID or URN.
+    """
     regenerateAppKey(id: ID!): AppCreated!
 
     # User management
@@ -809,56 +879,174 @@ export const typeDefs = `#graphql
 
     # Organization management
     createOrganization(name: String!, urn: String!): Organization!
+
+    """
+    Update an Organization.
+
+    Accepts the entity's ID or URN.
+    """
     updateOrganization(id: ID!, name: String, urn: String, isVisible: Boolean): Organization!
+
+    """
+    Soft-delete an Organization.
+
+    Accepts the entity's ID or URN.
+    """
     deleteOrganization(id: ID!): Boolean!
 
-    # Link a GitHub App installation to an organization (org ADMIN or platform ADMIN)
+    """
+    Link a GitHub App installation to an organization (org ADMIN or platform ADMIN).
+
+    Accepts the entity's ID or URN.
+    """
     linkGithubApp(orgId: ID!, installationId: Int!): Organization!
 
-    # Set GitHub App credentials for an organization (encrypted at rest)
+    """
+    Set GitHub App credentials for an organization (encrypted at rest).
+
+    Accepts the entity's ID or URN.
+    """
     updateOrgGithubApp(orgId: ID!, appId: String!, privateKey: String!): Organization!
 
-    # Remove all GitHub App config from an organization
+    """
+    Remove all GitHub App config from an organization.
+
+    Accepts the entity's ID or URN.
+    """
     unlinkGithubApp(orgId: ID!): Organization!
 
-    # User invitations (org ADMIN or platform ADMIN)
+    """
+    User invitations (org ADMIN or platform ADMIN).
+
+    Accepts the entity's ID or URN.
+    """
     createUserInvitation(orgId: ID!, memberRole: Role!, name: String, email: String, githubUsername: String, maxActivations: Int, expiresInDays: Int): UserInvitation!
     # Platform invite — no org association, just onboards a new user
     inviteUser(name: String, email: String, githubUsername: String, maxActivations: Int, expiresInDays: Int): UserInvitation!
     acceptInvitation(slug: String!): Boolean!
 
-    # Organization membership (platform ADMIN or org OWNER/ADMIN)
+    # Organization membership (platform ADMIN or org OWNER/ADMIN).
+    # orgId accepts the entity's ID or URN. userId is keyed by raw ID only —
+    # User has no urn column.
+    """Accepts the entity's ID or URN (orgId)."""
     addOrgMember(orgId: ID!, userId: ID!, role: Role!): OrgMember!
+    """Accepts the entity's ID or URN (orgId)."""
     updateOrgMember(orgId: ID!, userId: ID!, role: Role!): OrgMember!
+    """Accepts the entity's ID or URN (orgId)."""
     removeOrgMember(orgId: ID!, userId: ID!): Boolean!
 
     # Memory management (org ADMIN)
+    """
+    Create a Memory in an organization.
+
+    Accepts the entity's ID or URN.
+    """
     createMemory(orgId: ID!, name: String!, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, type: MemoryType): Memory!
+
+    """
+    Update a Memory.
+
+    Accepts the entity's ID or URN.
+    """
     updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility): Memory!
+
+    """
+    Soft-delete a Memory.
+
+    Accepts the entity's ID or URN.
+    """
     deleteMemory(id: ID!): Boolean!
-    # Set encrypted source token for non-GitHub-App repos
+    """
+    Set encrypted source token for non-GitHub-App repos.
+
+    Accepts the entity's ID or URN.
+    """
     setMemorySourceToken(id: ID!, token: String!, expiresAt: String): Memory!
 
     # Agent management (org ADMIN)
+    """
+    Create an Agent in an organization.
+
+    Accepts the entity's ID or URN.
+    """
     createAgent(orgId: ID!, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: MemoryVisibility, type: AgentType, surfaces: [String!]): Agent!
+
+    """
+    Update an Agent.
+
+    Accepts the entity's ID or URN.
+    """
     updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: MemoryVisibility, type: AgentType, surfaces: [String!]): Agent!
+
+    """
+    Soft-delete an Agent.
+
+    Accepts the entity's ID or URN.
+    """
     deleteAgent(id: ID!): Boolean!
+
+    """
+    Attach a Memory to an Agent.
+
+    Accepts the entity's ID or URN.
+    """
     addMemoryToAgent(agentId: ID!, memoryId: ID!, role: String): Agent!
+
+    """
+    Update an Agent's role on an attached Memory.
+
+    Accepts the entity's ID or URN.
+    """
     updateAgentMemoryRole(agentId: ID!, memoryId: ID!, role: String!): Agent!
+
+    """
+    Detach a Memory from an Agent.
+
+    Accepts the entity's ID or URN.
+    """
     removeMemoryFromAgent(agentId: ID!, memoryId: ID!): Agent!
 
     # Memory subscriptions (cross-org)
+    """
+    Create a cross-org Memory subscription.
+
+    Accepts the entity's ID or URN.
+    """
     createMemorySubscription(memoryId: ID!, orgId: ID!, role: Role!): MemorySubscription!
+
+    """
+    Update a cross-org Memory subscription.
+
+    Accepts the entity's ID or URN.
+    """
     updateMemorySubscription(memoryId: ID!, orgId: ID!, role: Role!): MemorySubscription!
+
+    """
+    Delete a cross-org Memory subscription.
+
+    Accepts the entity's ID or URN.
+    """
     deleteMemorySubscription(memoryId: ID!, orgId: ID!): Boolean!
 
-    # Trigger an on-demand sync for one memory (org ADMIN or CONTRIBUTOR)
+    """
+    Trigger an on-demand sync for one memory (org ADMIN or CONTRIBUTOR).
+
+    Accepts the entity's ID or URN.
+    """
     syncMemory(id: ID!): Memory!
 
-    # Push all nodes in a memory to its configured git repo
+    """
+    Push all nodes in a memory to its configured git repo.
+
+    Accepts the entity's ID or URN.
+    """
     pushMemoryToGit(id: ID!): Boolean!
 
-    # Add a public memory to the current user's personal workspace
+    """
+    Add a public memory to the current user's personal workspace.
+
+    Accepts the entity's ID or URN.
+    """
     addToMyMemories(memoryId: ID!): Boolean!
 
     # Exchange integration (connection created via OAuth at /auth/microsoft)
@@ -868,9 +1056,14 @@ export const typeDefs = `#graphql
     exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
 
     # ── Chat API ──────────────────────────────────────────────────────
-    # Start a chat session (creates chat nodes, loads conversation, returns compiled prompt).
-    # When called by a JWT user, the chat is created in that user's
-    # personal memory for the agent (provisioned lazily if needed).
+    """
+    Start a chat session (creates chat nodes, loads conversation, returns
+    compiled prompt). When called by a JWT user, the chat is created in
+    that user's personal memory for the agent (provisioned lazily if
+    needed).
+
+    Accepts the entity's ID or URN.
+    """
     startChat(agentId: ID!, userId: String, conversationName: String): ChatStartResult!
     # Process a user message (saves message, builds context, returns next prompt)
     sendChatMessage(chatId: String!, userMessage: String!): ChatPromptResult!
@@ -884,16 +1077,55 @@ export const typeDefs = `#graphql
     deleteChat(chatId: String!): Boolean!
 
     # Agent AI config (org ADMIN). Key is encrypted at rest.
+    """
+    Update an Agent's AI provider config. Key is encrypted at rest.
+
+    Accepts the entity's ID or URN.
+    """
     updateAgentAIConfig(agentId: ID!, provider: String!, model: String!, apiKey: String): Agent!
+
+    """
+    Clear an Agent's AI provider config.
+
+    Accepts the entity's ID or URN.
+    """
     clearAgentAIConfig(agentId: ID!): Agent!
 
     # Chatbot revisions (org ADMIN)
+    """
+    Snapshot an Agent's system memory as a new revision.
+
+    Accepts the entity's ID or URN.
+    """
     createRevision(agentId: ID!, description: String): RevisionResult!
+
+    """
+    Publish a revision and pin the Agent to it.
+
+    Accepts the entity's ID or URN.
+    """
     publishRevision(agentId: ID!, revisionLoc: String!, versionLabel: String): RevisionResult!
+
+    """
+    Restore an Agent's system memory from a revision (auto-saves first).
+
+    Accepts the entity's ID or URN.
+    """
     restoreRevision(agentId: ID!, revisionLoc: String!): RevisionResult!
 
     # Editor lock (org ADMIN)
+    """
+    Acquire (or renew) the editor lock for an Agent's system memory.
+
+    Accepts the entity's ID or URN.
+    """
     acquireEditorLock(agentId: ID!): EditorLockResult!
+
+    """
+    Release the editor lock for an Agent's system memory.
+
+    Accepts the entity's ID or URN.
+    """
     releaseEditorLock(agentId: ID!): Boolean!
 
     # Public mutations (no auth required)
@@ -904,6 +1136,11 @@ export const typeDefs = `#graphql
 
     # App management (org ADMIN) — the unified caller-identity entity per
     # Constitution Invariant #6.
+    """
+    Create an App in an organization.
+
+    Accepts the entity's ID or URN.
+    """
     createApp(
       orgId: ID!
       name: String!
@@ -922,6 +1159,12 @@ export const typeDefs = `#graphql
       sessionTimeoutSeconds: Int
       anonymousTtlDays: Int
     ): App!
+
+    """
+    Update an App.
+
+    Accepts the entity's ID or URN.
+    """
     updateApp(
       id: ID!
       name: String
@@ -940,22 +1183,50 @@ export const typeDefs = `#graphql
       sessionTimeoutSeconds: Int
       anonymousTtlDays: Int
     ): App!
+
+    """
+    Soft-delete an App.
+
+    Accepts the entity's ID or URN.
+    """
     deleteApp(id: ID!): Boolean!
-    # Add an Agent to an App's membership graph.
+
+    """
+    Add an Agent to an App's membership graph.
+
+    Accepts the entity's ID or URN.
+    """
     addAgentToApp(
       appId: ID!
       agentId: ID!
       role: AppAgentRole
       trainingMode: Boolean
     ): App!
+
+    """
+    Remove an Agent from an App's membership graph.
+
+    Accepts the entity's ID or URN.
+    """
     removeAgentFromApp(appId: ID!, agentId: ID!): App!
+
+    """
+    Mint a new AppKey for an App.
+
+    Accepts the entity's ID or URN.
+    """
     createAppKey(appId: ID!, label: String): AppKeyCreated!
+    # AppKey is keyed by raw ID — no urn column. Stays ID-only.
     revokeAppKey(id: ID!): Boolean!
 
-    # 005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's
-    # AgentSubscription. Authorized for ADMIN/OWNER of the Agent's owning
-    # org. Side effect: empty personal Memory of (user, agent) is hard-
-    # deleted; non-empty is retained with userMemoryOfAgentId preserved.
+    """
+    005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's
+    AgentSubscription. Authorized for ADMIN/OWNER of the Agent's owning
+    org. Side effect: empty personal Memory of (user, agent) is hard-
+    deleted; non-empty is retained with userMemoryOfAgentId preserved.
+
+    Accepts the entity's ID or URN (agentId).
+    """
     revokeAgentSubscription(userId: ID!, agentId: ID!): AgentSubscription!
 
     # App Key callers only: vouch for a user and manage sessions.
@@ -975,13 +1246,22 @@ export const typeDefs = `#graphql
     ): Session!
     endAgentSession(sessionId: ID!): Boolean!
 
-    # Link an anonymous memory to a real user (converts session memory ownership).
-    # Providing dataKey encrypts the memory in place atomically with the link.
+    """
+    Link an anonymous memory to a real user (converts session memory
+    ownership). Providing dataKey encrypts the memory in place atomically
+    with the link.
+
+    Accepts the entity's ID or URN.
+    """
     linkMemoryToUser(memoryId: ID!, externalUserId: String!, dataKey: String): Memory!
 
-    # Convert an existing plaintext memory to an encrypted one. The caller
-    # provides the data key; all existing node content/data is re-written as
-    # ciphertext in a single transaction.
+    """
+    Convert an existing plaintext memory to an encrypted one. The caller
+    provides the data key; all existing node content/data is re-written
+    as ciphertext in a single transaction.
+
+    Accepts the entity's ID or URN.
+    """
     encryptMemory(memoryId: ID!, dataKey: String!): Memory!
   }
 
