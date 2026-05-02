@@ -973,9 +973,11 @@ export const resolvers = {
     },
 
     memoryUsageSummary: async (_: unknown, { memoryId }: { memoryId: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       // Get all node locs belonging to this memory
       const nodes = await ctx.db.node.findMany({
-        where: { memoryId },
+        where: { memoryId: resolvedMemoryId },
         select: { loc: true },
       });
       const locs = nodes.map((n: { loc: string }) => n.loc);
