@@ -3060,6 +3060,9 @@ export const resolvers = {
     ) => {
       requireRole(ctx, 'READER');
 
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+
       // Resolve effective user id. The portal calls with userId omitted and
       // we use ctx.userId. The App Key path can pass an externalUserId.
       // Legacy callers with no user get "anonymous".
@@ -3069,12 +3072,12 @@ export const resolvers = {
       // on the first user-attributed contact for (user, agent). Idempotent.
       // Skip for the "anonymous" sentinel — there is no User row.
       if (effectiveUserId !== 'anonymous') {
-        await ensureAgentSubscription(ctx.db, effectiveUserId, agentId);
+        await ensureAgentSubscription(ctx.db, effectiveUserId, resolvedAgentId);
       }
 
       // Load agent with system memory
       const agent = await ctx.db.agent.findUniqueOrThrow({
-        where: { id: agentId },
+        where: { id: resolvedAgentId },
         include: { memoryItems: { include: { memory: true } } },
       });
 
@@ -3169,7 +3172,7 @@ export const resolvers = {
       } else if (ctx.userId) {
         const existing = await ctx.db.memory.findFirst({
           where: {
-            userMemoryOfAgentId: agentId,
+            userMemoryOfAgentId: resolvedAgentId,
             createdBy: ctx.userId,
             deletedAt: null,
           },
@@ -3200,7 +3203,7 @@ export const resolvers = {
               userId: ctx.userId,
               class: 'personal',
               visibility: 'PERSONAL',
-              userMemoryOfAgentId: agentId,
+              userMemoryOfAgentId: resolvedAgentId,
               createdBy: ctx.userId,
             },
           });
@@ -3840,7 +3843,9 @@ export const resolvers = {
       { agentId, provider, apiKey, model }: { agentId: string; provider: string; apiKey?: string | null; model: string },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       // If apiKey is provided, encrypt it and store a preview (last 4 chars).
       // If omitted/blank, keep the existing encrypted key.
@@ -3852,7 +3857,7 @@ export const resolvers = {
         throw new Error('API key is required when no key is saved yet');
       }
       return ctx.db.agent.update({
-        where: { id: agentId },
+        where: { id: resolvedAgentId },
         data: {
           aiProvider: provider,
           aiModel: model,
@@ -3864,10 +3869,12 @@ export const resolvers = {
     },
 
     clearAgentAIConfig: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       return ctx.db.agent.update({
-        where: { id: agentId },
+        where: { id: resolvedAgentId },
         data: {
           aiProvider: null,
           aiModel: null,

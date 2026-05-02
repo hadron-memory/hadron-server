@@ -193,6 +193,54 @@ describe('Agent AI config', () => {
     ).rejects.toThrow('Forbidden');
   });
 
+  // 007-entity-id-or-urn: updateAgentAIConfig + clearAgentAIConfig
+  // accept agentId as ID or URN.
+  it('updateAgentAIConfig accepts a URN as agentId input', async () => {
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const updated = await resolvers.Mutation.updateAgentAIConfig(
+      {},
+      { agentId: stored.urn, provider: 'anthropic', apiKey: 'sk-ant-via-urn', model: 'claude-opus-4-6' },
+      adminCtx(),
+    );
+    expect(updated.id).toBe(agent.id);
+    expect(updated.aiProvider).toBe('anthropic');
+  });
+
+  it('updateAgentAIConfig accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const updated = await resolvers.Mutation.updateAgentAIConfig(
+      {},
+      { agentId: `urn:agent:${stored.urn}`, provider: 'anthropic', apiKey: 'sk-ant-via-prefix', model: 'claude-opus-4-6' },
+      adminCtx(),
+    );
+    expect(updated.id).toBe(agent.id);
+  });
+
+  it('clearAgentAIConfig accepts a URN as agentId input', async () => {
+    await resolvers.Mutation.updateAgentAIConfig(
+      {},
+      { agentId: agent.id, provider: 'anthropic', apiKey: 'sk', model: 'claude-opus-4-6' },
+      adminCtx(),
+    );
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const cleared = await resolvers.Mutation.clearAgentAIConfig(
+      {},
+      { agentId: stored.urn },
+      adminCtx(),
+    );
+    expect(cleared.aiProvider).toBeNull();
+    expect(cleared.aiApiKeyEncrypted).toBeNull();
+  });
+
   it('clearAgentAIConfig wipes the config', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
@@ -265,6 +313,38 @@ describe('startChat (JWT user)', () => {
     expect(new Set(mems.map((m) => m.createdBy))).toEqual(
       new Set([adminUser.id, otherUser.id]),
     );
+  });
+
+  // 007-entity-id-or-urn: startChat accepts agentId as ID or URN.
+  it('accepts a URN as agentId input', async () => {
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const result = await resolvers.Mutation.startChat(
+      {},
+      { agentId: stored.urn },
+      userCtx(adminUser.id),
+    );
+    expect(result.chatId).toMatch(/^chats:/);
+    // Chat node lives in a memory tied to the resolved agent ID.
+    const mem = await db.memory.findFirst({
+      where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id },
+    });
+    expect(mem).not.toBeNull();
+  });
+
+  it('accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const result = await resolvers.Mutation.startChat(
+      {},
+      { agentId: `urn:agent:${stored.urn}` },
+      userCtx(adminUser.id),
+    );
+    expect(result.chatId).toMatch(/^chats:/);
   });
 
   it('throws when the agent has no system memory', async () => {
