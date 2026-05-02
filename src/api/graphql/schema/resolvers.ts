@@ -1069,7 +1069,9 @@ export const resolvers = {
 
     agentAIConfig: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       // Org ADMIN on the agent's org can read the decrypted key.
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       if (!agent.aiProvider || !agent.aiModel || !agent.aiApiKeyEncrypted) return null;
@@ -1086,11 +1088,13 @@ export const resolvers = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       // Find the user memory for (agent, current user). No auto-create
       // here — the list is empty until the user starts their first chat.
       const userMemory = await ctx.db.memory.findFirst({
         where: {
-          userMemoryOfAgentId: agentId,
+          userMemoryOfAgentId: resolvedAgentId,
           createdBy: ctx.userId,
           deletedAt: null,
         },
@@ -1531,10 +1535,12 @@ export const resolvers = {
       { agentId }: { agentId: string },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       return ctx.db.agentSubscription.findMany({
-        where: { agentId },
+        where: { agentId: resolvedAgentId },
         orderBy: { createdAt: 'desc' },
       });
     },

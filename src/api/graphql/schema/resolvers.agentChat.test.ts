@@ -145,6 +145,43 @@ describe('Agent AI config', () => {
     expect(cfg?.model).toBe('claude-opus-4-6');
   });
 
+  // 007-entity-id-or-urn: agentAIConfig accepts agentId as ID or URN.
+  it('agentAIConfig accepts a URN as agentId input', async () => {
+    await resolvers.Mutation.updateAgentAIConfig(
+      {},
+      { agentId: agent.id, provider: 'anthropic', apiKey: 'sk-ant-urn', model: 'claude-opus-4-6' },
+      adminCtx(),
+    );
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const cfg = await resolvers.Query.agentAIConfig(
+      {},
+      { agentId: stored.urn },
+      adminCtx(),
+    );
+    expect(cfg?.apiKey).toBe('sk-ant-urn');
+  });
+
+  it('agentAIConfig accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
+    await resolvers.Mutation.updateAgentAIConfig(
+      {},
+      { agentId: agent.id, provider: 'anthropic', apiKey: 'sk-ant-prefix', model: 'claude-opus-4-6' },
+      adminCtx(),
+    );
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const cfg = await resolvers.Query.agentAIConfig(
+      {},
+      { agentId: `urn:agent:${stored.urn}` },
+      adminCtx(),
+    );
+    expect(cfg?.apiKey).toBe('sk-ant-prefix');
+  });
+
   it('agentAIConfig refuses non-admin', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
@@ -278,6 +315,35 @@ describe('myChats', () => {
       userCtx(adminUser.id),
     );
     expect(result).toEqual([]);
+  });
+
+  // 007-entity-id-or-urn: myChats accepts agentId as ID or URN.
+  it('accepts a URN as agentId input', async () => {
+    const c1 = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const chats = await resolvers.Query.myChats(
+      {},
+      { agentId: stored.urn },
+      userCtx(adminUser.id),
+    );
+    expect(chats.map((c) => c.loc)).toEqual([c1.chatId]);
+  });
+
+  it('accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
+    const c1 = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const chats = await resolvers.Query.myChats(
+      {},
+      { agentId: `urn:agent:${stored.urn}` },
+      userCtx(adminUser.id),
+    );
+    expect(chats.map((c) => c.loc)).toEqual([c1.chatId]);
   });
 
   it('derives the title from the first user message', async () => {
