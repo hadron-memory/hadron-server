@@ -1,372 +1,397 @@
-import {Prisma, PrismaClient} from '../src/generated/prisma/index.js';
-import bcrypt from 'bcrypt';
-import { randomBytes, createCipheriv } from 'crypto';
+/**
+ * Local dev seed (post-008-agent-installation).
+ *
+ * Builds a minimal-but-narrative fixture set on top of the post-008 schema:
+ *
+ *   - Three Orgs: a platform Org that authors agents, plus two installer Orgs.
+ *   - A "Mealplan" agent (single-org install, unlimited members, shared
+ *     app memory) — exercises Story 1 + the personal-memory pivot.
+ *   - A "Juno" agent (multi-org install, maxMembers=2, per-user app memory)
+ *     installed in TWO Orgs by the same end-user — exercises Story 2's
+ *     privacy invariant (the multi-install isolation that 008 hangs on).
+ *   - One AppKey per App, with raw keys printed at the end so a developer
+ *     can paste them into hadron-portal or hadron-client.
+ *
+ * All identities are anonymized fixtures — names like "Alice", "Bob", "Mike",
+ * org URNs like "platform-co", "acme-corp", etc. No real PII.
+ *
+ * Re-run with `pnpm db:dev-reset` (drops the dev DB and rebuilds from scratch).
+ */
+import { PrismaClient } from '../src/generated/prisma/index.js';
+import { randomBytes, createHash } from 'crypto';
 import { generateId } from '../src/lib/id.js';
-import MemoryCreateArgs = Prisma.MemoryCreateArgs;
 
-function encryptToken(plaintext: string): string {
-  const key = process.env.HADRON_ENCRYPTION_KEY;
-  if (!key) throw new Error('HADRON_ENCRYPTION_KEY env var is required for seeding');
-  const keyBuf = Buffer.from(key, 'hex');
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', keyBuf, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return Buffer.concat([iv, tag, encrypted]).toString('base64');
+const APP_KEY_PREFIX = 'hdr_app_';
+
+function mintAppKey(): { rawKey: string; keyHash: string; keyPreview: string } {
+  const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+  const keyHash = createHash('sha256').update(rawKey).digest('hex');
+  // Preview = first 12 + last 4 of the raw key, matching the createAppKey
+  // resolver shape so the portal preview UI displays the same thing it would
+  // for a real key.
+  const keyPreview = `${rawKey.slice(0, 12)}...${rawKey.slice(-4)}`;
+  return { rawKey, keyHash, keyPreview };
 }
 
 const db = new PrismaClient();
 
+interface MintedKey {
+  appName: string;
+  rawKey: string;
+}
+
 async function main() {
-  console.log('Seeding database...');
+  const mintedKeys: MintedKey[] = [];
+  console.log('Seeding hadron_dev (post-008 fixtures)...\n');
 
-  // 1. HadronServer
-  const server = await db.hadronServer.create({
+  // ── Organizations ─────────────────────────────────────────────────────
+  // Platform-co: hosts the Mealplan + Juno agents (the "marketplace" side).
+  // Acme-corp: deploys Mealplan (single-org install).
+  // Mentor-co: deploys Juno (Mike's first install).
+  // Client-co: also deploys Juno (Mike's second install — multi-install case).
+  const platformOrg = await db.organization.create({
     data: {
       id: generateId(),
-      url: 'https://hc.hadrongraph.io',
-      logLevel: 'ERROR',
-    },
-  });
-  console.log(`  Created HadronServer: ${server.url}`);
-
-  // 2. Organization: Hadron Memory
-  const hadronOrg = await db.organization.create({
-    data: {
-      id: generateId(),
-      name: 'Hadron Memory',
-      urn: 'hadronmemory-com',
-      githubAppId: '3125298',
-      githubInstallationId: 117769692,
-      githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_PRIVATE_KEY
-        ? encryptToken(process.env.GITHUB_APP_PRIVATE_KEY)
-        : undefined,
+      name: 'Platform Co',
+      urn: 'platform-co',
       isVisible: true,
     },
   });
-  console.log(`  Created Organization: ${hadronOrg.name} (${hadronOrg.urn})`);
-
-  // 2. Organization: Baragaun
-  const baragaunOrg = await db.organization.create({
+  const acmeOrg = await db.organization.create({
     data: {
       id: generateId(),
-      name: 'Baragaun',
-      urn: 'baragaun-com',
-      githubAppId: '3125298',
-      githubInstallationId: 117385803,
-      githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_PRIVATE_KEY
-        ? encryptToken(process.env.GITHUB_APP_PRIVATE_KEY)
-        : undefined,
+      name: 'Acme Corp',
+      urn: 'acme-corp',
       isVisible: true,
     },
   });
-  console.log(`  Created Organization: ${baragaunOrg.name} (${baragaunOrg.urn})`);
-
-  // 2. Organization: Baragaun
-  const micromentorOrg = await db.organization.create({
+  const mentorOrg = await db.organization.create({
     data: {
       id: generateId(),
-      name: 'Micromentor',
-      urn: 'micromentor-org',
-      githubAppId: '3125298',
-      githubInstallationId: 117769754,
-      githubAppPrivateKeyEncrypted: process.env.GITHUB_APP_PRIVATE_KEY
-        ? encryptToken(process.env.GITHUB_APP_PRIVATE_KEY)
-        : undefined,
+      name: 'Mentor Co',
+      urn: 'mentor-co',
       isVisible: true,
     },
   });
-  console.log(`  Created Organization: ${micromentorOrg.name} (${micromentorOrg.urn})`);
-
-  // 3. Users
-  const holger = await db.user.create({
+  const clientOrg = await db.organization.create({
     data: {
-      githubId: 204708, // shadowbrush GitHub ID
-      githubUsername: 'shadowbrush',
-      identityProvider: 'GITHUB',
-      name: 'Holger',
-      email: 'h@baragaun.com',
-      roles: ['ADMIN'],
-      maxReferrals: 100,
+      id: generateId(),
+      name: 'Client Co',
+      urn: 'client-co',
+      isVisible: true,
     },
   });
-  console.log(`  Created User: ${holger.name} (${holger.githubUsername})`);
+  console.log(`  Created 4 orgs: platform-co, acme-corp, mentor-co, client-co`);
 
-  const raghvind = await db.user.create({
+  // ── Users ─────────────────────────────────────────────────────────────
+  // alice: platform-co builder; admin in platform-co.
+  // bob: acme-corp owner; deploys Mealplan.
+  // mike: ClientCo + MentorCo member; the load-bearing multi-install user.
+  // dana: filler member to exercise maxMembers=2 on Juno.
+  const alice = await db.user.create({
     data: {
-      githubId: 123397631,
-      githubUsername: 'RaghvindYadav',
-      identityProvider: 'GITHUB',
-      name: 'Raghvind Yadav',
-      email: 'vadayraghvind@baragaun.com',
-      roles: ['ADMIN'],
-      maxReferrals: 100,
-    },
-  });
-  console.log(`  Created User: ${raghvind.name} (${raghvind.email})`);
-
-  const rupali = await db.user.create({
-    data: {
+      id: generateId(),
+      handle: 'alice',
       identityProvider: 'EMAIL',
-      name: 'Rupali Raijput',
-      email: 'rupali@baragaun.com',
+      name: 'Alice (fixture)',
+      email: 'alice@platform-co.test',
       roles: ['ADMIN'],
     },
   });
-  console.log(`  Created User: ${rupali.name} (${rupali.email})`);
-
-  const noel = await db.user.create({
-    data: {
-      githubId: 107146551,
-      githubUsername: 'LASITW',
-      identityProvider: 'GITHUB',
-      name: 'Noel Saji',
-      email: 'saji.noel@gmail.com',
-      roles: ['ADMIN'],
-    },
-  });
-  console.log(`  Created User: ${noel.name} (${noel.email})`);
-
-  // 4. OrgMembers
-  for (const { user, role } of [
-    { user: holger, role: 'OWNER' as const },
-    { user: raghvind, role: 'OWNER' as const },
-    { user: rupali, role: 'OWNER' as const },
-    { user: noel, role: 'OWNER' as const },
-  ]) {
-    await db.orgMember.create({
-      data: {
-        id: generateId(),
-        organizationId: baragaunOrg.id,
-        userId: user.id,
-        role,
-        canInvite: true,
-      },
-    });
-    console.log(`  Created OrgMember: ${user.name} → ${baragaunOrg.name} (${role})`);
-  }
-
-  for (const { user, role } of [
-    { user: holger, role: 'OWNER' as const },
-    { user: raghvind, role: 'OWNER' as const },
-    { user: rupali, role: 'OWNER' as const },
-    { user: noel, role: 'OWNER' as const },
-  ]) {
-    await db.orgMember.create({
-      data: {
-        id: generateId(),
-        organizationId: hadronOrg.id,
-        userId: user.id,
-        role,
-        canInvite: true,
-      },
-    });
-    console.log(`  Created OrgMember: ${user.name} → ${hadronOrg.name} (${role})`);
-  }
-
-  for (const { user, role } of [
-    { user: holger, role: 'OWNER' as const },
-    { user: raghvind, role: 'OWNER' as const },
-    { user: rupali, role: 'OWNER' as const },
-    { user: noel, role: 'OWNER' as const },
-  ]) {
-    await db.orgMember.create({
-      data: {
-        id: generateId(),
-        organizationId: micromentorOrg.id,
-        userId: user.id,
-        role,
-        canInvite: true,
-      },
-    });
-    console.log(`  Created OrgMember: ${user.name} → ${micromentorOrg.name} (${role})`);
-  }
-
-  // 5. Memory: hadron-core
-  const seedMemories: { id: string, name: string, props: MemoryCreateArgs }[] = [
-    {
-      id: '',
-      name: '',
-      props: {
-        data: {
-          id: generateId(),
-          organizationId: hadronOrg.id,
-          urn: `${hadronOrg.urn}:core`,
-          name: 'hadronmemory-com.core',
-          source: 'https://github.com/hadron-memory/hadronmem-core',
-          readBranch: 'main',
-          writeBranch: 'hadron-updates',
-          visibility: 'PUBLIC',
-          syncStatus: 'PENDING',
-          class: 'knowledge',
-        },
-      }
-    },
-    {
-      id: '',
-      name: '',
-      props: {
-        data: {
-          id: generateId(),
-          organizationId: baragaunOrg.id,
-          urn: `${baragaunOrg.urn}:baragaun-com`,
-          name: 'baragaun-com',
-          source: 'https://github.com/baragaun/hadronmem-baragaun-com',
-          readBranch: 'main',
-          writeBranch: 'hadron-updates',
-          visibility: 'PUBLIC',
-          syncStatus: 'PENDING',
-          class: 'knowledge',
-        },
-      }
-    },
-    {
-      id: '',
-      name: '',
-      props: {
-        data: {
-          id: generateId(),
-          organizationId: baragaunOrg.id,
-          urn: `${baragaunOrg.urn}:bg-code-gen`,
-          name: 'baragaun-com.bg-code-gen',
-          source: 'https://github.com/baragaun/hadronmem-bg-code-gen',
-          readBranch: 'main',
-          writeBranch: 'hadron-updates',
-          visibility: 'PUBLIC',
-          syncStatus: 'PENDING',
-          class: 'knowledge',
-        },
-      },
-    },
-    {
-      id: '',
-      name: '',
-      props: {
-        data: {
-          id: generateId(),
-          organizationId: baragaunOrg.id,
-          urn: `${baragaunOrg.urn}:bg-node-client`,
-          name: 'baragaun-com.bg-node-client',
-          source: 'https://github.com/baragaun/hadronmem-bg-node-client',
-          readBranch: 'main',
-          writeBranch: 'hadron-updates',
-          visibility: 'PUBLIC',
-          syncStatus: 'PENDING',
-          class: 'knowledge',
-        },
-      },
-    },
-    {
-      id: '',
-      name: '',
-      props: {
-        data: {
-          id: generateId(),
-          organizationId: micromentorOrg.id,
-          urn: `${micromentorOrg.urn}:mmdata`,
-          name: 'micromentor-org.mmdata',
-          source: 'https://github.com/micromentor-team/hadronmem-mmdata',
-          readBranch: 'main',
-          writeBranch: 'hadron-updates',
-          visibility: 'PRIVATE',
-          syncStatus: 'PENDING',
-          class: 'knowledge',
-        },
-      },
-    },
-    {
-      id: '',
-      name: '',
-      props: {
-        data: {
-          id: generateId(),
-          organizationId: micromentorOrg.id,
-          urn: `${micromentorOrg.urn}:mm-app`,
-          name: 'micromentor-org.mm-app',
-          source: 'https://github.com/micromentor-team/hadronmem-mm-app',
-          readBranch: 'main',
-          writeBranch: 'hadron-updates',
-          visibility: 'PRIVATE',
-          syncStatus: 'PENDING',
-          class: 'knowledge',
-        },
-      },
-    },
-  ]
-
-  for (const mem of seedMemories) {
-    const memory = await db.memory.create(mem.props);
-    mem.id = memory.id
-    mem.name = memory.name
-    console.log(`  Created Memory: ${memory.name}`);
-  }
-
-  // 6. Agent: Engineering
-  const agent = await db.agent.create({
+  const bob = await db.user.create({
     data: {
       id: generateId(),
-      organizationId: baragaunOrg.id,
-      urn: `${baragaunOrg.urn}:engineering`,
-      name: 'Engineering',
-      description: 'All Baragaun engineering memories',
+      handle: 'bob',
+      identityProvider: 'EMAIL',
+      name: 'Bob (fixture)',
+      email: 'bob@acme-corp.test',
+      roles: ['ADMIN'],
     },
   });
-  console.log(`  Created Agent: ${agent.name}`);
+  const mike = await db.user.create({
+    data: {
+      id: generateId(),
+      handle: 'mike',
+      identityProvider: 'EMAIL',
+      name: 'Mike (fixture)',
+      email: 'mike@mentor-co.test',
+      roles: ['ADMIN'],
+    },
+  });
+  const dana = await db.user.create({
+    data: {
+      id: generateId(),
+      handle: 'dana',
+      identityProvider: 'EMAIL',
+      name: 'Dana (fixture)',
+      email: 'dana@mentor-co.test',
+      roles: ['ADMIN'],
+    },
+  });
+  console.log(`  Created 4 users: alice, bob, mike, dana`);
 
-  // 7. AgentMemoryItem: Engineering → memories
-  for (const mem of seedMemories) {
-    await db.agentMemoryItem.create({
-      data: {
-        id: generateId(),
-        agentId: agent.id,
-        memoryId: mem.id,
+  // ── Org membership ────────────────────────────────────────────────────
+  await db.orgMember.createMany({
+    data: [
+      { id: generateId(), organizationId: platformOrg.id, userId: alice.id, role: 'OWNER', canInvite: true },
+      { id: generateId(), organizationId: acmeOrg.id, userId: bob.id, role: 'OWNER', canInvite: true },
+      { id: generateId(), organizationId: mentorOrg.id, userId: mike.id, role: 'OWNER', canInvite: true },
+      { id: generateId(), organizationId: mentorOrg.id, userId: dana.id, role: 'CONTRIBUTOR' },
+      { id: generateId(), organizationId: clientOrg.id, userId: mike.id, role: 'OWNER', canInvite: true },
+    ],
+  });
+  console.log(`  Created 5 org memberships`);
+
+  // ── Knowledge memory (shared across Mealplan + Juno) ──────────────────
+  // A simple platform-owned knowledge memory both agents can attach to.
+  const sharedKnowledge = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: platformOrg.id,
+      urn: `${platformOrg.urn}:recipes`,
+      name: 'Recipes (shared knowledge)',
+      class: 'knowledge',
+      visibility: 'PUBLIC',
+      shortDescription: 'Public recipe corpus',
+    },
+  });
+  console.log(`  Created knowledge memory: recipes`);
+
+  // ── Agent: Mealplan ────────────────────────────────────────────────────
+  // Mealplan's system memory holds its conversation design. For seed
+  // purposes we leave it empty — the chat-flow tests exercise the design.
+  const mealplanSystemMemory = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: platformOrg.id,
+      urn: `${platformOrg.urn}:mealplan-system`,
+      name: 'Mealplan system memory',
+      class: 'system',
+    },
+  });
+  const mealplanAgent = await db.agent.create({
+    data: {
+      id: generateId(),
+      organizationId: platformOrg.id,
+      urn: `${platformOrg.urn}:mealplan`,
+      name: 'Mealplan',
+      description: 'Family meal planner agent (fixture)',
+      systemMemoryId: mealplanSystemMemory.id,
+      visibility: 'PUBLIC',
+      memoryProvisioning: { appMemory: 'shared' },
+      installationPolicy: {
+        maxMembers: 'unlimited',
+        memberRoles: ['owner', 'cook', 'eater'],
       },
-    });
-    console.log(`  Linked ${mem.name} → ${agent.name}`);
+    },
+  });
+  await db.agentMemoryItem.create({
+    data: {
+      id: generateId(),
+      agentId: mealplanAgent.id,
+      memoryId: sharedKnowledge.id,
+      role: 'read',
+    },
+  });
+  console.log(`  Created Mealplan agent (memberRoles: owner/cook/eater)`);
+
+  // ── Agent: Juno ────────────────────────────────────────────────────────
+  // Juno is the multi-install agent. installationPolicy.maxMembers=2 means
+  // an installation can have at most a principal + guide.
+  const junoSystemMemory = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: platformOrg.id,
+      urn: `${platformOrg.urn}:juno-system`,
+      name: 'Juno system memory',
+      class: 'system',
+    },
+  });
+  const junoAgent = await db.agent.create({
+    data: {
+      id: generateId(),
+      organizationId: platformOrg.id,
+      urn: `${platformOrg.urn}:juno`,
+      name: 'Juno',
+      description: 'Mentee mentor-chat agent (fixture)',
+      systemMemoryId: junoSystemMemory.id,
+      visibility: 'PUBLIC',
+      // Per-user app memory — each mentee has private chat history per install.
+      memoryProvisioning: { appMemory: 'user' },
+      installationPolicy: {
+        maxMembers: 2,
+        memberRoles: ['principal', 'guide'],
+      },
+    },
+  });
+  console.log(`  Created Juno agent (maxMembers=2, appMemory=user)`);
+
+  // ── App: Mealplan in Acme Corp ────────────────────────────────────────
+  // Same-org install: platform-co owns Mealplan but acme-corp deploys it.
+  // Cross-org → AgentOrgGrant required (008 R-2 / data-model.md gate 1).
+  await db.agentOrgGrant.create({
+    data: {
+      orgId: acmeOrg.id,
+      agentId: mealplanAgent.id,
+      activatedAt: new Date(),
+    },
+  });
+  const mealplanAppKey = mintAppKey();
+  const mealplanApp = await db.app.create({
+    data: {
+      id: generateId(),
+      organizationId: acmeOrg.id,
+      urn: `${acmeOrg.urn}:mealplan`,
+      name: 'Mealplan @ Acme',
+      agentId: mealplanAgent.id,
+      surfaces: ['chat', 'web'],
+      appType: 'CHATBOT',
+    },
+  });
+  await db.appKey.create({
+    data: {
+      id: generateId(),
+      appId: mealplanApp.id,
+      keyHash: mealplanAppKey.keyHash,
+      keyPreview: mealplanAppKey.keyPreview,
+      label: 'Mealplan @ Acme — initial key',
+    },
+  });
+  await db.appMember.createMany({
+    data: [
+      { appId: mealplanApp.id, userId: bob.id, role: 'owner' },
+      { appId: mealplanApp.id, userId: alice.id, role: 'cook' },
+    ],
+  });
+  mintedKeys.push({ appName: mealplanApp.name, rawKey: mealplanAppKey.rawKey });
+  console.log(`  Created App: Mealplan @ Acme (members: bob/owner, alice/cook)`);
+
+  // ── App: Juno in Mentor Co (Mike's first install) ─────────────────────
+  await db.agentOrgGrant.create({
+    data: {
+      orgId: mentorOrg.id,
+      agentId: junoAgent.id,
+      activatedAt: new Date(),
+    },
+  });
+  const junoMentorAppKey = mintAppKey();
+  const junoMentorApp = await db.app.create({
+    data: {
+      id: generateId(),
+      organizationId: mentorOrg.id,
+      urn: `${mentorOrg.urn}:juno`,
+      name: 'Juno @ Mentor Co',
+      agentId: junoAgent.id,
+      surfaces: ['chat'],
+      appType: 'CHATBOT',
+    },
+  });
+  await db.appKey.create({
+    data: {
+      id: generateId(),
+      appId: junoMentorApp.id,
+      keyHash: junoMentorAppKey.keyHash,
+      keyPreview: junoMentorAppKey.keyPreview,
+      label: 'Juno @ Mentor Co — initial key',
+    },
+  });
+  await db.appMember.createMany({
+    data: [
+      { appId: junoMentorApp.id, userId: mike.id, role: 'principal' },
+      { appId: junoMentorApp.id, userId: dana.id, role: 'guide' },
+    ],
+  });
+  mintedKeys.push({ appName: junoMentorApp.name, rawKey: junoMentorAppKey.rawKey });
+  console.log(`  Created App: Juno @ Mentor Co (members: mike/principal, dana/guide)`);
+
+  // ── App: Juno in Client Co (Mike's second install — multi-install) ────
+  // The whole point of 008's privacy invariant: Mike's data here is fully
+  // isolated from Mike's data at Mentor Co even though both Apps deploy
+  // the same Juno agent.
+  await db.agentOrgGrant.create({
+    data: {
+      orgId: clientOrg.id,
+      agentId: junoAgent.id,
+      activatedAt: new Date(),
+    },
+  });
+  const junoClientAppKey = mintAppKey();
+  const junoClientApp = await db.app.create({
+    data: {
+      id: generateId(),
+      organizationId: clientOrg.id,
+      urn: `${clientOrg.urn}:juno`,
+      name: 'Juno @ Client Co',
+      agentId: junoAgent.id,
+      surfaces: ['chat'],
+      appType: 'CHATBOT',
+    },
+  });
+  await db.appKey.create({
+    data: {
+      id: generateId(),
+      appId: junoClientApp.id,
+      keyHash: junoClientAppKey.keyHash,
+      keyPreview: junoClientAppKey.keyPreview,
+      label: 'Juno @ Client Co — initial key',
+    },
+  });
+  await db.appMember.create({
+    data: { appId: junoClientApp.id, userId: mike.id, role: 'principal' },
+  });
+  mintedKeys.push({ appName: junoClientApp.name, rawKey: junoClientAppKey.rawKey });
+  console.log(`  Created App: Juno @ Client Co (members: mike/principal)`);
+
+  // ── AgentSubscription for Mike↔Juno (personal-memory grant) ────────────
+  await db.agentSubscription.create({
+    data: {
+      userId: mike.id,
+      agentId: junoAgent.id,
+      activatedAt: new Date(),
+    },
+  });
+  console.log(`  Created AgentSubscription: mike → juno (personal-memory grant)`);
+
+  // ── Personal-class memories for Mike (one per Juno install) ────────────
+  // The (app_id, user_id) pivot is what gives multi-install isolation.
+  // These are seeded so a portal session can immediately demonstrate that
+  // the two installs of the same Juno agent have separate user data.
+  await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: mentorOrg.id,
+      urn: `${junoMentorApp.urn}:mike-personal`,
+      name: 'Mike\'s personal memory @ Mentor Co',
+      class: 'personal',
+      visibility: 'PERSONAL',
+      userId: mike.id,
+      userMemoryOfAgentId: junoAgent.id,
+      appId: junoMentorApp.id,
+    },
+  });
+  await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: clientOrg.id,
+      urn: `${junoClientApp.urn}:mike-personal`,
+      name: 'Mike\'s personal memory @ Client Co',
+      class: 'personal',
+      visibility: 'PERSONAL',
+      userId: mike.id,
+      userMemoryOfAgentId: junoAgent.id,
+      appId: junoClientApp.id,
+    },
+  });
+  console.log(`  Created 2 personal memories for Mike (one per Juno install)`);
+
+  // ── Final summary ──────────────────────────────────────────────────────
+  console.log(`\nSeed complete!\n`);
+  console.log(`AppKeys (paste into hadron-portal or .hadron/config.json):`);
+  for (const k of mintedKeys) {
+    console.log(`  ${k.appName}`);
+    console.log(`    ${k.rawKey}`);
   }
-
-  // 8. Stations + subscriptions (one per user)
-  const stationDefs = [
-    { user: holger, name: 'biene-mbp4' },
-    { user: raghvind, name: 'raghvind-ws' },
-    { user: rupali, name: 'rupali-ws' },
-    { user: noel, name: 'noel-ws' },
-  ];
-
-  for (const def of stationDefs) {
-    const rawKey = randomBytes(32).toString('hex');
-    const keyHash = await bcrypt.hash(rawKey, 12);
-    const stationUrn = `${baragaunOrg.urn}:${def.name}`;
-    const station = await db.station.create({
-      data: {
-        id: generateId(),
-        userId: def.user.id,
-        organizationId: baragaunOrg.id,
-        stationType: 'WORKSTATION',
-        urn: stationUrn,
-        name: def.name,
-        keyHash,
-        role: 'ADMIN',
-        apiKeyShown: false,
-        agentTools: ['CLAUDE_CODE', 'CURSOR'],
-      },
-    });
-    console.log(`  Created Station: ${station.name} (user: ${def.user.name})`);
-    console.log(`    API Key: ${rawKey}`);
-
-    await db.stationAgentSubscription.create({
-      data: {
-        id: generateId(),
-        stationId: station.id,
-        agentId: agent.id,
-        subscriptionType: 'READ_WRITE',
-        trainingMode: true,
-      },
-    });
-    console.log(`    Subscribed ${station.name} → ${agent.name} (READ_WRITE, training)`);
-  }
-
-  console.log('\nSeed complete!');
+  console.log('');
 }
 
 main()

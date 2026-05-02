@@ -66,8 +66,9 @@ beforeEach(async () => {
       identifyUserMethod: 'USER_ID',
     },
   });
-  await db.appAgent.create({ data: { appId: secretApp.id, agentId: agent.id } });
-  await db.appAgent.create({ data: { appId: plaintextApp.id, agentId: agent.id } });
+  // 008: App→Agent is a direct FK on App.agent_id (no AppAgent join).
+  await db.app.update({ where: { id: secretApp.id },    data: { agentId: agent.id } });
+  await db.app.update({ where: { id: plaintextApp.id }, data: { agentId: agent.id } });
 });
 
 // ---------------------------------------------------------------------------

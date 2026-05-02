@@ -67,7 +67,11 @@ describe('AppAgent post-subscription_type-drop parity (SC-005)', () => {
     }
   });
 
-  it('AppAgent.role=DEVELOP unlocks system memory writes; OPERATE does not', async () => {
+  it('system memory is universally read-only from any App context (008)', async () => {
+    // 008-agent-installation: DEVELOP-from-App is dropped (R-10). System
+    // memory writes happen in the Agent ownership surface, never through
+    // an App. The legacy `role` arg is accepted for source compat but is
+    // a no-op — both legacy roles deny writes to system memory.
     const org = await db.organization.create({
       data: { id: generateId(), name: 'pd-org-3', urn: 'pd-org-3' },
     });
@@ -92,6 +96,6 @@ describe('AppAgent post-subscription_type-drop parity (SC-005)', () => {
     const { app: devApp } = await createDbAppWithKey(db, 'pd-dev-app', org.id);
     await createDbAppAgent(db, devApp.id, agent.id, { role: 'DEVELOP' });
     const devCtx: AuthContext = { appId: devApp.id, organizationId: org.id };
-    expect(await canWriteToMemory(db, devCtx, sysMemory.id)).toBe(true);
+    expect(await canWriteToMemory(db, devCtx, sysMemory.id)).toBe(false);
   });
 });

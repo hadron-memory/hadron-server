@@ -24,25 +24,52 @@ beforeEach(async () => {
   await cleanDb(db);
   pgClient = new Client({ connectionString: DATABASE_URL });
   await pgClient.connect();
-  // Loosen schema invariants so we can simulate pre-spec state
+  // Loosen schema invariants so we can simulate pre-spec state. 008's
+  // chk_memory_class_app_id is dropped here too: the 005 backfill SQL
+  // (replayed by these tests) doesn't know about app_id, so it can
+  // briefly create class='personal' rows with app_id=NULL.
   await pgClient.query(`ALTER TABLE memories DROP CONSTRAINT IF EXISTS chk_personal_visibility_user`);
+  await pgClient.query(`ALTER TABLE memories DROP CONSTRAINT IF EXISTS chk_memory_class_app_id`);
   await pgClient.query(`ALTER TABLE memories ALTER COLUMN class DROP NOT NULL`);
 });
 
 afterEach(async () => {
   // Restore the schema invariants for the next test
   await pgClient.query(`UPDATE memories SET class = 'knowledge' WHERE class IS NULL`);
+  // Belt-and-braces: any rows the test left with class IN ('app', 'personal')
+  // and app_id IS NULL would block re-adding chk_memory_class_app_id. Since
+  // these tests live in their own DB that isn't exercising the 008 app_id
+  // pivot end-to-end, downgrade leftovers to knowledge so the constraint can
+  // be re-added cleanly.
+  await pgClient.query(`
+    UPDATE memories SET class = 'knowledge', visibility = 'PRIVATE', user_id = NULL
+    WHERE class IN ('app', 'personal') AND app_id IS NULL
+  `);
   await pgClient.query(`ALTER TABLE memories ALTER COLUMN class SET NOT NULL`);
   await pgClient.query(`
     ALTER TABLE memories ADD CONSTRAINT chk_personal_visibility_user
       CHECK ((visibility = 'PERSONAL') = (user_id IS NOT NULL))
   `);
+  await pgClient.query(`
+    ALTER TABLE memories
+      ADD CONSTRAINT chk_memory_class_app_id
+      CHECK (
+        (class IN ('app', 'personal') AND app_id IS NOT NULL)
+        OR (class IN ('system', 'knowledge') AND app_id IS NULL)
+      )
+  `);
   await pgClient.end();
 });
 
 async function runBackfillSql() {
-  // The migration's UPDATE statements verbatim — see
-  // prisma/migrations/<timestamp>_agent_subscription/migration.sql
+  // The 005 migration's UPDATE statements verbatim — see
+  // prisma/migrations/<timestamp>_agent_subscription/migration.sql.
+  //
+  // 008-agent-installation: 005's reclassification to 'personal' violates the
+  // chk_memory_class_app_id constraint that 008 adds (no app_id populated by
+  // 005). The constraint is dropped at the start of each test (beforeEach);
+  // tests are responsible for completing the 008 app_id backfill before
+  // re-adding the constraint (afterEach).
   await pgClient.query(`
     UPDATE memories SET class = 'system'
     WHERE id IN (SELECT system_memory_id FROM agents WHERE system_memory_id IS NOT NULL)
@@ -118,6 +145,16 @@ describe('Memory.class backfill (FR-010)', () => {
     const agent = await db.agent.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:a`, name: 'a' },
     });
+    // 008: the eventual app_id pivot needs an App; seed one and attribute the
+    // session through it so the 005 personal-class classification + the 008
+    // app_id backfill (run inline below before re-adding the chk constraint)
+    // both succeed.
+    const app = await db.app.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:bf-app`,
+        name: 'bf-app', agentId: agent.id,
+      },
+    });
     const personalMemory = await db.memory.create({
       data: {
         id: generateId(), organizationId: org.id, urn: `${org.urn}:pm`, name: 'pm',
@@ -126,12 +163,20 @@ describe('Memory.class backfill (FR-010)', () => {
     });
     await db.session.create({
       data: {
-        id: generateId(), type: 'CHATBOT', memoryId: personalMemory.id, userId: user.id, appId: null,
+        id: generateId(), type: 'CHATBOT', memoryId: personalMemory.id, userId: user.id, appId: app.id,
       },
     });
 
     await pgClient.query(`UPDATE memories SET class = NULL WHERE id = $1`, [personalMemory.id]);
     await runBackfillSql();
+    // Simulate the 008 app_id backfill that runs after the 005 reclassify:
+    // populate app_id for personal-class memories from the most recent session
+    // of (user_id, agent) that has a non-null app_id. (The actual production
+    // 008 migration does this for all rows; here we apply it just to the test row.)
+    await pgClient.query(
+      `UPDATE memories SET app_id = $1 WHERE id = $2`,
+      [app.id, personalMemory.id],
+    );
 
     const after = await db.memory.findUniqueOrThrow({ where: { id: personalMemory.id } });
     expect(after.class).toBe('personal');

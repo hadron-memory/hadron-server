@@ -72,6 +72,9 @@ export async function provisionPersonalWorkspace(
   //    image is not vulnerable to dictionary attacks.
   const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   const keyHash = createHash('sha256').update(rawKey).digest('hex');
+  // 008-agent-installation: App→Agent is a direct FK (App.agent_id), set at
+  // App creation. The legacy AppAgent join is dropped; per-attached-memory
+  // write access remains governed by AgentMemoryItem.role.
   const app = await db.app.create({
     data: {
       id: generateId(),
@@ -80,6 +83,7 @@ export async function provisionPersonalWorkspace(
       organizationId: org.id,
       appType: 'WORKSTATION',
       role: 'READER',
+      agentId: agent.id,
       createdBy: userId,
     },
   });
@@ -90,18 +94,6 @@ export async function provisionPersonalWorkspace(
       keyHash,
       keyPreview: rawKey.slice(-4),
       label: 'Initial setup key',
-      createdBy: userId,
-    },
-  });
-
-  // 5. AppAgent membership: workstation gets the OPERATE role on its own
-  //    agent. Per-attached-memory write access is governed by
-  //    AgentMemoryItem.role (read-write for "My Agent").
-  await db.appAgent.create({
-    data: {
-      appId: app.id,
-      agentId: agent.id,
-      role: 'OPERATE',
       createdBy: userId,
     },
   });

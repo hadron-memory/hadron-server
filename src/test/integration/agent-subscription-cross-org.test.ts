@@ -94,9 +94,16 @@ async function buildFourOrgFixture(): Promise<FourOrgFixture> {
     data: { agentId: agent.id, memoryId: knowledgeMemory.id, role: 'read' },
   });
 
-  // OrgA owns the App + AppAgent wiring
+  // OrgA owns the App + App.agent_id direct FK (008 — AppAgent join is gone).
   const { app } = await createDbAppWithKey(db, 'OrgA-app', orgA.id);
   await createDbAppAgent(db, app.id, agent.id);
+  // 008: cross-org App↔Agent (OrgA's App using OrgB's Agent) requires an
+  // active AgentOrgGrant per the new gate 1 in data-model.md "Cross-org
+  // evaluation chain". Same-org installs auto-pass, but this fixture is
+  // intentionally cross-org.
+  await db.agentOrgGrant.create({
+    data: { orgId: orgA.id, agentId: agent.id, activatedAt: new Date() },
+  });
 
   // Alice's AgentSubscription + personal Memory in personal-alice
   await createDbAgentSubscription(db, alice.id, agent.id);

@@ -3,6 +3,22 @@ import { generateId } from '../../../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
+import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import {
+  ensureAppMember,
+  InvalidRoleError,
+  MaxMembersExceededError,
+  OrphanAppError,
+} from '../../../controller/operations/ensureAppMember.js';
+import {
+  publishAgentImport,
+  SelfImportError,
+  MultiLevelImportError,
+  MissingGrantError,
+  PositionConflictError,
+} from '../../../controller/operations/publishAgentImport.js';
+import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
+import { isLifecycleActive } from '../../../lib/lifecycle.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import {
@@ -48,7 +64,6 @@ import type {
   Role,
   AppType,
   AppMembershipRole,
-  AppAgentRole,
   SubscriptionType,
   MemoryVisibility,
   Prisma,
@@ -321,7 +336,7 @@ const ORG_INCLUDE = {
     orderBy: { name: 'asc' as const },
   },
   agents: { where: { deletedAt: null }, include: { memoryItems: { where: { deletedAt: null, memory: { deletedAt: null } }, include: { memory: true } } }, orderBy: { name: 'asc' as const } },
-  apps: { where: { deletedAt: null }, include: { keys: { where: { revokedAt: null } }, appAgents: { include: { agent: true } } }, orderBy: { name: 'asc' as const } },
+  apps: { where: { deletedAt: null }, include: { keys: { where: { revokedAt: null } }, agent: true }, orderBy: { name: 'asc' as const } },
   subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
   exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
 };
@@ -334,11 +349,7 @@ const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, tak
 
 const APP_INCLUDE = {
   keys: { where: { revokedAt: null }, orderBy: { createdAt: 'desc' as const } },
-  appAgents: {
-    where: { deletedAt: null },
-    include: { agent: { include: AGENT_INCLUDE } },
-    orderBy: { createdAt: 'asc' as const },
-  },
+  agent: { include: AGENT_INCLUDE },
 };
 
 const toISO = (v: Date | string | null | undefined): string | null =>
@@ -717,6 +728,12 @@ export const resolvers = {
     organization: (g: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
       (g as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: g.organizationId } }),
+    // 008-agent-installation: app pivot for app/personal-class memories.
+    app: async (g: { appId?: string | null; app?: unknown }, _: unknown, ctx: Context) => {
+      if (g.app !== undefined) return g.app ?? null;
+      if (!g.appId) return null;
+      return ctx.db.app.findUnique({ where: { id: g.appId } });
+    },
     // 005-agent-subscription FR-024: userId is gated. Resolves to the
     // actual User.id only for the memory owner or ADMIN/OWNER of the
     // memory's organization. End users querying other users' memories
@@ -762,23 +779,39 @@ export const resolvers = {
     organization: (a: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
       (a as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: a.organizationId } }),
-    agents: async (a: { id: string; appAgents?: Array<{ agent: unknown }> }, _: unknown, ctx: Context) => {
-      if (a.appAgents) {
-        return a.appAgents.map((aa) => aa.agent).filter((g) => g && !(g as { deletedAt?: Date | null }).deletedAt);
-      }
-      const rows = await ctx.db.appAgent.findMany({
-        where: { appId: a.id, deletedAt: null },
-        include: { agent: true },
-      });
-      return rows.map((r) => r.agent).filter((g) => !g.deletedAt);
+    // 008-agent-installation: App.agent is the canonical resolver. The
+    // deprecated App.agents (plural) synthesizes a single-element array
+    // for source-compat with portal callers that haven't migrated yet.
+    agent: async (
+      a: { id: string; agentId?: string | null; agent?: unknown },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (a.agent !== undefined) return a.agent ?? null;
+      if (!a.agentId) return null;
+      return ctx.db.agent.findUnique({ where: { id: a.agentId } });
     },
-    agentSubscriptions: async (a: { id: string; appAgents?: unknown[] }, _: unknown, ctx: Context) => {
-      if (a.appAgents) return a.appAgents;
-      return ctx.db.appAgent.findMany({
-        where: { appId: a.id, deletedAt: null },
-        include: { agent: { include: AGENT_INCLUDE } },
+    agents: async (
+      a: { id: string; agentId?: string | null; agent?: unknown },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (a.agent) {
+        const agent = a.agent as { deletedAt?: Date | null } | null;
+        return agent && !agent.deletedAt ? [agent] : [];
+      }
+      if (!a.agentId) return [];
+      const agent = await ctx.db.agent.findUnique({ where: { id: a.agentId } });
+      return agent && !agent.deletedAt ? [agent] : [];
+    },
+    members: async (a: { id: string }, _: unknown, ctx: Context) => {
+      return ctx.db.appMember.findMany({
+        where: { appId: a.id },
         orderBy: { createdAt: 'asc' },
       });
+    },
+    memberCount: async (a: { id: string }, _: unknown, ctx: Context) => {
+      return ctx.db.appMember.count({ where: { appId: a.id } });
     },
     keys: async (a: { id: string; keys?: unknown[] }, _: unknown, ctx: Context) => {
       if (a.keys) return a.keys;
@@ -788,26 +821,67 @@ export const resolvers = {
       });
     },
   },
-  AppAgentSub: {
-    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
-    agent: async (s: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) =>
-      s.agent ?? ctx.db.agent.findUnique({ where: { id: s.agentId } }),
-  },
   AgentSubscription: {
     createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
     activatedAt: (s: { activatedAt?: Date | string | null }) => toISO(s.activatedAt ?? null),
     expiresAt: (s: { expiresAt?: Date | string | null }) => toISO(s.expiresAt ?? null),
     revokedAt: (s: { revokedAt?: Date | string | null }) => toISO(s.revokedAt ?? null),
-    isActive: (s: { activatedAt?: Date | null; revokedAt?: Date | null; expiresAt?: Date | null }) => {
-      if (!s.activatedAt) return false;
-      if (s.revokedAt) return false;
-      if (s.expiresAt && new Date(s.expiresAt) <= new Date()) return false;
-      return true;
-    },
+    isActive: (s: { activatedAt?: Date | null; revokedAt?: Date | null; expiresAt?: Date | null }) =>
+      isLifecycleActive({
+        activatedAt: s.activatedAt ?? null,
+        revokedAt: s.revokedAt ?? null,
+        expiresAt: s.expiresAt ?? null,
+      }),
     user: async (s: { userId: string; user?: unknown }, _: unknown, ctx: Context) =>
       s.user ?? ctx.db.user.findUnique({ where: { id: s.userId } }),
     agent: async (s: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) =>
       s.agent ?? ctx.db.agent.findUnique({ where: { id: s.agentId } }),
+  },
+  // 008-agent-installation: User↔App membership join.
+  AppMember: {
+    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    updatedAt: (s: { updatedAt?: Date | string | null }) => toISO(s.updatedAt ?? null),
+    app: async (s: { appId: string; app?: unknown }, _: unknown, ctx: Context) =>
+      s.app ?? ctx.db.app.findUnique({ where: { id: s.appId } }),
+    user: async (s: { userId: string; user?: unknown }, _: unknown, ctx: Context) =>
+      s.user ?? ctx.db.user.findUnique({ where: { id: s.userId } }),
+  },
+  // 008-agent-installation: Agent dependency edge.
+  AgentImport: {
+    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    parentAgent: async (s: { parentAgentId: string }, _: unknown, ctx: Context) =>
+      ctx.db.agent.findUnique({ where: { id: s.parentAgentId } }),
+    importedAgent: async (s: { importedAgentId: string }, _: unknown, ctx: Context) =>
+      ctx.db.agent.findUnique({ where: { id: s.importedAgentId } }),
+  },
+  // 008-agent-installation: Org↔Agent license — sibling to AgentSubscription.
+  AgentOrgGrant: {
+    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    activatedAt: (s: { activatedAt?: Date | string | null }) => toISO(s.activatedAt ?? null),
+    expiresAt: (s: { expiresAt?: Date | string | null }) => toISO(s.expiresAt ?? null),
+    revokedAt: (s: { revokedAt?: Date | string | null }) => toISO(s.revokedAt ?? null),
+    isActive: (s: { activatedAt?: Date | null; revokedAt?: Date | null; expiresAt?: Date | null }) =>
+      isLifecycleActive({
+        activatedAt: s.activatedAt ?? null,
+        revokedAt: s.revokedAt ?? null,
+        expiresAt: s.expiresAt ?? null,
+      }),
+    organization: async (s: { orgId: string }, _: unknown, ctx: Context) =>
+      ctx.db.organization.findUnique({ where: { id: s.orgId } }),
+    agent: async (s: { agentId: string }, _: unknown, ctx: Context) =>
+      ctx.db.agent.findUnique({ where: { id: s.agentId } }),
+  },
+  // 008-agent-installation: Agent declarative knobs are stored as JSON on
+  // the row; the type resolvers pluck the known keys for ergonomic client
+  // access. Both come back from `Agent.findUnique` already shaped — these
+  // resolvers exist so GraphQL knows MemoryProvisioning/InstallationPolicy
+  // are passthrough types, not auto-resolved scalars.
+  MemoryProvisioning: {
+    appMemory: (p: { appMemory: 'shared' | 'user' | 'none' }) => p.appMemory,
+  },
+  InstallationPolicy: {
+    maxMembers: (p: { maxMembers: number | 'unlimited' }) => String(p.maxMembers),
+    memberRoles: (p: { memberRoles: string[] }) => p.memberRoles,
   },
   AppKey: {
     createdAt: (k: { createdAt: Date | string }) => toISO(k.createdAt)!,
@@ -816,6 +890,16 @@ export const resolvers = {
   },
   User: {
     linkedAt: (u: { linkedAt?: Date | string | null }) => toISO(u.linkedAt ?? null),
+    // 008-agent-installation: User↔App memberships. Resolves to a non-empty
+    // list only when the queried User is the authenticated user (mirrors
+    // 005's User.agentSubscriptions resolver-side gate).
+    appMemberships: async (u: { id: string }, _: unknown, ctx: Context) => {
+      if (ctx.userId !== u.id) return [];
+      return ctx.db.appMember.findMany({
+        where: { userId: u.id },
+        orderBy: { createdAt: 'asc' },
+      });
+    },
   },
   Session: {
     startedAt: (s: { startedAt: Date | string }) => toISO(s.startedAt)!,
@@ -851,6 +935,28 @@ export const resolvers = {
         orderBy: { name: 'asc' },
       });
     },
+    // 008-agent-installation: list grants for this Org. Resolvable only to
+    // ADMIN/OWNER of the org. Non-admins get an empty list (silent rather
+    // than erroring — same shape as User.appMemberships).
+    agentOrgGrants: async (org: { id: string }, _: unknown, ctx: Context) => {
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      if (!isPlatformAdmin && ctx.organizationId !== org.id) return [];
+      if (!isPlatformAdmin) {
+        const member = await ctx.db.orgMember.findFirst({
+          where: {
+            organizationId: org.id,
+            userId: ctx.userId ?? '',
+            deletedAt: null,
+            role: { in: ['ADMIN', 'OWNER'] },
+          },
+        });
+        if (!member) return [];
+      }
+      return ctx.db.agentOrgGrant.findMany({
+        where: { orgId: org.id },
+        orderBy: { createdAt: 'asc' },
+      });
+    },
   },
   ExchangeConnection: {
     lastSyncAt: (c: { lastSyncAt?: Date | string | null }) => toISO(c.lastSyncAt),
@@ -861,6 +967,66 @@ export const resolvers = {
     createdAt: (b: { createdAt: Date | string }) => toISO(b.createdAt)!,
     // Never return the encrypted API key itself — only whether one exists.
     hasAiApiKey: (a: { aiApiKeyEncrypted?: string | null }) => !!a.aiApiKeyEncrypted,
+    // 008-agent-installation: declarative knobs come back from Prisma as
+    // JSON columns. Pass through with sensible defaults (the column has a
+    // schema-level DEFAULT, so this is belt-and-braces against partial
+    // selects that omit the column).
+    memoryProvisioning: (a: { memoryProvisioning?: unknown }) =>
+      (a.memoryProvisioning as { appMemory: 'shared' | 'user' | 'none' } | undefined) ??
+      { appMemory: 'shared' },
+    installationPolicy: (a: { installationPolicy?: unknown }) =>
+      (a.installationPolicy as { maxMembers: number | 'unlimited'; memberRoles: string[] } | undefined) ??
+      { maxMembers: 'unlimited', memberRoles: ['owner'] },
+    imports: async (a: { id: string }, _: unknown, ctx: Context) =>
+      ctx.db.agentImport.findMany({
+        where: { parentAgentId: a.id },
+        orderBy: { position: 'asc' },
+      }),
+    importedBy: async (a: { id: string }, _: unknown, ctx: Context) =>
+      ctx.db.agentImport.findMany({
+        where: { importedAgentId: a.id },
+        orderBy: { position: 'asc' },
+      }),
+    // Apps that deploy this Agent. Resolvable to ADMIN/OWNER of the
+    // Agent's owning org; everyone else gets an empty list.
+    apps: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      if (!isPlatformAdmin) {
+        const member = await ctx.db.orgMember.findFirst({
+          where: {
+            organizationId: a.organizationId,
+            userId: ctx.userId ?? '',
+            deletedAt: null,
+            role: { in: ['ADMIN', 'OWNER'] },
+          },
+        });
+        if (!member) return [];
+      }
+      return ctx.db.app.findMany({
+        where: { agentId: a.id, deletedAt: null },
+        orderBy: { createdAt: 'asc' },
+      });
+    },
+    appCount: async (a: { id: string }, _: unknown, ctx: Context) =>
+      ctx.db.app.count({ where: { agentId: a.id, deletedAt: null } }),
+    orgGrants: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      if (!isPlatformAdmin) {
+        const member = await ctx.db.orgMember.findFirst({
+          where: {
+            organizationId: a.organizationId,
+            userId: ctx.userId ?? '',
+            deletedAt: null,
+            role: { in: ['ADMIN', 'OWNER'] },
+          },
+        });
+        if (!member) return [];
+      }
+      return ctx.db.agentOrgGrant.findMany({
+        where: { agentId: a.id },
+        orderBy: { createdAt: 'asc' },
+      });
+    },
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
@@ -1403,18 +1569,25 @@ export const resolvers = {
         ? {}
         : { type: { not: 'AGENT_SYSTEM' as const } };
 
-      // App-keyed caller — return memories from AppAgent membership
+      // 008: App-keyed caller — App.agent_id is direct; load the App's Agent
+      // and surface its memoryItems. Orphan Apps (agent_id IS NULL) see zero
+      // memories.
       if (ctx.appId) {
-        const appAgents = await ctx.db.appAgent.findMany({
-          where: { appId: ctx.appId, deletedAt: null },
-          include: { agent: { include: { memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } } } } },
+        const app = await ctx.db.app.findUnique({
+          where: { id: ctx.appId },
+          select: {
+            agent: {
+              include: {
+                memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
+              },
+            },
+          },
         });
+        if (!app?.agent) return [];
         const memoryMap = new Map<string, any>();
-        for (const sub of appAgents) {
-          for (const item of sub.agent.memoryItems) {
-            if (!includeAgentSystem && item.memory.type === 'AGENT_SYSTEM') continue;
-            memoryMap.set(item.memory.id, item.memory);
-          }
+        for (const item of app.agent.memoryItems) {
+          if (!includeAgentSystem && item.memory.type === 'AGENT_SYSTEM') continue;
+          memoryMap.set(item.memory.id, item.memory);
         }
         return Array.from(memoryMap.values());
       }
@@ -1577,12 +1750,16 @@ export const resolvers = {
       if (!isPlatformAdmin) {
         await requireOrgRole(ctx, app.organizationId, 'READER');
       }
-      const subs = await ctx.db.appAgent.findMany({
-        where: { appId: resolvedAppId, deletedAt: null },
-        include: { agent: { include: { memoryItems: true } } },
+      // 008: App.agent_id is direct — load the App's single Agent and gather
+      // its memoryItems. Orphan Apps (agent_id IS NULL) have no accessible nodes.
+      const appWithAgent = await ctx.db.app.findUnique({
+        where: { id: resolvedAppId },
+        select: {
+          agent: { include: { memoryItems: true } },
+        },
       });
       const memoryIds = [
-        ...new Set(subs.flatMap((s) => s.agent.memoryItems.map((m) => m.memoryId))),
+        ...new Set((appWithAgent?.agent?.memoryItems ?? []).map((m) => m.memoryId)),
       ];
       if (memoryIds.length === 0) return [];
 
@@ -3231,12 +3408,45 @@ export const resolvers = {
           targetMemoryId = existing.id;
         } else {
           // Lazily provision a per-user memory for this (agent, user).
+          // 008: personal-class memory requires app_id (chk_memory_class_app_id).
+          // For a JWT-user chat we resolve the App via App.agent_id matching the
+          // chat agent inside the user's accessible orgs. If no matching App
+          // exists, we downgrade to a knowledge-class memory for this chat —
+          // analogous to the migration's R-3 fallback for unattributed personal
+          // memories.
           const org = await ctx.db.organization.findUniqueOrThrow({
             where: { id: agent.organizationId }, select: { urn: true },
           });
           const opaqueId = generateId();
           const agentSlug = agent.urn.split(':').slice(1).join(':');
           const memoryUrn = `${org.urn}:${agentSlug}:user:${opaqueId}`;
+
+          const ownerOrgIds = (
+            await ctx.db.orgMember.findMany({
+              where: { userId: ctx.userId, deletedAt: null },
+              select: { organizationId: true },
+            })
+          ).map((m) => m.organizationId);
+
+          const matchingApp =
+            ownerOrgIds.length > 0
+              ? await ctx.db.app.findFirst({
+                  where: {
+                    agentId: resolvedAgentId,
+                    organizationId: { in: ownerOrgIds },
+                    deletedAt: null,
+                  },
+                  select: { id: true },
+                })
+              : null;
+
+          const memoryClass: 'personal' | 'knowledge' = matchingApp
+            ? 'personal'
+            : 'knowledge';
+          const visibility: 'PERSONAL' | 'PRIVATE' = matchingApp
+            ? 'PERSONAL'
+            : 'PRIVATE';
+
           const created = await ctx.db.memory.create({
             data: {
               organizationId: agent.organizationId,
@@ -3249,10 +3459,11 @@ export const resolvers = {
               // the legacy JWT-user path; the spec's FR-015 (use
               // user's personal org) applies to the new App-keyed
               // AgentSubscription auto-provisioning path.
-              userId: ctx.userId,
-              class: 'personal',
-              visibility: 'PERSONAL',
+              userId: matchingApp ? ctx.userId : null,
+              class: memoryClass,
+              visibility,
               userMemoryOfAgentId: resolvedAgentId,
+              appId: matchingApp?.id,
               createdBy: ctx.userId,
             },
           });
@@ -3580,6 +3791,11 @@ export const resolvers = {
 
       const messageHistory = messages.map((m) => {
         const name = m.loc.split(':').pop() ?? '';
+        // TODO(constitution-invariant-14): hardcoding 'juno' violates "no
+        // agent-specific platform code." The role should come from message
+        // metadata (e.g. node.data.role or a dedicated nodeType), not from
+        // the agent's name appearing in the loc. Tracked as a follow-up
+        // cleanup; flagged by the no-agent-specific-code grep gate.
         const isUser = !name.includes('assistant') && !name.includes('juno') && !name.includes('ai');
         return { role: isUser ? 'user' : 'assistant', content: m.content ?? '' };
       });
@@ -4237,6 +4453,7 @@ export const resolvers = {
       _: unknown,
       {
         orgId,
+        agentId,
         name,
         urn,
         appType,
@@ -4248,6 +4465,9 @@ export const resolvers = {
         aiModel,
         aiApiKey,
         expiresAt,
+        surfaces,
+        trainingMode,
+        installOptional,
         // App-original fields
         createUserPermission,
         identifyUserMethod,
@@ -4255,6 +4475,7 @@ export const resolvers = {
         anonymousTtlDays,
       }: {
         orgId: string; name: string;
+        agentId?: string;
         urn?: string;
         appType?: AppType;
         role?: AppMembershipRole;
@@ -4265,6 +4486,9 @@ export const resolvers = {
         aiModel?: string;
         aiApiKey?: string;
         expiresAt?: string;
+        surfaces?: string[];
+        trainingMode?: boolean;
+        installOptional?: string[];
         createUserPermission?: 'DENY' | 'EXPLICIT' | 'IMPLICIT';
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
@@ -4288,6 +4512,19 @@ export const resolvers = {
         .replace(/^-+|-+$/g, '');
       if (!slug) throw new Error('App URN slug cannot be empty');
       const appUrn = `${org.urn}:${slug}`;
+
+      // 008-agent-installation: resolve the Agent if the caller supplied one,
+      // and auto-provision an AgentOrgGrant so the cross-org access-control
+      // gate (App.org → Agent) clears for sessions through this App. v1
+      // accepts apps without an agentId for cutover compat with legacy
+      // callers; new portal flows always pass an agentId.
+      let resolvedAgentId: string | null = null;
+      if (agentId) {
+        const ref = await resolveAgentRef(ctx.db, agentId);
+        resolvedAgentId = ref.id;
+        await ensureAgentOrgGrant(ctx.db, resolvedOrgId, resolvedAgentId);
+      }
+
       // Hard-delete a soft-deleted collision so the URN can be reused
       // (same pattern as createAgent/createMemory)
       const existing = await ctx.db.app.findUnique({ where: { urn: appUrn } });
@@ -4298,11 +4535,14 @@ export const resolvers = {
           throw new Error(`An app with URN "${appUrn}" already exists`);
         }
       }
-      return ctx.db.app.create({
+      const createdApp = await ctx.db.app.create({
         data: {
           organizationId: resolvedOrgId,
           name,
           urn: appUrn,
+          agentId: resolvedAgentId,
+          surfaces: surfaces ?? undefined, // undefined → use the schema default ['chat']
+          trainingMode: trainingMode ?? false,
           appType: appType ?? 'WORKSTATION',
           role: role ?? 'READER',
           description: description ?? null,
@@ -4320,6 +4560,86 @@ export const resolvers = {
         },
         include: APP_INCLUDE,
       });
+
+      // 008-agent-installation T059: cascade-install required deps.
+      // Walk AgentImport rows for the parent and install each one as its own
+      // App (or reuse an existing App in the same org for the same dep).
+      // Required imports always cascade; optional imports cascade only when
+      // their id appears in `installOptional`.
+      if (resolvedAgentId) {
+        const imports = await ctx.db.agentImport.findMany({
+          where: { parentAgentId: resolvedAgentId },
+          orderBy: { position: 'asc' },
+        });
+
+        // Resolve `installOptional` URNs/ids to canonical ids so callers
+        // can pass either form.
+        const optionalIds = new Set<string>();
+        if (installOptional && installOptional.length > 0) {
+          for (const ref of installOptional) {
+            const { id } = await resolveAgentRef(ctx.db, ref);
+            optionalIds.add(id);
+          }
+        }
+
+        for (const imp of imports) {
+          const shouldInstall = imp.required || optionalIds.has(imp.importedAgentId);
+          if (!shouldInstall) continue;
+
+          // Reuse an existing App for the same (org, dep agent) — one App per
+          // (org, Agent) pair (v1 doesn't support per-bundle namespacing of
+          // dep installations, per spec User Story 3 acceptance scenario 4).
+          const existingDepApp = await ctx.db.app.findFirst({
+            where: {
+              organizationId: resolvedOrgId,
+              agentId: imp.importedAgentId,
+              deletedAt: null,
+            },
+            select: { id: true },
+          });
+          if (existingDepApp) continue;
+
+          // Auto-provision the AgentOrgGrant for the dep too — every App we
+          // create is gated on having an active grant.
+          await ensureAgentOrgGrant(ctx.db, resolvedOrgId, imp.importedAgentId);
+
+          // Derive a sensible URN for the dep's App. Use the imported
+          // Agent's slug; fall back to `dep-${id}` if the URN doesn't have
+          // a slug suffix (defensive — all 008-shape Agents have URNs).
+          const depAgent = await ctx.db.agent.findUniqueOrThrow({
+            where: { id: imp.importedAgentId },
+            select: { name: true, urn: true },
+          });
+          const depSlug =
+            depAgent.urn.split(':').slice(1).join(':') || `dep-${imp.importedAgentId}`;
+          let depUrn = `${org.urn}:${depSlug}`;
+          // If the URN happens to collide with a soft-deleted App, hard-delete
+          // it (same pattern as the parent App branch above). For non-deleted
+          // collisions, append the imported-agent id as a disambiguator.
+          const depCollision = await ctx.db.app.findUnique({ where: { urn: depUrn } });
+          if (depCollision) {
+            if (depCollision.deletedAt) {
+              await ctx.db.app.delete({ where: { id: depCollision.id } });
+            } else {
+              depUrn = `${depUrn}:${imp.importedAgentId.slice(-8)}`;
+            }
+          }
+
+          await ctx.db.app.create({
+            data: {
+              organizationId: resolvedOrgId,
+              name: `${depAgent.name} (cascaded from ${name})`,
+              urn: depUrn,
+              agentId: imp.importedAgentId,
+              surfaces: ['chat'], // dep installs default to chat surface
+              trainingMode: false,
+              createdBy: ctx.userId ?? null,
+            },
+          });
+        }
+      }
+
+      return createdApp;
     },
 
     updateApp: async (
@@ -4337,6 +4657,8 @@ export const resolvers = {
         aiModel,
         aiApiKey,
         expiresAt,
+        surfaces,
+        trainingMode,
         // App-original fields
         createUserPermission,
         identifyUserMethod,
@@ -4353,6 +4675,8 @@ export const resolvers = {
         aiModel?: string;
         aiApiKey?: string;
         expiresAt?: string;
+        surfaces?: string[];
+        trainingMode?: boolean;
         createUserPermission?: 'DENY' | 'EXPLICIT' | 'IMPLICIT';
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
@@ -4393,6 +4717,8 @@ export const resolvers = {
           ...(aiModel !== undefined ? { aiModel } : {}),
           ...(aiApiKey !== undefined ? { aiApiKeyEncrypted: aiApiKey ? encryptToken(aiApiKey) : null } : {}),
           ...(expiresAt !== undefined ? { expiresAt: expiresAt ? new Date(expiresAt) : null } : {}),
+          ...(surfaces !== undefined ? { surfaces } : {}),
+          ...(trainingMode !== undefined ? { trainingMode } : {}),
           ...(createUserPermission !== undefined ? { createUserPermission } : {}),
           ...(identifyUserMethod !== undefined ? { identifyUserMethod } : {}),
           ...(sessionTimeoutSeconds !== undefined ? { sessionTimeoutSeconds } : {}),
@@ -4417,12 +4743,10 @@ export const resolvers = {
       {
         appId,
         agentId,
-        role,
         trainingMode,
       }: {
         appId: string;
         agentId: string;
-        role?: AppAgentRole;
         trainingMode?: boolean;
       },
       ctx: Context,
@@ -4438,20 +4762,15 @@ export const resolvers = {
       if (agent.organizationId !== app.organizationId) {
         throw new Error('Agent must belong to the same organization as the App');
       }
-      // 005-agent-subscription: subscription_type was dropped; the cap
-      // it used to enforce is governed by AgentMemoryItem.role per-attached
-      // memory.
-      await ctx.db.appAgent.upsert({
-        where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } },
-        create: {
-          appId: resolvedAppId,
+      // 008-agent-installation: App→Agent is a direct FK (App.agent_id), not
+      // an AppAgent join row. Auto-provision the AgentOrgGrant so cross-org
+      // gate 1 in access-control will clear (same-org installs auto-pass
+      // either way; this ensures the explicit grant exists for symmetry).
+      await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
+      await ctx.db.app.update({
+        where: { id: resolvedAppId },
+        data: {
           agentId: resolvedAgentId,
-          role: role ?? 'OPERATE',
-          trainingMode: trainingMode ?? false,
-          createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-        },
-        update: {
-          ...(role !== undefined ? { role } : {}),
           ...(trainingMode !== undefined ? { trainingMode } : {}),
           updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
         },
@@ -4470,10 +4789,185 @@ export const resolvers = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
-      await ctx.db.appAgent
-        .delete({ where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } } })
-        .catch(() => {}); // idempotent
+      // 008: clear App.agent_id only if it currently points at the named
+      // Agent — keeps the call idempotent and prevents an unrelated agent
+      // from being detached by a stale request.
+      if (app.agentId === resolvedAgentId) {
+        await ctx.db.app.update({
+          where: { id: resolvedAppId },
+          data: {
+            agentId: null,
+            updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+          },
+        });
+      }
       return ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId }, include: APP_INCLUDE });
+    },
+
+    // 008-agent-installation: AppMember management. Per spec FR-004 / FR-016
+    // and contracts/agent-app-graphql.md "ensureAppMember".
+    ensureAppMember: async (
+      _: unknown,
+      { appId, userId, role }: { appId: string; userId: string; role: string },
+      ctx: Context,
+    ) => {
+      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+
+      // Authorization: ADMIN/OWNER of the App's owning org, OR an existing
+      // owner-role AppMember. Self-service joins are not allowed in v1.
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      if (!isPlatformAdmin) {
+        const orgMember = await ctx.db.orgMember.findFirst({
+          where: {
+            organizationId: app.organizationId,
+            userId: ctx.userId ?? '',
+            deletedAt: null,
+            role: { in: ['ADMIN', 'OWNER'] },
+          },
+        });
+        if (!orgMember) {
+          const ownerMember = ctx.userId
+            ? await ctx.db.appMember.findUnique({
+                where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
+              })
+            : null;
+          if (!ownerMember || ownerMember.role !== 'owner') {
+            throw new Error('Forbidden: only org admins or App owners can manage members');
+          }
+        }
+      }
+
+      try {
+        await ensureAppMember(ctx.db, resolvedAppId, userId, role, {
+          actorId: ctx.userId ?? null,
+        });
+      } catch (e: unknown) {
+        // Surface typed errors with their canonical messages so the portal
+        // can render plain-language banners (Constitution Principle III).
+        if (
+          e instanceof InvalidRoleError ||
+          e instanceof MaxMembersExceededError ||
+          e instanceof OrphanAppError
+        ) {
+          throw new GraphQLError((e as Error).message, {
+            extensions: { code: (e as Error).name },
+          });
+        }
+        throw e;
+      }
+
+      return ctx.db.appMember.findUniqueOrThrow({
+        where: { appId_userId: { appId: resolvedAppId, userId } },
+      });
+    },
+
+    // 008-agent-installation: removeAppMember. Idempotent — a missing row
+    // returns true (no-op). Personal-class Memory at (appId, userId) is
+    // retained as an orphan per FR-015.
+    removeAppMember: async (
+      _: unknown,
+      { appId, userId }: { appId: string; userId: string },
+      ctx: Context,
+    ) => {
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+
+      // Authorization: same gate as ensureAppMember, plus self-removal —
+      // a member can remove themselves at any time without org/owner role.
+      const isSelfRemoval = ctx.userId === userId;
+      if (!isSelfRemoval) {
+        const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+        if (!isPlatformAdmin) {
+          const orgMember = await ctx.db.orgMember.findFirst({
+            where: {
+              organizationId: app.organizationId,
+              userId: ctx.userId ?? '',
+              deletedAt: null,
+              role: { in: ['ADMIN', 'OWNER'] },
+            },
+          });
+          if (!orgMember) {
+            const ownerMember = ctx.userId
+              ? await ctx.db.appMember.findUnique({
+                  where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
+                })
+              : null;
+            if (!ownerMember || ownerMember.role !== 'owner') {
+              throw new Error('Forbidden: only org admins, App owners, or the user themselves can remove members');
+            }
+          }
+        }
+      }
+
+      await ctx.db.appMember
+        .delete({ where: { appId_userId: { appId: resolvedAppId, userId } } })
+        .catch(() => {}); // idempotent: missing row → no-op
+      return true;
+    },
+
+    // 008-agent-installation: AgentImport bundling. Per spec FR-005 +
+    // contracts/agent-app-graphql.md "publishAgentImport".
+    publishAgentImport: async (
+      _: unknown,
+      {
+        parentAgentId,
+        importedAgentId,
+        position,
+        required,
+      }: {
+        parentAgentId: string;
+        importedAgentId: string;
+        position: number;
+        required?: boolean;
+      },
+      ctx: Context,
+    ) => {
+      const { id: resolvedParentId } = await resolveAgentRef(ctx.db, parentAgentId);
+      const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentId);
+      const parent = await ctx.db.agent.findUniqueOrThrow({
+        where: { id: resolvedParentId },
+      });
+      // Authorization: ADMIN/OWNER of the parent Agent's owning org.
+      await requireOrgRole(ctx, parent.organizationId, 'ADMIN');
+
+      try {
+        return await publishAgentImport(ctx.db, {
+          parentAgentId: resolvedParentId,
+          importedAgentId: resolvedImportedId,
+          position,
+          required: required ?? true,
+          actorId: ctx.userId ?? null,
+        });
+      } catch (e: unknown) {
+        if (
+          e instanceof SelfImportError ||
+          e instanceof MultiLevelImportError ||
+          e instanceof MissingGrantError ||
+          e instanceof PositionConflictError
+        ) {
+          throw new GraphQLError((e as Error).message, {
+            extensions: { code: (e as Error).name },
+          });
+        }
+        throw e;
+      }
+    },
+
+    removeAgentImport: async (
+      _: unknown,
+      { parentAgentId, importedAgentId }: { parentAgentId: string; importedAgentId: string },
+      ctx: Context,
+    ) => {
+      const { id: resolvedParentId } = await resolveAgentRef(ctx.db, parentAgentId);
+      const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentId);
+      const parent = await ctx.db.agent.findUniqueOrThrow({
+        where: { id: resolvedParentId },
+      });
+      await requireOrgRole(ctx, parent.organizationId, 'ADMIN');
+      await removeAgentImport(ctx.db, resolvedParentId, resolvedImportedId);
+      return true;
     },
 
     createAppKey: async (
@@ -4593,11 +5087,12 @@ export const resolvers = {
       if (!ctx.appId) throw new Error('Forbidden: App Key required');
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
 
-      // App must be allowed to operate this agent
-      const allowed = await ctx.db.appAgent.findUnique({
-        where: { appId_agentId: { appId: ctx.appId, agentId } },
-      });
-      if (!allowed) throw new Error('Forbidden: App is not allowed to operate this agent');
+      // 008: App→Agent is a direct FK; the App can operate exactly the Agent
+      // referenced by App.agent_id (no AppAgent join). Orphan Apps (agent_id
+      // IS NULL) cannot operate any agent.
+      if (!app.agentId || app.agentId !== agentId) {
+        throw new Error('Forbidden: App is not allowed to operate this agent');
+      }
 
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
       if (agent.deletedAt) throw new Error('Agent not found');
@@ -4668,6 +5163,10 @@ export const resolvers = {
               class: 'personal',
               visibility: 'PERSONAL',
               userMemoryOfAgentId: agentId,
+              // 008-agent-installation: personal memories pivot on
+              // (app_id, user_id). The chk_memory_class_app_id constraint
+              // requires app_id when class IN ('app', 'personal').
+              appId: ctx.appId,
               // New user memories in SECRET mode are encrypted from creation.
               isEncrypted: parsedKey !== null,
               createdBy: userId,
@@ -4697,6 +5196,9 @@ export const resolvers = {
             class: 'app',
             visibility: 'PRIVATE',
             userMemoryOfAgentId: agentId,
+            // 008-agent-installation: app-class memories require app_id
+            // (chk_memory_class_app_id).
+            appId: ctx.appId,
             anonymousExpiresAt: expires,
             createdBy: ctx.appId,
           },

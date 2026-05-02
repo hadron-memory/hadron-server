@@ -28,5 +28,23 @@ export async function setup() {
     END$$;
   `);
 
+  // 008-agent-installation: app_id is required for class IN ('app', 'personal'),
+  // forbidden for class IN ('system', 'knowledge').
+  await client.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'chk_memory_class_app_id'
+      ) THEN
+        ALTER TABLE "memories"
+          ADD CONSTRAINT "chk_memory_class_app_id"
+          CHECK (
+            (class IN ('app', 'personal') AND app_id IS NOT NULL)
+            OR (class IN ('system', 'knowledge') AND app_id IS NULL)
+          );
+      END IF;
+    END$$;
+  `);
+
   await client.end();
 }

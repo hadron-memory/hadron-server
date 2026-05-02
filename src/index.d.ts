@@ -100,5 +100,4 @@ export interface User {
 export type Role = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
 export type AppMembershipRole = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
 export type AppType = 'WORKSTATION' | 'CHATBOT' | 'AGENT' | 'AUTOMATION' | 'CLOUD' | 'IOT';
-export type AppAgentRole = 'OPERATE' | 'DEVELOP';
 export type IdentityProvider = 'GITHUB';

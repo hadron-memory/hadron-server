@@ -160,17 +160,28 @@ export const typeDefs = `#graphql
     avatarUrl: String
     roles: [Role!]!
     maxReferrals: Int
+    # 008-agent-installation: User-App memberships. Resolves to a non-empty
+    # list only when the queried User is the authenticated user (mirrors
+    # the User.agentSubscriptions resolver-side gate from 005).
+    appMemberships: [AppMember!]!
   }
 
-  # A third-party application (e.g. Micromentor's backend) that calls Hadron on
-  # behalf of its own users. Owns long-lived App Keys and a set of agents it may
-  # operate.
+  # The runtime deployment of an Agent in an Organization. Owns long-lived
+  # App Keys and references its Agent via App.agent_id (a direct FK; the
+  # legacy AppAgent join was dropped in 008-agent-installation).
   type App {
     id: ID!
     name: String!
     urn: String!
     organizationId: String!
     organization: Organization
+    # 008-agent-installation: direct FK replaces the AppAgent join.
+    agentId: ID
+    agent: Agent
+    trainingMode: Boolean!
+    surfaces: [String!]!
+    members: [AppMember!]!
+    memberCount: Int!
     appType: AppType!
     role: AppMembershipRole!
     description: String
@@ -185,12 +196,13 @@ export const typeDefs = `#graphql
     identifyUserMethod: IdentifyUserMethod!
     sessionTimeoutSeconds: Int!
     anonymousTtlDays: Int!
-    agents: [Agent!]!
-    # Membership rows linking this App to agents. Each row carries the
-    # AppAgentRole (operate | develop, per Constitution Invariant #6) and
-    # trainingMode. Per-attached-memory write caps live on
-    # AgentMemoryItem.role (per spec 005-agent-subscription).
-    agentSubscriptions: [AppAgentSub!]!
+    """
+    Soft-deprecated convenience: returns a single-element list with App.agent
+    (or empty if agent_id is NULL). Pre-008, an App could reference multiple
+    Agents through the AppAgent join; that join is gone, so post-008 there
+    is at most one Agent per App. Use App.agent directly.
+    """
+    agents: [Agent!]! @deprecated(reason: "Use App.agent (singular). 008-agent-installation dropped the AppAgent join in favor of a direct FK.")
     keys: [AppKey!]!
     createdAt: String!
     updatedAt: String
@@ -212,18 +224,64 @@ export const typeDefs = `#graphql
     READER
   }
 
-  enum AppAgentRole {
-    OPERATE
-    DEVELOP
+  # 008-agent-installation: User↔App membership join carrying a per-App role
+  # validated against the parent Agent's installation_policy.memberRoles.
+  type AppMember {
+    appId: ID!
+    userId: ID!
+    app: App!
+    user: User!
+    role: String!
+    createdAt: String!
+    updatedAt: String
   }
 
-  # An App's link to an Agent.
-  type AppAgentSub {
-    appId: String!
-    agentId: String!
+  # 008-agent-installation: the Agent declarative knobs.
+  enum AppMemoryKind {
+    shared
+    user
+    none
+  }
+
+  type MemoryProvisioning {
+    appMemory: AppMemoryKind!
+  }
+
+  type InstallationPolicy {
+    """
+    Integer-as-string OR the sentinel 'unlimited'. GraphQL does not have an
+    Int|String union; clients parse: parseInt(maxMembers) succeeds for
+    integer values; 'unlimited' is the sentinel.
+    """
+    maxMembers: String!
+    memberRoles: [String!]!
+  }
+
+  # 008-agent-installation: Agent dependency edge ("Suite imports Calendar").
+  # v1 enforces 1-level imports only.
+  type AgentImport {
+    parentAgentId: ID!
+    importedAgentId: ID!
+    parentAgent: Agent!
+    importedAgent: Agent!
+    position: Int!
+    required: Boolean!
+    createdAt: String!
+  }
+
+  # 008-agent-installation: Org↔Agent license. Authorizes (a) creating an App
+  # in this Org that uses this Agent, and (b) bundling this Agent in an
+  # AgentImport edge of an Agent the Org owns. Sibling to AgentSubscription.
+  type AgentOrgGrant {
+    orgId: ID!
+    agentId: ID!
+    organization: Organization!
     agent: Agent!
-    role: AppAgentRole!
-    trainingMode: Boolean!
+    activatedAt: String
+    expiresAt: String
+    revokedAt: String
+    revokedBy: ID
+    isActive: Boolean!
     createdAt: String!
   }
 
@@ -295,6 +353,9 @@ export const typeDefs = `#graphql
     apps: [App!]!
     subscriptions: [MemorySubscription!]!
     exchangeConnections: [ExchangeConnection!]!
+    # 008-agent-installation: this org's grants for using/bundling Agents.
+    # Resolvable to ADMIN/OWNER of the org only.
+    agentOrgGrants: [AgentOrgGrant!]!
     createdAt: String!
     updatedAt: String!
   }
@@ -344,6 +405,10 @@ export const typeDefs = `#graphql
     isEncrypted: Boolean!
     userMemoryOfAgentId: String
     anonymousExpiresAt: String
+    # 008-agent-installation: app pivot for app/personal-class memories.
+    # Required when class IN ('app', 'personal'); NULL otherwise.
+    appId: ID
+    app: App
     # Populated only for type = AGENT_SYSTEM — the agent this memory is
     # the system memory of. Null for regular knowledge memories.
     agent: Agent
@@ -356,7 +421,9 @@ export const typeDefs = `#graphql
     subscriptions: [MemorySubscription!]!
   }
 
-  # A named agent configuration; groups memories and (future) tools.
+  # The definition (one per Agent) — what a Builder creates and what the
+  # marketplace sells. Per 008-agent-installation. An App is the deployment
+  # of an Agent in some org.
   type Agent {
     id: ID!
     organizationId: String!
@@ -374,6 +441,23 @@ export const typeDefs = `#graphql
     aiApiKeyPreview: String
     properties: JSON
     memoryItems: [AgentMemoryItem!]!
+    # 008-agent-installation: declarative knobs.
+    memoryProvisioning: MemoryProvisioning!
+    installationPolicy: InstallationPolicy!
+    # 008-agent-installation: dependency edges and installations.
+    imports: [AgentImport!]!
+    importedBy: [AgentImport!]!
+    """
+    Apps that deploy this Agent (App.agent_id = this.id). Resolvable to
+    ADMIN/OWNER of the Agent's owning org; non-admins see an empty list.
+    """
+    apps: [App!]!
+    appCount: Int!
+    """
+    Org grants for this Agent. Resolvable to ADMIN/OWNER of the Agent's
+    owning org only.
+    """
+    orgGrants: [AgentOrgGrant!]!
     createdAt: String!
   }
 
@@ -1144,6 +1228,12 @@ export const typeDefs = `#graphql
     createApp(
       orgId: ID!
       name: String!
+      """
+      008-agent-installation: the Agent this App deploys. Optional only to
+      absorb cutover orphans; new portal flows always pass an agentId. The
+      resolver auto-provisions an AgentOrgGrant when supplied.
+      """
+      agentId: ID
       urn: String
       appType: AppType
       role: AppMembershipRole
@@ -1154,6 +1244,15 @@ export const typeDefs = `#graphql
       aiModel: String
       aiApiKey: String
       expiresAt: String
+      surfaces: [String!]
+      trainingMode: Boolean
+      """
+      008-agent-installation: optional dep Agent ids to cascade-install.
+      Required imports of the parent Agent always cascade; optional imports
+      install only when their id appears here. Pass [] (or omit) to skip
+      all optional deps. v1 accepts ID or URN.
+      """
+      installOptional: [ID!]
       createUserPermission: CreateUserPermission
       identifyUserMethod: IdentifyUserMethod
       sessionTimeoutSeconds: Int
@@ -1178,6 +1277,8 @@ export const typeDefs = `#graphql
       aiModel: String
       aiApiKey: String
       expiresAt: String
+      surfaces: [String!]
+      trainingMode: Boolean
       createUserPermission: CreateUserPermission
       identifyUserMethod: IdentifyUserMethod
       sessionTimeoutSeconds: Int
@@ -1192,23 +1293,77 @@ export const typeDefs = `#graphql
     deleteApp(id: ID!): Boolean!
 
     """
-    Add an Agent to an App's membership graph.
+    Set the App's Agent. 008-agent-installation: App→Agent is a direct FK
+    on App.agent_id; this mutation is a setter (not a join-row creator).
+    The legacy role arg is gone — system memory is universally read-only
+    from any App context per R-10.
 
     Accepts the entity's ID or URN.
     """
     addAgentToApp(
       appId: ID!
       agentId: ID!
-      role: AppAgentRole
       trainingMode: Boolean
     ): App!
 
     """
-    Remove an Agent from an App's membership graph.
+    Clear the App's Agent (sets App.agent_id to NULL). Idempotent — clears
+    only if the current agentId matches the supplied agentId.
 
     Accepts the entity's ID or URN.
     """
     removeAgentFromApp(appId: ID!, agentId: ID!): App!
+
+    """
+    Idempotent UPSERT of an AppMember row. Per spec 008-agent-installation
+    FR-004 / FR-016. The role MUST be a value present in the parent
+    Agent's installationPolicy.memberRoles. Creating a new member is
+    rejected if the App's current member count meets or exceeds the
+    Agent's installationPolicy.maxMembers. Updating an existing member's
+    role does NOT trigger the maxMembers check.
+
+    Accepts the entity's ID or URN.
+    """
+    ensureAppMember(appId: ID!, userId: ID!, role: String!): AppMember!
+
+    """
+    Delete an AppMember row. Idempotent (no-op when the row doesn't exist).
+    Personal-class memory at (appId, userId) is retained as an orphan per
+    FR-015 — re-attaches automatically if the user later rejoins the same
+    App.
+
+    Accepts the entity's ID or URN.
+    """
+    removeAppMember(appId: ID!, userId: ID!): Boolean!
+
+    """
+    Publish a dependency edge from a parent Agent to an imported Agent
+    (008-agent-installation FR-005). v1 supports 1-level imports only:
+    the imported Agent must not itself be a parent of any other import.
+
+    Authorization: ADMIN/OWNER of the parent Agent's owning org. The
+    parent's owning org MUST hold an active AgentOrgGrant for the
+    imported Agent — bundling requires the same kind of license that
+    installation does.
+
+    Accepts the entity's ID or URN for both Agent ids.
+    """
+    publishAgentImport(
+      parentAgentId: ID!
+      importedAgentId: ID!
+      position: Int!
+      required: Boolean = true
+    ): AgentImport!
+
+    """
+    Delete a dependency edge between two Agents. Idempotent (no-op when
+    the row doesn't exist). Apps that already installed the imported
+    Agent are unaffected; removing the import only stops *future*
+    parent installs from cascading the dep.
+
+    Accepts the entity's ID or URN.
+    """
+    removeAgentImport(parentAgentId: ID!, importedAgentId: ID!): Boolean!
 
     """
     Mint a new AppKey for an App.

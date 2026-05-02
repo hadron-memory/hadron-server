@@ -45,6 +45,20 @@ beforeEach(async () => {
   user = await db.user.create({
     data: { githubId: 9501, githubUsername: 'list-user', roles: ['READER'] },
   });
+  // 008: personal-class memory requires app_id (chk_memory_class_app_id). Seed
+  // a minimal Agent + App so the personal memory has somewhere to pivot from.
+  const agent = await db.agent.create({
+    data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:list-agent`, name: 'list-agent' },
+  });
+  const app = await db.app.create({
+    data: {
+      id: generateId(),
+      organizationId: org.id,
+      urn: `${org.urn}:list-app`,
+      name: 'list-app',
+      agentId: agent.id,
+    },
+  });
   memory = await db.memory.create({
     data: {
       id: generateId(),
@@ -54,6 +68,7 @@ beforeEach(async () => {
       class: 'personal',
       visibility: 'PERSONAL',
       userId: user.id,
+      appId: app.id,
     },
   });
 });

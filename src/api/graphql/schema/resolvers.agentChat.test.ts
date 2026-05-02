@@ -62,6 +62,19 @@ beforeEach(async () => {
     { id: agent.id, systemMemoryId: systemMemory.id },
     adminCtx(),
   );
+  // 008-agent-installation: personal-class memory pivots on (app_id, user_id).
+  // The JWT-user startChat path resolves the App via App.agent_id matching the
+  // chat agent inside the user's accessible orgs. Seed an App linking this
+  // agent so personal-memory provisioning lands with class='personal'.
+  await db.app.create({
+    data: {
+      id: generateId(),
+      name: 'research-app',
+      urn: `${orgA.urn}:research-app`,
+      organizationId: orgA.id,
+      agentId: agent.id,
+    },
+  });
 
   // Seed the system memory with conversations + stages + prompts
   const nodes = [
