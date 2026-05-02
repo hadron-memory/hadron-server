@@ -2181,9 +2181,11 @@ export const resolvers = {
       { orgId, installationId }: { orgId: string; installationId: number },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       return ctx.db.organization.update({
-        where: { id: orgId },
+        where: { id: resolvedOrgId },
         data: { githubInstallationId: installationId },
         include: ORG_INCLUDE,
       });
@@ -2194,10 +2196,12 @@ export const resolvers = {
       { orgId, appId, privateKey }: { orgId: string; appId: string; privateKey: string },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       const encrypted = encryptToken(privateKey);
       return ctx.db.organization.update({
-        where: { id: orgId },
+        where: { id: resolvedOrgId },
         data: { githubAppId: appId, githubAppPrivateKeyEncrypted: encrypted },
         include: ORG_INCLUDE,
       });
@@ -2208,9 +2212,11 @@ export const resolvers = {
       { orgId }: { orgId: string },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       return ctx.db.organization.update({
-        where: { id: orgId },
+        where: { id: resolvedOrgId },
         data: {
           githubInstallationId: null,
           githubAppId: null,
@@ -2239,7 +2245,9 @@ export const resolvers = {
       },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       const slug = generateId().slice(0, 16);
       const expiresAt = expiresInDays
         ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
@@ -2249,7 +2257,7 @@ export const resolvers = {
           id: generateId(),
           slug,
           senderUserId: ctx.userId ?? null,
-          organizationId: orgId,
+          organizationId: resolvedOrgId,
           memberRole: (memberRole as Role) ?? 'READER',
           name: name ?? null,
           email: email ?? null,
@@ -2360,9 +2368,12 @@ export const resolvers = {
       { orgId, userId, role }: { orgId: string; userId: string; role: string },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      // (userId is keyed by raw ID — User has no urn column.)
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       return ctx.db.orgMember.create({
-        data: { id: generateId(), organizationId: orgId, userId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
+        data: { id: generateId(), organizationId: resolvedOrgId, userId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: { user: true },
       });
     },
@@ -2372,9 +2383,11 @@ export const resolvers = {
       { orgId, userId, role }: { orgId: string; userId: string; role: string },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       return ctx.db.orgMember.update({
-        where: { organizationId_userId: { organizationId: orgId, userId } },
+        where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
         data: { role: role as Role },
         include: { user: true },
       });
@@ -2385,19 +2398,21 @@ export const resolvers = {
       { orgId, userId }: { orgId: string; userId: string },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       // Cannot remove the last OWNER
       const owners = await ctx.db.orgMember.findMany({
-        where: { organizationId: orgId, role: 'OWNER', deletedAt: null },
+        where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
       });
       const member = await ctx.db.orgMember.findUniqueOrThrow({
-        where: { organizationId_userId: { organizationId: orgId, userId } },
+        where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
       });
       if (member.role === 'OWNER' && owners.length <= 1) {
         throw new Error('Cannot remove the last owner of an organization');
       }
       await ctx.db.orgMember.delete({
-        where: { organizationId_userId: { organizationId: orgId, userId } },
+        where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
       });
       return true;
     },
@@ -2434,8 +2449,10 @@ export const resolvers = {
       },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
-      const memOrg = await ctx.db.organization.findUniqueOrThrow({ where: { id: orgId }, select: { urn: true } });
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+      const memOrg = await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId }, select: { urn: true } });
       const memoryUrn = `${memOrg.urn}:${name}`;
       // Check for existing memory with the same URN
       const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
@@ -2449,7 +2466,7 @@ export const resolvers = {
       const memory = await ctx.db.memory.create({
         data: {
           id: generateId(),
-          organizationId: orgId,
+          organizationId: resolvedOrgId,
           urn: memoryUrn,
           name,
           shortDescription,
@@ -2595,8 +2612,10 @@ export const resolvers = {
       { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces }: { orgId: string; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
-      const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: orgId }, select: { urn: true } });
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+      const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId }, select: { urn: true } });
       const agentUrn = `${org.urn}:${name}`;
       // Check for existing agent with the same URN
       const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
@@ -2617,7 +2636,7 @@ export const resolvers = {
       // This is the wizard's primary entry point.
       if (systemMemoryId) {
         const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
-        if (target.organizationId !== orgId) {
+        if (target.organizationId !== resolvedOrgId) {
           throw new Error('System memory must belong to the same organization as the agent');
         }
         const otherAgent = await ctx.db.agent.findFirst({
@@ -2639,7 +2658,7 @@ export const resolvers = {
 
       return ctx.db.agent.create({
         data: {
-          organizationId: orgId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: systemMemoryId ?? null,
+          organizationId: resolvedOrgId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: systemMemoryId ?? null,
           visibility: agentVisibility,
           type: inferredType,
           surfaces: surfaces ?? defaultSurfaces,
@@ -4253,12 +4272,14 @@ export const resolvers = {
       },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       // URN format matches memories and agents: "{org.urn}:{slug}".
       // If the caller provides an explicit slug use it; otherwise derive from
       // the name (lowercase, non-alphanum → hyphens, trimmed).
       const org = await ctx.db.organization.findUniqueOrThrow({
-        where: { id: orgId }, select: { urn: true },
+        where: { id: resolvedOrgId }, select: { urn: true },
       });
       const slug = (urn ?? name)
         .trim()
@@ -4279,7 +4300,7 @@ export const resolvers = {
       }
       return ctx.db.app.create({
         data: {
-          organizationId: orgId,
+          organizationId: resolvedOrgId,
           name,
           urn: appUrn,
           appType: appType ?? 'WORKSTATION',
