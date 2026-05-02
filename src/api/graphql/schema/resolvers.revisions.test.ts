@@ -105,6 +105,33 @@ describe('createRevision', () => {
     const r2 = await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
     expect(r2.revisionLoc).toBe('revisions:rev-2');
   });
+
+  // 007-entity-id-or-urn: createRevision accepts agentId as ID or URN.
+  it('accepts a URN as agentId input', async () => {
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const result = await resolvers.Mutation.createRevision(
+      {},
+      { agentId: stored.urn, description: 'urn-input' },
+      adminCtx(),
+    );
+    expect(result.revisionLoc).toBe('revisions:rev-1');
+  });
+
+  it('accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const result = await resolvers.Mutation.createRevision(
+      {},
+      { agentId: `urn:agent:${stored.urn}`, description: 'prefixed-urn-input' },
+      adminCtx(),
+    );
+    expect(result.revisionLoc).toBe('revisions:rev-1');
+  });
 });
 
 describe('publishRevision', () => {
@@ -121,6 +148,23 @@ describe('publishRevision', () => {
     expect(result.label).toBe('v1.0');
 
     // Agent should have publishedRevisionLoc set
+    const updatedAgent = await db.agent.findUnique({ where: { id: agent.id } });
+    expect(updatedAgent?.publishedRevisionLoc).toBe('revisions:rev-1');
+  });
+
+  // 007-entity-id-or-urn: publishRevision accepts agentId as ID or URN.
+  it('accepts a URN as agentId input', async () => {
+    await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const result = await resolvers.Mutation.publishRevision(
+      {},
+      { agentId: stored.urn, revisionLoc: 'revisions:rev-1', versionLabel: 'v1.0' },
+      adminCtx(),
+    );
+    expect(result.published).toBe(true);
     const updatedAgent = await db.agent.findUnique({ where: { id: agent.id } });
     expect(updatedAgent?.publishedRevisionLoc).toBe('revisions:rev-1');
   });
@@ -167,6 +211,21 @@ describe('restoreRevision', () => {
     });
     expect(autoSave).toBeTruthy();
     expect(((autoSave?.data as Record<string, unknown>).snapshot as any).nodes.length).toBeGreaterThan(6);
+  });
+
+  // 007-entity-id-or-urn: restoreRevision accepts agentId as ID or URN.
+  it('accepts a URN as agentId input', async () => {
+    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'v1' }, adminCtx());
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const result = await resolvers.Mutation.restoreRevision(
+      {},
+      { agentId: stored.urn, revisionLoc: 'revisions:rev-1' },
+      adminCtx(),
+    );
+    expect(result.revisionLoc).toBe('revisions:rev-1');
   });
 });
 
@@ -216,5 +275,36 @@ describe('Editor lock', () => {
     );
     expect(result.locked).toBe(true);
     expect(result.lockedBy).toBe(otherAdmin.id);
+  });
+
+  // 007-entity-id-or-urn: editor-lock pair accepts agentId as ID or URN.
+  it('acquireEditorLock accepts a URN as agentId input', async () => {
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const result = await resolvers.Mutation.acquireEditorLock(
+      {},
+      { agentId: stored.urn },
+      adminCtx(),
+    );
+    expect(result.locked).toBe(true);
+    expect(result.lockedBy).toBe(adminUser.id);
+  });
+
+  it('releaseEditorLock accepts a URN as agentId input', async () => {
+    await resolvers.Mutation.acquireEditorLock({}, { agentId: agent.id }, adminCtx());
+    const stored = await db.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { urn: true },
+    });
+    const released = await resolvers.Mutation.releaseEditorLock(
+      {},
+      { agentId: stored.urn },
+      adminCtx(),
+    );
+    expect(released).toBe(true);
+    const updated = await db.agent.findUnique({ where: { id: agent.id } });
+    expect(updated?.editorLockUserId).toBeNull();
   });
 });
