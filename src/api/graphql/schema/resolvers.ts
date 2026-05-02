@@ -3893,7 +3893,9 @@ export const resolvers = {
       { agentId, description }: { agentId: string; description?: string },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -3958,7 +3960,9 @@ export const resolvers = {
       { agentId, revisionLoc, versionLabel }: { agentId: string; revisionLoc: string; versionLabel?: string },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -3979,7 +3983,7 @@ export const resolvers = {
 
       // Update agent to point to this revision
       await ctx.db.agent.update({
-        where: { id: agentId },
+        where: { id: resolvedAgentId },
         data: { publishedRevisionLoc: revisionLoc },
       });
 
@@ -3991,7 +3995,9 @@ export const resolvers = {
       { agentId, revisionLoc }: { agentId: string; revisionLoc: string },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -4006,7 +4012,7 @@ export const resolvers = {
       if (!snapshot) throw new Error('Revision has no snapshot data');
 
       // Auto-save current state before restoring
-      await resolvers.Mutation.createRevision({}, { agentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
+      await resolvers.Mutation.createRevision({}, { agentId: resolvedAgentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
 
       // Delete all current non-revision nodes in the system memory
       await ctx.db.node.updateMany({
@@ -4077,7 +4083,9 @@ export const resolvers = {
       { agentId }: { agentId: string },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
 
       const now = new Date();
@@ -4092,7 +4100,7 @@ export const resolvers = {
       // Acquire or renew lock (5 minutes)
       const expiresAt = new Date(now.getTime() + 5 * 60 * 1000);
       await ctx.db.agent.update({
-        where: { id: agentId },
+        where: { id: resolvedAgentId },
         data: { editorLockUserId: ctx.userId, editorLockExpiresAt: expiresAt },
       });
 
@@ -4104,11 +4112,13 @@ export const resolvers = {
       { agentId }: { agentId: string },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
 
       await ctx.db.agent.update({
-        where: { id: agentId },
+        where: { id: resolvedAgentId },
         data: { editorLockUserId: null, editorLockExpiresAt: null },
       });
       return true;
