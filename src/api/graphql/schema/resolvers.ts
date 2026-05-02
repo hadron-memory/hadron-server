@@ -2902,8 +2902,11 @@ export const resolvers = {
       requireRole(ctx, 'READER');
       if (!ctx.userId) throw new Error('Authentication required');
 
+      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+
       // Verify the memory is public
-      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       if (memory.visibility !== 'PUBLIC') throw new Error('Memory is not public');
 
       // Find user's personal org
@@ -2922,10 +2925,10 @@ export const resolvers = {
 
       // Create memory subscription (personal org subscribes to the memory)
       await ctx.db.memorySubscription.upsert({
-        where: { memoryId_organizationId: { memoryId, organizationId: org.id } },
+        where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: org.id } },
         create: {
           id: generateId(),
-          memoryId,
+          memoryId: resolvedMemoryId,
           organizationId: org.id,
           role: 'READER',
           activated: true,
@@ -2936,8 +2939,8 @@ export const resolvers = {
 
       // Add memory to the default agent
       await ctx.db.agentMemoryItem.upsert({
-        where: { agentId_memoryId: { agentId: agent.id, memoryId } },
-        create: { id: generateId(), agentId: agent.id, memoryId, createdBy: ctx.userId ?? null },
+        where: { agentId_memoryId: { agentId: agent.id, memoryId: resolvedMemoryId } },
+        create: { id: generateId(), agentId: agent.id, memoryId: resolvedMemoryId, createdBy: ctx.userId ?? null },
         update: {},
       });
 
