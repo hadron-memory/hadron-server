@@ -443,3 +443,182 @@ describe('regenerateAppKey', () => {
     expect(activeKeys.length).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 007-entity-id-or-urn — App-keyed ops accept either ID or URN
+// ---------------------------------------------------------------------------
+
+describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
+  it('Query.app accepts a URN', async () => {
+    const created = await resolvers.Mutation.createApp(
+      {},
+      { orgId, name: 'urn-app-q' },
+      adminCtx(),
+    );
+    const stored = await db.app.findUniqueOrThrow({
+      where: { id: created.id },
+      select: { urn: true },
+    });
+    const byUrn = await resolvers.Query.app({}, { id: stored.urn }, adminCtx());
+    expect(byUrn?.id).toBe(created.id);
+  });
+
+  it('Query.app accepts a prefixed URN (urn:app:...)', async () => {
+    const created = await resolvers.Mutation.createApp(
+      {},
+      { orgId, name: 'urn-app-q-prefix' },
+      adminCtx(),
+    );
+    const stored = await db.app.findUniqueOrThrow({
+      where: { id: created.id },
+      select: { urn: true },
+    });
+    const byUrn = await resolvers.Query.app({}, { id: `urn:app:${stored.urn}` }, adminCtx());
+    expect(byUrn?.id).toBe(created.id);
+  });
+
+  it('updateApp accepts a URN as id', async () => {
+    const created = await resolvers.Mutation.createApp(
+      {},
+      { orgId, name: 'urn-update' },
+      adminCtx(),
+    );
+    const stored = await db.app.findUniqueOrThrow({
+      where: { id: created.id },
+      select: { urn: true },
+    });
+    const updated = await resolvers.Mutation.updateApp(
+      {},
+      { id: stored.urn, description: 'via-urn' },
+      adminCtx(),
+    );
+    expect(updated.description).toBe('via-urn');
+  });
+
+  it('deleteApp accepts a URN as id', async () => {
+    const created = await resolvers.Mutation.createApp(
+      {},
+      { orgId, name: 'urn-delete' },
+      adminCtx(),
+    );
+    const stored = await db.app.findUniqueOrThrow({
+      where: { id: created.id },
+      select: { urn: true },
+    });
+    const ok = await resolvers.Mutation.deleteApp({}, { id: stored.urn }, adminCtx());
+    expect(ok).toBe(true);
+    const after = await db.app.findUnique({ where: { id: created.id } });
+    expect(after?.deletedAt).not.toBeNull();
+  });
+
+  it('addAgentToApp accepts URNs for both appId and agentId', async () => {
+    const created = await resolvers.Mutation.createApp(
+      {},
+      { orgId, name: 'urn-add-agent' },
+      adminCtx(),
+    );
+    const appStored = await db.app.findUniqueOrThrow({
+      where: { id: created.id },
+      select: { urn: true },
+    });
+    const agentStored = await db.agent.findUniqueOrThrow({
+      where: { id: agentId },
+      select: { urn: true },
+    });
+    await resolvers.Mutation.addAgentToApp(
+      {},
+      { appId: appStored.urn, agentId: agentStored.urn },
+      adminCtx(),
+    );
+    const link = await db.appAgent.findUniqueOrThrow({
+      where: { appId_agentId: { appId: created.id, agentId } },
+    });
+    expect(link.role).toBe('OPERATE');
+  });
+
+  it('removeAgentFromApp accepts URNs for both appId and agentId', async () => {
+    const created = await resolvers.Mutation.createApp(
+      {},
+      { orgId, name: 'urn-remove-agent' },
+      adminCtx(),
+    );
+    await resolvers.Mutation.addAgentToApp(
+      {},
+      { appId: created.id, agentId },
+      adminCtx(),
+    );
+    const appStored = await db.app.findUniqueOrThrow({
+      where: { id: created.id },
+      select: { urn: true },
+    });
+    const agentStored = await db.agent.findUniqueOrThrow({
+      where: { id: agentId },
+      select: { urn: true },
+    });
+    await resolvers.Mutation.removeAgentFromApp(
+      {},
+      { appId: appStored.urn, agentId: agentStored.urn },
+      adminCtx(),
+    );
+    const link = await db.appAgent.findUnique({
+      where: { appId_agentId: { appId: created.id, agentId } },
+    });
+    expect(link).toBeNull();
+  });
+
+  it('createAppKey accepts a URN as appId', async () => {
+    const created = await resolvers.Mutation.createApp(
+      {},
+      { orgId, name: 'urn-createkey' },
+      adminCtx(),
+    );
+    const stored = await db.app.findUniqueOrThrow({
+      where: { id: created.id },
+      select: { urn: true },
+    });
+    const result = await resolvers.Mutation.createAppKey(
+      {},
+      { appId: stored.urn },
+      adminCtx(),
+    );
+    expect(result.key.appId).toBe(created.id);
+    expect(result.rawKey).toMatch(/^hdr_app_[0-9a-f]{64}$/);
+  });
+
+  it('regenerateAppKey accepts a URN as id', async () => {
+    const { app } = await createDbAppWithKey(db, 'regen-via-urn', orgId);
+    const stored = await db.app.findUniqueOrThrow({
+      where: { id: app.id },
+      select: { urn: true },
+    });
+    const result = await resolvers.Mutation.regenerateAppKey(
+      {},
+      { id: stored.urn },
+      adminCtx(),
+    );
+    expect(result.app.id).toBe(app.id);
+    expect(result.rawKey).toMatch(/^hdr_app_[0-9a-f]{64}$/);
+  });
+
+  it('appNodes / appAIConfig / appKeys accept URN as appId', async () => {
+    const created = await resolvers.Mutation.createApp(
+      {},
+      { orgId, name: 'urn-reads', aiProvider: 'anthropic', aiModel: 'claude-opus-4-6', aiApiKey: 'sk-test' },
+      adminCtx(),
+    );
+    const stored = await db.app.findUniqueOrThrow({
+      where: { id: created.id },
+      select: { urn: true },
+    });
+    // appNodes — empty, but the call should succeed.
+    const nodes = await resolvers.Query.appNodes({}, { appId: stored.urn }, adminCtx());
+    expect(Array.isArray(nodes)).toBe(true);
+
+    const cfg = await resolvers.Query.appAIConfig({}, { appId: stored.urn }, adminCtx());
+    expect(cfg?.provider).toBe('anthropic');
+    expect(cfg?.apiKey).toBe('sk-test');
+
+    const keys = await resolvers.Query.appKeys({}, { appId: stored.urn }, adminCtx());
+    expect(Array.isArray(keys)).toBe(true);
+  });
+});

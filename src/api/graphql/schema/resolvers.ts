@@ -32,6 +32,7 @@ import {
 } from '../../../controller/operations/beginAssetUpload.js';
 import { listMemoryAssets } from '../../../controller/operations/listMemoryAssets.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
@@ -1486,7 +1487,16 @@ export const resolvers = {
     },
 
     app: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const app = await ctx.db.app.findUnique({ where: { id }, include: APP_INCLUDE });
+      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
+      // Soft "not found" (return null) preserves existing semantics —
+      // resolveAppRef would throw on missing/deleted, so swallow.
+      let resolvedId: string;
+      try {
+        ({ id: resolvedId } = await resolveAppRef(ctx.db, id));
+      } catch {
+        return null;
+      }
+      const app = await ctx.db.app.findUnique({ where: { id: resolvedId }, include: APP_INCLUDE });
       if (!app || app.deletedAt) return null;
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
       return app;
@@ -1550,7 +1560,9 @@ export const resolvers = {
       { appId, limit }: { appId: string; limit?: number },
       ctx: Context,
     ) => {
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       // Org-scoped auth: anyone with org membership at READER+ on the App's
       // org may read its accessible nodes; platform ADMIN/OWNER bypasses.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
@@ -1558,7 +1570,7 @@ export const resolvers = {
         await requireOrgRole(ctx, app.organizationId, 'READER');
       }
       const subs = await ctx.db.appAgent.findMany({
-        where: { appId, deletedAt: null },
+        where: { appId: resolvedAppId, deletedAt: null },
         include: { agent: { include: { memoryItems: true } } },
       });
       const memoryIds = [
@@ -1581,7 +1593,9 @@ export const resolvers = {
     },
 
     appAIConfig: async (_: unknown, { appId }: { appId: string }, ctx: Context) => {
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       // Org-scoped auth: ADMIN of the App's org (or platform ADMIN) sees the
       // decrypted key.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
@@ -1597,13 +1611,15 @@ export const resolvers = {
     },
 
     appKeys: async (_: unknown, { appId }: { appId: string }, ctx: Context) => {
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) {
         await requireOrgRole(ctx, app.organizationId, 'ADMIN');
       }
       return ctx.db.appKey.findMany({
-        where: { appId, revokedAt: null },
+        where: { appId: resolvedAppId, revokedAt: null },
         orderBy: { createdAt: 'desc' },
       });
     },
@@ -2050,13 +2066,15 @@ export const resolvers = {
     },
 
     regenerateAppKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const existing = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveAppRef(ctx.db, id);
+      const existing = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
 
       // Revoke all active keys, then create a fresh one.
       await ctx.db.appKey.updateMany({
-        where: { appId: id, revokedAt: null },
+        where: { appId: resolvedId, revokedAt: null },
         data: { revokedAt: new Date() },
       });
       const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
@@ -2064,7 +2082,7 @@ export const resolvers = {
       await ctx.db.appKey.create({
         data: {
           id: generateId(),
-          appId: id,
+          appId: resolvedId,
           keyHash,
           keyPreview: rawKey.slice(-4),
           label: 'Regenerated key',
@@ -2072,7 +2090,7 @@ export const resolvers = {
         },
       });
       const fresh = await ctx.db.app.findUniqueOrThrow({
-        where: { id },
+        where: { id: resolvedId },
         include: APP_INCLUDE,
       });
       return { app: fresh, rawKey };
@@ -4309,7 +4327,9 @@ export const resolvers = {
       },
       ctx: Context,
     ) => {
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveAppRef(ctx.db, id);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
       // URN updates: accept a new slug and rebuild the full URN against the
       // app's current org.
@@ -4327,7 +4347,7 @@ export const resolvers = {
         newUrn = `${org.urn}:${slug}`;
       }
       return ctx.db.app.update({
-        where: { id },
+        where: { id: resolvedId },
         data: {
           ...(name !== undefined ? { name } : {}),
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
@@ -4351,9 +4371,11 @@ export const resolvers = {
     },
 
     deleteApp: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveAppRef(ctx.db, id);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
-      await ctx.db.app.update({ where: { id }, data: { deletedAt: new Date() } });
+      await ctx.db.app.update({ where: { id: resolvedId }, data: { deletedAt: new Date() } });
       return true;
     },
 
@@ -4372,10 +4394,14 @@ export const resolvers = {
       },
       ctx: Context,
     ) => {
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      // 007-entity-id-or-urn: appId + agentId may each be ID, bare URN,
+      // or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
       // Agent must belong to the same org
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       if (agent.organizationId !== app.organizationId) {
         throw new Error('Agent must belong to the same organization as the App');
       }
@@ -4383,10 +4409,10 @@ export const resolvers = {
       // it used to enforce is governed by AgentMemoryItem.role per-attached
       // memory.
       await ctx.db.appAgent.upsert({
-        where: { appId_agentId: { appId, agentId } },
+        where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } },
         create: {
-          appId,
-          agentId,
+          appId: resolvedAppId,
+          agentId: resolvedAgentId,
           role: role ?? 'OPERATE',
           trainingMode: trainingMode ?? false,
           createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
@@ -4397,7 +4423,7 @@ export const resolvers = {
           updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
         },
       });
-      return ctx.db.app.findUniqueOrThrow({ where: { id: appId }, include: APP_INCLUDE });
+      return ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId }, include: APP_INCLUDE });
     },
 
     removeAgentFromApp: async (
@@ -4405,12 +4431,16 @@ export const resolvers = {
       { appId, agentId }: { appId: string; agentId: string },
       ctx: Context,
     ) => {
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      // 007-entity-id-or-urn: appId + agentId may each be ID, bare URN,
+      // or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
       await ctx.db.appAgent
-        .delete({ where: { appId_agentId: { appId, agentId } } })
+        .delete({ where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } } })
         .catch(() => {}); // idempotent
-      return ctx.db.app.findUniqueOrThrow({ where: { id: appId }, include: APP_INCLUDE });
+      return ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId }, include: APP_INCLUDE });
     },
 
     createAppKey: async (
@@ -4418,7 +4448,9 @@ export const resolvers = {
       { appId, label }: { appId: string; label?: string },
       ctx: Context,
     ) => {
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
       // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
       const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
@@ -4426,7 +4458,7 @@ export const resolvers = {
       const keyPreview = rawKey.slice(0, 12) + '...' + rawKey.slice(-4);
       const appKey = await ctx.db.appKey.create({
         data: {
-          appId,
+          appId: resolvedAppId,
           keyHash,
           keyPreview,
           label: label ?? null,
