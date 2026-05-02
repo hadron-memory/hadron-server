@@ -1306,14 +1306,16 @@ export const resolvers = {
     },
 
     organization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
         if (!ctx.userId) throw new Error('Forbidden');
         const member = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: id, userId: ctx.userId } },
+          where: { organizationId_userId: { organizationId: resolvedId, userId: ctx.userId } },
         });
         if (!member) throw new Error('Forbidden');
       }
-      return ctx.db.organization.findUnique({ where: { id }, include: ORG_INCLUDE });
+      return ctx.db.organization.findUnique({ where: { id: resolvedId }, include: ORG_INCLUDE });
     },
 
     invitation: async (_: unknown, { slug }: { slug: string }, ctx: Context) => {
@@ -1367,17 +1369,19 @@ export const resolvers = {
       { orgId }: { orgId: string },
       ctx: Context,
     ) => {
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       // Authorization: platform ADMIN or member of the org
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
         if (!ctx.userId) throw new Error('Forbidden');
         const member = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: ctx.userId } },
         });
         if (!member) throw new Error('Forbidden');
       }
       return ctx.db.memory.findMany({
         where: {
-          organizationId: orgId,
+          organizationId: resolvedOrgId,
           deletedAt: null,
           type: 'AGENT_SYSTEM',
           userMemoryOfAgentId: null,
@@ -1444,9 +1448,11 @@ export const resolvers = {
     // ── Exchange integration queries ────────────────────────────────────
 
     exchangeConnections: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       return ctx.db.exchangeConnection.findMany({
-        where: { organizationId: orgId, deletedAt: null },
+        where: { organizationId: resolvedOrgId, deletedAt: null },
         orderBy: { createdAt: 'asc' },
       });
     },
@@ -1478,9 +1484,11 @@ export const resolvers = {
 
     // ── Apps (multi-user agent callers) ─────────────────────────────
     apps: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
-      await requireOrgRole(ctx, orgId, 'ADMIN');
+      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       return ctx.db.app.findMany({
-        where: { organizationId: orgId, deletedAt: null },
+        where: { organizationId: resolvedOrgId, deletedAt: null },
         include: APP_INCLUDE,
         orderBy: { name: 'asc' },
       });
@@ -2146,9 +2154,11 @@ export const resolvers = {
       { id, name, urn, isVisible }: { id: string; name?: string; urn?: string; isVisible?: boolean },
       ctx: Context,
     ) => {
-      await requireOrgRole(ctx, id, 'ADMIN');
+      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
+      await requireOrgRole(ctx, resolvedId, 'ADMIN');
       return ctx.db.organization.update({
-        where: { id },
+        where: { id: resolvedId },
         data: {
           ...(name ? { name } : {}),
           ...(urn ? { urn } : {}),
@@ -2160,7 +2170,9 @@ export const resolvers = {
 
     deleteOrganization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       requireRole(ctx, 'ADMIN');
-      await ctx.db.organization.update({ where: { id }, data: { deletedAt: new Date() } });
+      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
+      await ctx.db.organization.update({ where: { id: resolvedId }, data: { deletedAt: new Date() } });
       return true;
     },
 
