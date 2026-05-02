@@ -7,7 +7,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isUrn } from './shape.js';
+import { isId } from './shape.js';
 import { parseUrnInput } from '../urn.js';
 import { AgentNotFoundError } from './errors.js';
 
@@ -16,7 +16,7 @@ export async function resolveAgentRef(
   urn: string,
 ): Promise<{ id: string }> {
   const normalized = parseUrnInput(urn).value;
-  const where = isUrn(normalized) ? { urn: normalized } : { id: normalized };
+  const where = isId(normalized) ? { id: normalized } : { urn: normalized };
   const agent = await db.agent.findUnique({
     where,
     select: { id: true, deletedAt: true },

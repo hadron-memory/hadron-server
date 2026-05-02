@@ -14,7 +14,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isUrn } from './shape.js';
+import { isId } from './shape.js';
 import { parseUrnInput } from '../urn.js';
 import { MemoryNotFoundError } from '../asset/gate.js';
 
@@ -26,7 +26,7 @@ export async function resolveMemoryRef(
   // the bare value; for already-bare input it returns the input
   // unchanged.
   const normalized = parseUrnInput(urn).value;
-  const where = isUrn(normalized) ? { urn: normalized } : { id: normalized };
+  const where = isId(normalized) ? { id: normalized } : { urn: normalized };
   const memory = await db.memory.findUnique({
     where,
     select: { id: true, deletedAt: true },
