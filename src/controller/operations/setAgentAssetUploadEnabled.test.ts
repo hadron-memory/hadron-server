@@ -118,6 +118,27 @@ describe('setAgentAssetUploadEnabled', () => {
     ).rejects.toThrow(SetAssetEnabledError);
   });
 
+  // 007-entity-id-or-urn FR-012: agentUrn input accepts ID or URN.
+  it('accepts a raw agent ID as agentUrn input', async () => {
+    const updated = await setAgentAssetUploadEnabled(
+      db,
+      { userId: admin.id },
+      { agentUrn: agent.id, enabled: true },
+      isAdminFor,
+    );
+    expect(updated.agentTools).toContain('asset:upload');
+  });
+
+  it('accepts a prefixed URN (urn:agent:...) as agentUrn input', async () => {
+    const updated = await setAgentAssetUploadEnabled(
+      db,
+      { userId: admin.id },
+      { agentUrn: `urn:agent:${agent.urn}`, enabled: true },
+      isAdminFor,
+    );
+    expect(updated.agentTools).toContain('asset:upload');
+  });
+
   it('rejects when the agent has no matching App', async () => {
     const orphanUrn = `${org.urn}:orphan`;
     await db.agent.create({

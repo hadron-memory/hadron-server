@@ -194,6 +194,29 @@ describe('listAgentAssets', () => {
     expect(result.assets[0].filename).toBe('mine.pdf');
   });
 
+  // 007-entity-id-or-urn FR-012: agentUrn input accepts ID or URN.
+  it('accepts a raw agent ID as agentUrn input', async () => {
+    await seedAsset({ filename: 'one.pdf' });
+    const result = await listAgentAssets(
+      db,
+      { userId: user.id },
+      { agentUrn: agent.id },
+      resolveTargetMemoryId,
+    );
+    expect(result.total).toBe(1);
+  });
+
+  it('accepts a prefixed URN (urn:agent:...) as agentUrn input', async () => {
+    await seedAsset({ filename: 'one.pdf' });
+    const result = await listAgentAssets(
+      db,
+      { userId: user.id },
+      { agentUrn: `urn:agent:${agent.urn}` },
+      resolveTargetMemoryId,
+    );
+    expect(result.total).toBe(1);
+  });
+
   it('returns TOOL_NOT_ENABLED when the agent\'s App lacks the tool', async () => {
     await db.app.update({ where: { id: app.id }, data: { agentTools: [] } });
     await expect(

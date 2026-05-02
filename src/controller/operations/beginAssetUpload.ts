@@ -22,6 +22,7 @@ import {
 } from '../../lib/asset/gate.js';
 import { canWriteToMemory } from '../../mcp/access-control.js';
 import type { AuthContext } from '../../middleware/auth.js';
+import { resolveAgentRef } from '../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
 import { mintPutUrl } from '../../integrations/r2/client.js';
 
@@ -82,8 +83,16 @@ export async function beginAssetUpload(
     );
   }
 
+  // 007-entity-id-or-urn FR-012: input.agentUrn (named for v1 BC)
+  // accepts ID or URN. Resolve before lookup.
+  let resolvedAgentId: string;
+  try {
+    ({ id: resolvedAgentId } = await resolveAgentRef(db, input.agentUrn));
+  } catch {
+    throw new AssetUploadError('NOT_FOUND', 'agent not found');
+  }
   const agent = await db.agent.findUnique({
-    where: { urn: input.agentUrn },
+    where: { id: resolvedAgentId },
     select: {
       id: true,
       organizationId: true,

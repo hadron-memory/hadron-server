@@ -12,6 +12,7 @@
 
 import type { App, PrismaClient } from '../../generated/prisma/index.js';
 import { ASSET_UPLOAD_TOOL_KEY } from '../../lib/asset/gate.js';
+import { resolveAgentRef } from '../../lib/entityRef/agentRef.js';
 
 export class SetAssetEnabledError extends Error {
   constructor(public code: string, message: string) {
@@ -43,8 +44,16 @@ export async function setAgentAssetUploadEnabled(
   input: SetAgentAssetUploadEnabledInput,
   isAdminFor: IsAdminFor,
 ): Promise<App> {
+  // 007-entity-id-or-urn FR-012: input.agentUrn (named for backward
+  // compatibility) accepts ID or URN. Resolve to a definite ID first.
+  let resolvedAgentId: string;
+  try {
+    ({ id: resolvedAgentId } = await resolveAgentRef(db, input.agentUrn));
+  } catch {
+    throw new SetAssetEnabledError('NOT_FOUND', 'agent not found');
+  }
   const agent = await db.agent.findUnique({
-    where: { urn: input.agentUrn },
+    where: { id: resolvedAgentId },
     select: { id: true, organizationId: true, urn: true },
   });
   if (!agent) {
