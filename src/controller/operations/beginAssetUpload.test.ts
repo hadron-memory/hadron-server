@@ -93,6 +93,41 @@ describe('beginAssetUpload', () => {
     expect(ticket.allowedMimeType).toBe('application/pdf');
   });
 
+  // 007-entity-id-or-urn FR-012: v1 agentUrn input accepts ID or URN.
+  it('accepts a raw agent ID as agentUrn input', async () => {
+    const ticket = await beginAssetUpload(
+      db,
+      { userId: user.id },
+      {
+        agentUrn: agent.id,
+        filename: 'doc.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 1024,
+        uploadIntent: 'USER',
+      },
+      resolveTargetMemoryId,
+    );
+    expect(ticket.putUrl).toBe('https://r2.example/presigned-put');
+    expect(ticket.uploadId).toBeTruthy();
+  });
+
+  it('accepts a prefixed URN (urn:agent:...) as agentUrn input', async () => {
+    const ticket = await beginAssetUpload(
+      db,
+      { userId: user.id },
+      {
+        agentUrn: `urn:agent:${agent.urn}`,
+        filename: 'doc.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 1024,
+        uploadIntent: 'USER',
+      },
+      resolveTargetMemoryId,
+    );
+    expect(ticket.putUrl).toBe('https://r2.example/presigned-put');
+    expect(ticket.uploadId).toBeTruthy();
+  });
+
   it('rejects when the App does not have asset:upload enabled', async () => {
     await db.app.update({
       where: { id: app.id },

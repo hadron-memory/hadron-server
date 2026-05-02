@@ -12,6 +12,7 @@
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 import { assertAssetToolEnabled } from '../../lib/asset/gate.js';
+import { resolveAgentRef } from '../../lib/entityRef/agentRef.js';
 import { AssetUploadError } from './beginAssetUpload.js';
 import type { AssetCallerContext } from './beginAssetUpload.js';
 
@@ -45,8 +46,16 @@ export async function listAgentAssets(
   const skip = Math.max(0, input.skip ?? 0);
   const count = Math.min(MAX_COUNT, Math.max(1, input.count ?? DEFAULT_COUNT));
 
+  // 007-entity-id-or-urn FR-012: input.agentUrn (named for v1 BC)
+  // accepts ID or URN. Resolve before lookup.
+  let resolvedAgentId: string;
+  try {
+    ({ id: resolvedAgentId } = await resolveAgentRef(db, input.agentUrn));
+  } catch {
+    throw new AssetUploadError('NOT_FOUND', 'agent not found');
+  }
   const agent = await db.agent.findUnique({
-    where: { urn: input.agentUrn },
+    where: { id: resolvedAgentId },
     select: { id: true, organizationId: true, urn: true },
   });
   if (!agent) throw new AssetUploadError('NOT_FOUND', 'agent not found');
