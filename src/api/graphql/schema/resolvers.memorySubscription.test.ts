@@ -1,0 +1,281 @@
+/**
+ * Integration tests for the memory-subscription mutation trio.
+ *
+ * createMemorySubscription / updateMemorySubscription / deleteMemorySubscription
+ * had zero existing test coverage. Added as part of spec
+ * 007-entity-id-or-urn (which widens memoryId AND orgId to accept ID
+ * or URN); tests cover both the existing ID-input behavior and the
+ * new URN-input paths.
+ */
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { resolvers, type Context } from './resolvers.js';
+
+let ownerOrg: { id: string; urn: string };
+let subscriberOrg: { id: string; urn: string };
+let publicMemory: { id: string; urn: string };
+let privateMemory: { id: string; urn: string };
+let ownerAdminUser: { id: string };
+let subscriberAdminUser: { id: string };
+
+function adminCtx(userId: string): Context {
+  return { db, userId, roles: ['ADMIN'] };
+}
+
+function readerCtx(userId: string): Context {
+  return { db, userId, roles: ['READER'] };
+}
+
+beforeEach(async () => {
+  await cleanDb(db);
+
+  ownerOrg = await db.organization.create({
+    data: {
+      id: generateId(),
+      name: 'sub-test-owner',
+      urn: `sub-test-owner-${Date.now()}`,
+    },
+  });
+  subscriberOrg = await db.organization.create({
+    data: {
+      id: generateId(),
+      name: 'sub-test-subscriber',
+      urn: `sub-test-subscriber-${Date.now()}`,
+    },
+  });
+
+  ownerAdminUser = await db.user.create({
+    data: { id: generateId(), githubId: 9601, githubUsername: 'sub-owner-admin', roles: ['READER'] },
+  });
+  subscriberAdminUser = await db.user.create({
+    data: { id: generateId(), githubId: 9602, githubUsername: 'sub-subscriber-admin', roles: ['READER'] },
+  });
+
+  await db.orgMember.create({
+    data: { id: generateId(), organizationId: ownerOrg.id, userId: ownerAdminUser.id, role: 'ADMIN' },
+  });
+  await db.orgMember.create({
+    data: { id: generateId(), organizationId: subscriberOrg.id, userId: subscriberAdminUser.id, role: 'ADMIN' },
+  });
+
+  publicMemory = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: ownerOrg.id,
+      urn: `${ownerOrg.urn}:public-mem`,
+      name: 'public-mem',
+      class: 'knowledge',
+      visibility: 'PUBLIC',
+    },
+  });
+  privateMemory = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: ownerOrg.id,
+      urn: `${ownerOrg.urn}:private-mem`,
+      name: 'private-mem',
+      class: 'knowledge',
+      visibility: 'PRIVATE',
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createMemorySubscription
+// ---------------------------------------------------------------------------
+
+describe('createMemorySubscription', () => {
+  it('subscriber-org admin can create a subscription to a PUBLIC memory (input by ID)', async () => {
+    const sub = await resolvers.Mutation.createMemorySubscription(
+      null,
+      { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' },
+      adminCtx(subscriberAdminUser.id),
+    );
+    expect(sub.memoryId).toBe(publicMemory.id);
+    expect(sub.organizationId).toBe(subscriberOrg.id);
+    expect(sub.role).toBe('READER');
+  });
+
+  // 007-entity-id-or-urn: memoryId + orgId both accept ID or URN.
+  it('accepts URNs for both memoryId and orgId', async () => {
+    const sub = await resolvers.Mutation.createMemorySubscription(
+      null,
+      { memoryId: publicMemory.urn, orgId: subscriberOrg.urn, role: 'READER' },
+      adminCtx(subscriberAdminUser.id),
+    );
+    expect(sub.memoryId).toBe(publicMemory.id);
+    expect(sub.organizationId).toBe(subscriberOrg.id);
+  });
+
+  it('accepts prefixed URNs for both memoryId and orgId', async () => {
+    const sub = await resolvers.Mutation.createMemorySubscription(
+      null,
+      {
+        memoryId: `urn:memory:${publicMemory.urn}`,
+        orgId: `urn:org:${subscriberOrg.urn}`,
+        role: 'READER',
+      },
+      adminCtx(subscriberAdminUser.id),
+    );
+    expect(sub.memoryId).toBe(publicMemory.id);
+    expect(sub.organizationId).toBe(subscriberOrg.id);
+  });
+
+  it('rejects subscription to a PRIVATE memory', async () => {
+    await expect(
+      resolvers.Mutation.createMemorySubscription(
+        null,
+        { memoryId: privateMemory.id, orgId: subscriberOrg.id, role: 'READER' },
+        adminCtx(subscriberAdminUser.id),
+      ),
+    ).rejects.toThrow(/public/);
+  });
+
+  it('rejects when subscriber-org admin role is missing', async () => {
+    const reader = await db.user.create({
+      data: { id: generateId(), githubId: 9603, githubUsername: 'sub-reader', roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: subscriberOrg.id, userId: reader.id, role: 'READER' },
+    });
+    await expect(
+      resolvers.Mutation.createMemorySubscription(
+        null,
+        { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' },
+        readerCtx(reader.id),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('rejects when owner-org tries to self-subscribe', async () => {
+    await expect(
+      resolvers.Mutation.createMemorySubscription(
+        null,
+        { memoryId: publicMemory.id, orgId: ownerOrg.id, role: 'READER' },
+        adminCtx(ownerAdminUser.id),
+      ),
+    ).rejects.toThrow(/implicit access/);
+  });
+
+  it('rejects unknown memoryId with MEMORY_NOT_FOUND', async () => {
+    await expect(
+      resolvers.Mutation.createMemorySubscription(
+        null,
+        // 25-char cuid-shaped string that doesn't exist in DB.
+        { memoryId: 'cnonexistentnonexistent12', orgId: subscriberOrg.id, role: 'READER' },
+        adminCtx(subscriberAdminUser.id),
+      ),
+    ).rejects.toThrow(/MEMORY_NOT_FOUND/);
+  });
+
+  it('rejects unknown orgId with ORGANIZATION_NOT_FOUND', async () => {
+    await expect(
+      resolvers.Mutation.createMemorySubscription(
+        null,
+        // URN-shaped string that doesn't exist in DB.
+        { memoryId: publicMemory.id, orgId: 'no-such-org-urn', role: 'READER' },
+        adminCtx(subscriberAdminUser.id),
+      ),
+    ).rejects.toThrow(/ORGANIZATION_NOT_FOUND/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateMemorySubscription
+// ---------------------------------------------------------------------------
+
+describe('updateMemorySubscription', () => {
+  beforeEach(async () => {
+    // Seed an existing subscription so update has something to operate on.
+    await db.memorySubscription.create({
+      data: {
+        id: generateId(),
+        memoryId: publicMemory.id,
+        organizationId: subscriberOrg.id,
+        role: 'READER',
+      },
+    });
+  });
+
+  it('owner-org admin can update the role (input by ID)', async () => {
+    const sub = await resolvers.Mutation.updateMemorySubscription(
+      null,
+      { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'CONTRIBUTOR' },
+      adminCtx(ownerAdminUser.id),
+    );
+    expect(sub.role).toBe('CONTRIBUTOR');
+  });
+
+  it('accepts URNs for both memoryId and orgId', async () => {
+    const sub = await resolvers.Mutation.updateMemorySubscription(
+      null,
+      { memoryId: publicMemory.urn, orgId: subscriberOrg.urn, role: 'CONTRIBUTOR' },
+      adminCtx(ownerAdminUser.id),
+    );
+    expect(sub.role).toBe('CONTRIBUTOR');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deleteMemorySubscription
+// ---------------------------------------------------------------------------
+
+describe('deleteMemorySubscription', () => {
+  beforeEach(async () => {
+    await db.memorySubscription.create({
+      data: {
+        id: generateId(),
+        memoryId: publicMemory.id,
+        organizationId: subscriberOrg.id,
+        role: 'READER',
+      },
+    });
+  });
+
+  it('owner-org admin can delete (input by ID)', async () => {
+    const result = await resolvers.Mutation.deleteMemorySubscription(
+      null,
+      { memoryId: publicMemory.id, orgId: subscriberOrg.id },
+      adminCtx(ownerAdminUser.id),
+    );
+    expect(result).toBe(true);
+    const after = await db.memorySubscription.findMany({
+      where: { memoryId: publicMemory.id, organizationId: subscriberOrg.id },
+    });
+    expect(after).toHaveLength(0);
+  });
+
+  it('subscriber-org admin can also delete (either side admin gates)', async () => {
+    const result = await resolvers.Mutation.deleteMemorySubscription(
+      null,
+      { memoryId: publicMemory.id, orgId: subscriberOrg.id },
+      adminCtx(subscriberAdminUser.id),
+    );
+    expect(result).toBe(true);
+  });
+
+  it('accepts URNs for both memoryId and orgId', async () => {
+    const result = await resolvers.Mutation.deleteMemorySubscription(
+      null,
+      { memoryId: publicMemory.urn, orgId: subscriberOrg.urn },
+      adminCtx(ownerAdminUser.id),
+    );
+    expect(result).toBe(true);
+  });
+
+  it('rejects when caller is admin of neither org', async () => {
+    const stranger = await db.user.create({
+      data: { id: generateId(), githubId: 9604, githubUsername: 'sub-stranger', roles: ['READER'] },
+    });
+    await expect(
+      resolvers.Mutation.deleteMemorySubscription(
+        null,
+        { memoryId: publicMemory.id, orgId: subscriberOrg.id },
+        readerCtx(stranger.id),
+      ),
+    ).rejects.toThrow(/Forbidden/);
+  });
+});
