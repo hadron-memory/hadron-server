@@ -155,3 +155,141 @@ describe('Mutation.deleteOrganization (007-entity-id-or-urn)', () => {
     expect(after?.deletedAt).not.toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Chunk 2: GitHub link + membership + creators
+// ---------------------------------------------------------------------------
+
+describe('Mutation.linkGithubApp (007-entity-id-or-urn)', () => {
+  it('accepts a URN', async () => {
+    const updated = await resolvers.Mutation.linkGithubApp(
+      {},
+      { orgId: org.urn, installationId: 12345 },
+      adminCtx(),
+    );
+    expect(updated.id).toBe(org.id);
+    expect(updated.githubInstallationId).toBe(12345);
+  });
+});
+
+describe('Mutation.unlinkGithubApp (007-entity-id-or-urn)', () => {
+  beforeEach(async () => {
+    await db.organization.update({
+      where: { id: org.id },
+      data: { githubInstallationId: 99999 },
+    });
+  });
+
+  it('accepts a URN', async () => {
+    const updated = await resolvers.Mutation.unlinkGithubApp(
+      {},
+      { orgId: org.urn },
+      adminCtx(),
+    );
+    expect(updated.githubInstallationId).toBeNull();
+  });
+});
+
+describe('Mutation.updateOrgGithubApp (007-entity-id-or-urn)', () => {
+  it('accepts a URN', async () => {
+    const updated = await resolvers.Mutation.updateOrgGithubApp(
+      {},
+      { orgId: org.urn, appId: 'app-id-007', privateKey: 'pk-007' },
+      adminCtx(),
+    );
+    expect(updated.githubAppId).toBe('app-id-007');
+  });
+});
+
+describe('Mutation.createUserInvitation (007-entity-id-or-urn)', () => {
+  it('accepts a URN', async () => {
+    const invite = await resolvers.Mutation.createUserInvitation(
+      {},
+      { orgId: org.urn, memberRole: 'READER', name: 'urn-invite' },
+      adminCtx(),
+    );
+    expect(invite.organizationId).toBe(org.id);
+    expect(invite.memberRole).toBe('READER');
+  });
+});
+
+describe('Mutation.addOrgMember / updateOrgMember / removeOrgMember (007-entity-id-or-urn)', () => {
+  let target: { id: string };
+
+  beforeEach(async () => {
+    target = await db.user.create({
+      data: { id: generateId(), githubId: 9810, githubUsername: 'org-target', roles: ['READER'] },
+    });
+  });
+
+  it('addOrgMember accepts a URN as orgId', async () => {
+    const member = await resolvers.Mutation.addOrgMember(
+      {},
+      { orgId: org.urn, userId: target.id, role: 'CONTRIBUTOR' },
+      adminCtx(),
+    );
+    expect(member.organizationId).toBe(org.id);
+    expect(member.userId).toBe(target.id);
+    expect(member.role).toBe('CONTRIBUTOR');
+  });
+
+  it('updateOrgMember accepts a URN as orgId', async () => {
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: target.id, role: 'READER' },
+    });
+    const updated = await resolvers.Mutation.updateOrgMember(
+      {},
+      { orgId: org.urn, userId: target.id, role: 'CONTRIBUTOR' },
+      adminCtx(),
+    );
+    expect(updated.role).toBe('CONTRIBUTOR');
+  });
+
+  it('removeOrgMember accepts a URN as orgId', async () => {
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: target.id, role: 'READER' },
+    });
+    const ok = await resolvers.Mutation.removeOrgMember(
+      {},
+      { orgId: org.urn, userId: target.id },
+      adminCtx(),
+    );
+    expect(ok).toBe(true);
+    const after = await db.orgMember.findUnique({
+      where: { organizationId_userId: { organizationId: org.id, userId: target.id } },
+    });
+    expect(after).toBeNull();
+  });
+});
+
+describe('Mutation.createMemory / createAgent / createApp (007-entity-id-or-urn)', () => {
+  it('createMemory accepts a URN as orgId', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: org.urn, name: 'urn-mem' },
+      adminCtx(),
+    );
+    expect(mem.organizationId).toBe(org.id);
+    expect(mem.urn).toBe(`${org.urn}:urn-mem`);
+  });
+
+  it('createAgent accepts a URN as orgId', async () => {
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: org.urn, name: 'urn-agent' },
+      adminCtx(),
+    );
+    expect(agent.organizationId).toBe(org.id);
+    expect(agent.urn).toBe(`${org.urn}:urn-agent`);
+  });
+
+  it('createApp accepts a URN as orgId', async () => {
+    const app = await resolvers.Mutation.createApp(
+      {},
+      { orgId: org.urn, name: 'urn-app' },
+      adminCtx(),
+    );
+    expect(app.organizationId).toBe(org.id);
+    expect(app.urn).toBe(`${org.urn}:urn-app`);
+  });
+});
