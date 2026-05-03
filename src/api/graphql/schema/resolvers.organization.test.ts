@@ -284,9 +284,16 @@ describe('Mutation.createMemory / createAgent / createApp (007-entity-id-or-urn)
   });
 
   it('createApp accepts a URN as orgId', async () => {
+    // 009-install-agent-flow: createApp now requires agentId. Stand up a
+    // minimal Agent in the same org so the install path is satisfied.
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: org.id, name: 'urn-app-host-agent' },
+      adminCtx(),
+    );
     const app = await resolvers.Mutation.createApp(
       {},
-      { orgId: org.urn, name: 'urn-app' },
+      { orgId: org.urn, agentId: agent.id, name: 'urn-app' },
       adminCtx(),
     );
     expect(app.organizationId).toBe(org.id);

@@ -85,6 +85,7 @@ describe('createApp accepts absorbed Station fields', () => {
       {},
       {
         orgId,
+        agentId,
         name: 'My Workstation',
         appType: 'CHATBOT',
         role: 'CONTRIBUTOR',
@@ -112,7 +113,7 @@ describe('createApp accepts absorbed Station fields', () => {
   it('uses the documented defaults when absorbed fields are omitted', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'Plain App' },
+      { orgId, agentId, name: 'Plain App' },
       adminCtx(),
     );
     expect(created.appType).toBe('WORKSTATION');
@@ -127,7 +128,7 @@ describe('updateApp updates absorbed Station fields', () => {
   it('updates appType, role, description, systemPrompt, agentTools, ai*', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'To Update' },
+      { orgId, agentId, name: 'To Update' },
       adminCtx(),
     );
     const updated = await resolvers.Mutation.updateApp(
@@ -157,7 +158,7 @@ describe('updateApp updates absorbed Station fields', () => {
   it('clears aiApiKey when passed an empty string', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'Has Key', aiApiKey: 'sk-initial' },
+      { orgId, agentId, name: 'Has Key', aiApiKey: 'sk-initial' },
       adminCtx(),
     );
     const cleared = await resolvers.Mutation.updateApp(
@@ -177,7 +178,7 @@ describe('addAgentToApp accepts AppAgent fields', () => {
   it('persists role=DEVELOP + subscriptionType=READ_WRITE + trainingMode=true', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'AppAgent Test' },
+      { orgId, agentId, name: 'AppAgent Test' },
       adminCtx(),
     );
     await resolvers.Mutation.addAgentToApp(
@@ -199,7 +200,7 @@ describe('addAgentToApp accepts AppAgent fields', () => {
   it('defaults trainingMode to false when args omitted', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'Default Membership' },
+      { orgId, agentId, name: 'Default Membership' },
       adminCtx(),
     );
     await resolvers.Mutation.addAgentToApp(
@@ -215,7 +216,7 @@ describe('addAgentToApp accepts AppAgent fields', () => {
   it('re-running addAgentToApp updates App.agent_id idempotently', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'Upsert App' },
+      { orgId, agentId, name: 'Upsert App' },
       adminCtx(),
     );
     await resolvers.Mutation.addAgentToApp(
@@ -242,14 +243,14 @@ describe('App field resolvers', () => {
   it('hasAiApiKey is false by default; true when aiApiKeyEncrypted is set', async () => {
     const noKey = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'No AI' },
+      { orgId, agentId, name: 'No AI' },
       adminCtx(),
     );
     expect(resolvers.App.hasAiApiKey(noKey)).toBe(false);
 
     const withKey = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'Has AI', aiApiKey: 'sk-test' },
+      { orgId, agentId, name: 'Has AI', aiApiKey: 'sk-test' },
       adminCtx(),
     );
     expect(resolvers.App.hasAiApiKey(withKey)).toBe(true);
@@ -368,7 +369,7 @@ describe('appAIConfig', () => {
   it('returns null when the App has no AI provider configured', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'No AI Config' },
+      { orgId, agentId, name: 'No AI Config' },
       adminCtx(),
     );
     const cfg = await resolvers.Query.appAIConfig({}, { appId: created.id }, adminCtx());
@@ -380,6 +381,7 @@ describe('appAIConfig', () => {
       {},
       {
         orgId,
+        agentId,
         name: 'Configured',
         aiProvider: 'anthropic',
         aiModel: 'claude-sonnet-4-20250514',
@@ -397,7 +399,7 @@ describe('appAIConfig', () => {
   it('rejects non-org-admin callers (Forbidden)', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'Locked', aiProvider: 'anthropic', aiModel: 'm', aiApiKey: 'k' },
+      { orgId, agentId, name: 'Locked', aiProvider: 'anthropic', aiModel: 'm', aiApiKey: 'k' },
       adminCtx(),
     );
     const otherUser = await db.user.create({
@@ -460,7 +462,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
   it('Query.app accepts a URN', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'urn-app-q' },
+      { orgId, agentId, name: 'urn-app-q' },
       adminCtx(),
     );
     const stored = await db.app.findUniqueOrThrow({
@@ -474,7 +476,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
   it('Query.app accepts a prefixed URN (urn:app:...)', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'urn-app-q-prefix' },
+      { orgId, agentId, name: 'urn-app-q-prefix' },
       adminCtx(),
     );
     const stored = await db.app.findUniqueOrThrow({
@@ -488,7 +490,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
   it('updateApp accepts a URN as id', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'urn-update' },
+      { orgId, agentId, name: 'urn-update' },
       adminCtx(),
     );
     const stored = await db.app.findUniqueOrThrow({
@@ -506,7 +508,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
   it('deleteApp accepts a URN as id', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'urn-delete' },
+      { orgId, agentId, name: 'urn-delete' },
       adminCtx(),
     );
     const stored = await db.app.findUniqueOrThrow({
@@ -522,7 +524,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
   it('addAgentToApp accepts URNs for both appId and agentId', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'urn-add-agent' },
+      { orgId, agentId, name: 'urn-add-agent' },
       adminCtx(),
     );
     const appStored = await db.app.findUniqueOrThrow({
@@ -545,7 +547,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
   it('removeAgentFromApp accepts URNs for both appId and agentId', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'urn-remove-agent' },
+      { orgId, agentId, name: 'urn-remove-agent' },
       adminCtx(),
     );
     await resolvers.Mutation.addAgentToApp(
@@ -573,7 +575,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
   it('createAppKey accepts a URN as appId', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'urn-createkey' },
+      { orgId, agentId, name: 'urn-createkey' },
       adminCtx(),
     );
     const stored = await db.app.findUniqueOrThrow({
@@ -607,7 +609,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
   it('appNodes / appAIConfig / appKeys accept URN as appId', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'urn-reads', aiProvider: 'anthropic', aiModel: 'claude-opus-4-6', aiApiKey: 'sk-test' },
+      { orgId, agentId, name: 'urn-reads', aiProvider: 'anthropic', aiModel: 'claude-opus-4-6', aiApiKey: 'sk-test' },
       adminCtx(),
     );
     const stored = await db.app.findUniqueOrThrow({
