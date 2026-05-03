@@ -1,0 +1,42 @@
+# Exemptions for the no-agent-specific-code CI grep gate
+# (Constitution Invariant #14, added in 008-agent-installation).
+#
+# Each line is a path relative to the hadron-server repo root. The CI
+# job grep-excludes these paths when searching for hardcoded agent
+# names. Add a path here only when the file *deliberately* names an
+# agent (test fixtures, migration scripts that document historical
+# data shapes, narrative-walkthrough comments).
+#
+# Format:
+#   <path-glob>          # one-line reason
+#
+# Globs use the syntax `git grep` accepts (':!**/...').
+
+# Test fixtures and tests that exercise per-Agent narrative scenarios.
+# Naming agents in tests is fine — production code is what the gate
+# protects.
+:!**/*.test.ts
+:!**/*.test.tsx
+:!**/__fixtures__/**
+:!src/test/**
+# `lib/edge-conditions/fixture-24.ts` is the spec-kit conformance fixture
+# for the edge-condition spec — 24 grounded use cases by name (Juno, Pong,
+# Tickfinder, Mealplan), referenced by tests. Lives in `lib/` for sharing
+# between unit + integration tests.
+:!src/lib/edge-conditions/fixture-24.ts
+
+# Past Prisma migrations may literally include agent slugs as part of
+# data backfills (e.g., spec-008's `migration:008-agent-installation`
+# created_by string). They're history, not running code.
+:!prisma/migrations/**
+
+# The seed script lives in prisma/ and creates fixture agents
+# ("Mealplan", "Juno") for local-dev convenience. Same reasoning as
+# tests — it isn't production code, and the named agents exist only
+# to demonstrate the platform.
+:!prisma/seed.ts
+
+# Documentation comments in the codebase that *describe* an agent's
+# spec (e.g., "Juno's case" inline comments in access-control logic)
+# are referencing concepts, not building agent-specific behavior.
+# Add specific files here as needed; do not blanket-exempt all docs.

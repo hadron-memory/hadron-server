@@ -1340,13 +1340,37 @@ export const resolvers = {
         },
         orderBy: { seq: 'asc' as const },
         take: limit ?? 100,
-        select: { loc: true, content: true, seq: true, createdAt: true },
+        select: { loc: true, content: true, data: true, seq: true, createdAt: true, memoryId: true, nodeType: true },
       });
+      // Decrypt before reading `data.role` / returning `content` — for
+      // encrypted memories `data` is an opaque wrapper until decrypted, so
+      // role detection would otherwise always fall through to the loc
+      // suffix.
+      const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
+      if (memEncInfo.isEncrypted) {
+        for (const m of rows) decryptNodeFields(m, memEncInfo);
+      }
       return rows.map((m) => {
+        // Agent-agnostic role detection (Constitution Invariant #14):
+        //   - Primary: data.role on the message node.
+        //   - Fallback: deterministic loc suffix from message creation —
+        //     assistant messages always end with `-assistant`. Summary
+        //     nodes (loc suffix `${NNN}a-summary`, created by
+        //     saveChatSummary) and anything else default to 'user',
+        //     matching the LLM-facing history builder in sendChatMessage.
         const name = m.loc.split(':').pop() ?? '';
-        const isUser = !name.includes('assistant') && !name.includes('a-summary');
+        const data = (m.data as { role?: unknown } | null) ?? null;
+        const explicitRole = typeof data?.role === 'string' ? data.role : null;
+        const role: 'user' | 'assistant' =
+          explicitRole === 'assistant'
+            ? 'assistant'
+            : explicitRole === 'user'
+              ? 'user'
+              : name.endsWith('-assistant')
+                ? 'assistant'
+                : 'user';
         return {
-          role: isUser ? 'user' : 'assistant',
+          role,
           content: m.content ?? '',
           seq: m.seq,
           createdAt: m.createdAt,
@@ -2959,7 +2983,7 @@ export const resolvers = {
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       // AGENT_SYSTEM memories can only be linked via Agent.systemMemoryId.
       // Attaching them as regular memory items would allow access patterns
-      // we don't want (e.g. another agent reading Juno's prompts).
+      // we don't want (e.g. another agent reading the linked agent's prompts).
       const memory = await ctx.db.memory.findUniqueOrThrow({
         where: { id: resolvedMemoryId },
         select: { type: true },
@@ -3590,17 +3614,22 @@ export const resolvers = {
 
       // Save user message. When the memory is encrypted we need to encrypt
       // the message content AND the chat node's updated `data`.
+      // The `data.role` field is what the message-history reader uses to
+      // decide user-vs-assistant — agent-agnostic per Constitution Invariant
+      // #14 (no hardcoded agent names anywhere in the platform).
       const msgNum = String(messageCount).padStart(3, '0');
       const userId = chatData.userId as string ?? 'user';
       const newMsgFields = encryptNodeFields(
-        { content: userMessage, data: null },
+        { content: userMessage, data: { role: 'user' } },
         memEncInfo,
       );
       await ctx.db.node.create({
         data: {
           id: generateId(), memoryId: chatNode.memoryId,
           loc: `${chatId}:messages:${msgNum}-${userId}`, name: `${msgNum}-${userId}`,
-          nodeType: 'record', content: newMsgFields.content ?? null, seq: messageCount,
+          nodeType: 'record', content: newMsgFields.content ?? null,
+          data: (newMsgFields.data ?? null) as InputJsonValue,
+          seq: messageCount,
         },
       });
 
@@ -3789,15 +3818,28 @@ export const resolvers = {
         for (const m of messages) decryptNodeFields(m, memEncInfo);
       }
 
+      // Role detection is agent-agnostic (Constitution Invariant #14):
+      // - Primary: read `data.role` from the message node. New messages
+      //   created post-cleanup always carry this.
+      // - Fallback: the loc/name suffix produced by the message-create
+      //   path is deterministic — assistant messages always end with
+      //   `-assistant`. Anything else is a user message (or a summary,
+      //   which we treat as user to preserve pre-cleanup behavior).
+      // - Legacy messages without `data.role` and without the suffix
+      //   (vanishingly rare; only present in pre-006 fixtures) default
+      //   to 'user'.
       const messageHistory = messages.map((m) => {
-        const name = m.loc.split(':').pop() ?? '';
-        // TODO(constitution-invariant-14): hardcoding 'juno' violates "no
-        // agent-specific platform code." The role should come from message
-        // metadata (e.g. node.data.role or a dedicated nodeType), not from
-        // the agent's name appearing in the loc. Tracked as a follow-up
-        // cleanup; flagged by the no-agent-specific-code grep gate.
-        const isUser = !name.includes('assistant') && !name.includes('juno') && !name.includes('ai');
-        return { role: isUser ? 'user' : 'assistant', content: m.content ?? '' };
+        const data = (m.data as { role?: unknown } | null) ?? null;
+        const explicitRole = typeof data?.role === 'string' ? data.role : null;
+        const role: 'user' | 'assistant' =
+          explicitRole === 'assistant'
+            ? 'assistant'
+            : explicitRole === 'user'
+              ? 'user'
+              : (m.loc.split(':').pop() ?? '').endsWith('-assistant')
+                ? 'assistant'
+                : 'user';
+        return { role, content: m.content ?? '' };
       });
 
       // Check if summarization is needed
@@ -3835,14 +3877,22 @@ export const resolvers = {
       const onTrack = toolResponse.onTrack as boolean | undefined;
       const offTrackReason = toolResponse.offTrackReason as string | undefined;
 
-      // Save assistant message (encrypted when memory is encrypted)
+      // Save assistant message (encrypted when memory is encrypted).
+      // `data.role = 'assistant'` is what the message-history reader uses
+      // to identify the role — agent-agnostic per Constitution Invariant
+      // #14 (no hardcoded agent names anywhere in the platform).
       const msgNum = String(messageCount).padStart(3, '0');
-      const encMsg = encryptNodeFields({ content: message, data: null }, memEncInfo);
+      const encMsg = encryptNodeFields(
+        { content: message, data: { role: 'assistant' } },
+        memEncInfo,
+      );
       await ctx.db.node.create({
         data: {
           id: generateId(), memoryId: chatNode.memoryId,
           loc: `${chatId}:messages:${msgNum}-assistant`, name: `${msgNum}-assistant`,
-          nodeType: 'record', content: encMsg.content ?? null, seq: messageCount,
+          nodeType: 'record', content: encMsg.content ?? null,
+          data: (encMsg.data ?? null) as InputJsonValue,
+          seq: messageCount,
         },
       });
 

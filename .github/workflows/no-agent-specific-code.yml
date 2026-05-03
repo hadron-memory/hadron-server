@@ -1,0 +1,74 @@
+name: No Agent-Specific Code
+
+# Per Constitution Invariant #14 (added in 008-agent-installation
+# FR-028): the Hadron platform code MUST NOT reference any specific
+# Agent by name, slug, or id. Chatbot support, the four-class memory
+# typology, the installation policy, and the import system are the
+# canonical agent-agnostic primitives — everything an Agent-author
+# wants to express must go through one of them.
+#
+# This is the installed copy of the spec-kits template at
+# `spec-kits/.specify/memory/no-agent-specific-code.yml`. Keep them
+# in sync by hand when the template changes (or set up a periodic
+# sync).
+#
+# Exemptions live at:
+#   .specify/memory/no-agent-specific-exemptions.txt
+#
+# Each line of that file is a `git grep` path-glob excluded from the
+# search. Test fixtures, migrations, and the dev-seed are pre-listed.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  no-agent-specific-code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load exemptions list
+        run: |
+          if [ -f .specify/memory/no-agent-specific-exemptions.txt ]; then
+            cp .specify/memory/no-agent-specific-exemptions.txt /tmp/exemptions.txt
+          else
+            : > /tmp/exemptions.txt
+          fi
+          # Build the git-grep `:!` exclude args from non-comment, non-blank
+          # lines. Strip trailing `# reason` annotations (the exemptions
+          # file's documented format puts the reason on the same line as
+          # the path-glob); without stripping, the trailing tokens would
+          # be passed through to `git grep` and confuse the call.
+          EXCLUDES=$(sed -E 's/[[:space:]]*#.*$//; /^[[:space:]]*$/d' /tmp/exemptions.txt || true)
+          echo "$EXCLUDES" > /tmp/excludes.txt
+
+      - name: git grep — known agent slugs in src/
+        run: |
+          set +e
+          # Known fixture/spec agent names. Add to this list when a new
+          # agent is introduced in seed.ts or test fixtures, with an
+          # exemption in no-agent-specific-exemptions.txt for the file
+          # that legitimately references it.
+          #
+          # Use `git grep -P` (PCRE) so `\b` works as a word boundary —
+          # POSIX ERE (`-E`) does not support `\b`, so an `-E \bfoo\b`
+          # search would silently miss matches. `-i` matches all
+          # capitalizations (mealplan / Mealplan / MEALPLAN / etc.).
+          PATTERN='\b(mealplan|juno|tickfinder|pong|sage|know-yourself|research-assistant)\b'
+          EXCLUDES=$(cat /tmp/excludes.txt)
+          # shellcheck disable=SC2086
+          MATCHES=$(git grep -niP "$PATTERN" -- 'src/' $EXCLUDES)
+          set -e
+          if [ -n "$MATCHES" ]; then
+            echo "::error::Agent-specific references found in src/ (Constitution Invariant #14, added in 008-agent-installation):"
+            echo "$MATCHES"
+            echo ""
+            echo "If a match is legitimate (e.g., a test fixture), add the file path to"
+            echo ".specify/memory/no-agent-specific-exemptions.txt and re-run."
+            echo "(That is the in-repo exemptions file. The same path also lives in"
+            echo "spec-kits/.specify/memory/ as the template — update both to keep them in sync.)"
+            exit 1
+          fi
+          echo "OK — no agent-specific references in src/."

@@ -52,8 +52,8 @@ export type MemoryResolutionResult =
  *    multiple writable memories exist. The caller surfaces the
  *    candidates so the agent can disambiguate on the next turn.
  *  - `{ ok: false, reason: 'NO_WRITABLE_MEMORY' }` when zero writable
- *    memories exist (e.g. an agent like Pong's email-receiver that
- *    writes only to the App memory).
+ *    memories exist (e.g. a stateless email-receiver agent that writes
+ *    only to the App memory).
  *
  * "Writable" here means an `AgentMemoryItem` row with `role = 'read-write'`
  * linking the agent to a memory. The userId parameter is currently

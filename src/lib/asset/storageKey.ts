@@ -3,8 +3,9 @@
 // Format: {orgUrn}/{memoryPath}/{assetId}[.{ext}]
 //   memoryPath = Memory.urn after the leading "{orgUrn}:" with each
 //                ":" turned into "/" so colon-delimited per-user memories
-//                (e.g. "juno:user:019dd...") become directory hierarchies
-//                in object storage rather than colon-laden flat keys.
+//                (e.g. "<agent-slug>:user:019dd...") become directory
+//                hierarchies in object storage rather than colon-laden
+//                flat keys.
 
 // Each path segment: lowercase alnum + dash/underscore, optionally with
 // dotted parts (e.g. "baragaun.com"). Segments cannot start with a dot,

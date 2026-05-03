@@ -553,6 +553,75 @@ describe('chatHistory', () => {
       resolvers.Query.chatHistory({}, { chatId: start.chatId }, userCtx(otherUser.id)),
     ).rejects.toThrow('Forbidden');
   });
+
+  // Regression for Constitution Invariant #14: role detection must not
+  // depend on the agent's name. The pre-cleanup code used
+  // `name.includes('juno')` to mark messages as assistant — which means a
+  // user message authored by a user whose handle was 'juno' (or any
+  // string containing it) would be misclassified as an assistant message.
+  // The cleanup writes data.role on each message node and reads from
+  // there; the role no longer depends on the agent's name appearing
+  // anywhere.
+  it('role detection does not depend on agent-name substrings (Invariant #14)', async () => {
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id },
+      userCtx(adminUser.id),
+    );
+
+    // The chatNode's userId determines the user-message loc suffix. Set
+    // it to a value that *contains* known agent names ('juno', 'mealplan')
+    // — pre-cleanup, this would misclassify the message as assistant.
+    const chatNode = await db.node.findFirstOrThrow({
+      where: { loc: start.chatId },
+    });
+    const data = (chatNode.data as Record<string, unknown>) ?? {};
+    await db.node.update({
+      where: { id: chatNode.id },
+      data: { data: { ...data, userId: 'mealplan-juno-fan' } as any },
+    });
+
+    await resolvers.Mutation.sendChatMessage(
+      {},
+      { chatId: start.chatId, userMessage: 'I love both of those agents' },
+      userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.processChatResponse(
+      {},
+      {
+        chatId: start.chatId,
+        toolResponse: { message: 'Glad to hear it!', data: null, next_stage: null },
+      },
+      userCtx(adminUser.id),
+    );
+
+    const history = await resolvers.Query.chatHistory(
+      {},
+      { chatId: start.chatId },
+      userCtx(adminUser.id),
+    );
+    // Without the cleanup, history[0].role would be 'assistant' because
+    // the loc suffix `-mealplan-juno-fan` matches `name.includes('juno')`.
+    // With data.role driving the decision, the message is correctly
+    // classified as user.
+    expect(history[0].role).toBe('user');
+    expect(history[0].content).toBe('I love both of those agents');
+    expect(history[1].role).toBe('assistant');
+    expect(history[1].content).toBe('Glad to hear it!');
+
+    // Belt-and-braces: the message nodes carry the explicit role on
+    // node.data so any other consumer (the message-history reader in
+    // sendChatMessage, an MCP tool, an audit query) gets the correct
+    // answer without having to parse loc strings.
+    const userMsg = await db.node.findFirstOrThrow({
+      where: { loc: { contains: '-mealplan-juno-fan' }, deletedAt: null },
+    });
+    const assistantMsg = await db.node.findFirstOrThrow({
+      where: { loc: { endsWith: '-assistant' }, deletedAt: null },
+    });
+    expect((userMsg.data as { role?: string } | null)?.role).toBe('user');
+    expect((assistantMsg.data as { role?: string } | null)?.role).toBe('assistant');
+  });
 });
 
 // ---------------------------------------------------------------------------

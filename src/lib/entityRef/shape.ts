@@ -12,7 +12,7 @@
  *     called explicitly).
  *
  * Anything else is treated as a URN — including bare URNs
- * (`org-foo:family-mealplan`), domain-shaped org URNs
+ * (`org-foo:family-recipes`), domain-shaped org URNs
  * (`hadronmemory.com`), and short slug-shaped org URNs (`org-a`).
  * After upstream prefix-normalization (see `parseUrnInput` in
  * `src/lib/urn.ts`) any `urn:<type>:` prefix is stripped before this
