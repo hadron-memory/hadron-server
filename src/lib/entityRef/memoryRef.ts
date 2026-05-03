@@ -5,9 +5,9 @@
  * Spec: 007-entity-id-or-urn / contracts/resolution-helpers.md.
  *
  * Three input forms all resolve to the same row:
- *   - "abc123…"                          (raw 32-hex-char ID)
- *   - "org-foo:family-mealplan"          (bare URN, DB form)
- *   - "urn:memory:org-foo:family-mealplan" (prefixed URN, external form)
+ *   - "abc123…"                            (raw 32-hex-char ID)
+ *   - "org-foo:family-recipes"             (bare URN, DB form)
+ *   - "urn:memory:org-foo:family-recipes"  (prefixed URN, external form)
  *
  * Soft-deleted memories return MemoryNotFoundError, matching the
  * existing convention.
