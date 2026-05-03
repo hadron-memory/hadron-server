@@ -1340,14 +1340,24 @@ export const resolvers = {
         },
         orderBy: { seq: 'asc' as const },
         take: limit ?? 100,
-        select: { loc: true, content: true, data: true, seq: true, createdAt: true },
+        select: { loc: true, content: true, data: true, seq: true, createdAt: true, memoryId: true, nodeType: true },
       });
+      // Decrypt before reading `data.role` / returning `content` — for
+      // encrypted memories `data` is an opaque wrapper until decrypted, so
+      // role detection would otherwise always fall through to the loc
+      // suffix.
+      const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
+      if (memEncInfo.isEncrypted) {
+        for (const m of rows) decryptNodeFields(m, memEncInfo);
+      }
       return rows.map((m) => {
         // Agent-agnostic role detection (Constitution Invariant #14):
         //   - Primary: data.role on the message node.
-        //   - Fallback: deterministic name suffix from message creation
-        //     (-assistant for assistant, -summary skipped, anything else
-        //     defaults to user).
+        //   - Fallback: deterministic loc suffix from message creation —
+        //     assistant messages always end with `-assistant`. Summary
+        //     nodes (loc suffix `${NNN}a-summary`, created by
+        //     saveChatSummary) and anything else default to 'user',
+        //     matching the LLM-facing history builder in sendChatMessage.
         const name = m.loc.split(':').pop() ?? '';
         const data = (m.data as { role?: unknown } | null) ?? null;
         const explicitRole = typeof data?.role === 'string' ? data.role : null;
@@ -1356,7 +1366,7 @@ export const resolvers = {
             ? 'assistant'
             : explicitRole === 'user'
               ? 'user'
-              : name.endsWith('-assistant') || name.includes('a-summary')
+              : name.endsWith('-assistant')
                 ? 'assistant'
                 : 'user';
         return {

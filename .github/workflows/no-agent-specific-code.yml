@@ -36,8 +36,12 @@ jobs:
           else
             : > /tmp/exemptions.txt
           fi
-          # Build the git-grep `:!` exclude args from non-comment, non-blank lines.
-          EXCLUDES=$(grep -vE '^\s*(#|$)' /tmp/exemptions.txt || true)
+          # Build the git-grep `:!` exclude args from non-comment, non-blank
+          # lines. Strip trailing `# reason` annotations (the exemptions
+          # file's documented format puts the reason on the same line as
+          # the path-glob); without stripping, the trailing tokens would
+          # be passed through to `git grep` and confuse the call.
+          EXCLUDES=$(sed -E 's/[[:space:]]*#.*$//; /^[[:space:]]*$/d' /tmp/exemptions.txt || true)
           echo "$EXCLUDES" > /tmp/excludes.txt
 
       - name: git grep — known agent slugs in src/
@@ -62,7 +66,9 @@ jobs:
             echo "$MATCHES"
             echo ""
             echo "If a match is legitimate (e.g., a test fixture), add the file path to"
-            echo "spec-kits/.specify/memory/no-agent-specific-exemptions.txt and re-run."
+            echo ".specify/memory/no-agent-specific-exemptions.txt and re-run."
+            echo "(That is the in-repo exemptions file. The same path also lives in"
+            echo "spec-kits/.specify/memory/ as the template — update both to keep them in sync.)"
             exit 1
           fi
           echo "OK — no agent-specific references in src/."
