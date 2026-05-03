@@ -319,6 +319,10 @@ const MEMORY_INCLUDE = {
   subscriptions: { include: { organization: true }, orderBy: { createdAt: 'asc' as const } },
 };
 
+const AGENT_INCLUDE = {
+  memoryItems: { where: { deletedAt: null, memory: { deletedAt: null } }, include: { memory: true } },
+};
+
 const ORG_INCLUDE = {
   members: { where: { deletedAt: null }, include: { user: true }, orderBy: { createdAt: 'asc' as const } },
   // User memories (per-user, per-agent) and agent system memories are
@@ -335,14 +339,14 @@ const ORG_INCLUDE = {
     include: MEMORY_INCLUDE,
     orderBy: { name: 'asc' as const },
   },
-  agents: { where: { deletedAt: null }, include: { memoryItems: { where: { deletedAt: null, memory: { deletedAt: null } }, include: { memory: true } } }, orderBy: { name: 'asc' as const } },
-  apps: { where: { deletedAt: null }, include: { keys: { where: { revokedAt: null } }, agent: true }, orderBy: { name: 'asc' as const } },
+  agents: { where: { deletedAt: null }, include: AGENT_INCLUDE, orderBy: { name: 'asc' as const } },
+  // App.agent eagerly loads memoryItems so the GraphQL non-null
+  // contract on Agent.memoryItems is satisfied even when the linked
+  // Agent is soft-deleted (the App keeps its agent reference; the
+  // schema requires memoryItems to be a list, not nullable).
+  apps: { where: { deletedAt: null }, include: { keys: { where: { revokedAt: null } }, agent: { include: AGENT_INCLUDE } }, orderBy: { name: 'asc' as const } },
   subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
   exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
-};
-
-const AGENT_INCLUDE = {
-  memoryItems: { where: { deletedAt: null, memory: { deletedAt: null } }, include: { memory: true } },
 };
 
 const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
@@ -782,6 +786,13 @@ export const resolvers = {
     // 008-agent-installation: App.agent is the canonical resolver. The
     // deprecated App.agents (plural) synthesizes a single-element array
     // for source-compat with portal callers that haven't migrated yet.
+    //
+    // Agent.memoryItems is non-null in the schema, so a re-fetch here
+    // must include AGENT_INCLUDE — otherwise a downstream selection of
+    // `agent { memoryItems { ... } }` raises "Cannot return null for
+    // non-nullable field Agent.memoryItems" and bubbles up to the
+    // caller (most callers eagerly include via APP_INCLUDE / ORG_INCLUDE,
+    // but this branch is the safety net for the rest).
     agent: async (
       a: { id: string; agentId?: string | null; agent?: unknown },
       _: unknown,
@@ -789,7 +800,10 @@ export const resolvers = {
     ) => {
       if (a.agent !== undefined) return a.agent ?? null;
       if (!a.agentId) return null;
-      return ctx.db.agent.findUnique({ where: { id: a.agentId } });
+      return ctx.db.agent.findUnique({
+        where: { id: a.agentId },
+        include: AGENT_INCLUDE,
+      });
     },
     agents: async (
       a: { id: string; agentId?: string | null; agent?: unknown },
@@ -801,7 +815,13 @@ export const resolvers = {
         return agent && !agent.deletedAt ? [agent] : [];
       }
       if (!a.agentId) return [];
-      const agent = await ctx.db.agent.findUnique({ where: { id: a.agentId } });
+      // Match the singular App.agent re-fetch above: AGENT_INCLUDE so
+      // the returned Agent satisfies the non-null `memoryItems` contract
+      // when a downstream caller selects it.
+      const agent = await ctx.db.agent.findUnique({
+        where: { id: a.agentId },
+        include: AGENT_INCLUDE,
+      });
       return agent && !agent.deletedAt ? [agent] : [];
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
