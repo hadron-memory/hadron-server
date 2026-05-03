@@ -17,18 +17,20 @@ BEGIN;
 -- 1. New tables
 -- ──────────────────────────────────────────────────────────────────────
 
+-- Constraint + index names follow Prisma's introspection convention so
+-- `prisma migrate diff` reports a clean state when comparing this
+-- migration's output against schema.prisma. Prisma also defaults FKs to
+-- ON UPDATE CASCADE and uses TIMESTAMP(3) for DateTime columns; we match.
 CREATE TABLE "app_members" (
   "app_id"      TEXT NOT NULL,
   "user_id"     TEXT NOT NULL,
   "role"        TEXT NOT NULL,
-  "created_at"  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "created_at"  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "created_by"  TEXT,
-  "updated_at"  TIMESTAMPTZ,
+  "updated_at"  TIMESTAMP(3),
   "updated_by"  TEXT,
 
-  PRIMARY KEY ("app_id", "user_id"),
-  CONSTRAINT "app_members_app_id_fkey"  FOREIGN KEY ("app_id")  REFERENCES "apps"  ("id") ON DELETE CASCADE,
-  CONSTRAINT "app_members_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON DELETE CASCADE
+  CONSTRAINT "app_members_pkey" PRIMARY KEY ("app_id", "user_id")
 );
 
 CREATE INDEX "app_members_user_id_idx" ON "app_members" ("user_id");
@@ -36,18 +38,16 @@ CREATE INDEX "app_members_user_id_idx" ON "app_members" ("user_id");
 CREATE TABLE "agent_org_grants" (
   "org_id"        TEXT NOT NULL,
   "agent_id"      TEXT NOT NULL,
-  "activated_at"  TIMESTAMPTZ,
-  "expires_at"    TIMESTAMPTZ,
-  "revoked_at"    TIMESTAMPTZ,
+  "activated_at"  TIMESTAMP(3),
+  "expires_at"    TIMESTAMP(3),
+  "revoked_at"    TIMESTAMP(3),
   "revoked_by"    TEXT,
-  "created_at"    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "created_at"    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "created_by"    TEXT,
-  "updated_at"    TIMESTAMPTZ,
+  "updated_at"    TIMESTAMP(3),
   "updated_by"    TEXT,
 
-  PRIMARY KEY ("org_id", "agent_id"),
-  CONSTRAINT "agent_org_grants_org_id_fkey"   FOREIGN KEY ("org_id")   REFERENCES "organizations" ("id") ON DELETE CASCADE,
-  CONSTRAINT "agent_org_grants_agent_id_fkey" FOREIGN KEY ("agent_id") REFERENCES "agents"        ("id") ON DELETE CASCADE
+  CONSTRAINT "agent_org_grants_pkey" PRIMARY KEY ("org_id", "agent_id")
 );
 
 CREATE INDEX "agent_org_grants_agent_id_idx" ON "agent_org_grants" ("agent_id");
@@ -59,19 +59,48 @@ CREATE TABLE "agent_imports" (
   "required"                  BOOLEAN NOT NULL DEFAULT TRUE,
   "agent_org_grant_org_id"    TEXT    NOT NULL,
   "agent_org_grant_agent_id"  TEXT    NOT NULL,
-  "created_at"                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "created_at"                TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "created_by"                TEXT,
 
-  PRIMARY KEY ("parent_agent_id", "imported_agent_id"),
-  CONSTRAINT "agent_imports_parent_fkey"   FOREIGN KEY ("parent_agent_id")   REFERENCES "agents" ("id") ON DELETE CASCADE,
-  CONSTRAINT "agent_imports_imported_fkey" FOREIGN KEY ("imported_agent_id") REFERENCES "agents" ("id") ON DELETE RESTRICT,
-  CONSTRAINT "agent_imports_grant_fkey"
-    FOREIGN KEY ("agent_org_grant_org_id", "agent_org_grant_agent_id")
-    REFERENCES "agent_org_grants" ("org_id", "agent_id") ON DELETE RESTRICT
+  CONSTRAINT "agent_imports_pkey" PRIMARY KEY ("parent_agent_id", "imported_agent_id")
 );
 
-CREATE UNIQUE INDEX "agent_imports_parent_position_key" ON "agent_imports" ("parent_agent_id", "position");
-CREATE INDEX "agent_imports_imported_idx" ON "agent_imports" ("imported_agent_id");
+CREATE UNIQUE INDEX "agent_imports_parent_agent_id_position_key" ON "agent_imports" ("parent_agent_id", "position");
+CREATE INDEX "agent_imports_imported_agent_id_idx" ON "agent_imports" ("imported_agent_id");
+
+-- FK constraints. Names follow Prisma's `<table>_<column>_fkey` convention
+-- (the agent_imports composite FK uses the underscore-joined column name
+-- list, matching what `prisma migrate dev` would emit). All FKs include
+-- ON UPDATE CASCADE to match Prisma's default.
+ALTER TABLE "app_members"
+  ADD CONSTRAINT "app_members_app_id_fkey"
+  FOREIGN KEY ("app_id") REFERENCES "apps" ("id")
+  ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "app_members"
+  ADD CONSTRAINT "app_members_user_id_fkey"
+  FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+  ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "agent_org_grants"
+  ADD CONSTRAINT "agent_org_grants_org_id_fkey"
+  FOREIGN KEY ("org_id") REFERENCES "organizations" ("id")
+  ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "agent_org_grants"
+  ADD CONSTRAINT "agent_org_grants_agent_id_fkey"
+  FOREIGN KEY ("agent_id") REFERENCES "agents" ("id")
+  ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "agent_imports"
+  ADD CONSTRAINT "agent_imports_parent_agent_id_fkey"
+  FOREIGN KEY ("parent_agent_id") REFERENCES "agents" ("id")
+  ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "agent_imports"
+  ADD CONSTRAINT "agent_imports_imported_agent_id_fkey"
+  FOREIGN KEY ("imported_agent_id") REFERENCES "agents" ("id")
+  ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "agent_imports"
+  ADD CONSTRAINT "agent_imports_agent_org_grant_org_id_agent_org_grant_agent_fkey"
+  FOREIGN KEY ("agent_org_grant_org_id", "agent_org_grant_agent_id")
+  REFERENCES "agent_org_grants" ("org_id", "agent_id")
+  ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- ──────────────────────────────────────────────────────────────────────
 -- 2. New columns on existing tables
@@ -89,7 +118,8 @@ ALTER TABLE "apps"
   ADD COLUMN "surfaces"      TEXT[]  NOT NULL DEFAULT ARRAY['chat']::TEXT[];
 
 ALTER TABLE "apps"
-  ADD CONSTRAINT "apps_agent_id_fkey" FOREIGN KEY ("agent_id") REFERENCES "agents" ("id") ON DELETE SET NULL;
+  ADD CONSTRAINT "apps_agent_id_fkey" FOREIGN KEY ("agent_id") REFERENCES "agents" ("id")
+  ON DELETE SET NULL ON UPDATE CASCADE;
 
 CREATE INDEX "apps_agent_id_idx" ON "apps" ("agent_id");
 
@@ -103,9 +133,11 @@ ALTER TABLE "memories"
 -- The AppMember-removal orphan-retention path (FR-015) is independent — it
 -- deletes from app_members, not apps.
 ALTER TABLE "memories"
-  ADD CONSTRAINT "memories_app_id_fkey" FOREIGN KEY ("app_id") REFERENCES "apps" ("id") ON DELETE CASCADE;
+  ADD CONSTRAINT "memories_app_id_fkey" FOREIGN KEY ("app_id") REFERENCES "apps" ("id")
+  ON DELETE CASCADE ON UPDATE CASCADE;
 
-CREATE INDEX "memories_app_id_idx" ON "memories" ("app_id") WHERE "app_id" IS NOT NULL;
+-- Full (not partial) index — Prisma's introspection produces this shape.
+CREATE INDEX "memories_app_id_idx" ON "memories" ("app_id");
 
 -- ──────────────────────────────────────────────────────────────────────
 -- 3. Backfill: App.agent_id from app_agents fold (handles fan-out + orphans)
