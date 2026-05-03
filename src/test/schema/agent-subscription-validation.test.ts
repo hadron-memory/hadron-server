@@ -56,13 +56,26 @@ describe('AgentSubscription model + MemoryClass enum + PERSONAL visibility', () 
     const agent = await db.agent.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:a`, name: 'a' },
     });
+    // 008-agent-installation: app- and personal-class memories require app_id
+    // (chk_memory_class_app_id). Seed an App linked to the agent so the
+    // helper can resolve it for the personal memory below, and use the same
+    // App.id explicitly for the app-class memory.
+    const app = await db.app.create({
+      data: {
+        id: generateId(),
+        name: 'mc-app',
+        urn: `${org.urn}:mc-app`,
+        organizationId: org.id,
+        agentId: agent.id,
+      },
+    });
 
     // 'system' / 'app' / 'knowledge' / 'personal' all parse and round-trip.
     const memSystem = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:s`, name: 's', class: 'system' },
     });
     const memApp = await db.memory.create({
-      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:p`, name: 'p', class: 'app' },
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:p`, name: 'p', class: 'app', appId: app.id },
     });
     const memKnowledge = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:k`, name: 'k', class: 'knowledge' },
@@ -129,6 +142,17 @@ describe('CHECK constraint: PERSONAL ⇔ userId IS NOT NULL', () => {
     const user = await db.user.create({ data: { id: generateId(), githubId: 9005 } });
     const agent = await db.agent.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:a`, name: 'a' },
+    });
+    // 008: personal memory requires app_id; seed a matching App so the helper
+    // can resolve it.
+    await db.app.create({
+      data: {
+        id: generateId(),
+        name: 'check-app',
+        urn: `${org.urn}:check-app`,
+        organizationId: org.id,
+        agentId: agent.id,
+      },
     });
     const mem = await createDbPersonalMemory(db, {
       userId: user.id,

@@ -33,11 +33,6 @@ enum AppType {
   IOT
 }
 
-enum AppAgentRole {
-  OPERATE
-  DEVELOP
-}
-
 enum SubscriptionType {
   READ_ONLY
   READ_WRITE
@@ -165,6 +160,7 @@ model User {
   sessions                  Session[]                  @relation("SessionUser")
   ownedMemories             Memory[]                   @relation("UserMemoriesOwned")
   agentSubscriptions        AgentSubscription[]        @relation("UserAgentSubscriptions")
+  appMemberships            AppMember[]                @relation("UserAppMemberships")
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -192,6 +188,7 @@ model Organization {
   invitations         UserInvitation[]     @relation("OrgInvitations")
   exchangeConnections ExchangeConnection[]
   apps                App[]
+  agentOrgGrants      AgentOrgGrant[]
 
   @@map("organizations")
 }
@@ -246,6 +243,10 @@ model Memory {
   // memories. NULL for non-personal memories. Postgres CHECK constraint
   // enforces the bidirectional invariant: visibility=PERSONAL ⇔ userId IS NOT NULL.
   userId               String?          @map("user_id")
+  // 008-agent-installation (2026-05-02): App pivot for class IN ('app', 'personal').
+  // Required when class IN ('app', 'personal'); NULL for class IN ('system', 'knowledge').
+  // Enforced by the chk_memory_class_app_id CHECK constraint added in the migration.
+  appId                String?          @map("app_id")
   // 005-agent-subscription (2026-04-30): four-way memory typology. Required
   // post-migration; backfilled by the migration's UPDATE statements.
   class                MemoryClass
@@ -276,12 +277,20 @@ model Memory {
   logEntries        MemoryLogEntry[]
   userMemoryOfAgent Agent?               @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
   user              User?                @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
+  // 008-agent-installation: hard App deletion cascades to its personal/app
+  // memories (per data-model.md "Cascade behavior"). The CHECK constraint
+  // prohibits app_id IS NULL for class IN ('app', 'personal'), so SET NULL
+  // would leave the row in an invalid state on delete. AppMember removal
+  // (orphan retention per FR-015) is independent — that's a row delete in
+  // app_members, not in apps.
+  app               App?                 @relation("AppMemories", fields: [appId], references: [id], onDelete: Cascade)
   sessions          Session[]            @relation("SessionMemory")
 
   @@index([organizationId])
   @@index([userMemoryOfAgentId])
   @@index([anonymousExpiresAt])
   @@index([userId])
+  @@index([appId])
   @@map("memories")
 }
 
@@ -512,6 +521,14 @@ model Agent {
   editorLockUserId     String?          @map("editor_lock_user_id")
   editorLockExpiresAt  DateTime?        @map("editor_lock_expires_at")
   properties           Json?
+  // 008-agent-installation (2026-05-02): Agent declares per-deployment memory
+  // provisioning shape. Schema: { appMemory: 'shared' | 'user' | 'none' }.
+  // Personal-class provisioning is implicit (lazy on first user-attributed write).
+  memoryProvisioning   Json             @default("{\"appMemory\": \"shared\"}") @map("memory_provisioning")
+  // 008-agent-installation (2026-05-02): Agent declares membership constraints.
+  // Schema: { maxMembers: number | 'unlimited', memberRoles: string[] }.
+  // Enforced at AppMember invite-acceptance time.
+  installationPolicy   Json             @default("{\"maxMembers\": \"unlimited\", \"memberRoles\": [\"owner\"]}") @map("installation_policy")
   createdAt            DateTime         @default(now()) @map("created_at")
   createdBy            String?          @map("created_by")
   updatedAt            DateTime?        @map("updated_at")
@@ -523,8 +540,13 @@ model Agent {
   memoryItems       AgentMemoryItem[]
   userMemories      Memory[]            @relation("UserMemoriesOfAgent")
   sessions          Session[]           @relation("SessionAgent")
-  appAgents         AppAgent[]
   userSubscriptions AgentSubscription[] @relation("AgentUserSubscriptions")
+  // 008-agent-installation (2026-05-02): direct App→Agent FK replaces the
+  // dropped AppAgent join. Imports / importedBy / orgGrants are new joins.
+  apps              App[]
+  imports           AgentImport[]       @relation("ParentAgent")
+  importedBy        AgentImport[]       @relation("ImportedAgent")
+  orgGrants         AgentOrgGrant[]
 
   @@map("agents")
 }
@@ -828,6 +850,13 @@ model App {
   aiModel               String?              @map("ai_model")
   aiApiKeyEncrypted     String?              @map("ai_api_key_encrypted")
   expiresAt             DateTime?            @map("expires_at")
+  // 008-agent-installation (2026-05-02): App is the runtime deployment of
+  // an Agent. agent_id is nullable only to absorb orphan Apps during the
+  // cutover and the Agent-deletion SET NULL cascade; new App creation
+  // post-migration MUST set agentId (enforced at the createApp resolver).
+  agentId               String?              @map("agent_id")
+  trainingMode          Boolean              @default(false) @map("training_mode")
+  surfaces              String[]             @default(["chat"])
   // Standard audit fields
   createdAt             DateTime             @default(now()) @map("created_at")
   createdBy             String?              @map("created_by")
@@ -837,8 +866,10 @@ model App {
   deletedBy             String?              @map("deleted_by")
 
   organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agent         Agent?         @relation(fields: [agentId], references: [id], onDelete: SetNull)
   keys          AppKey[]
-  appAgents     AppAgent[]
+  members       AppMember[]
+  memories      Memory[]       @relation("AppMemories")
   users         User[]
   sessions      Session[]
   logEntries    AppLogEntry[]
@@ -846,6 +877,7 @@ model App {
   pendingSetups PendingSetup[]
 
   @@index([organizationId])
+  @@index([agentId])
   @@map("apps")
 }
 
@@ -866,27 +898,81 @@ model AppKey {
   @@map("app_keys")
 }
 
-model AppAgent {
-  appId        String       @map("app_id")
-  agentId      String       @map("agent_id")
-  role         AppAgentRole @default(OPERATE)
-  // 005-agent-subscription (2026-04-30): subscription_type was dropped.
-  // The cap previously enforced by it is now exclusively governed by
-  // AgentMemoryItem.role (per-attached-memory).
-  trainingMode Boolean      @default(false) @map("training_mode")
-  createdAt    DateTime     @default(now()) @map("created_at")
-  createdBy    String?      @map("created_by")
-  updatedAt    DateTime?    @map("updated_at")
-  updatedBy    String?      @map("updated_by")
-  deletedAt    DateTime?    @map("deleted_at")
-  deletedBy    String?      @map("deleted_by")
+// 008-agent-installation (2026-05-02): User↔App membership join.
+// Per-User lifecycle is reserved for a future spec — there is no
+// revoked_at / expires_at column. Removing a member is a row delete.
+// The user's personal-class Memory at (app_id, user.id) survives the
+// row delete (orphan retention per FR-015).
+model AppMember {
+  appId     String    @map("app_id")
+  userId    String    @map("user_id")
+  // Free-form string per R-7. Validated at write-time against the parent
+  // Agent's installation_policy.memberRoles (e.g., ['owner', 'guide']).
+  role      String
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @map("updated_at")
+  updatedBy String?   @map("updated_by")
 
-  app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
-  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  app  App  @relation(fields: [appId], references: [id], onDelete: Cascade)
+  user User @relation("UserAppMemberships", fields: [userId], references: [id], onDelete: Cascade)
 
-  @@id([appId, agentId])
+  @@id([appId, userId])
+  @@index([userId])
+  @@map("app_members")
+}
+
+// 008-agent-installation (2026-05-02): Org↔Agent license. Authorizes
+// (a) creating an App in org_id that uses agent_id, and (b) bundling
+// agent_id as an AgentImport in another Agent that org_id owns. Sibling
+// to AgentSubscription (User↔Agent, from 005); shares the lifecycle
+// shape and the isLifecycleActive predicate.
+model AgentOrgGrant {
+  orgId       String    @map("org_id")
+  agentId     String    @map("agent_id")
+  activatedAt DateTime? @map("activated_at")
+  expiresAt   DateTime? @map("expires_at")
+  revokedAt   DateTime? @map("revoked_at")
+  revokedBy   String?   @map("revoked_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  createdBy   String?   @map("created_by")
+  updatedAt   DateTime? @map("updated_at")
+  updatedBy   String?   @map("updated_by")
+
+  organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  agent        Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  imports      AgentImport[]
+
+  @@id([orgId, agentId])
   @@index([agentId])
-  @@map("app_agents")
+  @@map("agent_org_grants")
+}
+
+// 008-agent-installation (2026-05-02): directed Agent→Agent dependency
+// edge. v1 enforces 1-level imports only (the dep itself must not be
+// a parent of any AgentImport). The composite FK to AgentOrgGrant is
+// the Builder-grant authorizing this import — the spec named this
+// agent_subscription_id (FR-005); R-2 renamed it to the new sibling
+// table since the universal-grant role lives on AgentOrgGrant for
+// org-level grants, not AgentSubscription (which stays User↔Agent).
+model AgentImport {
+  parentAgentId         String   @map("parent_agent_id")
+  importedAgentId       String   @map("imported_agent_id")
+  position              Int
+  required              Boolean  @default(true)
+  agentOrgGrantOrgId    String   @map("agent_org_grant_org_id")
+  agentOrgGrantAgentId  String   @map("agent_org_grant_agent_id")
+  createdAt             DateTime @default(now()) @map("created_at")
+  createdBy             String?  @map("created_by")
+
+  parentAgent   Agent         @relation("ParentAgent", fields: [parentAgentId], references: [id], onDelete: Cascade)
+  importedAgent Agent         @relation("ImportedAgent", fields: [importedAgentId], references: [id], onDelete: Restrict)
+  agentOrgGrant AgentOrgGrant @relation(fields: [agentOrgGrantOrgId, agentOrgGrantAgentId], references: [orgId, agentId], onDelete: Restrict)
+
+  @@id([parentAgentId, importedAgentId])
+  @@unique([parentAgentId, position])
+  @@index([importedAgentId])
+  @@map("agent_imports")
 }
 
 // User-side license expressing "this user is authorized to use this agent."

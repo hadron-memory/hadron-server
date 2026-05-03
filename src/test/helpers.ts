@@ -30,7 +30,11 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.agentMemoryItem.deleteMany();
   await db.appLogEntry.deleteMany();
   await db.appKey.deleteMany();
-  await db.appAgent.deleteMany();
+  // 008-agent-installation: AppAgent join is gone (App.agent_id is the FK).
+  // New 008 joins clean up first to satisfy Restrict cascades on AgentImport.
+  await db.appMember.deleteMany();
+  await db.agentImport.deleteMany();
+  await db.agentOrgGrant.deleteMany();
   await db.app.deleteMany();
   await db.agent.deleteMany();
   await db.memorySubscription.deleteMany();
@@ -135,11 +139,15 @@ export async function createDbAppWithKey(
 }
 
 /**
- * Link an App to an Agent through an AppAgent join row.
- * Defaults match the schema (role=OPERATE, training_mode=false).
+ * Link an App to an Agent. Pre-008 this created an AppAgent join row; under
+ * the two-layer model (008-agent-installation), the App→Agent relation is a
+ * direct FK on App.agent_id. The helper now updates App.agent_id (and
+ * App.training_mode if requested). The legacy `role` arg is accepted for
+ * source compat but ignored — DEVELOP-from-App is dropped (R-10).
  *
- * 005-agent-subscription dropped subscription_type — per-attached-memory
- * write caps are governed by AgentMemoryItem.role.
+ * Returns the updated App row, mirroring the prior return shape closely
+ * enough for existing tests (which mostly used the result for assertions
+ * about presence rather than schema).
  */
 export async function createDbAppAgent(
   db: PrismaClient,
@@ -150,12 +158,86 @@ export async function createDbAppAgent(
     trainingMode?: boolean;
   } = {},
 ) {
-  return db.appAgent.create({
+  void opts.role;
+  return db.app.update({
+    where: { id: appId },
     data: {
-      appId,
       agentId,
-      role: opts.role ?? 'OPERATE',
-      trainingMode: opts.trainingMode ?? false,
+      ...(opts.trainingMode !== undefined ? { trainingMode: opts.trainingMode } : {}),
+    },
+  });
+}
+
+/**
+ * 008-agent-installation: insert an AppMember. Caller is responsible for
+ * the role string being valid for the App's Agent's installationPolicy
+ * (use ensureAppMember if you want validation).
+ */
+export async function createDbAppMember(
+  db: PrismaClient,
+  appId: string,
+  userId: string,
+  role: string = 'owner',
+) {
+  return db.appMember.create({
+    data: { appId, userId, role },
+  });
+}
+
+/**
+ * 008-agent-installation: insert an AgentImport row directly. Bypasses the
+ * publishAgentImport validation (grant check, 1-level enforcement) — useful
+ * when seeding fixtures where you want to assert *post-publish* behavior
+ * without going through the resolver. For tests that exercise the
+ * validation, call the resolver / `publishAgentImport` helper instead.
+ *
+ * Caller is responsible for the AgentOrgGrant existing — the FK requires it.
+ */
+export async function createDbAgentImport(
+  db: PrismaClient,
+  parentAgentId: string,
+  importedAgentId: string,
+  opts: { position?: number; required?: boolean } = {},
+) {
+  // Look up the parent agent's owning org to derive the grant FK.
+  const parent = await db.agent.findUniqueOrThrow({
+    where: { id: parentAgentId },
+    select: { organizationId: true },
+  });
+  return db.agentImport.create({
+    data: {
+      parentAgentId,
+      importedAgentId,
+      position: opts.position ?? 100,
+      required: opts.required ?? true,
+      agentOrgGrantOrgId: parent.organizationId,
+      agentOrgGrantAgentId: importedAgentId,
+    },
+  });
+}
+
+/**
+ * 008-agent-installation: insert an AgentOrgGrant. Defaults match the v1
+ * lifecycle (activated immediately, no expiry, not revoked) — same shape
+ * as createDbAgentSubscription.
+ */
+export async function createDbAgentOrgGrant(
+  db: PrismaClient,
+  orgId: string,
+  agentId: string,
+  opts: {
+    activatedAt?: Date | null;
+    expiresAt?: Date | null;
+    revokedAt?: Date | null;
+  } = {},
+) {
+  return db.agentOrgGrant.create({
+    data: {
+      orgId,
+      agentId,
+      activatedAt: opts.activatedAt === undefined ? new Date() : opts.activatedAt,
+      expiresAt: opts.expiresAt ?? null,
+      revokedAt: opts.revokedAt ?? null,
     },
   });
 }
@@ -189,6 +271,13 @@ export async function createDbAgentSubscription(
  * Insert a test personal-class Memory owned by a User. Sets the
  * required class+visibility+userId combo per the bidirectional
  * invariant.
+ *
+ * 008-agent-installation: personal-class memories address on
+ * (app_id, user_id). The chk_memory_class_app_id constraint requires
+ * a non-NULL app_id when class IN ('app', 'personal'). Pass `appId`
+ * to set it explicitly; if omitted, the helper looks up an App for
+ * the agent in the same org and uses that. Tests that don't have an
+ * App set up should pass appId explicitly.
  */
 export async function createDbPersonalMemory(
   db: PrismaClient,
@@ -197,9 +286,34 @@ export async function createDbPersonalMemory(
     organizationId: string;
     agentId: string;
     name?: string;
+    appId?: string;
   },
 ) {
   const name = opts.name ?? `personal-${opts.userId}-${opts.agentId}`;
+  let appId = opts.appId ?? null;
+  if (!appId) {
+    // Personal memory pivots on (app_id, user_id) — the App can live in any
+    // org (cross-org case: Alice's personal-alice org holds the memory; the
+    // delivering App lives in OrgA). Look up by agent_id alone, preferring the
+    // memory's own org if any match exists.
+    const sameOrg = await db.app.findFirst({
+      where: { organizationId: opts.organizationId, agentId: opts.agentId, deletedAt: null },
+      select: { id: true },
+    });
+    appId = sameOrg?.id ?? null;
+    if (!appId) {
+      const anyOrg = await db.app.findFirst({
+        where: { agentId: opts.agentId, deletedAt: null },
+        select: { id: true },
+      });
+      appId = anyOrg?.id ?? null;
+    }
+  }
+  if (!appId) {
+    throw new Error(
+      'createDbPersonalMemory: no App found for the agent and none was passed. Personal-class memory requires app_id post-008. Pass `appId` explicitly or seed an App linking the same agent.',
+    );
+  }
   return db.memory.create({
     data: {
       id: generateId(),
@@ -208,6 +322,7 @@ export async function createDbPersonalMemory(
       name,
       userId: opts.userId,
       userMemoryOfAgentId: opts.agentId,
+      appId,
       class: 'personal',
       visibility: 'PERSONAL',
     },

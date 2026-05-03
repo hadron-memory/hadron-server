@@ -62,15 +62,12 @@ describe('provisionPersonalWorkspace', () => {
     expect(appKey!.label).toBe('Initial setup key');
   });
 
-  it('creates an AppAgent with role=OPERATE and subscriptionType=READ_WRITE', async () => {
+  it('sets App.agent_id to the provisioned Agent (008 — direct FK, no AppAgent)', async () => {
     const { appId, agentId } = await provisionPersonalWorkspace(db, userId, 'Test User');
 
-    const appAgent = await db.appAgent.findUnique({
-      where: { appId_agentId: { appId, agentId } },
-    });
-    expect(appAgent).toBeDefined();
-    expect(appAgent!.role).toBe('OPERATE');
-    expect(appAgent!.trainingMode).toBe(false);
+    const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
+    expect(app.agentId).toBe(agentId);
+    expect(app.trainingMode).toBe(false);
   });
 
   it('writes a PendingSetup record carrying appId', async () => {

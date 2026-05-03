@@ -87,8 +87,8 @@ beforeEach(async () => {
     },
   });
 
-  // Authorize app to operate agent
-  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  // 008: Authorize app to operate agent via App.agent_id direct FK.
+  await db.app.update({ where: { id: app.id }, data: { agentId: agent.id } });
 });
 
 // ---------------------------------------------------------------------------
@@ -175,16 +175,17 @@ describe('App CRUD', () => {
       { appId: app.id, agentId: agent.id },
       adminCtx(),
     );
-    const linksAfterRemove = await db.appAgent.findMany({ where: { appId: app.id } });
-    expect(linksAfterRemove.length).toBe(0);
+    // 008: App→Agent is a direct FK on App.agent_id; "removed" means NULL.
+    const afterRemove = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    expect(afterRemove.agentId).toBeNull();
 
     await resolvers.Mutation.addAgentToApp(
       {},
       { appId: app.id, agentId: agent.id },
       adminCtx(),
     );
-    const linksAfterAdd = await db.appAgent.findMany({ where: { appId: app.id } });
-    expect(linksAfterAdd.length).toBe(1);
+    const afterAdd = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    expect(afterAdd.agentId).toBe(agent.id);
   });
 
   it('refuses to add an agent from a different org to an app', async () => {

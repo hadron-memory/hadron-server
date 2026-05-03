@@ -1,75 +1,65 @@
 /**
  * MCP access-control: which memories can the caller read/write?
  *
- * Callers authenticate via an App Key and resolve to an `appId`; access
- * is gated by the AppAgent rows attached to that App. Per Constitution
- * Principle V (Zero-Trust Apps), every read and write is checked
- * server-side here — Apps cannot self-attest access.
+ * Callers authenticate via an App Key and resolve to an `appId`; access is
+ * gated by the App's direct `agent_id` FK (no longer an AppAgent join, after
+ * 008-agent-installation). Per Constitution Principle V (Zero-Trust Apps),
+ * every read and write is checked server-side here — Apps cannot self-attest.
  *
- * After spec 005-agent-subscription:
- *   - AppAgent.role (OPERATE | DEVELOP) is the sole control for the App's
- *     access to the Agent's system memory. DEVELOP unlocks read-write;
- *     OPERATE is read-only.
- *   - AppAgent.subscription_type is gone — per-attached-memory write caps
- *     are governed by AgentMemoryItem.role.
- *   - Memory.class = 'personal' enforces strict ownership (FR-016): only
- *     Memory.userId can read, no ADMIN/OWNER bypass. App writes are
- *     additionally gated by an active AgentSubscription(user, agent).
+ * After 008-agent-installation:
+ *   - AppAgent.role (OPERATE | DEVELOP) is gone. System memory is universally
+ *     read-only from any App context (DEVELOP-from-App is no longer supported;
+ *     edits happen in the Agent ownership surface). Per-attached-memory write
+ *     caps remain governed by AgentMemoryItem.role.
+ *   - Memory.class = 'personal' addresses on (app_id, user_id). The gate
+ *     additionally requires Memory.app_id === auth.appId so a session through
+ *     App A cannot read the personal memory at (B.id, user.id) for some other
+ *     App B of the same Agent.
+ *   - Cross-org App↔Agent uses requires an active AgentOrgGrant; same-org
+ *     installs (App.organization_id === Agent.organization_id) auto-pass.
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
+import { isLifecycleActive } from '../lib/lifecycle.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
 // ---------------------------------------------------------------------------
 
 /**
- * Fold AppAgent membership rows into an effective
+ * Fold an Agent's system memory + memoryItems into an effective
  * `memoryId → READ_ONLY|READ_WRITE` map.
  *
- * After 005-agent-subscription:
- *   - System memory: AppAgent.role=DEVELOP → READ_WRITE; OPERATE → READ_ONLY.
+ * After 008-agent-installation:
+ *   - System memory: always READ_ONLY from an App context (DEVELOP-from-App
+ *     is gone). The Agent ownership surface is the only path to edit it.
  *   - Knowledge memoryItems: governed by AgentMemoryItem.role
- *     (read | read-write); no AppAgent-level cap.
+ *     (read | read-write); no AppAgent-level cap exists.
  */
-type SubscriptionLike = {
-  role: 'OPERATE' | 'DEVELOP';
-  agent: {
-    systemMemoryId?: string | null;
-    memoryItems: Array<{ memoryId: string; role?: 'read' | 'read-write' | string | null }>;
-  };
+type AgentLike = {
+  systemMemoryId?: string | null;
+  memoryItems: Array<{ memoryId: string; role?: 'read' | 'read-write' | string | null }>;
 };
 
-export function foldSubscriptionsIntoAccessMap(
-  subs: SubscriptionLike[],
-): Map<string, string> {
+export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
   const access = new Map<string, string>();
-  for (const sub of subs) {
-    // Include the agent's system memory (linked via systemMemoryId, not
-    // as a memoryItem). DEVELOP grants read-write so builders can edit
-    // the conversation design / system prompt; OPERATE is read-only.
-    const systemMemoryId = sub.agent.systemMemoryId ?? null;
-    if (systemMemoryId) {
-      const effective = sub.role === 'DEVELOP' ? 'READ_WRITE' : 'READ_ONLY';
-      const existing = access.get(systemMemoryId);
-      if (!existing || effective === 'READ_WRITE') {
-        access.set(systemMemoryId, effective);
-      }
-    }
 
-    for (const item of sub.agent.memoryItems) {
-      // Per-attached-memory cap is exclusively governed by
-      // AgentMemoryItem.role after 005-agent-subscription.
-      const agentRole = item.role ?? 'read';
-      const effective = agentRole === 'read-write' ? 'READ_WRITE' : 'READ_ONLY';
-      const existing = access.get(item.memoryId);
-      if (!existing || effective === 'READ_WRITE') {
-        access.set(item.memoryId, effective);
-      }
+  const systemMemoryId = agent.systemMemoryId ?? null;
+  if (systemMemoryId) {
+    access.set(systemMemoryId, 'READ_ONLY');
+  }
+
+  for (const item of agent.memoryItems) {
+    const agentRole = item.role ?? 'read';
+    const effective = agentRole === 'read-write' ? 'READ_WRITE' : 'READ_ONLY';
+    const existing = access.get(item.memoryId);
+    if (!existing || effective === 'READ_WRITE') {
+      access.set(item.memoryId, effective);
     }
   }
+
   return access;
 }
 
@@ -78,35 +68,59 @@ export function foldSubscriptionsIntoAccessMap(
 // ---------------------------------------------------------------------------
 
 /**
- * Memory access for an App principal — walks AppAgent rows for the App,
- * then folds the agent's memoryItems + system memory into the access map.
+ * Memory access for an App principal — reads App.agent_id directly (the
+ * AppAgent join is gone), then folds the Agent's system memory + memoryItems
+ * into the access map.
+ *
+ * Cross-org gate: if the App's org and the Agent's org differ, an active
+ * AgentOrgGrant(App.organization_id, App.agent_id) is required. Same-org
+ * installations auto-pass.
  */
 export async function getAppMemoryAccess(
   db: PrismaClient,
   appId: string,
 ): Promise<Map<string, string>> {
-  const appAgents = await db.appAgent.findMany({
-    where: { appId, deletedAt: null },
-    include: {
+  const app = await db.app.findUnique({
+    where: { id: appId },
+    select: {
+      id: true,
+      organizationId: true,
+      agentId: true,
       agent: {
-        include: {
-          memoryItems: { include: { memory: true } },
+        select: {
+          id: true,
+          organizationId: true,
+          systemMemoryId: true,
+          deletedAt: true,
+          memoryItems: {
+            where: { deletedAt: null, memory: { deletedAt: null } },
+            select: { memoryId: true, role: true },
+          },
         },
       },
     },
   });
-  return foldSubscriptionsIntoAccessMap(
-    appAgents.map((sub) => ({
-      role: sub.role as 'OPERATE' | 'DEVELOP',
-      agent: {
-        systemMemoryId: sub.agent.systemMemoryId,
-        memoryItems: sub.agent.memoryItems.map((item) => ({
-          memoryId: item.memoryId,
-          role: (item as { role?: string | null }).role ?? 'read',
-        })),
-      },
+
+  if (!app || !app.agent || app.agent.deletedAt) return new Map();
+
+  // Cross-org gate: require active AgentOrgGrant when App and Agent live in
+  // different orgs. Same-org installs auto-pass — the Agent owner has implicit
+  // license to deploy it. The active-status predicate is shared across
+  // AgentSubscription + AgentOrgGrant via isLifecycleActive (008 R-2).
+  if (app.organizationId !== app.agent.organizationId) {
+    const grant = await db.agentOrgGrant.findUnique({
+      where: { orgId_agentId: { orgId: app.organizationId, agentId: app.agent.id } },
+    });
+    if (!grant || !isLifecycleActive(grant)) return new Map();
+  }
+
+  return foldAgentIntoAccessMap({
+    systemMemoryId: app.agent.systemMemoryId,
+    memoryItems: app.agent.memoryItems.map((item) => ({
+      memoryId: item.memoryId,
+      role: (item as { role?: string | null }).role ?? 'read',
     })),
-  );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -124,37 +138,62 @@ export async function getMemoryAccess(
 /**
  * Check if a caller has write access to a specific memory.
  *
- * Personal-class memories (FR-016): strict ownership — only Memory.userId
- * can write, no ADMIN/OWNER bypass; App-keyed callers additionally need
- * an active AgentSubscription(user, agent) per FR-019.
+ * Personal-class memories (FR-016 + 008 FR-011): strict ownership — only
+ * Memory.userId can write, no ADMIN/OWNER bypass; App-keyed callers
+ * additionally need (a) Memory.app_id === auth.appId (per-App isolation),
+ * and (b) an active AgentSubscription(user, app.agent_id).
  *
- * Other memory classes: ADMIN/OWNER bypass + AppAgent membership +
- * AgentMemoryItem.role caps as before.
+ * Other memory classes: ADMIN/OWNER bypass + App.agent_id-derived membership +
+ * AgentMemoryItem.role caps.
  */
 export async function canWriteToMemory(
   db: PrismaClient,
   auth: AuthContext,
   memoryId: string,
 ): Promise<boolean> {
-  // Personal-class memories: load the memory first to check the class
-  // and the strict ownership invariant before falling back to the
-  // standard ADMIN/OWNER bypass.
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
-    select: { class: true, userId: true, userMemoryOfAgentId: true },
+    select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true },
   });
 
   if (memory?.class === 'personal') {
-    // Strict ownership — no role bypass allowed
     if (auth.userId !== memory.userId) return false;
-    // App-keyed callers additionally need an active AgentSubscription
     if (auth.appId) {
-      if (!memory.userMemoryOfAgentId || !memory.userId) return false;
+      // Per-App isolation: a session through App A cannot write the personal
+      // memory at (B.id, user.id) for some other App B of the same Agent.
+      // Existing rows that pre-date the migration may have appId = NULL —
+      // accept them ONLY when the calling App's agentId matches the memory's
+      // userMemoryOfAgentId. Without that guard, an App for Agent Y could
+      // satisfy the AgentSubscription check (using its own agentId) and then
+      // touch a legacy memory that was actually created for Agent X.
+      const app = await db.app.findUnique({
+        where: { id: auth.appId },
+        select: { agentId: true },
+      });
+      if (memory.appId !== null) {
+        if (memory.appId !== auth.appId) return false;
+      } else {
+        // Legacy row: require the calling App's agent to match the memory's
+        // pre-008 agent pivot. If either side is null we can't prove the
+        // match, so deny — backfilling app_id (or upgrading to a strict
+        // isolation pass) is the path forward.
+        if (
+          !app?.agentId ||
+          !memory.userMemoryOfAgentId ||
+          app.agentId !== memory.userMemoryOfAgentId
+        ) {
+          return false;
+        }
+      }
+
+      // Resolve the Agent for the AgentSubscription check via App.agentId.
+      const agentId = app?.agentId ?? memory.userMemoryOfAgentId;
+      if (!agentId || !memory.userId) return false;
       const sub = await db.agentSubscription.findUnique({
         where: {
           userId_agentId: {
             userId: memory.userId,
-            agentId: memory.userMemoryOfAgentId,
+            agentId,
           },
         },
       });
@@ -163,7 +202,7 @@ export async function canWriteToMemory(
     return true;
   }
 
-  // Non-personal memory: standard checks
+  // Non-personal memory: standard checks.
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
   if (!auth.appId) return false;
 
@@ -174,8 +213,9 @@ export async function canWriteToMemory(
 /**
  * Check if a caller has read access to a specific memory.
  *
- * Personal-class memories enforce strict ownership (FR-016) — even
- * ADMIN/OWNER cannot read another user's personal memory.
+ * Personal-class memories enforce strict ownership (FR-016) — even ADMIN/OWNER
+ * cannot read another user's personal memory. The 008 per-App isolation
+ * (Memory.app_id === auth.appId) also applies.
  */
 export async function canReadMemory(
   db: PrismaClient,
@@ -184,19 +224,38 @@ export async function canReadMemory(
 ): Promise<boolean> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
-    select: { class: true, userId: true, userMemoryOfAgentId: true },
+    select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true },
   });
   if (!memory) return false;
 
   if (memory.class === 'personal') {
     if (auth.userId !== memory.userId) return false;
     if (auth.appId) {
-      if (!memory.userMemoryOfAgentId || !memory.userId) return false;
+      // Same legacy guard as canWriteToMemory: when memory.appId is NULL,
+      // require the calling App's agentId to match memory.userMemoryOfAgentId.
+      const app = await db.app.findUnique({
+        where: { id: auth.appId },
+        select: { agentId: true },
+      });
+      if (memory.appId !== null) {
+        if (memory.appId !== auth.appId) return false;
+      } else {
+        if (
+          !app?.agentId ||
+          !memory.userMemoryOfAgentId ||
+          app.agentId !== memory.userMemoryOfAgentId
+        ) {
+          return false;
+        }
+      }
+
+      const agentId = app?.agentId ?? memory.userMemoryOfAgentId;
+      if (!agentId || !memory.userId) return false;
       const sub = await db.agentSubscription.findUnique({
         where: {
           userId_agentId: {
             userId: memory.userId,
-            agentId: memory.userMemoryOfAgentId,
+            agentId,
           },
         },
       });
@@ -205,7 +264,7 @@ export async function canReadMemory(
     return true;
   }
 
-  // Non-personal memory: ADMIN/OWNER bypass + access map check
+  // Non-personal memory: ADMIN/OWNER bypass + access map check.
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
   if (!auth.appId) return false;
   const access = await getMemoryAccess(db, auth);

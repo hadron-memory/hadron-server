@@ -185,19 +185,18 @@ describe('addAgentToApp accepts AppAgent fields', () => {
       {
         appId: created.id,
         agentId,
-        role: 'DEVELOP',
         trainingMode: true,
       },
       adminCtx(),
     );
-    const link = await db.appAgent.findUniqueOrThrow({
-      where: { appId_agentId: { appId: created.id, agentId } },
-    });
-    expect(link.role).toBe('DEVELOP');
-    expect(link.trainingMode).toBe(true);
+    // 008: AppAgent join is gone — App.agent_id is the FK. The legacy role
+    // arg is gone too (T034) — system memory is universally read-only.
+    const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
+    expect(updated.agentId).toBe(agentId);
+    expect(updated.trainingMode).toBe(true);
   });
 
-  it('defaults to OPERATE / READ_ONLY / false when args omitted', async () => {
+  it('defaults trainingMode to false when args omitted', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       { orgId, name: 'Default Membership' },
@@ -208,14 +207,12 @@ describe('addAgentToApp accepts AppAgent fields', () => {
       { appId: created.id, agentId },
       adminCtx(),
     );
-    const link = await db.appAgent.findUniqueOrThrow({
-      where: { appId_agentId: { appId: created.id, agentId } },
-    });
-    expect(link.role).toBe('OPERATE');
-    expect(link.trainingMode).toBe(false);
+    const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
+    expect(updated.agentId).toBe(agentId);
+    expect(updated.trainingMode).toBe(false);
   });
 
-  it('upserts: re-running with new role updates the row', async () => {
+  it('re-running addAgentToApp updates App.agent_id idempotently', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       { orgId, name: 'Upsert App' },
@@ -228,13 +225,12 @@ describe('addAgentToApp accepts AppAgent fields', () => {
     );
     await resolvers.Mutation.addAgentToApp(
       {},
-      { appId: created.id, agentId, role: 'DEVELOP' },
+      { appId: created.id, agentId, trainingMode: true },
       adminCtx(),
     );
-    const link = await db.appAgent.findUniqueOrThrow({
-      where: { appId_agentId: { appId: created.id, agentId } },
-    });
-    expect(link.role).toBe('DEVELOP');
+    const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
+    expect(updated.agentId).toBe(agentId);
+    expect(updated.trainingMode).toBe(true);
   });
 });
 
@@ -259,25 +255,39 @@ describe('App field resolvers', () => {
     expect(resolvers.App.hasAiApiKey(withKey)).toBe(true);
   });
 
-  it('agentSubscriptions returns AppAgent rows', async () => {
+  it('App.agent resolver returns the linked Agent (008 — replaces agentSubscriptions)', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, name: 'For Subs' },
+      { orgId, name: 'For Agent', agentId },
       adminCtx(),
     );
-    await resolvers.Mutation.addAgentToApp(
+    const agent = await resolvers.App.agent(
+      { id: created.id, agentId: created.agentId },
       {},
-      { appId: created.id, agentId, role: 'OPERATE' },
       adminCtx(),
     );
-    const subs = (await resolvers.App.agentSubscriptions(
-      { id: created.id },
+    expect(agent).not.toBeNull();
+    expect((agent as { id: string }).id).toBe(agentId);
+  });
+
+  it('App.members returns the AppMember rows for the App', async () => {
+    const created = await resolvers.Mutation.createApp(
       {},
+      { orgId, name: 'For Members', agentId },
       adminCtx(),
-    )) as Array<{ role: string; agentId: string }>;
-    expect(subs.length).toBe(1);
-    expect(subs[0].role).toBe('OPERATE');
-    expect(subs[0].agentId).toBe(agentId);
+    );
+    await resolvers.Mutation.ensureAppMember(
+      {},
+      { appId: created.id, userId: user.id, role: 'owner' },
+      adminCtx(),
+    );
+    const members = await resolvers.App.members({ id: created.id }, {}, adminCtx());
+    expect(members.length).toBe(1);
+    expect((members as Array<{ userId: string; role: string }>)[0].userId).toBe(user.id);
+    expect((members as Array<{ userId: string; role: string }>)[0].role).toBe('owner');
+
+    const count = await resolvers.App.memberCount({ id: created.id }, {}, adminCtx());
+    expect(count).toBe(1);
   });
 });
 
@@ -335,17 +345,15 @@ describe('myApps', () => {
 // ---------------------------------------------------------------------------
 
 describe('appNodes', () => {
-  it('returns nodes from memories accessible via AppAgent membership', async () => {
+  it('returns nodes from memories accessible via App.agent_id', async () => {
     const { app } = await createDbAppWithKey(db, 'app-nodes', orgId);
-    await db.appAgent.create({
-      data: { appId: app.id, agentId, role: 'OPERATE' },
-    });
+    await db.app.update({ where: { id: app.id }, data: { agentId } });
     const nodes = await resolvers.Query.appNodes({}, { appId: app.id }, adminCtx());
     expect(nodes.length).toBe(1);
     expect(nodes[0].loc).toBe('org.test.node');
   });
 
-  it('returns empty when the App has no AppAgent rows', async () => {
+  it('returns empty when the App is orphan (agent_id IS NULL)', async () => {
     const { app } = await createDbAppWithKey(db, 'app-no-membership', orgId);
     const nodes = await resolvers.Query.appNodes({}, { appId: app.id }, adminCtx());
     expect(nodes).toEqual([]);
@@ -530,10 +538,8 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
       { appId: appStored.urn, agentId: agentStored.urn },
       adminCtx(),
     );
-    const link = await db.appAgent.findUniqueOrThrow({
-      where: { appId_agentId: { appId: created.id, agentId } },
-    });
-    expect(link.role).toBe('OPERATE');
+    const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
+    expect(updated.agentId).toBe(agentId);
   });
 
   it('removeAgentFromApp accepts URNs for both appId and agentId', async () => {
@@ -560,10 +566,8 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
       { appId: appStored.urn, agentId: agentStored.urn },
       adminCtx(),
     );
-    const link = await db.appAgent.findUnique({
-      where: { appId_agentId: { appId: created.id, agentId } },
-    });
-    expect(link).toBeNull();
+    const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
+    expect(updated.agentId).toBeNull();
   });
 
   it('createAppKey accepts a URN as appId', async () => {

@@ -88,58 +88,10 @@ describe('Phase 1 — App schema absorbs Station fields', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// T005: AppAgent gains role + subscriptionType + trainingMode with defaults
-// ---------------------------------------------------------------------------
-
-describe('Phase 1 — AppAgent defaults', () => {
-  it('defaults role=OPERATE per Constitution Invariant #6', async () => {
-    const app = await db.app.create({
-      data: { id: generateId(), name: 'a', urn: 'phase1-org:a', organizationId: orgId },
-    });
-    const agent = await db.agent.create({
-      data: {
-        id: generateId(),
-        name: 'agent-a',
-        urn: 'phase1-org:agent-a',
-        organizationId: orgId,
-      },
-    });
-
-    const appAgent = await db.appAgent.create({
-      data: { appId: app.id, agentId: agent.id },
-    });
-
-    expect(appAgent.role).toBe('OPERATE');
-    expect(appAgent.trainingMode).toBe(false);
-  });
-
-  it('persists role=DEVELOP when set explicitly', async () => {
-    const app = await db.app.create({
-      data: { id: generateId(), name: 'a', urn: 'phase1-org:a', organizationId: orgId },
-    });
-    const agent = await db.agent.create({
-      data: {
-        id: generateId(),
-        name: 'agent-b',
-        urn: 'phase1-org:agent-b',
-        organizationId: orgId,
-      },
-    });
-
-    const appAgent = await db.appAgent.create({
-      data: {
-        appId: app.id,
-        agentId: agent.id,
-        role: 'DEVELOP',
-        trainingMode: true,
-      },
-    });
-
-    expect(appAgent.role).toBe('DEVELOP');
-    expect(appAgent.trainingMode).toBe(true);
-  });
-});
+// 008-agent-installation: the AppAgent entity is dropped (FR-007). The
+// pre-008 "AppAgent defaults" tests (T005 from spec 003) targeted a join
+// table that no longer exists; the App→Agent direct FK (App.agent_id) is
+// covered by the addAgentToApp resolver tests in resolvers.appSurface.test.ts.
 
 // ---------------------------------------------------------------------------
 // T006: AppLogEntry exists, links to its App, cascades on App delete

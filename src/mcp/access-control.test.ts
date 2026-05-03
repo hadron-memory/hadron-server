@@ -1,7 +1,13 @@
 /**
  * Access-control tests. The only principal kind this layer resolves is
- * App-keyed (via AppAgent membership); ADMIN/OWNER roles bypass
- * subscription checks in the dispatch helpers.
+ * App-keyed (via App.agent_id direct FK after 008-agent-installation);
+ * ADMIN/OWNER roles bypass subscription checks in the dispatch helpers.
+ *
+ * 008 changes from 005:
+ *   - AppAgent.role (OPERATE | DEVELOP) is gone. System memory is universally
+ *     READ_ONLY from any App context (DEVELOP-from-App is dropped per R-10).
+ *   - App→Agent is a direct FK on App.agent_id; the AppAgent join is removed.
+ *   - Per-attached-memory write caps remain governed by AgentMemoryItem.role.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -70,35 +76,35 @@ beforeEach(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// getAppMemoryAccess (US2 — the new path)
+// getAppMemoryAccess — App-keyed via App.agent_id direct FK
 // ---------------------------------------------------------------------------
 
 describe('getAppMemoryAccess (App-key principal)', () => {
-  it('returns the agent system memory + memoryItems for a READ_ONLY AppAgent', async () => {
+  it('returns the agent system memory + memoryItems (system always READ_ONLY)', async () => {
     const { app } = await createDbAppWithKey(db, 'app-ro', orgId);
-    await createDbAppAgent(db, app.id, agentId, {  });
+    await createDbAppAgent(db, app.id, agentId);
 
     const access = await getAppMemoryAccess(db, app.id);
 
     expect(access.size).toBe(2);
+    // 008: system memory is universally READ_ONLY from an App context.
     expect(access.get(systemMemoryId)).toBe('READ_ONLY');
     expect(access.get(knowledgeMemoryId)).toBe('READ_ONLY');
   });
 
-  it('grants READ_WRITE on the system memory when AppAgent.role=DEVELOP', async () => {
+  it('keeps system memory READ_ONLY regardless of legacy DEVELOP arg', async () => {
+    // 008: the legacy `role: 'DEVELOP'` arg on createDbAppAgent is a no-op;
+    // system memory is read-only from any App.
     const { app } = await createDbAppWithKey(db, 'app-rw', orgId);
     await createDbAppAgent(db, app.id, agentId, { role: 'DEVELOP' });
 
     const access = await getAppMemoryAccess(db, app.id);
 
-    expect(access.get(systemMemoryId)).toBe('READ_WRITE');
-    // The knowledge memory's agentMemoryItem role defaults to 'read'.
-    // Per 005-agent-subscription, AppAgent.role no longer caps per-attached-memory
-    // writes; only AgentMemoryItem.role does. Default 'read' → READ_ONLY.
+    expect(access.get(systemMemoryId)).toBe('READ_ONLY');
     expect(access.get(knowledgeMemoryId)).toBe('READ_ONLY');
   });
 
-  it('grants READ_WRITE on a memoryItem when both subscription and item role allow it', async () => {
+  it('grants READ_WRITE on a memoryItem when AgentMemoryItem.role allows it', async () => {
     await cleanDb(db);
     const org = await db.organization.create({
       data: { id: generateId(), name: 'rw-org', urn: 'rw-org' },
@@ -108,14 +114,14 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     const localAgentId = built.agent.id;
     const localKnId = built.knMemory.id;
     const { app } = await createDbAppWithKey(db, 'app-rw', orgId);
-    await createDbAppAgent(db, app.id, localAgentId, {  });
+    await createDbAppAgent(db, app.id, localAgentId);
 
     const access = await getAppMemoryAccess(db, app.id);
 
     expect(access.get(localKnId)).toBe('READ_WRITE');
   });
 
-  it('returns an empty map when the App has no AppAgent rows', async () => {
+  it('returns an empty map when the App is orphan (agent_id IS NULL)', async () => {
     const { app } = await createDbAppWithKey(db, 'app-orphan', orgId);
 
     const access = await getAppMemoryAccess(db, app.id);
@@ -123,13 +129,10 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     expect(access.size).toBe(0);
   });
 
-  it('skips soft-deleted AppAgent rows', async () => {
+  it('returns an empty map when the App\'s linked Agent is soft-deleted', async () => {
     const { app } = await createDbAppWithKey(db, 'app-soft', orgId);
     await createDbAppAgent(db, app.id, agentId);
-    await db.appAgent.update({
-      where: { appId_agentId: { appId: app.id, agentId } },
-      data: { deletedAt: new Date() },
-    });
+    await db.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
 
     const access = await getAppMemoryAccess(db, app.id);
 
@@ -165,18 +168,19 @@ describe('getMemoryAccess (dispatch by principal kind)', () => {
 // ---------------------------------------------------------------------------
 
 describe('canWriteToMemory', () => {
-  it('returns true for an App with role=DEVELOP on the system memory', async () => {
+  it('returns false for an App on the system memory (universally read-only)', async () => {
+    // 008: DEVELOP-from-App is gone. Any App context cannot write system memory.
     const { app } = await createDbAppWithKey(db, 'app-w', orgId);
     await createDbAppAgent(db, app.id, agentId, { role: 'DEVELOP' });
 
     const auth: AuthContext = { appId: app.id, organizationId: orgId };
 
-    expect(await canWriteToMemory(db, auth, systemMemoryId)).toBe(true);
+    expect(await canWriteToMemory(db, auth, systemMemoryId)).toBe(false);
   });
 
-  it('returns false for an App with role=OPERATE on the system memory', async () => {
+  it('returns false for an App on the system memory (no DEVELOP role exists)', async () => {
     const { app } = await createDbAppWithKey(db, 'app-ro', orgId);
-    await createDbAppAgent(db, app.id, agentId, { role: 'OPERATE' });
+    await createDbAppAgent(db, app.id, agentId);
 
     const auth: AuthContext = { appId: app.id, organizationId: orgId };
 
@@ -200,7 +204,7 @@ describe('canWriteToMemory', () => {
 
   it('returns false for a memoryId outside the App\'s subscriptions', async () => {
     const { app } = await createDbAppWithKey(db, 'app-w', orgId);
-    await createDbAppAgent(db, app.id, agentId, { role: 'DEVELOP' });
+    await createDbAppAgent(db, app.id, agentId);
 
     const otherMem = await db.memory.create({
       data: {

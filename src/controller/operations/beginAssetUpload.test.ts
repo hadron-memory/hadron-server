@@ -56,6 +56,8 @@ beforeEach(async () => {
       urn: sharedUrn,
       name: 'Buno App',
       agentTools: ['asset:upload'], // tool enabled by default
+      // 008: App→Agent direct FK; required for personal-memory app_id pivot.
+      agentId: agent.id,
     },
   });
   memory = await db.memory.create({
@@ -290,6 +292,8 @@ describe('beginAssetUploadV2', () => {
         class: 'personal',
         visibility: 'PERSONAL',
         userId: user.id,
+        // 008: chk_memory_class_app_id requires app_id for personal-class.
+        appId: app.id,
       },
     });
   });

@@ -6,19 +6,14 @@
  *     AND revokedAt IS NULL
  *     AND (expiresAt IS NULL OR expiresAt > now())
  *
- * This is the predicate every access check uses; centralizing the helper
- * here ensures consistency and makes the rule trivially testable.
+ * 008-agent-installation generalized this to the shared `isLifecycleActive`
+ * helper (used by both AgentSubscription and the new AgentOrgGrant). This
+ * file's `isActiveAgentSubscription` keeps the named export for callers
+ * that pre-date 008.
  */
 
-type AgentSubscriptionLike = {
-  activatedAt: Date | null;
-  revokedAt: Date | null;
-  expiresAt: Date | null;
-};
+import { isLifecycleActive, type LifecycleLike } from './lifecycle.js';
 
-export function isActiveAgentSubscription(sub: AgentSubscriptionLike, now: Date = new Date()): boolean {
-  if (sub.activatedAt === null) return false;
-  if (sub.revokedAt !== null) return false;
-  if (sub.expiresAt !== null && sub.expiresAt <= now) return false;
-  return true;
+export function isActiveAgentSubscription(sub: LifecycleLike, now: Date = new Date()): boolean {
+  return isLifecycleActive(sub, now);
 }
