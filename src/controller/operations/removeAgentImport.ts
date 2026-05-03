@@ -11,25 +11,33 @@
  * parent Agent's owning org).
  */
 
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 
 export async function removeAgentImport(
   db: PrismaClient,
   parentAgentId: string,
   importedAgentId: string,
 ): Promise<void> {
-  await db.agentImport
-    .delete({
+  try {
+    await db.agentImport.delete({
       where: {
         parentAgentId_importedAgentId: {
           parentAgentId,
           importedAgentId,
         },
       },
-    })
-    .catch(() => {
-      // Idempotent: missing row → no-op. Other errors (FK violations from
-      // the AgentOrgGrant ON DELETE RESTRICT) are not expected here since
-      // we're deleting the edge, not the grant.
     });
+  } catch (e: unknown) {
+    // Idempotent: missing row (P2025) → no-op. Any other error (DB
+    // connectivity, unexpected constraint violation, permission issue)
+    // surfaces so the caller knows the delete didn't actually happen.
+    if (
+      typeof e === 'object' &&
+      e !== null &&
+      (e as Prisma.PrismaClientKnownRequestError).code === 'P2025'
+    ) {
+      return;
+    }
+    throw e;
+  }
 }

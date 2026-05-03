@@ -22,6 +22,7 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
+import { isLifecycleActive } from '../lib/lifecycle.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -104,17 +105,13 @@ export async function getAppMemoryAccess(
 
   // Cross-org gate: require active AgentOrgGrant when App and Agent live in
   // different orgs. Same-org installs auto-pass — the Agent owner has implicit
-  // license to deploy it.
+  // license to deploy it. The active-status predicate is shared across
+  // AgentSubscription + AgentOrgGrant via isLifecycleActive (008 R-2).
   if (app.organizationId !== app.agent.organizationId) {
     const grant = await db.agentOrgGrant.findUnique({
       where: { orgId_agentId: { orgId: app.organizationId, agentId: app.agent.id } },
     });
-    const active =
-      !!grant &&
-      grant.activatedAt !== null &&
-      grant.revokedAt === null &&
-      (grant.expiresAt === null || grant.expiresAt > new Date());
-    if (!active) return new Map();
+    if (!grant || !isLifecycleActive(grant)) return new Map();
   }
 
   return foldAgentIntoAccessMap({
@@ -164,15 +161,32 @@ export async function canWriteToMemory(
     if (auth.appId) {
       // Per-App isolation: a session through App A cannot write the personal
       // memory at (B.id, user.id) for some other App B of the same Agent.
-      // Existing rows that pre-date the migration may have appId = NULL — accept
-      // them when the agent matches via App.agentId for backward compat.
-      if (memory.appId !== null && memory.appId !== auth.appId) return false;
-
-      // Resolve the Agent for the AgentSubscription check via App.agentId.
+      // Existing rows that pre-date the migration may have appId = NULL —
+      // accept them ONLY when the calling App's agentId matches the memory's
+      // userMemoryOfAgentId. Without that guard, an App for Agent Y could
+      // satisfy the AgentSubscription check (using its own agentId) and then
+      // touch a legacy memory that was actually created for Agent X.
       const app = await db.app.findUnique({
         where: { id: auth.appId },
         select: { agentId: true },
       });
+      if (memory.appId !== null) {
+        if (memory.appId !== auth.appId) return false;
+      } else {
+        // Legacy row: require the calling App's agent to match the memory's
+        // pre-008 agent pivot. If either side is null we can't prove the
+        // match, so deny — backfilling app_id (or upgrading to a strict
+        // isolation pass) is the path forward.
+        if (
+          !app?.agentId ||
+          !memory.userMemoryOfAgentId ||
+          app.agentId !== memory.userMemoryOfAgentId
+        ) {
+          return false;
+        }
+      }
+
+      // Resolve the Agent for the AgentSubscription check via App.agentId.
       const agentId = app?.agentId ?? memory.userMemoryOfAgentId;
       if (!agentId || !memory.userId) return false;
       const sub = await db.agentSubscription.findUnique({
@@ -217,12 +231,24 @@ export async function canReadMemory(
   if (memory.class === 'personal') {
     if (auth.userId !== memory.userId) return false;
     if (auth.appId) {
-      if (memory.appId !== null && memory.appId !== auth.appId) return false;
-
+      // Same legacy guard as canWriteToMemory: when memory.appId is NULL,
+      // require the calling App's agentId to match memory.userMemoryOfAgentId.
       const app = await db.app.findUnique({
         where: { id: auth.appId },
         select: { agentId: true },
       });
+      if (memory.appId !== null) {
+        if (memory.appId !== auth.appId) return false;
+      } else {
+        if (
+          !app?.agentId ||
+          !memory.userMemoryOfAgentId ||
+          app.agentId !== memory.userMemoryOfAgentId
+        ) {
+          return false;
+        }
+      }
+
       const agentId = app?.agentId ?? memory.userMemoryOfAgentId;
       if (!agentId || !memory.userId) return false;
       const sub = await db.agentSubscription.findUnique({

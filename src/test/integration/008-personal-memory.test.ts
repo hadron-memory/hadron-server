@@ -183,6 +183,95 @@ describe('T049: access-control gate 3 enforces Memory.app_id === auth.appId', ()
     // Even though Bob is a member of appAtX with an AgentSubscription, the
     // strict-ownership gate denies cross-user reads of personal memory.
   });
+
+  it('legacy memory with app_id=NULL: a session through an App for a different agent is denied', async () => {
+    // Pre-008 row that survived migration without a Session attribution
+    // (i.e., the migration's R-3 fallback would have downgraded it; for the
+    // test we simulate the residual case where some legacy row still has
+    // class='personal' and app_id=NULL). The chk_memory_class_app_id check
+    // forbids that combination, so we drop the constraint just for this row.
+    await db.$executeRawUnsafe(`ALTER TABLE memories DROP CONSTRAINT IF EXISTS chk_memory_class_app_id`);
+    try {
+      const otherAgent = await db.agent.create({
+        data: {
+          id: generateId(),
+          organizationId: orgX.id,
+          urn: `${orgX.urn}:other-agent`,
+          name: 'other-agent',
+        },
+      });
+      // Mike has a subscription to BOTH agents — without the agent-match
+      // guard, this would be the attack vector: a session through the
+      // other-agent App could touch a legacy memory created for mealplan.
+      await db.agentSubscription.create({
+        data: {
+          userId: mike.id,
+          agentId: otherAgent.id,
+          activatedAt: new Date(),
+        },
+      });
+      const otherApp = await db.app.create({
+        data: {
+          id: generateId(),
+          organizationId: orgX.id,
+          urn: `${orgX.urn}:other-app`,
+          name: 'Other App',
+          agentId: otherAgent.id,
+        },
+      });
+      const legacyMem = await db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: orgX.id,
+          urn: `${orgX.urn}:legacy-mike`,
+          name: 'Legacy Mike memory (Mealplan)',
+          class: 'personal',
+          visibility: 'PERSONAL',
+          userId: mike.id,
+          userMemoryOfAgentId: mealplan.id,
+          appId: null, // legacy
+        },
+      });
+
+      // The attack: Mike's session through Other App tries to read his
+      // legacy-Mealplan memory. With the agent-match guard, this is denied
+      // because otherApp.agentId !== legacyMem.userMemoryOfAgentId.
+      const attackCtx: AuthContext = {
+        appId: otherApp.id,
+        userId: mike.id,
+        organizationId: orgX.id,
+      };
+      expect(await canReadMemory(db, attackCtx, legacyMem.id)).toBe(false);
+      expect(await canWriteToMemory(db, attackCtx, legacyMem.id)).toBe(false);
+
+      // The legitimate path still works: Mike's session through appAtX
+      // (whose agentId IS mealplan) can read the legacy memory.
+      const goodCtx: AuthContext = {
+        appId: appAtX.id,
+        userId: mike.id,
+        organizationId: orgX.id,
+      };
+      expect(await canReadMemory(db, goodCtx, legacyMem.id)).toBe(true);
+    } finally {
+      // Clean any class='personal' app_id=NULL rows we created (the
+      // legacy-shape rows would violate the constraint we're about to
+      // re-add). Downgrade them to knowledge with the same shape the
+      // migration's step 4b applies.
+      await db.$executeRawUnsafe(`
+        UPDATE memories
+           SET class = 'knowledge', user_id = NULL, visibility = 'PRIVATE'
+         WHERE class = 'personal' AND app_id IS NULL
+      `);
+      await db.$executeRawUnsafe(`
+        ALTER TABLE memories
+          ADD CONSTRAINT chk_memory_class_app_id
+          CHECK (
+            (class IN ('app', 'personal') AND app_id IS NOT NULL)
+            OR (class IN ('system', 'knowledge') AND app_id IS NULL)
+          )
+      `);
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

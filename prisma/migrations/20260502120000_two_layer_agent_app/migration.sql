@@ -293,8 +293,11 @@ UPDATE "memories" m
  WHERE m."class" = 'personal'
    AND m."app_id" IS NULL;
 
--- 4b. Personal-class memories with no Session attribution: downgrade to 'knowledge'
--- (R-3 fallback). Operator can audit via the NOTICE.
+-- 4b. Personal-class memories with no Session attribution: downgrade to
+-- 'knowledge' (R-3 fallback). The downgrade clears `user_id` and resets
+-- `visibility` to PRIVATE — a knowledge-class memory can't carry a
+-- per-user owner per the chk_personal_visibility_user invariant
+-- (PERSONAL ⇔ user_id IS NOT NULL). Operator can audit via the NOTICE.
 DO $$
 DECLARE
   orphan_count INTEGER;
@@ -307,7 +310,9 @@ BEGIN
     RAISE NOTICE 'Downgrading % personal-class memories with no Session attribution to class=knowledge (no App pivot found)', orphan_count;
 
     UPDATE "memories"
-       SET "class" = 'knowledge'
+       SET "class"      = 'knowledge',
+           "user_id"    = NULL,
+           "visibility" = 'PRIVATE'
      WHERE "class" = 'personal' AND "app_id" IS NULL;
   END IF;
 END $$;
