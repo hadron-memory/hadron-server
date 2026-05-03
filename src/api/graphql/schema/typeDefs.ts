@@ -1240,9 +1240,11 @@ export const typeDefs = `#graphql
       orgId: ID!
       """
       The Agent this App deploys. Required as of 009-install-agent-flow:
-      every App must reference an Agent. v1 portal flows only install
-      Agents owned by the caller org; cross-org install via an
-      AgentOrgGrant is reserved for a later spec.
+      every App must reference an Agent. The server itself accepts any
+      Agent the caller can resolve and auto-provisions an AgentOrgGrant
+      (008 behavior preserved); the portal's install flow restricts the
+      affordance to Agents owned by the caller org. A hard server-side
+      cross-org gate is reserved for the marketplace spec.
       """
       agentId: ID!
       name: String!

@@ -4712,21 +4712,28 @@ export const resolvers = {
       }
 
       // 009-install-agent-flow T015: the installer is auto-added as an
-      // AppMember with role 'owner'. ctx.userId is guaranteed by the upstream
-      // requireOrgRole check (which throws Forbidden if userId is missing).
-      // Upsert keeps the call idempotent in the unlikely repeat-invocation case.
-      await ctx.db.appMember.upsert({
-        where: {
-          appId_userId: { appId: createdApp.id, userId: ctx.userId! },
-        },
-        update: {},
-        create: {
-          appId: createdApp.id,
-          userId: ctx.userId!,
-          role: 'owner',
-          createdBy: ctx.userId!,
-        },
+      // AppMember with role 'owner' when the Agent's installationPolicy
+      // permits it. Routed through ensureAppMember so the memberRoles +
+      // maxMembers invariants from 008 R-7 are honored (a raw upsert would
+      // bypass them — see hadron-server#98 review).
+      //
+      // Some Agents customize `memberRoles` without 'owner' (e.g.,
+      // ['principal', 'guide']); in that case the install still succeeds
+      // but no auto-membership is granted — the installer can add
+      // themselves explicitly via ensureAppMember with a role from the
+      // policy. ctx.userId is guaranteed by the upstream requireOrgRole
+      // check.
+      const installerAgent = await ctx.db.agent.findUniqueOrThrow({
+        where: { id: resolvedAgentId },
+        select: { installationPolicy: true },
       });
+      const allowedRoles = (installerAgent.installationPolicy as { memberRoles?: string[] })
+        ?.memberRoles ?? ['owner'];
+      if (allowedRoles.includes('owner')) {
+        await ensureAppMember(ctx.db, createdApp.id, ctx.userId!, 'owner', {
+          actorId: ctx.userId,
+        });
+      }
 
       return createdApp;
     },

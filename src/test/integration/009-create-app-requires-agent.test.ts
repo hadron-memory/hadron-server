@@ -14,10 +14,11 @@
  * the server preserves 008's auto-grant behavior. The marketplace spec adds
  * the hard server gate.
  *
- * The "agentId is required" gate at the GraphQL surface (`agentId: ID!`) is
- * enforced by the parser before any resolver runs — covered by typeDef shape
- * + TypeScript's `agentId: string` parameter type. No runtime test added for
- * that case; it's structurally impossible to call the resolver without it.
+ * The "agentId is required" gate is enforced by the GraphQL schema
+ * (`agentId: ID!` — the parser rejects requests missing it before the
+ * resolver runs). Resolver-direct test calls in this file pass agentId in
+ * every case below; coverage of the schema-level rejection lives at the
+ * GraphQL execution layer, not here.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
