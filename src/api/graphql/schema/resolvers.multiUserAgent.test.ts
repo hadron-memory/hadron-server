@@ -99,7 +99,7 @@ describe('App CRUD', () => {
   it('creates an app with defaults', async () => {
     const result = await resolvers.Mutation.createApp(
       {},
-      { orgId: orgA.id, name: 'Wizard App' },
+      { orgId: orgA.id, agentId: agent.id, name: 'Wizard App' },
       adminCtx(),
     );
     expect(result.name).toBe('Wizard App');
@@ -113,7 +113,7 @@ describe('App CRUD', () => {
   it('accepts an explicit URN slug', async () => {
     const result = await resolvers.Mutation.createApp(
       {},
-      { orgId: orgA.id, name: 'Custom', urn: 'my-custom-slug' },
+      { orgId: orgA.id, agentId: agent.id, name: 'Custom', urn: 'my-custom-slug' },
       adminCtx(),
     );
     expect(result.urn).toBe('org-a:my-custom-slug');
@@ -122,13 +122,13 @@ describe('App CRUD', () => {
   it('rejects duplicate URNs', async () => {
     await resolvers.Mutation.createApp(
       {},
-      { orgId: orgA.id, name: 'Dup' },
+      { orgId: orgA.id, agentId: agent.id, name: 'Dup' },
       adminCtx(),
     );
     await expect(
       resolvers.Mutation.createApp(
         {},
-        { orgId: orgA.id, name: 'Dup' },
+        { orgId: orgA.id, agentId: agent.id, name: 'Dup' },
         adminCtx(),
       ),
     ).rejects.toThrow(/already exists/);
@@ -138,7 +138,7 @@ describe('App CRUD', () => {
     await expect(
       resolvers.Mutation.createApp(
         {},
-        { orgId: orgA.id, name: 'Noob App' },
+        { orgId: orgA.id, agentId: agent.id, name: 'Noob App' },
         ctx({ userId: 'random-user' }),
       ),
     ).rejects.toThrow('Forbidden');

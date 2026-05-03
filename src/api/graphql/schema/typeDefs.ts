@@ -1221,19 +1221,33 @@ export const typeDefs = `#graphql
     # App management (org ADMIN) — the unified caller-identity entity per
     # Constitution Invariant #6.
     """
-    Create an App in an organization.
+    Install an Agent into an organization, creating an App that deploys it.
+
+    Auto-provisions an AgentOrgGrant for (orgId, agentId) on first install,
+    and adds the caller as an AppMember with role 'owner'. Required
+    AgentImports cascade automatically; optional imports cascade only when
+    their id appears in installOptional.
+
+    009-install-agent-flow: the cross-org install restriction (FR-009) is
+    enforced at the portal — the Install affordance is hidden for Agents
+    not owned by the calling org. The server still auto-provisions grants
+    on first install (preserved from 008); a hard server-side cross-org
+    gate is reserved for the marketplace spec.
 
     Accepts the entity's ID or URN.
     """
     createApp(
       orgId: ID!
+      """
+      The Agent this App deploys. Required as of 009-install-agent-flow:
+      every App must reference an Agent. The server itself accepts any
+      Agent the caller can resolve and auto-provisions an AgentOrgGrant
+      (008 behavior preserved); the portal's install flow restricts the
+      affordance to Agents owned by the caller org. A hard server-side
+      cross-org gate is reserved for the marketplace spec.
+      """
+      agentId: ID!
       name: String!
-      """
-      008-agent-installation: the Agent this App deploys. Optional only to
-      absorb cutover orphans; new portal flows always pass an agentId. The
-      resolver auto-provisions an AgentOrgGrant when supplied.
-      """
-      agentId: ID
       urn: String
       appType: AppType
       role: AppMembershipRole

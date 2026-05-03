@@ -4544,8 +4544,9 @@ export const resolvers = {
         sessionTimeoutSeconds,
         anonymousTtlDays,
       }: {
-        orgId: string; name: string;
-        agentId?: string;
+        orgId: string;
+        agentId: string;
+        name: string;
         urn?: string;
         appType?: AppType;
         role?: AppMembershipRole;
@@ -4583,17 +4584,16 @@ export const resolvers = {
       if (!slug) throw new Error('App URN slug cannot be empty');
       const appUrn = `${org.urn}:${slug}`;
 
-      // 008-agent-installation: resolve the Agent if the caller supplied one,
-      // and auto-provision an AgentOrgGrant so the cross-org access-control
-      // gate (App.org → Agent) clears for sessions through this App. v1
-      // accepts apps without an agentId for cutover compat with legacy
-      // callers; new portal flows always pass an agentId.
-      let resolvedAgentId: string | null = null;
-      if (agentId) {
-        const ref = await resolveAgentRef(ctx.db, agentId);
-        resolvedAgentId = ref.id;
-        await ensureAgentOrgGrant(ctx.db, resolvedOrgId, resolvedAgentId);
-      }
+      // 009-install-agent-flow: agentId is required (typeDef gate). Resolve
+      // the Agent (resolveAgentRef rejects soft-deleted Agents with
+      // AgentNotFoundError). Per 009 spec FR-009, the cross-org install
+      // restriction is enforced at the *portal* layer (the Install affordance
+      // is hidden for non-owned Agents), not at the server. Server-side
+      // auto-provisioning of AgentOrgGrant is retained from 008 to preserve
+      // the existing 008 test surface and the future marketplace path —
+      // tightening to a hard server gate is reserved for the marketplace spec.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      await ensureAgentOrgGrant(ctx.db, resolvedOrgId, resolvedAgentId);
 
       // Hard-delete a soft-deleted collision so the URN can be reused
       // (same pattern as createAgent/createMemory)
@@ -4636,7 +4636,9 @@ export const resolvers = {
       // App (or reuse an existing App in the same org for the same dep).
       // Required imports always cascade; optional imports cascade only when
       // their id appears in `installOptional`.
-      if (resolvedAgentId) {
+      // 009-install-agent-flow: the outer `if (resolvedAgentId)` guard is
+      // dropped — agentId is always present post-009.
+      {
         const imports = await ctx.db.agentImport.findMany({
           where: { parentAgentId: resolvedAgentId },
           orderBy: { position: 'asc' },
@@ -4707,6 +4709,30 @@ export const resolvers = {
             },
           });
         }
+      }
+
+      // 009-install-agent-flow T015: the installer is auto-added as an
+      // AppMember with role 'owner' when the Agent's installationPolicy
+      // permits it. Routed through ensureAppMember so the memberRoles +
+      // maxMembers invariants from 008 R-7 are honored (a raw upsert would
+      // bypass them — see hadron-server#98 review).
+      //
+      // Some Agents customize `memberRoles` without 'owner' (e.g.,
+      // ['principal', 'guide']); in that case the install still succeeds
+      // but no auto-membership is granted — the installer can add
+      // themselves explicitly via ensureAppMember with a role from the
+      // policy. ctx.userId is guaranteed by the upstream requireOrgRole
+      // check.
+      const installerAgent = await ctx.db.agent.findUniqueOrThrow({
+        where: { id: resolvedAgentId },
+        select: { installationPolicy: true },
+      });
+      const allowedRoles = (installerAgent.installationPolicy as { memberRoles?: string[] })
+        ?.memberRoles ?? ['owner'];
+      if (allowedRoles.includes('owner')) {
+        await ensureAppMember(ctx.db, createdApp.id, ctx.userId!, 'owner', {
+          actorId: ctx.userId,
+        });
       }
 
       return createdApp;
