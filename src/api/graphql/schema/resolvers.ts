@@ -815,7 +815,13 @@ export const resolvers = {
         return agent && !agent.deletedAt ? [agent] : [];
       }
       if (!a.agentId) return [];
-      const agent = await ctx.db.agent.findUnique({ where: { id: a.agentId } });
+      // Match the singular App.agent re-fetch above: AGENT_INCLUDE so
+      // the returned Agent satisfies the non-null `memoryItems` contract
+      // when a downstream caller selects it.
+      const agent = await ctx.db.agent.findUnique({
+        where: { id: a.agentId },
+        include: AGENT_INCLUDE,
+      });
       return agent && !agent.deletedAt ? [agent] : [];
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {

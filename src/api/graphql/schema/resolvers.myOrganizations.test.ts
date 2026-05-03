@@ -78,7 +78,7 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
     });
 
     // Step 2: create an App that links to the agent.
-    const app = await db.app.create({
+    await db.app.create({
       data: {
         id: generateId(),
         organizationId: org.id,
@@ -117,9 +117,6 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
     // (`memoryItems.where: { deletedAt: null, memory.deletedAt: null }`)
     // doesn't drop rows when only the parent Agent is soft-deleted.
     expect(linkedAgent!.memoryItems).toHaveLength(1);
-
-    // Cleanup hint: the test data lifecycle is per-test via cleanDb.
-    void app; // silence unused warning if test body shrinks
   });
 
   it('also returns memoryItems for an App whose Agent is alive — the eager include is the same code path', async () => {
