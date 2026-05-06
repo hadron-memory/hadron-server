@@ -59,6 +59,7 @@ import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.
 import { restoreAsset } from '../../../controller/operations/restoreAsset.js';
 import { GraphQLError } from 'graphql';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
+import { Prisma } from '../../../generated/prisma/index.js';
 import type {
   PrismaClient,
   Role,
@@ -66,7 +67,6 @@ import type {
   AppMembershipRole,
   SubscriptionType,
   MemoryVisibility,
-  Prisma,
 } from '../../../generated/prisma/index.js';
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
@@ -2182,11 +2182,23 @@ export const resolvers = {
         await requireMemoryWriteAccess(ctx, resolvedTargetMemoryId);
       }
       const destMemoryId = resolvedTargetMemoryId ?? resolvedMemoryId;
-      return ctx.db.node.update({
-        where: { loc_memoryId: { loc: from, memoryId: resolvedMemoryId } },
-        data: { loc: to, memoryId: destMemoryId },
-        include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
-      });
+      try {
+        return await ctx.db.node.update({
+          where: { loc_memoryId: { loc: from, memoryId: resolvedMemoryId } },
+          data: { loc: to, memoryId: destMemoryId },
+          include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+        });
+      } catch (e) {
+        // Prisma P2025 = "Record to update not found." Wrap so the resolver
+        // surfaces a typed NODE_NOT_FOUND error instead of leaking the raw
+        // ORM message as INTERNAL_SERVER_ERROR (issue #100).
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+          throw new GraphQLError(`Node "${from}" not found in this memory`, {
+            extensions: { code: 'NODE_NOT_FOUND', loc: from, memoryId: resolvedMemoryId },
+          });
+        }
+        throw e;
+      }
     },
 
     replaceSubtree: async (

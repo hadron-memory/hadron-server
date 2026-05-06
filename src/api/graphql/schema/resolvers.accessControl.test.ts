@@ -339,6 +339,25 @@ describe('Mutation.moveNode access control', () => {
     );
     expect(node.loc).toBe('org-a.repo.movedByUrn');
   });
+
+  // #100: Prisma P2025 must be wrapped as a typed NODE_NOT_FOUND error
+  // rather than leaking as INTERNAL_SERVER_ERROR with raw ORM message.
+  it('throws NODE_NOT_FOUND when source loc does not exist', async () => {
+    await expect(
+      resolvers.Mutation.moveNode(
+        null,
+        { from: 'org-a.repo.doesNotExist', to: 'org-a.repo.target', memoryId: graphA.id },
+        ctx({ appId: appContributor.id }),
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('not found'),
+      extensions: {
+        code: 'NODE_NOT_FOUND',
+        loc: 'org-a.repo.doesNotExist',
+        memoryId: graphA.id,
+      },
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

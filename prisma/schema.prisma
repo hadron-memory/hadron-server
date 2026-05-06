@@ -646,8 +646,6 @@ model ServerLogEntry {
   createdBy String?   @map("created_by")
   updatedAt DateTime? @map("updated_at")
   updatedBy String?   @map("updated_by")
-  deletedAt DateTime? @map("deleted_at")
-  deletedBy String?   @map("deleted_by")
 
   server HadronServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
@@ -668,8 +666,6 @@ model MemoryLogEntry {
   createdBy String?            @map("created_by")
   updatedAt DateTime?          @map("updated_at")
   updatedBy String?            @map("updated_by")
-  deletedAt DateTime?          @map("deleted_at")
-  deletedBy String?            @map("deleted_by")
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
