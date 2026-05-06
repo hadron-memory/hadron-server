@@ -29,7 +29,7 @@ import {
   getMemoryEncryptionInfo,
   type MemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
-import { parseUrnInput, validateUrnType } from '../../../lib/urn.js';
+import { parseUrnInput, validateUrnType, formatUrn } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
 import {
   validateEdgeCondition,
@@ -3995,6 +3995,14 @@ export const resolvers = {
               const agentBag: Record<string, unknown> = {
                 config: (agentConfigNode?.data as Record<string, unknown> | null) ?? {},
               };
+              // Resolve the system memory's slug-path URN once so error-side
+              // sourceNodeUrn composition stays canonical (urn:node:<mem>:<loc>)
+              // instead of the legacy urn:memory:<PK>:<loc> form (issue #99).
+              const sysMem = await ctx.db.memory.findUnique({
+                where: { id: sysMemId },
+                select: { urn: true },
+              });
+              const sysMemUrn = sysMem?.urn ?? sysMemId;
               // Build the memory cascade for this turn:
               //   Layer A (defaults): agent's system memory — holds
               //     conversation/stage definitions and any agent-wide
@@ -4026,7 +4034,7 @@ export const resolvers = {
                     condition: edge.condition,
                     edge: {
                       id: edge.id,
-                      sourceNodeUrn: `urn:memory:${sysMemId}:${currentStageLoc}`,
+                      sourceNodeUrn: formatUrn('node', `${sysMemUrn}:${currentStageLoc}`),
                     },
                     memoryLayers,
                     chat: {
