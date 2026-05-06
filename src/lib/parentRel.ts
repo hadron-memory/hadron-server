@@ -44,18 +44,33 @@ export function validateParentRel(parentRel: string | undefined): void {
     );
   }
 
-  const urnMatch = trimmed.match(/^urn:([a-zA-Z]+):/);
-  if (urnMatch) {
-    const acceptable = ACCEPTED_URN_PREFIXES.some((p) => trimmed.startsWith(p));
-    if (!acceptable) {
-      const type = urnMatch[1];
-      const known = (KNOWN_URN_TYPES as readonly string[]).includes(type);
-      const hint = known
-        ? `'urn:${type}:' addresses an entity, not a subtree path.`
-        : `'urn:${type}:' is not a known URN type.`;
-      throw new InvalidParentRelError(
-        `parentRel cannot start with 'urn:${type}:'. ${hint} Pass a bare rel-path, or use 'urn:memory:' / 'urn:node:'.`,
-      );
+  // Accepted prefixes (urn:memory:, urn:node:, loc:) MUST have a non-empty
+  // value after the prefix — `urn:memory:` alone (or `loc:` alone) would
+  // pass through to downstream parseUrnInput as an empty rel and produce
+  // confusing not-found / malformed-loc behavior. Reject explicitly.
+  for (const prefix of ACCEPTED_URN_PREFIXES) {
+    if (trimmed.startsWith(prefix)) {
+      if (trimmed.length === prefix.length) {
+        throw new InvalidParentRelError(
+          `parentRel cannot be just '${prefix}' with no value after it. Provide the rel-path after the prefix.`,
+        );
+      }
+      return; // accepted prefix with non-empty value
     }
   }
+
+  // Reject other urn:<type>: prefixes (silent coercion is a security risk).
+  const urnMatch = trimmed.match(/^urn:([a-zA-Z]+):/);
+  if (urnMatch) {
+    const type = urnMatch[1];
+    const known = (KNOWN_URN_TYPES as readonly string[]).includes(type);
+    const hint = known
+      ? `'urn:${type}:' addresses an entity, not a subtree path.`
+      : `'urn:${type}:' is not a known URN type.`;
+    throw new InvalidParentRelError(
+      `parentRel cannot start with 'urn:${type}:'. ${hint} Pass a bare rel-path, or use 'urn:memory:' / 'urn:node:'.`,
+    );
+  }
+
+  // Otherwise: bare rel-path, accepted.
 }

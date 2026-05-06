@@ -102,14 +102,18 @@ async function resolveLocFromUrn(
  * can surface a clean error rather than silently coerce — see #100 #3
  * (the memory-scoped read-after-write asymmetry traced to this exact
  * normalization gap).
+ *
+ * Soft-deleted memories are treated as not found, matching the convention
+ * in `resolveMemoryRef` and the entity-ref helpers under `src/lib/entityRef/`.
  */
 async function resolveMemoryByUrn(
   rawUrn: string,
 ): Promise<{ id: string; urn: string } | null> {
-  const parsed = parseUrnInput(rawUrn);
+  const parsed = parseUrnInput(rawUrn.trim());
   if (parsed.type !== 'memory' && parsed.type !== 'unknown') return null;
+  if (!parsed.value) return null;
   return await db.memory.findFirst({
-    where: { urn: parsed.value },
+    where: { urn: parsed.value, deletedAt: null },
     select: { id: true, urn: true },
   });
 }
@@ -204,19 +208,18 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // the right memory; reads do not. Result: writes succeed, reads see
       // an inconsistent / empty scope, which is the read-after-write
       // asymmetry reported in issue #100.
-      const parsed = parseUrnInput(memoryUrn);
+      const parsed = parseUrnInput(memoryUrn.trim());
       if (parsed.type !== 'memory' && parsed.type !== 'unknown') {
         const prefix = parsed.type === 'loc' ? 'loc:' : `urn:${parsed.type}:`;
         return textResult(
           `Expected a memory URN, got '${prefix}'. Pass 'hadronmemory.com:dev' or 'urn:memory:hadronmemory.com:dev'.`,
         );
       }
-      const bareUrn = parsed.value;
 
-      // Resolve eagerly so we fail fast on a typo'd or inaccessible memory
-      // rather than letting downstream lookups silently fall back to the
-      // wrong scope (the original #3 failure mode).
-      const mem = await db.memory.findFirst({ where: { urn: bareUrn }, select: { id: true } });
+      // Resolve via the shared helper — soft-delete filtering, trimming, and
+      // bare-URN normalization all live in one place so every read-side
+      // scoping point behaves consistently.
+      const mem = await resolveMemoryByUrn(memoryUrn);
       if (!mem) {
         return textResult(`Memory not found: '${memoryUrn}'. Use h-list-memories to see what's available.`);
       }
@@ -224,8 +227,10 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult(`Access denied: '${memoryUrn}'.`);
       }
 
-      activeMemoryUrn = bareUrn;
-      return textResult(`Active memory set to: ${formatUrn('memory', bareUrn)}`);
+      // Store the bare URN from the DB row (the canonical form for downstream
+      // findFirst({urn:activeMemoryUrn}) lookups).
+      activeMemoryUrn = mem.urn;
+      return textResult(`Active memory set to: ${formatUrn('memory', mem.urn)}`);
     },
   );
 
@@ -345,6 +350,12 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         throw e;
       }
 
+      // Normalize parentRel once so validation, resolution, and scoping all
+      // operate on the same string. Without this, ' review ' passes
+      // validation (which trims internally) but then resolveLocFromUrn /
+      // findFirst-by-loc see the whitespace-padded version and miss.
+      const trimmedParentRel = parentRel?.trim();
+
       const memoryIds = await getAccessibleMemoryIds(db, auth);
       const where: Record<string, unknown> = {};
       if (memoryIds) where.memoryId = { in: memoryIds };
@@ -352,15 +363,29 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Scope to memory URN if provided (or active memory). #100 #3: route
       // through resolveMemoryByUrn so a canonical 'urn:memory:' input from
       // the caller doesn't silently miss against a bare-stored Memory.urn.
+      // If the caller supplied an explicit memoryUrn that doesn't resolve
+      // (typo, deleted memory, wrong-type prefix), fail fast — the original
+      // bug shape from #100 was a silent fall-back to all-accessible
+      // memories, which masks input mistakes and produces surprising
+      // results.
       const urn = memoryUrn ?? activeMemoryUrn;
       if (urn) {
         const mem = await resolveMemoryByUrn(urn);
-        if (mem) where.memoryId = mem.id;
+        if (!mem) {
+          const source = memoryUrn ? 'memoryUrn argument' : 'active memory';
+          const hint = memoryUrn
+            ? 'Use h-list-memories to see what is available.'
+            : 'Use h-set-active-memory to update the active memory.';
+          return textResult(
+            `Memory not found or invalid: '${urn}' (from ${source}). ${hint}`,
+          );
+        }
+        where.memoryId = mem.id;
       }
 
       // Scope to subtree if parentRel provided
-      if (parentRel) {
-        const resolvedParent = await resolveLocFromUrn(parentRel, memoryIds);
+      if (trimmedParentRel) {
+        const resolvedParent = await resolveLocFromUrn(trimmedParentRel, memoryIds);
         where.loc = { startsWith: resolvedParent.loc };
         if (resolvedParent.memoryId) where.memoryId = resolvedParent.memoryId;
       }
@@ -568,8 +593,11 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         throw e;
       }
 
+      // Normalize parentRel once (matches the h-find-nodes pattern).
+      const trimmedParentRel = parentRel?.trim();
+
       const urn = memoryUrn ?? activeMemoryUrn;
-      if (!urn && !parentRel) {
+      if (!urn && !trimmedParentRel) {
         return textResult('Please provide a memoryUrn or parentRel, or set an active memory with h-set-active-memory.');
       }
 
@@ -579,18 +607,29 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Resolve the parent prefix
       let prefix: string;
       let memoryId: string | undefined;
-      if (parentRel) {
-        const resolved = await resolveLocFromUrn(parentRel, memoryIds);
+      if (trimmedParentRel) {
+        const resolved = await resolveLocFromUrn(trimmedParentRel, memoryIds);
         prefix = resolved.loc;
         memoryId = resolved.memoryId;
       } else {
         prefix = '';
         // Find memory by URN. #100 #3: route through resolveMemoryByUrn so
         // a canonical 'urn:memory:' input doesn't miss against bare-stored
-        // Memory.urn.
+        // Memory.urn. Fail fast on unresolvable input rather than silently
+        // listing across all accessible memories — that fallback was the
+        // original mis-scope symptom from #100.
         if (urn) {
           const mem = await resolveMemoryByUrn(urn);
-          if (mem) memoryId = mem.id;
+          if (!mem) {
+            const source = memoryUrn ? 'memoryUrn argument' : 'active memory';
+            const hint = memoryUrn
+              ? 'Use h-list-memories to see what is available.'
+              : 'Use h-set-active-memory to update the active memory.';
+            return textResult(
+              `Memory not found or invalid: '${urn}' (from ${source}). ${hint}`,
+            );
+          }
+          memoryId = mem.id;
         }
       }
 

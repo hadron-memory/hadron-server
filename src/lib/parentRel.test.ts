@@ -47,4 +47,15 @@ describe('validateParentRel', () => {
   it('rejects unknown urn:<type>: prefixes', () => {
     expect(() => validateParentRel('urn:bogus:foo')).toThrow(/not a known URN type/);
   });
+
+  it('rejects accepted prefixes with empty value (urn:memory:, urn:node:, loc:)', () => {
+    expect(() => validateParentRel('urn:memory:')).toThrow(/no value after it/);
+    expect(() => validateParentRel('urn:node:')).toThrow(/no value after it/);
+    expect(() => validateParentRel('loc:')).toThrow(/no value after it/);
+  });
+
+  it('rejects accepted prefixes with whitespace-only value', () => {
+    expect(() => validateParentRel('urn:memory:   ')).toThrow(InvalidParentRelError);
+    expect(() => validateParentRel('loc:   ')).toThrow(InvalidParentRelError);
+  });
 });
