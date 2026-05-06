@@ -9,6 +9,7 @@ import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import {
+  canReadMemory,
   canWriteToMemory,
   getAccessibleMemoryIds,
   getMemoryAccess,
@@ -94,6 +95,26 @@ async function resolveLocFromUrn(
 }
 
 /**
+ * Look up a Memory by a user-supplied URN that may be canonical
+ * (`urn:memory:foo:bar`) or bare (`foo:bar`). Memory.urn is stored bare,
+ * so a prefixed input must be stripped before the DB lookup. A wrong-type
+ * URN prefix (`urn:agent:`, `urn:org:`, etc.) returns null so the caller
+ * can surface a clean error rather than silently coerce — see #100 #3
+ * (the memory-scoped read-after-write asymmetry traced to this exact
+ * normalization gap).
+ */
+async function resolveMemoryByUrn(
+  rawUrn: string,
+): Promise<{ id: string; urn: string } | null> {
+  const parsed = parseUrnInput(rawUrn);
+  if (parsed.type !== 'memory' && parsed.type !== 'unknown') return null;
+  return await db.memory.findFirst({
+    where: { urn: parsed.value },
+    select: { id: true, urn: true },
+  });
+}
+
+/**
  * Resolve a memoryId that may be either a cuid (primary key) or a memory URN.
  * Returns the actual database ID, or null if not found.
  */
@@ -172,11 +193,39 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'h-set-active-memory',
     'Set the active memory for this session. Subsequent tree tools will use this as the default scope.',
     {
-      memoryUrn: z.string().describe('Memory URN, e.g. hadronmemory.com:dev'),
+      memoryUrn: z.string().describe('Memory URN, e.g. hadronmemory.com:dev or urn:memory:hadronmemory.com:dev'),
     },
     async ({ memoryUrn }) => {
-      activeMemoryUrn = memoryUrn;
-      return textResult(`Active memory set to: ${memoryUrn}`);
+      // #100 #3: Memory.urn is stored bare ('hadronmemory.com:dev'). Storing
+      // the caller-supplied string verbatim makes every downstream
+      // findFirst({urn:activeMemoryUrn}) silently miss when the caller passed
+      // the canonical 'urn:memory:' form. Writes have fallback paths
+      // (single-writable-memory, parent-node lookup) and so still land on
+      // the right memory; reads do not. Result: writes succeed, reads see
+      // an inconsistent / empty scope, which is the read-after-write
+      // asymmetry reported in issue #100.
+      const parsed = parseUrnInput(memoryUrn);
+      if (parsed.type !== 'memory' && parsed.type !== 'unknown') {
+        const prefix = parsed.type === 'loc' ? 'loc:' : `urn:${parsed.type}:`;
+        return textResult(
+          `Expected a memory URN, got '${prefix}'. Pass 'hadronmemory.com:dev' or 'urn:memory:hadronmemory.com:dev'.`,
+        );
+      }
+      const bareUrn = parsed.value;
+
+      // Resolve eagerly so we fail fast on a typo'd or inaccessible memory
+      // rather than letting downstream lookups silently fall back to the
+      // wrong scope (the original #3 failure mode).
+      const mem = await db.memory.findFirst({ where: { urn: bareUrn }, select: { id: true } });
+      if (!mem) {
+        return textResult(`Memory not found: '${memoryUrn}'. Use h-list-memories to see what's available.`);
+      }
+      if (!(await canReadMemory(db, auth, mem.id))) {
+        return textResult(`Access denied: '${memoryUrn}'.`);
+      }
+
+      activeMemoryUrn = bareUrn;
+      return textResult(`Active memory set to: ${formatUrn('memory', bareUrn)}`);
     },
   );
 
@@ -300,10 +349,12 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const where: Record<string, unknown> = {};
       if (memoryIds) where.memoryId = { in: memoryIds };
 
-      // Scope to memory URN if provided (or active memory)
+      // Scope to memory URN if provided (or active memory). #100 #3: route
+      // through resolveMemoryByUrn so a canonical 'urn:memory:' input from
+      // the caller doesn't silently miss against a bare-stored Memory.urn.
       const urn = memoryUrn ?? activeMemoryUrn;
       if (urn) {
-        const mem = await db.memory.findFirst({ where: { urn }, select: { id: true } });
+        const mem = await resolveMemoryByUrn(urn);
         if (mem) where.memoryId = mem.id;
       }
 
@@ -534,9 +585,11 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         memoryId = resolved.memoryId;
       } else {
         prefix = '';
-        // Find memory by URN
+        // Find memory by URN. #100 #3: route through resolveMemoryByUrn so
+        // a canonical 'urn:memory:' input doesn't miss against bare-stored
+        // Memory.urn.
         if (urn) {
-          const mem = await db.memory.findFirst({ where: { urn }, select: { id: true } });
+          const mem = await resolveMemoryByUrn(urn);
           if (mem) memoryId = mem.id;
         }
       }
