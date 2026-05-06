@@ -31,7 +31,7 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, validateUrnType, formatUrn } from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
-import { NodeLocConflictError } from '../../../lib/entityRef/errors.js';
+import { NodeLocConflictError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { compileTemplate } from '../../../lib/template.js';
 import {
   validateEdgeCondition,
@@ -52,6 +52,7 @@ import { listMemoryAssets } from '../../../controller/operations/listMemoryAsset
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
@@ -1981,23 +1982,37 @@ export const resolvers = {
 
       let finalNode = node;
       if (edges !== undefined) {
+        // Per spec 007, `targetId` accepts ID, URN, full memory-prefixed
+        // loc, or short loc. Resolve every ref BEFORE mutating any
+        // edge rows so that an unresolvable target fails the whole
+        // mutation cleanly — a partial deleteMany + half-applied
+        // edges would be hard to recover from. Issue #105: previously
+        // the resolver fell through to `pending_edges` (no FK) on any
+        // ref it could not load by id, producing silent-success calls
+        // with no real edge written.
+        const resolvedEdges: Array<{ targetNodeId: string; label: string | null }> = [];
+        for (const e of edges) {
+          try {
+            const { id: targetNodeId } = await resolveNodeRef(ctx.db, e.targetId, input.memoryId);
+            resolvedEdges.push({ targetNodeId, label: e.label ?? null });
+          } catch (err) {
+            if (err instanceof NodeNotFoundError) {
+              throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
+                extensions: { code: err.name, ref: err.ref },
+              });
+            }
+            throw err;
+          }
+        }
+
         await ctx.db.edge.deleteMany({ where: { sourceId: node.id } });
         await ctx.db.pendingEdge.deleteMany({ where: { sourceId: node.id } });
-        for (const e of edges) {
-          const target = await ctx.db.node.findUnique({ where: { id: e.targetId } });
-          if (target) {
-            await ctx.db.edge.upsert({
-              where: { sourceId_targetId_label: { sourceId: node.id, targetId: target.id, label: e.label ?? '' } },
-              create: { sourceId: node.id, targetId: target.id, label: e.label ?? '', createdBy },
-              update: {},
-            });
-          } else {
-            await ctx.db.pendingEdge.upsert({
-              where: { sourceId_targetId: { sourceId: node.id, targetId: e.targetId } },
-              create: { sourceId: node.id, targetId: e.targetId, label: e.label ?? null, createdBy },
-              update: { label: e.label ?? null },
-            });
-          }
+        for (const e of resolvedEdges) {
+          await ctx.db.edge.upsert({
+            where: { sourceId_targetId_label: { sourceId: node.id, targetId: e.targetNodeId, label: e.label ?? '' } },
+            create: { sourceId: node.id, targetId: e.targetNodeId, label: e.label ?? '', createdBy },
+            update: {},
+          });
         }
         finalNode = (await ctx.db.node.findUnique({
           where: { id: node.id },
