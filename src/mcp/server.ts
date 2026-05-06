@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import { parseUrnInput, formatUrn } from '../lib/urn.js';
+import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
@@ -193,6 +194,13 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     async ({ parentRel, name, description, tags }) => {
       const content = description ?? `Section: ${name}`;
 
+      try {
+        validateParentRel(parentRel);
+      } catch (e) {
+        if (e instanceof InvalidParentRelError) return textResult(e.message);
+        throw e;
+      }
+
       // Resolve parent: strip URN prefixes, find memory
       const memoryIds = await getAccessibleMemoryIds(db, auth);
       const resolved = parentRel ? await resolveLocFromUrn(parentRel, memoryIds) : { loc: '', memoryId: undefined };
@@ -281,6 +289,13 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       limit: z.number().optional().describe('Max results (default 50)'),
     },
     async ({ query, parentRel, memoryUrn, brief, limit }) => {
+      try {
+        validateParentRel(parentRel);
+      } catch (e) {
+        if (e instanceof InvalidParentRelError) return textResult(e.message);
+        throw e;
+      }
+
       const memoryIds = await getAccessibleMemoryIds(db, auth);
       const where: Record<string, unknown> = {};
       if (memoryIds) where.memoryId = { in: memoryIds };
@@ -495,6 +510,13 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       depth: z.number().optional().describe('Max depth to traverse (default: 1)'),
     },
     async ({ parentRel, memoryUrn, depth }) => {
+      try {
+        validateParentRel(parentRel);
+      } catch (e) {
+        if (e instanceof InvalidParentRelError) return textResult(e.message);
+        throw e;
+      }
+
       const urn = memoryUrn ?? activeMemoryUrn;
       if (!urn && !parentRel) {
         return textResult('Please provide a memoryUrn or parentRel, or set an active memory with h-set-active-memory.');
