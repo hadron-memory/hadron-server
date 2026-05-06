@@ -35,14 +35,19 @@ export class OrganizationNotFoundError extends Error {
 }
 
 /**
- * Thrown by `upsertNode` when called with `createOnly: true` and a node
- * already exists at the target `(loc, memoryId)`. The GraphQL resolver
- * layer wraps it as `GraphQLError` with
- * `extensions.code: 'NodeLocConflictError'`.
+ * Surfaced by `upsertNode` when called with `createOnly: true` and a
+ * **live** (not soft-deleted) node already exists at the target
+ * `(loc, memoryId)`. The GraphQL resolver layer reads `name` and
+ * `message` off this class to construct a `GraphQLError` with
+ * `extensions.code: 'NodeLocConflictError'` — i.e., this class is the
+ * source of truth for the code string and the user-facing message; it
+ * is not thrown raw to the wire.
  *
  * NOTE: `upsertNode` is upsert by default — passing `createOnly: false`
  * (or omitting the flag) preserves the legacy update-on-collision
- * behavior and never throws this error.
+ * behavior and never surfaces this error. Soft-deleted nodes at the
+ * target loc are treated as not-existing for collision purposes; the
+ * create resurrects them.
  */
 export class NodeLocConflictError extends Error {
   constructor(public loc: string, public memoryId: string) {
