@@ -91,3 +91,8 @@ two-layer model without further setup:
   `AgentOrgGrant`) have no `id` column. The Prisma client extension at
   `src/integrations/db/client.ts` keeps these out of the auto-id-injection
   list — add new composite-PK models to `MODELS_WITHOUT_ID` there.
+
+<!-- SPECKIT START -->
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+<!-- SPECKIT END -->

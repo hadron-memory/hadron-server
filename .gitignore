@@ -11,7 +11,9 @@ prisma/*.db-journal
 /graphs/
 
 # IDEs
-.idea
+/.idea
 
 # npm (no longer used)
 package-lock.json
+/.hadron
+/.mcp.json
