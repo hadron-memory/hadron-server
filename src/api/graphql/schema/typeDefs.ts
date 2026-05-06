@@ -582,6 +582,13 @@ export const typeDefs = `#graphql
     aiAgent: String
     # Replace all outgoing edges when provided (omit to leave edges unchanged)
     edges: [NodeEdgeInput!]
+    # When true, reject the mutation with NodeLocConflictError if a node
+    # already exists at (loc, memoryId). Default false preserves the
+    # legacy upsert-on-collision behavior. Set true from create-only
+    # callers (e.g., the portal new-node form per spec 011) so a colliding
+    # loc surfaces as a clean error instead of silently overwriting the
+    # existing node.
+    createOnly: Boolean
   }
 
   input EdgeInput {

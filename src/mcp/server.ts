@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import { parseUrnInput, formatUrn } from '../lib/urn.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
+import { validateLoc } from '../lib/validateLoc.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
@@ -50,14 +51,9 @@ function matchesQuery(
   return terms.every((t) => haystack.includes(t));
 }
 
-function validateLoc(loc: string): void {
-  const parts = loc.split(':');
-  if (parts.some((p) => !/^[a-zA-Z0-9_-]+$/.test(p))) {
-    throw new Error(
-      `Invalid loc "${loc}": each segment must contain only letters, digits, hyphens, or underscores`,
-    );
-  }
-}
+// Loc validation moved to src/lib/validateLoc.ts so the GraphQL
+// upsertNode resolver and the MCP tool surface share the same rule
+// and produce the same typed InvalidLocError.
 
 /**
  * If the user passes a full URN (e.g. "hadronmemory.com:dev:architecture"),
