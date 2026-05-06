@@ -30,6 +30,7 @@ import {
   type MemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, validateUrnType, formatUrn } from '../../../lib/urn.js';
+import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
 import { compileTemplate } from '../../../lib/template.js';
 import {
   validateEdgeCondition,
@@ -1878,6 +1879,20 @@ export const resolvers = {
       }
       await requireMemoryWriteAccess(ctx, input.memoryId);
 
+      // Validate loc shape at the GraphQL boundary so any caller — portal,
+      // MCP, tests, future — gets the same typed InvalidLocError instead
+      // of a downstream Prisma constraint failure leaking as INTERNAL_SERVER_ERROR.
+      try {
+        validateLoc(input.loc);
+      } catch (e) {
+        if (e instanceof InvalidLocError) {
+          throw new GraphQLError(e.message, {
+            extensions: { code: 'InvalidLocError', loc: input.loc, segment: e.segment },
+          });
+        }
+        throw e;
+      }
+
       // Reject saves whose extraction-spec arrays would write into the
       // reserved exception namespace (spec 001-edge-condition-spec FR-013).
       throwOnReservedExtractionSpec(input.data);
@@ -1886,6 +1901,24 @@ export const resolvers = {
       const existing = await ctx.db.node.findUnique({
         where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
       });
+
+      // Spec 011 follow-up: callers that want pure CREATE semantics pass
+      // `createOnly: true`. Reject the mutation if a node already lives at
+      // (loc, memoryId), so the portal's create form (and any other
+      // create-only caller) surfaces a NodeLocConflictError instead of
+      // silently overwriting the existing node.
+      if (input.createOnly && existing) {
+        throw new GraphQLError(
+          `A node already exists at loc "${input.loc}" in this memory.`,
+          {
+            extensions: {
+              code: 'NodeLocConflictError',
+              loc: input.loc,
+              memoryId: input.memoryId,
+            },
+          },
+        );
+      }
       if (existing) {
         await ctx.db.nodeVersion.create({
           data: {
@@ -1904,7 +1937,9 @@ export const resolvers = {
 
       const tags = serializeTags(input.tags ?? []) as string[];
       const id = input.id ?? generateId();
-      const { edges, ...nodeFields } = input;
+      // Strip GraphQL-only flags from the Prisma payload — `createOnly`
+      // is a control input, not a column.
+      const { edges, createOnly: _createOnly, ...nodeFields } = input;
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
 
       // If the target memory is encrypted, encrypt content and data before
@@ -5544,6 +5579,7 @@ interface NodeInput {
   aiAgent?: string;
   ownerRepo?: string;
   edges?: NodeEdgeInput[];
+  createOnly?: boolean;
 }
 
 interface EdgeInput {

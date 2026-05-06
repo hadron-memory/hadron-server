@@ -33,3 +33,24 @@ export class OrganizationNotFoundError extends Error {
     this.name = 'OrganizationNotFoundError';
   }
 }
+
+/**
+ * Thrown by `upsertNode` when called with `createOnly: true` and a node
+ * already exists at the target `(loc, memoryId)`. The GraphQL resolver
+ * layer wraps it as `GraphQLError` with
+ * `extensions.code: 'NodeLocConflictError'`.
+ *
+ * NOTE: `upsertNode` is upsert by default — passing `createOnly: false`
+ * (or omitting the flag) preserves the legacy update-on-collision
+ * behavior and never throws this error.
+ */
+export class NodeLocConflictError extends Error {
+  constructor(public loc: string, public memoryId: string) {
+    super(`A node already exists at loc "${loc}" in this memory.`);
+    this.name = 'NodeLocConflictError';
+  }
+}
+
+// Re-export from sibling modules so callers can import error classes
+// from a single place.
+export { InvalidLocError } from '../validateLoc.js';
