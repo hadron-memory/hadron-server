@@ -3998,6 +3998,10 @@ export const resolvers = {
               // Resolve the system memory's slug-path URN once so error-side
               // sourceNodeUrn composition stays canonical (urn:node:<mem>:<loc>)
               // instead of the legacy urn:memory:<PK>:<loc> form (issue #99).
+              // TODO(#99-followup): this lookup-and-format pattern is now
+              // duplicated with src/mcp/server.ts:nodeUrn(). Extract a shared
+              // composer (likely a small package) per the audit's
+              // recommendation in issue #99.
               const sysMem = await ctx.db.memory.findUnique({
                 where: { id: sysMemId },
                 select: { urn: true },
