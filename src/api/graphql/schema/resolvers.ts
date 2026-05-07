@@ -1922,6 +1922,31 @@ export const resolvers = {
           extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
         });
       }
+
+      // Resolve edge targets BEFORE any write so an unresolvable
+      // target aborts the mutation without committing the source
+      // node, the version snapshot, or any edge changes. Per spec 007
+      // (issue #105), `targetId` accepts ID, full URN, memory-prefixed
+      // loc, or short loc — `resolveNodeRef` is the single resolver
+      // and throws `NodeNotFoundError` on miss.
+      let resolvedEdges: Array<{ targetNodeId: string; label: string | null }> | null = null;
+      if (input.edges !== undefined) {
+        resolvedEdges = [];
+        for (const e of input.edges) {
+          try {
+            const { id: targetNodeId } = await resolveNodeRef(ctx.db, e.targetId, input.memoryId);
+            resolvedEdges.push({ targetNodeId, label: e.label ?? null });
+          } catch (err) {
+            if (err instanceof NodeNotFoundError) {
+              throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
+                extensions: { code: err.name, ref: err.ref },
+              });
+            }
+            throw err;
+          }
+        }
+      }
+
       if (existing) {
         await ctx.db.nodeVersion.create({
           data: {
@@ -1942,7 +1967,10 @@ export const resolvers = {
       const id = input.id ?? generateId();
       // Strip GraphQL-only flags from the Prisma payload — `createOnly`
       // is a control input, not a column.
-      const { edges, createOnly: _createOnly, ...nodeFields } = input;
+      // `edges` is consumed above (resolved into `resolvedEdges`) and
+      // applied below; strip it from the Prisma payload along with
+      // the GraphQL-only `createOnly` control flag.
+      const { edges: _edges, createOnly: _createOnly, ...nodeFields } = input;
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
 
       // If the target memory is encrypted, encrypt content and data before
@@ -1981,37 +2009,24 @@ export const resolvers = {
       }
 
       let finalNode = node;
-      if (edges !== undefined) {
-        // Per spec 007, `targetId` accepts ID, URN, full memory-prefixed
-        // loc, or short loc. Resolve every ref BEFORE mutating any
-        // edge rows so that an unresolvable target fails the whole
-        // mutation cleanly — a partial deleteMany + half-applied
-        // edges would be hard to recover from. Issue #105: previously
-        // the resolver fell through to `pending_edges` (no FK) on any
-        // ref it could not load by id, producing silent-success calls
-        // with no real edge written.
-        const resolvedEdges: Array<{ targetNodeId: string; label: string | null }> = [];
-        for (const e of edges) {
-          try {
-            const { id: targetNodeId } = await resolveNodeRef(ctx.db, e.targetId, input.memoryId);
-            resolvedEdges.push({ targetNodeId, label: e.label ?? null });
-          } catch (err) {
-            if (err instanceof NodeNotFoundError) {
-              throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
-                extensions: { code: err.name, ref: err.ref },
-              });
-            }
-            throw err;
-          }
-        }
-
+      if (resolvedEdges !== null) {
+        // Replace the source's outgoing edges with the resolved set.
+        // After deleteMany clears every existing edge for `sourceId`
+        // there can be no `(sourceId, targetId, label)` collision, so
+        // a single createMany with skipDuplicates: true (a defense
+        // against a duplicate inside the input array itself) is one
+        // round-trip in place of N upserts.
         await ctx.db.edge.deleteMany({ where: { sourceId: node.id } });
         await ctx.db.pendingEdge.deleteMany({ where: { sourceId: node.id } });
-        for (const e of resolvedEdges) {
-          await ctx.db.edge.upsert({
-            where: { sourceId_targetId_label: { sourceId: node.id, targetId: e.targetNodeId, label: e.label ?? '' } },
-            create: { sourceId: node.id, targetId: e.targetNodeId, label: e.label ?? '', createdBy },
-            update: {},
+        if (resolvedEdges.length > 0) {
+          await ctx.db.edge.createMany({
+            data: resolvedEdges.map((e) => ({
+              sourceId: node.id,
+              targetId: e.targetNodeId,
+              label: e.label ?? '',
+              createdBy,
+            })),
+            skipDuplicates: true,
           });
         }
         finalNode = (await ctx.db.node.findUnique({

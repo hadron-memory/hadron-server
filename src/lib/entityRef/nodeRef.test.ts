@@ -132,4 +132,55 @@ describe('resolveNodeRef', () => {
       NodeNotFoundError,
     );
   });
+
+  it('does not fall back to short-loc when explicit urn:node: names a missing memory', async () => {
+    // A node exists in the context memory whose loc happens to match
+    // the body of the explicit URN. Without strict handling, the
+    // resolver would silently resolve the explicit URN against the
+    // context memory and return the wrong node.
+    const decoy = await db.node.create({
+      data: { memoryId, loc: 'no-such-mem:noderef-test-services:db', name: 'decoy' },
+    });
+    await expect(
+      resolveNodeRef(db, `urn:node:no-such-mem:noderef-test-services:db`, memoryId),
+    ).rejects.toBeInstanceOf(NodeNotFoundError);
+    // Sanity: the decoy is reachable via short-loc within context memory.
+    const direct = await resolveNodeRef(db, decoy.loc, memoryId);
+    expect(direct.id).toBe(decoy.id);
+  });
+
+  it('does not fall back to short-loc when the named memory is soft-deleted', async () => {
+    const deletedOrg = await db.organization.create({
+      data: { name: 'noderef-test-deleted-org', urn: `noderef-test-deleted-${Date.now()}` },
+    });
+    const deletedMem = await db.memory.create({
+      data: {
+        organizationId: deletedOrg.id,
+        urn: `${deletedOrg.urn}:gone`,
+        name: 'noderef-test-deleted-mem',
+        class: 'knowledge',
+        deletedAt: new Date(),
+      },
+    });
+    // Decoy: a node in the context memory whose loc matches the body.
+    await db.node.create({
+      data: { memoryId, loc: 'noderef-test-services:db', name: 'decoy' },
+    });
+    await expect(
+      resolveNodeRef(
+        db,
+        `${deletedMem.urn}:noderef-test-services:db`,
+        memoryId,
+      ),
+    ).rejects.toBeInstanceOf(NodeNotFoundError);
+  });
+
+  it('rejects an explicit urn:node:<id> form (node URNs are <memory-urn>:<loc>, not IDs)', async () => {
+    const node = await db.node.create({
+      data: { memoryId, loc: 'noderef-test-services:db', name: 'db' },
+    });
+    await expect(
+      resolveNodeRef(db, `urn:node:${node.id}`, memoryId),
+    ).rejects.toBeInstanceOf(NodeNotFoundError);
+  });
 });

@@ -122,4 +122,44 @@ describe('upsertNode — edge target resolution (issue #105)', () => {
       extensions: { code: 'NodeNotFoundError' },
     });
   });
+
+  it('does not create the source node when an edge target fails to resolve', async () => {
+    // Partial-apply concern raised on PR #106: edge resolution must
+    // happen before the source upsert so that a bad target rolls back
+    // cleanly. The source node should not exist after the failed call.
+    await expect(upsertSourceWithTarget('services:does-not-exist')).rejects.toMatchObject({
+      extensions: { code: 'NodeNotFoundError' },
+    });
+    const source = await db.node.findUnique({
+      where: { loc_memoryId: { loc: 'review:db-type-agnostic', memoryId: memory.id } },
+    });
+    expect(source).toBeNull();
+  });
+
+  it('persists multiple edges in one createMany roundtrip', async () => {
+    const second = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: memory.id,
+        loc: 'services:other-helper',
+        name: 'other-helper',
+      },
+    });
+    const node = await resolvers.Mutation.upsertNode(
+      {},
+      {
+        input: {
+          loc: 'review:db-type-agnostic',
+          name: 'db-type-agnostic',
+          memoryId: memory.id,
+          edges: [
+            { targetId: target.id, label: 'a' },
+            { targetId: second.id, label: 'b' },
+          ],
+        },
+      },
+      ctx(),
+    );
+    expect(await edgeCount(node.id)).toBe(2);
+  });
 });
