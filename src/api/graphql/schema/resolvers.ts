@@ -31,7 +31,7 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, validateUrnType, formatUrn } from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
-import { NodeLocConflictError } from '../../../lib/entityRef/errors.js';
+import { NodeLocConflictError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { compileTemplate } from '../../../lib/template.js';
 import {
   validateEdgeCondition,
@@ -52,6 +52,7 @@ import { listMemoryAssets } from '../../../controller/operations/listMemoryAsset
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
@@ -1921,6 +1922,31 @@ export const resolvers = {
           extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
         });
       }
+
+      // Resolve edge targets BEFORE any write so an unresolvable
+      // target aborts the mutation without committing the source
+      // node, the version snapshot, or any edge changes. Per spec 007
+      // (issue #105), `targetId` accepts ID, full URN, memory-prefixed
+      // loc, or short loc — `resolveNodeRef` is the single resolver
+      // and throws `NodeNotFoundError` on miss.
+      let resolvedEdges: Array<{ targetNodeId: string; label: string | null }> | null = null;
+      if (input.edges !== undefined) {
+        resolvedEdges = [];
+        for (const e of input.edges) {
+          try {
+            const { id: targetNodeId } = await resolveNodeRef(ctx.db, e.targetId, input.memoryId);
+            resolvedEdges.push({ targetNodeId, label: e.label ?? null });
+          } catch (err) {
+            if (err instanceof NodeNotFoundError) {
+              throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
+                extensions: { code: err.name, ref: err.ref },
+              });
+            }
+            throw err;
+          }
+        }
+      }
+
       if (existing) {
         await ctx.db.nodeVersion.create({
           data: {
@@ -1941,7 +1967,10 @@ export const resolvers = {
       const id = input.id ?? generateId();
       // Strip GraphQL-only flags from the Prisma payload — `createOnly`
       // is a control input, not a column.
-      const { edges, createOnly: _createOnly, ...nodeFields } = input;
+      // `edges` is consumed above (resolved into `resolvedEdges`) and
+      // applied below; strip it from the Prisma payload along with
+      // the GraphQL-only `createOnly` control flag.
+      const { edges: _edges, createOnly: _createOnly, ...nodeFields } = input;
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
 
       // If the target memory is encrypted, encrypt content and data before
@@ -1980,24 +2009,25 @@ export const resolvers = {
       }
 
       let finalNode = node;
-      if (edges !== undefined) {
+      if (resolvedEdges !== null) {
+        // Replace the source's outgoing edges with the resolved set.
+        // After deleteMany clears every existing edge for `sourceId`
+        // there can be no `(sourceId, targetId, label)` collision, so
+        // a single createMany with skipDuplicates: true (a defense
+        // against a duplicate inside the input array itself) is one
+        // round-trip in place of N upserts.
         await ctx.db.edge.deleteMany({ where: { sourceId: node.id } });
         await ctx.db.pendingEdge.deleteMany({ where: { sourceId: node.id } });
-        for (const e of edges) {
-          const target = await ctx.db.node.findUnique({ where: { id: e.targetId } });
-          if (target) {
-            await ctx.db.edge.upsert({
-              where: { sourceId_targetId_label: { sourceId: node.id, targetId: target.id, label: e.label ?? '' } },
-              create: { sourceId: node.id, targetId: target.id, label: e.label ?? '', createdBy },
-              update: {},
-            });
-          } else {
-            await ctx.db.pendingEdge.upsert({
-              where: { sourceId_targetId: { sourceId: node.id, targetId: e.targetId } },
-              create: { sourceId: node.id, targetId: e.targetId, label: e.label ?? null, createdBy },
-              update: { label: e.label ?? null },
-            });
-          }
+        if (resolvedEdges.length > 0) {
+          await ctx.db.edge.createMany({
+            data: resolvedEdges.map((e) => ({
+              sourceId: node.id,
+              targetId: e.targetNodeId,
+              label: e.label ?? '',
+              createdBy,
+            })),
+            skipDuplicates: true,
+          });
         }
         finalNode = (await ctx.db.node.findUnique({
           where: { id: node.id },

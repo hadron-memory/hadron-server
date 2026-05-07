@@ -35,6 +35,19 @@ export class OrganizationNotFoundError extends Error {
 }
 
 /**
+ * Surfaced by `resolveNodeRef` when the inbound reference (ID, URN,
+ * full memory-prefixed loc, or short loc) does not name a live node.
+ * Used by `upsertNode` to fail edge-target resolution loudly instead
+ * of silently writing to `pending_edges` (issue #105).
+ */
+export class NodeNotFoundError extends Error {
+  constructor(public ref: string) {
+    super(`NODE_NOT_FOUND: ${ref}`);
+    this.name = 'NodeNotFoundError';
+  }
+}
+
+/**
  * Surfaced by `upsertNode` when called with `createOnly: true` and a
  * **live** (not soft-deleted) node already exists at the target
  * `(loc, memoryId)`. The GraphQL resolver layer reads `name` and

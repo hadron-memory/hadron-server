@@ -560,6 +560,12 @@ export const typeDefs = `#graphql
 
   # Outgoing edge on a node, used in NodeInput.edges
   input NodeEdgeInput {
+    """
+    Reference to the target node. Accepts a node ID, a full URN
+    (urn:node:<memory-urn>:<loc>), a memory-prefixed loc
+    (<memory-urn>:<loc>), or a short loc resolved within the source
+    node's memory.
+    """
     targetId: String!
     label: String
   }
