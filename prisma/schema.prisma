@@ -88,6 +88,12 @@ enum MemoryLogEventType {
   LICENSE
   EDGE
   OTHER
+  // 011-soft-delete-memory: lifecycle events for soft-delete, restore,
+  // sync-skip on soft-deleted memories, and subscriber notifications when an
+  // owning org soft-deletes a memory other orgs subscribe to. Hard-delete
+  // events are written to memory_audit_log instead, since MemoryLogEntry
+  // rows are cascade-removed with their parent Memory.
+  LIFECYCLE
 }
 
 enum MemoryVisibility {
@@ -674,6 +680,42 @@ model MemoryLogEntry {
   @@index([eventType])
   @@index([createdAt])
   @@map("memory_log")
+}
+
+// 011-soft-delete-memory: append-only audit table for hard-delete events.
+// memory_id and organization_id are stored as plain TEXT (no FK) so the row
+// survives the cascade that hard-delete itself produces. Used by both the
+// retention sweep and the ops-only force-hard-delete CLI.
+model MemoryAuditLog {
+  id              String   @id @default(cuid())
+  memoryId        String   @map("memory_id")
+  memoryUrn       String   @map("memory_urn")
+  organizationId  String   @map("organization_id")
+  organizationUrn String   @map("organization_urn")
+  eventType       String   @map("event_type")
+  action          String
+  actor           String
+  detail          Json?
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([memoryId])
+  @@index([memoryUrn])
+  @@index([organizationId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("memory_audit_log")
+}
+
+// 011-soft-delete-memory: small key/value config table. The 011 release
+// marker is persisted under key "memory.011.release_marker" and read once
+// at retention-sweep startup; subsequent restarts must not reset it.
+model SystemConfig {
+  key       String    @id
+  value     Json
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime? @map("updated_at")
+
+  @@map("system_config")
 }
 
 model OrgMemberInvitation {
