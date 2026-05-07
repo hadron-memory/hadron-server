@@ -16,6 +16,8 @@ import {
   getMemoryAccess,
 } from './access-control.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
+import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
+import { NodeNotFoundError } from '../lib/entityRef/errors.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { SessionType } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
@@ -26,6 +28,79 @@ import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 
 function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
+}
+
+/** A single resolved edge ready to be written to the database. */
+export type ResolvedEdge = { targetNodeId: string; label: string };
+
+/**
+ * Resolve every edge `targetId` through `resolveNodeRef` (spec 007)
+ * so all four supported reference shapes — bare ID, full `urn:node:`
+ * URN, memory-prefixed loc, and short loc within `sourceMemoryId` —
+ * work uniformly.
+ *
+ * Pure read; writes nothing. Returns the resolved edges on success,
+ * or `{ error: <user-facing string> }` when any ref doesn't resolve.
+ * Callers run this BEFORE mutating the source node, so an unresolvable
+ * target aborts the mutation cleanly without committing the source
+ * upsert/update.
+ *
+ * Issue #107: prior inline logic in h-add-node / h-update-node used a
+ * `targetId.includes(':')` heuristic plus `findFirst({loc})` (no
+ * memory scope), which silently no-op'd memory-prefixed/URN forms and
+ * FK-errored on single-segment short locs.
+ */
+export async function resolveEdgeRefs(
+  edges: Array<{ targetId: string; label: string }>,
+  sourceMemoryId: string,
+): Promise<{ resolved: ResolvedEdge[] } | { error: string }> {
+  const resolved: ResolvedEdge[] = [];
+  for (const edge of edges) {
+    try {
+      const { id: targetNodeId } = await resolveNodeRef(db, edge.targetId, sourceMemoryId);
+      resolved.push({ targetNodeId, label: edge.label });
+    } catch (err) {
+      if (err instanceof NodeNotFoundError) {
+        return { error: `Edge target not found: "${err.ref}"` };
+      }
+      throw err;
+    }
+  }
+  return { resolved };
+}
+
+/**
+ * Replace the outgoing edges of `sourceNodeId` with `resolved`, in a
+ * single `$transaction` so we never observe a state where the
+ * existing edges are gone but the new ones are missing.
+ *
+ * Caller must have already validated targets via `resolveEdgeRefs` —
+ * this function performs only writes. Each row gets an explicit
+ * UUIDv7 from `generateId()` because the Prisma client extension at
+ * `src/integrations/db/client.ts` only auto-injects IDs on `create`
+ * and `upsert`, not on `createMany`.
+ */
+export async function replaceOutgoingEdges(args: {
+  sourceNodeId: string;
+  resolved: ResolvedEdge[];
+  createdBy: string | null;
+}): Promise<void> {
+  await db.$transaction(async (tx) => {
+    await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId } });
+    await tx.pendingEdge.deleteMany({ where: { sourceId: args.sourceNodeId } });
+    if (args.resolved.length > 0) {
+      await tx.edge.createMany({
+        data: args.resolved.map((e) => ({
+          id: generateId(),
+          sourceId: args.sourceNodeId,
+          targetId: e.targetNodeId,
+          label: e.label,
+          createdBy: args.createdBy,
+        })),
+        skipDuplicates: true,
+      });
+    }
+  });
 }
 
 /** Build a full urn:node: URN from a loc and memoryId. Caches memory URNs. */
@@ -780,6 +855,17 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult('Write access denied for this memory.');
       }
 
+      // Resolve edge targets BEFORE the source upsert so an
+      // unresolvable target rolls back cleanly with no source-node
+      // mutation (parallel to the GraphQL upsertNode resolver from
+      // #106). Issue #107 review feedback.
+      let resolvedEdges: ResolvedEdge[] | null = null;
+      if (edges) {
+        const r = await resolveEdgeRefs(edges, memoryId);
+        if ('error' in r) return textResult(r.error);
+        resolvedEdges = r.resolved;
+      }
+
       const existing = await db.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
 
       const upserted = await db.node.upsert({
@@ -814,46 +900,12 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         } as any,
       });
 
-      // Replace edges if provided
-      if (edges) {
-        await db.edge.deleteMany({ where: { sourceId: upserted.id } });
-        await db.pendingEdge.deleteMany({ where: { sourceId: upserted.id } });
-        for (const edge of edges) {
-          // Resolve targetId: if it looks like a loc path (contains dots), look up the node
-          let resolvedTargetId = edge.targetId;
-          if (edge.targetId.includes(':')) {
-            const targetNode = await db.node.findFirst({ where: { loc: edge.targetId } });
-            if (targetNode) {
-              resolvedTargetId = targetNode.id;
-            } else {
-              // Target doesn't exist yet — create a PendingEdge
-              await db.pendingEdge.upsert({
-                where: { sourceId_targetId: { sourceId: upserted.id, targetId: edge.targetId } },
-                create: {
-                  id: generateId(),
-                  sourceId: upserted.id,
-                  targetId: edge.targetId,
-                  label: edge.label,
-                  createdBy: auth.clientId ?? null,
-                },
-                update: { label: edge.label },
-              });
-              continue;
-            }
-          }
-          // Target exists — create a real Edge
-          await db.edge.upsert({
-            where: { sourceId_targetId_label: { sourceId: upserted.id, targetId: resolvedTargetId, label: edge.label } },
-            create: {
-              id: generateId(),
-              sourceId: upserted.id,
-              targetId: resolvedTargetId,
-              label: edge.label,
-              createdBy: auth.clientId ?? null,
-            },
-            update: {},
-          });
-        }
+      if (resolvedEdges !== null) {
+        await replaceOutgoingEdges({
+          sourceNodeId: upserted.id,
+          resolved: resolvedEdges,
+          createdBy: auth.clientId ?? null,
+        });
       }
 
       // Resolve any PendingEdges waiting for this node (by ID or loc)
@@ -947,6 +999,16 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult('Write access denied for this memory.');
       }
 
+      // Resolve edge targets BEFORE the version snapshot + node update
+      // so an unresolvable target rolls back cleanly with no source-
+      // node mutation. Issue #107 review feedback.
+      let resolvedEdges: ResolvedEdge[] | null = null;
+      if (edges !== undefined) {
+        const r = await resolveEdgeRefs(edges, existing.memoryId);
+        if ('error' in r) return textResult(r.error);
+        resolvedEdges = r.resolved;
+      }
+
       // Snapshot current state for version history
       await db.nodeVersion.create({
         data: {
@@ -980,43 +1042,12 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         await db.node.update({ where: { id: existing.id }, data });
       }
 
-      // Replace edges if provided (same logic as h-create-node)
-      if (edges !== undefined) {
-        await db.edge.deleteMany({ where: { sourceId: existing.id } });
-        await db.pendingEdge.deleteMany({ where: { sourceId: existing.id } });
-        for (const edge of edges) {
-          let resolvedTargetId = edge.targetId;
-          if (edge.targetId.includes(':')) {
-            const targetNode = await db.node.findFirst({ where: { loc: edge.targetId } });
-            if (targetNode) {
-              resolvedTargetId = targetNode.id;
-            } else {
-              await db.pendingEdge.upsert({
-                where: { sourceId_targetId: { sourceId: existing.id, targetId: edge.targetId } },
-                create: {
-                  id: generateId(),
-                  sourceId: existing.id,
-                  targetId: edge.targetId,
-                  label: edge.label,
-                  createdBy: auth.clientId ?? null,
-                },
-                update: { label: edge.label },
-              });
-              continue;
-            }
-          }
-          await db.edge.upsert({
-            where: { sourceId_targetId_label: { sourceId: existing.id, targetId: resolvedTargetId, label: edge.label } },
-            create: {
-              id: generateId(),
-              sourceId: existing.id,
-              targetId: resolvedTargetId,
-              label: edge.label,
-              createdBy: auth.clientId ?? null,
-            },
-            update: {},
-          });
-        }
+      if (resolvedEdges !== null) {
+        await replaceOutgoingEdges({
+          sourceNodeId: existing.id,
+          resolved: resolvedEdges,
+          createdBy: auth.clientId ?? null,
+        });
       }
 
       // Record usage event
