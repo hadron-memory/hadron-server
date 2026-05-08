@@ -616,6 +616,7 @@ describe('deleteMemory (spec 013)', () => {
           urn: `${app.urn}:owner-personal`,
           name: 'Owner personal memory',
           class: 'personal',
+          visibility: 'PERSONAL',
           userId: owner.id,
           appId: app.id,
         },
