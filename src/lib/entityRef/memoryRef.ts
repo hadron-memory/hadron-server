@@ -9,8 +9,10 @@
  *   - "org-foo:family-recipes"             (bare URN, DB form)
  *   - "urn:memory:org-foo:family-recipes"  (prefixed URN, external form)
  *
- * Soft-deleted memories return MemoryNotFoundError, matching the
- * existing convention.
+ * Soft-deleted memories return MemoryNotFoundError by default, matching
+ * the existing convention. Pass `{ includeDeleted: true }` when the
+ * caller needs to operate on a row regardless of `deletedAt` (e.g.,
+ * `deleteMemory` re-deletes for FR-014 idempotency).
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -21,6 +23,7 @@ import { MemoryNotFoundError } from '../asset/gate.js';
 export async function resolveMemoryRef(
   db: Pick<PrismaClient, 'memory'>,
   urn: string,
+  options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
   // Strip a `urn:<type>:` prefix if present. parseUrnInput returns
   // the bare value; for already-bare input it returns the input
@@ -31,7 +34,7 @@ export async function resolveMemoryRef(
     where,
     select: { id: true, deletedAt: true },
   });
-  if (!memory || memory.deletedAt) {
+  if (!memory || (!options?.includeDeleted && memory.deletedAt)) {
     throw new MemoryNotFoundError(urn);
   }
   return { id: memory.id };
