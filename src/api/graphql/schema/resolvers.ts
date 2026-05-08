@@ -2883,13 +2883,30 @@ export const resolvers = {
 
     deleteMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      // Spec 013: class-aware authz. Personal-class memories belong to a
+      // single user (Memory.userId, enforced by a Postgres CHECK
+      // constraint); only the owner deletes — matches parent constitution
+      // Invariant 13. All other classes (system/app/knowledge) gate on
+      // org-admin role on the parent org. Authz runs first so unauthorized
+      // callers can't probe row state via the AGENT_SYSTEM guard or
+      // idempotency short-circuit below.
+      if (memory.class === 'personal') {
+        if (!ctx.userId || memory.userId !== ctx.userId) {
+          throw new Error('Forbidden: only the owner can delete a personal memory');
+        }
+      } else {
+        await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      }
       // AGENT_SYSTEM memories are owned by their agent and can only be
       // removed by deleting the agent. This prevents the agent from ending
       // up with no brain via a stray deleteMemory call.
       if (memory.type === 'AGENT_SYSTEM') {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
+      // Spec 013 FR-014: idempotency. A re-delete on an already-soft-
+      // deleted memory returns true without overwriting the original
+      // deletedAt timestamp.
+      if (memory.deletedAt) return true;
       await ctx.db.memory.update({ where: { id }, data: { deletedAt: new Date() } });
       return true;
     },
