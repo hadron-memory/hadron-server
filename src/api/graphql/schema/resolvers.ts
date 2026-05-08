@@ -2882,7 +2882,10 @@ export const resolvers = {
     },
 
     deleteMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const { id: resolvedId } = await resolveMemoryRef(ctx.db, id);
+      // includeDeleted: a re-delete on an already-soft-deleted memory must
+      // return true (FR-014 idempotency). The default resolveMemoryRef
+      // would throw MemoryNotFoundError on the second call.
+      const { id: resolvedId } = await resolveMemoryRef(ctx.db, id, { includeDeleted: true });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedId } });
       // Spec 013: class-aware authz. Personal-class memories have a single
       // owner in Memory.userId. The chk_personal_visibility_user CHECK

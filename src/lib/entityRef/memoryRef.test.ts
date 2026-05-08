@@ -99,4 +99,28 @@ describe('resolveMemoryRef', () => {
       MemoryNotFoundError,
     );
   });
+
+  it('resolves a soft-deleted memory when includeDeleted is true', async () => {
+    const memory = await db.memory.create({
+      data: {
+        organizationId: orgId,
+        urn: `${orgId}:memref-test-mem-deleted-included`,
+        name: 'memref-test-mem-deleted-included',
+        class: 'knowledge',
+        deletedAt: new Date(),
+      },
+    });
+    await expect(
+      resolveMemoryRef(db, memory.id, { includeDeleted: true }),
+    ).resolves.toEqual({ id: memory.id });
+    await expect(
+      resolveMemoryRef(db, memory.urn, { includeDeleted: true }),
+    ).resolves.toEqual({ id: memory.id });
+  });
+
+  it('still throws MemoryNotFoundError on a real miss when includeDeleted is true', async () => {
+    await expect(
+      resolveMemoryRef(db, 'no-such-org:no-such-memory', { includeDeleted: true }),
+    ).rejects.toBeInstanceOf(MemoryNotFoundError);
+  });
 });
