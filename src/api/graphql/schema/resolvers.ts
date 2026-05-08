@@ -2882,15 +2882,38 @@ export const resolvers = {
     },
 
     deleteMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      const { id: resolvedId } = await resolveMemoryRef(ctx.db, id);
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedId } });
+      // Spec 013: class-aware authz. Personal-class memories have a single
+      // owner in Memory.userId. The chk_personal_visibility_user CHECK
+      // constraint enforces visibility=PERSONAL ⇔ userId IS NOT NULL;
+      // class=personal → visibility=PERSONAL is application-enforced.
+      // Only the owner deletes — matches parent constitution Invariant 13.
+      // All other classes (system/app/knowledge) gate on org-admin role on
+      // the parent org. Authz runs first so unauthorized callers can't probe
+      // row state via the AGENT_SYSTEM guard or idempotency short-circuit.
+      if (memory.class === 'personal') {
+        if (!ctx.userId || memory.userId !== ctx.userId) {
+          throw new Error('Forbidden: only the owner can delete a personal memory');
+        }
+      } else {
+        await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      }
       // AGENT_SYSTEM memories are owned by their agent and can only be
       // removed by deleting the agent. This prevents the agent from ending
       // up with no brain via a stray deleteMemory call.
       if (memory.type === 'AGENT_SYSTEM') {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
-      await ctx.db.memory.update({ where: { id }, data: { deletedAt: new Date() } });
+      // Spec 013 FR-014: idempotency. A re-delete on an already-soft-deleted
+      // memory returns true without overwriting the original deletedAt. The
+      // explicit short-circuit avoids an unnecessary write; the conditional
+      // updateMany closes the read-then-write race so deletedAt is set once.
+      if (memory.deletedAt) return true;
+      await ctx.db.memory.updateMany({
+        where: { id: resolvedId, deletedAt: null },
+        data: { deletedAt: new Date() },
+      });
       return true;
     },
 

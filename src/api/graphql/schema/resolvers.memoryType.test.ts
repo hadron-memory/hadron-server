@@ -531,3 +531,195 @@ describe('Memory.agent derived field', () => {
     expect(resolved).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Spec 013-soft-delete-memory — class-aware authz + idempotency on
+// deleteMemory. The pre-existing AGENT_SYSTEM-guard test above (line ~299)
+// is the regression we intentionally do NOT duplicate here.
+// ---------------------------------------------------------------------------
+
+describe('deleteMemory (spec 013)', () => {
+  it('admin can soft-delete a knowledge-class memory and sets deletedAt', async () => {
+    const m = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'doomed' },
+      adminCtx(),
+    );
+    const result = await resolvers.Mutation.deleteMemory(
+      {},
+      { id: m.id },
+      adminCtx(),
+    );
+    expect(result).toBe(true);
+    const after = await db.memory.findUniqueOrThrow({ where: { id: m.id } });
+    expect(after.deletedAt).toBeInstanceOf(Date);
+  });
+
+  it('is idempotent: re-delete preserves the original deletedAt', async () => {
+    const m = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'doomed-twice' },
+      adminCtx(),
+    );
+    await resolvers.Mutation.deleteMemory({}, { id: m.id }, adminCtx());
+    const firstSnapshot = await db.memory.findUniqueOrThrow({ where: { id: m.id } });
+    expect(firstSnapshot.deletedAt).toBeInstanceOf(Date);
+    const firstTs = firstSnapshot.deletedAt!.getTime();
+
+    // Tiny pause so a wrongly-overwritten timestamp would be detectably newer.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const secondResult = await resolvers.Mutation.deleteMemory(
+      {},
+      { id: m.id },
+      adminCtx(),
+    );
+    expect(secondResult).toBe(true);
+    const secondSnapshot = await db.memory.findUniqueOrThrow({ where: { id: m.id } });
+    expect(secondSnapshot.deletedAt!.getTime()).toBe(firstTs);
+  });
+
+  describe('personal-class authz', () => {
+    let owner: { id: string };
+    let nonOwner: { id: string };
+    let app: { id: string; urn: string };
+    let personalMemory: { id: string };
+
+    beforeEach(async () => {
+      owner = await db.user.create({
+        data: { githubId: 9101, githubUsername: 'personal-owner' },
+      });
+      nonOwner = await db.user.create({
+        data: { githubId: 9102, githubUsername: 'random-user' },
+      });
+      // Both users are members of orgA so the test can verify org-membership
+      // alone does NOT confer delete authority on personal-class memories.
+      await db.orgMember.create({
+        data: { organizationId: orgA.id, userId: owner.id, role: 'CONTRIBUTOR' },
+      });
+      await db.orgMember.create({
+        data: { organizationId: orgA.id, userId: nonOwner.id, role: 'CONTRIBUTOR' },
+      });
+      // Personal-class memories require an App (chk_memory_class_app_id).
+      app = await db.app.create({
+        data: {
+          id: generateId(),
+          name: 'test-app',
+          urn: `${orgA.urn}:test-app`,
+          organizationId: orgA.id,
+        },
+      });
+      const m = await db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: orgA.id,
+          urn: `${app.urn}:owner-personal`,
+          name: 'Owner personal memory',
+          class: 'personal',
+          visibility: 'PERSONAL',
+          userId: owner.id,
+          appId: app.id,
+        },
+      });
+      personalMemory = { id: m.id };
+    });
+
+    it('owner can delete', async () => {
+      const result = await resolvers.Mutation.deleteMemory(
+        {},
+        { id: personalMemory.id },
+        { db, userId: owner.id },
+      );
+      expect(result).toBe(true);
+      const after = await db.memory.findUniqueOrThrow({
+        where: { id: personalMemory.id },
+      });
+      expect(after.deletedAt).toBeInstanceOf(Date);
+    });
+
+    it('org admin (non-owner) cannot delete', async () => {
+      // adminUser is an ADMIN of orgA but is NOT the owner of personalMemory.
+      // The personal-class branch must reject regardless of org role.
+      await expect(
+        resolvers.Mutation.deleteMemory({}, { id: personalMemory.id }, adminCtx()),
+      ).rejects.toThrow(/only the owner can delete a personal memory/);
+      const after = await db.memory.findUniqueOrThrow({
+        where: { id: personalMemory.id },
+      });
+      expect(after.deletedAt).toBeNull();
+    });
+
+    it('non-owner non-admin user cannot delete', async () => {
+      await expect(
+        resolvers.Mutation.deleteMemory(
+          {},
+          { id: personalMemory.id },
+          { db, userId: nonOwner.id },
+        ),
+      ).rejects.toThrow(/only the owner can delete a personal memory/);
+      const after = await db.memory.findUniqueOrThrow({
+        where: { id: personalMemory.id },
+      });
+      expect(after.deletedAt).toBeNull();
+    });
+
+    it('unauthenticated caller cannot delete', async () => {
+      await expect(
+        resolvers.Mutation.deleteMemory(
+          {},
+          { id: personalMemory.id },
+          { db },
+        ),
+      ).rejects.toThrow(/only the owner can delete a personal memory/);
+    });
+
+    it('personal-class authz is idempotent for the owner', async () => {
+      await resolvers.Mutation.deleteMemory(
+        {},
+        { id: personalMemory.id },
+        { db, userId: owner.id },
+      );
+      const first = await db.memory.findUniqueOrThrow({
+        where: { id: personalMemory.id },
+      });
+      const firstTs = first.deletedAt!.getTime();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const secondResult = await resolvers.Mutation.deleteMemory(
+        {},
+        { id: personalMemory.id },
+        { db, userId: owner.id },
+      );
+      expect(secondResult).toBe(true);
+      const second = await db.memory.findUniqueOrThrow({
+        where: { id: personalMemory.id },
+      });
+      expect(second.deletedAt!.getTime()).toBe(firstTs);
+    });
+  });
+
+  // T010 (US2 regression): myMemories must filter out soft-deleted memories.
+  // Live, the resolver at resolvers.ts:1607 explicitly applies
+  // `deletedAt: null` (line 1651). This test pins that behavior so a
+  // future refactor can't silently drop the filter.
+  it('myMemories does not include a soft-deleted memory', async () => {
+    const live = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'still-here' },
+      adminCtx(),
+    );
+    const doomed = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'gone-soon' },
+      adminCtx(),
+    );
+    await resolvers.Mutation.deleteMemory({}, { id: doomed.id }, adminCtx());
+    const list = await resolvers.Query.myMemories(
+      {},
+      { includeAgentSystem: false },
+      adminCtx(),
+    );
+    const ids = (list as { id: string }[]).map((m) => m.id);
+    expect(ids).toContain(live.id);
+    expect(ids).not.toContain(doomed.id);
+  });
+});
