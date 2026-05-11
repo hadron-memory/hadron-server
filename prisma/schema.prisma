@@ -8,8 +8,57 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ─── Hadron entity model ──────────────────────────────────────────────
+//
+// This schema is the **canonical** source of entity definitions for the
+// Hadron platform. The legacy hadron-specs/General/Entities.md was folded
+// into this file on 2026-05-11 and deleted; do not recreate it.
+//
+// Shared audit fields
+// -------------------
+// Every model below carries the same audit columns (not re-described per
+// field to keep the file readable):
+//   createdAt, createdBy   — set at row insert (createdBy is fk-ish to
+//                            User.id but unconstrained for system writes)
+//   updatedAt, updatedBy   — set on every update (Prisma @updatedAt)
+//   deletedAt, deletedBy   — soft-delete marker; null = live row
+// A handful of tables (AppMember, AgentSubscription, AgentOrgGrant) omit
+// deletedAt/deletedBy on purpose — soft-delete is redundant there because
+// the row has a richer lifecycle field (revokedAt) or is a pure join with
+// no meaningful "soft-deleted" state. Each such table calls this out in
+// its model-level doc.
+//
+// URN convention
+// --------------
+// Globally addressable entities (Organization, Memory, Agent, App) carry
+// both a `urn` (unique, stable, colon-delimited identifier) and a `name`
+// (human-friendly display label, not unique). Colon is the structural
+// delimiter. URN shapes:
+//   - Organization: `<domain>`               e.g. "baragaun.com"
+//   - Memory:       `<org>:<slug>`           e.g. "baragaun.com:secureid"
+//   - Agent:        `<org>:<slug>`           e.g. "micromentor.org:juno"
+//   - App:          `<org>:<slug>`           e.g. "baragaun.com:internal-ops"
+//   - Node:         `<memory.urn>:<loc>`     computed, NOT stored
+//   - Asset:        `<memory.urn>:assets:<asset.id>`
+// See hadron-specs/General/URN.md for the full scheme.
+//
+// Table naming
+// ------------
+// All model `@@map(...)` names are explicit and snake_case_plural. Prisma
+// would default to PascalCase otherwise; the explicit map keeps the SQL
+// surface stable across model renames.
+
 // ─── Enums ─────────────────────────────────────────────────────────────
 
+/// Global / organization-membership role. Used on OrgMember.role,
+/// MemorySubscription.role, and the *Invitation roles. Hierarchy:
+/// OWNER > ADMIN > CONTRIBUTOR > READER. Invitations cannot grant a
+/// role higher than the sender's own. **Note**: MemorySubscription /
+/// OrgMemberInvitation / UserInvitation use this full enum at the
+/// column level, but the intended grant set is narrower (typically
+/// CONTRIBUTOR | READER for subscriptions; admin | contributor |
+/// reader for invitations). Tightening the column is reserved for a
+/// future cleanup spec.
 enum Role {
   OWNER
   ADMIN
@@ -17,6 +66,11 @@ enum Role {
   READER
 }
 
+/// Per-App default role assigned to new members when no Agent
+/// `installation_policy.memberRoles` override applies. Free-form
+/// AppMember.role strings (validated against installation_policy) are
+/// distinct from this enum — the enum survives mainly for legacy
+/// App.role storage.
 enum AppMembershipRole {
   OWNER
   ADMIN
@@ -24,6 +78,9 @@ enum AppMembershipRole {
   READER
 }
 
+/// **Deprecated** in favor of App.surfaces (008-agent-installation
+/// R-4). Kept to avoid spurious portal churn; a follow-up cleanup
+/// spec will drop it.
 enum AppType {
   WORKSTATION
   CHATBOT
@@ -33,11 +90,19 @@ enum AppType {
   IOT
 }
 
+/// Reserved enum — declared but not currently referenced by any
+/// column. A 2026-Q3 marketplace-licensing spec is expected to wire
+/// this into MemorySubscription. Flagged for cleanup-if-not-used.
 enum SubscriptionType {
   READ_ONLY
   READ_WRITE
 }
 
+/// Coarse classification of a Session: who/what is driving it.
+///   DEVELOPER  — interactive coding session (Claude Code, Cursor, …)
+///   CHATBOT    — end-user chat through an App (e.g. Juno)
+///   AUTOMATION — non-interactive run (cron, CI, scripted agent)
+///   EDGE       — triggered by an Edge condition firing
 enum SessionType {
   DEVELOPER
   CHATBOT
@@ -45,6 +110,9 @@ enum SessionType {
   EDGE
 }
 
+/// State machine for Memory git-sync and ExchangeConnection mailbox
+/// sync. Transitions: PENDING → SYNCING → OK | ERROR; ERROR rows can
+/// re-enter SYNCING on retry.
 enum SyncStatus {
   PENDING
   SYNCING
@@ -52,6 +120,10 @@ enum SyncStatus {
   ERROR
 }
 
+/// How a User authenticated. APP is reserved for users provisioned
+/// via App-scoped flows (e.g. chatbot `createAppUser`); GOOGLE /
+/// MICROSOFT are reserved for future SSO. v1 ships GITHUB and EMAIL
+/// only.
 enum IdentityProvider {
   GITHUB
   EMAIL
@@ -60,17 +132,32 @@ enum IdentityProvider {
   MICROSOFT
 }
 
+/// App-level policy for whether the App may create new platform Users
+/// on-the-fly when a chatbot session arrives with a previously-unseen
+/// external id.
+///   DENY     — never create; reject the request
+///   EXPLICIT — only via the `createAppUser` mutation
+///   IMPLICIT — auto-create on first contact (used by Workstation apps)
 enum CreateUserPermission {
   DENY
   EXPLICIT
   IMPLICIT
 }
 
+/// App-level policy for how to resolve "which User is this?" from the
+/// incoming session credential.
+///   USER_ID — the App passes our internal User.id (default; trust-the-caller)
+///   SECRET  — the App passes a per-user secret we look up
 enum IdentifyUserMethod {
   USER_ID
   SECRET
 }
 
+/// **Largely legacy**. The Agent.type field below carries the coarse
+/// behavior hint (ASSISTANT vs CHATBOT). Post-008-agent-installation
+/// most behavior is driven by surfaces / installation_policy /
+/// memory_provisioning, not this enum. Kept for backward-compat with
+/// portal listings; a follow-up cleanup spec may collapse it.
 enum AgentType {
   ASSISTANT
   CHATBOT
@@ -83,6 +170,8 @@ enum LogLevel {
   ERROR
 }
 
+/// Tag for MemoryLogEntry rows to support filtered tail views in
+/// hadron-portal (e.g. "show me only sync errors for this memory").
 enum MemoryLogEventType {
   SYNC
   LICENSE
@@ -90,6 +179,10 @@ enum MemoryLogEventType {
   OTHER
 }
 
+/// Memory visibility. **Bidirectional invariant** enforced by a
+/// Postgres CHECK constraint: `visibility = PERSONAL` ⇔ `userId IS
+/// NOT NULL`. PERSONAL is strict ownership — no ADMIN/OWNER bypass;
+/// only the owning user can read.
 enum MemoryVisibility {
   PUBLIC
   PRIVATE
@@ -97,14 +190,37 @@ enum MemoryVisibility {
   PERSONAL
 }
 
+/// **Legacy two-way type** kept alongside the post-005 four-way
+/// `class` field. AGENT_SYSTEM corresponds to `class = system`;
+/// KNOWLEDGE was the catch-all before 005 split the world into
+/// app/knowledge/personal. New code should branch on `class`, not
+/// `type`. A future cleanup spec will collapse this.
 enum MemoryType {
   KNOWLEDGE
   AGENT_SYSTEM
 }
 
-// Per-Agent memory typology — formalized in 005-agent-subscription
-// (2026-04-30). PERSONAL-class memories MUST have Memory.userId set
-// (enforced by a Postgres CHECK constraint added in the migration).
+/// Per-Memory typology — formalized in 005-agent-subscription
+/// (2026-04-30); per-class governance refined in 008-agent-installation
+/// (2026-05-02). PERSONAL-class memories MUST have Memory.userId set
+/// (enforced by a Postgres CHECK constraint added in the 005 migration).
+/// APP- and PERSONAL-class memories MUST have Memory.appId set
+/// (enforced by chk_memory_class_app_id from the 008 migration).
+///
+///   system     — the Agent's own definition (one per Agent, linked via
+///                Agent.systemMemoryId). Universally read-only from any
+///                App context post-008 (DEVELOP-from-App is dropped per
+///                R-10). Edits happen in the Agent ownership surface.
+///   app        — records the App writes through the Agent (chat history,
+///                extracted facts, generated artifacts). Keyed on
+///                (app_id, agent_id) for shared-app-memory Agents,
+///                (app_id, agent_id, user_id) for per-user-app-memory.
+///   knowledge  — reference content the Agent reads from. Per-Agent
+///                (not per-App); two installs of the same Agent share
+///                the same knowledge memory.
+///   personal   — per-user records keyed on (app_id, user_id) post-008.
+///                The per-App pivot is what gives multi-install
+///                Mike-on-two-orgs clean isolation. Strict ownership.
 enum MemoryClass {
   system
   app
@@ -112,6 +228,8 @@ enum MemoryClass {
   personal
 }
 
+/// Asset virus-scan state. Downloads are gated on CLEAN. Transitions:
+/// PENDING → CLEAN | BLOCKED.
 enum AssetScanStatus {
   PENDING
   CLEAN
@@ -120,10 +238,34 @@ enum AssetScanStatus {
 
 // ─── Models ────────────────────────────────────────────────────────────
 
+/// A person who uses Hadron, authenticated via GitHub OAuth (or email
+/// in future). N:N to Organization via OrgMember. Every user has a
+/// personal organization (auto-created on signup, isVisible=false).
+///
+/// **Invitation chain**: UserInvitationActivation links each User back
+/// to their UserInvitation, whose senderUserId points to the inviter,
+/// recursively up to the root (senderUserId IS NULL = system seed from
+/// Baragaun).
+///
+/// **Referral quota** (`maxReferrals`): the maximum number of new
+/// platform users this user is allowed to onboard. Unaccepted
+/// invitations don't count; the count is on accepted activations only.
+/// Quota is tracked transitively up the chain — if A invites B and B
+/// invites C, both A's and B's quotas decrement when C joins. When
+/// sending an invite, `UserInvitation.maxActivations` must not exceed
+/// the minimum free quota across the inviter's referral chain. There
+/// is a known race condition: if a referral starts onboarding and the
+/// "create account" request would push the chain over quota, the
+/// account is still created (don't block a real human on a counter).
 model User {
   id               String            @id @default(cuid())
+  /// Unique username, e.g. "holger"; displayed as `@holger` in UI and
+  /// node frontmatter `author` field. Defaults to githubUsername on
+  /// signup.
   handle           String?           @unique
+  /// GitHub numeric account id.
   githubId         Int?              @unique @map("github_id")
+  /// GitHub login.
   githubUsername   String?           @unique @map("github_username")
   identityProvider IdentityProvider? @map("identity_provider")
   // 005-agent-subscription discovery (2026-04-30): R-5 in research.md
@@ -135,13 +277,23 @@ model User {
   // the hadron user-id itself on every call. That requires a separate
   // design discussion — restored `externalId` for now; deferred the
   // drop. See spec.md §"Assumptions" for the deferral note.
+  /// App-scoped external user id. Composite-unique with `externalAppId`.
   externalId       String?           @map("external_id")
+  /// The App that minted this externalId. Forms a (App, externalId)
+  /// idempotency key for chatbot user provisioning.
   externalAppId    String?           @map("external_app_id")
+  /// When this app-scoped external identity was linked to the
+  /// platform User (i.e. when the chatbot user "graduated" to a real
+  /// account).
   linkedAt         DateTime?         @map("linked_at")
   name             String?
+  /// Used for invite matching and email-based auth.
   email            String?           @unique
   avatarUrl        String?           @map("avatar_url")
+  /// Global platform roles (not org-scoped). Default `[READER]`.
   roles            Role[]            @default([READER])
+  /// Maximum number of new platform users this user can onboard. See
+  /// the model-level doc for the referral-quota semantics.
   maxReferrals     Int?              @map("max_referrals")
   createdAt        DateTime          @default(now()) @map("created_at")
   createdBy        String?           @map("created_by")
@@ -166,13 +318,28 @@ model User {
   @@map("users")
 }
 
+/// A company, team, or group that owns memories and has members.
+/// Must have at least one OrgMember with role OWNER (can have many).
+/// Every user has a personal organization (auto-created on signup,
+/// `isVisible: false`) — see hadron-specs/General/Personal Organizations.md.
 model Organization {
   id                           String    @id @default(cuid())
   name                         String
+  /// The organization's domain name, e.g. "baragaun.com",
+  /// "micromentor.org". Serves as the namespace for all resources
+  /// owned by this org (URN prefix).
   urn                          String    @unique
+  /// Whether this org appears in public listings. `false` for
+  /// auto-created personal orgs.
   isVisible                    Boolean?  @map("is_visible")
+  /// GitHub App installation id. Used to mint ephemeral tokens
+  /// (1-hour expiry) for memory git-sync against repos within this
+  /// installation's scope.
   githubInstallationId         Int?      @unique @map("github_installation_id")
   githubAppId                  String?   @map("github_app_id")
+  /// AES-256-GCM-encrypted GitHub App private key. Plaintext never
+  /// stored or shown after initial entry. Encryption key:
+  /// HADRON_ENCRYPTION_KEY env var.
   githubAppPrivateKeyEncrypted String?   @map("github_app_private_key_encrypted")
   createdAt                    DateTime  @default(now()) @map("created_at")
   createdBy                    String?   @map("created_by")
@@ -193,11 +360,18 @@ model Organization {
   @@map("organizations")
 }
 
+/// Associates a User with an Organization. To remove a User from an
+/// Organization, delete the OrgMember row. Must NOT delete the
+/// OrgMember if it is the only one with role OWNER (enforced at the
+/// resolver, not the schema).
 model OrgMember {
   id             String    @id @default(cuid())
   organizationId String    @map("organization_id")
   userId         String    @map("user_id")
   role           Role      @default(READER)
+  /// Whether this member can invite other existing platform users to
+  /// the organization. Inviting a *new* platform user (UserInvitation)
+  /// is governed separately by User.maxReferrals.
   canInvite      Boolean   @default(false) @map("can_invite")
   createdAt      DateTime  @default(now()) @map("created_at")
   createdBy      String?   @map("created_by")
@@ -215,51 +389,122 @@ model OrgMember {
   @@map("org_members")
 }
 
+/// A Hadron knowledge graph, owned by an Organization. The four-way
+/// `class` field (system / app / knowledge / personal) governs
+/// addressing and access — see the MemoryClass enum doc.
+///
+/// **Git-backed memories** — the root `node.yaml` in the repo is the
+/// **memory manifest**, declaring the memory's urn and marketplace
+/// metadata. On import the server reads this manifest and creates or
+/// updates the Memory row. The org portion of the URN must match an
+/// existing Organization on the server.
+///
+/// **Git authentication** — the server first tries the owning
+/// Organization's `githubInstallationId` to mint ephemeral tokens
+/// (1-hour expiry). If the repo is outside the GitHub App's scope
+/// (different GitHub org, personal repo, GitLab, etc.), the server
+/// falls back to `sourceTokenEncrypted`. The GitHub App's private key
+/// (used to sign JWT requests for installation tokens) lives in the
+/// server's environment/secrets manager — not in the database. For
+/// the SaaS server, Baragaun manages this key.
+///
+/// **Token encryption** — `sourceTokenEncrypted` uses AES-256-GCM
+/// with a symmetric key from the server's environment
+/// (HADRON_ENCRYPTION_KEY). Plaintext never stored or shown after
+/// initial entry. To replace an expired/revoked token, the user
+/// pastes a new one (overwrites the old encrypted value). Key
+/// rotation: re-encrypt all stored tokens with the new key in a
+/// single migration.
 model Memory {
-  id                   String           @id @default(cuid())
-  organizationId       String           @map("organization_id")
-  urn                  String           @unique
-  name                 String
-  shortDescription     String?          @map("short_description")
-  description          String?
-  tags                 String[]
-  license              String?
-  category0            String?          @map("category_0")
-  category1            String?          @map("category_1")
-  category2            String?          @map("category_2")
-  iconUrl              String?          @map("icon_url")
-  heroUrl              String?          @map("hero_url")
-  homeUrl              String?          @map("home_url")
-  source               String?
-  sourceTokenEncrypted String?          @map("source_token_encrypted")
-  sourceTokenExpiresAt DateTime?        @map("source_token_expires_at")
-  readBranch           String?          @map("read_branch")
-  writeBranch          String?          @map("write_branch")
-  visibility           MemoryVisibility @default(PRIVATE)
-  type                 MemoryType       @default(KNOWLEDGE)
-  isEncrypted          Boolean          @default(false) @map("is_encrypted")
-  userMemoryOfAgentId  String?          @map("user_memory_of_agent_id")
-  // 005-agent-subscription (2026-04-30): explicit User owner for personal-class
-  // memories. NULL for non-personal memories. Postgres CHECK constraint
-  // enforces the bidirectional invariant: visibility=PERSONAL ⇔ userId IS NOT NULL.
-  userId               String?          @map("user_id")
+  id                  String  @id @default(cuid())
+  organizationId      String  @map("organization_id")
   // 008-agent-installation (2026-05-02): App pivot for class IN ('app', 'personal').
   // Required when class IN ('app', 'personal'); NULL for class IN ('system', 'knowledge').
   // Enforced by the chk_memory_class_app_id CHECK constraint added in the migration.
-  appId                String?          @map("app_id")
+  /// The App this memory belongs to. Required when `class` is `app`
+  /// or `personal`; NULL otherwise. Enforced by chk_memory_class_app_id.
+  appId               String? @map("app_id")
+  // 005-agent-subscription (2026-04-30): explicit User owner for personal-class
+  // memories. NULL for non-personal memories. Postgres CHECK constraint
+  // enforces the bidirectional invariant: visibility=PERSONAL ⇔ userId IS NOT NULL.
+  /// Owning user for personal-class memories. Bidirectional invariant
+  /// (CHECK): `visibility = PERSONAL` ⇔ `userId IS NOT NULL`.
+  userId              String? @map("user_id")
+  /// Legacy 005 Agent-pivot for personal memories. **Retained for
+  /// backward-compat queries** (008 R-3); not consulted by post-008
+  /// access-control, which uses `appId` directly. A future cleanup
+  /// spec may collapse it.
+  userMemoryOfAgentId String? @map("user_memory_of_agent_id")
+
+  /// Globally unique identifier, e.g. "baragaun.com:secureid".
+  /// Derived from `org.urn + ":" + slug`.
+  urn                  String           @unique
+  /// Human-friendly display name, e.g. "SecureID Service".
+  name                 String
+  /// One-line summary for marketplace listings and search results.
+  shortDescription     String?          @map("short_description")
+  /// Full description (markdown); shown when expanding a listing.
+  description          String?
+  /// Classification tags for search and filtering.
+  tags                 String[]
+  /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").
+  license              String?
+  /// Primary category (e.g. "Developer Tools").
+  category0            String?          @map("category_0")
+  /// Secondary category (e.g. "Backend").
+  category1            String?          @map("category_1")
+  /// Tertiary category (e.g. "Node.js").
+  category2            String?          @map("category_2")
+  /// Square icon/logo URL for listings.
+  iconUrl              String?          @map("icon_url")
+  /// Banner image URL for the detail page.
+  heroUrl              String?          @map("hero_url")
+  /// External homepage or documentation URL.
+  homeUrl              String?          @map("home_url")
+  /// Git clone URL; null = DB-only mode (no git backing).
+  source               String?
+  /// AES-256-GCM-encrypted access token for repos not covered by the
+  /// org's GitHub App installation (e.g. personal repos, GitLab,
+  /// Bitbucket). Plaintext never stored or displayed after initial entry.
+  sourceTokenEncrypted String?          @map("source_token_encrypted")
+  /// Expiry of the stored token; server warns via MemoryLogEntry
+  /// before expiration.
+  sourceTokenExpiresAt DateTime?        @map("source_token_expires_at")
+  /// Branch to clone/pull from (default: repo default branch).
+  readBranch           String?          @map("read_branch")
+  /// Branch for mutations (default: "hadron-updates").
+  writeBranch          String?          @map("write_branch")
+  visibility           MemoryVisibility @default(PRIVATE)
+  /// **Legacy two-way type** — see MemoryType enum doc. Branch on
+  /// `class` instead for new code.
+  type                 MemoryType       @default(KNOWLEDGE)
+  /// Whether the memory's contents (including asset bytes) are
+  /// encrypted at rest using AES-256-GCM under HADRON_ENCRYPTION_KEY.
+  isEncrypted          Boolean          @default(false) @map("is_encrypted")
   // 005-agent-subscription (2026-04-30): four-way memory typology. Required
   // post-migration; backfilled by the migration's UPDATE statements.
+  /// Per-class governance — see MemoryClass enum doc for the four
+  /// classes and their addressing rules.
   class                MemoryClass
+  /// When an anonymous (pre-account-creation) memory expires and is
+  /// reaped by the janitor. NULL for non-anonymous memories.
   anonymousExpiresAt   DateTime?        @map("anonymous_expires_at")
+  /// If true, any subscription must have a valid MemoryLicense.
   requiresLicense      Boolean          @default(false) @map("requires_license")
+  /// Last successful git sync.
   lastSyncedAt         DateTime?        @map("last_synced_at")
   syncStatus           SyncStatus       @default(PENDING) @map("sync_status")
+  /// Error message from the last failed sync.
   syncError            String?          @map("sync_error")
+  /// Number of unresolved PendingEdge records (denormalized for
+  /// dashboard display).
   pendingEdgeCount     Int              @default(0) @map("pending_edge_count")
   // 006-asset-upload-redesign (2026-05-01): per-memory upload acceptance
   // flag. Default true at the column level; system-class memories must
   // opt out explicitly at creation time. Migration backfilled existing
   // rows by class (system → false; app/knowledge/personal → true).
+  /// Whether this memory accepts asset uploads. system-class memories
+  /// typically opt out.
   acceptsUploads       Boolean          @default(true) @map("accepts_uploads")
   createdAt            DateTime         @default(now()) @map("created_at")
   createdBy            String?          @map("created_by")
@@ -294,26 +539,54 @@ model Memory {
   @@map("memories")
 }
 
-// User-uploaded files (documents, images). Bytes live in object
-// storage (R2 / MinIO). This row carries metadata, the storage
-// pointer, and virus-scan state. See spec 004-asset-upload.
+/// A user-uploaded file (document, image) bound to a Memory. Bytes
+/// live in object storage (Cloudflare R2 in v1; MinIO for local dev);
+/// this row carries metadata, the storage pointer, and virus-scan
+/// state. Spec: spec-kits/specs/004-asset-upload/spec.md.
+///
+/// **Why a separate table (not a `nodeType`)**: normalization (asset
+/// and node schemas diverge), scale (raw-material assets shouldn't
+/// bloat the knowledge-node table), and FK-shape (containment is
+/// foreign-key-shaped, not graph-shaped). See
+/// design-discussions/hadron-platform/2026-04-28-asset-upload-design/010-summary.md
+/// §"Why this summary supersedes 007-summary.md".
+///
+/// **URN form**: `<memory.urn>:assets:<asset.id>` resolves to this row.
+///
+/// **Cross-references from nodes** are reserved for a future spec —
+/// `Node.attachedAssetId?` (one-asset case) or a `node_assets` join
+/// (many-to-many). Not in v1.
 model Asset {
   id          String          @id @default(cuid())
   // 006-asset-upload-redesign (2026-05-01): nullable to support staging.
   // An asset with memoryId IS NULL is "staged" — uploaded but not yet
   // attached to a memory. Janitor sweeps staged assets past the 24h TTL.
+  /// The Memory this asset belongs to; NULL while the asset is staged
+  /// (uploaded but not yet attached). Janitor sweeps staged assets
+  /// past the 24h TTL.
   memoryId    String?         @map("memory_id")
+  /// Original filename as supplied by the user. Never appears in
+  /// `storageKey`.
   filename    String
+  /// RFC 6838 type/subtype.
   mimeType    String          @map("mime_type")
+  /// Verified at complete-upload time against `HeadObject.contentLength`.
   sizeBytes   Int             @map("size_bytes")
   // Object-store key. Encrypted at rest (AES-256-GCM under
   // HADRON_ENCRYPTION_KEY) when the memory is encrypted; plaintext
   // otherwise. See src/lib/asset/encryption.ts.
+  /// Object-store key shape: `{orgUrn}/{memoryUrn-segment}/{assetId}.{ext}`.
+  /// Encrypted at rest when the memory is encrypted; plaintext otherwise.
   storageKey  String          @unique @map("storage_key")
+  /// Virus scan state. Downloads gated on CLEAN.
   scanStatus  AssetScanStatus @default(PENDING) @map("scan_status")
+  /// Optional; agent- or user-provided.
   description String?
   uploadedAt  DateTime        @default(now()) @map("uploaded_at")
+  /// fk to User.id — who uploaded.
   uploadedBy  String          @map("uploaded_by")
+  /// Soft-delete marker. Janitor sweeps R2 object + hard-deletes
+  /// after 24h.
   deletedAt   DateTime?       @map("deleted_at")
 
   memory Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
@@ -328,25 +601,74 @@ model Asset {
   @@map("assets")
 }
 
+/// A single node in a Memory. `loc` is the colon-delimited path
+/// within the memory (e.g. `auth:tokens`), memory-relative. The full
+/// URN is computed `memory.urn + ":" + loc` (e.g.
+/// `baragaun.com:secureid:auth:tokens`) and **not stored**. `id` is
+/// optional in YAML; the server assigns it on import if missing.
+///
+/// **Node types** define the node's role in the memory:
+///   - `info` (default)  — living knowledge: specs, guides, facts.
+///                         Shown in tree, normal search priority.
+///   - `abstract`        — condensed knowledge: summaries, TL;DRs,
+///                         paper abstracts. Highest search priority.
+///                         May be the only representation if the source
+///                         is archived.
+///   - `reference`       — external source: papers, URLs, legislation,
+///                         books. Carries metadata (DOI, ISBN, URL) in
+///                         `data`.
+///   - `record`          — immutable history: chat messages, session
+///                         logs. Hidden in tree by default, low search
+///                         priority.
+///   - `system`          — agent configuration: conversation designs,
+///                         stages, prompt templates, partials. Hidden
+///                         in tree, excluded from search.
+/// (The earlier `asset` node-type was promoted to its own Asset table
+/// in spec 004-asset-upload.)
+///
+/// **Column type is `String` (not enum)** because the running schema
+/// pre-dates the formalization; the intended-values list above is the
+/// contract — tightening to a Prisma enum is reserved for a future
+/// cleanup spec.
 model Node {
   id          String    @id @default(cuid()) // UUIDv7 from node.yaml — stable across moves
   memoryId    String    @map("memory_id")
-  nodeType    String    @default("info") @map("node_type") // "info", "data", "task", "record", "chat", "plan", "parent"
+  /// See the node-types list in the model doc. Default `info`.
+  nodeType    String    @default("info") @map("node_type")
+  /// Human-friendly display name of this node.
   name        String
+  /// Alternative name.
   alias       String?
+  /// Colon-delimited path within the memory (e.g. "auth:tokens").
   loc         String
   isLink      Boolean   @default(false) @map("is_link")
   description String?
+  /// The topic content (topic.md full text).
   content     String?
+  /// SHA256(yaml+md)[0:8] for change detection.
   contentHash String?   @map("content_hash")
+  /// Number of input tokens.
   tokens      Int?
+  /// Classification tags.
   tags        String[]
+  /// Typed key-value structured data; queryable via the API.
   properties  Json?
+  /// Structured JSON on the node; used for template-variable
+  /// resolution, user profiles, extracted facts, reference metadata.
+  /// Returned by `h-get-data`, set by `h-set-data`.
   data        Json?
+  /// Sort order among sibling nodes (lower values come first); used
+  /// by `h-read-next-node` and portal drag-and-drop reordering.
   seq         Int?
+  /// GitHub repo slug (e.g. "micromentor/mmdata").
   ownerRepo   String?   @map("owner_repo")
+  /// If true, this node can be executed as a task.
   isRunnable  Boolean?  @map("is_runnable")
+  /// LLM model that created or last modified this node (e.g.
+  /// "claude-opus-4-6", "gpt-4o").
   llmModel    String?   @map("llm_model")
+  /// AI agent tool that created or last modified this node (e.g.
+  /// "claude-code", "cursor", "hadron-portal").
   aiAgent     String?   @map("ai_agent")
   createdAt   DateTime  @default(now()) @map("created_at")
   createdBy   String?   @map("created_by")
@@ -368,6 +690,10 @@ model Node {
   @@map("nodes")
 }
 
+/// Directed edge between two Nodes. The `label` describes the
+/// relationship — e.g. "imports", "depends_on", "related-to", "cites",
+/// "abstract-of". An edge whose target is not yet synced lives in
+/// PendingEdge until the target arrives.
 model Edge {
   id        String    @id @default(cuid())
   sourceId  String    @map("source_id")
@@ -376,11 +702,24 @@ model Edge {
   // Edge-condition spec: JSONLogic gating expression. Null = always fires.
   // Validated server-side at save and evaluate time. See
   // src/lib/edge-conditions/.
+  /// JSONLogic gating expression evaluated by the shared
+  /// edge-condition evaluator at edge-resolution time. NULL means the
+  /// edge always fires. Validated against the v1 operator subset and
+  /// the five variable scopes (`memory.*`, `chat.*`, `agent.*`,
+  /// `message.data.*`, `now()` / `today()`). Spec:
+  /// spec-kits/specs/001-edge-condition-spec/spec.md. Hadron-docs:
+  /// reference/edge-conditions.md.
   condition Json?
   // Stable ordering hook (lower = earlier). Future agent-exceptions
   // feature uses this so handler edges can sit at the top of the
   // resolution order without re-architecting.
+  /// Resolution-order hook for edges sharing a source node; lower
+  /// fires first, ties broken by insertion order. Reserved space for
+  /// the future agent-exceptions feature to slot handler edges at the
+  /// top.
   priority  Int       @default(0)
+  /// Free-form structured payload on the edge (e.g. transition
+  /// metadata for conversation-design edges).
   data      Json?
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
@@ -397,10 +736,15 @@ model Edge {
   @@map("edges")
 }
 
+/// An edge whose target Node has not been synced yet; stored without
+/// a foreign key to the target. When the target Node is synced, the
+/// PendingEdge is converted to a regular Edge.
 model PendingEdge {
   id        String    @id @default(cuid())
   sourceId  String    @map("source_id")
-  targetId  String    @map("target_id") // intended target node id — NOT a FK
+  /// Intended target node id — **NOT a foreign key**; resolved at
+  /// promotion time.
+  targetId  String    @map("target_id")
   label     String?
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
@@ -416,33 +760,64 @@ model PendingEdge {
   @@map("pending_edges")
 }
 
+/// Tracks a unit of work by an App: an AI/agent conversation, a
+/// chatbot interaction, an automation run. Sessions are the top-level
+/// tracking concept; UsageEvent rows are recorded within a session.
 model Session {
   id              String      @id // caller-generated (e.g. UUID from h-start-session)
   type            SessionType @default(DEVELOPER)
   appId           String?     @map("app_id")
+  /// The User this session is attributed to (typically the end-user
+  /// in a chatbot/automation session; the developer in a DEVELOPER
+  /// session).
   userId          String?     @map("user_id")
+  /// The Agent driving the session (NULL for free-form developer
+  /// sessions not tied to a specific Agent).
   agentId         String?     @map("agent_id")
+  /// The active write-memory for this session, when there's an
+  /// unambiguous one. Resolves the multi-writable-memory ambiguity.
   memoryId        String?     @map("memory_id")
+  /// Hard expiry; the janitor reaps sessions past this point.
   expiresAt       DateTime?   @map("expires_at")
+  /// Git repo slug.
   repo            String?
+  /// Git branch name at session start.
   branch          String?
+  /// GitHub PR number.
   prNumber        Int?        @map("pr_number")
+  /// Tenant/customer identifier (free-form, supplied by the App).
   customerId      String?     @map("customer_id")
+  /// Spoken ("en", "es") or programming language.
   language        String?
+  /// The execution plan, when one was prepared.
   plan            String?
+  /// LLM model used (e.g. "claude-opus-4-6").
   llmModel        String?     @map("llm_model")
+  /// Total prompt tokens across the session.
   inputTokens     Int?        @map("input_tokens")
+  /// Total completion tokens across the session.
   outputTokens    Int?        @map("output_tokens")
+  /// Number of human-AI exchanges.
   turnCount       Int?        @map("turn_count")
+  /// Failed tool calls / action runs.
   errorCount      Int?        @map("error_count")
+  /// Sub-agent vertical relation (this session was spawned by a parent).
   parentSessionId String?     @map("parent_session_id")
+  /// Chain horizontal relation (linked journey — this session
+  /// continues from a previous one).
   prevSessionId   String?     @map("prev_session_id")
+  /// AI-composed summary at session end.
   summary         String?
+  /// 0.0-1.0, reported externally.
   outcome         Float?
+  /// GUID or URL of authoritative outcome record.
   outcomeRef      String?     @map("outcome_ref")
+  /// Domain-specific outcome detail.
   outcomeMeta     Json?       @map("outcome_meta")
   startedAt       DateTime    @default(now()) @map("started_at")
   endedAt         DateTime?   @map("ended_at")
+  /// Set if the session was auto-expired due to inactivity (vs.
+  /// explicitly ended).
   autoExpiredAt   DateTime?   @map("auto_expired_at")
   createdAt       DateTime    @default(now()) @map("created_at")
   createdBy       String?     @map("created_by")
@@ -472,16 +847,30 @@ model Session {
   @@map("sessions")
 }
 
+/// Record of a single operation within a Session (read, write,
+/// action run, edge traversal, session summary).
+///
+/// **Column `type` is `String` (not enum)** — intended values:
+/// `read | write | action-run | edge-traversal | session-summary`.
+/// Tightening to a Prisma enum is reserved for a future cleanup spec.
 model UsageEvent {
   id         String    @id @default(cuid())
   type       String
+  /// Stored directly so the event survives node deletion.
   nodeLoc    String?   @map("node_loc")
+  /// Set null on node deletion.
   nodeId     String?   @map("node_id")
+  /// Set null on session deletion.
   sessionId  String?   @map("session_id")
+  /// The App that authored this event.
   appId      String?   @map("app_id")
+  /// Key-value args when `type = 'action-run'`.
   actionArgs Json?     @map("action_args")
+  /// LLM model used for this specific event.
   model      String?
+  /// Input tokens consumed.
   tokensIn   Int?      @map("tokens_in")
+  /// Output tokens generated.
   tokensOut  Int?      @map("tokens_out")
   createdAt  DateTime  @default(now()) @map("created_at")
   createdBy  String?   @map("created_by")
@@ -502,32 +891,83 @@ model UsageEvent {
   @@map("usage_events")
 }
 
+/// **The Agent definition** — what a Builder creates and what the
+/// marketplace sells. One Agent row holds the canonical conversation
+/// design (system memory), the default AI config, the declared
+/// memory-provisioning policy, and the declared installation policy.
+/// Spec: 008-agent-installation (2026-05-02).
+///
+/// An **App** is the *deployment* of an Agent in some org. The Agent
+/// is what is shared across installations; the App is what
+/// authenticates, holds members, and accumulates per-deployment data.
+/// (PWA analogy: you build an Agent, and when someone installs it,
+/// the running instance is called an App.)
+///
+/// Examples: "Mealplan" (the Agent your family meal planner is built
+/// from), "Juno" (the mentee chat agent shared across MicroMentor
+/// orgs).
 model Agent {
   id                   String           @id @default(cuid())
   organizationId       String           @map("organization_id")
+  /// Globally unique identifier (e.g. "micromentor.org:juno");
+  /// derived from `org.urn + ":" + slug`.
   urn                  String           @unique
+  /// Display name of this agent.
   name                 String
   description          String?
+  /// System prompt sent to the LLM at session start.
   systemPrompt         String?          @map("system_prompt")
+  /// Memory containing conversation designs (stages, prompts,
+  /// partials). Universally read-only from any App context post-008
+  /// (DEVELOP-from-App is dropped per R-10); edits happen in the
+  /// Agent ownership surface.
   systemMemoryId       String?          @map("system_memory_id")
+  /// PUBLIC | ORGANIZATION | PRIVATE — PERSONAL is reserved for
+  /// memories and not a valid value here despite the shared enum
+  /// type. Default PRIVATE.
   visibility           MemoryVisibility @default(PRIVATE)
+  /// Coarse behavior hint — see AgentType enum doc. Largely legacy
+  /// post-008.
   type                 AgentType        @default(ASSISTANT)
+  /// Surfaces this Agent is designed for (free-form per 008 R-9; v1
+  /// known values: 'chat', 'slack', 'mcp', 'web'). Distinct from the
+  /// per-App `surfaces` — this is the *design-time* declaration.
   surfaces             String[]         @default([])
+  /// AI provider for the Agent's default AI config (e.g. "anthropic",
+  /// "openai"). An App can override at deploy time via `App.aiProvider`.
   aiProvider           String?          @map("ai_provider")
   aiModel              String?          @map("ai_model")
+  /// AES-256-GCM-encrypted API key for the Agent's default AI config.
   aiApiKeyEncrypted    String?          @map("ai_api_key_encrypted")
+  /// Last 4 characters of the raw API key for masked display.
   aiApiKeyPreview      String?          @map("ai_api_key_preview")
+  /// Loc of the currently-published revision of the Agent's system
+  /// memory. Lets the Builder ship draft revisions without affecting
+  /// running Apps.
   publishedRevisionLoc String?          @map("published_revision_loc")
+  /// Optimistic editor-lock owner (one Builder at a time can hold the
+  /// edit lock on the system memory).
   editorLockUserId     String?          @map("editor_lock_user_id")
+  /// When the editor lock expires (auto-released on stale).
   editorLockExpiresAt  DateTime?        @map("editor_lock_expires_at")
+  /// Agent working state (per-user data like family budget,
+  /// preferences); automatically available to the LLM as context.
   properties           Json?
   // 008-agent-installation (2026-05-02): Agent declares per-deployment memory
   // provisioning shape. Schema: { appMemory: 'shared' | 'user' | 'none' }.
   // Personal-class provisioning is implicit (lazy on first user-attributed write).
+  /// Declares how this Agent expects per-App memory to be
+  /// provisioned. Shape: `{ appMemory: 'shared' | 'user' | 'none' }`.
+  /// `personalMemory` provisioning is implicit (lazy-create on first
+  /// user-attributed write). 008-agent-installation FR-008.
   memoryProvisioning   Json             @default("{\"appMemory\": \"shared\"}") @map("memory_provisioning")
   // 008-agent-installation (2026-05-02): Agent declares membership constraints.
   // Schema: { maxMembers: number | 'unlimited', memberRoles: string[] }.
   // Enforced at AppMember invite-acceptance time.
+  /// Declares membership constraints for any App that installs this
+  /// Agent. Shape: `{ maxMembers: number | 'unlimited', memberRoles:
+  /// string[] }`. `maxMembers` enforced at AppMember
+  /// invite-acceptance time. 008-agent-installation FR-009.
   installationPolicy   Json             @default("{\"maxMembers\": \"unlimited\", \"memberRoles\": [\"owner\"]}") @map("installation_policy")
   createdAt            DateTime         @default(now()) @map("created_at")
   createdBy            String?          @map("created_by")
@@ -551,11 +991,19 @@ model Agent {
   @@map("agents")
 }
 
+/// Associates a Memory with an Agent, with a per-memory access level.
+/// The Agent controls which memories are read-only vs read-write
+/// per-attached-memory. After 005-agent-subscription,
+/// `AgentMemoryItem.role` is the sole per-knowledge-memory write cap
+/// (the AppAgent-level cap was first relaxed in 005, then the
+/// AppAgent join itself was dropped in 008-agent-installation).
 model AgentMemoryItem {
   id        String    @id @default(cuid())
   agentId   String    @map("agent_id")
   memoryId  String    @map("memory_id")
-  role      String    @default("read") // "read" or "read-write"
+  /// `"read"` or `"read-write"`. Default `"read"`. Controls whether
+  /// the Agent can write to this memory.
+  role      String    @default("read")
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
   updatedAt DateTime? @map("updated_at")
@@ -570,15 +1018,24 @@ model AgentMemoryItem {
   @@map("agent_memory_items")
 }
 
+/// Commercial usage grant of a Memory; defines capacity and terms.
+/// Consumed via MemorySubscription.licenseId.
 model MemoryLicense {
   id          String    @id @default(cuid())
   memoryId    String    @map("memory_id")
+  /// **Column type is `String` (not enum)** — intended values:
+  /// `user | app | organization`.
   licenseType String    @map("license_type")
+  /// Number of consumers allowed to use this license.
   seats       Int
   validFrom   DateTime  @map("valid_from")
   validUntil  DateTime  @map("valid_until")
+  /// One or more license keys.
   licenseKeys String[]  @map("license_keys")
+  /// Usage terms & conditions.
   terms       String
+  /// If true, the memory will be merged into the blended graph for
+  /// the consumer.
   activated   Boolean   @default(false)
   createdAt   DateTime  @default(now()) @map("created_at")
   createdBy   String?   @map("created_by")
@@ -593,12 +1050,66 @@ model MemoryLicense {
   @@map("memory_licenses")
 }
 
+/// An Organization subscribes to another Organization's Memory.
+/// Governed by a MemoryLicense when the memory requires one.
+///
+/// **Access evaluation order** (cross-org chain — extended in
+/// 005-agent-subscription with the App↔Agent and User↔Agent gates;
+/// rewritten in 008-agent-installation with App.agent_id direct +
+/// AgentOrgGrant):
+///   1. **App ↔ Agent** — `App.agentId IS NOT NULL` AND
+///      `Agent.visibility` allows the App's org. Cross-org installs
+///      (`App.organizationId != Agent.organizationId`) additionally
+///      require an active `AgentOrgGrant(App.organizationId,
+///      App.agentId)`. Same-org installs auto-pass.
+///   2. **Agent ↔ Memory (knowledge / app / system)** —
+///      `AgentMemoryItem(agent, memory)` exists OR memory is the
+///      Agent's `systemMemoryId` OR memory's `appId = App.id` AND
+///      memory's `class = 'app'`. When cross-org for knowledge:
+///      `MemorySubscription(orgB, memory)` AND any required
+///      `MemoryLicense` valid (not expired, seats available).
+///   3. **User ↔ Agent (personal-class memory only)** —
+///      `AgentSubscription(user, App.agentId)` exists AND active per
+///      the predicate, AND `Memory.appId = App.id` (the per-App
+///      isolation that User Story 2 hangs on — a session through App
+///      A cannot read the personal memory at `(B.id, user.id)` for
+///      some other App B of the same Agent).
+///   4. **Effective role** — most restrictive of
+///      `AgentMemoryItem.role` and `MemorySubscription.role`. (The
+///      legacy `AppAgent.role` is dropped post-008 — system memory is
+///      universally read-only from any App.) PERSONAL-class memories
+///      enforce strict ownership *additionally*: even an ADMIN/OWNER
+///      who would otherwise satisfy gate 2 cannot read a PERSONAL
+///      memory they do not own (FR-016).
+///
+/// **Worked example** (the four-org Juno scenario, 008 vocabulary):
+/// an App in `OrgA` deploys Juno (Agent in `OrgB` with
+/// visibility=ORGANIZATION since Alice is a Micromentor org-member;
+/// or PUBLIC for marketplace shape) which references a knowledge
+/// Memory in `OrgC`. The cross-org App↔Agent gate is satisfied by an
+/// active `AgentOrgGrant(OrgA, juno)`. End-user Alice (personal org
+/// `personal-alice`) chats through that App; her records land in a
+/// personal Memory at `(App.id, alice.id)` (`Memory.userId = alice`,
+/// `Memory.appId = App.id`, `class = personal`,
+/// `visibility = PERSONAL`). The cross-org write into Alice's
+/// personal memory is granted by `AgentSubscription(alice, juno)` —
+/// without it, Juno has zero access. If Alice installs Juno into a
+/// *second* App (different Org), her records there go to a separate
+/// `(B.id, alice.id)` row — fully isolated from the OrgA installation.
+/// Each gate above must clear in order; failure denies at the right
+/// layer with a typed error.
 model MemorySubscription {
   id             String    @id @default(cuid())
   memoryId       String    @map("memory_id")
+  /// The subscribing organization (not the owner).
   organizationId String    @map("organization_id")
   licenseId      String?   @map("license_id")
+  /// Column type is the full `Role` enum, but the intended grant set
+  /// is `CONTRIBUTOR | READER` (reader = read-only, contributor =
+  /// read-write). Tightening reserved for a future cleanup spec.
   role           Role      @default(READER)
+  /// If true, the memory will be merged into the blended graph for
+  /// the subscriber.
   activated      Boolean   @default(false)
   createdAt      DateTime  @default(now()) @map("created_at")
   createdBy      String?   @map("created_by")
@@ -616,12 +1127,21 @@ model MemorySubscription {
   @@map("memory_subscriptions")
 }
 
+/// Represents a running Hadron server instance (SaaS or self-hosted).
+/// Each organization connects to one server; a server serves one or
+/// many organizations.
 model HadronServer {
   id              String    @id @default(cuid())
+  /// The organization that owns/operates this server; NULL for the
+  /// Baragaun SaaS server.
   organizationId  String?   @map("organization_id")
+  /// Base URL of this server (e.g. "https://server.hadrongraph.io").
   url             String
+  /// Minimum level for ServerLogEntry records.
   logLevel        LogLevel  @default(ERROR) @map("log_level")
+  /// Deployed software version.
   version         String?
+  /// Last health-check timestamp.
   lastHeartbeatAt DateTime? @map("last_heartbeat_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   createdBy       String?   @map("created_by")
@@ -635,12 +1155,18 @@ model HadronServer {
   @@map("hadron_server")
 }
 
+/// Log entry for the Hadron server, surfaced in hadron-portal for
+/// troubleshooting. Examples: memory sync failures, GitHub App
+/// errors, system-level events.
 model ServerLogEntry {
   id        String    @id @default(cuid())
   serverId  String    @map("server_id")
   level     LogLevel
+  /// Set if the log relates to a specific memory.
   memoryId  String?   @map("memory_id")
+  /// Human-readable log message.
   message   String
+  /// Structured context (stack trace, request/response, etc.).
   detail    Json?
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
@@ -655,12 +1181,18 @@ model ServerLogEntry {
   @@map("server_log")
 }
 
+/// Log entry for a specific memory, surfaced in hadron-portal for
+/// troubleshooting. Examples: sync failures, license expirations,
+/// pending edge resolution, branch conflicts.
 model MemoryLogEntry {
   id        String             @id @default(cuid())
   memoryId  String             @map("memory_id")
   level     LogLevel
+  /// Categorizes the log for filtering.
   eventType MemoryLogEventType @map("event_type")
+  /// Human-readable log message.
   message   String
+  /// Structured context (sync diff, expired license details, etc.).
   detail    Json?
   createdAt DateTime           @default(now()) @map("created_at")
   createdBy String?            @map("created_by")
@@ -676,12 +1208,23 @@ model MemoryLogEntry {
   @@map("memory_log")
 }
 
+/// An invitation sent to an existing platform User to join an
+/// Organization. The `role` cannot be higher than that of the sender.
+/// (Contrast with UserInvitation, which is for inviting *new* platform
+/// users.)
 model OrgMemberInvitation {
   id              String    @id @default(cuid())
+  /// fk to OrgMember.id — the sender of the invitation.
   memberUserId    String    @map("member_user_id")
+  /// fk to User.id — the recipient (an existing platform user).
   recipientUserId String    @map("recipient_user_id")
+  /// Column type is the full `Role` enum, but the intended grant set
+  /// is `ADMIN | CONTRIBUTOR | READER` (you can't invite someone as
+  /// OWNER — promotion happens via a separate transfer flow).
   role            Role      @default(READER)
+  /// When this invitation expires.
   expiresAt       DateTime? @map("expires_at")
+  /// When the recipient accepted the invitation.
   acceptedAt      DateTime? @map("accepted_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   createdBy       String?   @map("created_by")
@@ -696,20 +1239,57 @@ model OrgMemberInvitation {
   @@map("org_member_invitations")
 }
 
+/// Invitation sent out to one or more persons that do not yet have a
+/// user account. If `maxActivations = 1` this invitation is
+/// single-use. If `email` or `githubUsername` is given, the new user
+/// is validated against this — which essentially locks the identity
+/// of the new person and sets `maxActivations` to 1.
+///
+/// **Quota** is tracked on `User.maxReferrals`, not on the invitation.
+/// When a new user is created from this invitation, their
+/// `maxReferrals` is set by the onboarding process (e.g. from the
+/// sender's remaining quota or a system default).
+///
+/// **Race conditions**: if a referral arrives at the landing page
+/// after activations exceed `maxActivations`, the page shows
+/// "The invitation has expired. Please contact the sender." If
+/// onboarding has *started* and the create-account request would push
+/// the count above the cap, the account is still created (don't block
+/// a real human on a counter).
+///
+/// **Role bounds**: `userRole` cannot be higher than the sender's;
+/// `memberRole` cannot be higher than the sender's OrgMember role in
+/// the target org.
 model UserInvitation {
   id             String    @id @default(cuid())
+  /// fk to User.id — the sender; NULL for system/seed invitations
+  /// from Baragaun.
   senderUserId   String?   @map("sender_user_id")
+  /// If the new user should be added to an organization on signup.
   organizationId String?   @map("organization_id")
+  /// Random string to get a unique invite URL.
   slug           String    @unique
+  /// Column type is the full `Role` enum, but the intended set is
+  /// `ADMIN | null` (most invites grant no global role).
   userRole       Role?     @map("user_role")
+  /// Column type is the full `Role` enum, but the intended grant set
+  /// is `ADMIN | CONTRIBUTOR | READER`.
   memberRole     Role      @default(READER) @map("member_role")
+  /// fk to User.id — set when the invitation is accepted and a User
+  /// is created.
   newUserId      String?   @map("new_user_id")
+  /// Recipient's name.
   name           String?
   email          String?
   githubUsername String?   @map("github_username")
   phoneNumber    String?   @map("phone_number")
+  /// Maximum number of times this invitation can be accepted by a
+  /// new recipient; current count is determined from
+  /// UserInvitationActivation rows.
   maxActivations Int?      @map("max_activations")
   expiresAt      DateTime? @map("expires_at")
+  /// When this invitation was accepted and the new User was created.
+  /// (For multi-use invites this is set on the *first* acceptance.)
   acceptedAt     DateTime? @map("accepted_at")
   createdAt      DateTime  @default(now()) @map("created_at")
   createdBy      String?   @map("created_by")
@@ -725,9 +1305,14 @@ model UserInvitation {
   @@map("user_invitations")
 }
 
+/// One row per User created in response to a UserInvitation. Role
+/// bounds match UserInvitation's: `userRole` and `memberRole` cannot
+/// exceed the sender's at activation time.
 model UserInvitationActivation {
   id           String    @id @default(cuid())
+  /// The invitation that was accepted.
   invitationId String    @map("invitation_id")
+  /// The newly created User.
   userId       String    @map("user_id")
   createdAt    DateTime  @default(now()) @map("created_at")
   createdBy    String?   @map("created_by")
@@ -742,6 +1327,7 @@ model UserInvitationActivation {
   @@map("user_invitation_activations")
 }
 
+/// Temporary token for email verification during signup.
 model EmailVerificationToken {
   id        String    @id @default(cuid())
   email     String
@@ -754,6 +1340,8 @@ model EmailVerificationToken {
   @@map("email_verification_tokens")
 }
 
+/// A versioned snapshot of a Node's content. Written every time a
+/// Node is updated, so the full history is recoverable.
 model NodeVersion {
   id          String   @id @default(cuid())
   nodeId      String   @map("node_id")
@@ -763,6 +1351,8 @@ model NodeVersion {
   description String?
   content     String?
   tags        String[]
+  /// Free-form author label (typically a User.id, but may be an
+  /// agent identifier for AI edits).
   editedBy    String?  @map("edited_by")
   createdBy   String?  @map("created_by")
   createdAt   DateTime @default(now()) @map("created_at")
@@ -773,10 +1363,15 @@ model NodeVersion {
   @@map("node_versions")
 }
 
+/// Temporary record holding an encrypted API key for a newly
+/// provisioned workspace, consumed during first-time setup. The raw
+/// key is the `hdr_app_<…>` value, shown once via `/setup/info`.
 model PendingSetup {
   id              String   @id @default(cuid())
   userId          String   @unique @map("user_id")
+  /// The workspace's App; ON DELETE CASCADE.
   appId           String   @map("app_id")
+  /// AES-256-GCM-encrypted raw API key.
   rawKeyEncrypted String   @map("raw_key_encrypted")
   consumed        Boolean  @default(false)
   createdBy       String?  @map("created_by")
@@ -788,18 +1383,31 @@ model PendingSetup {
   @@map("pending_setups")
 }
 
+/// A linked Microsoft Exchange / Outlook mailbox for an
+/// Organization-scoped user. Used by the email-ingestion pipeline to
+/// pull message bodies into memory nodes. `refreshTokenEncrypted` is
+/// AES-256-GCM-encrypted under HADRON_ENCRYPTION_KEY.
 model ExchangeConnection {
   id                    String     @id @default(cuid())
   organizationId        String     @map("organization_id")
   userId                String     @map("user_id")
+  /// The mailbox email address; (organizationId, mailboxEmail) is
+  /// unique.
   mailboxEmail          String     @map("mailbox_email")
   displayName           String?    @map("display_name")
+  /// AES-256-GCM-encrypted MS Graph refresh token.
   refreshTokenEncrypted String     @map("refresh_token_encrypted")
+  /// Soft toggle — operator can pause sync without removing the
+  /// connection.
   syncEnabled           Boolean    @default(true) @map("sync_enabled")
   syncStatus            SyncStatus @default(PENDING) @map("sync_status")
   lastSyncAt            DateTime?  @map("last_sync_at")
+  /// Error message from the last failed sync.
   lastError             String?    @map("last_error")
+  /// MS Graph change-notification subscription id.
   webhookSubscriptionId String?    @map("webhook_subscription_id")
+  /// Subscription expiry — MS Graph webhooks are short-lived; the
+  /// renewer cron job watches this column.
   webhookExpiresAt      DateTime?  @map("webhook_expires_at")
   createdAt             DateTime   @default(now()) @map("created_at")
   createdBy             String?    @map("created_by")
@@ -816,6 +1424,10 @@ model ExchangeConnection {
   @@map("exchange_connections")
 }
 
+/// Pre-launch waitlist signup capture from the marketing site. Holds
+/// an email plus an optional free-form "what features would you most
+/// want?" answer. Not connected to User (signups happen before the
+/// user has an account).
 model WaitingListItem {
   id                String   @id @default(cuid())
   email             String
@@ -828,20 +1440,60 @@ model WaitingListItem {
 
 // ─── Multi-user agent: Apps ────────────────────────────────────────────
 
+/// **The runtime deployment of an Agent in some Organization** — what
+/// someone installs when they pick an Agent off the marketplace (or
+/// install one from their own org). Holds credentials, surfaces,
+/// optional AI override, members, and per-deployment memory pivots.
+/// Per Constitution Technology Invariant #6, this is also the unified
+/// caller-identity entity that authenticates against the Hadron platform.
+///
+/// Per (org, Agent) install: typically one App per pair. Multi-install
+/// of the same Agent across orgs is supported and explicitly isolates
+/// app- and personal-class memory at `(app_id, …)` keys.
+///
+/// **Auth credentials** live on AppKey rows (one or many per App,
+/// independently revocable). The wire-token prefix `hdr_app_` and the
+/// `appKey` developer-facing identifier are deliberately preserved by
+/// 008 — there is no rename.
+///
+/// 008-agent-installation drops the `AppAgent` join: an App now
+/// references its Agent directly via `agentId`. The legacy
+/// OPERATE/DEVELOP role distinction is removed (system memory is
+/// universally read-only from any App context — DEVELOP-from-App is
+/// gone per R-10).
+///
+/// **Cascade behavior**: hard App deletion cascades to AppKey,
+/// AppLogEntry, AppMember, and the App's `app`/`personal`-class Memory
+/// rows. The orphan-retention behavior in 008 FR-015 (personal memory
+/// survives an AppMember removal) is independent — it's a row delete
+/// in `app_members`, not in `apps`.
 model App {
   id                    String               @id @default(cuid())
+  /// Display name.
   name                  String
+  /// Globally unique identifier; derived from `org.urn + ":" + slug`.
   urn                   String               @unique
   organizationId        String               @map("organization_id")
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
   identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")
   sessionTimeoutSeconds Int                  @default(900) @map("session_timeout_seconds")
   anonymousTtlDays      Int                  @default(7) @map("anonymous_ttl_days")
+  /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
+  /// in a follow-up cleanup spec (per 008 R-4); kept in place to
+  /// avoid spurious portal churn.
   appType               AppType              @default(WORKSTATION) @map("app_type")
+  /// Default member role applied when the Agent's
+  /// `installation_policy.memberRoles` doesn't apply.
   role                  AppMembershipRole    @default(READER)
   description           String?
+  /// **Deprecated** — superseded by `Agent.systemMemoryId` +
+  /// `Agent.systemPrompt`. Scheduled for removal in a follow-up
+  /// cleanup spec (per 008 R-4).
   systemPrompt          String?              @map("system_prompt")
+  /// Tools this App's agent can access; default `[]`.
   agentTools            String[]             @default([]) @map("agent_tools")
+  /// Optional AI override on the App; if NULL, sessions resolve from
+  /// the Agent's default AI config.
   aiProvider            String?              @map("ai_provider")
   aiModel               String?              @map("ai_model")
   aiApiKeyEncrypted     String?              @map("ai_api_key_encrypted")
@@ -850,8 +1502,21 @@ model App {
   // an Agent. agent_id is nullable only to absorb orphan Apps during the
   // cutover and the Agent-deletion SET NULL cascade; new App creation
   // post-migration MUST set agentId (enforced at the createApp resolver).
+  /// The Agent this App is a deployment of. Nullable only to absorb
+  /// orphan Apps during the 008 cutover and the Agent-deletion
+  /// SET NULL cascade; new App creation post-008 MUST set agentId
+  /// (enforced at the createApp resolver). 008-agent-installation
+  /// FR-002 / FR-022.
   agentId               String?              @map("agent_id")
+  /// Migrated from the dropped `app_agents.training_mode`. Sessions
+  /// through this App are flagged as training data for the Agent's
+  /// owner to review. 008-agent-installation FR-022.
   trainingMode          Boolean              @default(false) @map("training_mode")
+  /// Free-form per 008 R-9; v1 known values: `'chat'`, `'slack'`,
+  /// `'mcp'`, `'web'`. Surface enforcement (which features are gated
+  /// on which surfaces) is handled by the portal/app code; chat-tab
+  /// gating in hadron-portal#187 reads `surfaces.includes('chat')`.
+  /// 008-agent-installation FR-014.
   surfaces              String[]             @default(["chat"])
   // Standard audit fields
   createdAt             DateTime             @default(now()) @map("created_at")
@@ -877,11 +1542,35 @@ model App {
   @@map("apps")
 }
 
+/// An API key for an App, independently revocable; multiple keys per
+/// App. The raw key carries the canonical `hdr_app_` prefix and is
+/// shown once at creation; only the SHA-256 hash is stored. (SHA-256,
+/// not bcrypt — bcrypt's per-hash salt would prevent the
+/// constant-time keyHash lookup the auth resolver does. The raw key
+/// is a 256-bit random value, so dictionary attacks against the hash
+/// are not a concern.)
+///
+/// **Auth path**: the resolver at
+/// `hadron-server/src/middleware/auth.ts` accepts `hdr_app_`-prefixed
+/// bearer tokens, looks up the AppKey by SHA-256 hash, and resolves
+/// the principal to the parent App. Memory access is then gated by
+/// `hadron-server/src/mcp/access-control.ts`, which reads
+/// `App.agentId` directly (the legacy AppAgent join was dropped in
+/// 008-agent-installation) and folds the Agent's `systemMemoryId` +
+/// `memoryItems` into the access map.
+///
+/// **Client config field**: hadron-client reads the AppKey value from
+/// the `appKey` field of `.hadron/config.json`. The env var name
+/// `HADRON_CLIENT_KEY` describes location (the client process), not
+/// the entity.
 model AppKey {
   id         String    @id @default(cuid())
   appId      String    @map("app_id")
+  /// SHA-256 hash of the raw `hdr_app_<…>` key.
   keyHash    String    @unique @map("key_hash")
+  /// Last 4 characters of the raw key for masked display.
   keyPreview String    @map("key_preview")
+  /// Human-friendly name for this key.
   label      String?
   createdAt  DateTime  @default(now()) @map("created_at")
   createdBy  String?   @map("created_by")
@@ -894,6 +1583,16 @@ model AppKey {
   @@map("app_keys")
 }
 
+/// The User↔App membership join with a per-member role. Spec:
+/// 008-agent-installation FR-004.
+///
+/// **Per-User lifecycle is reserved for a future spec** — there is no
+/// `revokedAt` / `expiresAt` column. Removing a member is a row delete;
+/// the user's personal-class Memory at `(app_id, user.id)` is
+/// **retained by default** as an orphan (FR-015) and re-attaches
+/// automatically if the user later rejoins the *same* App.
+///
+/// **No deletedAt** — soft-delete is meaningless for a pure join.
 // 008-agent-installation (2026-05-02): User↔App membership join.
 // Per-User lifecycle is reserved for a future spec — there is no
 // revoked_at / expires_at column. Removing a member is a row delete.
@@ -904,6 +1603,10 @@ model AppMember {
   userId    String    @map("user_id")
   // Free-form string per R-7. Validated at write-time against the parent
   // Agent's installation_policy.memberRoles (e.g., ['owner', 'guide']).
+  /// Free-form string validated at write-time against the parent
+  /// Agent's `installation_policy.memberRoles` (per 008 R-7). Examples:
+  /// `'owner'`, `'guide'`, `'cook'`. `installation_policy.maxMembers`
+  /// is enforced at invite-acceptance time (per FR-016).
   role      String
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
@@ -918,6 +1621,31 @@ model AppMember {
   @@map("app_members")
 }
 
+/// The Org↔Agent license — authorizes an Org to (a) create Apps that
+/// deploy this Agent, and (b) bundle this Agent in `AgentImport` edges
+/// of Agents the Org owns. Spec: 008-agent-installation FR-006 / R-2.
+///
+/// Sibling to `AgentSubscription` (User↔Agent, from 005). Both share
+/// the lifecycle field shape (`activatedAt`, `expiresAt`, `revokedAt`,
+/// `revokedBy`) and the same active-status predicate. The two-table
+/// split (rather than a polymorphic `subjectType` + `subjectId`)
+/// preserves typed FK integrity and per-table indexing clarity.
+///
+/// For **same-org installs** (an Org deploying its own Agent), the
+/// grant is auto-provisioned by `ensureAgentOrgGrant` on first
+/// contact. **Cross-org installs** require an explicit grant; the v1
+/// surface auto-provisions on first contact (the marketplace UX for
+/// explicit subscribe lands in a future spec).
+///
+/// **No deletedAt** — soft-delete is redundant with the
+/// `revokedAt` lifecycle.
+///
+/// **Active-status predicate** (shared with `AgentSubscription` via
+/// the `isLifecycleActive` helper):
+///
+///     activatedAt IS NOT NULL
+///       AND revokedAt IS NULL
+///       AND (expiresAt IS NULL OR expiresAt > now())
 // 008-agent-installation (2026-05-02): Org↔Agent license. Authorizes
 // (a) creating an App in org_id that uses agent_id, and (b) bundling
 // agent_id as an AgentImport in another Agent that org_id owns. Sibling
@@ -926,9 +1654,13 @@ model AppMember {
 model AgentOrgGrant {
   orgId       String    @map("org_id")
   agentId     String    @map("agent_id")
+  /// v1 default: `now()` on creation since billing is out of scope.
   activatedAt DateTime? @map("activated_at")
   expiresAt   DateTime? @map("expires_at")
+  /// Set by an ADMIN/OWNER of the Agent's owning org via
+  /// `revokeAgentOrgGrant`.
   revokedAt   DateTime? @map("revoked_at")
+  /// fk to User.id — audit trail for who revoked.
   revokedBy   String?   @map("revoked_by")
   createdAt   DateTime  @default(now()) @map("created_at")
   createdBy   String?   @map("created_by")
@@ -944,6 +1676,17 @@ model AgentOrgGrant {
   @@map("agent_org_grants")
 }
 
+/// A directed dependency edge between two Agents — "Agent A imports
+/// Agent B as a dep." Spec: 008-agent-installation FR-005 / User Story 3.
+///
+/// Installing the parent (a row in `apps` with `agentId = parent`)
+/// cascade-installs required deps (creates additional Apps in the
+/// same org, one per dep). Optional deps install only if the caller
+/// passes `installOptional`.
+///
+/// v1 enforces **1-level imports only** — the dep itself must NOT be
+/// a parent of any AgentImport. Cycles are trivially blocked at write
+/// time (`parentAgentId != importedAgentId`).
 // 008-agent-installation (2026-05-02): directed Agent→Agent dependency
 // edge. v1 enforces 1-level imports only (the dep itself must not be
 // a parent of any AgentImport). The composite FK to AgentOrgGrant is
@@ -952,25 +1695,71 @@ model AgentOrgGrant {
 // table since the universal-grant role lives on AgentOrgGrant for
 // org-level grants, not AgentSubscription (which stays User↔Agent).
 model AgentImport {
-  parentAgentId         String   @map("parent_agent_id")
-  importedAgentId       String   @map("imported_agent_id")
-  position              Int
-  required              Boolean  @default(true)
-  agentOrgGrantOrgId    String   @map("agent_org_grant_org_id")
-  agentOrgGrantAgentId  String   @map("agent_org_grant_agent_id")
-  createdAt             DateTime @default(now()) @map("created_at")
-  createdBy             String?  @map("created_by")
+  /// The Agent that does the importing (the "Suite"). ON DELETE
+  /// CASCADE.
+  parentAgentId        String   @map("parent_agent_id")
+  /// The dep Agent. ON DELETE RESTRICT — deleting it would
+  /// invalidate every Suite that depends on it; operators must
+  /// remove the import edge first.
+  importedAgentId      String   @map("imported_agent_id")
+  /// Sparse-int ordering (per 008 R-8). Builders set values like
+  /// 100, 200, 300 to allow easy reordering without renumbering.
+  position             Int
+  /// Hard dep vs optional. Default `true`.
+  required             Boolean  @default(true)
+  /// Composite fk to `AgentOrgGrant(orgId, agentId)` (ON DELETE
+  /// RESTRICT) — the Builder grant authorizing this import. Spec
+  /// FR-005 named this column `agent_subscription_id`; renamed per
+  /// 008 R-2 since the universal-grant role for org-level grants
+  /// lives on the new `AgentOrgGrant` sibling, not `AgentSubscription`.
+  agentOrgGrantOrgId   String   @map("agent_org_grant_org_id")
+  agentOrgGrantAgentId String   @map("agent_org_grant_agent_id")
+  createdAt            DateTime @default(now()) @map("created_at")
+  createdBy            String?  @map("created_by")
 
   parentAgent   Agent         @relation("ParentAgent", fields: [parentAgentId], references: [id], onDelete: Cascade)
   importedAgent Agent         @relation("ImportedAgent", fields: [importedAgentId], references: [id], onDelete: Restrict)
   agentOrgGrant AgentOrgGrant @relation(fields: [agentOrgGrantOrgId, agentOrgGrantAgentId], references: [orgId, agentId], onDelete: Restrict)
 
   @@id([parentAgentId, importedAgentId])
-  @@unique([parentAgentId, position])
+  @@unique([parentAgentId, position]) // prevents two imports at the same position under the same parent
   @@index([importedAgentId])
   @@map("agent_imports")
 }
 
+/// The User-side license: "this user is authorized to use this agent."
+/// Auto-provisioned on first user-attributed contact (per
+/// `controller/operations/ensureAgentSubscription.ts`); revocable by
+/// an ADMIN/OWNER of the Agent's owning org. Authorizes the cross-org
+/// write from the Agent into the user's *personal*-class Memory.
+///
+/// Sibling to `AgentOrgGrant` (Org↔Agent, added in
+/// 008-agent-installation). Both share the lifecycle field shape and
+/// the same `isLifecycleActive` predicate; AgentSubscription
+/// continues to express User↔Agent grants while AgentOrgGrant covers
+/// Org↔Agent (App-creation + import-bundling) grants.
+///
+/// Spec: 005-agent-subscription (2026-04-30). Composite primary key
+/// on `(userId, agentId)`.
+///
+/// **No deletedAt** — soft-delete is redundant with `revokedAt`.
+///
+/// **Active-status predicate** (used by the access-resolver):
+///
+///     activatedAt IS NOT NULL
+///       AND revokedAt IS NULL
+///       AND (expiresAt IS NULL OR expiresAt > now())
+///
+/// **Revocation behavior** (per FR-028 / FR-029): when revoked, the
+/// user's personal Memory of the Agent is **retained** by default —
+/// the user owns it, may want to keep their notes after a class ends.
+/// The Agent loses write access (per FR-019); the user retains read
+/// access via direct authenticated queries. The
+/// `Memory.userMemoryOfAgentId` pivot is preserved so the memory
+/// remains identifiable as "originally from Agent X." **Single
+/// exception**: if the personal Memory has zero nodes at revocation
+/// time, the platform may hard-delete it alongside the
+/// AgentSubscription (avoids orphan accumulation).
 // User-side license expressing "this user is authorized to use this agent."
 // Auto-provisioned on first user-attributed contact (per
 // `controller/operations/ensureAgentSubscription.ts`); revocable by an
@@ -983,9 +1772,16 @@ model AgentSubscription {
   // Lifecycle. v1 default: activatedAt = now() on creation. Future billing
   // work introduces a deferred-activation path (activatedAt = null until
   // payment confirms).
+  /// v1 default: `now()` on creation since billing is out of scope;
+  /// future billing introduces a deferred-activation path
+  /// (activatedAt = null until payment confirms).
   activatedAt DateTime? @map("activated_at")
+  /// Time-bounded subscriptions; NULL for non-expiring.
   expiresAt   DateTime? @map("expires_at")
+  /// Set by an ADMIN/OWNER of the Agent's owning org via
+  /// `revokeAgentSubscription`.
   revokedAt   DateTime? @map("revoked_at")
+  /// fk to User.id — audit trail.
   revokedBy   String?   @map("revoked_by")
   // Standard audit fields. (No deletedAt — soft-delete is redundant with
   // the revokedAt lifecycle; if a row needs to truly disappear it's a
@@ -1003,13 +1799,17 @@ model AgentSubscription {
   @@map("agent_subscriptions")
 }
 
+/// Log entry for a specific App, surfaced in hadron-portal for
+/// troubleshooting.
 model AppLogEntry {
   id        String    @id @default(cuid())
   appId     String    @map("app_id")
   level     LogLevel
   memoryId  String?   @map("memory_id")
   sessionId String?   @map("session_id")
+  /// Human-readable log message.
   message   String
+  /// Structured context.
   detail    Json?
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
