@@ -1326,30 +1326,54 @@ export const resolvers = {
 
       if (readableMemoryIds.length === 0) return [];
 
-      // Top-level chat nodes live at loc "chats:<id>" (depth 2).
-      const chatNodes = await ctx.db.node.findMany({
+      // Top-level chat nodes live at loc "chats:<id>" (depth 2). The only
+      // sub-shapes today are `chats:UUID:messages` (container) and
+      // `chats:UUID:messages:NNN-*` (message rows) — both contain
+      // ':messages', and chat-root locs do not, so we can filter them out
+      // at the DB layer instead of pulling every message body just to
+      // discard it.
+      //
+      // Sort by Node.updatedAt (Prisma's @updatedAt) — bumped automatically
+      // each time sendChatMessage / processChatResponse writes the new
+      // `data.lastMessageAt` back to the chat-root row. That makes the
+      // column an exact proxy for the previous "lastMessageAt || createdAt"
+      // ordering, sortable at the DB layer with `take`/`skip` — no
+      // application-side resort, no JS slice.
+      const tops = await ctx.db.node.findMany({
         where: {
           memoryId: { in: readableMemoryIds },
           loc: { startsWith: 'chats:' },
+          NOT: { loc: { contains: ':messages' } },
           deletedAt: null,
         },
+        orderBy: { updatedAt: 'desc' as const },
+        take: limit ?? 100,
+        skip: offset ?? 0,
       });
-      const tops = chatNodes.filter((n) => n.loc.split(':').length === 2);
-      // Pre-fetch first user message per chat for title fallback.
+      if (tops.length === 0) return [];
+
+      // First-message lookup, scoped to the visible page only (was: every
+      // candidate chat). Parallelized via Promise.all.
+      const firstMessageEntries = await Promise.all(
+        tops.map(async (top) => {
+          const firstMsg = await ctx.db.node.findFirst({
+            where: {
+              memoryId: top.memoryId,
+              loc: { startsWith: `${top.loc}:messages:` },
+              deletedAt: null,
+            },
+            orderBy: { seq: 'asc' as const },
+            select: { content: true },
+          });
+          return [top.loc, firstMsg?.content ?? null] as const;
+        }),
+      );
       const firstMessagesByChat = new Map<string, string>();
-      for (const top of tops) {
-        const firstMsg = await ctx.db.node.findFirst({
-          where: {
-            memoryId: top.memoryId,
-            loc: { startsWith: `${top.loc}:messages:` },
-            deletedAt: null,
-          },
-          orderBy: { seq: 'asc' as const },
-          select: { loc: true, content: true },
-        });
-        if (firstMsg?.content) firstMessagesByChat.set(top.loc, firstMsg.content);
+      for (const [loc, content] of firstMessageEntries) {
+        if (content) firstMessagesByChat.set(loc, content);
       }
-      const chats = tops.map((node) => {
+
+      return tops.map((node) => {
         const data = (node.data as Record<string, unknown>) ?? {};
         const title = deriveChatTitle(node, data, firstMessagesByChat.get(node.loc) ?? null);
         // Spec 017: scope comes from chat-root data.scope, denormalized
@@ -1371,12 +1395,6 @@ export const resolvers = {
           createdBy: node.createdBy ?? null,
         };
       });
-      chats.sort((a, b) => {
-        const ta = a.lastMessageAt ? Date.parse(a.lastMessageAt) : Date.parse(String(a.createdAt));
-        const tb = b.lastMessageAt ? Date.parse(b.lastMessageAt) : Date.parse(String(b.createdAt));
-        return tb - ta;
-      });
-      return chats.slice(offset ?? 0, (offset ?? 0) + (limit ?? 100));
     },
 
     chatHistory: async (

@@ -18,6 +18,8 @@
  *     `shared` chat is requested without a resolvable App context.
  */
 
+import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
+
 /** Resolved description of a chat sufficient to compute its read-set. */
 export interface ChatScopeContext {
   scope: 'private' | 'shared';
@@ -109,6 +111,13 @@ export function allowedReadSet(
  *
  * Mirrors the personal-memory provisioner pattern at
  * `resolvers.ts:3573-3625`.
+ *
+ * Concurrency + soft-delete handling: the lookup keys off `urn` (the
+ * unique column) so a soft-deleted row with the same URN is found and
+ * restored rather than colliding with a fresh `create`. The `create`
+ * call is wrapped to recover from a concurrent winner — if another
+ * request inserted the row between our findUnique and create, P2002
+ * fires and we re-read instead of bubbling the failure.
  */
 export async function findOrCreateAppClassMemory(args: {
   appId: string;
@@ -116,33 +125,65 @@ export async function findOrCreateAppClassMemory(args: {
   appName: string;
   organizationId: string;
   actingUserId: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  db: any;
+  db: PrismaClient;
 }): Promise<string> {
   const { appId, appUrn, appName, organizationId, actingUserId, db } = args;
+  const urn = `${appUrn}:shared`;
 
-  const existing = await db.memory.findFirst({
-    where: { appId, class: 'app', deletedAt: null },
-    select: { id: true },
+  const existing = await db.memory.findUnique({
+    where: { urn },
+    select: { id: true, deletedAt: true },
   });
   if (existing) {
+    if (existing.deletedAt) {
+      await db.memory.update({
+        where: { id: existing.id },
+        data: { deletedAt: null, deletedBy: null },
+      });
+    }
     return existing.id;
   }
 
-  const created = await db.memory.create({
-    data: {
-      organizationId,
-      urn: `${appUrn}:shared`,
-      name: `${appName} — shared chats`,
-      class: 'app',
-      visibility: 'PRIVATE',
-      appId,
-      userId: null,
-      createdBy: actingUserId,
-    },
-    select: { id: true },
-  });
-  return created.id;
+  try {
+    const created = await db.memory.create({
+      data: {
+        organizationId,
+        urn,
+        name: `${appName} — shared chats`,
+        class: 'app',
+        visibility: 'PRIVATE',
+        appId,
+        userId: null,
+        createdBy: actingUserId,
+      },
+      select: { id: true },
+    });
+    return created.id;
+  } catch (err) {
+    // Concurrent provisioner won the race. The winner left a live (non-
+    // soft-deleted) row — re-read and return it. Soft-delete branch is
+    // unreachable here in practice but kept for symmetry with the lookup
+    // above.
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === 'P2002'
+    ) {
+      const race = await db.memory.findUnique({
+        where: { urn },
+        select: { id: true, deletedAt: true },
+      });
+      if (race) {
+        if (race.deletedAt) {
+          await db.memory.update({
+            where: { id: race.id },
+            data: { deletedAt: null, deletedBy: null },
+          });
+        }
+        return race.id;
+      }
+    }
+    throw err;
+  }
 }
 
 /**
