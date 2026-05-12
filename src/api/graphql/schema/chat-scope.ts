@@ -145,6 +145,59 @@ export async function findOrCreateAppClassMemory(args: {
   return created.id;
 }
 
+/**
+ * Validate the chat-root node's stored scope matches the holding
+ * memory's class (data-model.md §I-1):
+ *
+ *   data.scope === 'private'  ⟺  memory.class === 'personal'
+ *   data.scope === 'shared'   ⟺  memory.class === 'app'
+ *
+ * A violation is a corruption signal — a chat-root whose scope claims
+ * one tier while its holding memory belongs to the other. Throws
+ * ChatScopeError('CHAT_MEMORY_OUT_OF_SCOPE') so the chat-handling
+ * resolvers can reject the chat early before doing any work that
+ * would honor the corrupted state.
+ *
+ * Legacy chats whose `data.scope` is unset are treated as `'private'`
+ * for the duration of the v1 release per FR-017's migration intent;
+ * pass `{ allowMissingScope: true }` from `sendChatMessage` /
+ * `processChatResponse` so pre-migration chats keep working until the
+ * backfill runs (Phase 6, T036/T037).
+ */
+export function validateChatScopeInvariants(args: {
+  /** From the chat-root node's `data`. */
+  scope: 'private' | 'shared' | undefined;
+  /** From the holding `Memory.class`. */
+  memoryClass: 'personal' | 'app' | 'knowledge' | 'system';
+  /** True during the migration window — treats missing `scope` as `private`. */
+  allowMissingScope?: boolean;
+}): void {
+  const { scope, memoryClass, allowMissingScope = false } = args;
+
+  if (scope === undefined) {
+    if (allowMissingScope && memoryClass === 'personal') {
+      return; // legacy private chat, awaiting backfill — OK
+    }
+    throw new ChatScopeError(
+      'CHAT_MEMORY_OUT_OF_SCOPE',
+      `Chat-root node missing data.scope (memory.class=${memoryClass}).`,
+    );
+  }
+
+  if (scope === 'private' && memoryClass !== 'personal') {
+    throw new ChatScopeError(
+      'CHAT_MEMORY_OUT_OF_SCOPE',
+      `Chat claims scope=private but holding memory.class=${memoryClass}.`,
+    );
+  }
+  if (scope === 'shared' && memoryClass !== 'app') {
+    throw new ChatScopeError(
+      'CHAT_MEMORY_OUT_OF_SCOPE',
+      `Chat claims scope=shared but holding memory.class=${memoryClass}.`,
+    );
+  }
+}
+
 /** Discriminator for chat-scope errors so callers can distinguish them. */
 export type ChatScopeErrorCode =
   | 'SHARED_CHAT_REQUIRES_APP_CONTEXT'

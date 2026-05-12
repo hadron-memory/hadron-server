@@ -19,6 +19,7 @@ import { generateId } from '../../../lib/id.js';
 import {
   allowedReadSet,
   findOrCreateAppClassMemory,
+  validateChatScopeInvariants,
   ChatScopeError,
   type ChatScopeContext,
   type ChatScopeAttachments,
@@ -238,5 +239,77 @@ describe('ChatScopeError', () => {
   it('is a real Error subclass', () => {
     const e = new ChatScopeError('CHAT_MEMORY_OUT_OF_SCOPE', 'nope');
     expect(e instanceof Error).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateChatScopeInvariants — data-model.md §I-1
+// ---------------------------------------------------------------------------
+
+describe('validateChatScopeInvariants', () => {
+  it('accepts private + personal', () => {
+    expect(() =>
+      validateChatScopeInvariants({ scope: 'private', memoryClass: 'personal' }),
+    ).not.toThrow();
+  });
+
+  it('accepts shared + app', () => {
+    expect(() =>
+      validateChatScopeInvariants({ scope: 'shared', memoryClass: 'app' }),
+    ).not.toThrow();
+  });
+
+  it('rejects private + app', () => {
+    expect(() =>
+      validateChatScopeInvariants({ scope: 'private', memoryClass: 'app' }),
+    ).toThrow(ChatScopeError);
+  });
+
+  it('rejects shared + personal (the surprise-leak vector)', () => {
+    try {
+      validateChatScopeInvariants({ scope: 'shared', memoryClass: 'personal' });
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(ChatScopeError);
+      expect((e as ChatScopeError).code).toBe('CHAT_MEMORY_OUT_OF_SCOPE');
+    }
+  });
+
+  it('rejects private + knowledge or system (chat must be in personal/app)', () => {
+    expect(() =>
+      validateChatScopeInvariants({ scope: 'private', memoryClass: 'knowledge' }),
+    ).toThrow(ChatScopeError);
+    expect(() =>
+      validateChatScopeInvariants({ scope: 'shared', memoryClass: 'system' }),
+    ).toThrow(ChatScopeError);
+  });
+
+  it('rejects missing scope by default (corruption signal)', () => {
+    expect(() =>
+      validateChatScopeInvariants({ scope: undefined, memoryClass: 'personal' }),
+    ).toThrow(ChatScopeError);
+  });
+
+  it('tolerates missing scope when allowMissingScope=true AND memory is personal (migration window)', () => {
+    expect(() =>
+      validateChatScopeInvariants({
+        scope: undefined,
+        memoryClass: 'personal',
+        allowMissingScope: true,
+      }),
+    ).not.toThrow();
+  });
+
+  it('still rejects missing scope on a non-personal memory even with allowMissingScope=true', () => {
+    // The migration backfill only covers existing private chats (which
+    // live in personal memory). A chat-root in app-class memory with
+    // no scope is corruption regardless of the migration flag.
+    expect(() =>
+      validateChatScopeInvariants({
+        scope: undefined,
+        memoryClass: 'app',
+        allowMissingScope: true,
+      }),
+    ).toThrow(ChatScopeError);
   });
 });

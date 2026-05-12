@@ -690,3 +690,95 @@ describe('chat ownership mutations', () => {
     ).rejects.toThrow('Forbidden');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Spec 017 — chat scope (US1: private path + invariant gate)
+// ---------------------------------------------------------------------------
+
+describe('spec 017 — chat scope (US1 private path)', () => {
+  it('startChat creates a chat with data.scope="private" in a personal-class memory', async () => {
+    const result = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id },
+      userCtx(adminUser.id),
+    );
+
+    // The holding memory is personal-class for a JWT-user private chat.
+    const memory = await db.memory.findFirst({
+      where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id },
+    });
+    expect(memory).not.toBeNull();
+    expect(memory!.class).toBe('personal');
+
+    // The chat-root node carries the scope as data.scope='private'.
+    const chatNode = await db.node.findFirst({
+      where: { memoryId: memory!.id, loc: result.chatId },
+    });
+    expect(chatNode).not.toBeNull();
+    expect((chatNode!.data as Record<string, unknown>).scope).toBe('private');
+  });
+
+  it('sendChatMessage rejects a chat-root whose data.scope contradicts the holding memory class', async () => {
+    // Start a real private chat first (so memory + chat-root are real).
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id },
+      userCtx(adminUser.id),
+    );
+    const memory = await db.memory.findFirst({
+      where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id },
+    });
+    const chatNode = await db.node.findFirstOrThrow({
+      where: { memoryId: memory!.id, loc: start.chatId },
+    });
+
+    // Corrupt the chat-root: claim scope=shared while the memory is
+    // personal-class. The validate gate inside sendChatMessage MUST
+    // catch this before doing any chat work.
+    const corruptedData = { ...(chatNode.data as Record<string, unknown>), scope: 'shared' };
+    await db.node.update({
+      where: { id: chatNode.id },
+      data: { data: corruptedData as never },
+    });
+
+    await expect(
+      resolvers.Mutation.sendChatMessage(
+        {},
+        { chatId: start.chatId, userMessage: 'hello' },
+        userCtx(adminUser.id),
+      ),
+    ).rejects.toThrow(/CHAT_MEMORY_OUT_OF_SCOPE|scope=shared/);
+  });
+
+  it('sendChatMessage tolerates a pre-feature chat with no data.scope (migration window)', async () => {
+    // Simulate a chat created before the feature shipped: a chat-root
+    // in personal-class memory with no `scope` field. The validator
+    // accepts this when allowMissingScope is set (which sendChatMessage
+    // passes for the duration of the migration window — FR-017/T036).
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id },
+      userCtx(adminUser.id),
+    );
+    const memory = await db.memory.findFirst({
+      where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id },
+    });
+    const chatNode = await db.node.findFirstOrThrow({
+      where: { memoryId: memory!.id, loc: start.chatId },
+    });
+    const dataWithoutScope = { ...(chatNode.data as Record<string, unknown>) };
+    delete dataWithoutScope.scope;
+    await db.node.update({
+      where: { id: chatNode.id },
+      data: { data: dataWithoutScope as never },
+    });
+
+    // Should NOT throw — pre-feature chats are tolerated until backfill.
+    const result = await resolvers.Mutation.sendChatMessage(
+      {},
+      { chatId: start.chatId, userMessage: 'still works' },
+      userCtx(adminUser.id),
+    );
+    expect(result).toBeDefined();
+  });
+});

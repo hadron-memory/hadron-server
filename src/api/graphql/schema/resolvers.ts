@@ -82,6 +82,10 @@ import {
   listFolders,
   extractErrorMessage,
 } from '../../../integrations/exchange/exchange.js';
+import {
+  validateChatScopeInvariants,
+  ChatScopeError,
+} from './chat-scope.js';
 
 export interface Context {
   db: PrismaClient;
@@ -3671,8 +3675,13 @@ export const resolvers = {
       const convGoals = (convData.goalDescriptions as string[]) ?? [];
       const initialGoal = convGoals[0] ?? `${convName} conversation`;
 
-      // Create the chat node with initial goal stack and route history
+      // Create the chat node with initial goal stack and route history.
+      // Spec 017: scope='private' for every chat created here (US1).
+      // The shared branch lands in Phase 4 (T019/T020), at which point
+      // the scope arg from GraphQL is destructured above and routed
+      // through the target-memory selection.
       const initialChatData: Record<string, unknown> = {
+        scope: 'private',
         conversationName: convName,
         stageName: firstStage,
         userId: effectiveUserId,
@@ -3740,6 +3749,22 @@ export const resolvers = {
       if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
 
       const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+
+      // Spec 017 — chat-scope invariant gate (data-model.md §I-1):
+      // assert the chat-root node's stored scope matches the holding
+      // memory's class before doing any work. `allowMissingScope: true`
+      // covers pre-feature chats whose `data.scope` is undefined until
+      // the Phase 6 backfill runs (T036/T037); after backfill every chat
+      // has an explicit scope and the legacy path falls cold.
+      const chatScopeCheckMemory = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: chatNode.memoryId },
+        select: { class: true },
+      });
+      validateChatScopeInvariants({
+        scope: chatData.scope as 'private' | 'shared' | undefined,
+        memoryClass: chatScopeCheckMemory.class,
+        allowMissingScope: true,
+      });
       const messageCount = ((chatData.messageCount as number) ?? 0) + 1;
       const convName = chatData.conversationName as string;
       const stageName = chatData.stageName as string;
@@ -4001,6 +4026,32 @@ export const resolvers = {
       if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
 
       const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+
+      // Spec 017 — chat-scope invariant gate (see sendChatMessage for
+      // the rationale). The write side (extracted data lands in
+      // chatNode.memoryId, line below at line ~4055) is bounded by the
+      // chat's holding memory by construction; the validate-call here
+      // ensures no corrupted chat-root can slip past.
+      //
+      // ── Phase-4/T015 (deferred from Phase 3) ──────────────────────
+      // When the shared-chat branch lands and tools that accept a
+      // memoryUrn/memoryId argument are added to the chat-tool schema,
+      // this is the point where each such tool-handler dispatch MUST
+      // pass through `allowedReadSet(chat)` and reject any out-of-set
+      // reference before any DB content read. The chat-API surface
+      // today only exposes the `respond` tool (which takes no memory
+      // argument), so the gate has no current target — but the hook
+      // belongs here.
+      const chatScopeCheckMemory = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: chatNode.memoryId },
+        select: { class: true },
+      });
+      validateChatScopeInvariants({
+        scope: chatData.scope as 'private' | 'shared' | undefined,
+        memoryClass: chatScopeCheckMemory.class,
+        allowMissingScope: true,
+      });
+
       const messageCount = ((chatData.messageCount as number) ?? 0) + 1;
 
       const message = (toolResponse.message as string) ?? '';
