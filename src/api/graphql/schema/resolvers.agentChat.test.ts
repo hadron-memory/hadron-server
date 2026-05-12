@@ -695,6 +695,154 @@ describe('chat ownership mutations', () => {
 // Spec 017 — chat scope (US1: private path + invariant gate)
 // ---------------------------------------------------------------------------
 
+describe('spec 017 — chat scope (US2 shared path)', () => {
+  async function makeAppMember(appUrn: string, userId: string, role = 'member'): Promise<void> {
+    const app = await db.app.findFirstOrThrow({ where: { urn: appUrn } });
+    await db.appMember.create({ data: { appId: app.id, userId, role } });
+  }
+
+  it("creates a shared chat in an app-class memory, idempotent on a second call", async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const r1 = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, scope: 'shared' },
+      userCtx(adminUser.id),
+    );
+    const r2 = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, scope: 'shared' },
+      userCtx(adminUser.id),
+    );
+    expect(r1.chatId).not.toBe(r2.chatId);
+
+    // Both chats land in the SAME app-class memory.
+    const chat1 = await db.node.findFirstOrThrow({ where: { loc: r1.chatId } });
+    const chat2 = await db.node.findFirstOrThrow({ where: { loc: r2.chatId } });
+    expect(chat1.memoryId).toBe(chat2.memoryId);
+
+    const sharedMem = await db.memory.findUniqueOrThrow({ where: { id: chat1.memoryId } });
+    expect(sharedMem.class).toBe('app');
+    expect(sharedMem.urn).toMatch(/:shared$/);
+
+    // Only one app-class memory provisioned per App (idempotency).
+    const all = await db.memory.findMany({
+      where: { appId: sharedMem.appId!, class: 'app', deletedAt: null },
+    });
+    expect(all.length).toBe(1);
+
+    // Chat-root carries scope='shared'.
+    expect((chat1.data as Record<string, unknown>).scope).toBe('shared');
+  });
+
+  it("rejects scope='shared' when the caller has no qualifying AppMember row", async () => {
+    // adminUser is NOT an AppMember here.
+    await expect(
+      resolvers.Mutation.startChat(
+        {},
+        { agentId: agent.id, scope: 'shared' },
+        userCtx(adminUser.id),
+      ),
+    ).rejects.toThrow(/SHARED_CHAT_REQUIRES_APP_CONTEXT|not a member/);
+  });
+
+  it("myChats returns the union of caller's private chats and all shared chats in apps they belong to", async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+
+    // adminUser: one private, one shared
+    const adminPriv = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'private' }, userCtx(adminUser.id),
+    );
+    const adminShared = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+
+    // otherUser: one private, one shared
+    const otherPriv = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'private' }, userCtx(otherUser.id),
+    );
+    const otherShared = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(otherUser.id),
+    );
+
+    // adminUser sees: own private + both shared (both are in app-class memory).
+    const adminList = await resolvers.Query.myChats(
+      {}, { agentId: agent.id }, userCtx(adminUser.id),
+    );
+    const adminLocs = new Set(adminList.map((c) => c.loc));
+    expect(adminLocs.has(adminPriv.chatId)).toBe(true);
+    expect(adminLocs.has(adminShared.chatId)).toBe(true);
+    expect(adminLocs.has(otherShared.chatId)).toBe(true);
+    expect(adminLocs.has(otherPriv.chatId)).toBe(false);
+
+    // otherUser sees: own private + both shared. NOT adminUser's private.
+    const otherList = await resolvers.Query.myChats(
+      {}, { agentId: agent.id }, userCtx(otherUser.id),
+    );
+    const otherLocs = new Set(otherList.map((c) => c.loc));
+    expect(otherLocs.has(otherPriv.chatId)).toBe(true);
+    expect(otherLocs.has(otherShared.chatId)).toBe(true);
+    expect(otherLocs.has(adminShared.chatId)).toBe(true);
+    expect(otherLocs.has(adminPriv.chatId)).toBe(false);
+
+    // Returned scope field is populated correctly.
+    const adminPrivRow = adminList.find((c) => c.loc === adminPriv.chatId);
+    const adminSharedRow = adminList.find((c) => c.loc === adminShared.chatId);
+    expect(adminPrivRow?.scope).toBe('private');
+    expect(adminSharedRow?.scope).toBe('shared');
+  });
+
+  it("chatHistory: non-author AppMember can read a shared chat's messages", async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const shared = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    // adminUser posts a message
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: shared.chatId, userMessage: 'hi family' }, userCtx(adminUser.id),
+    );
+    // otherUser reads the chat history (they're an AppMember, not the author)
+    const history = await resolvers.Query.chatHistory(
+      {}, { chatId: shared.chatId }, userCtx(otherUser.id),
+    );
+    expect(history.length).toBeGreaterThan(0);
+  });
+
+  it("chatHistory: non-AppMember cannot read a shared chat's messages", async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    // otherUser is intentionally NOT an AppMember of research-app.
+    const shared = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: shared.chatId, userMessage: 'secret family chat' }, userCtx(adminUser.id),
+    );
+    await expect(
+      resolvers.Query.chatHistory(
+        {}, { chatId: shared.chatId }, userCtx(otherUser.id),
+      ),
+    ).rejects.toThrow('Forbidden');
+  });
+
+  it("deleteChat: only the chat author can delete a shared chat, not any AppMember", async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const shared = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    // otherUser is an AppMember but not the chat author → cannot delete.
+    await expect(
+      resolvers.Mutation.deleteChat({}, { chatId: shared.chatId }, userCtx(otherUser.id)),
+    ).rejects.toThrow('Forbidden');
+    // adminUser (the author) → can delete.
+    const result = await resolvers.Mutation.deleteChat(
+      {}, { chatId: shared.chatId }, userCtx(adminUser.id),
+    );
+    expect(result).toBe(true);
+  });
+});
+
 describe('spec 017 — chat scope (US1 private path)', () => {
   it('startChat creates a chat with data.scope="private" in a personal-class memory', async () => {
     const result = await resolvers.Mutation.startChat(

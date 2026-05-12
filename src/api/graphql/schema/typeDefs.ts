@@ -495,6 +495,11 @@ export const typeDefs = `#graphql
     lastMessageAt: String
     # 017-chat-visibility-and-personal-memory.
     scope: ChatScope!
+    # The chat's author (chat-root node's createdBy). Null for legacy
+    # chats predating createdBy persistence. Surfaces who started a
+    # shared chat so the portal can distinguish own vs other-member
+    # shared chats in the list.
+    createdBy: ID
   }
 
   # One chat message in history, as returned by chatHistory.
