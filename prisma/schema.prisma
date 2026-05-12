@@ -1073,12 +1073,20 @@ model MemoryLicense {
 ///      (`App.organizationId != Agent.organizationId`) additionally
 ///      require an active `AgentOrgGrant(App.organizationId,
 ///      App.agentId)`. Same-org installs auto-pass.
-///   2. **Agent ↔ Memory (knowledge / app / system)** —
+///   2. **Agent ↔ Memory (knowledge / app / system)** — current
+///      implementation (`src/mcp/access-control.ts#foldAgentIntoAccessMap`):
 ///      `AgentMemoryItem(agent, memory)` exists OR memory is the
-///      Agent's `systemMemoryId` OR memory's `appId = App.id` AND
-///      memory's `class = 'app'`. When cross-org for knowledge:
+///      Agent's `systemMemoryId`. When cross-org for knowledge:
 ///      `MemorySubscription(orgB, memory)` AND any required
 ///      `MemoryLicense` valid (not expired, seats available).
+///      **Known gap** (tracked in
+///      [issue #115](https://github.com/hadron-memory/hadron-server/issues/115)):
+///      this gate does NOT auto-grant access to app-class memories
+///      where `memory.appId = App.id` AND `memory.class = 'app'`.
+///      Today an explicit `AgentMemoryItem` row is required for
+///      app-class memories to be reachable through the MCP/GraphQL
+///      gates. The spec called for auto-grant; the implementation
+///      currently does not.
 ///   3. **User ↔ Agent (personal-class memory only)** —
 ///      `AgentSubscription(user, App.agentId)` exists AND active per
 ///      the predicate, AND `Memory.appId = App.id` (the per-App
