@@ -11,8 +11,13 @@ datasource db {
 // ─── Hadron entity model ──────────────────────────────────────────────
 //
 // This schema is the **canonical** source of entity definitions for the
-// Hadron platform. The legacy hadron-specs/General/Entities.md was folded
-// into this file on 2026-05-11 and deleted; do not recreate it.
+// Hadron platform. The legacy Entities.md (in the sister `hadron-concept`
+// repo, at hadron-specs/General/Entities.md) was folded into this file on
+// 2026-05-11 and deleted; do not recreate it.
+//
+// Cross-repo references below cite paths in sister repos by repo name
+// (e.g. `hadron-concept/...`, `hadron-docs/...`). Those trees do not live
+// in this repository.
 //
 // Shared audit fields
 // -------------------
@@ -40,13 +45,15 @@ datasource db {
 //   - App:          `<org>:<slug>`           e.g. "baragaun.com:internal-ops"
 //   - Node:         `<memory.urn>:<loc>`     computed, NOT stored
 //   - Asset:        `<memory.urn>:assets:<asset.id>`
-// See hadron-specs/General/URN.md for the full scheme.
+// Full scheme: `hadron-concept/hadron-specs/General/URN.md` (sister repo).
 //
 // Table naming
 // ------------
-// All model `@@map(...)` names are explicit and snake_case_plural. Prisma
-// would default to PascalCase otherwise; the explicit map keeps the SQL
-// surface stable across model renames.
+// All model `@@map(...)` names are explicit snake_case. Most are plural
+// (`users`, `organizations`, `memories`), but some are singular by
+// convention — `hadron_server`, `server_log`, `memory_log`, `app_log`,
+// `waiting_list`. Prisma would default to PascalCase otherwise; the
+// explicit map keeps the SQL surface stable across model renames.
 
 // ─── Enums ─────────────────────────────────────────────────────────────
 
@@ -321,7 +328,8 @@ model User {
 /// A company, team, or group that owns memories and has members.
 /// Must have at least one OrgMember with role OWNER (can have many).
 /// Every user has a personal organization (auto-created on signup,
-/// `isVisible: false`) — see hadron-specs/General/Personal Organizations.md.
+/// `isVisible: false`) — see
+/// `hadron-concept/hadron-specs/General/Personal Organizations.md` (sister repo).
 model Organization {
   id                           String    @id @default(cuid())
   name                         String
@@ -542,14 +550,14 @@ model Memory {
 /// A user-uploaded file (document, image) bound to a Memory. Bytes
 /// live in object storage (Cloudflare R2 in v1; MinIO for local dev);
 /// this row carries metadata, the storage pointer, and virus-scan
-/// state. Spec: spec-kits/specs/004-asset-upload/spec.md.
+/// state. Spec: `hadron-concept/spec-kits/specs/004-asset-upload/spec.md` (sister repo).
 ///
 /// **Why a separate table (not a `nodeType`)**: normalization (asset
 /// and node schemas diverge), scale (raw-material assets shouldn't
 /// bloat the knowledge-node table), and FK-shape (containment is
 /// foreign-key-shaped, not graph-shaped). See
-/// design-discussions/hadron-platform/2026-04-28-asset-upload-design/010-summary.md
-/// §"Why this summary supersedes 007-summary.md".
+/// `hadron-concept/design-discussions/hadron-platform/2026-04-28-asset-upload-design/010-summary.md`
+/// (sister repo) §"Why this summary supersedes 007-summary.md".
 ///
 /// **URN form**: `<memory.urn>:assets:<asset.id>` resolves to this row.
 ///
@@ -631,7 +639,9 @@ model Asset {
 /// contract — tightening to a Prisma enum is reserved for a future
 /// cleanup spec.
 model Node {
-  id          String    @id @default(cuid()) // UUIDv7 from node.yaml — stable across moves
+  /// UUIDv7 from `node.yaml` when supplied by the importer (stable across
+  /// moves); falls back to `cuid()` for inserts that omit `id`.
+  id          String    @id @default(cuid())
   memoryId    String    @map("memory_id")
   /// See the node-types list in the model doc. Default `info`.
   nodeType    String    @default("info") @map("node_type")
@@ -707,8 +717,9 @@ model Edge {
   /// edge always fires. Validated against the v1 operator subset and
   /// the five variable scopes (`memory.*`, `chat.*`, `agent.*`,
   /// `message.data.*`, `now()` / `today()`). Spec:
-  /// spec-kits/specs/001-edge-condition-spec/spec.md. Hadron-docs:
-  /// reference/edge-conditions.md.
+  /// `hadron-concept/spec-kits/specs/001-edge-condition-spec/spec.md`
+  /// (sister repo). User docs:
+  /// https://docs.hadronmemory.com/reference/edge-conditions/.
   condition Json?
   // Stable ordering hook (lower = earlier). Future agent-exceptions
   // feature uses this so handler edges can sit at the top of the
@@ -1550,11 +1561,10 @@ model App {
 /// is a 256-bit random value, so dictionary attacks against the hash
 /// are not a concern.)
 ///
-/// **Auth path**: the resolver at
-/// `hadron-server/src/middleware/auth.ts` accepts `hdr_app_`-prefixed
-/// bearer tokens, looks up the AppKey by SHA-256 hash, and resolves
-/// the principal to the parent App. Memory access is then gated by
-/// `hadron-server/src/mcp/access-control.ts`, which reads
+/// **Auth path**: the resolver at `src/middleware/auth.ts` accepts
+/// `hdr_app_`-prefixed bearer tokens, looks up the AppKey by SHA-256
+/// hash, and resolves the principal to the parent App. Memory access
+/// is then gated by `src/mcp/access-control.ts`, which reads
 /// `App.agentId` directly (the legacy AppAgent join was dropped in
 /// 008-agent-installation) and folds the Agent's `systemMemoryId` +
 /// `memoryItems` into the access map.
