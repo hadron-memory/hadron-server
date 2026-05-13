@@ -1183,8 +1183,11 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     # 017: scope defaults to private (FR-003). A shared request
-    # requires a resolvable App context; absent that, throws
-    # SHARED_CHAT_REQUIRES_APP_CONTEXT (FR-006).
+    # requires a JWT user with an AppMember row in some App that
+    # installs this Agent (FR-006 + research.md Q-R2). Otherwise:
+    #   - MCP App-key session → SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS
+    #   - JWT user without a qualifying AppMember row, or no auth →
+    #     SHARED_CHAT_REQUIRES_APP_CONTEXT
     startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private): ChatStartResult!
     # Process a user message (saves message, builds context, returns next prompt)
     sendChatMessage(chatId: String!, userMessage: String!): ChatPromptResult!

@@ -745,6 +745,22 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     ).rejects.toThrow(/SHARED_CHAT_REQUIRES_APP_CONTEXT|not a member/);
   });
 
+  it("rejects scope='shared' from an MCP App-key session with a distinct error code", async () => {
+    // research.md Q-R2: App-key sessions are private-only in v1. The
+    // rejection message must distinguish this from the no-AppMember case
+    // so SC-005 callers see something actionable.
+    const app = await db.app.findFirstOrThrow({
+      where: { urn: `${orgA.urn}:research-app` },
+    });
+    await expect(
+      resolvers.Mutation.startChat(
+        {},
+        { agentId: agent.id, scope: 'shared' },
+        userCtx(adminUser.id, { appId: app.id }),
+      ),
+    ).rejects.toThrow(/SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS|App-key/);
+  });
+
   it("myChats returns the union of caller's private chats and all shared chats in apps they belong to", async () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);

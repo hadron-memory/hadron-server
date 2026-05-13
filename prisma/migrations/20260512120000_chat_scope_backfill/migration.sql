@@ -7,7 +7,13 @@
 -- their author.
 --
 -- Chat-root nodes are addressed by:
---   loc LIKE 'chats:%'  AND  loc not containing a second colon  (depth 2)
+--   loc LIKE 'chats:%'  AND  loc NOT LIKE '%:messages%'
+--
+-- The chat subtree under a chat-root is `chats:<id>:messages` (container)
+-- and `chats:<id>:messages:<seq>-*` (message rows); both contain
+-- ':messages', and chat-root locs do not. Aligning the predicate with
+-- the `myChats` resolver's filter (`NOT { loc: { contains: ':messages' } }`)
+-- keeps the two definitions of "chat-root" in lockstep.
 --
 -- The migration is **idempotent**: a second run touches no rows because
 -- the WHERE filter excludes nodes that already have `data.scope`. No
@@ -22,5 +28,5 @@ SET "data" = jsonb_set(
   true
 )
 WHERE "loc" LIKE 'chats:%'
-  AND POSITION(':' IN SUBSTRING("loc" FROM 7)) = 0
+  AND "loc" NOT LIKE '%:messages%'
   AND ("data" IS NULL OR "data" ->> 'scope' IS NULL);

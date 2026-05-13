@@ -242,6 +242,7 @@ export function validateChatScopeInvariants(args: {
 /** Discriminator for chat-scope errors so callers can distinguish them. */
 export type ChatScopeErrorCode =
   | 'SHARED_CHAT_REQUIRES_APP_CONTEXT'
+  | 'SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS'
   | 'CHAT_MEMORY_OUT_OF_SCOPE';
 
 /** Typed error thrown by the chat-scope layer. */

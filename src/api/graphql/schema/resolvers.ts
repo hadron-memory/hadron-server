@@ -3640,11 +3640,22 @@ export const resolvers = {
       //   3. Legacy fallback → first writable memory attached to the agent
       let targetMemoryId: string | null = null;
       if (chatScope === 'shared') {
-        // Spec 017 FR-006: shared chats require a resolvable App context.
-        if (!ctx.userId || ctx.appId) {
+        // Spec 017 FR-006 + research.md Q-R2: shared chats require a
+        // JWT-user AppMember context. Two distinct rejection paths so
+        // SC-005 callers see an actionable message:
+        //   - MCP App-key session → shared chats not available in v1
+        //   - JWT user but not an AppMember → not a member of any App
+        //     that installs this Agent.
+        if (ctx.appId) {
+          throw new ChatScopeError(
+            'SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS',
+            'Shared chats are not available for MCP App-key sessions — start the chat from a signed-in user surface.',
+          );
+        }
+        if (!ctx.userId) {
           throw new ChatScopeError(
             'SHARED_CHAT_REQUIRES_APP_CONTEXT',
-            "Cannot create a shared chat — you are not a member of any App that installs this Agent.",
+            'Cannot create a shared chat — sign in as a user that belongs to an App that installs this Agent.',
           );
         }
         const membership = await ctx.db.appMember.findFirst({
