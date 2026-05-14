@@ -82,6 +82,12 @@ import {
   listFolders,
   extractErrorMessage,
 } from '../../../integrations/exchange/exchange.js';
+import {
+  validateChatScopeInvariants,
+  findOrCreateAppClassMemory,
+  chatScopeAccessFilter,
+  ChatScopeError,
+} from './chat-scope.js';
 
 export interface Context {
   db: PrismaClient;
@@ -1280,9 +1286,17 @@ export const resolvers = {
       if (!ctx.userId) throw new Error('Unauthenticated');
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      // Find the user memory for (agent, current user). No auto-create
-      // here — the list is empty until the user starts their first chat.
-      const userMemory = await ctx.db.memory.findFirst({
+
+      // Spec 017 — collect the memories the caller may read chats from:
+      //  - the caller's own personal memory for this agent (private chats)
+      //  - app-class memories of every App where the caller is an
+      //    AppMember and App.agentId == this agent (shared chats)
+      //
+      // The DB query is filtered by memory id; the visibility rule is
+      // enforced at the query layer (no application-side post-filter).
+      const readableMemoryIds: string[] = [];
+
+      const personalMemory = await ctx.db.memory.findFirst({
         where: {
           userMemoryOfAgentId: resolvedAgentId,
           createdBy: ctx.userId,
@@ -1290,33 +1304,89 @@ export const resolvers = {
         },
         select: { id: true },
       });
-      if (!userMemory) return [];
-      // Top-level chat nodes live at loc "chats:<id>" (depth 2)
-      const chatNodes = await ctx.db.node.findMany({
+      if (personalMemory) readableMemoryIds.push(personalMemory.id);
+
+      // TODO(008-amendment / 2026-05-12-user-installing-app §3): `App.agentId`
+      // is being dropped in favor of the reintroduced `AppAgent` join.
+      // Replace `app: { agentId: ... }` with
+      // `app: { agents: { some: { agentId: ... } } }` when the amendment lands.
+      const sharedMemberships = await ctx.db.appMember.findMany({
         where: {
-          memoryId: userMemory.id,
-          loc: { startsWith: 'chats:' },
-          deletedAt: null,
+          userId: ctx.userId,
+          app: { agentId: resolvedAgentId, deletedAt: null },
         },
+        select: { app: { select: { id: true } } },
       });
-      const tops = chatNodes.filter((n) => n.loc.split(':').length === 2);
-      // Pre-fetch first user message per chat for title fallback
-      const firstMessagesByChat = new Map<string, string>();
-      for (const top of tops) {
-        const firstMsg = await ctx.db.node.findFirst({
+      if (sharedMemberships.length > 0) {
+        const sharedMemories = await ctx.db.memory.findMany({
           where: {
-            memoryId: userMemory.id,
-            loc: { startsWith: `${top.loc}:messages:` },
+            appId: { in: sharedMemberships.map((m) => m.app.id) },
+            class: 'app',
             deletedAt: null,
           },
-          orderBy: { seq: 'asc' as const },
-          select: { loc: true, content: true },
+          select: { id: true },
         });
-        if (firstMsg?.content) firstMessagesByChat.set(top.loc, firstMsg.content);
+        for (const m of sharedMemories) readableMemoryIds.push(m.id);
       }
-      const chats = tops.map((node) => {
+
+      if (readableMemoryIds.length === 0) return [];
+
+      // Top-level chat nodes live at loc "chats:<id>" (depth 2). The only
+      // sub-shapes today are `chats:UUID:messages` (container) and
+      // `chats:UUID:messages:NNN-*` (message rows) — both contain
+      // ':messages', and chat-root locs do not, so we can filter them out
+      // at the DB layer instead of pulling every message body just to
+      // discard it.
+      //
+      // Sort by Node.updatedAt (Prisma's @updatedAt) — bumped automatically
+      // each time sendChatMessage / processChatResponse writes the new
+      // `data.lastMessageAt` back to the chat-root row. That makes the
+      // column an exact proxy for the previous "lastMessageAt || createdAt"
+      // ordering, sortable at the DB layer with `take`/`skip` — no
+      // application-side resort, no JS slice.
+      const tops = await ctx.db.node.findMany({
+        where: {
+          memoryId: { in: readableMemoryIds },
+          loc: { startsWith: 'chats:' },
+          NOT: { loc: { contains: ':messages' } },
+          deletedAt: null,
+        },
+        orderBy: { updatedAt: 'desc' as const },
+        take: limit ?? 100,
+        skip: offset ?? 0,
+      });
+      if (tops.length === 0) return [];
+
+      // First-message lookup, scoped to the visible page only (was: every
+      // candidate chat). Parallelized via Promise.all.
+      const firstMessageEntries = await Promise.all(
+        tops.map(async (top) => {
+          const firstMsg = await ctx.db.node.findFirst({
+            where: {
+              memoryId: top.memoryId,
+              loc: { startsWith: `${top.loc}:messages:` },
+              deletedAt: null,
+            },
+            orderBy: { seq: 'asc' as const },
+            select: { content: true },
+          });
+          return [top.loc, firstMsg?.content ?? null] as const;
+        }),
+      );
+      const firstMessagesByChat = new Map<string, string>();
+      for (const [loc, content] of firstMessageEntries) {
+        if (content) firstMessagesByChat.set(loc, content);
+      }
+
+      return tops.map((node) => {
         const data = (node.data as Record<string, unknown>) ?? {};
         const title = deriveChatTitle(node, data, firstMessagesByChat.get(node.loc) ?? null);
+        // Spec 017: scope comes from chat-root data.scope, denormalized
+        // at chat creation. Legacy chats predating the feature have no
+        // scope on disk; they're treated as 'private' (which matches
+        // their storage class) until the Phase 6 backfill runs.
+        const scope: 'private' | 'shared' =
+          data.scope === 'shared' ? 'shared' : 'private';
         return {
           id: node.id,
           loc: node.loc,
@@ -1326,14 +1396,10 @@ export const resolvers = {
           messageCount: (data.messageCount as number) ?? 0,
           createdAt: node.createdAt,
           lastMessageAt: (data.lastMessageAt as string) ?? null,
+          scope,
+          createdBy: node.createdBy ?? null,
         };
       });
-      chats.sort((a, b) => {
-        const ta = a.lastMessageAt ? Date.parse(a.lastMessageAt) : Date.parse(String(a.createdAt));
-        const tb = b.lastMessageAt ? Date.parse(b.lastMessageAt) : Date.parse(String(b.createdAt));
-        return tb - ta;
-      });
-      return chats.slice(offset ?? 0, (offset ?? 0) + (limit ?? 100));
     },
 
     chatHistory: async (
@@ -1347,14 +1413,28 @@ export const resolvers = {
         select: { id: true, memoryId: true, createdBy: true },
       });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
-      // Ownership check: the user must own the memory the chat lives in.
+      // Spec 017 — read-visibility check (FR-007/FR-008):
+      //   - private (personal-class memory) → memory owner only
+      //   - shared (app-class memory)       → any AppMember of memory.appId
+      //   - global ADMIN/OWNER bypass remains for ops
       const mem = await ctx.db.memory.findUniqueOrThrow({
         where: { id: chatNode.memoryId },
-        select: { createdBy: true },
+        select: { createdBy: true, class: true, appId: true },
       });
-      if (mem.createdBy !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
-        throw new Error('Forbidden');
+      const isAdmin = !!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'));
+      let canRead = isAdmin;
+      if (!canRead) {
+        if (mem.class === 'personal') {
+          canRead = mem.createdBy === ctx.userId;
+        } else if (mem.class === 'app' && mem.appId) {
+          const member = await ctx.db.appMember.findFirst({
+            where: { appId: mem.appId, userId: ctx.userId },
+            select: { userId: true },
+          });
+          canRead = !!member;
+        }
       }
+      if (!canRead) throw new Error('Forbidden');
       const rows = await ctx.db.node.findMany({
         where: {
           memoryId: chatNode.memoryId,
@@ -3437,10 +3517,25 @@ export const resolvers = {
 
     startChat: async (
       _: unknown,
-      { agentId, userId, conversationName }: { agentId: string; userId?: string; conversationName?: string },
+      {
+        agentId,
+        userId,
+        conversationName,
+        scope,
+      }: {
+        agentId: string;
+        userId?: string;
+        conversationName?: string;
+        // Spec 017: chosen at chat creation, immutable afterward.
+        scope?: 'private' | 'shared';
+      },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
+
+      // Spec 017: default per FR-003. The GraphQL schema also defaults
+      // scope to `private`; the resolver default is a defensive belt.
+      const chatScope: 'private' | 'shared' = scope ?? 'private';
 
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
@@ -3540,12 +3635,71 @@ export const resolvers = {
 
       // ── Target memory selection ──────────────────────────────────────
       // The chat (and its future messages + extracted data) get stored
-      // in a user-scoped memory. Three auth paths:
+      // in a user-scoped memory. Four auth paths:
+      //   0. (Spec 017) `scope: 'shared'` → app-class memory for the App
+      //      the caller is an AppMember of (and whose agentId matches).
+      //      JWT-user only in v1; App-key sessions stay private-only per
+      //      research.md Q-R2.
       //   1. App Key session with an active sessionId → use session.memoryId
       //   2. JWT user → find-or-create a per-user memory for (agent, ctx.userId)
       //   3. Legacy fallback → first writable memory attached to the agent
       let targetMemoryId: string | null = null;
-      if (ctx.appId && ctx.sessionId) {
+      if (chatScope === 'shared') {
+        // Spec 017 FR-006 + research.md Q-R2: shared chats require a
+        // JWT-user AppMember context. Two distinct rejection paths so
+        // SC-005 callers see an actionable message:
+        //   - MCP App-key session → shared chats not available in v1
+        //   - JWT user but not an AppMember → not a member of any App
+        //     that installs this Agent.
+        if (ctx.appId) {
+          throw new ChatScopeError(
+            'SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS',
+            'Shared chats are not available for MCP App-key sessions — start the chat from a signed-in user surface.',
+          );
+        }
+        if (!ctx.userId) {
+          throw new ChatScopeError(
+            'SHARED_CHAT_REQUIRES_APP_CONTEXT',
+            'Cannot create a shared chat — sign in as a user that belongs to an App that installs this Agent.',
+          );
+        }
+        // TODO(008-amendment / 2026-05-12-user-installing-app §3): `App.agentId`
+        // is being dropped in favor of the reintroduced `AppAgent` join.
+        // Replace `app: { agentId: ... }` with
+        // `app: { agents: { some: { agentId: ... } } }` when the amendment
+        // lands. With multi-Agent Apps, this query will return one App per
+        // membership-that-installs-the-Agent; today it returns at most one.
+        const membership = await ctx.db.appMember.findFirst({
+          where: {
+            userId: ctx.userId,
+            app: { agentId: resolvedAgentId, deletedAt: null },
+          },
+          select: {
+            app: { select: { id: true, urn: true, name: true, organizationId: true } },
+          },
+        });
+        if (!membership?.app) {
+          throw new ChatScopeError(
+            'SHARED_CHAT_REQUIRES_APP_CONTEXT',
+            "Cannot create a shared chat — you are not a member of any App that installs this Agent.",
+          );
+        }
+        // Idempotent: first shared chat under the (App, Agent) pair
+        // provisions the app-class memory; subsequent calls reuse it.
+        // Keyed per-agent (not per-app) so multi-Agent Apps — the model
+        // the 2026-05-12-user-installing-app session settled on — get
+        // one shared memory per installed Agent.
+        targetMemoryId = await findOrCreateAppClassMemory({
+          appId: membership.app.id,
+          appUrn: membership.app.urn,
+          appName: membership.app.name,
+          agentUrn: agent.urn,
+          agentName: agent.name,
+          organizationId: membership.app.organizationId,
+          actingUserId: ctx.userId,
+          db: ctx.db,
+        });
+      } else if (ctx.appId && ctx.sessionId) {
         const session = await ctx.db.session.findUnique({
           where: { id: ctx.sessionId },
           select: { memoryId: true },
@@ -3634,10 +3788,39 @@ export const resolvers = {
         throw new Error('No target memory available for this chat');
       }
 
-      // Compile the prompt with Mustache against the target memory's data
+      // Compile the prompt with Mustache against the target memory's data.
+      //
+      // Spec 017 D5 — retrieval-time enforcement. compileTemplate spreads
+      // the accessFilter AFTER the literal memoryId, so a permissive
+      // filter (the caller's full memory set) effectively broadens the
+      // ref lookup beyond the chat's holding memory. For SHARED chats
+      // we must constrain to the chat's allowedReadSet (excludes any
+      // personal memory) — see chat-scope.ts:chatScopeAccessFilter for
+      // the full rationale. PRIVATE chats keep the legacy
+      // memoryAccessFilter behavior: no regression for existing
+      // private-chat templates, which can rely on cross-memory refs
+      // within the caller's own access scope.
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
-        const access = await memoryAccessFilter(ctx);
+        const access =
+          chatScope === 'shared'
+            ? chatScopeAccessFilter(
+                {
+                  scope: 'shared',
+                  memoryId: targetMemoryId,
+                  appId: null, // not needed by allowedReadSet
+                  authorUserId: ctx.userId ?? effectiveUserId,
+                  agentId: resolvedAgentId,
+                },
+                {
+                  knowledgeMemoryIds: agent.memoryItems
+                    .filter((m) => m.memory.class === 'knowledge')
+                    .map((m) => m.memory.id),
+                  systemMemoryId,
+                  appClassMemoryId: targetMemoryId, // for shared, chat.memoryId IS the app-class memory
+                },
+              )
+            : await memoryAccessFilter(ctx);
         systemMessage = await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access);
       }
 
@@ -3650,9 +3833,17 @@ export const resolvers = {
       // on the same conversation would otherwise collide on (loc, memoryId).
       // Use the last 8 chars of a UUIDv7 (the random portion — the first
       // bytes are a timestamp and collide for calls in the same second).
+      //
+      // Sanitize `convName` to `[a-zA-Z0-9-]` before embedding in the
+      // loc: ':' is the URN structural delimiter, and `myChats` /
+      // chat_scope_backfill use `loc NOT LIKE '%:messages%'` to
+      // distinguish chat-root nodes from message rows. A user-supplied
+      // `conversationName` containing `:messages` would slip out of
+      // both filters.
+      const safeConvName = convName.replace(/[^a-zA-Z0-9-]/g, '-');
       const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
       const shortId = generateId().slice(-8);
-      const chatName = `${ts}-${shortId}-${convName}`;
+      const chatName = `${ts}-${shortId}-${safeConvName}`;
       const chatLoc = `chats:${chatName}`;
 
       // Ensure the chats parent exists
@@ -3671,8 +3862,15 @@ export const resolvers = {
       const convGoals = (convData.goalDescriptions as string[]) ?? [];
       const initialGoal = convGoals[0] ?? `${convName} conversation`;
 
-      // Create the chat node with initial goal stack and route history
+      // Create the chat node with initial goal stack and route history.
+      // Spec 017: data.scope carries the chosen tier (FR-001/FR-002,
+      // immutable post-creation). The target-memory selection above
+      // routed the chat into the matching memory class (personal for
+      // private, app for shared); data.scope is the denormalization
+      // that lets chat-list endpoints surface the tier without joining
+      // Memory.class per row (data-model.md §2).
       const initialChatData: Record<string, unknown> = {
+        scope: chatScope,
         conversationName: convName,
         stageName: firstStage,
         userId: effectiveUserId,
@@ -3740,6 +3938,22 @@ export const resolvers = {
       if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
 
       const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+
+      // Spec 017 — chat-scope invariant gate (data-model.md §I-1):
+      // assert the chat-root node's stored scope matches the holding
+      // memory's class before doing any work. `allowMissingScope: true`
+      // covers pre-feature chats whose `data.scope` is undefined until
+      // the Phase 6 backfill runs (T036/T037); after backfill every chat
+      // has an explicit scope and the legacy path falls cold.
+      const chatScopeCheckMemory = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: chatNode.memoryId },
+        select: { class: true },
+      });
+      validateChatScopeInvariants({
+        scope: chatData.scope as 'private' | 'shared' | undefined,
+        memoryClass: chatScopeCheckMemory.class,
+        allowMissingScope: true,
+      });
       const messageCount = ((chatData.messageCount as number) ?? 0) + 1;
       const convName = chatData.conversationName as string;
       const stageName = chatData.stageName as string;
@@ -3921,8 +4135,38 @@ export const resolvers = {
           promptContent = stageNode.content;
         }
 
-        // Compile with data
-        const access = await memoryAccessFilter(ctx);
+        // Compile with data.
+        //
+        // Spec 017 D5 — retrieval-time enforcement: for SHARED chats,
+        // narrow the access filter to the chat's allowedReadSet so a
+        // Mustache reference cannot resolve against the caller's
+        // personal memory. PRIVATE chats keep the legacy
+        // memoryAccessFilter behavior. See chat-scope.ts:
+        // chatScopeAccessFilter for the full rationale.
+        const isShared = chatData.scope === 'shared';
+        let access: Record<string, unknown>;
+        if (isShared && agent) {
+          const knowledgeItems = await ctx.db.agentMemoryItem.findMany({
+            where: { agentId: agent.id, memory: { class: 'knowledge', deletedAt: null } },
+            select: { memoryId: true },
+          });
+          access = chatScopeAccessFilter(
+            {
+              scope: 'shared',
+              memoryId: chatNode.memoryId,
+              appId: null,
+              authorUserId: (chatData.userId as string) ?? '',
+              agentId: agent.id,
+            },
+            {
+              knowledgeMemoryIds: knowledgeItems.map((k) => k.memoryId),
+              systemMemoryId,
+              appClassMemoryId: chatNode.memoryId, // chat IS in the app-class memory
+            },
+          );
+        } else {
+          access = await memoryAccessFilter(ctx);
+        }
         if (promptContent.includes('{{')) {
           systemMessage = await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access);
         } else {
@@ -4001,6 +4245,32 @@ export const resolvers = {
       if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
 
       const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+
+      // Spec 017 — chat-scope invariant gate (see sendChatMessage for
+      // the rationale). The write side (extracted data lands in
+      // chatNode.memoryId, line below at line ~4055) is bounded by the
+      // chat's holding memory by construction; the validate-call here
+      // ensures no corrupted chat-root can slip past.
+      //
+      // ── Phase-4/T015 (deferred from Phase 3) ──────────────────────
+      // When the shared-chat branch lands and tools that accept a
+      // memoryUrn/memoryId argument are added to the chat-tool schema,
+      // this is the point where each such tool-handler dispatch MUST
+      // pass through `allowedReadSet(chat)` and reject any out-of-set
+      // reference before any DB content read. The chat-API surface
+      // today only exposes the `respond` tool (which takes no memory
+      // argument), so the gate has no current target — but the hook
+      // belongs here.
+      const chatScopeCheckMemory = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: chatNode.memoryId },
+        select: { class: true },
+      });
+      validateChatScopeInvariants({
+        scope: chatData.scope as 'private' | 'shared' | undefined,
+        memoryClass: chatScopeCheckMemory.class,
+        allowMissingScope: true,
+      });
+
       const messageCount = ((chatData.messageCount as number) ?? 0) + 1;
 
       const message = (toolResponse.message as string) ?? '';
@@ -4595,12 +4865,24 @@ export const resolvers = {
         where: { loc: chatId, deletedAt: null },
       });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
-      const mem = await ctx.db.memory.findUniqueOrThrow({
-        where: { id: chatNode.memoryId },
-        select: { createdBy: true },
-      });
-      if (mem.createdBy !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
-        throw new Error('Forbidden');
+      // Spec 017 — write-ownership is author-only regardless of scope
+      // (per design-discussion D7). A non-author AppMember of a shared
+      // chat can read it but not rename it.
+      const isAdmin = !!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'));
+      const isAuthor = chatNode.createdBy === ctx.userId;
+      if (!isAdmin && !isAuthor) {
+        // Legacy fallback: pre-feature chats may not have createdBy set
+        // on the chat-root node (it was added later). Fall back to the
+        // historical "memory owner" check for those.
+        if (chatNode.createdBy === null) {
+          const legacyMem = await ctx.db.memory.findUniqueOrThrow({
+            where: { id: chatNode.memoryId },
+            select: { createdBy: true },
+          });
+          if (legacyMem.createdBy !== ctx.userId) throw new Error('Forbidden');
+        } else {
+          throw new Error('Forbidden');
+        }
       }
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
@@ -4620,12 +4902,20 @@ export const resolvers = {
         where: { loc: chatId, deletedAt: null },
       });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
-      const mem = await ctx.db.memory.findUniqueOrThrow({
-        where: { id: chatNode.memoryId },
-        select: { createdBy: true },
-      });
-      if (mem.createdBy !== ctx.userId && !ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
-        throw new Error('Forbidden');
+      // Spec 017 — author-only deletion (D7). Legacy fallback to
+      // memory owner for pre-feature chats that lack chat-root createdBy.
+      const isAdmin = !!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'));
+      const isAuthor = chatNode.createdBy === ctx.userId;
+      if (!isAdmin && !isAuthor) {
+        if (chatNode.createdBy === null) {
+          const legacyMem = await ctx.db.memory.findUniqueOrThrow({
+            where: { id: chatNode.memoryId },
+            select: { createdBy: true },
+          });
+          if (legacyMem.createdBy !== ctx.userId) throw new Error('Forbidden');
+        } else {
+          throw new Error('Forbidden');
+        }
       }
       // Soft-delete the chat node and all its message children by loc prefix
       await ctx.db.node.updateMany({

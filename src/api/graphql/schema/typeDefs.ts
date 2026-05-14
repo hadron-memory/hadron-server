@@ -296,6 +296,15 @@ export const typeDefs = `#graphql
     personal
   }
 
+  # 017-chat-visibility-and-personal-memory: a chat is created in one
+  # of two tiers, chosen by the user at chat creation and immutable
+  # thereafter. private chats live in the user's personal-class
+  # memory; shared chats live in the App's app-class memory.
+  enum ChatScope {
+    private
+    shared
+  }
+
   type AgentSubscription {
     userId: ID!
     agentId: ID!
@@ -469,7 +478,12 @@ export const typeDefs = `#graphql
     model: String!
   }
 
-  # A saved chat in a user's personal memory for an agent.
+  # A saved chat in one of the chat-scope tiers.
+  #
+  # Per spec 017, scope is set at chat creation and immutable
+  # thereafter. private chats live in the author's personal-class
+  # memory; shared chats live in the App's app-class memory and are
+  # readable by every AppMember of that App.
   type Chat {
     id: ID!
     loc: String!
@@ -479,6 +493,13 @@ export const typeDefs = `#graphql
     messageCount: Int!
     createdAt: String!
     lastMessageAt: String
+    # 017-chat-visibility-and-personal-memory.
+    scope: ChatScope!
+    # The chat's author (chat-root node's createdBy). Null for legacy
+    # chats predating createdBy persistence. Surfaces who started a
+    # shared chat so the portal can distinguish own vs other-member
+    # shared chats in the list.
+    createdBy: ID
   }
 
   # One chat message in history, as returned by chatHistory.
@@ -1161,7 +1182,13 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    startChat(agentId: ID!, userId: String, conversationName: String): ChatStartResult!
+    # 017: scope defaults to private (FR-003). A shared request
+    # requires a JWT user with an AppMember row in some App that
+    # installs this Agent (FR-006 + research.md Q-R2). Otherwise:
+    #   - MCP App-key session → SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS
+    #   - JWT user without a qualifying AppMember row, or no auth →
+    #     SHARED_CHAT_REQUIRES_APP_CONTEXT
+    startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private): ChatStartResult!
     # Process a user message (saves message, builds context, returns next prompt)
     sendChatMessage(chatId: String!, userMessage: String!): ChatPromptResult!
     # Process the LLM's tool response (extract data, transition stage, save assistant message)

@@ -222,6 +222,16 @@ enum MemoryType {
 ///                extracted facts, generated artifacts). Keyed on
 ///                (app_id, agent_id) for shared-app-memory Agents,
 ///                (app_id, agent_id, user_id) for per-user-app-memory.
+///                Spec 017 (2026-05-12): app-class memories named
+///                `${app.urn}:${agentSlug}:shared` are the v1 home for
+///                SHARED chats (chats readable by every AppMember of
+///                the App). Keyed per-(App, Agent) so the multi-Agent
+///                App from 2026-05-12-user-installing-app §3 — where
+///                one App can install N Agents under the reintroduced
+///                AppAgent join — gives each installed Agent its own
+///                shared memory. Lazy-provisioned by
+///                `findOrCreateAppClassMemory` on the first shared
+///                chat for an (App, Agent) pair.
 ///   knowledge  — reference content the Agent reads from. Per-Agent
 ///                (not per-App); two installs of the same Agent share
 ///                the same knowledge memory.
@@ -638,6 +648,14 @@ model Asset {
 /// pre-dates the formalization; the intended-values list above is the
 /// contract — tightening to a Prisma enum is reserved for a future
 /// cleanup spec.
+///
+/// **Chat-root `data.scope`** (spec 017, 2026-05-12) — chat-root nodes
+/// (loc `chats:<id>`, depth 2, nodeType `record`) carry a `scope` field
+/// in `data` recording the chat's visibility tier (`private` | `shared`).
+/// Set at chat creation and immutable thereafter (FR-002).
+/// Denormalized from `Memory.class` for chat-list query performance;
+/// MUST stay consistent with the holding memory's class per the
+/// invariant validator in `src/api/graphql/schema/chat-scope.ts`.
 model Node {
   /// UUIDv7 from `node.yaml` when supplied by the importer (stable across
   /// moves); falls back to `cuid()` for inserts that omit `id`.
