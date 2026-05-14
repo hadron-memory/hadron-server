@@ -18,6 +18,7 @@
  *     `shared` chat is requested without a resolvable App context.
  */
 
+import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 
 /** Resolved description of a chat sufficient to compute its read-set. */
@@ -317,11 +318,21 @@ export type ChatScopeErrorCode =
   | 'CHAT_MEMORY_OUT_OF_SCOPE';
 
 /** Typed error thrown by the chat-scope layer. */
-export class ChatScopeError extends Error {
+/**
+ * Extends `GraphQLError` so Apollo Server's default formatter
+ * preserves `extensions.code` on the wire. Without this, Apollo
+ * masks the error as `INTERNAL_SERVER_ERROR` and clients lose the
+ * ability to distinguish `SHARED_CHAT_REQUIRES_APP_CONTEXT` from
+ * `SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS` programmatically —
+ * they'd have to substring-match the English message text. The
+ * top-level `code` property is kept for type-narrowing in tests and
+ * internal callers that catch `instanceof ChatScopeError`.
+ */
+export class ChatScopeError extends GraphQLError {
   readonly code: ChatScopeErrorCode;
 
   constructor(code: ChatScopeErrorCode, message: string) {
-    super(message);
+    super(message, { extensions: { code } });
     this.name = 'ChatScopeError';
     this.code = code;
   }
