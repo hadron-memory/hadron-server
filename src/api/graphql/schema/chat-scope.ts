@@ -101,13 +101,22 @@ export function allowedReadSet(
 }
 
 /**
- * Lazy-provision the app-class memory for an App. On first call
- * creates a `class='app'` memory with URN `${app.urn}:shared`;
- * subsequent calls return the existing memory's id.
+ * Lazy-provision the app-class memory for an `(App, Agent)` pair. On
+ * first call creates a `class='app'` memory with URN
+ * `${app.urn}:${agentSlug}:shared`; subsequent calls for the same pair
+ * return the existing memory's id.
  *
- * One app-class memory per App (not per `(app, agent)`): per spec
- * 008-agent-installation each App has at most one Agent, so the keys
- * are interchangeable.
+ * One app-class memory per `(app, agent)`, not per `app` alone — the
+ * 2026-05-12-user-installing-app design discussion (§3) reintroduced
+ * the multi-Agent App via the `AppAgent` join, dropping `App.agentId`
+ * as the single FK. Keying the shared memory by `(app, agent)` keeps
+ * the chat-visibility decision (`shared` chats are scoped to one App
+ * AND one Agent) intact across the upcoming 008-amendment migration:
+ * two Agents installed in the same App will not collide on one shared
+ * memory. The agent slug is derived from `agent.urn` — for an agent
+ * with URN `micromentor.org:juno` installed in App
+ * `micromentor.org:family`, the shared memory URN is
+ * `micromentor.org:family:juno:shared`.
  *
  * Mirrors the personal-memory provisioner pattern at
  * `resolvers.ts:3573-3625`.
@@ -123,12 +132,23 @@ export async function findOrCreateAppClassMemory(args: {
   appId: string;
   appUrn: string;
   appName: string;
+  /** The Agent the shared chat is conducted with. URN form
+   *  `<org-urn>:<agent-slug>`; the slug is everything after the first
+   *  colon segment. */
+  agentUrn: string;
+  agentName: string;
   organizationId: string;
   actingUserId: string;
   db: PrismaClient;
 }): Promise<string> {
-  const { appId, appUrn, appName, organizationId, actingUserId, db } = args;
-  const urn = `${appUrn}:shared`;
+  const { appId, appUrn, appName, agentUrn, agentName, organizationId, actingUserId, db } = args;
+  const agentSlug = agentUrn.split(':').slice(1).join(':');
+  if (!agentSlug) {
+    throw new Error(
+      `findOrCreateAppClassMemory: agentUrn "${agentUrn}" has no slug segment after the org prefix.`,
+    );
+  }
+  const urn = `${appUrn}:${agentSlug}:shared`;
 
   const existing = await db.memory.findUnique({
     where: { urn },
@@ -149,7 +169,7 @@ export async function findOrCreateAppClassMemory(args: {
       data: {
         organizationId,
         urn,
-        name: `${appName} — shared chats`,
+        name: `${appName} — ${agentName} — shared chats`,
         class: 'app',
         visibility: 'PRIVATE',
         appId,
@@ -187,37 +207,88 @@ export async function findOrCreateAppClassMemory(args: {
 }
 
 /**
+ * Build a Prisma `where`-clause fragment restricting node reads to the
+ * chat's allowed read-set. This is the D5 retrieval-time enforcement
+ * point from the 2026-05-12-chat-visibility design discussion:
+ *
+ *   "A `shared` chat's read-set is `{app-class memory, knowledge
+ *    memory, agent system memory}`. Personal memory is excluded."
+ *
+ * Pass the returned object as the `accessFilter` argument to
+ * `compileTemplate` (or as the access fragment in any future
+ * memoryId-taking chat-tool dispatch). The fragment shape is
+ * `{ memoryId: { in: <ids> } }` — when spread into a Prisma `where`,
+ * it constrains node lookups to the allowed set.
+ *
+ * Why this is load-bearing: `compileTemplate`'s `where: { loc,
+ * memoryId, ...accessFilter }` spreads the filter AFTER the literal
+ * `memoryId` argument, which means a permissive `accessFilter`
+ * (e.g. `memoryAccessFilter(ctx)`, returning every memory the caller
+ * can read) effectively *broadens* the lookup beyond the chat's
+ * holding memory. For a `shared` chat this means a Mustache reference
+ * like `{{secret-data.field}}` would happily resolve against the
+ * caller's own personal memory if a node named `secret-data` lives
+ * there. The narrow filter here is the only thing standing between
+ * a shared chat and the author's personal data — prompt-level
+ * guardrails do not satisfy D5.
+ */
+export function chatScopeAccessFilter(
+  chat: ChatScopeContext,
+  attachments: ChatScopeAttachments,
+): { memoryId: { in: string[] } } {
+  const ids = Array.from(allowedReadSet(chat, attachments));
+  return { memoryId: { in: ids } };
+}
+
+/**
  * Validate the chat-root node's stored scope matches the holding
  * memory's class (data-model.md §I-1):
  *
- *   data.scope === 'private'  ⟺  memory.class === 'personal'
+ *   data.scope === 'private'  ⟹  memory.class ∈ { personal, knowledge }
  *   data.scope === 'shared'   ⟺  memory.class === 'app'
  *
- * A violation is a corruption signal — a chat-root whose scope claims
- * one tier while its holding memory belongs to the other. Throws
- * ChatScopeError('CHAT_MEMORY_OUT_OF_SCOPE') so the chat-handling
- * resolvers can reject the chat early before doing any work that
- * would honor the corrupted state.
+ * The `shared ⇔ app` half is load-bearing for the chat-visibility
+ * privacy boundary: a shared chat in any other memory class is
+ * corruption and we reject it before doing any work.
  *
- * Legacy chats whose `data.scope` is unset are treated as `'private'`
- * for the duration of the v1 release per FR-017's migration intent;
- * pass `{ allowMissingScope: true }` from `sendChatMessage` /
- * `processChatResponse` so pre-migration chats keep working until the
- * backfill runs (Phase 6, T036/T037).
+ * The `private` half tolerates the legacy `knowledge`-class fallback.
+ * `startChat`'s legacy-attachment branch (caller has no App context
+ * and no per-user memory) stores chats in the agent's first writable
+ * attached memory, which today is always `knowledge`-class. The
+ * 20260512120000_chat_scope_backfill migration tags every pre-feature
+ * chat-root with `data.scope='private'` regardless of holding memory
+ * class, so after backfill the (private + knowledge) state is
+ * permanent for those legacy chats. Migrating their content is out of
+ * scope per spec 017 FR-018 ("no chat content moves between
+ * memories").
+ *
+ * `allowMissingScope: true` (passed from `sendChatMessage` /
+ * `processChatResponse`) tolerates pre-migration chats with no
+ * `data.scope` set — these are functionally indistinguishable from
+ * private chats and keep working until the backfill runs.
+ *
+ * Throws ChatScopeError('CHAT_MEMORY_OUT_OF_SCOPE') on a real
+ * corruption.
  */
 export function validateChatScopeInvariants(args: {
   /** From the chat-root node's `data`. */
   scope: 'private' | 'shared' | undefined;
   /** From the holding `Memory.class`. */
   memoryClass: 'personal' | 'app' | 'knowledge' | 'system';
-  /** True during the migration window — treats missing `scope` as `private`. */
+  /** True during the migration window — treats missing `scope` as
+   *  `private` for any non-shared memory class. */
   allowMissingScope?: boolean;
 }): void {
   const { scope, memoryClass, allowMissingScope = false } = args;
 
   if (scope === undefined) {
-    if (allowMissingScope && memoryClass === 'personal') {
-      return; // legacy private chat, awaiting backfill — OK
+    // The legacy migration-window path. Tolerate any non-shared memory
+    // class (personal OR knowledge — the two homes legacy chats live
+    // in). An app-class chat-root with no scope is corruption: app
+    // memory was only introduced for shared chats post-017, so a row
+    // there must have been written with explicit scope.
+    if (allowMissingScope && (memoryClass === 'personal' || memoryClass === 'knowledge')) {
+      return; // legacy private chat, awaiting or surviving backfill — OK
     }
     throw new ChatScopeError(
       'CHAT_MEMORY_OUT_OF_SCOPE',
@@ -225,7 +296,7 @@ export function validateChatScopeInvariants(args: {
     );
   }
 
-  if (scope === 'private' && memoryClass !== 'personal') {
+  if (scope === 'private' && memoryClass !== 'personal' && memoryClass !== 'knowledge') {
     throw new ChatScopeError(
       'CHAT_MEMORY_OUT_OF_SCOPE',
       `Chat claims scope=private but holding memory.class=${memoryClass}.`,

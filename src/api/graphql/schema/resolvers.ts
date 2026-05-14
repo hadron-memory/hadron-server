@@ -85,6 +85,7 @@ import {
 import {
   validateChatScopeInvariants,
   findOrCreateAppClassMemory,
+  chatScopeAccessFilter,
   ChatScopeError,
 } from './chat-scope.js';
 
@@ -1305,6 +1306,10 @@ export const resolvers = {
       });
       if (personalMemory) readableMemoryIds.push(personalMemory.id);
 
+      // TODO(008-amendment / 2026-05-12-user-installing-app §3): `App.agentId`
+      // is being dropped in favor of the reintroduced `AppAgent` join.
+      // Replace `app: { agentId: ... }` with
+      // `app: { agents: { some: { agentId: ... } } }` when the amendment lands.
       const sharedMemberships = await ctx.db.appMember.findMany({
         where: {
           userId: ctx.userId,
@@ -3658,6 +3663,12 @@ export const resolvers = {
             'Cannot create a shared chat — sign in as a user that belongs to an App that installs this Agent.',
           );
         }
+        // TODO(008-amendment / 2026-05-12-user-installing-app §3): `App.agentId`
+        // is being dropped in favor of the reintroduced `AppAgent` join.
+        // Replace `app: { agentId: ... }` with
+        // `app: { agents: { some: { agentId: ... } } }` when the amendment
+        // lands. With multi-Agent Apps, this query will return one App per
+        // membership-that-installs-the-Agent; today it returns at most one.
         const membership = await ctx.db.appMember.findFirst({
           where: {
             userId: ctx.userId,
@@ -3673,12 +3684,17 @@ export const resolvers = {
             "Cannot create a shared chat — you are not a member of any App that installs this Agent.",
           );
         }
-        // Idempotent: first shared chat under the App provisions the
-        // app-class memory; subsequent calls reuse it.
+        // Idempotent: first shared chat under the (App, Agent) pair
+        // provisions the app-class memory; subsequent calls reuse it.
+        // Keyed per-agent (not per-app) so multi-Agent Apps — the model
+        // the 2026-05-12-user-installing-app session settled on — get
+        // one shared memory per installed Agent.
         targetMemoryId = await findOrCreateAppClassMemory({
           appId: membership.app.id,
           appUrn: membership.app.urn,
           appName: membership.app.name,
+          agentUrn: agent.urn,
+          agentName: agent.name,
           organizationId: membership.app.organizationId,
           actingUserId: ctx.userId,
           db: ctx.db,
@@ -3772,10 +3788,39 @@ export const resolvers = {
         throw new Error('No target memory available for this chat');
       }
 
-      // Compile the prompt with Mustache against the target memory's data
+      // Compile the prompt with Mustache against the target memory's data.
+      //
+      // Spec 017 D5 — retrieval-time enforcement. compileTemplate spreads
+      // the accessFilter AFTER the literal memoryId, so a permissive
+      // filter (the caller's full memory set) effectively broadens the
+      // ref lookup beyond the chat's holding memory. For SHARED chats
+      // we must constrain to the chat's allowedReadSet (excludes any
+      // personal memory) — see chat-scope.ts:chatScopeAccessFilter for
+      // the full rationale. PRIVATE chats keep the legacy
+      // memoryAccessFilter behavior: no regression for existing
+      // private-chat templates, which can rely on cross-memory refs
+      // within the caller's own access scope.
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
-        const access = await memoryAccessFilter(ctx);
+        const access =
+          chatScope === 'shared'
+            ? chatScopeAccessFilter(
+                {
+                  scope: 'shared',
+                  memoryId: targetMemoryId,
+                  appId: null, // not needed by allowedReadSet
+                  authorUserId: ctx.userId ?? effectiveUserId,
+                  agentId: resolvedAgentId,
+                },
+                {
+                  knowledgeMemoryIds: agent.memoryItems
+                    .filter((m) => m.memory.class === 'knowledge')
+                    .map((m) => m.memory.id),
+                  systemMemoryId,
+                  appClassMemoryId: targetMemoryId, // for shared, chat.memoryId IS the app-class memory
+                },
+              )
+            : await memoryAccessFilter(ctx);
         systemMessage = await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access);
       }
 
@@ -3788,9 +3833,17 @@ export const resolvers = {
       // on the same conversation would otherwise collide on (loc, memoryId).
       // Use the last 8 chars of a UUIDv7 (the random portion — the first
       // bytes are a timestamp and collide for calls in the same second).
+      //
+      // Sanitize `convName` to `[a-zA-Z0-9-]` before embedding in the
+      // loc: ':' is the URN structural delimiter, and `myChats` /
+      // chat_scope_backfill use `loc NOT LIKE '%:messages%'` to
+      // distinguish chat-root nodes from message rows. A user-supplied
+      // `conversationName` containing `:messages` would slip out of
+      // both filters.
+      const safeConvName = convName.replace(/[^a-zA-Z0-9-]/g, '-');
       const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
       const shortId = generateId().slice(-8);
-      const chatName = `${ts}-${shortId}-${convName}`;
+      const chatName = `${ts}-${shortId}-${safeConvName}`;
       const chatLoc = `chats:${chatName}`;
 
       // Ensure the chats parent exists
@@ -4082,8 +4135,38 @@ export const resolvers = {
           promptContent = stageNode.content;
         }
 
-        // Compile with data
-        const access = await memoryAccessFilter(ctx);
+        // Compile with data.
+        //
+        // Spec 017 D5 — retrieval-time enforcement: for SHARED chats,
+        // narrow the access filter to the chat's allowedReadSet so a
+        // Mustache reference cannot resolve against the caller's
+        // personal memory. PRIVATE chats keep the legacy
+        // memoryAccessFilter behavior. See chat-scope.ts:
+        // chatScopeAccessFilter for the full rationale.
+        const isShared = chatData.scope === 'shared';
+        let access: Record<string, unknown>;
+        if (isShared && agent) {
+          const knowledgeItems = await ctx.db.agentMemoryItem.findMany({
+            where: { agentId: agent.id, memory: { class: 'knowledge', deletedAt: null } },
+            select: { memoryId: true },
+          });
+          access = chatScopeAccessFilter(
+            {
+              scope: 'shared',
+              memoryId: chatNode.memoryId,
+              appId: null,
+              authorUserId: (chatData.userId as string) ?? '',
+              agentId: agent.id,
+            },
+            {
+              knowledgeMemoryIds: knowledgeItems.map((k) => k.memoryId),
+              systemMemoryId,
+              appClassMemoryId: chatNode.memoryId, // chat IS in the app-class memory
+            },
+          );
+        } else {
+          access = await memoryAccessFilter(ctx);
+        }
         if (promptContent.includes('{{')) {
           systemMessage = await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access);
         } else {

@@ -18,6 +18,7 @@ import {
 import { generateId } from '../../../lib/id.js';
 import {
   allowedReadSet,
+  chatScopeAccessFilter,
   findOrCreateAppClassMemory,
   validateChatScopeInvariants,
   ChatScopeError,
@@ -140,6 +141,8 @@ describe('findOrCreateAppClassMemory', () => {
   let appId: string;
   let appUrn: string;
   let appName: string;
+  let agentUrn: string;
+  let agentName: string;
   let actingUserId: string;
 
   beforeEach(async () => {
@@ -154,13 +157,15 @@ describe('findOrCreateAppClassMemory', () => {
       data: { id: generateId(), organizationId: orgId, userId: actingUserId, role: 'OWNER' },
     });
     const agent = await db.agent.create({
-      data: { id: generateId(), organizationId: orgId, urn: `${orgId}:agent-017`, name: 'agent-017' },
+      data: { id: generateId(), organizationId: orgId, urn: `${org.urn}:agent-017`, name: 'agent-017' },
     });
+    agentUrn = agent.urn;
+    agentName = agent.name;
     const app = await db.app.create({
       data: {
         id: generateId(),
         organizationId: orgId,
-        urn: `${orgId}:app-017`,
+        urn: `${org.urn}:app-017`,
         name: 'App 017',
         appType: 'CHATBOT',
         agentId: agent.id,
@@ -171,11 +176,13 @@ describe('findOrCreateAppClassMemory', () => {
     appName = app.name;
   });
 
-  it('creates a new app-class memory on first call', async () => {
+  it('creates a new app-class memory on first call, keyed per (app, agent)', async () => {
     const id = await findOrCreateAppClassMemory({
       appId,
       appUrn,
       appName,
+      agentUrn,
+      agentName,
       organizationId: orgId,
       actingUserId,
       db,
@@ -185,14 +192,20 @@ describe('findOrCreateAppClassMemory', () => {
     expect(memory!.class).toBe('app');
     expect(memory!.appId).toBe(appId);
     expect(memory!.userId).toBeNull();
-    expect(memory!.urn).toBe(`${appUrn}:shared`);
+    // URN is `${app.urn}:${agentSlug}:shared`. agentSlug is everything
+    // after the first colon-segment of agent.urn (which itself starts
+    // with the org urn).
+    const agentSlug = agentUrn.split(':').slice(1).join(':');
+    expect(memory!.urn).toBe(`${appUrn}:${agentSlug}:shared`);
   });
 
-  it('returns the same memory id on a second call (idempotent)', async () => {
+  it('returns the same memory id on a second call for the same (app, agent) — idempotent', async () => {
     const id1 = await findOrCreateAppClassMemory({
       appId,
       appUrn,
       appName,
+      agentUrn,
+      agentName,
       organizationId: orgId,
       actingUserId,
       db,
@@ -201,6 +214,8 @@ describe('findOrCreateAppClassMemory', () => {
       appId,
       appUrn,
       appName,
+      agentUrn,
+      agentName,
       organizationId: orgId,
       actingUserId,
       db,
@@ -208,17 +223,115 @@ describe('findOrCreateAppClassMemory', () => {
     expect(id1).toBe(id2);
   });
 
-  it('uses the documented URN convention `${app.urn}:shared`', async () => {
-    const id = await findOrCreateAppClassMemory({
-      appId,
-      appUrn,
-      appName,
-      organizationId: orgId,
-      actingUserId,
-      db,
+  // Spec 017 + 2026-05-12-user-installing-app §3: shared memory is keyed
+  // per (App, Agent), not per App. Two Agents installed in the same App
+  // get DIFFERENT shared memories — required for multi-Agent App isolation.
+  it('returns distinct memories for two Agents installed in the same App', async () => {
+    const org = await db.organization.findFirstOrThrow({ where: { id: orgId } });
+    const agentB = await db.agent.create({
+      data: { id: generateId(), organizationId: orgId, urn: `${org.urn}:agent-017-b`, name: 'agent-017-b' },
     });
-    const memory = await db.memory.findUniqueOrThrow({ where: { id } });
-    expect(memory.urn.endsWith(':shared')).toBe(true);
+    const idA = await findOrCreateAppClassMemory({
+      appId, appUrn, appName,
+      agentUrn, agentName,
+      organizationId: orgId, actingUserId, db,
+    });
+    const idB = await findOrCreateAppClassMemory({
+      appId, appUrn, appName,
+      agentUrn: agentB.urn, agentName: agentB.name,
+      organizationId: orgId, actingUserId, db,
+    });
+    expect(idA).not.toBe(idB);
+    const memA = await db.memory.findUniqueOrThrow({ where: { id: idA } });
+    const memB = await db.memory.findUniqueOrThrow({ where: { id: idB } });
+    expect(memA.urn).not.toBe(memB.urn);
+    expect(memA.urn.endsWith(`:agent-017:shared`)).toBe(true);
+    expect(memB.urn.endsWith(`:agent-017-b:shared`)).toBe(true);
+  });
+
+  it('throws when agentUrn has no slug segment after the org prefix', async () => {
+    await expect(
+      findOrCreateAppClassMemory({
+        appId, appUrn, appName,
+        agentUrn: 'no-colon-no-slug',
+        agentName,
+        organizationId: orgId, actingUserId, db,
+      }),
+    ).rejects.toThrow(/no slug segment/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// chatScopeAccessFilter — D5 retrieval-time enforcement
+// ---------------------------------------------------------------------------
+
+describe('chatScopeAccessFilter — D5 retrieval-time enforcement', () => {
+  const personalId = 'mem-personal-1';
+  const appClassId = 'mem-app-1';
+  const knowledgeId = 'mem-knowledge-1';
+  const systemId = 'mem-system-1';
+
+  function chat(overrides: Partial<ChatScopeContext> = {}): ChatScopeContext {
+    return {
+      scope: 'shared',
+      memoryId: appClassId,
+      appId: 'app-1',
+      authorUserId: 'user-1',
+      agentId: 'agent-1',
+      ...overrides,
+    };
+  }
+
+  it('returns { memoryId: { in: <ids> } } shape suitable for Prisma where-spread', () => {
+    const filter = chatScopeAccessFilter(chat(), {
+      knowledgeMemoryIds: [knowledgeId],
+      systemMemoryId: systemId,
+      appClassMemoryId: appClassId,
+    });
+    expect(filter).toHaveProperty('memoryId');
+    expect(filter.memoryId).toHaveProperty('in');
+    expect(Array.isArray(filter.memoryId.in)).toBe(true);
+  });
+
+  // Load-bearing safety property — the entire reason this filter exists.
+  // A shared chat asking for nodes via `where: { loc, memoryId, ...filter }`
+  // must not be able to resolve a ref against any personal memory.
+  it('SHARED chat filter does not contain any personal memory id', () => {
+    const filter = chatScopeAccessFilter(
+      chat({ scope: 'shared', memoryId: appClassId }),
+      {
+        knowledgeMemoryIds: [knowledgeId],
+        systemMemoryId: systemId,
+        appClassMemoryId: appClassId,
+      },
+    );
+    expect(filter.memoryId.in).not.toContain(personalId);
+  });
+
+  it('SHARED chat filter includes app-class, knowledge, and system memories', () => {
+    const filter = chatScopeAccessFilter(
+      chat({ scope: 'shared', memoryId: appClassId }),
+      {
+        knowledgeMemoryIds: [knowledgeId],
+        systemMemoryId: systemId,
+        appClassMemoryId: appClassId,
+      },
+    );
+    expect(filter.memoryId.in).toContain(appClassId);
+    expect(filter.memoryId.in).toContain(knowledgeId);
+    expect(filter.memoryId.in).toContain(systemId);
+  });
+
+  it('PRIVATE chat filter contains the author\'s personal memory (chat.memoryId)', () => {
+    const filter = chatScopeAccessFilter(
+      chat({ scope: 'private', memoryId: personalId }),
+      {
+        knowledgeMemoryIds: [knowledgeId],
+        systemMemoryId: systemId,
+        appClassMemoryId: appClassId,
+      },
+    );
+    expect(filter.memoryId.in).toContain(personalId);
   });
 });
 
@@ -275,9 +388,31 @@ describe('validateChatScopeInvariants', () => {
     }
   });
 
-  it('rejects private + knowledge or system (chat must be in personal/app)', () => {
+  // The legacy fallback at startChat's "agent's first writable attached
+  // memory" branch stores chats in knowledge-class memory. The
+  // 20260512120000_chat_scope_backfill migration sets data.scope='private'
+  // on every pre-feature chat-root, including those in knowledge memory.
+  // Reject this combination would break running legacy chats post-backfill
+  // (FR-018 forbids moving the content). Treat private + knowledge as a
+  // permanent legacy state.
+  it('accepts private + knowledge (legacy fallback path stays valid after backfill)', () => {
     expect(() =>
       validateChatScopeInvariants({ scope: 'private', memoryClass: 'knowledge' }),
+    ).not.toThrow();
+  });
+
+  it('rejects private + app and private + system (chats never live there)', () => {
+    expect(() =>
+      validateChatScopeInvariants({ scope: 'private', memoryClass: 'app' }),
+    ).toThrow(ChatScopeError);
+    expect(() =>
+      validateChatScopeInvariants({ scope: 'private', memoryClass: 'system' }),
+    ).toThrow(ChatScopeError);
+  });
+
+  it('rejects shared + knowledge or system (load-bearing — shared MUST be app-class)', () => {
+    expect(() =>
+      validateChatScopeInvariants({ scope: 'shared', memoryClass: 'knowledge' }),
     ).toThrow(ChatScopeError);
     expect(() =>
       validateChatScopeInvariants({ scope: 'shared', memoryClass: 'system' }),
@@ -290,7 +425,7 @@ describe('validateChatScopeInvariants', () => {
     ).toThrow(ChatScopeError);
   });
 
-  it('tolerates missing scope when allowMissingScope=true AND memory is personal (migration window)', () => {
+  it('tolerates missing scope when allowMissingScope=true AND memory is personal', () => {
     expect(() =>
       validateChatScopeInvariants({
         scope: undefined,
@@ -300,10 +435,21 @@ describe('validateChatScopeInvariants', () => {
     ).not.toThrow();
   });
 
-  it('still rejects missing scope on a non-personal memory even with allowMissingScope=true', () => {
-    // The migration backfill only covers existing private chats (which
-    // live in personal memory). A chat-root in app-class memory with
-    // no scope is corruption regardless of the migration flag.
+  it('tolerates missing scope when allowMissingScope=true AND memory is knowledge (legacy)', () => {
+    expect(() =>
+      validateChatScopeInvariants({
+        scope: undefined,
+        memoryClass: 'knowledge',
+        allowMissingScope: true,
+      }),
+    ).not.toThrow();
+  });
+
+  it('still rejects missing scope on app-class memory even with allowMissingScope=true', () => {
+    // App-class memory was only introduced for shared chats post-017,
+    // so a chat-root row there must have been written with explicit
+    // scope. Missing scope on app-class is corruption regardless of
+    // the migration flag.
     expect(() =>
       validateChatScopeInvariants({
         scope: undefined,

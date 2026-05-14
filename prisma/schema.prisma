@@ -222,11 +222,16 @@ enum MemoryType {
 ///                extracted facts, generated artifacts). Keyed on
 ///                (app_id, agent_id) for shared-app-memory Agents,
 ///                (app_id, agent_id, user_id) for per-user-app-memory.
-///                Spec 017 (2026-05-12): an app-class memory named
-///                `${app.urn}:shared` is the v1 home for SHARED chats
-///                (chats readable by every AppMember of the App).
-///                Lazy-provisioned by `findOrCreateAppClassMemory` on
-///                the first shared chat for an App.
+///                Spec 017 (2026-05-12): app-class memories named
+///                `${app.urn}:${agentSlug}:shared` are the v1 home for
+///                SHARED chats (chats readable by every AppMember of
+///                the App). Keyed per-(App, Agent) so the multi-Agent
+///                App from 2026-05-12-user-installing-app §3 — where
+///                one App can install N Agents under the reintroduced
+///                AppAgent join — gives each installed Agent its own
+///                shared memory. Lazy-provisioned by
+///                `findOrCreateAppClassMemory` on the first shared
+///                chat for an (App, Agent) pair.
 ///   knowledge  — reference content the Agent reads from. Per-Agent
 ///                (not per-App); two installs of the same Agent share
 ///                the same knowledge memory.
