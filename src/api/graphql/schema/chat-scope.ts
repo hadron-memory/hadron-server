@@ -114,9 +114,9 @@ export function allowedReadSet(
  * AND one Agent) intact across the upcoming 008-amendment migration:
  * two Agents installed in the same App will not collide on one shared
  * memory. The agent slug is derived from `agent.urn` — for an agent
- * with URN `micromentor.org:juno` installed in App
- * `micromentor.org:family`, the shared memory URN is
- * `micromentor.org:family:juno:shared`.
+ * with URN `<org-urn>:<agent-slug>` installed in App
+ * `<org-urn>:<app-slug>`, the shared memory URN is
+ * `<org-urn>:<app-slug>:<agent-slug>:shared`.
  *
  * Mirrors the personal-memory provisioner pattern at
  * `resolvers.ts:3573-3625`.
