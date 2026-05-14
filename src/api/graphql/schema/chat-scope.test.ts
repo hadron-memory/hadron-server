@@ -353,6 +353,18 @@ describe('ChatScopeError', () => {
     const e = new ChatScopeError('CHAT_MEMORY_OUT_OF_SCOPE', 'nope');
     expect(e instanceof Error).toBe(true);
   });
+
+  // Apollo's default formatter preserves `extensions.code` on wire only
+  // when the thrown value extends `GraphQLError`. Without this, every
+  // ChatScopeError ships to the client as `INTERNAL_SERVER_ERROR` and
+  // the three sub-codes collapse into one unidentifiable failure.
+  it('exposes the code as extensions.code (so clients can branch on it)', () => {
+    const e = new ChatScopeError(
+      'SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS',
+      'nope from MCP App-key',
+    );
+    expect(e.extensions?.code).toBe('SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS');
+  });
 });
 
 // ---------------------------------------------------------------------------
