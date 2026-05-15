@@ -3522,12 +3522,17 @@ export const resolvers = {
         userId,
         conversationName,
         scope,
+        isTestRun,
       }: {
         agentId: string;
         userId?: string;
         conversationName?: string;
         // Spec 017: chosen at chat creation, immutable afterward.
         scope?: 'private' | 'shared';
+        // Spec 019: skip cross-cutting side-effects when the call comes
+        // from the Tester. Defaults to false; see typeDefs for the
+        // full rationale.
+        isTestRun?: boolean;
       },
       ctx: Context,
     ) => {
@@ -3548,7 +3553,13 @@ export const resolvers = {
       // 005-agent-subscription FR-002: auto-provision an AgentSubscription
       // on the first user-attributed contact for (user, agent). Idempotent.
       // Skip for the "anonymous" sentinel — there is no User row.
-      if (effectiveUserId !== 'anonymous') {
+      //
+      // Spec 019: also skip when `isTestRun` is true. AgentSubscription is
+      // the platform's license-grant entity, narrowed in
+      // 2026-05-12-user-installing-app to "user is licensed to interact
+      // with this Agent at all." A side-effect of clicking "Test" once
+      // silently granting that license re-broadens what we narrowed.
+      if (effectiveUserId !== 'anonymous' && !isTestRun) {
         await ensureAgentSubscription(ctx.db, effectiveUserId, resolvedAgentId);
       }
 
