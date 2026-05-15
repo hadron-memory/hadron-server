@@ -590,6 +590,108 @@ describe('chatHistory', () => {
     ).rejects.toThrow('Forbidden');
   });
 
+  // Regression: when the agent has no matching App in the caller's orgs,
+  // startChat downgrades the per-user chat memory from class='personal'
+  // to class='knowledge' (still bound via userMemoryOfAgentId, owned by
+  // the caller). The chatHistory auth check used to only allow class
+  // 'personal' or 'app', so the caller got Forbidden on their own chat.
+  // The fix authorizes any userMemoryOfAgentId-bound memory via createdBy,
+  // regardless of the personal-vs-knowledge label.
+  it('allows the owner to read a chat in a knowledge-class user memory (no matching App)', async () => {
+    // Set up an isolated agent without a matching App so the lazy-
+    // provisioned per-user memory lands at class='knowledge'.
+    const noAppAgent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'no-app-agent', visibility: 'ORGANIZATION' },
+      adminCtx(),
+    );
+    const noAppSysMem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'no-app-system' },
+      adminCtx(),
+    );
+    await resolvers.Mutation.updateAgent(
+      {},
+      { id: noAppAgent.id, systemMemoryId: noAppSysMem.id },
+      adminCtx(),
+    );
+    // Seed minimal conversation + stage so startChat can find a first stage.
+    const seedNodes = [
+      { loc: 'conversations', name: 'conversations', nodeType: 'system' },
+      {
+        loc: 'conversations:default',
+        name: 'default',
+        nodeType: 'system',
+        data: { stageOrder: ['greet'], isSetup: false },
+      },
+      {
+        loc: 'conversations:default:greet',
+        name: 'greet',
+        nodeType: 'system',
+        data: { promptRef: 'prompts:default:greet' },
+      },
+      { loc: 'prompts', name: 'prompts', nodeType: 'system' },
+      { loc: 'prompts:default', name: 'default', nodeType: 'system' },
+      {
+        loc: 'prompts:default:greet',
+        name: 'greet',
+        nodeType: 'system',
+        content: 'Greet the user.',
+      },
+    ];
+    for (const n of seedNodes) {
+      await db.node.create({
+        data: {
+          id: generateId(),
+          memoryId: noAppSysMem.id,
+          loc: n.loc,
+          name: n.name,
+          nodeType: n.nodeType,
+          data: (n as any).data ?? null,
+          content: (n as any).content ?? null,
+        },
+      });
+    }
+
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: noAppAgent.id },
+      userCtx(adminUser.id),
+    );
+
+    // Verify the holding memory is class='knowledge' — this is the case
+    // the original Forbidden bug missed.
+    const chatNode = await db.node.findFirstOrThrow({ where: { loc: start.chatId } });
+    const holdingMem = await db.memory.findUniqueOrThrow({
+      where: { id: chatNode.memoryId },
+      select: { class: true, userMemoryOfAgentId: true, createdBy: true },
+    });
+    expect(holdingMem.class).toBe('knowledge');
+    expect(holdingMem.userMemoryOfAgentId).toBe(noAppAgent.id);
+    expect(holdingMem.createdBy).toBe(adminUser.id);
+
+    await resolvers.Mutation.sendChatMessage(
+      {},
+      { chatId: start.chatId, userMessage: 'hi' },
+      userCtx(adminUser.id),
+    );
+
+    // Owner can read.
+    const history = await resolvers.Query.chatHistory(
+      {},
+      { chatId: start.chatId },
+      userCtx(adminUser.id),
+    );
+    expect(history.length).toBe(1);
+    expect(history[0].role).toBe('user');
+    expect(history[0].content).toBe('hi');
+
+    // Non-owner still cannot.
+    await expect(
+      resolvers.Query.chatHistory({}, { chatId: start.chatId }, userCtx(otherUser.id)),
+    ).rejects.toThrow('Forbidden');
+  });
+
   // Regression for Constitution Invariant #14: role detection must not
   // depend on the agent's name. The pre-cleanup code used
   // `name.includes('juno')` to mark messages as assistant — which means a

@@ -1414,24 +1414,38 @@ export const resolvers = {
       });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
       // Spec 017 — read-visibility check (FR-007/FR-008):
-      //   - private (personal-class memory) → memory owner only
-      //   - shared (app-class memory)       → any AppMember of memory.appId
+      //   - shared (app-class memory)         → any AppMember of memory.appId
+      //   - per-user agent memory             → memory.createdBy only.
+      //     Covers both class='personal' AND class='knowledge': startChat
+      //     provisions the chat's holding memory as 'personal' when the
+      //     agent has a matching App in the caller's orgs, and downgrades
+      //     to 'knowledge' otherwise (see startChat target-memory selection,
+      //     and the chk_memory_class_app_id CHECK constraint that forces
+      //     personal-class to carry an appId). Both shapes are bound to a
+      //     single user via userMemoryOfAgentId — so authorize on
+      //     createdBy in either case rather than the class label.
+      //   - other classes                     → no chat-read path
       //   - global ADMIN/OWNER bypass remains for ops
       const mem = await ctx.db.memory.findUniqueOrThrow({
         where: { id: chatNode.memoryId },
-        select: { createdBy: true, class: true, appId: true },
+        select: { createdBy: true, class: true, appId: true, userMemoryOfAgentId: true },
       });
       const isAdmin = !!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'));
       let canRead = isAdmin;
       if (!canRead) {
-        if (mem.class === 'personal') {
-          canRead = mem.createdBy === ctx.userId;
-        } else if (mem.class === 'app' && mem.appId) {
+        if (mem.class === 'app' && mem.appId) {
           const member = await ctx.db.appMember.findFirst({
             where: { appId: mem.appId, userId: ctx.userId },
             select: { userId: true },
           });
           canRead = !!member;
+        } else if (mem.userMemoryOfAgentId) {
+          canRead = mem.createdBy === ctx.userId;
+        } else if (mem.class === 'personal') {
+          // Defensive fallback for any pre-spec personal-class chat
+          // memory that wasn't bound via userMemoryOfAgentId. Modern
+          // chat creation always sets the binding (see startChat).
+          canRead = mem.createdBy === ctx.userId;
         }
       }
       if (!canRead) throw new Error('Forbidden');
