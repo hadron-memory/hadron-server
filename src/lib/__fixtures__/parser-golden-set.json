@@ -1,0 +1,234 @@
+{
+  "_comment": "Parser-LAYER golden-set fixture (cats 1 and 4 only). Consumed by parser tests in hadron-server, hadron-portal, and hadron-client. Each repo's parser test suite iterates and asserts behavior. Cats 2 and 3 are resolver-layer (DB lookup required) and live in a separate server-only fixture; see contracts/parser.md and contracts/canonical-form.md.",
+  "_schema": {
+    "input": "string — the URN string to feed parseUrn()",
+    "expectedType": "UrnType — the parsed `.type`",
+    "expectedParserCanonical": "string — the parser-layer canonical form, what `.parserCanonical` should equal",
+    "expectedParserRewrites": "AliasCategory[] — parser-layer rewrites that fired (cats 1, 4 only)",
+    "expectedNeedsResolver": "boolean — whether `.needsResolverCanonicalization` is true (cat 2 or cat 3 may need to fire downstream). Defaults to false when omitted; test harnesses MUST treat missing as false.",
+    "expectedReject": "UrnParseError.reason — if set, the parser MUST throw with this reason instead of returning",
+    "offendingSegment": "string — optional, the segment cited in the error"
+  },
+
+  "cases": [
+    {
+      "_section": "D1 — type registry acceptance",
+      "input": "urn:agent:hadronmemory.com::coding-agent",
+      "expectedType": "agent",
+      "expectedParserCanonical": "urn:agent:hadronmemory.com::coding-agent",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:memory:hadronmemory.com::coding-agent::system",
+      "expectedType": "memory",
+      "expectedParserCanonical": "urn:memory:hadronmemory.com::coding-agent::system",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:app:micromentor.org::coding-app",
+      "expectedType": "app",
+      "expectedParserCanonical": "urn:app:micromentor.org::coding-app",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:fake:foo",
+      "expectedReject": "unknown-type"
+    },
+
+    {
+      "_section": "D2 — grammar (both forms accepted; bare is canonical)",
+      "input": "urn:agent:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent",
+      "expectedType": "agent",
+      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "expectedParserRewrites": ["type-marker-optionality"]
+    },
+    {
+      "input": "urn:memory:org::::app",
+      "expectedReject": "empty-segment"
+    },
+    {
+      "input": "urn:memory:org::app::",
+      "expectedReject": "trailing-double-colon"
+    },
+
+    {
+      "_section": "D4 — memory-role markers",
+      "input": "urn:memory:micromentor.org::coding-app::coding-agent::system",
+      "expectedType": "memory",
+      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::system",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:memory:micromentor.org::coding-app::coding-agent::app-mem",
+      "expectedType": "memory",
+      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::app-mem",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:memory:micromentor.org::coding-app::coding-agent::app-user:shadowbrush",
+      "expectedType": "memory",
+      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::app-user:shadowbrush",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:memory:micromentor.org::coding-app::coding-agent::priv:shadowbrush",
+      "expectedType": "memory",
+      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::priv:shadowbrush",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:memory:micromentor.org::coding-app::coding-agent::group-mem:eng-team",
+      "expectedType": "memory",
+      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::group-mem:eng-team",
+      "expectedParserRewrites": []
+    },
+
+    {
+      "_section": "D5 — slug-or-PK at parameterized role-marker positions",
+      "input": "urn:memory:micromentor.org::coding-app::coding-agent::app-user:c0123abc456def789012345678",
+      "expectedType": "memory",
+      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::app-user:c0123abc456def789012345678",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:memory:micromentor.org::coding-app::coding-agent::priv:01234567890abcdef0123456789abcde",
+      "expectedType": "memory",
+      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::priv:01234567890abcdef0123456789abcde",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:memory:micromentor.org::coding-app::coding-agent::app-user:foo bar",
+      "expectedReject": "invalid-charset",
+      "offendingSegment": "foo bar"
+    },
+
+    {
+      "_section": "D8 — loc: deprecated",
+      "input": "urn:loc:foo:bar",
+      "expectedReject": "loc-segment-rejected"
+    },
+    {
+      "input": "loc:foo",
+      "expectedReject": "loc-segment-rejected"
+    },
+    {
+      "input": "urn:memory:org::loc:foo",
+      "expectedReject": "loc-segment-rejected"
+    },
+
+    {
+      "_section": "D9 — slug rules",
+      "input": "urn:org:baragaun.com",
+      "expectedType": "org",
+      "expectedParserCanonical": "urn:org:baragaun.com",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:memory:org::foo bar",
+      "expectedReject": "invalid-charset",
+      "offendingSegment": "foo bar"
+    },
+    {
+      "input": "urn:memory:org::system",
+      "expectedReject": "reserved-word-slug",
+      "offendingSegment": "system"
+    },
+    {
+      "input": "urn:memory:org::Agent",
+      "expectedReject": "reserved-word-slug",
+      "offendingSegment": "Agent"
+    },
+    {
+      "input": "urn:memory:org::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toolong",
+      "expectedReject": "slug-too-long"
+    },
+
+    {
+      "_section": "D10 / R2 — installed-object URNs (already canonical)",
+      "input": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "expectedType": "agent",
+      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:agent:micromentor.org::coding-app::competitor.com:coding-agent",
+      "expectedType": "agent",
+      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::competitor.com:coding-agent",
+      "expectedParserRewrites": []
+    },
+
+    {
+      "_section": "D11 cat 1 — source/install memory (canonical = definition URN)",
+      "_note": "When the installing org equals the author, the install-by-self URN is an alias for the definition URN.",
+      "input": "urn:memory:hadronmemory.com::hadronmemory.com:coding-agent::system",
+      "expectedType": "memory",
+      "expectedParserCanonical": "urn:memory:hadronmemory.com::coding-agent::system",
+      "expectedParserRewrites": ["source-install-memory"]
+    },
+
+    {
+      "_section": "D11 cat 2 — node-role polymorphism (RESOLVER LAYER)",
+      "_note": "The role-form rewrite needs DB access to look up the node's role; parser flags it for the resolver.",
+      "input": "urn:node:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
+      "expectedType": "node",
+      "expectedParserCanonical": "urn:node:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
+      "expectedParserRewrites": [],
+      "expectedNeedsResolver": true
+    },
+    {
+      "input": "urn:prompt:micromentor.org::coding-app::coding-agent::system::notify",
+      "expectedType": "prompt",
+      "expectedParserCanonical": "urn:prompt:micromentor.org::coding-app::coding-agent::system::notify",
+      "expectedParserRewrites": [],
+      "expectedNeedsResolver": false
+    },
+
+    {
+      "_section": "D11 cat 3 — path/slug shortening (RESOLVER LAYER)",
+      "_note": "Shortened form is parsed faithfully; resolver does the DB lookup to find the author-org. Parser flags needsResolver=true.",
+      "input": "urn:agent:micromentor.org::coding-app::coding-agent",
+      "expectedType": "agent",
+      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::coding-agent",
+      "expectedParserRewrites": [],
+      "expectedNeedsResolver": true
+    },
+
+    {
+      "_section": "D11 cat 4 — type-marker optionality (canonical = bare)",
+      "input": "urn:agent:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent",
+      "expectedType": "agent",
+      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "expectedParserRewrites": ["type-marker-optionality"]
+    },
+    {
+      "input": "urn:memory:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent::memory:app-mem",
+      "expectedType": "memory",
+      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::hadronmemory.com:coding-agent::app-mem",
+      "expectedParserRewrites": ["type-marker-optionality"]
+    },
+
+    {
+      "_section": "Compound rewrites — parser-layer cat 4 + resolver-flagged cat 3",
+      "_note": "type-markered AND shortened. Parser strips markers (cat 4 fires at parser layer); shortening remains for the resolver.",
+      "input": "urn:agent:micromentor.org::app:coding-app::agent:coding-agent",
+      "expectedType": "agent",
+      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::coding-agent",
+      "expectedParserRewrites": ["type-marker-optionality"],
+      "expectedNeedsResolver": true
+    },
+
+    {
+      "_section": "Idempotence — canonical-form inputs pass through unchanged",
+      "input": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "expectedType": "agent",
+      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "urn:prompt:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
+      "expectedType": "prompt",
+      "expectedParserCanonical": "urn:prompt:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
+      "expectedParserRewrites": []
+    }
+  ]
+}

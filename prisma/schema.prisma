@@ -537,6 +537,12 @@ model Memory {
   subscriptions     MemorySubscription[]
   agentItems        AgentMemoryItem[]
   licenses          MemoryLicense[]
+  /// Spec 021 FR-032 online URN-shape migration gate (transient). Null =
+  /// pre-canonical row; set = canonical-form row. Dropped post-migration.
+  urnNormalizedAt          DateTime? @map("urn_normalized_at")
+  /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
+  urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
+
   logEntries        MemoryLogEntry[]
   userMemoryOfAgent Agent?               @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
   user              User?                @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
@@ -1004,6 +1010,12 @@ model Agent {
   updatedBy            String?          @map("updated_by")
   deletedAt            DateTime?        @map("deleted_at")
   deletedBy            String?          @map("deleted_by")
+
+  /// Spec 021 FR-032 online URN-shape migration gate (transient). Null =
+  /// pre-canonical row; set = canonical-form row. Dropped post-migration.
+  urnNormalizedAt          DateTime? @map("urn_normalized_at")
+  /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
+  urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
 
   organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   memoryItems       AgentMemoryItem[]
@@ -1509,6 +1521,16 @@ model App {
   /// Display name.
   name                  String
   /// Globally unique identifier; derived from `org.urn + ":" + slug`.
+  /// Spec 021 note: this field stays declared `@unique` here so Prisma's
+  /// generated types continue to expose `findUnique({ where: { urn } })`
+  /// for callers. At the DB level, the migration replaces the constraint
+  /// with the partial unique index `apps_urn_active_uniq WHERE
+  /// uninstalled_at IS NULL` — this enforces uniqueness ONLY for the
+  /// active subset, which allows slug reuse after soft-uninstall per
+  /// FR-027. New code that needs deterministic active-row resolution
+  /// SHOULD use `findFirst({ where: { urn, uninstalledAt: null } })`
+  /// per FR-028 resolution precedence; the active-row helper lands in
+  /// the US4 implementation phase.
   urn                   String               @unique
   organizationId        String               @map("organization_id")
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
@@ -1562,6 +1584,24 @@ model App {
   updatedBy             String?              @map("updated_by")
   deletedAt             DateTime?            @map("deleted_at")
   deletedBy             String?              @map("deleted_by")
+
+  /// Soft-uninstall timestamp per spec 021 FR-025. Null = active install;
+  /// set = uninstalled (read-only, write-rejected with "app uninstalled"
+  /// error including cascade to child agents/memories/nodes per FR-026).
+  /// Reinstall after soft-uninstall is allowed via the partial unique index
+  /// `apps_urn_active_uniq WHERE uninstalled_at IS NULL` (declared in the
+  /// 021 migration; supersedes Prisma's @unique on urn at the DB level).
+  uninstalledAt            DateTime? @map("uninstalled_at")
+  /// Spec 021 FR-032 online URN-shape migration gate (transient). Null =
+  /// pre-canonical row (read through the legacy parser); set = canonical-
+  /// form row (read through the new parser). Dropped once 100% of rows
+  /// are migrated.
+  urnNormalizedAt          DateTime? @map("urn_normalized_at")
+  /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
+  /// Non-null = the row's urn failed normalization; the migration job
+  /// skips it on subsequent passes (avoids infinite retry). Transient;
+  /// dropped with urnNormalizedAt.
+  urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
 
   organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   agent         Agent?         @relation(fields: [agentId], references: [id], onDelete: SetNull)
