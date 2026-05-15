@@ -1188,7 +1188,17 @@ export const typeDefs = `#graphql
     #   - MCP App-key session → SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS
     #   - JWT user without a qualifying AppMember row, or no auth →
     #     SHARED_CHAT_REQUIRES_APP_CONTEXT
-    startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private): ChatStartResult!
+    #
+    # 019: isTestRun suppresses the AgentSubscription auto-provision
+    # side-effect for chats started by the spec-019 Tester. Default
+    # false; the tester portal endpoint passes true. The chat still
+    # creates real chat-root / message rows in memory — full
+    # production-state isolation is deferred to a separate spec
+    # (see STUBBED-tester-vs-production-memory-boundary). This single
+    # gate prevents the cross-cutting AgentSubscription side-effect
+    # from leaking from a chatbot-feature concern into the platform's
+    # license-grant model (narrowed in 2026-05-12-user-installing-app).
+    startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false): ChatStartResult!
     # Process a user message (saves message, builds context, returns next prompt)
     sendChatMessage(chatId: String!, userMessage: String!): ChatPromptResult!
     # Process the LLM's tool response (extract data, transition stage, save assistant message)

@@ -304,6 +304,42 @@ describe('startChat (JWT user)', () => {
     expect((chatNode!.data as Record<string, unknown>).stageName).toBe('scope');
   });
 
+  // Spec 019: the Tester portal endpoint passes isTestRun=true so a
+  // probe doesn't silently grant an AgentSubscription as a side effect.
+  // AgentSubscription was narrowed in 2026-05-12-user-installing-app to
+  // the license-grant role only; the Tester is a chatbot-feature concern
+  // that must not re-broaden it.
+  it('isTestRun=true does NOT auto-provision an AgentSubscription', async () => {
+    // Pre-condition: no subscription for (otherUser, agent) yet.
+    const before = await db.agentSubscription.findUnique({
+      where: { userId_agentId: { userId: otherUser.id, agentId: agent.id } },
+    });
+    expect(before).toBeNull();
+
+    const result = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, isTestRun: true },
+      userCtx(otherUser.id),
+    );
+    // The chat itself is still created — only the cross-cutting
+    // subscription side-effect is skipped.
+    expect(result.chatId).toMatch(/^chats:/);
+
+    const after = await db.agentSubscription.findUnique({
+      where: { userId_agentId: { userId: otherUser.id, agentId: agent.id } },
+    });
+    expect(after).toBeNull();
+  });
+
+  // Control case: the default (isTestRun unset / false) still provisions.
+  it('isTestRun=false (default) DOES auto-provision an AgentSubscription', async () => {
+    await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(otherUser.id));
+    const sub = await db.agentSubscription.findUnique({
+      where: { userId_agentId: { userId: otherUser.id, agentId: agent.id } },
+    });
+    expect(sub).not.toBeNull();
+  });
+
   it('reuses the existing user memory on a second startChat', async () => {
     const r1 = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
     const r2 = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
