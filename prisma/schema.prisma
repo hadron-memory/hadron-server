@@ -1521,16 +1521,27 @@ model App {
   /// Display name.
   name                  String
   /// Globally unique identifier; derived from `org.urn + ":" + slug`.
-  /// Spec 021 note: this field stays declared `@unique` here so Prisma's
-  /// generated types continue to expose `findUnique({ where: { urn } })`
-  /// for callers. At the DB level, the migration replaces the constraint
-  /// with the partial unique index `apps_urn_active_uniq WHERE
-  /// uninstalled_at IS NULL` — this enforces uniqueness ONLY for the
-  /// active subset, which allows slug reuse after soft-uninstall per
-  /// FR-027. New code that needs deterministic active-row resolution
-  /// SHOULD use `findFirst({ where: { urn, uninstalledAt: null } })`
-  /// per FR-028 resolution precedence; the active-row helper lands in
-  /// the US4 implementation phase.
+  ///
+  /// **Spec 021 drift, knowingly accepted (PR #124 review)**: this field
+  /// stays declared `@unique` in `schema.prisma` so Prisma's generated
+  /// types continue to expose `findUnique({ where: { urn } })` for
+  /// existing callers. At the DB level the migration replaces the
+  /// constraint with the partial unique index
+  /// `apps_urn_active_uniq WHERE uninstalled_at IS NULL`, which enforces
+  /// uniqueness ONLY for the active subset (the FR-027 reinstall
+  /// scenario depends on this).
+  ///
+  /// Consequence: `prisma migrate diff` against this branch will report
+  /// drift (DB lacks the global `apps_urn_key` index). Subsequent
+  /// migrations MUST NOT auto-accept that diff — a follow-up cleanup
+  /// spec will either flip schema.prisma to `@@index([urn])` (after
+  /// auditing all `findUnique({where:{urn}})` call sites — see
+  /// `resolvers.ts:5039` and `:5130`) or keep this comment + a CI grep
+  /// guard against re-adding `apps_urn_key`.
+  ///
+  /// New code resolving an active App by URN SHOULD use
+  /// `findFirst({ where: { urn, uninstalledAt: null } })` per FR-028
+  /// resolution precedence; the active-row helper lands with US4.
   urn                   String               @unique
   organizationId        String               @map("organization_id")
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")

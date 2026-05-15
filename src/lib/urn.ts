@@ -53,7 +53,14 @@ const URN_TYPES = [
 
 const URN_TYPE_SET = new Set<string>(URN_TYPES);
 
-export type UrnType = (typeof URN_TYPES)[number];
+/**
+ * Canonical URN type — the full D1 registry. Used by the spec-021 parser
+ * (`parseUrn`, `ParsedUrn`). For backward-compatibility, the legacy
+ * `UrnType` symbol below preserves its old meaning (the small pre-021
+ * union including `'loc'` and `'unknown'`); callers MUST migrate to
+ * `CanonicalUrnType` when adopting the new parser.
+ */
+export type CanonicalUrnType = (typeof URN_TYPES)[number];
 
 /** Memory-role markers per D4 (slug-validation reserves their prefixes). */
 const ROLE_MARKERS = ['system', 'app-mem', 'app-user', 'group-mem', 'priv'] as const;
@@ -144,7 +151,7 @@ function messageFor(
 
 export interface ParsedUrn {
   /** The URN type after `urn:` — always a member of the D1 registry. */
-  type: UrnType;
+  type: CanonicalUrnType;
   /**
    * `::`-separated pieces of the URN path, in order (D9.4: "path-segment").
    * Each path-segment may itself contain `:`-separated slug atoms.
@@ -172,11 +179,24 @@ export interface ParsedUrn {
  * Parse a URN string. Returns a `ParsedUrn` with parser-layer canonicalization
  * applied (D11 cats 1, 4). Throws `UrnParseError` on any acceptance-rule
  * violation (D1 registry, D2 grammar, D9 slug rules, D8 `loc:` deprecation).
+ *
+ * **Case sensitivity**: per D9 spec, URN slug storage is case-sensitive.
+ * `urn:agent:org::Coding-Agent` and `urn:agent:org::coding-agent` are
+ * DIFFERENT URNs and parse to distinct `parserCanonical` values. The
+ * reserved-word check is the only case-insensitive part (FR-018). URN
+ * equality is byte-exact; callers comparing user-supplied URNs MUST NOT
+ * fold case unless they also normalize at create time.
  */
 export function parseUrn(input: string): ParsedUrn {
-  // Error precedence per FR-021: `loc:` rejection wins over `unknown-type`.
-  // Detect `loc:` segments BEFORE the type-registry check.
-  if (containsLocSegment(input)) {
+  // Reject `urn:loc:...` (canonical loc URN) and bare `loc:...` (the legacy
+  // sugar from 2026-04-06) upfront so the dedicated `loc-segment-rejected`
+  // reason wins over `unknown-type` / `malformed-grammar`. Per FR-021 the
+  // `loc:` vocabulary is deprecated entirely; either form is a signal the
+  // caller is using a pre-021 convention and should rewrite. We deliberately
+  // restrict this check to inputs that LEAD with a `loc:` prefix —
+  // arbitrary free-form strings containing the substring `loc:` are NOT
+  // matched here (they'd fall through to `malformed-grammar`).
+  if (/^(urn:)?loc:/i.test(input)) {
     throw new UrnParseError(input, 'loc-segment-rejected');
   }
 
@@ -192,6 +212,14 @@ export function parseUrn(input: string): ParsedUrn {
 
   const path = prefixMatch[2];
 
+  // Embedded `loc:` segments inside the path (e.g.,
+  // `urn:memory:org::loc:foo::system`) are deprecated per FR-021. This
+  // check runs on the path-only (not the full input) so it can't
+  // misfire on the URN's prefix.
+  if (/(^|::)loc:/.test(path)) {
+    throw new UrnParseError(input, 'loc-segment-rejected');
+  }
+
   // Trailing `::` check before splitting.
   if (path.endsWith('::')) {
     throw new UrnParseError(input, 'trailing-double-colon');
@@ -205,9 +233,10 @@ export function parseUrn(input: string): ParsedUrn {
 
   // Validate each segment's slug atoms (charset + length only — reserved-
   // word check happens after cat 4 stripping below so type markers don't
-  // trip on themselves).
+  // trip on themselves). Errors propagate with the FULL URN as `input` so
+  // logging/telemetry preserves context.
   for (const segment of rawSegments) {
-    validatePathSegment(segment);
+    validatePathSegment(input, segment);
   }
 
   // === Parser-layer rewrites ===
@@ -223,6 +252,10 @@ export function parseUrn(input: string): ParsedUrn {
     parserRewrites.push('type-marker-optionality');
   }
 
+  // Enforce FR-020 internal-`:` shape rules per path-segment position
+  // (after cat 4 strip, so type-marker atoms are no longer in the count).
+  rejectInvalidSegmentShapes(input, type, cat4Segments);
+
   // Reject reserved words at non-structural positions. Role-marker words
   // (system, app-mem, app-user, priv, group-mem) are legitimate ONLY at
   // the FINAL hierarchy segment of a memory URN (FR-012). Type-marker
@@ -235,7 +268,7 @@ export function parseUrn(input: string): ParsedUrn {
   // equals the author-org segment (after cat 4's strip), rewrite the
   // install-by-self URN to the definition URN.
   const { segments: cat1Segments, fired: cat1Fired } = collapseSelfInstall(
-    type as UrnType,
+    type as CanonicalUrnType,
     cat4Segments,
   );
   if (cat1Fired) {
@@ -246,13 +279,13 @@ export function parseUrn(input: string): ParsedUrn {
   // True if the URN shape suggests cat 2 or cat 3 may apply. The parser
   // can't tell for sure without DB context, so it flags conservatively.
   const needsResolverCanonicalization =
-    needsCat2(type as UrnType, cat1Segments) ||
-    needsCat3(type as UrnType, cat1Segments);
+    needsCat2(type as CanonicalUrnType, cat1Segments) ||
+    needsCat3(type as CanonicalUrnType, cat1Segments);
 
   const parserCanonical = `urn:${type}:${cat1Segments.join('::')}`;
 
   return {
-    type: type as UrnType,
+    type: type as CanonicalUrnType,
     pathSegments: cat1Segments,
     parserCanonical,
     inputForm: input,
@@ -275,27 +308,38 @@ function containsLocSegment(input: string): boolean {
  * inside URN paths, so rejecting them at parse time would be wrong. The
  * reserved-word check happens at entity-CREATE boundaries via
  * `validateUserSlug`, not here.
+ *
+ * `input` is the full URN being parsed; threaded through so any
+ * `UrnParseError` carries the full URN as `error.input` (not just the
+ * offending atom) for downstream logging/telemetry.
  */
-function validatePathSegment(segment: string): void {
+function validatePathSegment(input: string, segment: string): void {
   const atoms = segment.split(':');
   for (const atom of atoms) {
-    validateAtomShape(atom);
+    validateAtomShape(input, atom);
   }
 }
 
 /**
  * Parse-time slug-atom shape check: FR-016 charset + FR-017 length only.
  * Reserved-word rejection is FR-019 and lives in `validateUserSlug`.
+ *
+ * `input` is the full URN being parsed; preserved in the thrown
+ * `UrnParseError.input` so callers can recover the original URN that
+ * failed. The `offendingSegment` field carries the atom-level detail.
  */
-function validateAtomShape(slug: string): void {
-  if (slug.length === 0) {
-    throw new UrnParseError(slug, 'invalid-charset', slug);
+function validateAtomShape(input: string, atom: string): void {
+  if (atom.length === 0) {
+    // An empty atom is a structural failure (leading/trailing/consecutive
+    // `:` inside a path-segment), not a charset issue. Reported as
+    // invalid-segment-shape per FR-020.
+    throw new UrnParseError(input, 'invalid-segment-shape', atom);
   }
-  if (slug.length > 64) {
-    throw new UrnParseError(slug, 'slug-too-long', slug);
+  if (atom.length > 64) {
+    throw new UrnParseError(input, 'slug-too-long', atom);
   }
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$/.test(slug)) {
-    throw new UrnParseError(slug, 'invalid-charset', slug);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$/.test(atom)) {
+    throw new UrnParseError(input, 'invalid-charset', atom);
   }
 }
 
@@ -311,7 +355,10 @@ function validateAtomShape(slug: string): void {
  * entity-create time they are unconditionally rejected.
  */
 export function validateUserSlug(slug: string): void {
-  validateAtomShape(slug);
+  // At entity-create time the "input" being validated IS the slug; pass
+  // it as both `input` and `offendingSegment` so error.input has the slug
+  // for callers logging the create attempt.
+  validateAtomShape(slug, slug);
   if (RESERVED_SLUGS.has(slug.toLowerCase())) {
     throw new UrnParseError(slug, 'reserved-word-slug', slug);
   }
@@ -324,6 +371,54 @@ const NODE_URN_TYPES: ReadonlySet<string> = new Set<string>([
   ...NODE_ROLES,
   ...NODE_PARTS,
 ]);
+
+/**
+ * Enforce FR-020 internal-`:` shape rules per path-segment position.
+ *
+ * Per D9.5, each path-segment position has a bounded internal-`:` count
+ * (i.e., slug-atom count - 1):
+ *
+ *   - Org segment (always position 0): 0 internal `:` (single slug atom).
+ *   - App segment: 0 or 1. (After cat 4 strip the `app:` marker is gone,
+ *     so the segment is just `<app-slug>` — 0 internal `:`. We tolerate 1
+ *     defensively for forward compatibility.)
+ *   - Agent path-segment: 0, 1, or 2 (`<slug>`, `<author-org>:<slug>`, or
+ *     `<author-org>:<sub>:<slug>`).
+ *   - Memory role-marker segment: 0 or 1 (`system` / `app-mem` / `app-user:<id>`).
+ *   - Node leaf-path: unbounded (free-form node loc).
+ *
+ * This function makes conservative checks: org segment must have exactly
+ * 1 atom; intermediate segments must have ≤ 3 atoms; the leaf has no
+ * cap. Violations throw `invalid-segment-shape`.
+ */
+function rejectInvalidSegmentShapes(
+  input: string,
+  type: string,
+  segments: string[],
+): void {
+  const finalIdx = segments.length - 1;
+  const isNodeUrn = NODE_URN_TYPES.has(type);
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    const atomCount = segment.split(':').length;
+    if (i === 0) {
+      // Org segment: exactly one atom.
+      if (atomCount !== 1) {
+        throw new UrnParseError(input, 'invalid-segment-shape', segment);
+      }
+      continue;
+    }
+    if (isNodeUrn && i === finalIdx) {
+      // Leaf is the node loc: unbounded.
+      continue;
+    }
+    // Intermediate segments: cap at 3 atoms to bound parser work and
+    // catch malformed paths like `urn:agent:org::a:b:c:d:e` early.
+    if (atomCount > 3) {
+      throw new UrnParseError(input, 'invalid-segment-shape', segment);
+    }
+  }
+}
 
 /**
  * Position-aware reserved-word rejection during URN parsing.
@@ -345,18 +440,24 @@ function rejectReservedWordsAtIllegalPositions(
   segments: string[],
 ): void {
   const finalIdx = segments.length - 1;
-  // Where a role-marker is structurally allowed for this URN type.
+  // Where a role-marker is structurally allowed for this URN type, AND the
+  // minimum total segment count below which a role-marker has no valid
+  // structural position (it would leave no room for org + agent context).
   let roleMarkerIdx: number | null;
   let minSegments: number;
   if (type === 'memory') {
-    roleMarkerIdx = finalIdx; // final segment
-    minSegments = 3;          // need org + agent + role
+    // Memory URN role-marker is the FINAL segment. Minimum shapes:
+    //   urn:memory:org::agent::role           (3 segments)
+    //   urn:memory:org::app::agent::role      (4 segments)
+    roleMarkerIdx = finalIdx;
+    minSegments = 3;
   } else if (NODE_URN_TYPES.has(type)) {
-    roleMarkerIdx = finalIdx - 1; // second-to-last (leaf is below)
-    minSegments = 4;              // need org + (app | agent) + agent + role + leaf — at least 4 with definition shape; node URN MUST have at least one segment after the role marker.
-    // Refinement: only require >=2 path-segments if the URN has a leaf.
-    // Node URNs always have a leaf, so `length-1` is leaf, `length-2` is role-marker.
-    minSegments = Math.min(minSegments, segments.length);
+    // Node URN role-marker is the SECOND-TO-LAST segment (leaf is the node
+    // loc beneath the memory role). Minimum shapes:
+    //   urn:<role>:org::agent::role::leaf           (4 segments, definition)
+    //   urn:<role>:org::app::agent::role::leaf      (5 segments, installed)
+    roleMarkerIdx = finalIdx - 1;
+    minSegments = 4;
   } else {
     roleMarkerIdx = null; // no structural role-marker position for this type
     minSegments = 0;
@@ -426,36 +527,49 @@ function stripTypeMarkers(segments: string[]): {
  * Cat 1 — collapse install-by-self URN to definition URN when the installing
  * org equals the author org.
  *
- * Recognized shapes (after cat 4):
- *   urn:memory:<org>::<org>:<slug>::<role>   ->   urn:memory:<org>::<slug>::<role>
- *   urn:agent:<org>::<org>:<slug>            ->   urn:agent:<org>::<slug>
+ * The install pivot's position depends on URN shape:
+ *
+ *   Bare agent definition / install (urn:agent:):
+ *     urn:agent:<org>::<org>:<slug>            -> urn:agent:<org>::<slug>
+ *     urn:agent:<org>::<app>::<org>:<slug>     -> urn:agent:<org>::<app>::<slug>
+ *
+ *   Bare memory (urn:memory:):
+ *     urn:memory:<org>::<org>:<slug>::<role>            -> urn:memory:<org>::<slug>::<role>
+ *     urn:memory:<org>::<app>::<org>:<slug>::<role>     -> urn:memory:<org>::<app>::<slug>::<role>
+ *
+ * The detection scans every intermediate segment (positions 1..N-1 for an
+ * agent URN; 1..N-2 for a memory URN where the final segment is a role-
+ * marker) for the install-by-self shape `<author-org>:<slug>` where
+ * `<author-org>` equals `segments[0]`. The first such match collapses.
  */
 function collapseSelfInstall(
-  type: UrnType,
+  type: CanonicalUrnType,
   segments: string[],
 ): { segments: string[]; fired: boolean } {
   if ((type !== 'memory' && type !== 'agent') || segments.length < 2) {
     return { segments, fired: false };
   }
-
   const orgSeg = segments[0];
-  const installSeg = segments[1];
-
-  // installSeg should be `<author-org>:<slug>` for an install-by-self.
-  const installAtoms = installSeg.split(':');
-  if (installAtoms.length !== 2) {
-    return { segments, fired: false };
+  // For memory URNs, the final segment is the role marker — exclude it
+  // from the scan. For agent URNs, the install pivot CAN be the final
+  // segment (definition shape `urn:agent:org::slug` has just 2 segments
+  // total and isn't an install; install shape `urn:agent:org::app::author:slug`
+  // has the pivot at the last segment).
+  const lastScanIdx =
+    type === 'memory' ? segments.length - 2 : segments.length - 1;
+  for (let i = 1; i <= lastScanIdx; i++) {
+    const atoms = segments[i].split(':');
+    if (atoms.length !== 2) continue;
+    if (atoms[0] !== orgSeg) continue;
+    // Self-install detected at position `i`: collapse to `<slug>`.
+    const collapsed = [
+      ...segments.slice(0, i),
+      atoms[1],
+      ...segments.slice(i + 1),
+    ];
+    return { segments: collapsed, fired: true };
   }
-
-  const [authorOrg /*, slug */] = installAtoms;
-
-  if (authorOrg !== orgSeg) {
-    return { segments, fired: false };
-  }
-
-  // Self-install detected: collapse to definition URN.
-  const collapsed = [orgSeg, installAtoms[1], ...segments.slice(2)];
-  return { segments: collapsed, fired: true };
+  return { segments, fired: false };
 }
 
 /**
@@ -466,7 +580,7 @@ function collapseSelfInstall(
  * resolver looks up the addressed node's `role`; if set, rewrites to
  * `urn:<role>:...`).
  */
-function needsCat2(type: UrnType, _segments: string[]): boolean {
+function needsCat2(type: CanonicalUrnType, _segments: string[]): boolean {
   return type === 'node';
 }
 
@@ -484,7 +598,7 @@ function needsCat2(type: UrnType, _segments: string[]): boolean {
  * agent), so the agent slot inside a memory URN does NOT carry author-org.
  * See examples.md in the design discussion for the worked memory shape.
  */
-function needsCat3(type: UrnType, segments: string[]): boolean {
+function needsCat3(type: CanonicalUrnType, segments: string[]): boolean {
   // Only agent install URNs (3+ hierarchy segments, where the install slot
   // is the final segment).
   if (type !== 'agent') return false;
@@ -534,20 +648,32 @@ export interface UrnRow {
 /**
  * Per-row parser dispatch (FR-032 migration gate). Reads `urnNormalizedAt`
  * to decide which parser handles the row:
- *   - `urnNormalizedAt IS NOT NULL` → new canonical-form parser
- *   - `urnNormalizedAt IS NULL`     → legacy parser
  *
- * Returns a thin `{ canonical, isLegacy }` envelope. Callers that need the
- * full `ParsedUrn` should call `parseUrn(row.urn)` directly after confirming
- * `row.urnNormalizedAt !== null`.
+ *   - `urnNormalizedAt IS NOT NULL` → row is canonical. Parse with the new
+ *     parser and return its `parserCanonical`.
+ *   - `urnNormalizedAt IS NULL`     → row is pre-021 legacy shape. Parse
+ *     with the legacy parser (`parseUrnInput`) to validate it's a
+ *     well-formed legacy URN, then return the row's URN string unchanged.
+ *     The full URN string is what callers want to surface; the legacy
+ *     parser is invoked here so a malformed legacy URN surfaces as an
+ *     error at the gate rather than at every downstream consumer.
+ *
+ * Returns a `{ canonical, isLegacy }` envelope. Callers that need the
+ * full `ParsedUrn` for migrated rows should call `parseUrn(row.urn)`
+ * directly after confirming `row.urnNormalizedAt !== null`.
  */
 export function parseFor(row: UrnRow): { canonical: string; isLegacy: boolean } {
   if (row.urnNormalizedAt !== null) {
     return { canonical: parseUrn(row.urn).parserCanonical, isLegacy: false };
   }
-  // Legacy path: return the row's urn as-is. The legacy parser's
-  // `parseUrnInput` strips the `urn:<type>:` prefix and returns the bare
-  // value; for `parseFor` we want the FULL URN string, so just return as-is.
+  // Legacy path: validate via parseUrnInput so a malformed legacy URN
+  // doesn't slip through silently. parseUrnInput returns `{ type:
+  // 'unknown', value: input }` for unrecognized inputs — that's
+  // intentional legacy backward-compat (FR-022 doesn't break unprefixed
+  // inputs), so we only require the call to succeed, not to recognize a
+  // type. The full original URN is what we return — callers don't want
+  // the bare value here.
+  parseUrnInput(row.urn);
   return { canonical: row.urn, isLegacy: true };
 }
 
@@ -558,6 +684,13 @@ export function parseFor(row: UrnRow): { canonical: string; isLegacy: boolean } 
 /** Legacy types accepted by `parseUrnInput`. Pre-021. */
 const LEGACY_URN_TYPES = ['org', 'memory', 'agent', 'app', 'node'] as const;
 type LegacyUrnType = (typeof LEGACY_URN_TYPES)[number] | 'loc' | 'unknown';
+
+/**
+ * Backward-compat alias for the pre-spec-021 `UrnType` symbol. Preserves
+ * the small legacy union for callers that haven't migrated to the spec-021
+ * parser. New code SHOULD use `CanonicalUrnType` instead.
+ */
+export type UrnType = LegacyUrnType;
 
 export interface LegacyParsedUrn {
   type: LegacyUrnType;

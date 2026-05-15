@@ -21,7 +21,10 @@
 -- Org is also intentionally NOT touched.
 
 -- === App: soft-uninstall ============================================
-ALTER TABLE "apps" ADD COLUMN "uninstalled_at" TIMESTAMPTZ NULL;
+-- All ADD COLUMN / CREATE INDEX statements below use IF NOT EXISTS so a
+-- partial re-application (after a crash or a manual rollback) succeeds
+-- cleanly.
+ALTER TABLE "apps" ADD COLUMN IF NOT EXISTS "uninstalled_at" TIMESTAMPTZ NULL;
 
 -- Replace the global @unique on App.urn with a partial unique index restricted
 -- to active rows. This is what allows reinstall after soft-uninstall — the
@@ -47,31 +50,31 @@ BEGIN
     EXECUTE 'DROP INDEX "apps_urn_key"';
   END IF;
 END $$;
-CREATE UNIQUE INDEX "apps_urn_active_uniq"
+CREATE UNIQUE INDEX IF NOT EXISTS "apps_urn_active_uniq"
   ON "apps" ("urn")
   WHERE "uninstalled_at" IS NULL;
 
 -- === App / Memory / Agent: URN-shape migration gating columns ========
 ALTER TABLE "apps"
-  ADD COLUMN "urn_normalized_at"           TIMESTAMPTZ NULL,
-  ADD COLUMN "urn_migration_failed_reason" TEXT        NULL;
+  ADD COLUMN IF NOT EXISTS "urn_normalized_at"           TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS "urn_migration_failed_reason" TEXT        NULL;
 ALTER TABLE "memories"
-  ADD COLUMN "urn_normalized_at"           TIMESTAMPTZ NULL,
-  ADD COLUMN "urn_migration_failed_reason" TEXT        NULL;
+  ADD COLUMN IF NOT EXISTS "urn_normalized_at"           TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS "urn_migration_failed_reason" TEXT        NULL;
 ALTER TABLE "agents"
-  ADD COLUMN "urn_normalized_at"           TIMESTAMPTZ NULL,
-  ADD COLUMN "urn_migration_failed_reason" TEXT        NULL;
+  ADD COLUMN IF NOT EXISTS "urn_normalized_at"           TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS "urn_migration_failed_reason" TEXT        NULL;
 
 -- === Partial indexes covering the migration job's batch-fetch query ====
 -- WHERE urn_normalized_at IS NULL AND urn_migration_failed_reason IS NULL
 -- is the work-queue predicate. The partial index keeps it index-served as
 -- rows transition out of the queue.
-CREATE INDEX "apps_urn_migration_pending_idx"
+CREATE INDEX IF NOT EXISTS "apps_urn_migration_pending_idx"
   ON "apps" ("id")
   WHERE "urn_normalized_at" IS NULL AND "urn_migration_failed_reason" IS NULL;
-CREATE INDEX "memories_urn_migration_pending_idx"
+CREATE INDEX IF NOT EXISTS "memories_urn_migration_pending_idx"
   ON "memories" ("id")
   WHERE "urn_normalized_at" IS NULL AND "urn_migration_failed_reason" IS NULL;
-CREATE INDEX "agents_urn_migration_pending_idx"
+CREATE INDEX IF NOT EXISTS "agents_urn_migration_pending_idx"
   ON "agents" ("id")
   WHERE "urn_normalized_at" IS NULL AND "urn_migration_failed_reason" IS NULL;
