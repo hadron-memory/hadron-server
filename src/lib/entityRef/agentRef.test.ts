@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { resolveAgentRef } from './agentRef.js';
-import { AgentNotFoundError } from './errors.js';
+import { AgentNotFoundError, UrnNotQualifiedError } from './errors.js';
 
 const db = new PrismaClient();
 
@@ -59,9 +59,11 @@ describe('resolveAgentRef', () => {
   });
 
   it('throws AgentNotFoundError on miss (ID)', async () => {
-    await expect(resolveAgentRef(db, 'not-a-real-id')).rejects.toBeInstanceOf(
-      AgentNotFoundError,
-    );
+    // 32-char hex — ID-shape, bypasses the spec-022 qualification check
+    // and goes straight to DB lookup, which misses.
+    await expect(
+      resolveAgentRef(db, '0123456789abcdef0123456789abcdef'),
+    ).rejects.toBeInstanceOf(AgentNotFoundError);
   });
 
   it('throws AgentNotFoundError on miss (URN)', async () => {
@@ -81,5 +83,25 @@ describe('resolveAgentRef', () => {
     });
     await expect(resolveAgentRef(db, agent.id)).rejects.toBeInstanceOf(AgentNotFoundError);
     await expect(resolveAgentRef(db, agent.urn)).rejects.toBeInstanceOf(AgentNotFoundError);
+  });
+
+  // ===================================================================
+  // spec 022 — API-boundary URN qualification (FR-001, FR-002, FR-019)
+  // ===================================================================
+
+  it('rejects bare single-segment input as UrnNotQualifiedError (not an agent URN)', async () => {
+    await expect(resolveAgentRef(db, 'coding-agent')).rejects.toBeInstanceOf(
+      UrnNotQualifiedError,
+    );
+  });
+
+  it('rejects empty input as UrnNotQualifiedError', async () => {
+    await expect(resolveAgentRef(db, '')).rejects.toBeInstanceOf(UrnNotQualifiedError);
+  });
+
+  it('rejects urn:org: prefix (wrong type) as UrnNotQualifiedError', async () => {
+    await expect(resolveAgentRef(db, 'urn:org:acme.com')).rejects.toBeInstanceOf(
+      UrnNotQualifiedError,
+    );
   });
 });

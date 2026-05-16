@@ -17,7 +17,7 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId } from './shape.js';
-import { parseUrnInput } from '../urn.js';
+import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
 import { MemoryNotFoundError } from '../asset/gate.js';
 
 export async function resolveMemoryRef(
@@ -25,6 +25,10 @@ export async function resolveMemoryRef(
   urn: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
+  if (!isId(urn)) {
+    // Non-ID inputs MUST be fully-qualified URNs (spec 022).
+    assertFullyQualifiedUrn(urn, 'memory');
+  }
   // Strip a `urn:<type>:` prefix if present. parseUrnInput returns
   // the bare value; for already-bare input it returns the input
   // unchanged.

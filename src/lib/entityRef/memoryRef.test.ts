@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { resolveMemoryRef } from './memoryRef.js';
-import { MemoryNotFoundError } from './errors.js';
+import { MemoryNotFoundError, UrnNotQualifiedError } from './errors.js';
 
 const db = new PrismaClient();
 
@@ -65,9 +65,11 @@ describe('resolveMemoryRef', () => {
   });
 
   it('throws MemoryNotFoundError on an ID miss', async () => {
-    await expect(resolveMemoryRef(db, 'not-a-real-id')).rejects.toBeInstanceOf(
-      MemoryNotFoundError,
-    );
+    // 32-char hex — ID-shape, bypasses the spec-022 qualification check
+    // and goes straight to DB lookup, which misses.
+    await expect(
+      resolveMemoryRef(db, '0123456789abcdef0123456789abcdef'),
+    ).rejects.toBeInstanceOf(MemoryNotFoundError);
   });
 
   it('throws MemoryNotFoundError on a bare URN miss', async () => {
@@ -122,5 +124,23 @@ describe('resolveMemoryRef', () => {
     await expect(
       resolveMemoryRef(db, 'no-such-org:no-such-memory', { includeDeleted: true }),
     ).rejects.toBeInstanceOf(MemoryNotFoundError);
+  });
+
+  // ===================================================================
+  // spec 022 — API-boundary URN qualification (FR-001, FR-002, FR-019)
+  // ===================================================================
+
+  it('rejects bare single-segment input as UrnNotQualifiedError (not a memory URN)', async () => {
+    await expect(resolveMemoryRef(db, 'mmdata')).rejects.toBeInstanceOf(UrnNotQualifiedError);
+  });
+
+  it('rejects empty input as UrnNotQualifiedError', async () => {
+    await expect(resolveMemoryRef(db, '')).rejects.toBeInstanceOf(UrnNotQualifiedError);
+  });
+
+  it('rejects urn:org: prefix (wrong type) as UrnNotQualifiedError', async () => {
+    await expect(resolveMemoryRef(db, 'urn:org:foo')).rejects.toBeInstanceOf(
+      UrnNotQualifiedError,
+    );
   });
 });

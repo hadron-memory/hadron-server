@@ -115,6 +115,168 @@ export class UrnParseError extends Error {
   }
 }
 
+// ============================================================================
+// API-boundary qualification (spec 022)
+// ============================================================================
+
+/**
+ * The entity-type the caller expected the URN to address. Drives the
+ * minimum-segment-count rule for `assertFullyQualifiedUrn`. Memory / agent /
+ * app URNs need `org + slug` (2 hierarchy segments); node URNs need
+ * `org + memory + loc` (3 segments); org URNs need just `org` (1).
+ *
+ * Spec: 022 / contracts/urn-qualification.md.
+ */
+export type ExpectedUrnType = 'org' | 'memory' | 'agent' | 'app' | 'node';
+
+const MIN_HIERARCHY_SEGMENTS: Record<ExpectedUrnType, number> = {
+  org: 1,
+  memory: 2,
+  agent: 2,
+  app: 2,
+  node: 3,
+};
+
+const MIN_SEGMENTS_HINT: Record<ExpectedUrnType, string> = {
+  org: '1 hierarchy segment (e.g., "acme.com")',
+  memory: '2 hierarchy segments (org:memory, e.g., "acme.com:mmdata")',
+  agent: '2 hierarchy segments (org:agent-slug, e.g., "acme.com:coding-agent")',
+  app: '2 hierarchy segments (org:app-slug, e.g., "acme.com:dev-app")',
+  node: '3 hierarchy segments (org:memory:loc, e.g., "acme.com:mmdata:review:sort-imports")',
+};
+
+/**
+ * Node-role types from spec 021 D1 that alias for `urn:node:` per D11 cat 2.
+ * A caller passing `urn:prompt:org::mem::loc` where `expectedType='node'` is
+ * legitimate; passing `urn:org:foo` where `expectedType='memory'` is not.
+ */
+const NODE_ROLE_ALIASES: ReadonlySet<string> = new Set<string>([
+  'abstract', 'partial', 'parent', 'plan', 'prompt', 'record',
+  'task', 'review', 'chat', 'chat-message', 'config', 'conversation',
+  'event', 'goal', 'stage', 'condition', 'data',
+]);
+
+/**
+ * Thrown at the API boundary (MCP tool handlers, GraphQL resolvers,
+ * `hadron-client` SDK call sites) when a non-ID-shaped input fails the
+ * URN-qualification rule. The error code is `URN_NOT_QUALIFIED` in both
+ * GraphQL `extensions.code` and MCP tool error results.
+ *
+ * Message follows Constitution Principle III: states the offending value
+ * AND the canonical-form fix template. `offendingValue` is exposed as a
+ * structured field so logging / telemetry can render it without parsing
+ * the message. `parseCause` chains the underlying `UrnParseError` when
+ * the prefixed-form input failed the grammar parser.
+ *
+ * Spec: 022 / contracts/urn-qualification.md.
+ */
+export class UrnNotQualifiedError extends Error {
+  public readonly offendingValue: string;
+  public readonly expectedType: ExpectedUrnType | undefined;
+  public readonly parseCause: UrnParseError | undefined;
+
+  constructor(
+    offendingValue: string,
+    cause?: UrnParseError,
+    expectedType?: ExpectedUrnType,
+  ) {
+    const fixHint = expectedType
+      ? `Expected a ${expectedType} URN with at least ${MIN_SEGMENTS_HINT[expectedType]}.`
+      : 'Use the canonical form "<org>:<memory>[:path]" — org and memory slugs are mandatory at the API boundary.';
+    super(`URN "${offendingValue}" is not fully qualified. ${fixHint}`);
+    this.name = 'UrnNotQualifiedError';
+    this.offendingValue = offendingValue;
+    this.expectedType = expectedType;
+    this.parseCause = cause;
+  }
+}
+
+/**
+ * Reject inputs that are intended as URNs but lack the fully-qualified shape
+ * for `expectedType`. Throws `UrnNotQualifiedError` on failure.
+ *
+ * **Two input shapes accepted**:
+ *   - **Prefixed** (`urn:<type>:<path>`): parsed by spec-021 `parseUrn`, which
+ *     gives canonical `pathSegments.length`. The type marker MUST match
+ *     `expectedType` (with node-role aliases per D11 cat 2 — e.g.,
+ *     `urn:prompt:` is accepted where `expectedType='node'`).
+ *   - **Bare** (`<org>:<memory>[:<loc>...]`): the URN-prefix-less form spec-021
+ *     D7 / spec-022 FR-007 still accept at the API boundary. Path-segment count
+ *     uses splitMixedGrammar semantics (prefer `::`, fall back to `:`).
+ *
+ * **Pre-condition**: callers MUST filter out ID-shape inputs via `isId()`
+ * (`hadron-server/src/lib/entityRef/shape.ts`) before invoking this helper.
+ * The qualification rule does NOT apply to ID-shape values per spec 007.
+ *
+ * Spec: 022 / contracts/urn-qualification.md.
+ */
+export function assertFullyQualifiedUrn(
+  input: string,
+  expectedType: ExpectedUrnType,
+): void {
+  // Strip the optional `urn:<type>:` prefix and capture the type marker.
+  // Both canonical (`::` hierarchy) and legacy (`:`-only) prefixed forms
+  // are accepted at the API boundary per spec 021 D7 / FR-005 — this
+  // helper checks SHAPE (segment count + structural integrity), not
+  // full canonical grammar. parseUrn is the right tool for the deeper
+  // grammar checks; qualification is the upstream gate.
+  let path = input;
+  let prefixType: string | null = null;
+  const prefixMatch = input.match(/^urn:([a-z][a-z0-9-]*):(.+)$/);
+  if (prefixMatch) {
+    prefixType = prefixMatch[1];
+    path = prefixMatch[2];
+  } else if (input.startsWith('urn:')) {
+    // Malformed prefix shape (e.g., `urn::foo`, `urn:`). The prefix
+    // regex captures any well-formed type marker; anything else is
+    // structurally broken.
+    throw new UrnNotQualifiedError(input, undefined, expectedType);
+  }
+
+  // `loc:` prefix is deprecated entirely per spec 021 FR-021. Even
+  // though the spec-022 type set doesn't include 'loc', we surface
+  // a uniform qualification error rather than letting it fall through
+  // to a type-mismatch error with confusing wording.
+  if (prefixType === 'loc') {
+    throw new UrnNotQualifiedError(input, undefined, expectedType);
+  }
+
+  // Type-marker consistency: explicit prefix MUST match expectedType.
+  // Exception: node-role aliases per spec 021 D11 cat 2 (e.g.,
+  // `urn:prompt:` is a legitimate alias for `urn:node:`).
+  if (prefixType !== null && prefixType !== expectedType) {
+    const isNodeRoleAlias =
+      expectedType === 'node' && NODE_ROLE_ALIASES.has(prefixType);
+    if (!isNodeRoleAlias) {
+      throw new UrnNotQualifiedError(input, undefined, expectedType);
+    }
+  }
+
+  // Reject three-or-more consecutive colons upfront: `:::` is a structural
+  // failure mode that the `::`-then-`:`-fallback split can't reliably
+  // detect (it leaves a segment with a leading `:` rather than an empty
+  // segment).
+  if (/:{3,}/.test(path)) {
+    throw new UrnNotQualifiedError(input, undefined, expectedType);
+  }
+
+  // Mixed-grammar split: prefer `::` (canonical hierarchy separator per
+  // spec 021 D2), fall back to `:` for legacy single-colon URNs still
+  // flowing through during the migration window.
+  const segments = path.includes('::') ? path.split('::') : path.split(':');
+  if (segments.some(s => s.length === 0)) {
+    // Leading / trailing / consecutive separators — structurally malformed.
+    throw new UrnNotQualifiedError(input, undefined, expectedType);
+  }
+  if (segments.length < MIN_HIERARCHY_SEGMENTS[expectedType]) {
+    throw new UrnNotQualifiedError(input, undefined, expectedType);
+  }
+}
+
+// ============================================================================
+// Internal parser helpers
+// ============================================================================
+
 function messageFor(
   input: string,
   reason: UrnParseErrorReason,

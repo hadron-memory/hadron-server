@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { resolveNodeRef } from './nodeRef.js';
-import { NodeNotFoundError } from './errors.js';
+import { NodeNotFoundError, UrnNotQualifiedError } from './errors.js';
 
 const db = new PrismaClient();
 
@@ -182,5 +182,76 @@ describe('resolveNodeRef', () => {
     await expect(
       resolveNodeRef(db, `urn:node:${node.id}`, memoryId),
     ).rejects.toBeInstanceOf(NodeNotFoundError);
+  });
+
+  // ===================================================================
+  // spec 022 — API-boundary URN qualification (FR-001, FR-002, FR-007a)
+  //
+  // When contextMemoryId is OMITTED, the input MUST be a fully-qualified
+  // node URN (org:memory:loc minimum). When contextMemoryId is provided
+  // (internal callers only), the short-loc-within-context branch is
+  // reachable as before.
+  // ===================================================================
+
+  it('without contextMemoryId, rejects bare 2-segment input (the motivating safety case)', async () => {
+    // `review:sort-imports` is the canonical example of the bug spec 022
+    // exists to prevent — an agent constructs a relative-form node URN
+    // from active-memory + loc and submits it. Without contextMemoryId
+    // the qualification check rejects.
+    await expect(resolveNodeRef(db, 'review:sort-imports')).rejects.toBeInstanceOf(
+      UrnNotQualifiedError,
+    );
+  });
+
+  it('without contextMemoryId, rejects bare 1-segment input', async () => {
+    await expect(resolveNodeRef(db, 'review')).rejects.toBeInstanceOf(UrnNotQualifiedError);
+  });
+
+  it('without contextMemoryId, accepts a fully-qualified bare URN that resolves', async () => {
+    const node = await db.node.create({
+      data: { memoryId, loc: 'noderef-test-services:db', name: 'db' },
+    });
+    // Bare URN: `<orgUrn>:<memoryName>:<loc>` — 4+ segments.
+    const ref = `${memoryUrn}:${node.loc}`;
+    const result = await resolveNodeRef(db, ref);
+    expect(result).toEqual({ id: node.id });
+  });
+
+  it('without contextMemoryId, accepts urn:node: prefixed form', async () => {
+    const node = await db.node.create({
+      data: { memoryId, loc: 'noderef-test-services:db', name: 'db' },
+    });
+    const ref = `urn:node:${memoryUrn}:${node.loc}`;
+    const result = await resolveNodeRef(db, ref);
+    expect(result).toEqual({ id: node.id });
+  });
+
+  it('without contextMemoryId, throws NodeNotFoundError for a qualified URN naming a missing memory', async () => {
+    // Qualification check passes (3+ segments) but memory lookup fails;
+    // surface as NodeNotFoundError rather than falling through to short-
+    // loc resolution (which would need a contextMemoryId we don't have).
+    await expect(
+      resolveNodeRef(db, 'no-such-org:no-such-mem:no-such-loc'),
+    ).rejects.toBeInstanceOf(NodeNotFoundError);
+  });
+
+  it('with contextMemoryId (internal-caller path), short-loc still resolves', async () => {
+    // Sanity check: the bare-loc-within-context branch is preserved for
+    // internal callers that hold a memory in hand (FR-007a).
+    const node = await db.node.create({
+      data: { memoryId, loc: 'noderef-test-services:db', name: 'db' },
+    });
+    const result = await resolveNodeRef(db, node.loc, memoryId);
+    expect(result).toEqual({ id: node.id });
+  });
+
+  it('with contextMemoryId, ID-shape input still bypasses qualification (spec 007 dispatch)', async () => {
+    const node = await db.node.create({
+      data: { memoryId, loc: 'noderef-test-services:db', name: 'db' },
+    });
+    // ID input with contextMemoryId — bypasses qualification, finds the node.
+    expect(await resolveNodeRef(db, node.id, memoryId)).toEqual({ id: node.id });
+    // ID input WITHOUT contextMemoryId — also bypasses (isId check is first).
+    expect(await resolveNodeRef(db, node.id)).toEqual({ id: node.id });
   });
 });

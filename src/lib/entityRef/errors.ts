@@ -72,3 +72,7 @@ export class NodeLocConflictError extends Error {
 // Re-export from sibling modules so callers can import error classes
 // from a single place.
 export { InvalidLocError } from '../validateLoc.js';
+export {
+  UrnNotQualifiedError,
+  type ExpectedUrnType,
+} from '../urn.js';
