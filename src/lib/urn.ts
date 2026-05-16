@@ -660,6 +660,112 @@ export function toParserCanonical(input: string): string {
 }
 
 // ============================================================================
+// Install-URN composition — spec 021 D10 (R2) / FR-008 / FR-009 / US1
+//
+// When an Agent is installed into an org (the data model's `App` is the
+// install primitive), the install gets an R2 canonical URN that embeds
+// the author-org as a sub-path of the installed URN:
+//
+//   urn:agent:<installing-org>::<app-slug>::<author-org>:<agent-slug>
+//
+// Two orgs installing same-slug agents from different authors produce
+// distinct URNs that differ at the author-org segment.
+// ============================================================================
+
+/**
+ * Compose the R2 canonical install URN for an Agent installed in an App.
+ *
+ * Inputs are tolerant of grammar shape during the spec-021 migration:
+ *   - `appUrn` may be `urn:app:<org>::<slug>` (spec-021 canonical),
+ *     `urn:app:<org>:<slug>` (legacy with `urn:app:` prefix), or
+ *     `<org>:<slug>` (legacy bare slug-path).
+ *   - `agentUrn` may be `urn:agent:<author-org>::<slug>` (spec-021
+ *     canonical), `urn:agent:<author-org>:<slug>` (legacy with prefix),
+ *     or `<author-org>:<slug>` (legacy bare).
+ *
+ * Output is the canonical install URN after parser-layer rewrites
+ * (D11 cats 1, 4 applied — e.g., install-by-self collapses when the
+ * installing org equals the author org).
+ *
+ * Throws if either input is empty, has the wrong type prefix, or
+ * doesn't have at least one slug atom after the org segment.
+ */
+export function composeInstalledAgentUrn(appUrn: string, agentUrn: string): string {
+  const appPath = stripPrefixOrThrow(appUrn, 'app');
+  const agentPath = stripPrefixOrThrow(agentUrn, 'agent');
+
+  const appSegments = splitMixedGrammar(appPath);
+  const agentSegments = splitMixedGrammar(agentPath);
+
+  if (appSegments.length < 2) {
+    throw new Error(
+      `composeInstalledAgentUrn: appUrn must have at least <org>::<slug>; got "${appUrn}"`,
+    );
+  }
+  if (agentSegments.length < 2) {
+    throw new Error(
+      `composeInstalledAgentUrn: agentUrn must have at least <author-org>::<slug>; got "${agentUrn}"`,
+    );
+  }
+
+  // The R2 shape: installing-org / app-slug-path / author-org:agent-slug-leaf.
+  // For multi-segment apps or agents (rare today, but supported), the
+  // intermediate segments are preserved as-is and joined by `::`. The
+  // agent's author-org + final slug are joined into a single segment by
+  // `:` (R2's "author URN path appears verbatim as a sub-path" requires
+  // the author identity to be a single-segment <org>:<slug> tail).
+  const installingOrg = appSegments[0];
+  const appBody = appSegments.slice(1).join('::');
+  const authorOrg = agentSegments[0];
+  const agentSlug = agentSegments.slice(1).join('::');
+
+  // If the agent path was already in <org>:<slug> single-segment form
+  // (one `:`-atom after the org), join with `:`. Otherwise it's a
+  // multi-segment agent (e.g., installed-agent URN passed in) — join
+  // with `::` to preserve nesting.
+  const agentTail = agentSegments.length === 2 && !agentSegments[1].includes(':')
+    ? `${authorOrg}:${agentSlug}`
+    : `${authorOrg}::${agentSlug}`;
+
+  const raw = `urn:agent:${installingOrg}::${appBody}::${agentTail}`;
+
+  // Run the parser to apply D11 cats 1 + 4 canonicalization. If the
+  // installing org equals the author org (install-by-self), cat 1
+  // collapses the duplicated org segment.
+  return toParserCanonical(raw);
+}
+
+/** Strip `urn:<expected>:` prefix if present; reject wrong-type prefixes. */
+function stripPrefixOrThrow(urn: string, expectedType: 'app' | 'agent'): string {
+  if (!urn) {
+    throw new Error(`composeInstalledAgentUrn: ${expectedType} URN is empty`);
+  }
+  if (urn.startsWith(`urn:${expectedType}:`)) {
+    return urn.slice(`urn:${expectedType}:`.length);
+  }
+  if (urn.startsWith('urn:')) {
+    throw new Error(
+      `composeInstalledAgentUrn: expected urn:${expectedType}: prefix; got "${urn}"`,
+    );
+  }
+  return urn;
+}
+
+/**
+ * Split a slug-path on `::` if present, else on `:`. Bridges the spec-021
+ * canonical grammar (`::`-separated) and the legacy single-`:` grammar
+ * during the migration window. Output is always a list of path-segments.
+ *
+ * Legacy `org:slug` → ['org', 'slug']
+ * Canonical `org::slug` → ['org', 'slug']
+ * Canonical `org::app-slug::author:agent` → ['org', 'app-slug', 'author:agent']
+ */
+function splitMixedGrammar(path: string): string[] {
+  if (path.includes('::')) return path.split('::');
+  return path.split(':');
+}
+
+// ============================================================================
 // Per-row gate (FR-032)
 // ============================================================================
 

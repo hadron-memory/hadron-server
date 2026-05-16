@@ -178,6 +178,18 @@ export const typeDefs = `#graphql
     # 008-agent-installation: direct FK replaces the AppAgent join.
     agentId: ID
     agent: Agent
+    """
+    Spec 021 US1: the R2 canonical install URN combining the App's
+    identity with its installed Agent's author-org and slug. Format is
+    urn:agent:<installing-org>::<app-slug>::<author-org>:<agent-slug>.
+    Two orgs installing same-slug agents from different authors produce
+    distinct URNs that differ at the author-org segment, enabling
+    audit-log entries to identify each install unambiguously without a
+    PK disambiguator. Returns null when the App has no agent attached
+    (orphan apps from the 008 cutover; new apps require an agentId per
+    009).
+    """
+    installedAgentUrn: String
     trainingMode: Boolean!
     surfaces: [String!]!
     members: [AppMember!]!
