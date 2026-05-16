@@ -442,9 +442,6 @@ describe('parseFor — per-row gate dispatch (FR-032)', () => {
 // test locks the fix here.
 describe('parseUrn — type-markers are NOT stripped from the org segment (index 0)', () => {
   it('rejects urn:agent:app:org::slug as invalid-segment-shape (not silently canonicalized)', () => {
-    expect(() =>
-      parseUrn('urn:agent:app:micromentor.org::coding-agent'),
-    ).toThrow(UrnParseError);
     try {
       parseUrn('urn:agent:app:micromentor.org::coding-agent');
       throw new Error('should have thrown');
