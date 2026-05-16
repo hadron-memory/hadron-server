@@ -431,6 +431,40 @@ describe('parseFor — per-row gate dispatch (FR-032)', () => {
 // PR #124 round-2 review: Codex #3 — stripTypeMarkers must not touch
 // node-leaf segments because node locs are free-form intra-memory paths
 // that may legitimately begin with `app:`, `agent:`, or `memory:`.
+// hadron-client PR #9 Copilot review: stripTypeMarkers used to strip
+// at every segment INCLUDING index 0 (the org slot). A malformed URN
+// like `urn:agent:app:micromentor.org::coding-agent` would have its
+// `app:` stripped from segments[0] before validation, silently
+// canonicalizing to `urn:agent:micromentor.org::coding-agent`. The fix
+// skips index 0; the first-segment-must-be-one-atom validator now
+// catches this. Same bug existed in this parser (the code was ported
+// across hadron-server / hadron-portal / hadron-client); this regression
+// test locks the fix here.
+describe('parseUrn — type-markers are NOT stripped from the org segment (index 0)', () => {
+  it('rejects urn:agent:app:org::slug as invalid-segment-shape (not silently canonicalized)', () => {
+    try {
+      parseUrn('urn:agent:app:micromentor.org::coding-agent');
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(UrnParseError);
+      expect((e as UrnParseError).reason).toBe('invalid-segment-shape');
+      expect((e as UrnParseError).offendingSegment).toBe('app:micromentor.org');
+    }
+  });
+
+  it('rejects urn:memory:memory:org::slug similarly (memory: prefix at org slot)', () => {
+    expect(() => parseUrn('urn:memory:memory:micromentor.org::coding-agent::system')).toThrow(
+      UrnParseError,
+    );
+  });
+
+  it('rejects urn:agent:agent:org::slug similarly (agent: prefix at org slot)', () => {
+    expect(() => parseUrn('urn:agent:agent:micromentor.org::coding-agent')).toThrow(
+      UrnParseError,
+    );
+  });
+});
+
 describe('parseUrn — node-leaf locs are NOT mangled by cat 4 strip', () => {
   it('preserves a node leaf that begins with a type-marker word', () => {
     const result = parseUrn(

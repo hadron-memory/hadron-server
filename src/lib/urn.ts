@@ -520,12 +520,21 @@ function stripTypeMarkers(
   fired: boolean;
 } {
   let fired = false;
-  // The leaf segment of a node URN is the node loc — free-form intra-
-  // memory path. NEVER strip there; a node loc that begins with `app:`
-  // or `agent:` is a legitimate user path, not a type marker.
   const isNodeUrn = NODE_URN_TYPES.has(urnType);
   const lastIdx = segments.length - 1;
   const out = segments.map((segment, i) => {
+    // Index 0 is the org segment — it can NEVER carry a type marker
+    // (the type is already in the URN's `urn:<type>:` prefix). Skipping
+    // here prevents malformed inputs like `urn:agent:app:org::slug` from
+    // being silently canonicalized to `urn:agent:org::slug` (Copilot
+    // review on hadron-client PR #9). The first segment must reach
+    // `rejectInvalidSegmentShapes` un-stripped so the
+    // first-segment-must-be-one-atom rule actually fires for malformed
+    // inputs.
+    if (i === 0) return segment;
+    // The leaf segment of a node URN is the node loc — free-form intra-
+    // memory path. NEVER strip there; a node loc that begins with `app:`
+    // or `agent:` is a legitimate user path, not a type marker.
     if (isNodeUrn && i === lastIdx) return segment;
     const atoms = segment.split(':');
     // Only strip a leading marker that's at position 0 of a segment.
