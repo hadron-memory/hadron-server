@@ -12,7 +12,7 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId } from './shape.js';
-import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
+import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { OrganizationNotFoundError } from './errors.js';
 
 export async function resolveOrgRef(
@@ -23,7 +23,7 @@ export async function resolveOrgRef(
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(urn, 'org');
   }
-  const normalized = parseUrnInput(urn).value;
+  const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
   const where = isId(normalized) ? { id: normalized } : { urn: normalized };
   const org = await db.organization.findUnique({
     where,

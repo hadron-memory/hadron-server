@@ -17,7 +17,7 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId } from './shape.js';
-import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
+import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { MemoryNotFoundError } from '../asset/gate.js';
 
 export async function resolveMemoryRef(
@@ -31,8 +31,10 @@ export async function resolveMemoryRef(
   }
   // Strip a `urn:<type>:` prefix if present. parseUrnInput returns
   // the bare value; for already-bare input it returns the input
-  // unchanged.
-  const normalized = parseUrnInput(urn).value;
+  // unchanged. Then `normalizeUrnForLookup` collapses canonical `::`
+  // hierarchy separators to legacy `:` so the DB lookup matches
+  // pre-spec-021-migrated rows.
+  const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
   const where = isId(normalized) ? { id: normalized } : { urn: normalized };
   const memory = await db.memory.findUnique({
     where,

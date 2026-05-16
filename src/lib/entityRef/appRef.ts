@@ -8,7 +8,7 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId } from './shape.js';
-import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
+import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { AppNotFoundError } from './errors.js';
 
 export async function resolveAppRef(
@@ -19,7 +19,7 @@ export async function resolveAppRef(
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(urn, 'app');
   }
-  const normalized = parseUrnInput(urn).value;
+  const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
   const where = isId(normalized) ? { id: normalized } : { urn: normalized };
   const app = await db.app.findUnique({
     where,

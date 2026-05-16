@@ -6,6 +6,7 @@ import {
   formatUrn,
   assertFullyQualifiedUrn,
   splitNodeUrn,
+  normalizeUrnForLookup,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
@@ -190,39 +191,14 @@ async function resolveMemoryByUrn(
   const parsed = parseUrnInput(rawUrn.trim());
   if (parsed.type !== 'memory' && parsed.type !== 'unknown') return null;
   if (!parsed.value) return null;
+  // Spec 021 migration window: DB stores legacy `:`-form URNs on pre-
+  // migrated rows. Normalize canonical `::` input to legacy form so the
+  // lookup matches; see `normalizeUrnForLookup` for the rationale.
+  const normalized = normalizeUrnForLookup(parsed.value);
   return await db.memory.findFirst({
-    where: { urn: parsed.value, deletedAt: null },
+    where: { urn: normalized, deletedAt: null },
     select: { id: true, urn: true },
   });
-}
-
-/**
- * Resolve a memoryId that may be either a cuid (primary key) or a memory URN.
- * Returns the actual database ID, or null if not found.
- */
-async function resolveMemoryId(rawInput: string): Promise<string | null> {
-  // Strip urn:memory: prefix if present
-  const parsed = parseUrnInput(rawInput);
-  const memoryIdOrName = parsed.type === 'memory' ? parsed.value : parsed.value;
-  // Always use the stripped value — parseUrnInput handles both prefixed and bare inputs
-
-  // If it looks like a cuid (no colons, no slashes), try it directly
-  if (!memoryIdOrName.includes(':') && !memoryIdOrName.includes('/')) {
-    const exists = await db.memory.findUnique({ where: { id: memoryIdOrName }, select: { id: true } });
-    if (exists) return exists.id;
-  }
-  // Try to find by URN
-  const byUrn = await db.memory.findFirst({ where: { urn: memoryIdOrName }, select: { id: true } });
-  if (byUrn) return byUrn.id;
-  // Try to find by name
-  const byName = await db.memory.findFirst({ where: { name: memoryIdOrName }, select: { id: true } });
-  if (byName) return byName.id;
-  // Last resort: try as ID
-  if (memoryIdOrName.includes(':')) {
-    const byId = await db.memory.findUnique({ where: { id: memoryIdOrName }, select: { id: true } });
-    if (byId) return byId.id;
-  }
-  return null;
 }
 
 // Access control lives in ./access-control.ts.
@@ -502,6 +478,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
+      if (!(await canReadMemory(db, auth, memory.id))) {
+        return textResult(`Memory not found: "${memoryUrn}".`);
+      }
 
       const node = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
@@ -583,6 +562,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const { memoryUrn, loc: parentLoc } = splitNodeUrn(rawParent);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
+        return textResult(`Memory not found: "${memoryUrn}".`);
+      }
+      if (!(await canReadMemory(db, auth, memory.id))) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
       const prefix = parentLoc + ':';
@@ -1171,6 +1153,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const { memoryUrn, loc } = splitNodeUrn(rawUrn);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
+        return textResult(`Memory not found: "${memoryUrn}".`);
+      }
+      if (!(await canReadMemory(db, auth, memory.id))) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
 

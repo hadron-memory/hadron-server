@@ -9,6 +9,7 @@ import {
   composeInstalledAgentUrn,
   assertFullyQualifiedUrn, UrnNotQualifiedError,
   splitNodeUrn,
+  normalizeUrnForLookup,
   type AliasCategory,
 } from './urn.js';
 
@@ -687,6 +688,27 @@ describe('parseUrn — node-leaf locs are NOT mangled by cat 4 strip', () => {
 // =====================================================================
 
 // =====================================================================
+// spec 022 — normalizeUrnForLookup (DB compat during 021 migration)
+// =====================================================================
+
+describe('normalizeUrnForLookup', () => {
+  it('collapses canonical `::` to legacy `:` form', () => {
+    expect(normalizeUrnForLookup('acme.com::mmdata')).toBe('acme.com:mmdata');
+  });
+  it('passes legacy `:` form through unchanged', () => {
+    expect(normalizeUrnForLookup('acme.com:mmdata')).toBe('acme.com:mmdata');
+  });
+  it('passes single-segment input through unchanged', () => {
+    expect(normalizeUrnForLookup('acme.com')).toBe('acme.com');
+  });
+  it('collapses multi-level canonical to legacy', () => {
+    expect(normalizeUrnForLookup('acme.com::coding-app::coding-agent')).toBe(
+      'acme.com:coding-app:coding-agent',
+    );
+  });
+});
+
+// =====================================================================
 // spec 022 — splitNodeUrn (signature collapse helper)
 // =====================================================================
 
@@ -745,6 +767,22 @@ describe('splitNodeUrn', () => {
       memoryUrn: 'acme.com:mmdata',
       loc: 'review:sort-imports',
     });
+  });
+
+  // Self-validation: splitNodeUrn calls assertFullyQualifiedUrn internally
+  // so call sites added outside the spec-022-reviewed handlers can't
+  // silently produce wrong results.
+  it('throws UrnNotQualifiedError on the motivating bug input', () => {
+    expect(() => splitNodeUrn('review:sort-imports')).toThrow(UrnNotQualifiedError);
+  });
+  it('throws UrnNotQualifiedError on urn:loc: (deprecated)', () => {
+    expect(() => splitNodeUrn('urn:loc:foo:bar')).toThrow(UrnNotQualifiedError);
+  });
+  it('throws UrnNotQualifiedError on a single-segment bare input', () => {
+    expect(() => splitNodeUrn('foo')).toThrow(UrnNotQualifiedError);
+  });
+  it('throws UrnNotQualifiedError on a wrong-type prefix', () => {
+    expect(() => splitNodeUrn('urn:org:acme.com')).toThrow(UrnNotQualifiedError);
   });
 });
 

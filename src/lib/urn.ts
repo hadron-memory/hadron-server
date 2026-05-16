@@ -192,15 +192,39 @@ export class UrnNotQualifiedError extends Error {
 }
 
 /**
+ * Normalize a bare URN body (after `urn:<type>:` prefix stripping) so it
+ * matches the form stored in the DB. Spec 021's per-row migration is
+ * incremental: pre-migrated rows store the legacy single-`:` form
+ * (`<org>:<slug>`); migrated rows store the canonical `::` form. During
+ * the migration window the DB has a mix. Callers that lookup by URN
+ * SHOULD normalize input to the legacy form, which matches every
+ * unmigrated row + the spec 022 entityRef tests' fixture shape; the
+ * migration plan (spec 021 T067–T073) will revisit the lookup layer
+ * once every row is canonical.
+ *
+ * For canonical-form input (`acme.com::mmdata`), this returns the
+ * legacy-form equivalent (`acme.com:mmdata`). For legacy-form input,
+ * passthrough.
+ *
+ * Spec: 021 migration window + 022 entityRef-helper compatibility.
+ */
+export function normalizeUrnForLookup(bareUrn: string): string {
+  return bareUrn.includes('::') ? bareUrn.split('::').join(':') : bareUrn;
+}
+
+/**
  * Split a fully-qualified node URN into its memory URN and the loc within
  * that memory. Accepts both bare and `urn:<type>:`-prefixed inputs, and
  * both canonical `::` and legacy `:` mixed-grammar forms.
  *
- * **Precondition**: `assertFullyQualifiedUrn(input, 'node')` MUST have
- * succeeded for the input — this helper does NOT re-check qualification.
- * Inputs with fewer than 3 hierarchy segments will produce a degenerate
- * `loc === ''`, which downstream `validateLoc` will reject; callers
- * SHOULD call `assertFullyQualifiedUrn` first.
+ * **Self-validating**: this function calls `assertFullyQualifiedUrn(
+ * input, 'node')` internally and throws `UrnNotQualifiedError` on
+ * malformed inputs. Callers that have already validated MAY redundantly
+ * pre-check; the cost is one extra regex scan. The internal validation
+ * exists because the function is exported and the previous draft
+ * documented qualification as a "precondition" — a sharp edge for
+ * call sites added outside the validated MCP tool handlers reviewed
+ * for spec 022.
  *
  * The returned `memoryUrn` is the bare form (`<org>:<memorySlug>`) — the
  * shape stored in `Memory.urn` — so it can be passed directly to
@@ -209,6 +233,11 @@ export class UrnNotQualifiedError extends Error {
  * Spec: 022 / contracts/signature-collapse.md.
  */
 export function splitNodeUrn(input: string): { memoryUrn: string; loc: string } {
+  // Self-validate: every spec-022 caller has already passed through
+  // assertFullyQualifiedUrn, but the check is cheap and guards future
+  // call sites added outside the spec-022-reviewed tool handlers.
+  assertFullyQualifiedUrn(input, 'node');
+
   // Strip `urn:<type>:` prefix if present.
   const prefixMatch = input.match(/^urn:[a-z][a-z0-9-]*:(.+)$/);
   const path = prefixMatch ? prefixMatch[1] : input;
