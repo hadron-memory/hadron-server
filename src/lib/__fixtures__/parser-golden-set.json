@@ -124,22 +124,24 @@
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:memory:org::foo bar",
+      "input": "urn:memory:acme.com::foo bar",
       "expectedReject": "invalid-charset",
       "offendingSegment": "foo bar"
     },
     {
-      "input": "urn:memory:org::system",
+      "_note": "system as the position-1 segment of a 2-segment memory URN: no agent context, so the role-marker word is at the wrong structural position. Uses acme.com (not 'org') so the test isolates the system rejection rather than tripping on 'org' as a reserved-word.",
+      "input": "urn:memory:acme.com::system",
       "expectedReject": "reserved-word-slug",
       "offendingSegment": "system"
     },
     {
-      "input": "urn:memory:org::Agent",
+      "_note": "case-insensitive reserved-word check: Agent (mixed case) is still rejected.",
+      "input": "urn:memory:acme.com::Agent",
       "expectedReject": "reserved-word-slug",
       "offendingSegment": "Agent"
     },
     {
-      "input": "urn:memory:org::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toolong",
+      "input": "urn:memory:acme.com::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toolong",
       "expectedReject": "slug-too-long"
     },
 
