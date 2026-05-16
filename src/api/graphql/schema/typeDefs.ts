@@ -605,6 +605,12 @@ export const typeDefs = `#graphql
 
   input NodeInput {
     id: String
+    """
+    Memory reference. Accepts the entity's ID (CUID / 32-char hex) or its
+    URN (per spec 007 ID-or-URN dispatch). URN inputs MUST be fully
+    qualified (`<org>:<memory>`) per spec 022 — relative-form URNs are
+    rejected with `extensions.code: 'URN_NOT_QUALIFIED'`.
+    """
     memoryId: String!
     nodeType: String
     loc: String!
@@ -713,7 +719,11 @@ export const typeDefs = `#graphql
   # memoryId is required for the attached upload path. The staging
   # path (memoryId omitted) is added in US4.
   input BeginAssetUploadV2Input {
-    """Accepts the entity's ID or URN."""
+    """
+    Memory reference. Accepts ID (CUID / 32-char hex) or URN (per spec 007).
+    URN inputs MUST be fully qualified (`<org>:<memory>`) per spec 022 —
+    relative-form URNs are rejected with `extensions.code: 'URN_NOT_QUALIFIED'`.
+    """
     memoryId:        ID!
     filename:        String!
     mimeType:        String!
@@ -743,7 +753,11 @@ export const typeDefs = `#graphql
   }
 
   input SetAgentAssetUploadEnabledInput {
-    """Accepts the entity's ID or URN."""
+    """
+    Agent reference. Accepts ID (CUID / 32-char hex) or URN (per spec 007).
+    URN inputs MUST be fully qualified (`<org>:<agentSlug>`) per spec 022 —
+    relative-form URNs are rejected with `extensions.code: 'URN_NOT_QUALIFIED'`.
+    """
     agentUrn: String!
     enabled:  Boolean!
   }

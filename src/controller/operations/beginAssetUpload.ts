@@ -24,6 +24,7 @@ import { canWriteToMemory } from '../../mcp/access-control.js';
 import type { AuthContext } from '../../middleware/auth.js';
 import { resolveAgentRef } from '../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
+import { UrnNotQualifiedError } from '../../lib/urn.js';
 import { mintPutUrl } from '../../integrations/r2/client.js';
 
 const PRESIGN_TTL_SECONDS = 5 * 60;
@@ -300,10 +301,16 @@ export async function beginAssetUploadV2(
   // 007-entity-id-or-urn: input.memoryId may be a raw ID, a bare URN,
   // or a prefixed URN. Resolve to a definite ID before any subsequent
   // checks so all branches operate on a consistent shape.
+  //
+  // Spec 022: `resolveMemoryRef` throws `UrnNotQualifiedError` for non-ID
+  // inputs that lack the `<org>:<memory>` shape — let it propagate so the
+  // GraphQL formatError can surface it as `URN_NOT_QUALIFIED`. Genuine
+  // not-found errors (and other shape failures) still become NOT_FOUND.
   let memoryId: string;
   try {
     ({ id: memoryId } = await resolveMemoryRef(db, input.memoryId));
-  } catch {
+  } catch (e) {
+    if (e instanceof UrnNotQualifiedError) throw e;
     throw new AssetUploadError('NOT_FOUND', 'memory not found');
   }
 

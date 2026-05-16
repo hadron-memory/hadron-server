@@ -354,12 +354,14 @@ describe('beginAssetUploadV2', () => {
   });
 
   it('rejects unknown memoryId with NOT_FOUND', async () => {
+    // 32-char hex — ID-shape, bypasses the spec-022 qualification check
+    // and goes to DB lookup, which misses → NOT_FOUND.
     await expect(
       beginAssetUploadV2(
         db,
         { userId: user.id },
         {
-          memoryId: 'no-such-memory-id',
+          memoryId: '0123456789abcdef0123456789abcdef',
           filename: 'x.pdf',
           mimeType: 'application/pdf',
           sizeBytes: 1024,
