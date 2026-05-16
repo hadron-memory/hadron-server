@@ -33,6 +33,14 @@ export interface CanonicalRewriteContext {
  * The default (1.0 — log every rewrite) reflects the post-launch 90-day
  * window; operators override to 0.01 via env on the cut-over date. Tests
  * can override at runtime via `setSampleRateForTesting`.
+ *
+ * **Operator note**: changing `URN_REWRITE_SAMPLE_RATE` in the deployed
+ * environment requires a **full process restart** to take effect — once
+ * Node imports this module, ESM caches it and the value is fixed for
+ * the process lifetime. The "single config change" cut-over described
+ * in spec 021 contracts/canonical-form.md is config + restart, not just
+ * config. (We deliberately read once at startup rather than per-call to
+ * avoid the env-lookup cost on every parse-rewrite hot path.)
  */
 let SAMPLE_RATE: number = Number(process.env.URN_REWRITE_SAMPLE_RATE ?? '1');
 

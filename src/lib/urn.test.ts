@@ -361,13 +361,16 @@ describe('parseFor — per-row gate dispatch (FR-032)', () => {
     expect(result.canonical).toBe('urn:agent:hadronmemory.com::coding-agent');
   });
 
-  it('rewrites non-canonical input on the migrated path', () => {
-    const result = parseFor({
-      urn: 'urn:agent:micromentor.org::app:coding-app',
-      urnNormalizedAt: new Date(),
-    });
-    expect(result.isLegacy).toBe(false);
-    expect(result.canonical).toBe('urn:agent:micromentor.org::coding-app');
+  it('does NOT rewrite on the migrated path — migrated rows MUST already be canonical', () => {
+    // Codex / Copilot round-2 fix: parseFor used to silently rewrite a
+    // migrated row that drifted from canonical. That masked bugs at
+    // every downstream consumer. The new behavior throws on drift.
+    expect(() =>
+      parseFor({
+        urn: 'urn:agent:micromentor.org::app:coding-app',
+        urnNormalizedAt: new Date(),
+      }),
+    ).toThrow(UrnParseError);
   });
 
   it('returns the legacy URN unchanged for pre-migration rows (urnNormalizedAt null)', () => {
@@ -387,30 +390,113 @@ describe('parseFor — per-row gate dispatch (FR-032)', () => {
       }),
     ).toThrow(UrnParseError);
   });
+
+  // PR #124 round-2 review: Codex #2 — parseFor's legacy branch was
+  // accepting garbage because parseUrnInput never throws.
+  it('rejects malformed URNs on the legacy branch (not just the migrated branch)', () => {
+    expect(() =>
+      parseFor({
+        urn: 'not-a-urn-at-all',
+        urnNormalizedAt: null,
+      }),
+    ).toThrow(UrnParseError);
+  });
+
+  it('accepts well-formed legacy URNs on the legacy branch', () => {
+    // Pre-021 single-:-grammar URN — must still pass.
+    const result = parseFor({
+      urn: 'urn:agent:hadronmemory.com:coding-agent',
+      urnNormalizedAt: null,
+    });
+    expect(result.isLegacy).toBe(true);
+    expect(result.canonical).toBe('urn:agent:hadronmemory.com:coding-agent');
+  });
+
+  // PR #124 round-2 review: Copilot — parseFor previously returned
+  // parserCanonical for migrated rows even when row.urn drifted. Now
+  // asserts equality and throws on drift.
+  it('throws when a migrated row\'s stored URN drifts from canonical', () => {
+    // A migrated row that somehow has a non-canonical urn (e.g., a
+    // bug bypassed the canonicalizer on write) MUST surface here,
+    // not be silently rewritten.
+    expect(() =>
+      parseFor({
+        urn: 'urn:agent:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent',
+        urnNormalizedAt: new Date(),
+      }),
+    ).toThrow(UrnParseError);
+  });
+});
+
+// PR #124 round-2 review: Codex #3 — stripTypeMarkers must not touch
+// node-leaf segments because node locs are free-form intra-memory paths
+// that may legitimately begin with `app:`, `agent:`, or `memory:`.
+describe('parseUrn — node-leaf locs are NOT mangled by cat 4 strip', () => {
+  it('preserves a node leaf that begins with a type-marker word', () => {
+    const result = parseUrn(
+      'urn:node:micromentor.org::coding-app::coding-agent::system::app:settings',
+    );
+    expect(result.parserCanonical).toBe(
+      'urn:node:micromentor.org::coding-app::coding-agent::system::app:settings',
+    );
+    expect(result.parserRewrites).toEqual([]);
+  });
+
+  it('preserves a node leaf with a multi-atom path beginning with agent:', () => {
+    const result = parseUrn(
+      'urn:node:micromentor.org::coding-app::coding-agent::system::agent:profile:bio',
+    );
+    expect(result.parserCanonical).toBe(
+      'urn:node:micromentor.org::coding-app::coding-agent::system::agent:profile:bio',
+    );
+    expect(result.parserRewrites).toEqual([]);
+  });
+
+  it('still strips type markers from intermediate node-URN segments', () => {
+    // The leaf is exempt; intermediate segments still get cat 4 strip.
+    const result = parseUrn(
+      'urn:node:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent::system::review:sort-imports',
+    );
+    expect(result.parserCanonical).toBe(
+      'urn:node:micromentor.org::coding-app::hadronmemory.com:coding-agent::system::review:sort-imports',
+    );
+    expect(result.parserRewrites).toContain('type-marker-optionality');
+  });
 });
 
 // =====================================================================
 // Spec 021 T015 — parser performance microbenchmark
 //
-// Per research.md R-006, this benchmark REPORTS p95 latency and emits a
-// warning if it exceeds 200µs (2× the spec target). It is NOT a hard CI
-// gate — CI machine variance would make a strict threshold flaky. The
-// "shouldn't take more than" guard below is intentionally generous (1ms
-// per parse) so the test almost never fails — a regression to >1ms per
-// parse on representative inputs is severe enough to warrant a CI
-// failure even with variance.
+// Per research.md R-006, this benchmark REPORTS p95 latency and is NOT
+// a hard CI gate. PR #124 round-2 review (Copilot) flagged that timing-
+// based tests in the regular vitest suite are inherently flaky on CI:
+// cold-V8 warm-up costs can push the first 50-100 iterations 10-100×
+// slower than steady state, and noisy-neighbor variance can spike
+// individual calls.
+//
+// Mitigations: (a) run a warm-up pass before measuring, (b) very
+// generous hard ceiling (10ms per parse — only severe regressions
+// trip), (c) the failure-mode behavior is to emit a console.warn for
+// 200µs+ regressions rather than throw, so the signal is visible
+// without flaking the suite.
+//
+// The dedicated bench script for steady-state numbers lives at
+// `scripts/bench/urn-parser.bench.ts` (TODO: add as part of T067-T069
+// migration-ops work, where parser throughput matters most).
 // =====================================================================
 
 describe('parseUrn — microbenchmark (reported metric, not a hard gate)', () => {
   it('parses 1000 representative URNs and reports p95', () => {
-    // Representative input distribution: 40% install URNs, 30% role-
-    // marker URNs, 30% node-path URNs. All canonical inputs (no rewrite
-    // work) — the benchmark measures pure parse throughput.
     const sample = [
       ...Array(400).fill('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent'),
       ...Array(300).fill('urn:memory:micromentor.org::coding-app::coding-agent::app-user:shadowbrush'),
       ...Array(300).fill('urn:prompt:micromentor.org::coding-app::coding-agent::system::review:sort-imports'),
     ];
+
+    // Warm-up: hit the JIT with 200 parses before measuring. Cold-V8
+    // first-call overhead would otherwise skew the early samples and
+    // pollute the percentile sort.
+    for (let i = 0; i < 200; i++) parseUrn(sample[i % sample.length]);
 
     const durations: number[] = [];
     for (const input of sample) {
@@ -435,8 +521,9 @@ describe('parseUrn — microbenchmark (reported metric, not a hard gate)', () =>
       );
     }
 
-    // Hard guard: regression above 1ms per parse on representative
-    // inputs is a real problem regardless of CI variance.
-    expect(p95).toBeLessThan(1);
+    // Very generous hard ceiling: 10ms per parse. Only catastrophic
+    // regressions (e.g., accidentally calling a DB) would trip this.
+    // The real performance signal is the console.log output above.
+    expect(p95).toBeLessThan(10);
   });
 });

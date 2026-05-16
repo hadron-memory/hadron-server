@@ -539,8 +539,10 @@ model Memory {
   licenses          MemoryLicense[]
   /// Spec 021 FR-032 online URN-shape migration gate (transient). Null =
   /// pre-canonical row; set = canonical-form row. Dropped post-migration.
+  /// TODO(spec-021-cleanup): drop once the FR-032 migration completes.
   urnNormalizedAt          DateTime? @map("urn_normalized_at")
   /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
+  /// TODO(spec-021-cleanup): drop alongside urnNormalizedAt.
   urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
 
   logEntries        MemoryLogEntry[]
@@ -1013,8 +1015,10 @@ model Agent {
 
   /// Spec 021 FR-032 online URN-shape migration gate (transient). Null =
   /// pre-canonical row; set = canonical-form row. Dropped post-migration.
+  /// TODO(spec-021-cleanup): drop once the FR-032 migration completes.
   urnNormalizedAt          DateTime? @map("urn_normalized_at")
   /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
+  /// TODO(spec-021-cleanup): drop alongside urnNormalizedAt.
   urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
 
   organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -1522,27 +1526,19 @@ model App {
   name                  String
   /// Globally unique identifier; derived from `org.urn + ":" + slug`.
   ///
-  /// **Spec 021 drift, knowingly accepted (PR #124 review)**: this field
-  /// stays declared `@unique` in `schema.prisma` so Prisma's generated
-  /// types continue to expose `findUnique({ where: { urn } })` for
-  /// existing callers. At the DB level the migration replaces the
-  /// constraint with the partial unique index
-  /// `apps_urn_active_uniq WHERE uninstalled_at IS NULL`, which enforces
-  /// uniqueness ONLY for the active subset (the FR-027 reinstall
-  /// scenario depends on this).
+  /// **Spec 021 (FR-027) — uniqueness is now PARTIAL.** The DB-level
+  /// constraint is `apps_urn_active_uniq WHERE uninstalled_at IS NULL`
+  /// (declared in the 021 migration). The same URN can legitimately
+  /// appear on multiple rows: one active (`uninstalledAt IS NULL`)
+  /// plus N uninstalled history rows. Prisma's field-level `@unique`
+  /// declaration was REMOVED because it would generate a non-partial
+  /// global unique index that fights with the migration.
   ///
-  /// Consequence: `prisma migrate diff` against this branch will report
-  /// drift (DB lacks the global `apps_urn_key` index). Subsequent
-  /// migrations MUST NOT auto-accept that diff — a follow-up cleanup
-  /// spec will either flip schema.prisma to `@@index([urn])` (after
-  /// auditing all `findUnique({where:{urn}})` call sites — see
-  /// `resolvers.ts:5039` and `:5130`) or keep this comment + a CI grep
-  /// guard against re-adding `apps_urn_key`.
-  ///
-  /// New code resolving an active App by URN SHOULD use
-  /// `findFirst({ where: { urn, uninstalledAt: null } })` per FR-028
-  /// resolution precedence; the active-row helper lands with US4.
-  urn                   String               @unique
+  /// Callers MUST use `findFirst({ where: { urn, uninstalledAt: null } })`
+  /// for active-row resolution per FR-028 resolution precedence; the
+  /// `findUnique` callers in `resolvers.ts` were migrated to this
+  /// pattern in PR #124.
+  urn                   String
   organizationId        String               @map("organization_id")
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
   identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")
@@ -1607,11 +1603,15 @@ model App {
   /// pre-canonical row (read through the legacy parser); set = canonical-
   /// form row (read through the new parser). Dropped once 100% of rows
   /// are migrated.
+  /// TODO(spec-021-cleanup): drop this column once the FR-032 migration
+  /// completes — tracked under the spec-021 cleanup follow-up. The
+  /// `apps_urn_migration_pending_idx` partial index goes with it.
   urnNormalizedAt          DateTime? @map("urn_normalized_at")
   /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
   /// Non-null = the row's urn failed normalization; the migration job
   /// skips it on subsequent passes (avoids infinite retry). Transient;
   /// dropped with urnNormalizedAt.
+  /// TODO(spec-021-cleanup): drop alongside urnNormalizedAt.
   urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
 
   organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -1627,6 +1627,12 @@ model App {
 
   @@index([organizationId])
   @@index([agentId])
+  // Spec 021 FR-027: keep `urn` lookups index-served. The DB-level
+  // partial unique index `apps_urn_active_uniq` already covers active-row
+  // queries; this @@index makes lookups across the full history (active
+  // + uninstalled) also index-served. Prisma generates a non-unique
+  // btree index on `urn`.
+  @@index([urn])
   @@map("apps")
 }
 

@@ -121,8 +121,11 @@ function messageFor(
   offending: string | undefined,
 ): string {
   // Human-readable per Constitution Principle III: state what failed AND
-  // (where actionable) what the user can do about it.
-  const cite = offending ? ` (offending: "${offending}")` : '';
+  // (where actionable) what the user can do about it. When the offending
+  // atom IS the full input (entity-create boundary calling
+  // validateUserSlug), skip the parenthetical citation — it would
+  // duplicate the slug awkwardly in the error message.
+  const cite = offending && offending !== input ? ` (offending: "${offending}")` : '';
   switch (reason) {
     case 'unknown-type':
       return `URN "${input}" uses an unknown type. The type segment after "urn:" must be one of the registered types.`;
@@ -247,7 +250,16 @@ export function parseUrn(input: string): ParsedUrn {
   // determinable hierarchy positions. Run first so subsequent steps see a
   // normalized shape AND so the reserved-word check doesn't trip on type-
   // marker atoms.
-  const { segments: cat4Segments, fired: cat4Fired } = stripTypeMarkers(rawSegments);
+  //
+  // **Skip node-leaf segments.** For node URNs the final segment is the
+  // node loc (free-form intra-memory path); a leaf that happens to begin
+  // with `app:` / `agent:` / `memory:` is a legitimate node loc, NOT a
+  // type-marker to strip. Codex review on PR #124 caught that the
+  // previous version mangled such locs silently.
+  const { segments: cat4Segments, fired: cat4Fired } = stripTypeMarkers(
+    rawSegments,
+    type,
+  );
   if (cat4Fired) {
     parserRewrites.push('type-marker-optionality');
   }
@@ -292,12 +304,6 @@ export function parseUrn(input: string): ParsedUrn {
     parserRewrites,
     needsResolverCanonicalization,
   };
-}
-
-/** True if the input string contains a `loc:` segment anywhere. */
-function containsLocSegment(input: string): boolean {
-  // `urn:loc:...` OR `loc:...` at the start OR `::loc:...` mid-path.
-  return /(^|::|urn:)loc:/.test(input);
 }
 
 /**
@@ -506,12 +512,21 @@ function rejectReservedWordsAtIllegalPositions(
  * share names with markers (handled by FR-019 reserved-word rejection on
  * the validator side, but defense-in-depth here).
  */
-function stripTypeMarkers(segments: string[]): {
+function stripTypeMarkers(
+  segments: string[],
+  urnType: string,
+): {
   segments: string[];
   fired: boolean;
 } {
   let fired = false;
-  const out = segments.map(segment => {
+  // The leaf segment of a node URN is the node loc — free-form intra-
+  // memory path. NEVER strip there; a node loc that begins with `app:`
+  // or `agent:` is a legitimate user path, not a type marker.
+  const isNodeUrn = NODE_URN_TYPES.has(urnType);
+  const lastIdx = segments.length - 1;
+  const out = segments.map((segment, i) => {
+    if (isNodeUrn && i === lastIdx) return segment;
     const atoms = segment.split(':');
     // Only strip a leading marker that's at position 0 of a segment.
     if (atoms.length >= 2 && TYPE_MARKERS.has(atoms[0])) {
@@ -664,16 +679,35 @@ export interface UrnRow {
  */
 export function parseFor(row: UrnRow): { canonical: string; isLegacy: boolean } {
   if (row.urnNormalizedAt !== null) {
-    return { canonical: parseUrn(row.urn).parserCanonical, isLegacy: false };
+    // Migrated row: stored URN MUST equal its parserCanonical (FR-031
+    // says canonical form is what gets persisted). Return row.urn — not
+    // parseUrn().parserCanonical — so a drift between the stored value
+    // and the parser's idea of canonical surfaces here rather than
+    // silently masking the bug at every downstream consumer. parseUrn
+    // still runs (we throw on parse failure); we just don't replace
+    // the stored value.
+    const parsed = parseUrn(row.urn);
+    if (parsed.parserCanonical !== row.urn) {
+      // Stored URN drifted from canonical — likely a write bypassed the
+      // canonicalizer. Surface immediately rather than mask.
+      throw new UrnParseError(row.urn, 'malformed-grammar');
+    }
+    return { canonical: row.urn, isLegacy: false };
   }
-  // Legacy path: validate via parseUrnInput so a malformed legacy URN
-  // doesn't slip through silently. parseUrnInput returns `{ type:
-  // 'unknown', value: input }` for unrecognized inputs — that's
-  // intentional legacy backward-compat (FR-022 doesn't break unprefixed
-  // inputs), so we only require the call to succeed, not to recognize a
-  // type. The full original URN is what we return — callers don't want
-  // the bare value here.
-  parseUrnInput(row.urn);
+  // Legacy path: actually validate the URN, don't just call parseUrnInput
+  // (which never throws). Codex review on PR #124 caught that the
+  // previous version still accepted garbage like `not-a-urn` because
+  // parseUrnInput returns `{ type: 'unknown', ... }` for any unmatched
+  // input.
+  //
+  // For a pre-migration row to be readable, its URN MUST start with
+  // `urn:<type>:` where <type> is one of the spec-003/007 legacy types
+  // (org / memory / agent / app / node). Anything else is corrupt data
+  // and should surface at the gate.
+  const legacy = parseUrnInput(row.urn);
+  if (legacy.type === 'unknown') {
+    throw new UrnParseError(row.urn, 'malformed-grammar');
+  }
   return { canonical: row.urn, isLegacy: true };
 }
 

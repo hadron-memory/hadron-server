@@ -24,7 +24,7 @@
 -- All ADD COLUMN / CREATE INDEX statements below use IF NOT EXISTS so a
 -- partial re-application (after a crash or a manual rollback) succeeds
 -- cleanly.
-ALTER TABLE "apps" ADD COLUMN IF NOT EXISTS "uninstalled_at" TIMESTAMPTZ NULL;
+ALTER TABLE "apps" ADD COLUMN IF NOT EXISTS "uninstalled_at" TIMESTAMP(3) NULL;
 
 -- Replace the global @unique on App.urn with a partial unique index restricted
 -- to active rows. This is what allows reinstall after soft-uninstall — the
@@ -54,15 +54,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS "apps_urn_active_uniq"
   ON "apps" ("urn")
   WHERE "uninstalled_at" IS NULL;
 
+-- Non-unique full-history index on App.urn. The partial unique index
+-- above only covers active rows; this one keeps lookups against
+-- uninstalled history rows index-served too (the matching @@index([urn])
+-- in schema.prisma).
+CREATE INDEX IF NOT EXISTS "apps_urn_idx" ON "apps" ("urn");
+
 -- === App / Memory / Agent: URN-shape migration gating columns ========
 ALTER TABLE "apps"
-  ADD COLUMN IF NOT EXISTS "urn_normalized_at"           TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS "urn_normalized_at"           TIMESTAMP(3) NULL,
   ADD COLUMN IF NOT EXISTS "urn_migration_failed_reason" TEXT        NULL;
 ALTER TABLE "memories"
-  ADD COLUMN IF NOT EXISTS "urn_normalized_at"           TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS "urn_normalized_at"           TIMESTAMP(3) NULL,
   ADD COLUMN IF NOT EXISTS "urn_migration_failed_reason" TEXT        NULL;
 ALTER TABLE "agents"
-  ADD COLUMN IF NOT EXISTS "urn_normalized_at"           TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS "urn_normalized_at"           TIMESTAMP(3) NULL,
   ADD COLUMN IF NOT EXISTS "urn_migration_failed_reason" TEXT        NULL;
 
 -- === Partial indexes covering the migration job's batch-fetch query ====
