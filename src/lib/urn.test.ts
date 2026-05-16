@@ -8,6 +8,7 @@ import {
   validateUserSlug, parseFor, UrnParseError,
   composeInstalledAgentUrn,
   assertFullyQualifiedUrn, UrnNotQualifiedError,
+  splitNodeUrn,
   type AliasCategory,
 } from './urn.js';
 
@@ -684,6 +685,68 @@ describe('parseUrn — node-leaf locs are NOT mangled by cat 4 strip', () => {
 // `scripts/bench/urn-parser.bench.ts` (TODO: add as part of T067-T069
 // migration-ops work, where parser throughput matters most).
 // =====================================================================
+
+// =====================================================================
+// spec 022 — splitNodeUrn (signature collapse helper)
+// =====================================================================
+
+describe('splitNodeUrn', () => {
+  it('splits a bare node URN with 3 atoms (org:memory:loc)', () => {
+    expect(splitNodeUrn('acme.com:mmdata:review')).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'review',
+    });
+  });
+
+  it('splits a bare node URN with multi-atom loc', () => {
+    expect(splitNodeUrn('acme.com:mmdata:review:sort-imports')).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'review:sort-imports',
+    });
+  });
+
+  it('splits a `urn:node:` prefixed bare URN', () => {
+    expect(splitNodeUrn('urn:node:acme.com:mmdata:review:sort-imports')).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'review:sort-imports',
+    });
+  });
+
+  it('splits canonical `::` form (spec-021 hierarchy)', () => {
+    expect(
+      splitNodeUrn('urn:node:acme.com::mmdata::review:sort-imports'),
+    ).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'review:sort-imports',
+    });
+  });
+
+  it('splits canonical `::` form with deep loc', () => {
+    expect(
+      splitNodeUrn('urn:node:acme.com::mmdata::services::db-helpers::query'),
+    ).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'services:db-helpers:query',
+    });
+  });
+
+  it('produces bare-form memoryUrn ready for DB lookup', () => {
+    // `Memory.urn` is stored bare (`<org>:<memorySlug>`). The helper
+    // normalizes to that form regardless of input grammar.
+    expect(splitNodeUrn('acme.com:mmdata:loc').memoryUrn).toBe('acme.com:mmdata');
+    expect(splitNodeUrn('urn:node:acme.com::mmdata::loc').memoryUrn).toBe('acme.com:mmdata');
+  });
+
+  it('accepts node-role-alias prefixes (D11 cat 2)', () => {
+    // `urn:prompt:` and friends are aliases for `urn:node:` per spec 021.
+    expect(
+      splitNodeUrn('urn:prompt:acme.com::mmdata::review:sort-imports'),
+    ).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'review:sort-imports',
+    });
+  });
+});
 
 // =====================================================================
 // spec 022 — assertFullyQualifiedUrn (API-boundary qualification check)

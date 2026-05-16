@@ -1,7 +1,13 @@
 import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
-import { parseUrnInput, formatUrn } from '../lib/urn.js';
+import {
+  parseUrnInput,
+  formatUrn,
+  assertFullyQualifiedUrn,
+  splitNodeUrn,
+  UrnNotQualifiedError,
+} from '../lib/urn.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import { validateLoc } from '../lib/validateLoc.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -18,6 +24,7 @@ import {
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { NodeNotFoundError } from '../lib/entityRef/errors.js';
+import { isId } from '../lib/entityRef/shape.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { SessionType } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
@@ -230,7 +237,12 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     { capabilities: { tools: {} } },
   );
 
-  // Per-session state
+  // Per-session state. The field is preserved per spec 022 D4a as advisory
+  // metadata — the agent inference layer (hadron-client) MAY read it as a
+  // future hint signal, but no server-side code reads it. Set via
+  // `h-set-active-memory`; never consumed here.
+  // TODO(spec-022-cleanup): tracked as Q-2026-05-07-001 in the design
+  // discussion registry; revisit if usage stays "set, never read" past pilot.
   let activeMemoryUrn: string | undefined;
 
   // ── h-list-memories ──────────────────────────────────────────────────────
@@ -309,30 +321,31 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-add-parent-node',
-    'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes.',
+    'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes. The URN MUST be fully qualified (org:memory:loc).',
     {
-      parentRel: z.string().optional().describe('Parent node rel path (omit for root-level node)'),
-      name: z.string().describe('Node name'),
+      urn: z.string().describe('Fully-qualified node URN for the new section, e.g. "acme.com:mmdata:services" or "acme.com:mmdata:services:db-helpers"'),
+      name: z.string().optional().describe('Display name (defaults to the last loc atom)'),
       description: z.string().optional().describe('What this section contains'),
       tags: z.array(z.string()).optional(),
     },
-    async ({ parentRel, name, description, tags }) => {
-      const content = description ?? `Section: ${name}`;
-
+    async ({ urn: rawUrn, name: rawName, description, tags }) => {
+      // Spec 022: qualification at the API boundary.
       try {
-        validateParentRel(parentRel);
+        assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof InvalidParentRelError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
         throw e;
       }
 
-      // Resolve parent: strip URN prefixes, find memory
-      const memoryIds = await getAccessibleMemoryIds(db, auth);
-      const resolved = parentRel ? await resolveLocFromUrn(parentRel, memoryIds) : { loc: '', memoryId: undefined };
-      const parentLoc = resolved.loc;
-
-      // Build the final loc: if parent is empty (root-level), just use the name
-      const loc = parentLoc ? `${parentLoc}:${name}` : name;
+      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const memory = await resolveMemoryByUrn(memoryUrn);
+      if (!memory) {
+        return textResult(`Memory not found: "${memoryUrn}".`);
+      }
+      const memoryId = memory.id;
+      // Default name to the last loc atom (e.g. `services:db-helpers` → `db-helpers`).
+      const name = rawName ?? loc.split(':').pop()!;
+      const content = description ?? `Section: ${name}`;
 
       try {
         validateLoc(loc);
@@ -340,37 +353,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult((e as Error).message);
       }
 
-      // Determine target memory. Priority:
-      // 1. Resolved from the parentRel URN
-      // 2. Active memory (set via h-set-active-memory)
-      // 3. Parent node's memory
-      // 4. Single writable memory fallback
-      let memoryId = resolved.memoryId;
-
-      if (!memoryId && activeMemoryUrn) {
-        const mem = await db.memory.findFirst({ where: { urn: activeMemoryUrn }, select: { id: true } });
-        if (mem) memoryId = mem.id;
-      }
-
-      if (!memoryId && parentLoc) {
-        const parentNode = await db.node.findFirst({
-          where: { loc: parentLoc, ...(memoryIds ? { memoryId: { in: memoryIds } } : {}) },
-          select: { memoryId: true },
-        });
-        memoryId = parentNode?.memoryId ?? undefined;
-      }
-
-      if (!memoryId) {
-        const access = await getMemoryAccess(db, auth);
-        const writableIds = [...access.entries()].filter(([, v]) => v === 'READ_WRITE').map(([k]) => k);
-        if (writableIds.length === 1) memoryId = writableIds[0];
-      }
-
-      if (!memoryId) {
-        return textResult('Cannot determine target memory. Set an active memory with h-set-active-memory, or ensure only one writable memory.');
-      }
-
-      if (!(await canWriteToMemory(db, auth,memoryId))) {
+      if (!(await canWriteToMemory(db, auth, memoryId))) {
         return textResult('Write access denied for this memory.');
       }
 
@@ -431,24 +414,24 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       const where: Record<string, unknown> = {};
       if (memoryIds) where.memoryId = { in: memoryIds };
 
-      // Scope to memory URN if provided (or active memory). #100 #3: route
-      // through resolveMemoryByUrn so a canonical 'urn:memory:' input from
-      // the caller doesn't silently miss against a bare-stored Memory.urn.
-      // If the caller supplied an explicit memoryUrn that doesn't resolve
-      // (typo, deleted memory, wrong-type prefix), fail fast — the original
-      // bug shape from #100 was a silent fall-back to all-accessible
-      // memories, which masks input mistakes and produces surprising
-      // results.
-      const urn = memoryUrn ?? activeMemoryUrn;
-      if (urn) {
-        const mem = await resolveMemoryByUrn(urn);
+      // Scope to memory URN if provided. Spec 022 (FR-003): no fallback to
+      // `activeMemoryUrn` — the caller must supply a fully-qualified memory
+      // URN when scoping a search, otherwise the search runs across all
+      // accessible memories (set in `where.memoryId` above). #100 #3:
+      // route through resolveMemoryByUrn so a canonical 'urn:memory:' input
+      // from the caller doesn't silently miss against a bare-stored
+      // Memory.urn.
+      if (memoryUrn) {
+        try {
+          assertFullyQualifiedUrn(memoryUrn, 'memory');
+        } catch (e) {
+          if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+          throw e;
+        }
+        const mem = await resolveMemoryByUrn(memoryUrn);
         if (!mem) {
-          const source = memoryUrn ? 'memoryUrn argument' : 'active memory';
-          const hint = memoryUrn
-            ? 'Use h-list-memories to see what is available.'
-            : 'Use h-set-active-memory to update the active memory.';
           return textResult(
-            `Memory not found or invalid: '${urn}' (from ${source}). ${hint}`,
+            `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
           );
         }
         where.memoryId = mem.id;
@@ -667,9 +650,10 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // Normalize parentRel once (matches the h-find-nodes pattern).
       const trimmedParentRel = parentRel?.trim();
 
-      const urn = memoryUrn ?? activeMemoryUrn;
-      if (!urn && !trimmedParentRel) {
-        return textResult('Please provide a memoryUrn or parentRel, or set an active memory with h-set-active-memory.');
+      // Spec 022 (FR-003): no fallback to `activeMemoryUrn`. Caller MUST
+      // supply either `memoryUrn` or `parentRel`.
+      if (!memoryUrn && !trimmedParentRel) {
+        return textResult('Please provide a memoryUrn or parentRel.');
       }
 
       const memoryIds = await getAccessibleMemoryIds(db, auth);
@@ -686,18 +670,18 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         prefix = '';
         // Find memory by URN. #100 #3: route through resolveMemoryByUrn so
         // a canonical 'urn:memory:' input doesn't miss against bare-stored
-        // Memory.urn. Fail fast on unresolvable input rather than silently
-        // listing across all accessible memories — that fallback was the
-        // original mis-scope symptom from #100.
-        if (urn) {
-          const mem = await resolveMemoryByUrn(urn);
+        // Memory.urn. Spec 022: require qualification at this boundary.
+        if (memoryUrn) {
+          try {
+            assertFullyQualifiedUrn(memoryUrn, 'memory');
+          } catch (e) {
+            if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+            throw e;
+          }
+          const mem = await resolveMemoryByUrn(memoryUrn);
           if (!mem) {
-            const source = memoryUrn ? 'memoryUrn argument' : 'active memory';
-            const hint = memoryUrn
-              ? 'Use h-list-memories to see what is available.'
-              : 'Use h-set-active-memory to update the active memory.';
             return textResult(
-              `Memory not found or invalid: '${urn}' (from ${source}). ${hint}`,
+              `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
             );
           }
           memoryId = mem.id;
@@ -727,7 +711,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       });
 
       if (filtered.length === 0) {
-        return textResult(`No child nodes found under "${prefix || urn}".`);
+        return textResult(`No child nodes found under "${prefix || memoryUrn}".`);
       }
 
       // Compute child counts and render tree
@@ -742,7 +726,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return `${indent}├── ${nUrn} — ${n.name}${childInfo}`;
       }));
 
-      const header = `Tree: ${prefix || urn}`;
+      const header = `Tree: ${prefix || memoryUrn}`;
       return textResult(`${header}\n${lines.join('\n')}`);
     },
   );
@@ -751,10 +735,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-add-node',
-    'Add a new node to the memory graph (creates or updates). Requires write access to the memory.',
+    'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (org:memory:loc). Requires write access to the memory.',
     {
-      loc: z.string().describe('Node loc path or full URN (e.g. architecture or hadronmemory.com:dev:architecture)'),
-      memoryId: z.string().optional().describe('Memory ID or URN. Omit to auto-detect from loc URN prefix, or uses the only writable memory.'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com:mmdata:review:sort-imports" or "urn:node:acme.com:mmdata:review:sort-imports". Both bare and prefixed forms accepted. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('Short description'),
@@ -766,22 +749,28 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       llmModel: z.string().optional().describe('LLM model used (e.g. claude-opus-4-6)'),
       aiAgent: z.string().optional().describe('AI agent tool used (e.g. claude-code, cursor)'),
       edges: z.array(z.object({
-        targetId: z.string().describe('Target node ID or loc path'),
+        targetUrn: z.string().describe('Target node fully-qualified URN'),
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
-    async ({ loc: rawLoc, memoryId: inputMemoryId, name, nodeType, description, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
-      // Resolve URN to loc + memoryId if a full URN was passed
-      const memoryIds = await getAccessibleMemoryIds(db, auth);
-      const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
-      const loc = resolved.loc;
-      // If URN resolution found a memory, use it. If not, fall back to
-      // the session's active memory. Explicit inputMemoryId wins.
-      let rawMemoryId = inputMemoryId ?? resolved.memoryId ?? undefined;
-      if (!rawMemoryId && activeMemoryUrn) {
-        const activeMem = await db.memory.findFirst({ where: { urn: activeMemoryUrn }, select: { id: true } });
-        if (activeMem) rawMemoryId = activeMem.id;
+    async ({ urn: rawUrn, name, nodeType, description, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+      // Spec 022: enforce qualification at the API boundary. Relative-form
+      // URNs (e.g., `review:sort-imports` without org+memory) reject here
+      // before any DB lookup runs.
+      try {
+        assertFullyQualifiedUrn(rawUrn, 'node');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        throw e;
       }
+
+      // Split into memory URN + loc and resolve the memory.
+      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const memory = await resolveMemoryByUrn(memoryUrn);
+      if (!memory) {
+        return textResult(`Memory not found: "${memoryUrn}".`);
+      }
+      const memoryId = memory.id;
 
       try {
         validateLoc(loc);
@@ -789,69 +778,7 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult((e as Error).message);
       }
 
-      let memoryId: string | null = null;
-
-      if (rawMemoryId) {
-        // Explicit memoryId provided — resolve by name or ID
-        memoryId = await resolveMemoryId(rawMemoryId);
-        if (!memoryId) {
-          return textResult(`Memory not found: "${rawMemoryId}". Use the memory name (e.g. "my-org.my-repo") or its ID.`);
-        }
-      } else {
-        // Infer memoryId
-        const access = await getMemoryAccess(db, auth);
-        const writableIds = [...access.entries()].filter(([, v]) => v === 'READ_WRITE').map(([k]) => k);
-
-        if (writableIds.length === 1) {
-          // Only one writable memory — use it
-          memoryId = writableIds[0];
-        } else if (writableIds.length > 1) {
-          // Multiple writable memories — find the right one by looking for parent nodes
-          const locParts = loc.split(':');
-          for (let i = locParts.length - 1; i >= 1; i--) {
-            const parentLoc = locParts.slice(0, i).join(':');
-            const parentNode = await db.node.findFirst({
-              where: { loc: parentLoc, memoryId: { in: writableIds } },
-              select: { memoryId: true },
-            });
-            if (parentNode) {
-              memoryId = parentNode.memoryId;
-              break;
-            }
-          }
-
-          // If no parent found, try edges
-          if (!memoryId && edges?.length) {
-            const edgeMemoryIds = new Set<string>();
-            for (const edge of edges) {
-              if (edge.targetId.includes(':')) {
-                const targetNode = await db.node.findFirst({ where: { loc: edge.targetId }, select: { memoryId: true } });
-                if (targetNode && writableIds.includes(targetNode.memoryId)) {
-                  edgeMemoryIds.add(targetNode.memoryId);
-                }
-              }
-            }
-            if (edgeMemoryIds.size === 1) {
-              memoryId = [...edgeMemoryIds][0];
-            }
-          }
-        }
-
-        if (!memoryId) {
-          const memories = await db.memory.findMany({
-            where: { id: { in: writableIds } },
-            select: { urn: true, name: true },
-          });
-          const list = memories.map((m) => `${m.name} (${m.urn})`).join(', ');
-          return textResult(
-            writableIds.length === 0
-              ? 'No writable memories available. Subscribe to a memory with READ_WRITE access.'
-              : `Multiple writable memories available: ${list}. Please specify memoryId using the memory URN.`
-          );
-        }
-      }
-
-      if (!(await canWriteToMemory(db, auth,memoryId))) {
+      if (!(await canWriteToMemory(db, auth, memoryId))) {
         return textResult('Write access denied for this memory.');
       }
 
@@ -859,9 +786,28 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // unresolvable target rolls back cleanly with no source-node
       // mutation (parallel to the GraphQL upsertNode resolver from
       // #106). Issue #107 review feedback.
+      //
+      // Spec 022: each edge target MUST be a fully-qualified URN (or an
+      // ID-shape value via spec 007 dispatch). Pre-validate so short-loc
+      // targets reject at the API boundary, before resolveEdgeRefs.
       let resolvedEdges: ResolvedEdge[] | null = null;
       if (edges) {
-        const r = await resolveEdgeRefs(edges, memoryId);
+        for (const edge of edges) {
+          try {
+            if (!isId(edge.targetUrn)) {
+              assertFullyQualifiedUrn(edge.targetUrn, 'node');
+            }
+          } catch (e) {
+            if (e instanceof UrnNotQualifiedError) {
+              return textResult(`Edge target: ${e.message}`);
+            }
+            throw e;
+          }
+        }
+        const r = await resolveEdgeRefs(
+          edges.map((e) => ({ targetId: e.targetUrn, label: e.label })),
+          memoryId,
+        );
         if ('error' in r) return textResult(r.error);
         resolvedEdges = r.resolved;
       }
@@ -962,9 +908,9 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-update-node',
-    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved.',
+    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (org:memory:loc).',
     {
-      loc: z.string().describe('Node loc path or full URN'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com:mmdata:review:sort-imports"'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('New short description'),
@@ -976,35 +922,60 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       llmModel: z.string().optional().describe('LLM model used'),
       aiAgent: z.string().optional().describe('AI agent tool used'),
       edges: z.array(z.object({
-        targetId: z.string().describe('Target node ID or loc path'),
+        targetUrn: z.string().describe('Target node fully-qualified URN'),
         label: z.string().describe('Relationship label'),
       })).optional().describe('Replace outgoing edges'),
       reason: z.string().optional().describe('Why this change was made (stored in version history)'),
     },
-    async ({ loc: rawLoc, name, nodeType, description, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
-      // Resolve URN to loc if needed
-      const memoryIds = await getAccessibleMemoryIds(db, auth);
-      const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
-      const loc = resolved.loc;
-      const where: Record<string, unknown> = { loc };
-      if (resolved.memoryId) where.memoryId = resolved.memoryId;
-      else if (memoryIds) where.memoryId = { in: memoryIds };
-
-      const existing = await db.node.findFirst({ where });
-      if (!existing) {
-        return textResult(`Node not found: "${loc}"`);
+    async ({ urn: rawUrn, name, nodeType, description, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+      // Spec 022: qualification at the API boundary.
+      try {
+        assertFullyQualifiedUrn(rawUrn, 'node');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        throw e;
       }
 
-      if (!(await canWriteToMemory(db, auth,existing.memoryId))) {
+      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const memory = await resolveMemoryByUrn(memoryUrn);
+      if (!memory) {
+        return textResult(`Memory not found: "${memoryUrn}".`);
+      }
+
+      const existing = await db.node.findUnique({
+        where: { loc_memoryId: { loc, memoryId: memory.id } },
+      });
+      if (!existing) {
+        return textResult(`Node not found: "${rawUrn}"`);
+      }
+
+      if (!(await canWriteToMemory(db, auth, existing.memoryId))) {
         return textResult('Write access denied for this memory.');
       }
 
       // Resolve edge targets BEFORE the version snapshot + node update
       // so an unresolvable target rolls back cleanly with no source-
       // node mutation. Issue #107 review feedback.
+      //
+      // Spec 022: pre-validate edge URN qualification (matches h-add-node).
       let resolvedEdges: ResolvedEdge[] | null = null;
       if (edges !== undefined) {
-        const r = await resolveEdgeRefs(edges, existing.memoryId);
+        for (const edge of edges) {
+          try {
+            if (!isId(edge.targetUrn)) {
+              assertFullyQualifiedUrn(edge.targetUrn, 'node');
+            }
+          } catch (e) {
+            if (e instanceof UrnNotQualifiedError) {
+              return textResult(`Edge target: ${e.message}`);
+            }
+            throw e;
+          }
+        }
+        const r = await resolveEdgeRefs(
+          edges.map((e) => ({ targetId: e.targetUrn, label: e.label })),
+          existing.memoryId,
+        );
         if ('error' in r) return textResult(r.error);
         resolvedEdges = r.resolved;
       }
@@ -1092,18 +1063,37 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-move-node',
-    'Move or rename a node, optionally across memories. The node keeps its stable ID so all edge references remain valid.',
+    'Move or rename a node, optionally across memories. The node keeps its stable ID so all edge references remain valid. Both URNs MUST be fully qualified (org:memory:loc).',
     {
-      from: z.string().describe('Current node loc path or full URN'),
-      to: z.string().describe('New node loc path or full URN'),
-      targetMemoryUrn: z.string().optional().describe('Target memory URN for cross-memory moves'),
+      urn: z.string().describe('Current node fully-qualified URN, e.g. "acme.com:mmdata:services:db-helper"'),
+      targetUrn: z.string().describe('Destination node fully-qualified URN. Different memory in the target URN performs a cross-memory move.'),
     },
-    async ({ from: rawFrom, to: rawTo, targetMemoryUrn }) => {
-      const memoryIds = await getAccessibleMemoryIds(db, auth);
-      const resolvedFrom = await resolveLocFromUrn(rawFrom, memoryIds);
-      const resolvedTo = await resolveLocFromUrn(rawTo, memoryIds);
-      const fromLoc = resolvedFrom.loc;
-      const toLoc = resolvedTo.loc;
+    async ({ urn: rawFrom, targetUrn: rawTo }) => {
+      // Spec 022: qualification at the API boundary for both source and target.
+      try {
+        assertFullyQualifiedUrn(rawFrom, 'node');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(`Source: ${e.message}`);
+        throw e;
+      }
+      try {
+        assertFullyQualifiedUrn(rawTo, 'node');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(`Target: ${e.message}`);
+        throw e;
+      }
+
+      const { memoryUrn: fromMemoryUrn, loc: fromLoc } = splitNodeUrn(rawFrom);
+      const { memoryUrn: toMemoryUrn, loc: toLoc } = splitNodeUrn(rawTo);
+
+      const fromMemory = await resolveMemoryByUrn(fromMemoryUrn);
+      if (!fromMemory) {
+        return textResult(`Source memory not found: "${fromMemoryUrn}".`);
+      }
+      const toMemory = await resolveMemoryByUrn(toMemoryUrn);
+      if (!toMemory) {
+        return textResult(`Target memory not found: "${toMemoryUrn}".`);
+      }
 
       try {
         validateLoc(toLoc);
@@ -1111,44 +1101,27 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
         return textResult((e as Error).message);
       }
 
-      // Find the source node
-      const moveWhere: Record<string, unknown> = { loc: fromLoc };
-      if (resolvedFrom.memoryId) moveWhere.memoryId = resolvedFrom.memoryId;
-      else if (memoryIds) moveWhere.memoryId = { in: memoryIds };
-      const candidates = await db.node.findMany({ where: moveWhere });
-      const node = candidates.find((n) => !n.isLink) ?? candidates[0] ?? null;
-      if (!node) return textResult(`Node "${fromLoc}" not found.`);
+      const node = await db.node.findUnique({
+        where: { loc_memoryId: { loc: fromLoc, memoryId: fromMemory.id } },
+      });
+      if (!node) return textResult(`Node "${rawFrom}" not found.`);
 
-      if (!(await canWriteToMemory(db, auth,node.memoryId))) {
+      if (!(await canWriteToMemory(db, auth, fromMemory.id))) {
         return textResult('Write access denied for source memory.');
       }
-
-      // Resolve target memory for cross-memory moves
-      let destMemoryId = node.memoryId;
-      if (targetMemoryUrn) {
-        const targetMem = await db.memory.findFirst({ where: { urn: targetMemoryUrn, deletedAt: null } });
-        if (!targetMem) return textResult(`Target memory "${targetMemoryUrn}" not found.`);
-        if (!(await canWriteToMemory(db, auth,targetMem.id))) {
-          return textResult('Write access denied for target memory.');
-        }
-        destMemoryId = targetMem.id;
-      } else if (resolvedTo.memoryId && resolvedTo.memoryId !== node.memoryId) {
-        // Target URN resolved to a different memory
-        if (!(await canWriteToMemory(db, auth,resolvedTo.memoryId))) {
-          return textResult('Write access denied for target memory.');
-        }
-        destMemoryId = resolvedTo.memoryId;
+      if (toMemory.id !== fromMemory.id && !(await canWriteToMemory(db, auth, toMemory.id))) {
+        return textResult('Write access denied for target memory.');
       }
 
       const newName = toLoc.split(':').pop()!;
 
       await db.node.update({
-        where: { loc_memoryId: { loc: fromLoc, memoryId: node.memoryId } },
-        data: { loc: toLoc, name: newName, memoryId: destMemoryId },
+        where: { loc_memoryId: { loc: fromLoc, memoryId: fromMemory.id } },
+        data: { loc: toLoc, name: newName, memoryId: toMemory.id },
       });
 
-      const fromUrn = await nodeUrn(fromLoc, node.memoryId);
-      const toUrn = await nodeUrn(toLoc, destMemoryId);
+      const fromUrn = await nodeUrn(fromLoc, fromMemory.id);
+      const toUrn = await nodeUrn(toLoc, toMemory.id);
       return textResult(`Moved "${fromUrn}" → "${toUrn}"`);
     },
   );
@@ -1157,24 +1130,31 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-run-action',
-    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content.',
+    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (org:memory:loc).',
     {
-      loc: z.string().describe('Node loc path or full URN'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com:mmdata:actions:review"'),
       args: z.record(z.string(), z.string()).optional().describe('Action arguments as key-value pairs'),
     },
-    async ({ loc: rawLoc, args }) => {
-      const memoryIds = await getAccessibleMemoryIds(db, auth);
-      const resolved = await resolveLocFromUrn(rawLoc, memoryIds);
-      const loc = resolved.loc;
-      const actionWhere: Record<string, unknown> = { loc };
-      if (resolved.memoryId) actionWhere.memoryId = resolved.memoryId;
-      else if (memoryIds) actionWhere.memoryId = { in: memoryIds };
-      const actionCandidates = await db.node.findMany({
-        where: actionWhere,
+    async ({ urn: rawUrn, args }) => {
+      // Spec 022: qualification at the API boundary.
+      try {
+        assertFullyQualifiedUrn(rawUrn, 'node');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        throw e;
+      }
+
+      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const memory = await resolveMemoryByUrn(memoryUrn);
+      if (!memory) {
+        return textResult(`Memory not found: "${memoryUrn}".`);
+      }
+
+      const node = await db.node.findUnique({
+        where: { loc_memoryId: { loc, memoryId: memory.id } },
         include: { outgoingEdges: { include: { target: true } } },
       });
-      const node = actionCandidates.find((n) => !n.isLink) ?? actionCandidates[0] ?? null;
-      if (!node) return textResult(`Node "${loc}" not found.`);
+      if (!node) return textResult(`Node "${rawUrn}" not found.`);
 
       let actionContent = node.content || '';
 

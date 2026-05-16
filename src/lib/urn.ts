@@ -192,6 +192,46 @@ export class UrnNotQualifiedError extends Error {
 }
 
 /**
+ * Split a fully-qualified node URN into its memory URN and the loc within
+ * that memory. Accepts both bare and `urn:<type>:`-prefixed inputs, and
+ * both canonical `::` and legacy `:` mixed-grammar forms.
+ *
+ * **Precondition**: `assertFullyQualifiedUrn(input, 'node')` MUST have
+ * succeeded for the input — this helper does NOT re-check qualification.
+ * Inputs with fewer than 3 hierarchy segments will produce a degenerate
+ * `loc === ''`, which downstream `validateLoc` will reject; callers
+ * SHOULD call `assertFullyQualifiedUrn` first.
+ *
+ * The returned `memoryUrn` is the bare form (`<org>:<memorySlug>`) — the
+ * shape stored in `Memory.urn` — so it can be passed directly to
+ * `resolveMemoryRef` / `findFirst({urn})`.
+ *
+ * Spec: 022 / contracts/signature-collapse.md.
+ */
+export function splitNodeUrn(input: string): { memoryUrn: string; loc: string } {
+  // Strip `urn:<type>:` prefix if present.
+  const prefixMatch = input.match(/^urn:[a-z][a-z0-9-]*:(.+)$/);
+  const path = prefixMatch ? prefixMatch[1] : input;
+
+  // Canonical form: hierarchy separated by `::`. First segment is org,
+  // second is memorySlug, the rest is the loc path. Within the loc, `:`
+  // atoms preserve their meaning.
+  if (path.includes('::')) {
+    const segments = path.split('::');
+    const memoryUrn = `${segments[0]}:${segments[1]}`;
+    const loc = segments.slice(2).join(':');
+    return { memoryUrn, loc };
+  }
+
+  // Bare / legacy form: split on `:` atoms. The first two atoms form the
+  // memory URN; everything after is the loc.
+  const atoms = path.split(':');
+  const memoryUrn = `${atoms[0]}:${atoms[1]}`;
+  const loc = atoms.slice(2).join(':');
+  return { memoryUrn, loc };
+}
+
+/**
  * Reject inputs that are intended as URNs but lack the fully-qualified shape
  * for `expectedType`. Throws `UrnNotQualifiedError` on failure.
  *
