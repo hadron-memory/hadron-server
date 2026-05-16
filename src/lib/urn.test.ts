@@ -586,6 +586,30 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
     ).toThrow(/<author-org>::<slug>/);
   });
 
+  it('throws when appUrn has more than 2 segments (multi-segment inputs rejected)', () => {
+    // Codex review: the prior helper version handled multi-segment
+    // inputs by emitting `<org>::<sub>::<slug>` at the app slot, which
+    // didn't match the FR-009 single-segment contract in the
+    // installedAgentUrn GraphQL docstring. The helper now rejects
+    // multi-segment inputs explicitly rather than silently emitting a
+    // non-canonical URN.
+    expect(() =>
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org::sub::coding-app',
+        'urn:agent:hadronmemory.com::coding-agent',
+      ),
+    ).toThrow(/2 segments/);
+  });
+
+  it('throws when agentUrn has more than 2 segments', () => {
+    expect(() =>
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org::coding-app',
+        'urn:agent:hadronmemory.com::sub::coding-agent',
+      ),
+    ).toThrow(/2 segments/);
+  });
+
   it('output passes parseUrn (spec-021-parseable)', () => {
     const result = composeInstalledAgentUrn(
       'urn:app:micromentor.org::coding-app',

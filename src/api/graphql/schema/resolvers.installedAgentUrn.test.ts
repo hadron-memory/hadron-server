@@ -76,7 +76,18 @@ describe('App.installedAgentUrn — spec 021 US1', () => {
     expect(result).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
   });
 
-  it('two same-slug agents from different authors → distinct install URNs', async () => {
+  it('two same-slug agents from different authors → distinct install URNs (author-org is the disambiguator)', async () => {
+    // To prove the author-org is the disambiguating segment, we hold
+    // EVERY OTHER variable fixed: same installing org, same app slug,
+    // same agent slug. Only the author-org of the agent differs.
+    //
+    // App.agentId is mutable (the data model permits re-pointing an
+    // App at a different Agent), so we mutate the App.agentId between
+    // two `installedAgentUrn` queries — if the resolver weren't
+    // incorporating author-org, both queries would return the same
+    // URN. The test would have falsely passed Codex's earlier review
+    // because the two prior fixtures had differing app slugs that
+    // masked the comparison.
     const hadronOrg = await makeOrg('hadronmemory.com');
     const competitorOrg = await makeOrg('competitor.com');
     const micromentorOrg = await makeOrg('micromentor.org');
@@ -88,39 +99,42 @@ describe('App.installedAgentUrn — spec 021 US1', () => {
       'coding-agent',
     );
 
-    const appA = await makeApp(
+    const app = await makeApp(
       micromentorOrg.id,
       micromentorOrg.urn,
       'coding-app',
       hadronAgent.id,
     );
-    // Slug reuse across two Apps in the same org doesn't work today
-    // (the App.urn partial unique still rejects active duplicates), so
-    // use a distinct second app slug for the competitor install.
-    const appB = await makeApp(
-      micromentorOrg.id,
-      micromentorOrg.urn,
-      'coding-app-alt',
-      competitorAgent.id,
-    );
 
-    const urlA = await (resolvers.App as Record<string, Function>).installedAgentUrn(
-      appA,
-      {},
-      { db } as unknown as Context,
-    );
-    const urlB = await (resolvers.App as Record<string, Function>).installedAgentUrn(
-      appB,
+    const urlWithHadron = await (resolvers.App as Record<string, Function>).installedAgentUrn(
+      app,
       {},
       { db } as unknown as Context,
     );
 
-    expect(urlA).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
-    expect(urlB).toBe(
-      'urn:agent:micromentor.org::coding-app-alt::competitor.com:coding-agent',
+    // Re-point the App to competitor.com's same-slug agent. Same App
+    // row, same App.urn, same agent slug — only the author-org differs.
+    const updatedApp = await db.app.update({
+      where: { id: app.id },
+      data: { agentId: competitorAgent.id },
+    });
+
+    const urlWithCompetitor = await (
+      resolvers.App as Record<string, Function>
+    ).installedAgentUrn(updatedApp, {}, { db } as unknown as Context);
+
+    expect(urlWithHadron).toBe(
+      'urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
     );
-    // The author-org segment is what distinguishes them.
-    expect(urlA).not.toBe(urlB);
+    expect(urlWithCompetitor).toBe(
+      'urn:agent:micromentor.org::coding-app::competitor.com:coding-agent',
+    );
+    // The URNs differ ONLY at the author-org segment — the rest is
+    // byte-equal between the two outputs.
+    expect(urlWithHadron).not.toBe(urlWithCompetitor);
+    expect(urlWithHadron.replace('hadronmemory.com', '<author>')).toBe(
+      urlWithCompetitor.replace('competitor.com', '<author>'),
+    );
   });
 
   it('install-by-self (installing org == author org) collapses via D11 cat 1', async () => {

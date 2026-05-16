@@ -675,7 +675,14 @@ export function toParserCanonical(input: string): string {
 /**
  * Compose the R2 canonical install URN for an Agent installed in an App.
  *
- * Inputs are tolerant of grammar shape during the spec-021 migration:
+ * Inputs MUST be 2-segment URNs (org + slug each) — the only shape the
+ * current data model produces. Multi-segment inputs are rejected
+ * deliberately: the FR-009 install form expects single-segment app and
+ * agent slots, and tolerating multi-segment inputs would silently emit
+ * a non-canonical URN whose shape doesn't match the contract in
+ * GraphQL's `App.installedAgentUrn` docstring.
+ *
+ * Tolerant of grammar shape during the spec-021 migration window:
  *   - `appUrn` may be `urn:app:<org>::<slug>` (spec-021 canonical),
  *     `urn:app:<org>:<slug>` (legacy with `urn:app:` prefix), or
  *     `<org>:<slug>` (legacy bare slug-path).
@@ -688,7 +695,7 @@ export function toParserCanonical(input: string): string {
  * installing org equals the author org).
  *
  * Throws if either input is empty, has the wrong type prefix, or
- * doesn't have at least one slug atom after the org segment.
+ * doesn't have exactly 2 segments (one org, one slug).
  */
 export function composeInstalledAgentUrn(appUrn: string, agentUrn: string): string {
   const appPath = stripPrefixOrThrow(appUrn, 'app');
@@ -697,37 +704,25 @@ export function composeInstalledAgentUrn(appUrn: string, agentUrn: string): stri
   const appSegments = splitMixedGrammar(appPath);
   const agentSegments = splitMixedGrammar(agentPath);
 
-  if (appSegments.length < 2) {
+  if (appSegments.length !== 2) {
     throw new Error(
-      `composeInstalledAgentUrn: appUrn must have at least <org>::<slug>; got "${appUrn}"`,
+      `composeInstalledAgentUrn: appUrn must have exactly <org>::<slug> shape (2 segments); got "${appUrn}" (${appSegments.length} segments)`,
     );
   }
-  if (agentSegments.length < 2) {
+  if (agentSegments.length !== 2) {
     throw new Error(
-      `composeInstalledAgentUrn: agentUrn must have at least <author-org>::<slug>; got "${agentUrn}"`,
+      `composeInstalledAgentUrn: agentUrn must have exactly <author-org>::<slug> shape (2 segments); got "${agentUrn}" (${agentSegments.length} segments)`,
     );
   }
 
-  // The R2 shape: installing-org / app-slug-path / author-org:agent-slug-leaf.
-  // For multi-segment apps or agents (rare today, but supported), the
-  // intermediate segments are preserved as-is and joined by `::`. The
-  // agent's author-org + final slug are joined into a single segment by
-  // `:` (R2's "author URN path appears verbatim as a sub-path" requires
-  // the author identity to be a single-segment <org>:<slug> tail).
-  const installingOrg = appSegments[0];
-  const appBody = appSegments.slice(1).join('::');
-  const authorOrg = agentSegments[0];
-  const agentSlug = agentSegments.slice(1).join('::');
+  // R2 shape per FR-009: installing-org / app-slug / author-org:agent-slug.
+  // The author-org and agent-slug are joined into a SINGLE path-segment
+  // by `:` so the canonical author URN's path (`<author-org>:<agent-slug>`)
+  // appears verbatim as a sub-path of the installed URN.
+  const [installingOrg, appSlug] = appSegments;
+  const [authorOrg, agentSlug] = agentSegments;
 
-  // If the agent path was already in <org>:<slug> single-segment form
-  // (one `:`-atom after the org), join with `:`. Otherwise it's a
-  // multi-segment agent (e.g., installed-agent URN passed in) — join
-  // with `::` to preserve nesting.
-  const agentTail = agentSegments.length === 2 && !agentSegments[1].includes(':')
-    ? `${authorOrg}:${agentSlug}`
-    : `${authorOrg}::${agentSlug}`;
-
-  const raw = `urn:agent:${installingOrg}::${appBody}::${agentTail}`;
+  const raw = `urn:agent:${installingOrg}::${appSlug}::${authorOrg}:${agentSlug}`;
 
   // Run the parser to apply D11 cats 1 + 4 canonicalization. If the
   // installing org equals the author org (install-by-self), cat 1
