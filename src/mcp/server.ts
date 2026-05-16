@@ -486,26 +486,32 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-read-node',
-    'Read a node by its loc path (e.g. architecture) or full URN (e.g. hadronmemory.com:dev:architecture)',
-    { loc: z.string().describe('Node loc path or full URN') },
-    async ({ loc: rawLoc }) => {
-      const memoryIds = await getAccessibleMemoryIds(db, auth);
-      const { loc, memoryId } = await resolveLocFromUrn(rawLoc, memoryIds);
-      const where: Record<string, unknown> = { loc };
-      if (memoryId) where.memoryId = memoryId;
-      else if (memoryIds) where.memoryId = { in: memoryIds };
+    'Read a node by its fully-qualified URN. The URN MUST be fully qualified (org:memory:loc).',
+    { urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com:mmdata:architecture" or "urn:node:acme.com:mmdata:architecture"') },
+    async ({ urn: rawUrn }) => {
+      // Spec 022: qualification at the API boundary.
+      try {
+        assertFullyQualifiedUrn(rawUrn, 'node');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        throw e;
+      }
 
-      const candidates = await db.node.findMany({
-        where,
+      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const memory = await resolveMemoryByUrn(memoryUrn);
+      if (!memory) {
+        return textResult(`Memory not found: "${memoryUrn}".`);
+      }
+
+      const node = await db.node.findUnique({
+        where: { loc_memoryId: { loc, memoryId: memory.id } },
         include: {
           outgoingEdges: { include: { target: true } },
           incomingEdges: { include: { source: true } },
         },
       });
-      // Prefer canonical (isLink=false) over link nodes
-      const node = candidates.find((n) => !n.isLink) ?? candidates[0] ?? null;
       if (!node) {
-        return textResult(`Node "${loc}" not found.`);
+        return textResult(`Node "${rawUrn}" not found.`);
       }
 
       // Record usage event (fire-and-forget)
@@ -552,23 +558,39 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-read-next-node',
-    'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted.',
+    'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted. The URN MUST be fully qualified (org:memory:loc).',
     {
-      parent: z.string().describe('Parent node loc path or full URN'),
-      current: z.string().optional().describe('Current child node loc path or full URN'),
+      parent: z.string().describe('Fully-qualified parent node URN, e.g. "acme.com:mmdata:sections"'),
+      current: z.string().optional().describe('Fully-qualified current child node URN (must be in the same memory as `parent`)'),
     },
     async ({ parent: rawParent, current: rawCurrent }) => {
-      const memoryIds = await getAccessibleMemoryIds(db, auth);
-      const resolvedParent = await resolveLocFromUrn(rawParent, memoryIds);
-      const parentLoc = resolvedParent.loc;
-      const prefix = parentLoc + ':';
-      const where: Record<string, unknown> = {
-        loc: { startsWith: prefix },
-      };
-      if (resolvedParent.memoryId) where.memoryId = resolvedParent.memoryId;
-      else if (memoryIds) where.memoryId = { in: memoryIds };
+      // Spec 022: qualification at the API boundary.
+      try {
+        assertFullyQualifiedUrn(rawParent, 'node');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(`Parent: ${e.message}`);
+        throw e;
+      }
+      if (rawCurrent) {
+        try {
+          assertFullyQualifiedUrn(rawCurrent, 'node');
+        } catch (e) {
+          if (e instanceof UrnNotQualifiedError) return textResult(`Current: ${e.message}`);
+          throw e;
+        }
+      }
 
-      const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
+      const { memoryUrn, loc: parentLoc } = splitNodeUrn(rawParent);
+      const memory = await resolveMemoryByUrn(memoryUrn);
+      if (!memory) {
+        return textResult(`Memory not found: "${memoryUrn}".`);
+      }
+      const prefix = parentLoc + ':';
+
+      const allNodes = await db.node.findMany({
+        where: { memoryId: memory.id, loc: { startsWith: prefix } },
+        orderBy: { loc: 'asc' },
+      });
       // Direct children only (no further colons after prefix)
       const children = allNodes
         .filter((n) => !n.loc.slice(prefix.length).includes(':'))
@@ -588,8 +610,10 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       if (!rawCurrent) {
         next = children[0];
       } else {
-        const resolvedCurrent = await resolveLocFromUrn(rawCurrent, memoryIds);
-        const currentLoc = resolvedCurrent.loc;
+        const { memoryUrn: currentMemoryUrn, loc: currentLoc } = splitNodeUrn(rawCurrent);
+        if (currentMemoryUrn !== memoryUrn) {
+          return textResult(`Current URN's memory (${currentMemoryUrn}) doesn't match parent's memory (${memoryUrn}).`);
+        }
         const idx = children.findIndex((n) => n.loc === currentLoc);
         if (idx === -1) {
           return textResult(`Current node "${currentLoc}" not found among children of "${parentLoc}".`);
@@ -1282,15 +1306,29 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-validate',
-    'Check the memory for broken edge references and nodes with missing content',
-    {},
-    async () => {
-      const memoryIds = await getAccessibleMemoryIds(db, auth);
-      const where: Record<string, unknown> = {};
-      if (memoryIds) where.memoryId = { in: memoryIds };
+    'Check a memory for broken edge references and nodes with missing content. The memory URN MUST be fully qualified.',
+    {
+      memoryUrn: z.string().describe('Fully-qualified memory URN, e.g. "acme.com:mmdata"'),
+    },
+    async ({ memoryUrn }) => {
+      // Spec 022: qualification at the API boundary.
+      try {
+        assertFullyQualifiedUrn(memoryUrn, 'memory');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        throw e;
+      }
+
+      const memory = await resolveMemoryByUrn(memoryUrn);
+      if (!memory) {
+        return textResult(`Memory not found: "${memoryUrn}".`);
+      }
+      if (!(await canReadMemory(db, auth, memory.id))) {
+        return textResult('Access denied for this memory.');
+      }
 
       const nodes = await db.node.findMany({
-        where,
+        where: { memoryId: memory.id },
         include: { outgoingEdges: true },
       });
       const nodeIds = new Set(nodes.map((n) => n.id));
@@ -1321,17 +1359,27 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 
   server.tool(
     'h-sync-graph',
-    'Trigger an on-demand sync for a memory from its GitHub source.',
+    'Trigger an on-demand sync for a memory from its GitHub source. The memory URN MUST be fully qualified.',
     {
-      memoryId: z.string().describe('ID of the memory to sync'),
+      memoryUrn: z.string().describe('Fully-qualified memory URN, e.g. "acme.com:mmdata"'),
     },
-    async ({ memoryId }) => {
-      if (!(await canWriteToMemory(db, auth,memoryId))) {
+    async ({ memoryUrn }) => {
+      // Spec 022: qualification at the API boundary.
+      try {
+        assertFullyQualifiedUrn(memoryUrn, 'memory');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        throw e;
+      }
+
+      const memoryRef = await resolveMemoryByUrn(memoryUrn);
+      if (!memoryRef) return textResult(`Memory not found: "${memoryUrn}".`);
+      if (!(await canWriteToMemory(db, auth, memoryRef.id))) {
         return textResult('Access denied.');
       }
 
       const memory = await db.memory.findUnique({
-        where: { id: memoryId },
+        where: { id: memoryRef.id },
         include: { organization: true },
       });
       if (!memory) return textResult('Memory not found.');

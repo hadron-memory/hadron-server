@@ -608,8 +608,8 @@ export const typeDefs = `#graphql
     """
     Memory reference. Accepts the entity's ID (CUID / 32-char hex) or its
     URN (per spec 007 ID-or-URN dispatch). URN inputs MUST be fully
-    qualified (`<org>:<memory>`) per spec 022 — relative-form URNs are
-    rejected with `extensions.code: 'URN_NOT_QUALIFIED'`.
+    qualified (org:memory) per spec 022 — relative-form URNs are
+    rejected with extensions.code = URN_NOT_QUALIFIED.
     """
     memoryId: String!
     nodeType: String
@@ -721,8 +721,8 @@ export const typeDefs = `#graphql
   input BeginAssetUploadV2Input {
     """
     Memory reference. Accepts ID (CUID / 32-char hex) or URN (per spec 007).
-    URN inputs MUST be fully qualified (`<org>:<memory>`) per spec 022 —
-    relative-form URNs are rejected with `extensions.code: 'URN_NOT_QUALIFIED'`.
+    URN inputs MUST be fully qualified (org:memory) per spec 022 —
+    relative-form URNs are rejected with extensions.code = URN_NOT_QUALIFIED.
     """
     memoryId:        ID!
     filename:        String!
@@ -755,8 +755,8 @@ export const typeDefs = `#graphql
   input SetAgentAssetUploadEnabledInput {
     """
     Agent reference. Accepts ID (CUID / 32-char hex) or URN (per spec 007).
-    URN inputs MUST be fully qualified (`<org>:<agentSlug>`) per spec 022 —
-    relative-form URNs are rejected with `extensions.code: 'URN_NOT_QUALIFIED'`.
+    URN inputs MUST be fully qualified (org:agentSlug) per spec 022 —
+    relative-form URNs are rejected with extensions.code = URN_NOT_QUALIFIED.
     """
     agentUrn: String!
     enabled:  Boolean!
