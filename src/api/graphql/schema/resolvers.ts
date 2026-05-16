@@ -5035,8 +5035,17 @@ export const resolvers = {
       await ensureAgentOrgGrant(ctx.db, resolvedOrgId, resolvedAgentId);
 
       // Hard-delete a soft-deleted collision so the URN can be reused
-      // (same pattern as createAgent/createMemory)
-      const existing = await ctx.db.app.findUnique({ where: { urn: appUrn } });
+      // (same pattern as createAgent/createMemory).
+      //
+      // Spec 021 FR-027: App.urn is no longer globally unique — the
+      // partial unique index `apps_urn_active_uniq` only enforces
+      // uniqueness on rows where `uninstalled_at IS NULL`. Resolve the
+      // active row via `findFirst` with the active-row filter so
+      // uninstalled history rows sharing the same URN don't surface
+      // here.
+      const existing = await ctx.db.app.findFirst({
+        where: { urn: appUrn, uninstalledAt: null },
+      });
       if (existing) {
         if (existing.deletedAt) {
           await ctx.db.app.delete({ where: { id: existing.id } });
@@ -5127,7 +5136,11 @@ export const resolvers = {
           // If the URN happens to collide with a soft-deleted App, hard-delete
           // it (same pattern as the parent App branch above). For non-deleted
           // collisions, append the imported-agent id as a disambiguator.
-          const depCollision = await ctx.db.app.findUnique({ where: { urn: depUrn } });
+          // Spec 021 FR-027: active-row resolution (uninstalled history rows
+          // sharing this URN don't count as a collision).
+          const depCollision = await ctx.db.app.findFirst({
+            where: { urn: depUrn, uninstalledAt: null },
+          });
           if (depCollision) {
             if (depCollision.deletedAt) {
               await ctx.db.app.delete({ where: { id: depCollision.id } });
