@@ -29,7 +29,12 @@ import {
   getMemoryEncryptionInfo,
   type MemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
-import { parseUrnInput, validateUrnType, formatUrn } from '../../../lib/urn.js';
+import {
+  parseUrnInput,
+  validateUrnType,
+  formatUrn,
+  composeInstalledAgentUrn,
+} from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
 import { NodeLocConflictError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { compileTemplate } from '../../../lib/template.js';
@@ -792,6 +797,30 @@ export const resolvers = {
     organization: (a: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
       (a as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: a.organizationId } }),
+    // Spec 021 US1: R2 canonical install URN combining App + Agent URNs.
+    // Returns null when no agent is attached (008 orphan apps; pre-009
+    // back-compat). Field-resolves the agent's urn from the DB only when
+    // it isn't already eager-loaded via APP_INCLUDE / ORG_INCLUDE.
+    installedAgentUrn: async (
+      a: { urn: string; agentId?: string | null; agent?: unknown },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      let agentUrn: string | null = null;
+      if (a.agent && typeof a.agent === 'object' && a.agent !== null) {
+        const cached = (a.agent as { urn?: string }).urn;
+        if (typeof cached === 'string') agentUrn = cached;
+      }
+      if (!agentUrn && a.agentId) {
+        const fetched = await ctx.db.agent.findUnique({
+          where: { id: a.agentId },
+          select: { urn: true },
+        });
+        agentUrn = fetched?.urn ?? null;
+      }
+      if (!agentUrn) return null;
+      return composeInstalledAgentUrn(a.urn, agentUrn);
+    },
     // 008-agent-installation: App.agent is the canonical resolver. The
     // deprecated App.agents (plural) synthesizes a single-element array
     // for source-compat with portal callers that haven't migrated yet.

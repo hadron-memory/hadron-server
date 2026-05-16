@@ -6,6 +6,7 @@ import {
   parseUrnInput, formatUrn, validateUrnType,
   parseUrn, toParserCanonical, isParserCanonical,
   validateUserSlug, parseFor, UrnParseError,
+  composeInstalledAgentUrn,
   type AliasCategory,
 } from './urn.js';
 
@@ -462,6 +463,170 @@ describe('parseUrn — type-markers are NOT stripped from the org segment (index
     expect(() => parseUrn('urn:agent:agent:micromentor.org::coding-agent')).toThrow(
       UrnParseError,
     );
+  });
+});
+
+// =====================================================================
+// Spec 021 US1 — install URN provenance (composeInstalledAgentUrn)
+//
+// The helper produces the R2 canonical install URN per FR-008 / FR-009:
+//   urn:agent:<installing-org>::<app-slug>::<author-org>:<agent-slug>
+//
+// Two orgs installing same-slug agents from different authors produce
+// distinct URNs that differ at the author-org segment. Install-by-self
+// (installing org equals author org) collapses via D11 cat 1.
+// =====================================================================
+
+describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
+  it('composes the canonical R2 install URN with `urn:` prefixes on both inputs', () => {
+    expect(
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org::coding-app',
+        'urn:agent:hadronmemory.com::coding-agent',
+      ),
+    ).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+  });
+
+  it('two different authors with same agent slug → distinct install URNs', () => {
+    const a = composeInstalledAgentUrn(
+      'urn:app:micromentor.org::coding-app',
+      'urn:agent:hadronmemory.com::coding-agent',
+    );
+    const b = composeInstalledAgentUrn(
+      'urn:app:micromentor.org::coding-app',
+      'urn:agent:competitor.com::coding-agent',
+    );
+    expect(a).not.toBe(b);
+    expect(a).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+    expect(b).toBe('urn:agent:micromentor.org::coding-app::competitor.com:coding-agent');
+  });
+
+  it('install-by-self (installing org == author org) collapses via D11 cat 1', () => {
+    expect(
+      composeInstalledAgentUrn(
+        'urn:app:hadronmemory.com::coding-app',
+        'urn:agent:hadronmemory.com::coding-agent',
+      ),
+    ).toBe('urn:agent:hadronmemory.com::coding-app::coding-agent');
+  });
+
+  it('accepts legacy single-`:` shapes (transitional during migration)', () => {
+    // Pre-021 stored urns: `<org>:<slug>` without `urn:app:`/`urn:agent:` prefix.
+    expect(
+      composeInstalledAgentUrn(
+        'micromentor.org:coding-app',
+        'hadronmemory.com:coding-agent',
+      ),
+    ).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+  });
+
+  it('accepts mixed grammar (legacy app, spec-021 agent)', () => {
+    expect(
+      composeInstalledAgentUrn(
+        'micromentor.org:coding-app',
+        'urn:agent:hadronmemory.com::coding-agent',
+      ),
+    ).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+  });
+
+  it('accepts mixed grammar (spec-021 app, legacy agent)', () => {
+    expect(
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org::coding-app',
+        'hadronmemory.com:coding-agent',
+      ),
+    ).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+  });
+
+  it('throws on an empty appUrn', () => {
+    expect(() =>
+      composeInstalledAgentUrn('', 'urn:agent:hadronmemory.com::coding-agent'),
+    ).toThrow();
+  });
+
+  it('throws on an empty agentUrn', () => {
+    expect(() =>
+      composeInstalledAgentUrn('urn:app:micromentor.org::coding-app', ''),
+    ).toThrow();
+  });
+
+  it('throws on a wrong-type prefix on appUrn (security: no silent coercion)', () => {
+    expect(() =>
+      composeInstalledAgentUrn(
+        'urn:agent:micromentor.org::coding-app',
+        'urn:agent:hadronmemory.com::coding-agent',
+      ),
+    ).toThrow(/urn:app/);
+  });
+
+  it('throws on a wrong-type prefix on agentUrn', () => {
+    expect(() =>
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org::coding-app',
+        'urn:memory:hadronmemory.com::coding-agent',
+      ),
+    ).toThrow(/urn:agent/);
+  });
+
+  it('throws when appUrn has only an org segment (no app slug)', () => {
+    expect(() =>
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org',
+        'urn:agent:hadronmemory.com::coding-agent',
+      ),
+    ).toThrow(/<org>::<slug>/);
+  });
+
+  it('throws when agentUrn has only an org segment (no agent slug)', () => {
+    expect(() =>
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org::coding-app',
+        'urn:agent:hadronmemory.com',
+      ),
+    ).toThrow(/<author-org>::<slug>/);
+  });
+
+  it('throws when appUrn has more than 2 segments (multi-segment inputs rejected)', () => {
+    // Codex review: the prior helper version handled multi-segment
+    // inputs by emitting `<org>::<sub>::<slug>` at the app slot, which
+    // didn't match the FR-009 single-segment contract in the
+    // installedAgentUrn GraphQL docstring. The helper now rejects
+    // multi-segment inputs explicitly rather than silently emitting a
+    // non-canonical URN.
+    expect(() =>
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org::sub::coding-app',
+        'urn:agent:hadronmemory.com::coding-agent',
+      ),
+    ).toThrow(/2 segments/);
+  });
+
+  it('throws when agentUrn has more than 2 segments', () => {
+    expect(() =>
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org::coding-app',
+        'urn:agent:hadronmemory.com::sub::coding-agent',
+      ),
+    ).toThrow(/2 segments/);
+  });
+
+  it('output passes parseUrn (spec-021-parseable)', () => {
+    const result = composeInstalledAgentUrn(
+      'urn:app:micromentor.org::coding-app',
+      'urn:agent:hadronmemory.com::coding-agent',
+    );
+    const parsed = parseUrn(result);
+    expect(parsed.type).toBe('agent');
+    expect(parsed.parserCanonical).toBe(result);
+    expect(parsed.parserRewrites).toEqual([]);
+  });
+
+  it('is idempotent under parser canonicalization', () => {
+    const once = composeInstalledAgentUrn(
+      'urn:app:micromentor.org::coding-app',
+      'urn:agent:hadronmemory.com::coding-agent',
+    );
+    expect(toParserCanonical(once)).toBe(once);
   });
 });
 
