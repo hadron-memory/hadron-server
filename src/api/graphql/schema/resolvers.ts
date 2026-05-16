@@ -1982,26 +1982,18 @@ export const resolvers = {
 
   Mutation: {
     upsertNode: async (_: unknown, { input }: { input: NodeInput }, ctx: Context) => {
-      // Resolve memoryId from loc prefix when not provided
-      if (!input.memoryId) {
-        const memories = await ctx.db.memory.findMany({
-          where: { deletedAt: null },
-          select: { id: true, urn: true },
-        });
-        const match = memories
-          .filter((m) => m.urn && input.loc.startsWith(m.urn))
-          .sort((a, b) => b.urn.length - a.urn.length)[0];
-        if (match) {
-          input.memoryId = match.id;
-          // Strip memory URN prefix from loc — loc should be memory-relative
-          const prefix = match.urn + ':';
-          if (input.loc.startsWith(prefix)) {
-            input.loc = input.loc.slice(prefix.length);
-          }
-        } else {
-          throw new Error(`Cannot resolve memory for loc "${input.loc}". Provide a memoryId or set an active memory.`);
-        }
-      }
+      // Spec 022: `memoryId` MUST be supplied (typeDefs marks it `String!`).
+      // Route through `resolveMemoryRef` so:
+      //   - ID-shape inputs (CUID / 32-char hex) dispatch via spec 007
+      //   - URN-shape inputs trigger `assertFullyQualifiedUrn(_, 'memory')`
+      //     and reject relative-form inputs with UrnNotQualifiedError
+      //     (mapped to `URN_NOT_QUALIFIED` by Apollo's formatError)
+      //
+      // The pre-022 fallback that walked all accessible memories looking
+      // for a URN prefix of `input.loc` was the API-boundary loose-lookup
+      // path the spec exists to close — removed.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, input.memoryId);
+      input.memoryId = resolvedMemoryId;
       await requireMemoryWriteAccess(ctx, input.memoryId);
 
       // Validate loc shape at the GraphQL boundary so any caller — portal,

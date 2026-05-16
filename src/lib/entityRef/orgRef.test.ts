@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { resolveOrgRef } from './orgRef.js';
-import { OrganizationNotFoundError } from './errors.js';
+import { OrganizationNotFoundError, UrnNotQualifiedError } from './errors.js';
 
 const db = new PrismaClient();
 
@@ -61,5 +61,19 @@ describe('resolveOrgRef', () => {
     });
     await expect(resolveOrgRef(db, org.id)).rejects.toBeInstanceOf(OrganizationNotFoundError);
     await expect(resolveOrgRef(db, org.urn)).rejects.toBeInstanceOf(OrganizationNotFoundError);
+  });
+
+  // ===================================================================
+  // spec 022 — API-boundary URN qualification (FR-001, FR-002, FR-019)
+  // ===================================================================
+
+  it('rejects empty input as UrnNotQualifiedError', async () => {
+    await expect(resolveOrgRef(db, '')).rejects.toBeInstanceOf(UrnNotQualifiedError);
+  });
+
+  it('rejects urn:memory: prefix (wrong type) as UrnNotQualifiedError', async () => {
+    await expect(resolveOrgRef(db, 'urn:memory:foo::bar')).rejects.toBeInstanceOf(
+      UrnNotQualifiedError,
+    );
   });
 });

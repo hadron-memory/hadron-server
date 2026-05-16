@@ -7,6 +7,9 @@ import {
   parseUrn, toParserCanonical, isParserCanonical,
   validateUserSlug, parseFor, UrnParseError,
   composeInstalledAgentUrn,
+  assertFullyQualifiedUrn, UrnNotQualifiedError,
+  splitNodeUrn,
+  normalizeUrnForLookup,
   type AliasCategory,
 } from './urn.js';
 
@@ -682,6 +685,313 @@ describe('parseUrn — node-leaf locs are NOT mangled by cat 4 strip', () => {
 // The dedicated bench script for steady-state numbers lives at
 // `scripts/bench/urn-parser.bench.ts` (TODO: add as part of T067-T069
 // migration-ops work, where parser throughput matters most).
+// =====================================================================
+
+// =====================================================================
+// spec 022 — normalizeUrnForLookup (DB compat during 021 migration)
+// =====================================================================
+
+describe('normalizeUrnForLookup', () => {
+  it('collapses canonical `::` to legacy `:` form', () => {
+    expect(normalizeUrnForLookup('acme.com::mmdata')).toBe('acme.com:mmdata');
+  });
+  it('passes legacy `:` form through unchanged', () => {
+    expect(normalizeUrnForLookup('acme.com:mmdata')).toBe('acme.com:mmdata');
+  });
+  it('passes single-segment input through unchanged', () => {
+    expect(normalizeUrnForLookup('acme.com')).toBe('acme.com');
+  });
+  it('collapses multi-level canonical to legacy', () => {
+    expect(normalizeUrnForLookup('acme.com::coding-app::coding-agent')).toBe(
+      'acme.com:coding-app:coding-agent',
+    );
+  });
+});
+
+// =====================================================================
+// spec 022 — splitNodeUrn (signature collapse helper)
+// =====================================================================
+
+describe('splitNodeUrn', () => {
+  it('splits a bare node URN with 3 atoms (org:memory:loc)', () => {
+    expect(splitNodeUrn('acme.com:mmdata:review')).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'review',
+    });
+  });
+
+  it('splits a bare node URN with multi-atom loc', () => {
+    expect(splitNodeUrn('acme.com:mmdata:review:sort-imports')).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'review:sort-imports',
+    });
+  });
+
+  it('splits a `urn:node:` prefixed bare URN', () => {
+    expect(splitNodeUrn('urn:node:acme.com:mmdata:review:sort-imports')).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'review:sort-imports',
+    });
+  });
+
+  it('splits canonical `::` form (spec-021 hierarchy)', () => {
+    expect(
+      splitNodeUrn('urn:node:acme.com::mmdata::review:sort-imports'),
+    ).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'review:sort-imports',
+    });
+  });
+
+  it('splits canonical `::` form with deep loc', () => {
+    expect(
+      splitNodeUrn('urn:node:acme.com::mmdata::services::db-helpers::query'),
+    ).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'services:db-helpers:query',
+    });
+  });
+
+  it('produces bare-form memoryUrn ready for DB lookup', () => {
+    // `Memory.urn` is stored bare (`<org>:<memorySlug>`). The helper
+    // normalizes to that form regardless of input grammar.
+    expect(splitNodeUrn('acme.com:mmdata:loc').memoryUrn).toBe('acme.com:mmdata');
+    expect(splitNodeUrn('urn:node:acme.com::mmdata::loc').memoryUrn).toBe('acme.com:mmdata');
+  });
+
+  it('accepts node-role-alias prefixes (D11 cat 2)', () => {
+    // `urn:prompt:` and friends are aliases for `urn:node:` per spec 021.
+    expect(
+      splitNodeUrn('urn:prompt:acme.com::mmdata::review:sort-imports'),
+    ).toEqual({
+      memoryUrn: 'acme.com:mmdata',
+      loc: 'review:sort-imports',
+    });
+  });
+
+  // Self-validation: splitNodeUrn calls assertFullyQualifiedUrn internally
+  // so call sites added outside the spec-022-reviewed handlers can't
+  // silently produce wrong results.
+  it('throws UrnNotQualifiedError on the motivating bug input', () => {
+    expect(() => splitNodeUrn('review:sort-imports')).toThrow(UrnNotQualifiedError);
+  });
+  it('throws UrnNotQualifiedError on urn:loc: (deprecated)', () => {
+    expect(() => splitNodeUrn('urn:loc:foo:bar')).toThrow(UrnNotQualifiedError);
+  });
+  it('throws UrnNotQualifiedError on a single-segment bare input', () => {
+    expect(() => splitNodeUrn('foo')).toThrow(UrnNotQualifiedError);
+  });
+  it('throws UrnNotQualifiedError on a wrong-type prefix', () => {
+    expect(() => splitNodeUrn('urn:org:acme.com')).toThrow(UrnNotQualifiedError);
+  });
+});
+
+// =====================================================================
+// spec 022 — assertFullyQualifiedUrn (API-boundary qualification check)
+// =====================================================================
+
+describe('assertFullyQualifiedUrn — minimum-segment count per expectedType', () => {
+  describe('expectedType = org (MIN_SEGMENTS = 1)', () => {
+    it('accepts bare org slug', () => {
+      expect(() => assertFullyQualifiedUrn('acme.com', 'org')).not.toThrow();
+    });
+    it('accepts prefixed urn:org:slug', () => {
+      expect(() => assertFullyQualifiedUrn('urn:org:acme.com', 'org')).not.toThrow();
+    });
+    it('rejects empty input', () => {
+      expect(() => assertFullyQualifiedUrn('', 'org')).toThrow(UrnNotQualifiedError);
+    });
+  });
+
+  describe('expectedType = memory (MIN_SEGMENTS = 2)', () => {
+    it('accepts bare org:memory', () => {
+      expect(() => assertFullyQualifiedUrn('acme.com:mmdata', 'memory')).not.toThrow();
+    });
+    it('accepts canonical urn:memory:org::memory', () => {
+      expect(() => assertFullyQualifiedUrn('urn:memory:acme.com::mmdata', 'memory')).not.toThrow();
+    });
+    it('rejects bare single-segment input as memory URN', () => {
+      const err = expect(() => assertFullyQualifiedUrn('mmdata', 'memory'));
+      err.toThrow(UrnNotQualifiedError);
+      err.toThrow(/not fully qualified/);
+    });
+    it('rejects with `expectedType` populated on the error', () => {
+      try {
+        assertFullyQualifiedUrn('mmdata', 'memory');
+        expect.fail('expected UrnNotQualifiedError');
+      } catch (e) {
+        expect(e).toBeInstanceOf(UrnNotQualifiedError);
+        expect((e as UrnNotQualifiedError).expectedType).toBe('memory');
+        expect((e as UrnNotQualifiedError).offendingValue).toBe('mmdata');
+      }
+    });
+  });
+
+  describe('expectedType = agent (MIN_SEGMENTS = 2)', () => {
+    it('accepts bare org:agent-slug', () => {
+      expect(() => assertFullyQualifiedUrn('acme.com:coding-agent', 'agent')).not.toThrow();
+    });
+    it('accepts prefixed urn:agent:org::slug', () => {
+      expect(() => assertFullyQualifiedUrn('urn:agent:acme.com::coding-agent', 'agent')).not.toThrow();
+    });
+    it('rejects bare single segment', () => {
+      expect(() => assertFullyQualifiedUrn('coding-agent', 'agent')).toThrow(UrnNotQualifiedError);
+    });
+  });
+
+  describe('expectedType = app (MIN_SEGMENTS = 2)', () => {
+    it('accepts bare org:app-slug', () => {
+      expect(() => assertFullyQualifiedUrn('acme.com:dev-app', 'app')).not.toThrow();
+    });
+    it('rejects bare single segment', () => {
+      expect(() => assertFullyQualifiedUrn('dev-app', 'app')).toThrow(UrnNotQualifiedError);
+    });
+  });
+
+  describe('expectedType = node (MIN_SEGMENTS = 3)', () => {
+    it('accepts bare org:memory:loc', () => {
+      expect(() => assertFullyQualifiedUrn('acme.com:mmdata:review:sort-imports', 'node')).not.toThrow();
+    });
+    it('accepts canonical urn:node:org::memory::loc', () => {
+      expect(() =>
+        assertFullyQualifiedUrn('urn:node:acme.com::mmdata::review:sort-imports', 'node'),
+      ).not.toThrow();
+    });
+    it('rejects the motivating safety case: bare review:sort-imports (2 atoms)', () => {
+      // This is THE bug spec 022 exists to prevent — a relative-form node
+      // URN that an agent might construct from active-memory + loc. A naïve
+      // segCount >= 2 check would accept this. The type-aware MIN_SEGMENTS
+      // lookup catches it.
+      try {
+        assertFullyQualifiedUrn('review:sort-imports', 'node');
+        expect.fail('expected UrnNotQualifiedError for bare review:sort-imports');
+      } catch (e) {
+        expect(e).toBeInstanceOf(UrnNotQualifiedError);
+        const err = e as UrnNotQualifiedError;
+        expect(err.offendingValue).toBe('review:sort-imports');
+        expect(err.expectedType).toBe('node');
+        expect(err.message).toContain('not fully qualified');
+        expect(err.message).toContain('3 hierarchy segments');
+      }
+    });
+    it('rejects bare 1-segment input as node URN', () => {
+      expect(() => assertFullyQualifiedUrn('review', 'node')).toThrow(UrnNotQualifiedError);
+    });
+  });
+});
+
+describe('assertFullyQualifiedUrn — type-marker consistency', () => {
+  it('rejects urn:org:foo when expectedType=memory (silent coercion guard)', () => {
+    expect(() => assertFullyQualifiedUrn('urn:org:acme.com', 'memory')).toThrow(UrnNotQualifiedError);
+  });
+  it('rejects urn:memory:org::mem when expectedType=agent', () => {
+    expect(() =>
+      assertFullyQualifiedUrn('urn:memory:acme.com::mmdata', 'agent'),
+    ).toThrow(UrnNotQualifiedError);
+  });
+  it('rejects urn:agent:org::slug when expectedType=app', () => {
+    expect(() =>
+      assertFullyQualifiedUrn('urn:agent:acme.com::coding-agent', 'app'),
+    ).toThrow(UrnNotQualifiedError);
+  });
+});
+
+describe('assertFullyQualifiedUrn — D11 cat 2 node-role aliases accepted for expectedType=node', () => {
+  it('accepts urn:prompt: prefix when expectedType=node', () => {
+    expect(() =>
+      assertFullyQualifiedUrn('urn:prompt:acme.com::mmdata::review:sort-imports', 'node'),
+    ).not.toThrow();
+  });
+  it('accepts urn:review: prefix when expectedType=node', () => {
+    expect(() =>
+      assertFullyQualifiedUrn('urn:review:acme.com::mmdata::sort-imports', 'node'),
+    ).not.toThrow();
+  });
+  it('accepts urn:chat: prefix when expectedType=node', () => {
+    expect(() =>
+      assertFullyQualifiedUrn('urn:chat:acme.com::mmdata::session-1', 'node'),
+    ).not.toThrow();
+  });
+  it('still rejects urn:prompt: when expectedType is NOT node', () => {
+    expect(() =>
+      assertFullyQualifiedUrn('urn:prompt:acme.com::mmdata::review:sort-imports', 'memory'),
+    ).toThrow(UrnNotQualifiedError);
+  });
+});
+
+describe('assertFullyQualifiedUrn — mixed-separator robustness', () => {
+  it('accepts canonical `::` form for a node URN', () => {
+    expect(() =>
+      assertFullyQualifiedUrn('urn:node:acme.com::mmdata::review:sort-imports', 'node'),
+    ).not.toThrow();
+  });
+  it('accepts bare `:` form for a node URN (legacy compat during migration)', () => {
+    expect(() =>
+      assertFullyQualifiedUrn('acme.com:mmdata:review:sort-imports', 'node'),
+    ).not.toThrow();
+  });
+  it('counts segments correctly in mixed-separator bare form (prefers `::` if present)', () => {
+    // `org::memory::loc` has 3 `::`-segments → passes node MIN=3.
+    expect(() =>
+      assertFullyQualifiedUrn('acme.com::mmdata::review:sort-imports', 'node'),
+    ).not.toThrow();
+  });
+});
+
+describe('assertFullyQualifiedUrn — explicit rejection of deprecated / malformed prefix shapes', () => {
+  it('rejects urn:loc: prefix (deprecated entirely per spec 021 FR-021)', () => {
+    // `loc:` is not a valid URN type — it was a pre-021 sugar for relative
+    // node refs. Spec 022 rejects it at the API boundary regardless of
+    // expectedType.
+    expect(() => assertFullyQualifiedUrn('urn:loc:foo', 'node')).toThrow(UrnNotQualifiedError);
+    expect(() => assertFullyQualifiedUrn('urn:loc:foo', 'memory')).toThrow(UrnNotQualifiedError);
+  });
+
+  it('rejects urn::foo (malformed prefix — no type marker)', () => {
+    expect(() => assertFullyQualifiedUrn('urn::foo', 'memory')).toThrow(UrnNotQualifiedError);
+  });
+
+  it('rejects urn: with nothing after (degenerate)', () => {
+    expect(() => assertFullyQualifiedUrn('urn:', 'memory')).toThrow(UrnNotQualifiedError);
+  });
+});
+
+describe('assertFullyQualifiedUrn — empty-segment guard on bare form', () => {
+  it('rejects leading colon', () => {
+    expect(() => assertFullyQualifiedUrn(':foo', 'memory')).toThrow(UrnNotQualifiedError);
+  });
+  it('rejects trailing colon', () => {
+    expect(() => assertFullyQualifiedUrn('acme.com:', 'memory')).toThrow(UrnNotQualifiedError);
+  });
+  it('rejects consecutive colons in mixed form', () => {
+    // `acme.com:::mmdata` — single `::` would be canonical, but 3 colons creates
+    // an empty segment under the `:` fallback (and `::` split also yields empty).
+    expect(() => assertFullyQualifiedUrn('acme.com:::mmdata', 'memory')).toThrow(
+      UrnNotQualifiedError,
+    );
+  });
+});
+
+describe('UrnNotQualifiedError — message shape', () => {
+  it('embeds offendingValue in the message', () => {
+    const err = new UrnNotQualifiedError('review:sort-imports', undefined, 'node');
+    expect(err.message).toContain('"review:sort-imports"');
+  });
+  it('cites the expectedType in the fix hint', () => {
+    const err = new UrnNotQualifiedError('mmdata', undefined, 'memory');
+    expect(err.message).toContain('memory URN');
+    expect(err.message).toContain('2 hierarchy segments');
+  });
+  it('falls back to a generic fix hint when expectedType is undefined', () => {
+    const err = new UrnNotQualifiedError('mmdata');
+    expect(err.message).toContain('canonical form');
+  });
+  it('has .name = UrnNotQualifiedError', () => {
+    const err = new UrnNotQualifiedError('foo', undefined, 'memory');
+    expect(err.name).toBe('UrnNotQualifiedError');
+  });
+});
+
 // =====================================================================
 
 describe('parseUrn — microbenchmark (reported metric, not a hard gate)', () => {

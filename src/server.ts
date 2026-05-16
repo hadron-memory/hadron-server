@@ -18,6 +18,7 @@ import {
 import { resolveAuthContext } from './middleware/auth.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
+import { UrnNotQualifiedError } from './lib/urn.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
@@ -328,7 +329,31 @@ export async function createServer(): Promise<Express> {
   // GraphQL
   // ---------------------------------------------------------------------------
 
-  const apollo = new ApolloServer({ typeDefs, resolvers });
+  const apollo = new ApolloServer({
+    typeDefs,
+    resolvers,
+    formatError: (formattedError, error) => {
+      // Spec 022: surface UrnNotQualifiedError with a stable error code so
+      // external callers can branch on it programmatically. The unwrap
+      // pattern matches Apollo's: thrown errors are wrapped in
+      // `GraphQLError` with the original on `.originalError`.
+      const original =
+        (error as { originalError?: unknown })?.originalError ?? error;
+      if (original instanceof UrnNotQualifiedError) {
+        return {
+          ...formattedError,
+          message: original.message,
+          extensions: {
+            ...formattedError.extensions,
+            code: 'URN_NOT_QUALIFIED',
+            offendingValue: original.offendingValue,
+            expectedType: original.expectedType,
+          },
+        };
+      }
+      return formattedError;
+    },
+  });
   await apollo.start();
 
   app.use(

@@ -161,12 +161,24 @@ describe('addToMyMemories', () => {
   });
 
   it('rejects a non-existent memoryId with MEMORY_NOT_FOUND', async () => {
+    // 32-char hex — ID-shape; bypasses the spec-022 qualification check
+    // and goes to DB lookup, which misses → MEMORY_NOT_FOUND.
+    await expect(
+      resolvers.Mutation.addToMyMemories(
+        null,
+        { memoryId: '0123456789abcdef0123456789abcdef' },
+        readerCtx(userA.id),
+      ),
+    ).rejects.toThrow(/MEMORY_NOT_FOUND/);
+  });
+
+  it('rejects an unqualified memoryId with URN_NOT_QUALIFIED (spec 022)', async () => {
     await expect(
       resolvers.Mutation.addToMyMemories(
         null,
         { memoryId: 'no-such-memory-id' },
         readerCtx(userA.id),
       ),
-    ).rejects.toThrow(/MEMORY_NOT_FOUND/);
+    ).rejects.toThrow(/not fully qualified/);
   });
 });

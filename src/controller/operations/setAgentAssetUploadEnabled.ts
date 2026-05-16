@@ -13,6 +13,7 @@
 import type { App, PrismaClient } from '../../generated/prisma/index.js';
 import { ASSET_UPLOAD_TOOL_KEY } from '../../lib/asset/gate.js';
 import { resolveAgentRef } from '../../lib/entityRef/agentRef.js';
+import { UrnNotQualifiedError } from '../../lib/urn.js';
 
 export class SetAssetEnabledError extends Error {
   constructor(public code: string, message: string) {
@@ -46,10 +47,15 @@ export async function setAgentAssetUploadEnabled(
 ): Promise<App> {
   // 007-entity-id-or-urn FR-012: input.agentUrn (named for backward
   // compatibility) accepts ID or URN. Resolve to a definite ID first.
+  //
+  // Spec 022: `resolveAgentRef` throws `UrnNotQualifiedError` for non-ID
+  // inputs that lack the `<org>:<agentSlug>` shape — let it propagate so
+  // the GraphQL formatError can surface it as `URN_NOT_QUALIFIED`.
   let resolvedAgentId: string;
   try {
     ({ id: resolvedAgentId } = await resolveAgentRef(db, input.agentUrn));
-  } catch {
+  } catch (e) {
+    if (e instanceof UrnNotQualifiedError) throw e;
     throw new SetAssetEnabledError('NOT_FOUND', 'agent not found');
   }
   const agent = await db.agent.findUnique({

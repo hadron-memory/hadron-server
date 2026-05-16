@@ -3,7 +3,8 @@
  * definite node ID. See `memoryRef.ts` for the broader convention.
  *
  * Spec: 007-entity-id-or-urn (extension to nodes for spec 005 graph
- * traversal callers — primarily edges).
+ * traversal callers — primarily edges), amended by spec 022 (URN
+ * qualification at the API boundary).
  *
  * Accepted forms:
  *   - `<id>`                                    bare ID (cuid or 32-hex)
@@ -19,8 +20,21 @@
  * named in the URN (which may differ from the context memory — that
  * supports cross-memory edges).
  *
- * Throws `NodeNotFoundError` for any unresolvable ref. Soft-deleted
- * nodes are treated as not-existing.
+ * **API-boundary discipline (spec 022 FR-007a)**: GraphQL resolvers,
+ * MCP tool handlers, and `hadron-client` SDK call sites MUST NOT pass
+ * `contextMemoryId` — doing so would re-introduce the silent-routing
+ * bug spec 022 closed (an API-boundary caller passing
+ * `session.activeMemoryUrn` here would let a relative-form node URN
+ * dispatch to the active memory). The bare-loc-within-context branch
+ * is preserved ONLY for internal callers (graph traversal already
+ * operating inside a known memory). When `contextMemoryId` is omitted,
+ * the URN-input branch enforces `assertFullyQualifiedUrn` and the
+ * bare-loc branch is unreachable.
+ *
+ * Throws `NodeNotFoundError` for any unresolvable ref. Throws
+ * `UrnNotQualifiedError` when a non-ID, non-context-relative input
+ * lacks the org+memory+loc shape. Soft-deleted nodes are treated as
+ * not-existing.
  *
  * Why this lives next to `memoryRef.ts` and friends: spec 007's
  * resolution-helpers contract is the single place callers go to turn
@@ -32,13 +46,13 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId } from './shape.js';
-import { parseUrnInput } from '../urn.js';
+import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
 import { NodeNotFoundError } from './errors.js';
 
 export async function resolveNodeRef(
   db: Pick<PrismaClient, 'node' | 'memory'>,
   ref: string,
-  contextMemoryId: string,
+  contextMemoryId?: string,
 ): Promise<{ id: string }> {
   const parsed = parseUrnInput(ref);
 
@@ -70,6 +84,16 @@ export async function resolveNodeRef(
     });
     if (!node || node.deletedAt) throw new NodeNotFoundError(ref);
     return { id: node.id };
+  }
+
+  // Spec 022 enforcement: API-boundary callers MUST NOT pass
+  // `contextMemoryId`. When it's absent, the input MUST be a fully-
+  // qualified node URN (`org:memory:loc` minimum). The bare-loc-within-
+  // context branch is unreachable in that case — relative-form inputs
+  // throw UrnNotQualifiedError here rather than silently routing
+  // through the (no-longer-supplied) context memory.
+  if (contextMemoryId === undefined) {
+    assertFullyQualifiedUrn(ref, 'node');
   }
 
   // Form 2/3: full URN `<memory-urn>:<loc>`. Memory URNs are always
@@ -114,6 +138,15 @@ export async function resolveNodeRef(
   // Form 4: short loc — resolve within the context memory. Reached
   // only for unprefixed inputs whose 2-segment prefix doesn't name a
   // live memory.
+  //
+  // API-boundary callers don't pass `contextMemoryId` (spec 022 FR-007a);
+  // when it's absent here, the input was already qualified (the spec-022
+  // gate above ran) but the prefix-memory lookup failed — surface as
+  // NodeNotFoundError rather than dispatching to short-loc with no
+  // context (which would fall through to a Prisma type error).
+  if (contextMemoryId === undefined) {
+    throw new NodeNotFoundError(ref);
+  }
   const node = await db.node.findUnique({
     where: { loc_memoryId: { loc: normalized, memoryId: contextMemoryId } },
     select: { id: true, deletedAt: true },
