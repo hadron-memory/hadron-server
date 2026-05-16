@@ -274,13 +274,25 @@ export function chatScopeAccessFilter(
 export function validateChatScopeInvariants(args: {
   /** From the chat-root node's `data`. */
   scope: 'private' | 'shared' | undefined;
-  /** From the holding `Memory.class`. */
-  memoryClass: 'personal' | 'app' | 'knowledge' | 'system';
+  /** From the holding `Memory.class`. The full `MemoryClass` enum is
+   *  accepted so callers don't need to narrow; `group`-class memory
+   *  is explicitly rejected as it does not hold chat-roots (spec 023). */
+  memoryClass: 'personal' | 'app' | 'knowledge' | 'system' | 'group';
   /** True during the migration window — treats missing `scope` as
    *  `private` for any non-shared memory class. */
   allowMissingScope?: boolean;
 }): void {
   const { scope, memoryClass, allowMissingScope = false } = args;
+
+  // 023-app-shape: group-class memory is for team-shared collaborative
+  // content, not chat-roots. A chat-root landing on a group memory is
+  // corruption regardless of scope.
+  if (memoryClass === 'group') {
+    throw new ChatScopeError(
+      'CHAT_MEMORY_OUT_OF_SCOPE',
+      `Chat-root cannot live on a group-class memory (spec 023).`,
+    );
+  }
 
   if (scope === undefined) {
     // The legacy migration-window path. Tolerate any non-shared memory
