@@ -72,30 +72,37 @@ export async function provisionPersonalWorkspace(
   //    image is not vulnerable to dictionary attacks.
   const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   const keyHash = createHash('sha256').update(rawKey).digest('hex');
-  // 008-agent-installation: App→Agent is a direct FK (App.agent_id), set at
-  // App creation. The legacy AppAgent join is dropped; per-attached-memory
-  // write access remains governed by AgentMemoryItem.role.
-  const app = await db.app.create({
-    data: {
-      id: generateId(),
-      name: 'My Workstation',
-      urn: `${urn}:my-workstation`,
-      organizationId: org.id,
-      appType: 'WORKSTATION',
-      role: 'READER',
-      agentId: agent.id,
-      createdBy: userId,
-    },
-  });
-  await db.appKey.create({
-    data: {
-      id: generateId(),
-      appId: app.id,
-      keyHash,
-      keyPreview: rawKey.slice(-4),
-      label: 'Initial setup key',
-      createdBy: userId,
-    },
+  // 023-app-shape Phase 2b: App↔Agent is N:M via the reintroduced AppAgent
+  // join. Create the App with a nested-write AppAgent row in the same
+  // statement so the App is never persisted in an orphan state (no
+  // installed agents). The AppKey is also created in the same transaction
+  // so partial failures roll back cleanly.
+  const app = await db.$transaction(async (tx) => {
+    const created = await tx.app.create({
+      data: {
+        id: generateId(),
+        name: 'My Workstation',
+        urn: `${urn}:my-workstation`,
+        organizationId: org.id,
+        appType: 'WORKSTATION',
+        role: 'READER',
+        createdBy: userId,
+        appAgents: {
+          create: { agentId: agent.id, createdBy: userId },
+        },
+      },
+    });
+    await tx.appKey.create({
+      data: {
+        id: generateId(),
+        appId: created.id,
+        keyHash,
+        keyPreview: rawKey.slice(-4),
+        label: 'Initial setup key',
+        createdBy: userId,
+      },
+    });
+    return created;
   });
 
   // 6. Store raw key for the setup page (shown once, then consumed)

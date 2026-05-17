@@ -63,7 +63,7 @@ beforeEach(async () => {
       organizationId: orgX.id,
       urn: `${orgX.urn}:mealplan-app`,
       name: 'Mealplan @ Org X',
-      agentId: mealplan.id,
+      appAgents: { create: { agentId: mealplan.id } },
     },
   });
 
@@ -74,7 +74,7 @@ beforeEach(async () => {
       organizationId: orgY.id,
       urn: `${orgY.urn}:mealplan-app`,
       name: 'Mealplan @ Org Y',
-      agentId: mealplan.id,
+      appAgents: { create: { agentId: mealplan.id } },
     },
   });
   await createDbAgentOrgGrant(db, orgY.id, mealplan.id);
@@ -216,7 +216,7 @@ describe('T049: access-control gate 3 enforces Memory.app_id === auth.appId', ()
           organizationId: orgX.id,
           urn: `${orgX.urn}:other-app`,
           name: 'Other App',
-          agentId: otherAgent.id,
+          appAgents: { create: { agentId: otherAgent.id } },
         },
       });
       const legacyMem = await db.memory.create({
@@ -443,7 +443,7 @@ describe('T053: per-user app-class memory addresses on (app_id, agent_id, user_i
         organizationId: orgX.id,
         urn: `${orgX.urn}:juno-app`,
         name: 'Juno @ Org X',
-        agentId: juno.id,
+        appAgents: { create: { agentId: juno.id } },
       },
     });
 

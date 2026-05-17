@@ -30,6 +30,7 @@ import { Client } from 'pg';
 import { createHash, randomBytes } from 'crypto';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
+import { getPrimaryAgentId } from '../../lib/appAgent.js';
 import { generateId } from '../../lib/id.js';
 
 const DATABASE_URL =
@@ -419,7 +420,7 @@ describe('T023: auth-replay (pre-migration bearer tokens still authenticate, SC-
       expect(post!.appId).toBe(preKey.appId);
 
       const app = await db.app.findUnique({ where: { id: post!.appId } });
-      expect(app!.agentId).toBe(fixture.agents[0].id);
+      expect(await getPrimaryAgentId(db, app!.id)).toBe(fixture.agents[0].id);
     }
   });
 });
@@ -445,7 +446,7 @@ describe('T024: fan-out (1 App with 3 AppAgents)', () => {
     // first AppAgent (created_at, agent_id ordering in the migration).
     const originalAfter = await db.app.findUniqueOrThrow({ where: { id: sourceApp.id } });
     expect(originalAfter.urn).toBe(sourceApp.urn);
-    expect(originalAfter.agentId).toBe(sourceApp.appAgents[0].agentId);
+    expect(await getPrimaryAgentId(db, originalAfter.id)).toBe(sourceApp.appAgents[0].agentId);
 
     // Two fanned copies exist with derived URN + name.
     const fanned = await db.app.findMany({
@@ -456,7 +457,9 @@ describe('T024: fan-out (1 App with 3 AppAgents)', () => {
       orderBy: { urn: 'asc' },
     });
     expect(fanned.length).toBe(2);
-    const fannedAgentIds = new Set(fanned.map((a) => a.agentId));
+    const fannedAgentIds = new Set(
+      await Promise.all(fanned.map((a) => getPrimaryAgentId(db, a.id))),
+    );
     expect(fannedAgentIds).toEqual(
       new Set([sourceApp.appAgents[1].agentId, sourceApp.appAgents[2].agentId]),
     );
@@ -502,7 +505,7 @@ describe('T025: orphan App (zero AppAgent rows)', () => {
     await runMigrationBackfill();
 
     const after = await db.app.findUniqueOrThrow({ where: { id: orphan.id } });
-    expect(after.agentId).toBeNull();
+    expect(await getPrimaryAgentId(db, after.id)).toBeNull();
     expect(after.urn).toBe(orphan.urn);
     expect(await db.app.count()).toBe(beforeApps);
   });

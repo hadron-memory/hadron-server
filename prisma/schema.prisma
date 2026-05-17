@@ -1069,12 +1069,8 @@ model Agent {
   userMemories      Memory[]            @relation("UserMemoriesOfAgent")
   sessions          Session[]           @relation("SessionAgent")
   userSubscriptions AgentSubscription[] @relation("AgentUserSubscriptions")
-  // 008-agent-installation (2026-05-02): direct App→Agent FK replaces the
-  // dropped AppAgent join. Imports / importedBy / orgGrants are new joins.
-  apps              App[]
-  // 023-app-shape: N:M App↔Agent join, reintroduced for multi-Agent
-  // Apps. Co-exists with `App.agent` (the direct FK) during the
-  // transition.
+  // 023-app-shape Phase 2b: App↔Agent goes through `AppAgent` (N:M).
+  // The direct `App[]` back-relation is gone (dropped with App.agentId).
   appAgents         AppAgent[]
   imports           AgentImport[]       @relation("ParentAgent")
   importedBy        AgentImport[]       @relation("ImportedAgent")
@@ -1611,16 +1607,11 @@ model App {
   aiModel               String?              @map("ai_model")
   aiApiKeyEncrypted     String?              @map("ai_api_key_encrypted")
   expiresAt             DateTime?            @map("expires_at")
-  // 008-agent-installation (2026-05-02): App is the runtime deployment of
-  // an Agent. agent_id is nullable only to absorb orphan Apps during the
-  // cutover and the Agent-deletion SET NULL cascade; new App creation
-  // post-migration MUST set agentId (enforced at the createApp resolver).
-  /// The Agent this App is a deployment of. Nullable only to absorb
-  /// orphan Apps during the 008 cutover and the Agent-deletion
-  /// SET NULL cascade; new App creation post-008 MUST set agentId
-  /// (enforced at the createApp resolver). 008-agent-installation
-  /// FR-002 / FR-022.
-  agentId               String?              @map("agent_id")
+  // 008-agent-installation introduced a direct App→Agent FK; 023-app-shape
+  // Phase 2b dropped it in favor of the reintroduced N:M `AppAgent` join
+  // (multi-Agent App per US1). The GraphQL `App.agentId` and `App.agent`
+  // fields are kept as soft-deprecated convenience reads, resolved via
+  // the first AppAgent row by helpers in `src/lib/appAgent.ts`.
   /// Migrated from the dropped `app_agents.training_mode`. Sessions
   /// through this App are flagged as training data for the Agent's
   /// owner to review. 008-agent-installation FR-022.
@@ -1662,12 +1653,8 @@ model App {
   urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
 
   organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  agent         Agent?         @relation(fields: [agentId], references: [id], onDelete: SetNull)
-  // 023-app-shape: N:M App↔Agent join, reintroduced. Co-exists with
-  // `agentId` during the transition (see plan §"Phase 2b — drop
-  // App.agentId" for the consumer-retrofit follow-up). New install
-  // flows MUST write an AppAgent row; legacy code continues to read
-  // `App.agentId` until the retrofit completes.
+  // 023-app-shape Phase 2b: App↔Agent is N:M through AppAgent. The
+  // direct `agent` relation is gone (dropped with `agentId`).
   appAgents     AppAgent[]
   keys          AppKey[]
   members       AppMember[]
@@ -1679,7 +1666,6 @@ model App {
   pendingSetups PendingSetup[]
 
   @@index([organizationId])
-  @@index([agentId])
   // Spec 021 FR-027: keep `urn` lookups index-served. The DB-level
   // partial unique index `apps_urn_active_uniq` already covers active-row
   // queries; this @@index makes lookups across the full history (active

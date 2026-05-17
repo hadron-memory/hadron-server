@@ -72,7 +72,7 @@ beforeEach(async () => {
       name: 'research-app',
       urn: `${orgA.urn}:research-app`,
       organizationId: orgA.id,
-      agentId: agent.id,
+      appAgents: { create: { agentId: agent.id } },
     },
   });
 

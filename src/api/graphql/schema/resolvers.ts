@@ -19,6 +19,7 @@ import {
 } from '../../../controller/operations/publishAgentImport.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { isLifecycleActive } from '../../../lib/lifecycle.js';
+import { getPrimaryAgent, getPrimaryAgentId, isAgentInstalled } from '../../../lib/appAgent.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import {
@@ -354,24 +355,103 @@ const ORG_INCLUDE = {
     orderBy: { name: 'asc' as const },
   },
   agents: { where: { deletedAt: null }, include: AGENT_INCLUDE, orderBy: { name: 'asc' as const } },
-  // App.agent eagerly loads memoryItems so the GraphQL non-null
-  // contract on Agent.memoryItems is satisfied even when the linked
-  // Agent is soft-deleted (the App keeps its agent reference; the
-  // schema requires memoryItems to be a list, not nullable).
-  apps: { where: { deletedAt: null }, include: { keys: { where: { revokedAt: null } }, agent: { include: AGENT_INCLUDE } }, orderBy: { name: 'asc' as const } },
+  // 023-app-shape Phase 2b: App↔Agent moved from direct FK to the
+  // AppAgent N:M join. Eager-load the AppAgent rows (with each Agent's
+  // memoryItems) so the GraphQL `App.agent` / `App.agents` /
+  // `App.installedAgentUrn` field resolvers can compute their result
+  // without re-querying. The first AppAgent row (orderBy createdAt asc)
+  // is treated as the "primary" agent for legacy single-Agent reads.
+  apps: {
+    where: { deletedAt: null },
+    include: {
+      keys: { where: { revokedAt: null } },
+      appAgents: {
+        orderBy: { createdAt: 'asc' as const },
+        include: { agent: { include: AGENT_INCLUDE } },
+      },
+    },
+    orderBy: { name: 'asc' as const },
+  },
   subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
   exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
 };
 
 const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
 
+// 023-app-shape Phase 2b: APP_INCLUDE eager-loads the AppAgent rows
+// (with each Agent's memoryItems) so the GraphQL `App.agent` /
+// `App.agents` / `App.installedAgentUrn` field resolvers can compute
+// their result without re-querying. The legacy `agent: { ... }` key
+// is gone because the direct FK was dropped; consumers that need the
+// "primary" Agent read it via the first appAgents row (orderBy
+// createdAt asc) or via `getPrimaryAgent` / `getPrimaryAgentId`.
 const APP_INCLUDE = {
   keys: { where: { revokedAt: null }, orderBy: { createdAt: 'desc' as const } },
-  agent: { include: AGENT_INCLUDE },
+  appAgents: {
+    orderBy: { createdAt: 'asc' as const },
+    include: { agent: { include: AGENT_INCLUDE } },
+  },
 };
 
 const toISO = (v: Date | string | null | undefined): string | null =>
   v == null ? null : v instanceof Date ? v.toISOString() : v;
+
+// ─── 023-app-shape Phase 2b — App field-resolver helpers ────────────────
+//
+// `App.agent` / `App.agentId` / `App.installedAgentUrn` / `App.agents`
+// are soft-deprecated convenience reads. They first try the eager-loaded
+// `appAgents` collection (populated by APP_INCLUDE / ORG_INCLUDE) and
+// fall back to `getPrimaryAgent` / `getPrimaryAgentId` re-fetches when
+// the field-resolver is invoked on a parent that wasn't loaded with the
+// include.
+
+type EagerAppAgentRow = { agent: { id: string; urn?: string } & Record<string, unknown> };
+
+function readPrimaryAppAgent(parent: { appAgents?: unknown }): EagerAppAgentRow | undefined {
+  const rows = parent.appAgents;
+  if (!Array.isArray(rows)) return undefined;
+  // APP_INCLUDE / ORG_INCLUDE order by createdAt asc; [0] is the primary.
+  return rows[0] as EagerAppAgentRow | undefined;
+}
+
+function readPrimaryAgentIdFromEager(parent: { appAgents?: unknown }): string | null | undefined {
+  if (parent.appAgents === undefined) return undefined;
+  const first = readPrimaryAppAgent(parent);
+  return first?.agent?.id ?? null;
+}
+
+function readPrimaryAgentRecordFromEager(
+  parent: { appAgents?: unknown },
+): unknown | undefined {
+  if (parent.appAgents === undefined) return undefined;
+  const first = readPrimaryAppAgent(parent);
+  return first?.agent ?? null;
+}
+
+function readAllAgentRecordsFromEager(
+  parent: { appAgents?: unknown },
+): unknown[] | undefined {
+  const rows = parent.appAgents;
+  if (!Array.isArray(rows)) return undefined;
+  return rows.map((r) => (r as EagerAppAgentRow).agent);
+}
+
+async function readPrimaryAgentField(
+  parent: { id: string; appAgents?: unknown },
+  ctx: Context,
+  field: 'urn',
+): Promise<string | null> {
+  const first = readPrimaryAppAgent(parent);
+  if (first?.agent && typeof first.agent.urn === 'string') {
+    return first.agent.urn;
+  }
+  // Fall back to a re-fetch only when the parent wasn't loaded with the include.
+  if (parent.appAgents === undefined) {
+    const primary = await getPrimaryAgent(ctx.db, parent.id, { include: undefined });
+    return primary?.[field] ?? null;
+  }
+  return null;
+}
 
 /**
  * Derive a human-readable title for a saved chat. Priority:
@@ -798,69 +878,63 @@ export const resolvers = {
       (a as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: a.organizationId } }),
     // Spec 021 US1: R2 canonical install URN combining App + Agent URNs.
-    // Returns null when no agent is attached (008 orphan apps; pre-009
-    // back-compat). Field-resolves the agent's urn from the DB only when
-    // it isn't already eager-loaded via APP_INCLUDE / ORG_INCLUDE.
+    // 023-app-shape Phase 2b: read the primary installed Agent's URN via
+    // the eager-loaded `appAgents` (preferred — APP_INCLUDE / ORG_INCLUDE
+    // both surface it), with a fallback to `getPrimaryAgent`. Returns
+    // null when no Agent is installed.
     installedAgentUrn: async (
-      a: { urn: string; agentId?: string | null; agent?: unknown },
+      a: { id: string; urn: string; appAgents?: unknown },
       _: unknown,
       ctx: Context,
     ) => {
-      let agentUrn: string | null = null;
-      if (a.agent && typeof a.agent === 'object' && a.agent !== null) {
-        const cached = (a.agent as { urn?: string }).urn;
-        if (typeof cached === 'string') agentUrn = cached;
-      }
-      if (!agentUrn && a.agentId) {
-        const fetched = await ctx.db.agent.findUnique({
-          where: { id: a.agentId },
-          select: { urn: true },
-        });
-        agentUrn = fetched?.urn ?? null;
-      }
+      const agentUrn = await readPrimaryAgentField(a, ctx, 'urn');
       if (!agentUrn) return null;
       return composeInstalledAgentUrn(a.urn, agentUrn);
     },
-    // 008-agent-installation: App.agent is the canonical resolver. The
-    // deprecated App.agents (plural) synthesizes a single-element array
-    // for source-compat with portal callers that haven't migrated yet.
+    // 023-app-shape Phase 2b: `App.agent` and `App.agents` are
+    // soft-deprecated convenience fields that resolve via the AppAgent
+    // join. `App.agent` returns the first installed Agent (orderBy
+    // createdAt asc); `App.agents` returns every installed Agent.
     //
-    // Agent.memoryItems is non-null in the schema, so a re-fetch here
-    // must include AGENT_INCLUDE — otherwise a downstream selection of
-    // `agent { memoryItems { ... } }` raises "Cannot return null for
-    // non-nullable field Agent.memoryItems" and bubbles up to the
-    // caller (most callers eagerly include via APP_INCLUDE / ORG_INCLUDE,
-    // but this branch is the safety net for the rest).
+    // Agent.memoryItems is non-null in the schema, so the resolved
+    // value must include AGENT_INCLUDE — `appAgents` from APP_INCLUDE /
+    // ORG_INCLUDE already does, and the fallback re-fetch via
+    // `getPrimaryAgent({ include: AGENT_INCLUDE })` does too.
+    agentId: async (
+      a: { id: string; appAgents?: unknown },
+      _: unknown,
+      ctx: Context,
+    ): Promise<string | null> => {
+      const id = readPrimaryAgentIdFromEager(a);
+      if (id !== undefined) return id;
+      return getPrimaryAgentId(ctx.db, a.id);
+    },
     agent: async (
-      a: { id: string; agentId?: string | null; agent?: unknown },
+      a: { id: string; appAgents?: unknown },
       _: unknown,
       ctx: Context,
     ) => {
-      if (a.agent !== undefined) return a.agent ?? null;
-      if (!a.agentId) return null;
-      return ctx.db.agent.findUnique({
-        where: { id: a.agentId },
-        include: AGENT_INCLUDE,
-      });
+      const eager = readPrimaryAgentRecordFromEager(a);
+      if (eager !== undefined) return eager;
+      return getPrimaryAgent(ctx.db, a.id, { include: AGENT_INCLUDE });
     },
     agents: async (
-      a: { id: string; agentId?: string | null; agent?: unknown },
+      a: { id: string; appAgents?: unknown },
       _: unknown,
       ctx: Context,
     ) => {
-      if (a.agent) {
-        const agent = a.agent as { deletedAt?: Date | null } | null;
-        return agent && !agent.deletedAt ? [agent] : [];
+      const eagerAll = readAllAgentRecordsFromEager(a);
+      if (eagerAll !== undefined) {
+        return eagerAll.filter((ag): ag is { deletedAt: Date | null } & object =>
+          ag !== null && !(ag as { deletedAt?: Date | null }).deletedAt,
+        );
       }
-      if (!a.agentId) return [];
-      // Match the singular App.agent re-fetch above: AGENT_INCLUDE so
-      // the returned Agent satisfies the non-null `memoryItems` contract
-      // when a downstream caller selects it.
-      const agent = await ctx.db.agent.findUnique({
-        where: { id: a.agentId },
-        include: AGENT_INCLUDE,
+      const rows = await ctx.db.appAgent.findMany({
+        where: { appId: a.id },
+        orderBy: { createdAt: 'asc' },
+        include: { agent: { include: AGENT_INCLUDE } },
       });
-      return agent && !agent.deletedAt ? [agent] : [];
+      return rows.map((r) => r.agent).filter((ag) => ag && !ag.deletedAt);
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
       return ctx.db.appMember.findMany({
@@ -1060,13 +1134,17 @@ export const resolvers = {
         });
         if (!member) return [];
       }
+      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. List Apps
+      // that have this Agent installed.
       return ctx.db.app.findMany({
-        where: { agentId: a.id, deletedAt: null },
+        where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
         orderBy: { createdAt: 'asc' },
       });
     },
     appCount: async (a: { id: string }, _: unknown, ctx: Context) =>
-      ctx.db.app.count({ where: { agentId: a.id, deletedAt: null } }),
+      ctx.db.app.count({
+        where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
+      }),
     orgGrants: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) {
@@ -1335,14 +1413,16 @@ export const resolvers = {
       });
       if (personalMemory) readableMemoryIds.push(personalMemory.id);
 
-      // TODO(008-amendment / 2026-05-12-user-installing-app §3): `App.agentId`
-      // is being dropped in favor of the reintroduced `AppAgent` join.
-      // Replace `app: { agentId: ... }` with
-      // `app: { agents: { some: { agentId: ... } } }` when the amendment lands.
+      // 023-app-shape Phase 2b: App↔Agent moved from `App.agentId` to the
+      // N:M `AppAgent` join. Match Apps that have the resolved Agent
+      // installed via the join.
       const sharedMemberships = await ctx.db.appMember.findMany({
         where: {
           userId: ctx.userId,
-          app: { agentId: resolvedAgentId, deletedAt: null },
+          app: {
+            appAgents: { some: { agentId: resolvedAgentId } },
+            deletedAt: null,
+          },
         },
         select: { app: { select: { id: true } } },
       });
@@ -1739,25 +1819,32 @@ export const resolvers = {
         ? {}
         : { type: { not: 'AGENT_SYSTEM' as const } };
 
-      // 008: App-keyed caller — App.agent_id is direct; load the App's Agent
-      // and surface its memoryItems. Orphan Apps (agent_id IS NULL) see zero
-      // memories.
+      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Surface
+      // memoryItems for every installed Agent (the "primary" notion is
+      // not load-bearing here — the resolver returns the union). Apps
+      // with no installed Agents see zero memories.
       if (ctx.appId) {
         const app = await ctx.db.app.findUnique({
           where: { id: ctx.appId },
           select: {
-            agent: {
-              include: {
-                memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
+            appAgents: {
+              select: {
+                agent: {
+                  include: {
+                    memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
+                  },
+                },
               },
             },
           },
         });
-        if (!app?.agent) return [];
+        if (!app || app.appAgents.length === 0) return [];
         const memoryMap = new Map<string, any>();
-        for (const item of app.agent.memoryItems) {
-          if (!includeAgentSystem && item.memory.type === 'AGENT_SYSTEM') continue;
-          memoryMap.set(item.memory.id, item.memory);
+        for (const aa of app.appAgents) {
+          for (const item of aa.agent.memoryItems) {
+            if (!includeAgentSystem && item.memory.type === 'AGENT_SYSTEM') continue;
+            memoryMap.set(item.memory.id, item.memory);
+          }
         }
         return Array.from(memoryMap.values());
       }
@@ -1920,16 +2007,23 @@ export const resolvers = {
       if (!isPlatformAdmin) {
         await requireOrgRole(ctx, app.organizationId, 'READER');
       }
-      // 008: App.agent_id is direct — load the App's single Agent and gather
-      // its memoryItems. Orphan Apps (agent_id IS NULL) have no accessible nodes.
-      const appWithAgent = await ctx.db.app.findUnique({
+      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Gather
+      // memoryItems for every installed Agent. Apps with no installed
+      // Agents have no accessible nodes.
+      const appWithAgents = await ctx.db.app.findUnique({
         where: { id: resolvedAppId },
         select: {
-          agent: { include: { memoryItems: true } },
+          appAgents: {
+            select: { agent: { select: { memoryItems: true } } },
+          },
         },
       });
       const memoryIds = [
-        ...new Set((appWithAgent?.agent?.memoryItems ?? []).map((m) => m.memoryId)),
+        ...new Set(
+          (appWithAgents?.appAgents ?? []).flatMap((aa) =>
+            aa.agent.memoryItems.map((m) => m.memoryId),
+          ),
+        ),
       ];
       if (memoryIds.length === 0) return [];
 
@@ -3709,16 +3803,17 @@ export const resolvers = {
             'Cannot create a shared chat — sign in as a user that belongs to an App that installs this Agent.',
           );
         }
-        // TODO(008-amendment / 2026-05-12-user-installing-app §3): `App.agentId`
-        // is being dropped in favor of the reintroduced `AppAgent` join.
-        // Replace `app: { agentId: ... }` with
-        // `app: { agents: { some: { agentId: ... } } }` when the amendment
-        // lands. With multi-Agent Apps, this query will return one App per
-        // membership-that-installs-the-Agent; today it returns at most one.
+        // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Find an
+        // App that the user is an AppMember of AND that has this Agent
+        // installed. With multi-Agent Apps, this may return any App that
+        // matches both conditions; today it returns at most one.
         const membership = await ctx.db.appMember.findFirst({
           where: {
             userId: ctx.userId,
-            app: { agentId: resolvedAgentId, deletedAt: null },
+            app: {
+              appAgents: { some: { agentId: resolvedAgentId } },
+              deletedAt: null,
+            },
           },
           select: {
             app: { select: { id: true, urn: true, name: true, organizationId: true } },
@@ -3788,7 +3883,7 @@ export const resolvers = {
             ownerOrgIds.length > 0
               ? await ctx.db.app.findFirst({
                   where: {
-                    agentId: resolvedAgentId,
+                    appAgents: { some: { agentId: resolvedAgentId } },
                     organizationId: { in: ownerOrgIds },
                     deletedAt: null,
                   },
@@ -5074,12 +5169,14 @@ export const resolvers = {
           throw new Error(`An app with URN "${appUrn}" already exists`);
         }
       }
+      // 023-app-shape Phase 2b: App↔Agent moved from `App.agentId` to the
+      // N:M `AppAgent` join. Create the App, then immediately link the
+      // requested Agent via an AppAgent row.
       const createdApp = await ctx.db.app.create({
         data: {
           organizationId: resolvedOrgId,
           name,
           urn: appUrn,
-          agentId: resolvedAgentId,
           surfaces: surfaces ?? undefined, // undefined → use the schema default ['chat']
           trainingMode: trainingMode ?? false,
           appType: appType ?? 'WORKSTATION',
@@ -5096,6 +5193,7 @@ export const resolvers = {
           sessionTimeoutSeconds: sessionTimeoutSeconds ?? 900,
           anonymousTtlDays: anonymousTtlDays ?? 7,
           createdBy: ctx.userId ?? null,
+          appAgents: { create: { agentId: resolvedAgentId, createdBy: ctx.userId ?? null } },
         },
         include: APP_INCLUDE,
       });
@@ -5133,7 +5231,7 @@ export const resolvers = {
           const existingDepApp = await ctx.db.app.findFirst({
             where: {
               organizationId: resolvedOrgId,
-              agentId: imp.importedAgentId,
+              appAgents: { some: { agentId: imp.importedAgentId } },
               deletedAt: null,
             },
             select: { id: true },
@@ -5175,10 +5273,12 @@ export const resolvers = {
               organizationId: resolvedOrgId,
               name: `${depAgent.name} (cascaded from ${name})`,
               urn: depUrn,
-              agentId: imp.importedAgentId,
               surfaces: ['chat'], // dep installs default to chat surface
               trainingMode: false,
               createdBy: ctx.userId ?? null,
+              appAgents: {
+                create: { agentId: imp.importedAgentId, createdBy: ctx.userId ?? null },
+              },
             },
           });
         }
@@ -5331,19 +5431,39 @@ export const resolvers = {
       if (agent.organizationId !== app.organizationId) {
         throw new Error('Agent must belong to the same organization as the App');
       }
-      // 008-agent-installation: App→Agent is a direct FK (App.agent_id), not
-      // an AppAgent join row. Auto-provision the AgentOrgGrant so cross-org
-      // gate 1 in access-control will clear (same-org installs auto-pass
-      // either way; this ensures the explicit grant exists for symmetry).
+      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Upsert the
+      // AppAgent row, and apply trainingMode (still per-App) if supplied.
+      // Auto-provision AgentOrgGrant so cross-org gate 1 in access-control
+      // clears (same-org installs auto-pass either way; the explicit grant
+      // exists for symmetry).
       await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
-      await ctx.db.app.update({
-        where: { id: resolvedAppId },
-        data: {
-          agentId: resolvedAgentId,
-          ...(trainingMode !== undefined ? { trainingMode } : {}),
-          updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-        },
-      });
+      // Wrap the AppAgent upsert + the trainingMode update in a single
+      // transaction so the App is never in a half-updated state (agent
+      // linked but trainingMode stale, or vice versa).
+      await ctx.db.$transaction([
+        ctx.db.appAgent.upsert({
+          where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } },
+          create: {
+            appId: resolvedAppId,
+            agentId: resolvedAgentId,
+            createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+          },
+          update: {
+            updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+          },
+        }),
+        ...(trainingMode !== undefined
+          ? [
+              ctx.db.app.update({
+                where: { id: resolvedAppId },
+                data: {
+                  trainingMode,
+                  updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+                },
+              }),
+            ]
+          : []),
+      ]);
       return ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId }, include: APP_INCLUDE });
     },
 
@@ -5358,18 +5478,12 @@ export const resolvers = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
-      // 008: clear App.agent_id only if it currently points at the named
-      // Agent — keeps the call idempotent and prevents an unrelated agent
-      // from being detached by a stale request.
-      if (app.agentId === resolvedAgentId) {
-        await ctx.db.app.update({
-          where: { id: resolvedAppId },
-          data: {
-            agentId: null,
-            updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-          },
-        });
-      }
+      // 023-app-shape Phase 2b: delete the AppAgent row if it exists.
+      // Idempotent — deleteMany returns count and never throws on absent
+      // rows. The (App, Agent, *) memories persist as orphans per FR-005.
+      await ctx.db.appAgent.deleteMany({
+        where: { appId: resolvedAppId, agentId: resolvedAgentId },
+      });
       return ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId }, include: APP_INCLUDE });
     },
 
@@ -5659,7 +5773,9 @@ export const resolvers = {
       // 008: App→Agent is a direct FK; the App can operate exactly the Agent
       // referenced by App.agent_id (no AppAgent join). Orphan Apps (agent_id
       // IS NULL) cannot operate any agent.
-      if (!app.agentId || app.agentId !== agentId) {
+      // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
+      // that the requested Agent is installed in the calling App.
+      if (!(await isAgentInstalled(ctx.db, app.id, agentId))) {
         throw new Error('Forbidden: App is not allowed to operate this agent');
       }
 

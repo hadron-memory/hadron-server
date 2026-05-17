@@ -168,7 +168,7 @@ describe('findOrCreateAppClassMemory', () => {
         urn: `${org.urn}:app-017`,
         name: 'App 017',
         appType: 'CHATBOT',
-        agentId: agent.id,
+        appAgents: { create: { agentId: agent.id } },
       },
     });
     appId = app.id;

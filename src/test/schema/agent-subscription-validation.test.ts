@@ -66,7 +66,7 @@ describe('AgentSubscription model + MemoryClass enum + PERSONAL visibility', () 
         name: 'mc-app',
         urn: `${org.urn}:mc-app`,
         organizationId: org.id,
-        agentId: agent.id,
+        appAgents: { create: { agentId: agent.id } },
       },
     });
 
@@ -151,7 +151,7 @@ describe('CHECK constraint: PERSONAL ⇔ userId IS NOT NULL', () => {
         name: 'check-app',
         urn: `${org.urn}:check-app`,
         organizationId: org.id,
-        agentId: agent.id,
+        appAgents: { create: { agentId: agent.id } },
       },
     });
     const mem = await createDbPersonalMemory(db, {

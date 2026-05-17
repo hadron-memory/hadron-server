@@ -47,7 +47,7 @@ async function makeApp(
       organizationId: orgId,
       name: slug,
       urn: `${orgUrn}:${slug}`,
-      agentId,
+      appAgents: { create: { agentId } },
     },
   });
 }
@@ -114,10 +114,13 @@ describe('App.installedAgentUrn — spec 021 US1', () => {
 
     // Re-point the App to competitor.com's same-slug agent. Same App
     // row, same App.urn, same agent slug — only the author-org differs.
-    const updatedApp = await db.app.update({
-      where: { id: app.id },
-      data: { agentId: competitorAgent.id },
+    // 023-app-shape Phase 2b: App↔Agent is N:M; swap the AppAgent rows
+    // so the "primary" (first installed) agent flips to the competitor.
+    await db.appAgent.deleteMany({ where: { appId: app.id } });
+    await db.appAgent.create({
+      data: { appId: app.id, agentId: competitorAgent.id },
     });
+    const updatedApp = await db.app.findUniqueOrThrow({ where: { id: app.id } });
 
     const urlWithCompetitor = await (
       resolvers.App as Record<string, Function>

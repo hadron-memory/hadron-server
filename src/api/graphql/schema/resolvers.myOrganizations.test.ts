@@ -82,7 +82,7 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
       data: {
         id: generateId(),
         organizationId: org.id,
-        agentId: agent.id,
+        appAgents: { create: { agentId: agent.id } },
         name: 'My App',
         urn: `${org.urn}:my-app`,
         appType: 'WORKSTATION',
@@ -150,7 +150,7 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
       data: {
         id: generateId(),
         organizationId: org.id,
-        agentId: agent.id,
+        appAgents: { create: { agentId: agent.id } },
         name: 'Live App',
         urn: `${org.urn}:live-app`,
         appType: 'WORKSTATION',

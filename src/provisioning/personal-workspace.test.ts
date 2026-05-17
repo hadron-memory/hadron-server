@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import { getPrimaryAgentId } from '../lib/appAgent.js';
 import { createHash } from 'crypto';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -62,11 +63,11 @@ describe('provisionPersonalWorkspace', () => {
     expect(appKey!.label).toBe('Initial setup key');
   });
 
-  it('sets App.agent_id to the provisioned Agent (008 — direct FK, no AppAgent)', async () => {
+  it('installs the provisioned Agent into the App via AppAgent (023 Phase 2b — N:M join)', async () => {
     const { appId, agentId } = await provisionPersonalWorkspace(db, userId, 'Test User');
 
     const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
-    expect(app.agentId).toBe(agentId);
+    expect((await getPrimaryAgentId(db, app.id))).toBe(agentId);
     expect(app.trainingMode).toBe(false);
   });
 

@@ -11,8 +11,11 @@
  *      `installation_policy.maxMembers`. Throws `MaxMembersExceededError`
  *      otherwise. Updating an existing member's role does NOT trigger the
  *      maxMembers check.
- *   3. The App must have a non-NULL `agent_id`. An orphan App (cutover
- *      edge case) cannot accept members — throws `OrphanAppError`.
+ *   3. The App must have at least one installed Agent (an AppAgent
+ *      row). An orphan App (no installed Agents) cannot accept members —
+ *      throws `OrphanAppError`. Pre-023-Phase-2b this was a `App.agent_id`
+ *      check; the column was dropped, so the predicate now consults the
+ *      `AppAgent` join via `getPrimaryAgentId`.
  *
  * The maxMembers check is at *invite-acceptance time* (when the row is
  * inserted), not invite-creation time, consistent with the existing
@@ -20,6 +23,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { getPrimaryAgentId } from '../../lib/appAgent.js';
 
 export class InvalidRoleError extends Error {
   constructor(role: string, allowed: string[]) {
@@ -42,7 +46,8 @@ export class MaxMembersExceededError extends Error {
 export class OrphanAppError extends Error {
   constructor(appId: string) {
     super(
-      `App ${appId} is not linked to an Agent (orphan). Set App.agent_id before inviting members.`,
+      `App ${appId} has no installed Agents (orphan). Install an Agent ` +
+        `via installAgentIntoApp / addAgentToApp before inviting members.`,
     );
     this.name = 'OrphanAppError';
   }
@@ -60,14 +65,20 @@ export async function ensureAppMember(
   role: string,
   ctx: { actorId?: string | null } = {},
 ): Promise<void> {
-  const app = await db.app.findUniqueOrThrow({
+  await db.app.findUniqueOrThrow({
     where: { id: appId },
-    select: { id: true, agentId: true },
+    select: { id: true },
   });
-  if (!app.agentId) throw new OrphanAppError(appId);
+  // 023-app-shape Phase 2b: App→Agent goes through AppAgent (N:M).
+  // For installation-policy enforcement at member-add time, use the
+  // primary installed Agent. Multi-Agent semantics (which Agent's
+  // policy gates which membership) will be revisited in the US1
+  // resolvers.
+  const primaryAgentId = await getPrimaryAgentId(db, appId);
+  if (primaryAgentId === null) throw new OrphanAppError(appId);
 
   const agent = await db.agent.findUniqueOrThrow({
-    where: { id: app.agentId },
+    where: { id: primaryAgentId },
     select: { installationPolicy: true },
   });
   const policy = agent.installationPolicy as unknown as InstallationPolicy;

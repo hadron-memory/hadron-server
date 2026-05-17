@@ -20,6 +20,7 @@ import {
   createDbOrgAndGraph,
 } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { getPrimaryAgentId } from '../../../lib/appAgent.js';
 import { resolvers, type Context } from './resolvers.js';
 
 // ---------------------------------------------------------------------------
@@ -193,7 +194,7 @@ describe('addAgentToApp accepts AppAgent fields', () => {
     // 008: AppAgent join is gone — App.agent_id is the FK. The legacy role
     // arg is gone too (T034) — system memory is universally read-only.
     const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
-    expect(updated.agentId).toBe(agentId);
+    expect(await getPrimaryAgentId(db, updated.id)).toBe(agentId);
     expect(updated.trainingMode).toBe(true);
   });
 
@@ -209,7 +210,7 @@ describe('addAgentToApp accepts AppAgent fields', () => {
       adminCtx(),
     );
     const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
-    expect(updated.agentId).toBe(agentId);
+    expect(await getPrimaryAgentId(db, updated.id)).toBe(agentId);
     expect(updated.trainingMode).toBe(false);
   });
 
@@ -230,7 +231,7 @@ describe('addAgentToApp accepts AppAgent fields', () => {
       adminCtx(),
     );
     const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
-    expect(updated.agentId).toBe(agentId);
+    expect(await getPrimaryAgentId(db, updated.id)).toBe(agentId);
     expect(updated.trainingMode).toBe(true);
   });
 });
@@ -263,7 +264,7 @@ describe('App field resolvers', () => {
       adminCtx(),
     );
     const agent = await resolvers.App.agent(
-      { id: created.id, agentId: created.agentId },
+      { id: created.id },
       {},
       adminCtx(),
     );
@@ -348,7 +349,7 @@ describe('myApps', () => {
 describe('appNodes', () => {
   it('returns nodes from memories accessible via App.agent_id', async () => {
     const { app } = await createDbAppWithKey(db, 'app-nodes', orgId);
-    await db.app.update({ where: { id: app.id }, data: { agentId } });
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
     const nodes = await resolvers.Query.appNodes({}, { appId: app.id }, adminCtx());
     expect(nodes.length).toBe(1);
     expect(nodes[0].loc).toBe('org.test.node');
@@ -541,7 +542,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
       adminCtx(),
     );
     const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
-    expect(updated.agentId).toBe(agentId);
+    expect(await getPrimaryAgentId(db, updated.id)).toBe(agentId);
   });
 
   it('removeAgentFromApp accepts URNs for both appId and agentId', async () => {
@@ -569,7 +570,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
       adminCtx(),
     );
     const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
-    expect(updated.agentId).toBeNull();
+    expect(await getPrimaryAgentId(db, updated.id)).toBeNull();
   });
 
   it('createAppKey accepts a URN as appId', async () => {

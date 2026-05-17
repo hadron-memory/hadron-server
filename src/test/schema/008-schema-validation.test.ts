@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import { getPrimaryAgentId } from '../../lib/appAgent.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
@@ -36,7 +37,7 @@ describe('008 schema — new entities + dropped AppAgent', () => {
         name: 'mv-app',
         urn: `${org.urn}:mv-app`,
         organizationId: org.id,
-        agentId: agent.id,
+        appAgents: { create: { agentId: agent.id } },
       },
     });
 
@@ -188,7 +189,7 @@ describe('008 schema — App fields', () => {
         organizationId: org.id,
       },
     });
-    expect(app.agentId).toBeNull();
+    expect((await getPrimaryAgentId(db, app.id))).toBeNull();
     expect(app.trainingMode).toBe(false);
     expect(app.surfaces).toEqual(['chat']);
   });
@@ -206,12 +207,14 @@ describe('008 schema — App fields', () => {
         name: 'cas-app',
         urn: `${org.urn}:cas-app`,
         organizationId: org.id,
-        agentId: agent.id,
+        appAgents: { create: { agentId: agent.id } },
       },
     });
     await db.agent.delete({ where: { id: agent.id } });
-    const after = await db.app.findUniqueOrThrow({ where: { id: app.id } });
-    expect(after.agentId).toBeNull();
+    // 023-app-shape Phase 2b: Agent deletion cascades to AppAgent rows
+    // (the previous behavior was "App.agentId set to null on SET NULL");
+    // either way, the App is left with no primary Agent.
+    expect(await getPrimaryAgentId(db, app.id)).toBeNull();
   });
 });
 
@@ -270,7 +273,7 @@ describe('008 schema — chk_memory_class_app_id', () => {
         name: 'chk-app',
         urn: `${org.urn}:chk-app`,
         organizationId: org.id,
-        agentId: agent.id,
+        appAgents: { create: { agentId: agent.id } },
       },
     });
     await expect(
@@ -300,7 +303,7 @@ describe('008 schema — chk_memory_class_app_id', () => {
         name: 'chk-app-ok',
         urn: `${org.urn}:chk-app-ok`,
         organizationId: org.id,
-        agentId: agent.id,
+        appAgents: { create: { agentId: agent.id } },
       },
     });
     const mem = await db.memory.create({
@@ -330,7 +333,7 @@ describe('008 schema — chk_memory_class_app_id', () => {
         name: 'cas-app-2',
         urn: `${org.urn}:cas-app-2`,
         organizationId: org.id,
-        agentId: agent.id,
+        appAgents: { create: { agentId: agent.id } },
       },
     });
     const mem = await db.memory.create({

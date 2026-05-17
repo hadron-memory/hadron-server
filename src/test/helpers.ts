@@ -139,15 +139,16 @@ export async function createDbAppWithKey(
 }
 
 /**
- * Link an App to an Agent. Pre-008 this created an AppAgent join row; under
- * the two-layer model (008-agent-installation), the App→Agent relation is a
- * direct FK on App.agent_id. The helper now updates App.agent_id (and
- * App.training_mode if requested). The legacy `role` arg is accepted for
- * source compat but ignored — DEVELOP-from-App is dropped (R-10).
+ * Link an App to an Agent. The journey of this helper:
+ *   - Pre-008: created an AppAgent join row.
+ *   - 008-agent-installation: switched to setting App.agent_id (direct FK).
+ *   - 023-app-shape Phase 2b: App.agent_id was dropped; back to creating an
+ *     AppAgent join row. The legacy `role` arg is still accepted for source
+ *     compat but ignored (DEVELOP-from-App stays gone). trainingMode is now
+ *     per-App, not per-AppAgent, so the helper updates App.training_mode
+ *     when the option is supplied.
  *
- * Returns the updated App row, mirroring the prior return shape closely
- * enough for existing tests (which mostly used the result for assertions
- * about presence rather than schema).
+ * Returns the new AppAgent row.
  */
 export async function createDbAppAgent(
   db: PrismaClient,
@@ -159,12 +160,14 @@ export async function createDbAppAgent(
   } = {},
 ) {
   void opts.role;
-  return db.app.update({
-    where: { id: appId },
-    data: {
-      agentId,
-      ...(opts.trainingMode !== undefined ? { trainingMode: opts.trainingMode } : {}),
-    },
+  if (opts.trainingMode !== undefined) {
+    await db.app.update({
+      where: { id: appId },
+      data: { trainingMode: opts.trainingMode },
+    });
+  }
+  return db.appAgent.create({
+    data: { appId, agentId },
   });
 }
 
@@ -294,19 +297,26 @@ export async function createDbPersonalMemory(
   if (!appId) {
     // Personal memory pivots on (app_id, user_id) — the App can live in any
     // org (cross-org case: Alice's personal-alice org holds the memory; the
-    // delivering App lives in OrgA). Look up by agent_id alone, preferring the
-    // memory's own org if any match exists.
-    const sameOrg = await db.app.findFirst({
-      where: { organizationId: opts.organizationId, agentId: opts.agentId, deletedAt: null },
-      select: { id: true },
+    // delivering App lives in OrgA). Look up by AppAgent join (023-app-shape
+    // Phase 2b: App.agent_id is gone), preferring the memory's own org if
+    // any match exists. Order by AppAgent.createdAt asc so the chosen
+    // appId is deterministic when multiple Apps install the same Agent.
+    const sameOrg = await db.appAgent.findFirst({
+      where: {
+        agentId: opts.agentId,
+        app: { organizationId: opts.organizationId, deletedAt: null },
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { appId: true },
     });
-    appId = sameOrg?.id ?? null;
+    appId = sameOrg?.appId ?? null;
     if (!appId) {
-      const anyOrg = await db.app.findFirst({
-        where: { agentId: opts.agentId, deletedAt: null },
-        select: { id: true },
+      const anyOrg = await db.appAgent.findFirst({
+        where: { agentId: opts.agentId, app: { deletedAt: null } },
+        orderBy: { createdAt: 'asc' },
+        select: { appId: true },
       });
-      appId = anyOrg?.id ?? null;
+      appId = anyOrg?.appId ?? null;
     }
   }
   if (!appId) {

@@ -57,7 +57,7 @@ beforeEach(async () => {
       name: 'Buno App',
       agentTools: ['asset:upload'], // tool enabled by default
       // 008: App→Agent direct FK; required for personal-memory app_id pivot.
-      agentId: agent.id,
+      appAgents: { create: { agentId: agent.id } },
     },
   });
   memory = await db.memory.create({
