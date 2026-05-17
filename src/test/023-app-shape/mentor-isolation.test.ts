@@ -302,7 +302,7 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     expect((caught as GraphQLError).extensions?.code).toBe('MemoryShareNotFoundError');
   });
 
-  it('createMemoryShare rejects non-personal-class memories (FR-018)', async () => {
+  it('createMemoryShare rejects non-personal-class memories via the caller-authority guard (FR-018; surfaces as FORBIDDEN)', async () => {
     const knowledgeMem = await db.memory.create({
       data: {
         id: generateId(),
@@ -318,21 +318,21 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
       await resolvers.Mutation.createMemoryShare(
         {},
         { memoryId: knowledgeMem.id, granteeId: fx.mentorAId, role: 'reader' },
-        // Caller-authority guard fires first (knowledge memory has no
-        // userId / no principal). Using a platform admin context to
-        // bypass and reach the class check.
-        { db, userId: fx.aliceId, roles: ['ADMIN'] },
+        userCtx(fx.aliceId),
       );
     } catch (err) {
       caught = err;
     }
     expect(caught).toBeInstanceOf(GraphQLError);
-    // Either FORBIDDEN (caller-authority guard, since aliceId !== null
-    // and knowledgeMem.userId is null), OR the class-check error — both
-    // are acceptable v1 surfaces. The behavior under test is "denied":
-    expect((caught as GraphQLError).extensions?.code).toMatch(
-      /^(FORBIDDEN|InvalidMemoryClassForShareError)$/,
-    );
+    // Non-personal memories have no userId, so the caller-authority
+    // guard's "memory.userId === ctx.userId" check returns FORBIDDEN
+    // first — before the controller's class check has a chance to
+    // run. Intended ordering: don't leak "this is a knowledge memory"
+    // info to callers who aren't authorized for it. The typed
+    // InvalidMemoryClassForShareError is still defined on the
+    // controller for non-GraphQL callers and future Agent-mediated
+    // paths.
+    expect((caught as GraphQLError).extensions?.code).toBe('FORBIDDEN');
   });
 
   it('createMemoryShare rejects callers who are not the principal (FORBIDDEN)', async () => {

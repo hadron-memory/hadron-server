@@ -1048,9 +1048,10 @@ export const resolvers = {
       });
     },
     // 023-app-shape US3: cross-user grants on this Memory. Empty for
-    // non-personal-class memories. Visible only to the principal
-    // (memory.userId) and to ADMIN/OWNER of the memory's owning org —
-    // grantees can read their own shares via User.memorySharesGranted
+    // non-personal-class memories. Visible to (a) the principal
+    // (memory.userId), (b) an OrgMember of the memory's owning org
+    // with ADMIN/OWNER role, or (c) a platform ADMIN/OWNER.
+    // Grantees can read their own shares via User.memorySharesGranted
     // (out of scope here; can be added if a portal page needs it).
     shares: async (
       g: { id: string; class: string; userId?: string | null; organizationId: string },
@@ -1059,12 +1060,32 @@ export const resolvers = {
     ) => {
       if (g.class !== 'personal') return [];
       const isPrincipal = ctx.userId !== undefined && ctx.userId === g.userId;
-      const isOrgAdmin =
-        ctx.organizationId === g.organizationId &&
-        (ctx.roles?.includes('ADMIN') === true || ctx.roles?.includes('OWNER') === true);
       const isPlatformAdmin =
         ctx.roles?.includes('ADMIN') === true || ctx.roles?.includes('OWNER') === true;
-      if (!isPrincipal && !isOrgAdmin && !isPlatformAdmin) return [];
+      if (!isPrincipal && !isPlatformAdmin) {
+        // Verify the caller is an ADMIN/OWNER of the memory's owning
+        // org. The earlier `ctx.organizationId === g.organizationId`
+        // shortcut was incomplete — most callers don't have
+        // organizationId scoped per-request, which would have made
+        // non-platform org admins fall through to an empty list.
+        if (!ctx.userId) return [];
+        const member = await ctx.db.orgMember.findUnique({
+          where: {
+            organizationId_userId: {
+              organizationId: g.organizationId,
+              userId: ctx.userId,
+            },
+          },
+          select: { role: true, deletedAt: true },
+        });
+        if (
+          !member ||
+          member.deletedAt ||
+          (member.role !== 'ADMIN' && member.role !== 'OWNER')
+        ) {
+          return [];
+        }
+      }
       return ctx.db.memoryShare.findMany({
         where: { memoryId: g.id },
         orderBy: { createdAt: 'asc' },
@@ -5964,12 +5985,13 @@ export const resolvers = {
       }
       await requireMemorySharePrincipal(ctx, memoryId);
       try {
-        await createMemoryShare(ctx.db, {
+        const memoryShare = await createMemoryShare(ctx.db, {
           memoryId,
           granteeId,
           role,
           actorId: ctx.userId,
         });
+        return { memoryShare };
       } catch (e: unknown) {
         if (
           e instanceof InvalidMemoryClassForShareError ||
@@ -5982,10 +6004,6 @@ export const resolvers = {
         }
         throw e;
       }
-      const memoryShare = await ctx.db.memoryShare.findUniqueOrThrow({
-        where: { memoryId_granteeId: { memoryId, granteeId } },
-      });
-      return { memoryShare };
     },
 
     // 023-app-shape US3 — revoke an existing MemoryShare. Idempotent.
@@ -6023,12 +6041,13 @@ export const resolvers = {
       }
       await requireMemorySharePrincipal(ctx, memoryId);
       try {
-        await updateMemoryShareRole(ctx.db, {
+        const memoryShare = await updateMemoryShareRole(ctx.db, {
           memoryId,
           granteeId,
           role,
           actorId: ctx.userId,
         });
+        return { memoryShare };
       } catch (e: unknown) {
         if (e instanceof MemoryShareNotFoundError) {
           throw new GraphQLError(e.message, {
@@ -6037,10 +6056,6 @@ export const resolvers = {
         }
         throw e;
       }
-      const memoryShare = await ctx.db.memoryShare.findUniqueOrThrow({
-        where: { memoryId_granteeId: { memoryId, granteeId } },
-      });
-      return { memoryShare };
     },
 
     // 008-agent-installation: AgentImport bundling. Per spec FR-005 +

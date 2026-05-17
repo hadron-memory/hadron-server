@@ -7,9 +7,18 @@
  *
  * The caller-authority guard lives in the resolver; see
  * `createMemoryShare.ts` for the policy context.
+ *
+ * Race-safe: rather than a pre-check (which would be racy with a
+ * concurrent revoke), the update runs directly and Prisma's P2025
+ * "record to update not found" gets translated to the typed error.
  */
 
-import type { PrismaClient, MemoryShareRole } from '../../generated/prisma/index.js';
+import {
+  Prisma,
+  type PrismaClient,
+  type MemoryShareRole,
+  type MemoryShare,
+} from '../../generated/prisma/index.js';
 
 export class MemoryShareNotFoundError extends Error {
   constructor(memoryId: string, granteeId: string) {
@@ -28,25 +37,21 @@ export async function updateMemoryShareRole(
     role: MemoryShareRole;
     actorId: string;
   },
-): Promise<{ memoryId: string; granteeId: string; role: MemoryShareRole }> {
-  const existing = await db.memoryShare.findUnique({
-    where: {
-      memoryId_granteeId: { memoryId: args.memoryId, granteeId: args.granteeId },
-    },
-    select: { memoryId: true },
-  });
-  if (!existing) {
-    throw new MemoryShareNotFoundError(args.memoryId, args.granteeId);
+): Promise<MemoryShare> {
+  try {
+    return await db.memoryShare.update({
+      where: {
+        memoryId_granteeId: { memoryId: args.memoryId, granteeId: args.granteeId },
+      },
+      data: { role: args.role, updatedBy: args.actorId },
+    });
+  } catch (e) {
+    if (
+      e instanceof Prisma.PrismaClientKnownRequestError &&
+      e.code === 'P2025'
+    ) {
+      throw new MemoryShareNotFoundError(args.memoryId, args.granteeId);
+    }
+    throw e;
   }
-  await db.memoryShare.update({
-    where: {
-      memoryId_granteeId: { memoryId: args.memoryId, granteeId: args.granteeId },
-    },
-    data: { role: args.role, updatedBy: args.actorId },
-  });
-  return {
-    memoryId: args.memoryId,
-    granteeId: args.granteeId,
-    role: args.role,
-  };
 }

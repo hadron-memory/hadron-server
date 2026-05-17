@@ -1658,10 +1658,19 @@ export const typeDefs = `#graphql
 
     Error codes (extensions.code, Error.name style):
       - UNAUTHENTICATED — no logged-in user in context.
-      - MemoryNotFoundForShareError — memoryId doesn't resolve.
-      - InvalidMemoryClassForShareError — memory.class != 'personal'.
-      - MemoryShareGranteeMissingError — granteeId doesn't resolve.
-      - FORBIDDEN — caller is not the Memory's principal.
+      - FORBIDDEN — caller is not the Memory's principal. The
+        caller-authority guard runs first and deliberately does not
+        differentiate between "memory doesn't exist", "memory is not
+        personal-class", and "caller isn't the principal" — all three
+        return FORBIDDEN so memory metadata isn't leaked to
+        non-principals.
+      - MemoryShareGranteeMissingError — granteeId doesn't resolve to
+        an existing User. Only reachable when the caller passes the
+        principal guard.
+      - InvalidMemoryClassForShareError / MemoryNotFoundForShareError —
+        defined on the controller for completeness; functionally
+        unreachable via this GraphQL mutation in v1 because the
+        caller-authority guard short-circuits to FORBIDDEN first.
     """
     createMemoryShare(
       memoryId: ID!

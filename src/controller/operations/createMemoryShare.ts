@@ -28,7 +28,11 @@
  * the call throwing.
  */
 
-import type { PrismaClient, MemoryShareRole } from '../../generated/prisma/index.js';
+import type {
+  PrismaClient,
+  MemoryShareRole,
+  MemoryShare,
+} from '../../generated/prisma/index.js';
 
 export class InvalidMemoryClassForShareError extends Error {
   constructor(memoryId: string, actualClass: string) {
@@ -64,12 +68,7 @@ export async function createMemoryShare(
      *  Memory's principal (e.g., App backend acting on behalf). */
     actorId: string;
   },
-): Promise<{
-  memoryId: string;
-  granteeId: string;
-  grantorId: string;
-  role: MemoryShareRole;
-}> {
+): Promise<MemoryShare> {
   const memory = await db.memory.findUnique({
     where: { id: args.memoryId },
     select: { id: true, class: true, userId: true, deletedAt: true },
@@ -98,7 +97,7 @@ export async function createMemoryShare(
   // FR-019: grantor = principal, always. The acting party is `actorId`
   // recorded in `createdBy` — distinct from `grantorId`.
   const grantorId = memory.userId;
-  await db.memoryShare.upsert({
+  return db.memoryShare.upsert({
     where: {
       memoryId_granteeId: { memoryId: args.memoryId, granteeId: args.granteeId },
     },
@@ -114,10 +113,4 @@ export async function createMemoryShare(
       updatedBy: args.actorId,
     },
   });
-  return {
-    memoryId: args.memoryId,
-    granteeId: args.granteeId,
-    grantorId,
-    role: args.role,
-  };
 }
