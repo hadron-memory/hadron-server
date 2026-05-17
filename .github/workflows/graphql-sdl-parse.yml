@@ -1,0 +1,58 @@
+name: GraphQL SDL parse
+
+# Imports the `typeDefs` template literal from
+# `src/api/graphql/schema/typeDefs.ts` and runs `graphql.parse()` on
+# it. Catches the class of bug from PR #136: two adjacent
+# `"""docstring"""` blocks on the same definition silently merged
+# into a syntactically-invalid SDL. tsc treats the template literal
+# as opaque; the test suite doesn't necessarily import typeDefs in
+# a path that triggers SDL parse at module load; the runtime parse
+# only fires on first `makeExecutableSchema` / Apollo init, which
+# can be at process boot. Result: bad SDL survives every other gate
+# and surfaces in production as a boot loop.
+
+on:
+  pull_request:
+    paths:
+      - 'src/api/graphql/schema/**.ts'
+      - 'scripts/check-graphql-sdl.mjs'
+      - '.github/workflows/graphql-sdl-parse.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/api/graphql/schema/**.ts'
+      - 'scripts/check-graphql-sdl.mjs'
+      - '.github/workflows/graphql-sdl-parse.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+
+jobs:
+  graphql-sdl-parse:
+    runs-on: ubuntu-latest
+    env:
+      # prisma.config.ts loader requires DATABASE_URL even though
+      # nothing here connects to a DB. Dummy value; mirrors tsc.yml.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/dummy
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      # The Prisma client is imported transitively through some of
+      # the GraphQL schema neighbors; generate it so the SDL module
+      # can resolve without crashing on a missing client.
+      - run: pnpm prisma generate
+
+      - name: Parse the GraphQL SDL
+        run: pnpm tsx scripts/check-graphql-sdl.mjs
