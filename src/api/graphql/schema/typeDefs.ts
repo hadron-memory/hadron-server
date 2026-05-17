@@ -209,15 +209,54 @@ export const typeDefs = `#graphql
     sessionTimeoutSeconds: Int!
     anonymousTtlDays: Int!
     """
-    Soft-deprecated convenience: returns a single-element list with App.agent
-    (or empty if agent_id is NULL). Pre-008, an App could reference multiple
-    Agents through the AppAgent join; that join is gone, so post-008 there
-    is at most one Agent per App. Use App.agent directly.
+    023-app-shape US1: Agents installed in this App, via the AppAgent
+    N:M join. Multiple Agents can be installed; one App credential
+    routes to all of them via the URN supplied in the request.
     """
-    agents: [Agent!]! @deprecated(reason: "Use App.agent (singular). 008-agent-installation dropped the AppAgent join in favor of a direct FK.")
+    appAgents: [AppAgent!]!
+    """
+    023-app-shape: convenience that returns every installed Agent
+    (equivalent to App.appAgents.map(aa => aa.agent)). Previously was
+    a soft-deprecated single-element synthesis; now returns the FULL
+    multi-Agent set per spec 023 US1.
+    """
+    agents: [Agent!]!
     keys: [AppKey!]!
     createdAt: String!
     updatedAt: String
+  }
+
+  """
+  023-app-shape US1: the App↔Agent N:M join. Reintroduced after spec 008
+  collapsed it; per FR-003 it carries NO role column (system memory is
+  read-only to every App) and per FR-001 it carries NO trainingMode
+  column (training mode is per-App, on App.trainingMode).
+  """
+  type AppAgent {
+    app: App!
+    agent: Agent!
+    createdAt: String!
+    createdBy: String
+    updatedAt: String
+    updatedBy: String
+  }
+
+  """
+  Return shape for the installAgentIntoApp mutation. Wraps the new
+  AppAgent row so callers can read its audit fields without re-querying.
+  """
+  type InstallAgentIntoAppPayload {
+    appAgent: AppAgent!
+  }
+
+  """
+  Return shape for the uninstallAgentFromApp mutation. The Agent's
+  per-(App, Agent, *) memories are NOT cascade-deleted (spec 023 FR-005);
+  they persist as orphans on the now-removed AppAgent edge.
+  """
+  type UninstallAgentFromAppPayload {
+    appId: ID!
+    agentId: ID!
   }
 
   enum AppType {
@@ -469,10 +508,19 @@ export const typeDefs = `#graphql
     imports: [AgentImport!]!
     importedBy: [AgentImport!]!
     """
-    Apps that deploy this Agent (App.agent_id = this.id). Resolvable to
-    ADMIN/OWNER of the Agent's owning org; non-admins see an empty list.
+    Apps that have this Agent installed (via the AppAgent join). After
+    spec 023-app-shape, an App can install multiple Agents; this list
+    contains every App where THIS Agent is one of the installed ones.
+    Resolvable to ADMIN/OWNER of the Agent's owning org; non-admins
+    see an empty list.
     """
     apps: [App!]!
+    """
+    023-app-shape: the AppAgent join rows where this Agent is installed.
+    Use App.appAgents to get the join rows from the App side. Resolvable
+    to ADMIN/OWNER of the Agent's owning org.
+    """
+    appAgents: [AppAgent!]!
     appCount: Int!
     """
     Org grants for this Agent. Resolvable to ADMIN/OWNER of the Agent's
@@ -1385,10 +1433,42 @@ export const typeDefs = `#graphql
     deleteApp(id: ID!): Boolean!
 
     """
-    Set the App's Agent. 008-agent-installation: App→Agent is a direct FK
-    on App.agent_id; this mutation is a setter (not a join-row creator).
-    The legacy role arg is gone — system memory is universally read-only
-    from any App context per R-10.
+    Install an Agent into an App (023-app-shape US1). Creates an AppAgent
+    row joining the two. An App can have multiple Agents installed; one
+    credential addresses all of them.
+
+    Rejects with code DUPLICATE_APP_AGENT when the Agent is already
+    installed in the App.
+
+    Accepts the entity's ID or URN for both appId and agentId. Optional
+    trainingMode flag updates the per-App training flag (applies to
+    every installed Agent — training mode is per-App, not per-Agent,
+    per spec 023 FR-001).
+    """
+    installAgentIntoApp(
+      appId: ID!
+      agentId: ID!
+      trainingMode: Boolean
+    ): InstallAgentIntoAppPayload!
+
+    """
+    Uninstall an Agent from an App. Deletes the AppAgent row. The Agent's
+    per-(App, Agent, *) memories are NOT cascade-deleted (spec 023 FR-005);
+    they persist as orphans and become reachable again if the same Agent
+    is later reinstalled.
+
+    Idempotent — succeeds whether or not the AppAgent row exists.
+
+    Accepts the entity's ID or URN.
+    """
+    uninstallAgentFromApp(
+      appId: ID!
+      agentId: ID!
+    ): UninstallAgentFromAppPayload!
+
+    """
+    DEPRECATED: use installAgentIntoApp. Carried for source-compat with
+    pre-023 portal callers.
 
     Accepts the entity's ID or URN.
     """
@@ -1396,15 +1476,15 @@ export const typeDefs = `#graphql
       appId: ID!
       agentId: ID!
       trainingMode: Boolean
-    ): App!
+    ): App! @deprecated(reason: "Use installAgentIntoApp (spec 023-app-shape US1). Returns Payload type with the AppAgent row.")
 
     """
-    Clear the App's Agent (sets App.agent_id to NULL). Idempotent — clears
-    only if the current agentId matches the supplied agentId.
+    DEPRECATED: use uninstallAgentFromApp. Carried for source-compat
+    with pre-023 portal callers.
 
     Accepts the entity's ID or URN.
     """
-    removeAgentFromApp(appId: ID!, agentId: ID!): App!
+    removeAgentFromApp(appId: ID!, agentId: ID!): App! @deprecated(reason: "Use uninstallAgentFromApp (spec 023-app-shape US1).")
 
     """
     Idempotent UPSERT of an AppMember row. Per spec 008-agent-installation

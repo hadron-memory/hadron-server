@@ -453,6 +453,108 @@ async function readPrimaryAgentField(
   return null;
 }
 
+// ─── 023-app-shape US1 — install/uninstall Agent core logic ────────────
+//
+// Shared by both the canonical mutations (`installAgentIntoApp` /
+// `uninstallAgentFromApp`, returning Payload types) and the deprecated
+// pre-023 mutations (`addAgentToApp` / `removeAgentFromApp`, returning
+// `App`). Keeping the logic in one place prevents drift between the two
+// surfaces.
+
+class DuplicateAppAgentError extends GraphQLError {
+  constructor(appId: string, agentId: string) {
+    super(`Agent ${agentId} is already installed in App ${appId}.`, {
+      extensions: { code: 'DUPLICATE_APP_AGENT', appId, agentId },
+    });
+  }
+}
+
+async function installAgentIntoAppCore(
+  ctx: Context,
+  args: { appId: string; agentId: string; trainingMode?: boolean },
+): Promise<{
+  appId: string;
+  agentId: string;
+  appAgent: {
+    appId: string;
+    agentId: string;
+    app: unknown;
+    agent: unknown;
+    createdAt: Date;
+    createdBy: string | null;
+    updatedAt: Date | null;
+    updatedBy: string | null;
+  };
+}> {
+  // 007-entity-id-or-urn: appId + agentId may each be ID, bare URN, or
+  // prefixed URN.
+  const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appId);
+  const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentId);
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+  await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+  // Agent must belong to the same org (same as pre-023 behavior).
+  const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+  if (agent.organizationId !== app.organizationId) {
+    throw new Error('Agent must belong to the same organization as the App');
+  }
+  // Reject duplicate install with the typed code (spec 023 FR-001 +
+  // contracts/graphql-app-shape.md error-code list).
+  const existing = await ctx.db.appAgent.findUnique({
+    where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } },
+    select: { appId: true },
+  });
+  if (existing) throw new DuplicateAppAgentError(resolvedAppId, resolvedAgentId);
+  // Auto-provision AgentOrgGrant (cross-org gate symmetry).
+  await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
+  // Wrap the AppAgent create + the trainingMode update in a single
+  // transaction so the App is never in a half-updated state.
+  const created = await ctx.db.$transaction(async (tx) => {
+    const appAgent = await tx.appAgent.create({
+      data: {
+        appId: resolvedAppId,
+        agentId: resolvedAgentId,
+        createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+      },
+      include: {
+        app: true,
+        agent: { include: AGENT_INCLUDE },
+      },
+    });
+    if (args.trainingMode !== undefined) {
+      await tx.app.update({
+        where: { id: resolvedAppId },
+        data: {
+          trainingMode: args.trainingMode,
+          updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+        },
+      });
+    }
+    return appAgent;
+  });
+  return {
+    appId: resolvedAppId,
+    agentId: resolvedAgentId,
+    appAgent: created,
+  };
+}
+
+async function uninstallAgentFromAppCore(
+  ctx: Context,
+  args: { appId: string; agentId: string },
+): Promise<{ appId: string; agentId: string }> {
+  const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appId);
+  const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentId);
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+  await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+  // Idempotent delete — `deleteMany` returns a count, never throws on
+  // absent rows. The (App, Agent, *) memories persist as orphans per
+  // spec 023 FR-005.
+  await ctx.db.appAgent.deleteMany({
+    where: { appId: resolvedAppId, agentId: resolvedAgentId },
+  });
+  return { appId: resolvedAppId, agentId: resolvedAgentId };
+}
+
 /**
  * Derive a human-readable title for a saved chat. Priority:
  * 1. User-set title (`data.title`)
@@ -952,6 +1054,30 @@ export const resolvers = {
         orderBy: { createdAt: 'desc' },
       });
     },
+    // 023-app-shape US1: AppAgent join rows for this App. Prefer the
+    // eager-loaded rows (via APP_INCLUDE / ORG_INCLUDE); re-fetch
+    // ordered by createdAt asc otherwise.
+    appAgents: async (a: { id: string; appAgents?: unknown }, _: unknown, ctx: Context) => {
+      if (Array.isArray(a.appAgents)) return a.appAgents;
+      return ctx.db.appAgent.findMany({
+        where: { appId: a.id },
+        orderBy: { createdAt: 'asc' },
+        include: { app: true, agent: { include: AGENT_INCLUDE } },
+      });
+    },
+  },
+  // 023-app-shape US1: the App↔Agent N:M join.
+  AppAgent: {
+    createdAt: (aa: { createdAt: Date | string }) => toISO(aa.createdAt)!,
+    updatedAt: (aa: { updatedAt?: Date | string | null }) => toISO(aa.updatedAt ?? null),
+    app: async (aa: { appId: string; app?: unknown }, _: unknown, ctx: Context) =>
+      aa.app ?? ctx.db.app.findUniqueOrThrow({ where: { id: aa.appId } }),
+    agent: async (aa: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) =>
+      aa.agent ??
+      ctx.db.agent.findUniqueOrThrow({
+        where: { id: aa.agentId },
+        include: AGENT_INCLUDE,
+      }),
   },
   AgentSubscription: {
     createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
@@ -1145,6 +1271,28 @@ export const resolvers = {
       ctx.db.app.count({
         where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
       }),
+    // 023-app-shape US1: the AppAgent join rows where this Agent is
+    // installed. ADMIN/OWNER-gated like `apps` — non-admins of the
+    // Agent's owning org see an empty list.
+    appAgents: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      if (!isPlatformAdmin) {
+        const member = await ctx.db.orgMember.findFirst({
+          where: {
+            organizationId: a.organizationId,
+            userId: ctx.userId ?? '',
+            deletedAt: null,
+            role: { in: ['ADMIN', 'OWNER'] },
+          },
+        });
+        if (!member) return [];
+      }
+      return ctx.db.appAgent.findMany({
+        where: { agentId: a.id, app: { deletedAt: null } },
+        orderBy: { createdAt: 'asc' },
+        include: { app: true, agent: { include: AGENT_INCLUDE } },
+      });
+    },
     orgGrants: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) {
@@ -5407,84 +5555,66 @@ export const resolvers = {
       return true;
     },
 
+    installAgentIntoApp: async (
+      _: unknown,
+      {
+        appId,
+        agentId,
+        trainingMode,
+      }: { appId: string; agentId: string; trainingMode?: boolean },
+      ctx: Context,
+    ) => {
+      const { appAgent } = await installAgentIntoAppCore(ctx, {
+        appId,
+        agentId,
+        trainingMode,
+      });
+      return { appAgent };
+    },
+
+    uninstallAgentFromApp: async (
+      _: unknown,
+      { appId, agentId }: { appId: string; agentId: string },
+      ctx: Context,
+    ) => {
+      const result = await uninstallAgentFromAppCore(ctx, { appId, agentId });
+      return { appId: result.appId, agentId: result.agentId };
+    },
+
+    // DEPRECATED — pre-023 callers. Delegates to installAgentIntoAppCore
+    // and returns the App for source-compat.
     addAgentToApp: async (
       _: unknown,
       {
         appId,
         agentId,
         trainingMode,
-      }: {
-        appId: string;
-        agentId: string;
-        trainingMode?: boolean;
-      },
+      }: { appId: string; agentId: string; trainingMode?: boolean },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: appId + agentId may each be ID, bare URN,
-      // or prefixed URN.
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
-      // Agent must belong to the same org
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      if (agent.organizationId !== app.organizationId) {
-        throw new Error('Agent must belong to the same organization as the App');
-      }
-      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Upsert the
-      // AppAgent row, and apply trainingMode (still per-App) if supplied.
-      // Auto-provision AgentOrgGrant so cross-org gate 1 in access-control
-      // clears (same-org installs auto-pass either way; the explicit grant
-      // exists for symmetry).
-      await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
-      // Wrap the AppAgent upsert + the trainingMode update in a single
-      // transaction so the App is never in a half-updated state (agent
-      // linked but trainingMode stale, or vice versa).
-      await ctx.db.$transaction([
-        ctx.db.appAgent.upsert({
-          where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } },
-          create: {
-            appId: resolvedAppId,
-            agentId: resolvedAgentId,
-            createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-          },
-          update: {
-            updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-          },
-        }),
-        ...(trainingMode !== undefined
-          ? [
-              ctx.db.app.update({
-                where: { id: resolvedAppId },
-                data: {
-                  trainingMode,
-                  updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-                },
-              }),
-            ]
-          : []),
-      ]);
-      return ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId }, include: APP_INCLUDE });
+      const { appId: resolvedAppId } = await installAgentIntoAppCore(ctx, {
+        appId,
+        agentId,
+        trainingMode,
+      });
+      return ctx.db.app.findUniqueOrThrow({
+        where: { id: resolvedAppId },
+        include: APP_INCLUDE,
+      });
     },
 
+    // DEPRECATED — pre-023 callers. Delegates to uninstallAgentFromAppCore
+    // and returns the App for source-compat.
     removeAgentFromApp: async (
       _: unknown,
       { appId, agentId }: { appId: string; agentId: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: appId + agentId may each be ID, bare URN,
-      // or prefixed URN.
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
-      // 023-app-shape Phase 2b: delete the AppAgent row if it exists.
-      // Idempotent — deleteMany returns count and never throws on absent
-      // rows. The (App, Agent, *) memories persist as orphans per FR-005.
-      await ctx.db.appAgent.deleteMany({
-        where: { appId: resolvedAppId, agentId: resolvedAgentId },
+      const { appId: resolvedAppId } = await uninstallAgentFromAppCore(ctx, { appId, agentId });
+      return ctx.db.app.findUniqueOrThrow({
+        where: { id: resolvedAppId },
+        include: APP_INCLUDE,
       });
-      return ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId }, include: APP_INCLUDE });
     },
 
     // 008-agent-installation: AppMember management. Per spec FR-004 / FR-016
