@@ -17,8 +17,12 @@
  *   - Revoking A's grant denies A on the next read (FR-022).
  *   - grantorId is set to the principal even when the actor differs
  *     (FR-019).
- *   - createMemoryShare on a non-personal Memory throws
- *     InvalidMemoryClassForShareError (FR-018).
+ *   - createMemoryShare on a non-personal Memory is rejected with
+ *     FORBIDDEN (FR-018). The caller-authority guard short-circuits
+ *     before the controller's class check fires; the typed
+ *     InvalidMemoryClassForShareError stays defined on the controller
+ *     for non-GraphQL callers and is documented as unreachable from
+ *     this GraphQL mutation in v1.
  *
  * Spec: spec-kits/specs/023-app-shape/spec.md User Story 3 +
  *       quickstart.md "US3" + contracts/graphql-app-shape.md.
