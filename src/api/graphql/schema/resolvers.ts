@@ -3403,7 +3403,9 @@ export const resolvers = {
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
         type?: 'KNOWLEDGE' | 'AGENT_SYSTEM';
-        memoryClass?: 'knowledge' | 'group';
+        // GraphQL passes the full MemoryClass enum; the resolver
+        // allowlists the user-creatable values below.
+        memoryClass?: 'knowledge' | 'group' | 'system' | 'app' | 'personal';
       },
       ctx: Context,
     ) => {
@@ -3411,12 +3413,26 @@ export const resolvers = {
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
 
+      // 023-app-shape US4: createMemory only creates user-driven
+      // classes — `knowledge` (default) and `group`. The GraphQL enum
+      // exposes the full MemoryClass set for read paths, but the
+      // mutation's allowlist here rejects system / app / personal
+      // explicitly. Those classes auto-provision via different code
+      // paths (Agent.systemMemoryId; AgentSubscription/AppMember).
+      const requestedClass = memoryClass ?? 'knowledge';
+      if (requestedClass !== 'knowledge' && requestedClass !== 'group') {
+        throw new GraphQLError(
+          `createMemory does not accept class='${requestedClass}'. Only ` +
+            `'knowledge' and 'group' are user-creatable; '${requestedClass}' ` +
+            `auto-provisions via a different code path.`,
+          { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' } },
+        );
+      }
       // 023-app-shape US4: group-class memories must carry GROUP
       // visibility (enforced by the chk_memory_group_visibility CHECK
       // constraint at the DB level; we surface a clearer error at the
       // API layer instead of letting the constraint fire). The
       // creator becomes the first owner via the bootstrap path below.
-      const requestedClass = memoryClass ?? 'knowledge';
       if (requestedClass === 'group') {
         if (visibility !== undefined && visibility !== 'GROUP') {
           throw new GraphQLError(
@@ -6247,7 +6263,8 @@ export const resolvers = {
         if (
           e instanceof InvalidMemoryClassForMemberError ||
           e instanceof MemoryNotFoundForMemberError ||
-          e instanceof MemoryMemberUserMissingError
+          e instanceof MemoryMemberUserMissingError ||
+          e instanceof LastOwnerProtectedError
         ) {
           throw new GraphQLError((e as Error).message, {
             extensions: { code: (e as Error).name },

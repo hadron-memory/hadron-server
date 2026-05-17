@@ -2,13 +2,17 @@ import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 
 // Models with composite primary keys and no `id` column.
-// 008-agent-installation: AppAgent is gone; AppMember, AgentImport, and
-// AgentOrgGrant are new composite-PK joins that share the no-`id` shape.
+// 008-agent-installation: AppMember, AgentImport, AgentOrgGrant.
+// 023-app-shape: AppAgent (re-introduced N:M join — PR #130),
+// MemoryShare (US3 — PR #133), MemoryMember (US4 — this PR).
 const MODELS_WITHOUT_ID = new Set<string>([
   'AgentSubscription',
   'AppMember',
   'AgentImport',
   'AgentOrgGrant',
+  'AppAgent',
+  'MemoryShare',
+  'MemoryMember',
 ]);
 
 const basePrisma = new PrismaClient();

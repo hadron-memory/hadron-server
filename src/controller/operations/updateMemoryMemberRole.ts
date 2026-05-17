@@ -9,11 +9,18 @@
  *     A group-class Memory must always have ≥1 owner; the path to
  *     fully empty one is to delete the Memory.
  *
- * Race-safe: rather than a pre-check (which would be racy against
- * concurrent removes), the update runs directly and Prisma's P2025
- * "record to update not found" is translated to the typed error.
- * The last-owner protection runs as a count-based check inside a
- * transaction so the count + update are atomic.
+ * Flow & race-safety:
+ *   1. Pre-read the current row inside the transaction to learn its
+ *      role — this is needed for the FR-038 logic (we only run the
+ *      owner-count check when demoting an existing owner) and to
+ *      raise a clean MemoryMemberNotFoundError when the row is
+ *      already absent at call time.
+ *   2. Run the count + update inside a SERIALIZABLE transaction so
+ *      two concurrent self-demotes can't both observe ownerCount > 1
+ *      and both succeed (write-skew protection).
+ *   3. A row that's concurrently deleted *between* the pre-read and
+ *      the update surfaces as Prisma's P2025 ("record to update not
+ *      found") — caught and mapped to the typed error.
  */
 
 import {
@@ -51,40 +58,52 @@ export async function updateMemoryMemberRole(
     actorId: string;
   },
 ): Promise<MemoryMember> {
-  return db.$transaction(async (tx) => {
-    const current = await tx.memoryMember.findUnique({
-      where: { memoryId_userId: { memoryId: args.memoryId, userId: args.userId } },
-      select: { role: true },
-    });
-    if (!current) {
-      throw new MemoryMemberNotFoundError(args.memoryId, args.userId);
-    }
-    // FR-038: refuse to demote the sole remaining owner.
-    if (current.role === 'owner' && args.role !== 'owner') {
-      const ownerCount = await tx.memoryMember.count({
-        where: { memoryId: args.memoryId, role: 'owner' },
-      });
-      if (ownerCount <= 1) {
-        throw new LastOwnerProtectedError(args.memoryId);
-      }
-    }
-    try {
-      return await tx.memoryMember.update({
+  return db.$transaction(
+    async (tx) => {
+      const current = await tx.memoryMember.findUnique({
         where: {
           memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
         },
-        data: { role: args.role, updatedBy: args.actorId },
+        select: { role: true },
       });
-    } catch (e) {
-      // Race: a concurrent revoke between the count check and the
-      // update would surface as P2025 here. Map to the typed error.
-      if (
-        e instanceof Prisma.PrismaClientKnownRequestError &&
-        e.code === 'P2025'
-      ) {
+      if (!current) {
         throw new MemoryMemberNotFoundError(args.memoryId, args.userId);
       }
-      throw e;
-    }
-  });
+      // FR-038: refuse to demote the sole remaining owner. Under
+      // SERIALIZABLE isolation two concurrent self-demotes can't
+      // both observe ownerCount > 1 — one will fail with 40001 on
+      // commit and Prisma will surface that as a transient error
+      // the caller can retry.
+      if (current.role === 'owner' && args.role !== 'owner') {
+        const ownerCount = await tx.memoryMember.count({
+          where: { memoryId: args.memoryId, role: 'owner' },
+        });
+        if (ownerCount <= 1) {
+          throw new LastOwnerProtectedError(args.memoryId);
+        }
+      }
+      try {
+        return await tx.memoryMember.update({
+          where: {
+            memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
+          },
+          data: {
+            role: args.role,
+            updatedBy: args.actorId,
+          },
+        });
+      } catch (e) {
+        // Race: a concurrent revoke between the pre-read and the
+        // update would surface as P2025 here. Map to the typed error.
+        if (
+          e instanceof Prisma.PrismaClientKnownRequestError &&
+          e.code === 'P2025'
+        ) {
+          throw new MemoryMemberNotFoundError(args.memoryId, args.userId);
+        }
+        throw e;
+      }
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+  );
 }

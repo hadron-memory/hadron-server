@@ -567,31 +567,31 @@ model Memory {
   deletedAt            DateTime?        @map("deleted_at")
   deletedBy            String?          @map("deleted_by")
 
-  organization      Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  nodes             Node[]
-  assets            Asset[]
-  subscriptions     MemorySubscription[]
-  agentItems        AgentMemoryItem[]
-  licenses          MemoryLicense[]
+  organization             Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  nodes                    Node[]
+  assets                   Asset[]
+  subscriptions            MemorySubscription[]
+  agentItems               AgentMemoryItem[]
+  licenses                 MemoryLicense[]
   /// Spec 021 FR-032 online URN-shape migration gate (transient). Null =
   /// pre-canonical row; set = canonical-form row. Dropped post-migration.
   /// TODO(spec-021-cleanup): drop once the FR-032 migration completes.
-  urnNormalizedAt          DateTime? @map("urn_normalized_at")
+  urnNormalizedAt          DateTime?            @map("urn_normalized_at")
   /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
   /// TODO(spec-021-cleanup): drop alongside urnNormalizedAt.
-  urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
+  urnMigrationFailedReason String?              @map("urn_migration_failed_reason")
 
   logEntries        MemoryLogEntry[]
-  userMemoryOfAgent Agent?               @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
-  user              User?                @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
+  userMemoryOfAgent Agent?           @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
+  user              User?            @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
   // 008-agent-installation: hard App deletion cascades to its personal/app
   // memories (per data-model.md "Cascade behavior"). The CHECK constraint
   // prohibits app_id IS NULL for class IN ('app', 'personal'), so SET NULL
   // would leave the row in an invalid state on delete. AppMember removal
   // (orphan retention per FR-015) is independent — that's a row delete in
   // app_members, not in apps.
-  app               App?                 @relation("AppMemories", fields: [appId], references: [id], onDelete: Cascade)
-  sessions          Session[]            @relation("SessionMemory")
+  app               App?             @relation("AppMemories", fields: [appId], references: [id], onDelete: Cascade)
+  sessions          Session[]        @relation("SessionMemory")
   // 023-app-shape: per-Memory authorization primitives.
   // `shares`      — populated only when `class = 'personal'` (FR-018);
   //                 cross-user grants (asymmetric).
@@ -2015,19 +2015,19 @@ model AppAgent {
 /// is modeled by creating a new personal Memory per pairing — not by
 /// time-slicing one Memory.
 model MemoryShare {
-  memoryId   String          @map("memory_id")
-  granteeId  String          @map("grantee_id")
-  grantorId  String          @map("grantor_id")
-  role       MemoryShareRole
+  memoryId  String          @map("memory_id")
+  granteeId String          @map("grantee_id")
+  grantorId String          @map("grantor_id")
+  role      MemoryShareRole
   // Audit fields (no soft-delete). Revoke is a hard row delete (FR-022);
   // predicate lookups use `findUnique` on the composite PK.
-  createdAt  DateTime        @default(now()) @map("created_at")
-  createdBy  String?         @map("created_by")
-  updatedAt  DateTime?       @map("updated_at")
-  updatedBy  String?         @map("updated_by")
+  createdAt DateTime        @default(now()) @map("created_at")
+  createdBy String?         @map("created_by")
+  updatedAt DateTime?       @updatedAt @map("updated_at")
+  updatedBy String?         @map("updated_by")
 
   memory  Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
-  grantee User   @relation("MemorySharesGranted",   fields: [granteeId], references: [id], onDelete: Cascade)
+  grantee User   @relation("MemorySharesGranted", fields: [granteeId], references: [id], onDelete: Cascade)
   grantor User   @relation("MemorySharesByGrantor", fields: [grantorId], references: [id], onDelete: Cascade)
 
   @@id([memoryId, granteeId])
@@ -2063,7 +2063,7 @@ model MemoryMember {
   // predicate lookups use `findUnique` on the composite PK.
   createdAt DateTime         @default(now()) @map("created_at")
   createdBy String?          @map("created_by")
-  updatedAt DateTime?        @map("updated_at")
+  updatedAt DateTime?        @updatedAt @map("updated_at")
   updatedBy String?          @map("updated_by")
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)

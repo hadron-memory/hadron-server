@@ -9,21 +9,27 @@
  *     Other classes throw InvalidMemoryClassForMemberError.
  *   - **FR-028** role: `reader` | `writer` | `owner` (enforced by
  *     the Prisma enum).
+ *   - **FR-038** last-owner protection: the idempotent path can't be
+ *     used to silently demote the sole remaining owner — throws
+ *     LastOwnerProtectedError. The owner-count check + upsert run in
+ *     one SERIALIZABLE transaction so two concurrent self-demotes
+ *     can't both pass the count check (write-skew protection).
  *
  * **Caller-authority guard** lives in the resolver (v1 rule: caller
  * MUST be an existing owner of the Memory; the bootstrap case where
  * the creator becomes the first owner is handled by createMemory).
  *
  * Idempotent on the (memoryId, userId) PK — if a row already exists,
- * its role is updated to the supplied value rather than the call
- * throwing.
+ * its role is updated to the supplied value (subject to FR-038).
  */
 
-import type {
-  PrismaClient,
-  MemoryMemberRole,
-  MemoryMember,
+import {
+  Prisma,
+  type PrismaClient,
+  type MemoryMemberRole,
+  type MemoryMember,
 } from '../../generated/prisma/index.js';
+import { LastOwnerProtectedError } from './updateMemoryMemberRole.js';
 
 export class InvalidMemoryClassForMemberError extends Error {
   constructor(memoryId: string, actualClass: string) {
@@ -78,19 +84,47 @@ export async function addMemoryMember(
   if (!user || user.deletedAt) {
     throw new MemoryMemberUserMissingError(args.userId);
   }
-  return db.memoryMember.upsert({
-    where: {
-      memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
+  return db.$transaction(
+    async (tx) => {
+      // FR-038: refuse to demote the sole remaining owner via the
+      // idempotent upsert path. Only relevant when the requested role
+      // is not `owner` — adding/keeping `owner` can never reduce the
+      // owner count.
+      if (args.role !== 'owner') {
+        const current = await tx.memoryMember.findUnique({
+          where: {
+            memoryId_userId: {
+              memoryId: args.memoryId,
+              userId: args.userId,
+            },
+          },
+          select: { role: true },
+        });
+        if (current?.role === 'owner') {
+          const ownerCount = await tx.memoryMember.count({
+            where: { memoryId: args.memoryId, role: 'owner' },
+          });
+          if (ownerCount <= 1) {
+            throw new LastOwnerProtectedError(args.memoryId);
+          }
+        }
+      }
+      return tx.memoryMember.upsert({
+        where: {
+          memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
+        },
+        create: {
+          memoryId: args.memoryId,
+          userId: args.userId,
+          role: args.role,
+          createdBy: args.actorId,
+        },
+        update: {
+          role: args.role,
+          updatedBy: args.actorId,
+        },
+      });
     },
-    create: {
-      memoryId: args.memoryId,
-      userId: args.userId,
-      role: args.role,
-      createdBy: args.actorId,
-    },
-    update: {
-      role: args.role,
-      updatedBy: args.actorId,
-    },
-  });
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+  );
 }

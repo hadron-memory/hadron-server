@@ -83,3 +83,16 @@ ALTER TABLE "memories"
   ADD CONSTRAINT "chk_memory_personal_agent_id" CHECK (
     class <> 'personal' OR user_memory_of_agent_id IS NOT NULL
   );
+
+-- 023-app-shape: extend the spec-008 chk_memory_class_app_id constraint
+-- to include the new 'group' class. Group memory is org-scoped (FR-024)
+-- and has no app_id, like 'knowledge' and 'system'. Without this update
+-- the original 008 constraint (which enumerated only the four known
+-- classes) would reject every INSERT of class='group'.
+ALTER TABLE "memories"
+  DROP CONSTRAINT IF EXISTS "chk_memory_class_app_id";
+ALTER TABLE "memories"
+  ADD CONSTRAINT "chk_memory_class_app_id" CHECK (
+    (class IN ('app', 'personal') AND app_id IS NOT NULL)
+    OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
+  );
