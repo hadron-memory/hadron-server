@@ -23,6 +23,18 @@ import { getPrimaryAgent, getPrimaryAgentId, isAgentInstalled } from '../../../l
 import { isOrgExternalAppMember } from '../../../lib/auth/isOrgExternalAppMember.js';
 import { joinApp, NoMemberRolesError, AppUninstalledError } from '../../../controller/operations/joinApp.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import {
+  createMemoryShare,
+  InvalidMemoryClassForShareError,
+  MemoryNotFoundForShareError,
+  MemoryShareGranteeMissingError,
+} from '../../../controller/operations/createMemoryShare.js';
+import { revokeMemoryShare } from '../../../controller/operations/revokeMemoryShare.js';
+import {
+  updateMemoryShareRole,
+  MemoryShareNotFoundError,
+} from '../../../controller/operations/updateMemoryShareRole.js';
+import type { MemoryShareRole as MemoryShareRoleType } from '../../../generated/prisma/index.js';
 import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
@@ -455,6 +467,41 @@ async function readPrimaryAgentField(
     return primary?.[field] ?? null;
   }
   return null;
+}
+
+// ─── 023-app-shape US3 — MemoryShare caller-authority guard ────────────
+//
+// All three MemoryShare mutations (create / revoke / update-role)
+// share the same v1 rule: caller MUST be the Memory's principal
+// (`memory.userId`). The Agent-mediated path (App backend acting on
+// behalf via MCP) is supported by the access-control predicate but
+// not by this GraphQL surface — see joinApp.ts header for the
+// broader policy discussion.
+
+async function requireMemorySharePrincipal(
+  ctx: Context,
+  memoryId: string,
+): Promise<void> {
+  if (!ctx.userId) {
+    throw new GraphQLError('Authenticated user required', {
+      extensions: { code: 'UNAUTHENTICATED' },
+    });
+  }
+  const memory = await ctx.db.memory.findUnique({
+    where: { id: memoryId },
+    select: { userId: true, class: true, deletedAt: true },
+  });
+  if (!memory || memory.deletedAt) {
+    // Surface a generic FORBIDDEN rather than leaking memory existence.
+    throw new GraphQLError('You are not authorized to manage shares on this memory.', {
+      extensions: { code: 'FORBIDDEN' },
+    });
+  }
+  if (memory.userId !== ctx.userId) {
+    throw new GraphQLError('You are not authorized to manage shares on this memory.', {
+      extensions: { code: 'FORBIDDEN' },
+    });
+  }
 }
 
 // ─── 023-app-shape US1 — install/uninstall Agent core logic ────────────
@@ -1000,6 +1047,50 @@ export const resolvers = {
         include: AGENT_INCLUDE,
       });
     },
+    // 023-app-shape US3: cross-user grants on this Memory. Empty for
+    // non-personal-class memories. Visible to (a) the principal
+    // (memory.userId), (b) an OrgMember of the memory's owning org
+    // with ADMIN/OWNER role, or (c) a platform ADMIN/OWNER.
+    // Grantees can read their own shares via User.memorySharesGranted
+    // (out of scope here; can be added if a portal page needs it).
+    shares: async (
+      g: { id: string; class: string; userId?: string | null; organizationId: string },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (g.class !== 'personal') return [];
+      const isPrincipal = ctx.userId !== undefined && ctx.userId === g.userId;
+      const isPlatformAdmin =
+        ctx.roles?.includes('ADMIN') === true || ctx.roles?.includes('OWNER') === true;
+      if (!isPrincipal && !isPlatformAdmin) {
+        // Verify the caller is an ADMIN/OWNER of the memory's owning
+        // org. The earlier `ctx.organizationId === g.organizationId`
+        // shortcut was incomplete — most callers don't have
+        // organizationId scoped per-request, which would have made
+        // non-platform org admins fall through to an empty list.
+        if (!ctx.userId) return [];
+        const member = await ctx.db.orgMember.findUnique({
+          where: {
+            organizationId_userId: {
+              organizationId: g.organizationId,
+              userId: ctx.userId,
+            },
+          },
+          select: { role: true, deletedAt: true },
+        });
+        if (
+          !member ||
+          member.deletedAt ||
+          (member.role !== 'ADMIN' && member.role !== 'OWNER')
+        ) {
+          return [];
+        }
+      }
+      return ctx.db.memoryShare.findMany({
+        where: { memoryId: g.id },
+        orderBy: { createdAt: 'asc' },
+      });
+    },
   },
   App: {
     createdAt: (a: { createdAt: Date | string }) => toISO(a.createdAt)!,
@@ -1177,6 +1268,17 @@ export const resolvers = {
       });
       return orgMember === null;
     },
+  },
+  // 023-app-shape US3: asymmetric cross-user grant on personal-class memory.
+  MemoryShare: {
+    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    updatedAt: (s: { updatedAt?: Date | string | null }) => toISO(s.updatedAt ?? null),
+    memory: async (s: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
+      s.memory ?? ctx.db.memory.findUnique({ where: { id: s.memoryId } }),
+    grantee: async (s: { granteeId: string; grantee?: unknown }, _: unknown, ctx: Context) =>
+      s.grantee ?? ctx.db.user.findUnique({ where: { id: s.granteeId } }),
+    grantor: async (s: { grantorId: string; grantor?: unknown }, _: unknown, ctx: Context) =>
+      s.grantor ?? ctx.db.user.findUnique({ where: { id: s.grantorId } }),
   },
   // 008-agent-installation: Agent dependency edge.
   AgentImport: {
@@ -5862,6 +5964,98 @@ export const resolvers = {
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
       await leaveApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
       return { appId: resolvedAppId, userId: ctx.userId };
+    },
+
+    // 023-app-shape US3 — create / upsert a MemoryShare on a
+    // personal-class Memory. The caller MUST be the principal
+    // (memory.userId) in v1; the Agent-mediated path is deferred.
+    createMemoryShare: async (
+      _: unknown,
+      {
+        memoryId,
+        granteeId,
+        role,
+      }: { memoryId: string; granteeId: string; role: MemoryShareRoleType },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError('createMemoryShare requires an authenticated user', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      await requireMemorySharePrincipal(ctx, memoryId);
+      try {
+        const memoryShare = await createMemoryShare(ctx.db, {
+          memoryId,
+          granteeId,
+          role,
+          actorId: ctx.userId,
+        });
+        return { memoryShare };
+      } catch (e: unknown) {
+        if (
+          e instanceof InvalidMemoryClassForShareError ||
+          e instanceof MemoryNotFoundForShareError ||
+          e instanceof MemoryShareGranteeMissingError
+        ) {
+          throw new GraphQLError((e as Error).message, {
+            extensions: { code: (e as Error).name },
+          });
+        }
+        throw e;
+      }
+    },
+
+    // 023-app-shape US3 — revoke an existing MemoryShare. Idempotent.
+    revokeMemoryShare: async (
+      _: unknown,
+      { memoryId, granteeId }: { memoryId: string; granteeId: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError('revokeMemoryShare requires an authenticated user', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      await requireMemorySharePrincipal(ctx, memoryId);
+      await revokeMemoryShare(ctx.db, { memoryId, granteeId });
+      return { memoryId, granteeId };
+    },
+
+    // 023-app-shape US3 — change the role on an existing MemoryShare.
+    // Throws MemoryShareNotFoundError when the row doesn't exist
+    // (use createMemoryShare to upsert).
+    updateMemoryShareRole: async (
+      _: unknown,
+      {
+        memoryId,
+        granteeId,
+        role,
+      }: { memoryId: string; granteeId: string; role: MemoryShareRoleType },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError('updateMemoryShareRole requires an authenticated user', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      await requireMemorySharePrincipal(ctx, memoryId);
+      try {
+        const memoryShare = await updateMemoryShareRole(ctx.db, {
+          memoryId,
+          granteeId,
+          role,
+          actorId: ctx.userId,
+        });
+        return { memoryShare };
+      } catch (e: unknown) {
+        if (e instanceof MemoryShareNotFoundError) {
+          throw new GraphQLError(e.message, {
+            extensions: { code: e.name },
+          });
+        }
+        throw e;
+      }
     },
 
     // 008-agent-installation: AgentImport bundling. Per spec FR-005 +

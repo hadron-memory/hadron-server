@@ -269,6 +269,62 @@ export const typeDefs = `#graphql
   }
 
   """
+  023-app-shape US3: role on a MemoryShare row. Asymmetric grant
+  for personal-class memory.
+  - reader: read access only.
+  - writer: read + write (the grantee can add/edit/delete nodes
+    within the memory).
+  """
+  enum MemoryShareRole {
+    reader
+    writer
+  }
+
+  """
+  023-app-shape US3: asymmetric cross-user grant on a personal-class
+  Memory. The principal (memory.userId) grants a grantee read/write
+  access. Used for per-pairing isolation patterns (e.g., Alice's
+  personal Memory paired-with-Mentor-A is distinct from her
+  paired-with-Mentor-B Memory, each with its own MemoryShare).
+  """
+  type MemoryShare {
+    memory: Memory!
+    """
+    The User who was granted access.
+    """
+    grantee: User!
+    """
+    The principal of the Memory (Memory.userId). Per spec 023 FR-019
+    this is always the principal, even when an App backend made the
+    API call on the principal's behalf — that actor is recorded in
+    createdBy instead.
+    """
+    grantor: User!
+    role: MemoryShareRole!
+    createdAt: String!
+    """
+    The API actor who created the row. Distinct from grantor when an
+    App backend creates the share on the principal's behalf.
+    """
+    createdBy: String
+    updatedAt: String
+    updatedBy: String
+  }
+
+  type CreateMemorySharePayload {
+    memoryShare: MemoryShare!
+  }
+
+  type UpdateMemoryShareRolePayload {
+    memoryShare: MemoryShare!
+  }
+
+  type RevokeMemorySharePayload {
+    memoryId: ID!
+    granteeId: ID!
+  }
+
+  """
   Return shape for the leaveApp mutation (023-app-shape US2). The
   user's personal-class Memory at (appId, userId) is NOT
   cascade-deleted (spec 008 FR-015 orphan retention); it re-attaches
@@ -508,6 +564,13 @@ export const typeDefs = `#graphql
     createdAt: String!
     updatedAt: String!
     subscriptions: [MemorySubscription!]!
+    """
+    023-app-shape US3: cross-user grants on this memory. Non-empty
+    only when class = personal (FR-018). Includes grantee + role for
+    each row. Visible only to the principal (memory.userId) and to
+    ADMIN/OWNER of the memory's owning org.
+    """
+    shares: [MemoryShare!]!
   }
 
   # The definition (one per Agent) — what a Builder creates and what the
@@ -1576,6 +1639,69 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     leaveApp(appId: ID!): LeaveAppPayload!
+
+    """
+    023-app-shape US3 — asymmetric cross-user grant on a personal-class
+    Memory. The principal (memory.userId) grants a grantee read or
+    write access. Used for the per-pairing pattern (Alice's
+    paired-with-Mentor-A memory is distinct from her
+    paired-with-Mentor-B memory; each gets its own MemoryShare).
+
+    Upsert semantics: re-calling with a different role on an existing
+    (memoryId, granteeId) pair updates the role rather than throwing.
+
+    For v1 the caller MUST be the principal themselves (memory.userId
+    === ctx.userId). The Agent-mediated path (App backend acting on
+    the principal's behalf via MCP) is supported by the access-control
+    predicate but not by this GraphQL surface — see the deferred
+    policy discussion linked from joinApp.ts.
+
+    Error codes (extensions.code, Error.name style):
+      - UNAUTHENTICATED — no logged-in user in context.
+      - FORBIDDEN — caller is not the Memory's principal. The
+        caller-authority guard runs first and deliberately does not
+        differentiate between "memory doesn't exist", "memory is not
+        personal-class", and "caller isn't the principal" — all three
+        return FORBIDDEN so memory metadata isn't leaked to
+        non-principals.
+      - MemoryShareGranteeMissingError — granteeId doesn't resolve to
+        an existing User. Only reachable when the caller passes the
+        principal guard.
+      - InvalidMemoryClassForShareError / MemoryNotFoundForShareError —
+        defined on the controller for completeness; functionally
+        unreachable via this GraphQL mutation in v1 because the
+        caller-authority guard short-circuits to FORBIDDEN first.
+    """
+    createMemoryShare(
+      memoryId: ID!
+      granteeId: ID!
+      role: MemoryShareRole!
+    ): CreateMemorySharePayload!
+
+    """
+    023-app-shape US3 — revoke a MemoryShare. Per FR-022, revocation
+    takes effect on the next read (there's no "deactivated" state;
+    just a row delete). Idempotent.
+
+    Caller-authority rule matches createMemoryShare.
+    """
+    revokeMemoryShare(
+      memoryId: ID!
+      granteeId: ID!
+    ): RevokeMemorySharePayload!
+
+    """
+    023-app-shape US3 — change the role on an existing MemoryShare.
+    Throws MemoryShareNotFoundError if the (memoryId, granteeId) row
+    doesn't exist — use createMemoryShare to upsert.
+
+    Caller-authority rule matches createMemoryShare.
+    """
+    updateMemoryShareRole(
+      memoryId: ID!
+      granteeId: ID!
+      role: MemoryShareRole!
+    ): UpdateMemoryShareRolePayload!
 
     """
     Publish a dependency edge from a parent Agent to an imported Agent
