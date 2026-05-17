@@ -5437,26 +5437,33 @@ export const resolvers = {
       // clears (same-org installs auto-pass either way; the explicit grant
       // exists for symmetry).
       await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
-      await ctx.db.appAgent.upsert({
-        where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } },
-        create: {
-          appId: resolvedAppId,
-          agentId: resolvedAgentId,
-          createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-        },
-        update: {
-          updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-        },
-      });
-      if (trainingMode !== undefined) {
-        await ctx.db.app.update({
-          where: { id: resolvedAppId },
-          data: {
-            trainingMode,
+      // Wrap the AppAgent upsert + the trainingMode update in a single
+      // transaction so the App is never in a half-updated state (agent
+      // linked but trainingMode stale, or vice versa).
+      await ctx.db.$transaction([
+        ctx.db.appAgent.upsert({
+          where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } },
+          create: {
+            appId: resolvedAppId,
+            agentId: resolvedAgentId,
+            createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+          },
+          update: {
             updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
           },
-        });
-      }
+        }),
+        ...(trainingMode !== undefined
+          ? [
+              ctx.db.app.update({
+                where: { id: resolvedAppId },
+                data: {
+                  trainingMode,
+                  updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+                },
+              }),
+            ]
+          : []),
+      ]);
       return ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId }, include: APP_INCLUDE });
     },
 

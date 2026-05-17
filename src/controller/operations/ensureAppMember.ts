@@ -11,8 +11,11 @@
  *      `installation_policy.maxMembers`. Throws `MaxMembersExceededError`
  *      otherwise. Updating an existing member's role does NOT trigger the
  *      maxMembers check.
- *   3. The App must have a non-NULL `agent_id`. An orphan App (cutover
- *      edge case) cannot accept members — throws `OrphanAppError`.
+ *   3. The App must have at least one installed Agent (an AppAgent
+ *      row). An orphan App (no installed Agents) cannot accept members —
+ *      throws `OrphanAppError`. Pre-023-Phase-2b this was a `App.agent_id`
+ *      check; the column was dropped, so the predicate now consults the
+ *      `AppAgent` join via `getPrimaryAgentId`.
  *
  * The maxMembers check is at *invite-acceptance time* (when the row is
  * inserted), not invite-creation time, consistent with the existing
@@ -43,7 +46,8 @@ export class MaxMembersExceededError extends Error {
 export class OrphanAppError extends Error {
   constructor(appId: string) {
     super(
-      `App ${appId} is not linked to an Agent (orphan). Set App.agent_id before inviting members.`,
+      `App ${appId} has no installed Agents (orphan). Install an Agent ` +
+        `via installAgentIntoApp / addAgentToApp before inviting members.`,
     );
     this.name = 'OrphanAppError';
   }

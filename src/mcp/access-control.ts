@@ -192,6 +192,14 @@ export async function canWriteToMemory(
         // installed. If userMemoryOfAgentId is null (pre-005 ghost row) we
         // can't prove the match, so deny — backfilling app_id is the path
         // forward.
+        //
+        // Perf note: this branch performs an extra PK lookup per check
+        // (N+1 for bulk operations). The cost is bounded — it only fires
+        // for legacy rows with `memory.appId IS NULL`, a strictly
+        // shrinking set as new writes always populate app_id. Adding a
+        // request-scoped (appId, agentId) cache on AuthContext is the
+        // long-term answer; deferred until the predicate retrofit
+        // (Phase 2c) lands its own cache.
         if (
           !memory.userMemoryOfAgentId ||
           !(await isAgentInstalled(db, auth.appId, memory.userMemoryOfAgentId))
