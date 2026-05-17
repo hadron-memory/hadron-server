@@ -153,12 +153,20 @@ export async function resolveMemoryAuthorization(
   //   - `knowledge` — visibility rules (PUBLIC/PRIVATE/ORGANIZATION)
   //                 govern; the existing helper handles them.
   // Add new classes to this comment AND to the dispatch in Step 2.
-  const agentForLicense: string | null =
-    memory.class === 'personal' ? memory.userMemoryOfAgentId : null;
-
-  if (agentForLicense !== null) {
+  if (memory.class === 'personal') {
+    // FR-004 / chk_memory_personal_agent_id should guarantee this column
+    // is non-null for every personal-class row. If we encounter a row
+    // where it's null (legacy data predating the CHECK, or future
+    // constraint regression), fail closed — silently skipping the
+    // license check would be a bypass.
+    if (memory.userMemoryOfAgentId === null) {
+      return { allowed: false, reason: 'invalid-context' };
+    }
     const principalForLicense = ctx.actingForUserId ?? ctx.callerUserId;
-    const sub = await deps.getAgentSubscription(principalForLicense, agentForLicense);
+    const sub = await deps.getAgentSubscription(
+      principalForLicense,
+      memory.userMemoryOfAgentId,
+    );
     if (sub === null || !isLifecycleActive(sub)) {
       return { allowed: false, reason: 'no-subscription' };
     }
@@ -186,8 +194,15 @@ export async function resolveMemoryAuthorization(
 
     case 'knowledge': {
       if (deps.evaluateKnowledgeAccess === undefined) {
-        // Conservative default until the Phase 2b retrofit wires in
-        // the existing visibility logic. Callers can opt in via deps.
+        // **Permissive** default during the Phase 2a transition — knowledge
+        // access still goes through the legacy gate in
+        // `src/mcp/access-control.ts` (which enforces PUBLIC / PRIVATE /
+        // ORGANIZATION). Phase 2b will wire that helper in here as
+        // `evaluateKnowledgeAccess`, at which point the visibility rules
+        // run inside this predicate. Until then, this branch MUST NOT be
+        // reached by callers that are using the predicate as their sole
+        // gate for knowledge-class memory — pass `evaluateKnowledgeAccess`
+        // to enforce the visibility rules.
         return { allowed: true };
       }
       return deps.evaluateKnowledgeAccess(memory, ctx, op);
@@ -215,10 +230,18 @@ async function resolvePersonalAccess(
   ctx: AuthContext,
   op: Op,
 ): Promise<AuthResult> {
-  if (memory.userId === null) {
-    // Invariant break: personal-class memory MUST have a userId
-    // (existing CHECK constraint from spec 005 + 023's
-    // chk_memory_personal_agent_id). Treat as misconfigured.
+  if (
+    memory.userId === null ||
+    memory.appId === null ||
+    memory.userMemoryOfAgentId === null
+  ) {
+    // Invariant break: personal-class memory MUST carry the full
+    // (App, Agent, User) scope per FR-004 / FR-032. Enforced by three
+    // CHECK constraints — `chk_personal_visibility_user` (user_id NOT NULL,
+    // from spec 005), `chk_memory_class_app_id` (app_id NOT NULL,
+    // from spec 008), and `chk_memory_personal_agent_id`
+    // (user_memory_of_agent_id NOT NULL, from spec 023). If any are
+    // null here, the row is misconfigured; fail closed.
     return { allowed: false, reason: 'invalid-context' };
   }
 

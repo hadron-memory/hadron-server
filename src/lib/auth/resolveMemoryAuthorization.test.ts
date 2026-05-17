@@ -226,7 +226,7 @@ describe('resolveMemoryAuthorization', () => {
   });
 
   // 9. Personal — implicit Agent-write happy path.
-  it('allows implicit Agent-write when all four FR-034 conditions hold', async () => {
+  it('allows implicit Agent-write when all five FR-034 conditions hold', async () => {
     const s = stateWithAliceSub();
     s.appAgents.add('app-juno-mm:juno');
     s.appMembers.set('app-juno-mm:alice', { role: 'mentee' });
@@ -345,6 +345,30 @@ describe('resolveMemoryAuthorization', () => {
   it('denies group-class read when caller has no MemoryMember row', async () => {
     const result = await run(emptyState(), groupMemory(), ctx({ callerUserId: 'mallory' }));
     expect(result).toEqual({ allowed: false, reason: 'no-membership' });
+  });
+
+  // Defensive: personal-class with null agent fails closed (fails the
+  // license check rather than silently bypassing it).
+  it('returns invalid-context when personal-class memory has null userMemoryOfAgentId', async () => {
+    const result = await run(
+      stateWithAliceSub(),
+      personalMemory({ userMemoryOfAgentId: null }),
+      ctx({ callerUserId: 'alice' }),
+    );
+    expect(result).toEqual({ allowed: false, reason: 'invalid-context' });
+  });
+
+  // Defensive: personal-class scope-invariant break in resolvePersonalAccess
+  // covers all three required scoping columns.
+  it('returns invalid-context when personal-class memory has null appId', async () => {
+    // Note: the license check passes (userMemoryOfAgentId is non-null), so
+    // the invariant guard in resolvePersonalAccess is what fires.
+    const result = await run(
+      stateWithAliceSub(),
+      personalMemory({ appId: null, userId: 'mallory' }), // userId differs to skip owner-bypass
+      ctx({ callerUserId: 'alice' }),
+    );
+    expect(result).toEqual({ allowed: false, reason: 'invalid-context' });
   });
 
   // 16. Group — role enforcement (reader/writer/owner).

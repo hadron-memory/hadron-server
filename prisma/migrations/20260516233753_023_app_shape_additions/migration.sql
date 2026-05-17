@@ -12,15 +12,15 @@ CREATE TYPE "MemoryMemberRole" AS ENUM ('reader', 'writer', 'owner');
 -- ─── AppAgent: N:M join, no `role` column, no `trainingMode` ───────────
 
 CREATE TABLE "app_agents" (
-  "app_id"     TEXT      NOT NULL,
-  "agent_id"   TEXT      NOT NULL,
-  "created_at" TIMESTAMP NOT NULL DEFAULT now(),
+  "app_id"     TEXT         NOT NULL,
+  "agent_id"   TEXT         NOT NULL,
+  "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "created_by" TEXT,
-  "updated_at" TIMESTAMP,
+  "updated_at" TIMESTAMP(3),
   "updated_by" TEXT,
   CONSTRAINT "app_agents_pkey"          PRIMARY KEY ("app_id", "agent_id"),
-  CONSTRAINT "app_agents_app_id_fkey"   FOREIGN KEY ("app_id")   REFERENCES "apps"   ("id") ON DELETE CASCADE,
-  CONSTRAINT "app_agents_agent_id_fkey" FOREIGN KEY ("agent_id") REFERENCES "agents" ("id") ON DELETE CASCADE
+  CONSTRAINT "app_agents_app_id_fkey"   FOREIGN KEY ("app_id")   REFERENCES "apps"   ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT "app_agents_agent_id_fkey" FOREIGN KEY ("agent_id") REFERENCES "agents" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 CREATE INDEX "app_agents_agent_id_idx" ON "app_agents" ("agent_id");
 
@@ -31,14 +31,14 @@ CREATE TABLE "memory_shares" (
   "grantee_id" TEXT              NOT NULL,
   "grantor_id" TEXT              NOT NULL,
   "role"       "MemoryShareRole" NOT NULL,
-  "created_at" TIMESTAMP         NOT NULL DEFAULT now(),
+  "created_at" TIMESTAMP(3)      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "created_by" TEXT,
-  "updated_at" TIMESTAMP,
+  "updated_at" TIMESTAMP(3),
   "updated_by" TEXT,
   CONSTRAINT "memory_shares_pkey"            PRIMARY KEY ("memory_id", "grantee_id"),
-  CONSTRAINT "memory_shares_memory_id_fkey"  FOREIGN KEY ("memory_id")  REFERENCES "memories" ("id") ON DELETE CASCADE,
-  CONSTRAINT "memory_shares_grantee_id_fkey" FOREIGN KEY ("grantee_id") REFERENCES "users"    ("id") ON DELETE CASCADE,
-  CONSTRAINT "memory_shares_grantor_id_fkey" FOREIGN KEY ("grantor_id") REFERENCES "users"    ("id") ON DELETE CASCADE
+  CONSTRAINT "memory_shares_memory_id_fkey"  FOREIGN KEY ("memory_id")  REFERENCES "memories" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT "memory_shares_grantee_id_fkey" FOREIGN KEY ("grantee_id") REFERENCES "users"    ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT "memory_shares_grantor_id_fkey" FOREIGN KEY ("grantor_id") REFERENCES "users"    ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 CREATE INDEX "memory_shares_grantee_id_idx" ON "memory_shares" ("grantee_id");
 CREATE INDEX "memory_shares_grantor_id_idx" ON "memory_shares" ("grantor_id");
@@ -49,13 +49,13 @@ CREATE TABLE "memory_members" (
   "memory_id"  TEXT               NOT NULL,
   "user_id"    TEXT               NOT NULL,
   "role"       "MemoryMemberRole" NOT NULL,
-  "created_at" TIMESTAMP          NOT NULL DEFAULT now(),
+  "created_at" TIMESTAMP(3)       NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "created_by" TEXT,
-  "updated_at" TIMESTAMP,
+  "updated_at" TIMESTAMP(3),
   "updated_by" TEXT,
   CONSTRAINT "memory_members_pkey"           PRIMARY KEY ("memory_id", "user_id"),
-  CONSTRAINT "memory_members_memory_id_fkey" FOREIGN KEY ("memory_id") REFERENCES "memories" ("id") ON DELETE CASCADE,
-  CONSTRAINT "memory_members_user_id_fkey"   FOREIGN KEY ("user_id")   REFERENCES "users"    ("id") ON DELETE CASCADE
+  CONSTRAINT "memory_members_memory_id_fkey" FOREIGN KEY ("memory_id") REFERENCES "memories" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT "memory_members_user_id_fkey"   FOREIGN KEY ("user_id")   REFERENCES "users"    ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 CREATE INDEX "memory_members_user_id_idx" ON "memory_members" ("user_id");
 
