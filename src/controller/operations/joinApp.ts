@@ -24,6 +24,7 @@ import {
   ensureAppMember,
   OrphanAppError,
 } from './ensureAppMember.js';
+import { AppNotFoundError } from '../../lib/entityRef/errors.js';
 
 export class NoMemberRolesError extends Error {
   constructor(appId: string) {
@@ -35,6 +36,20 @@ export class NoMemberRolesError extends Error {
   }
 }
 
+/**
+ * Thrown when joinApp is called against an App in the soft-uninstalled
+ * lifecycle phase (spec 021 FR-026). The App row exists but write
+ * operations are rejected. Lives in the controller (not the resolver)
+ * so direct callers — not just the GraphQL surface — get consistent
+ * lifecycle enforcement.
+ */
+export class AppUninstalledError extends Error {
+  constructor(appId: string) {
+    super(`Cannot join an uninstalled App (id=${appId}).`);
+    this.name = 'AppUninstalledError';
+  }
+}
+
 type InstallationPolicyShape = {
   memberRoles?: string[];
 };
@@ -43,16 +58,21 @@ export async function joinApp(
   db: PrismaClient,
   args: { appId: string; userId: string },
 ): Promise<{ appId: string; userId: string; role: string }> {
-  // Verify the App exists and isn't soft-deleted before either the
-  // idempotent return path OR the create path runs. Without this, an
-  // existing AppMember row for a since-deleted App would return a
-  // stale-looking row instead of failing cleanly.
+  // Verify the App exists, isn't soft-deleted, and isn't in the
+  // soft-uninstalled lifecycle phase (spec 021 FR-026) before either
+  // the idempotent return path OR the create path runs. Each state
+  // throws its own typed error so callers (GraphQL or direct) get a
+  // clear extensions.code mapping rather than a misleading
+  // "orphan-no-installed-Agents" message for a missing App.
   const app = await db.app.findUnique({
     where: { id: args.appId },
-    select: { id: true, deletedAt: true },
+    select: { id: true, deletedAt: true, uninstalledAt: true },
   });
   if (!app || app.deletedAt) {
-    throw new OrphanAppError(args.appId);
+    throw new AppNotFoundError(args.appId);
+  }
+  if (app.uninstalledAt) {
+    throw new AppUninstalledError(args.appId);
   }
 
   // Idempotent: return the existing row if already a member, with no

@@ -1546,10 +1546,22 @@ export const typeDefs = `#graphql
     Role defaults to the first value in the Agent's
     installationPolicy.memberRoles (the conventional "guest" or "owner"
     slot). Idempotent — if the user is already an AppMember of the App,
-    the existing row is returned. Subject to the Agent's
-    installationPolicy.maxMembers limit (throws GraphQLError with
-    extensions.code = MaxMembersExceededError, matching the
-    ensureAppMember surface).
+    the existing row is returned.
+
+    Error codes (GraphQLError extensions.code, Error.name style):
+      - UNAUTHENTICATED — no logged-in user in context.
+      - AppNotFoundError — the App does not exist or is soft-deleted.
+      - AppUninstalledError — the App is in the spec-021 soft-uninstall
+        lifecycle phase.
+      - OrphanAppError — the App has no installed Agents (so there's
+        no Agent.installationPolicy to consult).
+      - NoMemberRolesError — the primary Agent's
+        installation_policy.memberRoles is empty, so joinApp can't
+        pick a default role.
+      - MaxMembersExceededError — the Agent's maxMembers limit is hit.
+      - InvalidRoleError — the picked default role isn't accepted by
+        the Agent's policy (rare; would indicate a policy update
+        race).
 
     Accepts the entity's ID or URN.
     """

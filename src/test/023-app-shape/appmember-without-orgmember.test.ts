@@ -388,4 +388,57 @@ describe('US2: AppMember without OrgMember', () => {
     expect(caught).toBeInstanceOf(GraphQLError);
     expect((caught as GraphQLError).extensions?.code).toBe('UNAUTHENTICATED');
   });
+
+  it('joinApp surfaces NoMemberRolesError when the policy has no roles', async () => {
+    await db.agent.update({
+      where: { id: fx.knowYourselfAgentId },
+      data: {
+        installationPolicy: { maxMembers: 'unlimited', memberRoles: [] },
+      },
+    });
+    let caught: unknown;
+    try {
+      await resolvers.Mutation.joinApp(
+        {},
+        { appId: fx.therapyAppId },
+        userCtx(fx.daisyUserId),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(GraphQLError);
+    expect((caught as GraphQLError).extensions?.code).toBe('NoMemberRolesError');
+  });
+
+  it('joinApp throws AppNotFoundError when a stale AppMember row exists for a soft-deleted App', async () => {
+    // First join Daisy successfully, then soft-delete the App. The
+    // existing AppMember row should NOT be returned as a stale success
+    // — joinApp's pre-checks reject the soft-deleted App.
+    await resolvers.Mutation.joinApp(
+      {},
+      { appId: fx.therapyAppId },
+      userCtx(fx.daisyUserId),
+    );
+    await db.app.update({
+      where: { id: fx.therapyAppId },
+      data: { deletedAt: new Date() },
+    });
+    let caught: unknown;
+    try {
+      await resolvers.Mutation.joinApp(
+        {},
+        { appId: fx.therapyAppId },
+        userCtx(fx.daisyUserId),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(GraphQLError);
+    // resolveAppRef catches soft-deleted Apps before joinApp runs, so
+    // the surfaced code is AppNotFoundError (resolveAppRef's path),
+    // not the controller's redundant check. Either way, the user-
+    // visible behavior is "App not found" rather than "stale row
+    // returned" — that's what matters.
+    expect((caught as GraphQLError).extensions?.code).toBe('AppNotFoundError');
+  });
 });

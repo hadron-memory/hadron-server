@@ -21,7 +21,8 @@ import { removeAgentImport } from '../../../controller/operations/removeAgentImp
 import { isLifecycleActive } from '../../../lib/lifecycle.js';
 import { getPrimaryAgent, getPrimaryAgentId, isAgentInstalled } from '../../../lib/appAgent.js';
 import { isOrgExternalAppMember } from '../../../lib/auth/isOrgExternalAppMember.js';
-import { joinApp, NoMemberRolesError } from '../../../controller/operations/joinApp.js';
+import { joinApp, NoMemberRolesError, AppUninstalledError } from '../../../controller/operations/joinApp.js';
+import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
@@ -1148,6 +1149,12 @@ export const resolvers = {
     // 023-app-shape US2 / FR-011: derived from the absence of an
     // OrgMember row in the App's owning Organization. No `appOnly`
     // column on AppMember.
+    //
+    // The parent is ALREADY an AppMember row by GraphQL contract, so
+    // the resolver bypasses the wrapper helper's AppMember-existence
+    // check (which would be wasted work — pure N+1 on list fields
+    // like Organization.appMembers). The wrapper's contract still
+    // matters for auth-side callers that may not have a parent row.
     isOrgExternal: async (
       s: { appId: string; userId: string; app?: { organizationId?: string } | null },
       _: unknown,
@@ -1156,14 +1163,19 @@ export const resolvers = {
       // Prefer the eager-loaded organizationId from APP_INCLUDE; fall
       // back to a re-fetch otherwise.
       const organizationId =
-        (s.app && typeof s.app === 'object' && 'organizationId' in s.app
-          ? (s.app as { organizationId?: string }).organizationId
-          : undefined) ?? undefined;
-      return isOrgExternalAppMember(ctx.db, {
-        userId: s.userId,
-        appId: s.appId,
-        organizationId,
+        s.app?.organizationId ??
+        (
+          await ctx.db.app.findUnique({
+            where: { id: s.appId },
+            select: { organizationId: true },
+          })
+        )?.organizationId;
+      if (!organizationId) return false;
+      const orgMember = await ctx.db.orgMember.findFirst({
+        where: { userId: s.userId, organizationId, deletedAt: null },
+        select: { userId: true },
       });
+      return orgMember === null;
     },
   },
   // 008-agent-installation: Agent dependency edge.
@@ -5802,14 +5814,15 @@ export const resolvers = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      if (app.uninstalledAt) {
-        throw new GraphQLError('Cannot join an uninstalled App.', {
-          extensions: { code: 'APP_UNINSTALLED', appId: resolvedAppId },
-        });
-      }
+      // resolveAppRef rejects soft-deleted Apps; the controller layer
+      // additionally rejects via AppNotFoundError (race after
+      // resolveAppRef) and AppUninstalledError. All lifecycle checks
+      // live in the controller so direct callers get them too. The
+      // try/catch covers both resolveAppRef + joinApp because
+      // resolveAppRef can throw the typed errors we want to surface.
+      let resolvedAppId: string;
       try {
+        ({ id: resolvedAppId } = await resolveAppRef(ctx.db, appId));
         await joinApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
       } catch (e: unknown) {
         // Surface typed errors with their canonical messages (Constitution
@@ -5818,7 +5831,9 @@ export const resolvers = {
           e instanceof InvalidRoleError ||
           e instanceof MaxMembersExceededError ||
           e instanceof OrphanAppError ||
-          e instanceof NoMemberRolesError
+          e instanceof NoMemberRolesError ||
+          e instanceof AppNotFoundError ||
+          e instanceof AppUninstalledError
         ) {
           throw new GraphQLError((e as Error).message, {
             extensions: { code: (e as Error).name },

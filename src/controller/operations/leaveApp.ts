@@ -9,6 +9,12 @@
  * retained as an orphan; if the user later re-joins the same App, it
  * re-attaches automatically. Memory cleanup is a separate lifecycle
  * concern, not a side-effect of leaving.
+ *
+ * **App lifecycle is intentionally NOT checked here.** Unlike joinApp
+ * (which rejects writes into soft-deleted or soft-uninstalled Apps),
+ * leaveApp is pure cleanup of the user-side state. A user can leave
+ * an uninstalled or soft-deleted App without ceremony — denying that
+ * would strand the user as a member of a dead App with no recourse.
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
