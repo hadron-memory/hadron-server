@@ -23,6 +23,12 @@ export const typeDefs = `#graphql
     PRIVATE
     ORGANIZATION
     PERSONAL
+    """
+    023-app-shape US4: team-shared visibility. Bound bidirectionally
+    to MemoryClass.group by the chk_memory_group_visibility CHECK
+    constraint — a memory has class=group iff visibility=GROUP.
+    """
+    GROUP
   }
 
   enum MemoryType {
@@ -325,6 +331,53 @@ export const typeDefs = `#graphql
   }
 
   """
+  023-app-shape US4: role on a MemoryMember row. Symmetric team
+  membership for group-class memory.
+  - reader: read access.
+  - writer: read + write (the member can add/edit/delete nodes
+    within the memory).
+  - owner: read + write + management — add/remove other members,
+    change roles, delete the Memory itself. Subject to the
+    last-owner protection rule (FR-038): the platform refuses
+    to remove or demote the sole remaining owner; the path to
+    fully empty a group memory is to delete it.
+  """
+  enum MemoryMemberRole {
+    reader
+    writer
+    owner
+  }
+
+  """
+  023-app-shape US4: symmetric team-membership row for group-class
+  memory. The "Company Brain" model — multiple users collaboratively
+  read/write a shared memory, governance by role, no single owner
+  on the Memory itself.
+  """
+  type MemoryMember {
+    memory: Memory!
+    user: User!
+    role: MemoryMemberRole!
+    createdAt: String!
+    createdBy: String
+    updatedAt: String
+    updatedBy: String
+  }
+
+  type AddMemoryMemberPayload {
+    memoryMember: MemoryMember!
+  }
+
+  type UpdateMemoryMemberRolePayload {
+    memoryMember: MemoryMember!
+  }
+
+  type RemoveMemoryMemberPayload {
+    memoryId: ID!
+    userId: ID!
+  }
+
+  """
   Return shape for the leaveApp mutation (023-app-shape US2). The
   user's personal-class Memory at (appId, userId) is NOT
   cascade-deleted (spec 008 FR-015 orphan retention); it re-attaches
@@ -430,6 +483,13 @@ export const typeDefs = `#graphql
     app
     knowledge
     personal
+    """
+    023-app-shape US4: team-shared memory with symmetric membership.
+    Governed by a list of MemoryMember rows (each with reader/writer/
+    owner role) — no single owner field on Memory. Closes the
+    Company Brain gap that wasn't covered by the four legacy classes.
+    """
+    group
   }
 
   # 017-chat-visibility-and-personal-memory: a chat is created in one
@@ -571,6 +631,12 @@ export const typeDefs = `#graphql
     ADMIN/OWNER of the memory's owning org.
     """
     shares: [MemoryShare!]!
+    """
+    023-app-shape US4: team membership rows on this memory. Non-empty
+    only when class = group (FR-027). Visible to any current member
+    (any role) and to ADMIN/OWNER of the memory's owning org.
+    """
+    members: [MemoryMember!]!
   }
 
   # The definition (one per Agent) — what a Builder creates and what the
@@ -1227,7 +1293,39 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    createMemory(orgId: ID!, name: String!, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, type: MemoryType): Memory!
+    """
+    Create a memory. Defaults to knowledge-class with PRIVATE
+    visibility. Pass memoryClass: group + visibility: GROUP to
+    create a group-class memory (023-app-shape US4); the calling
+    user is auto-added as the first owner. Personal-class and
+    system-class memories are NOT created via this mutation — they
+    auto-provision via AgentSubscription / Agent.systemMemoryId.
+    """
+    createMemory(
+      orgId: ID!
+      name: String!
+      shortDescription: String
+      description: String
+      tags: [String!]
+      license: String
+      category0: String
+      category1: String
+      category2: String
+      iconUrl: String
+      heroUrl: String
+      homeUrl: String
+      source: String
+      readBranch: String
+      writeBranch: String
+      visibility: MemoryVisibility
+      type: MemoryType
+      """
+      023-app-shape US4: 'knowledge' (default) or 'group'. Other
+      values (system, app, personal) are rejected — those classes
+      auto-provision via different code paths.
+      """
+      memoryClass: MemoryClass
+    ): Memory!
 
     """
     Update a Memory.
@@ -1702,6 +1800,62 @@ export const typeDefs = `#graphql
       granteeId: ID!
       role: MemoryShareRole!
     ): UpdateMemoryShareRolePayload!
+
+    """
+    023-app-shape US4 — add a team member to a group-class Memory.
+    Idempotent on the (memoryId, userId) PK: re-calling with a
+    different role upserts the role.
+
+    The caller MUST be an owner of the Memory (role = owner). The
+    bootstrap case is handled by createMemory itself, which adds the
+    creator as the first owner of a newly-created group memory.
+
+    Error codes (extensions.code, Error.name style):
+      - UNAUTHENTICATED — no logged-in user in context.
+      - FORBIDDEN — caller is not an owner of the memory. (Uniform
+        for missing-memory / wrong-class / not-an-owner cases, by
+        the same don't-leak-metadata rule as MemoryShare mutations.)
+      - InvalidMemoryClassForMemberError — memory is not group-class
+        (only reachable from non-GraphQL callers in v1 — the
+        caller-authority guard short-circuits to FORBIDDEN first).
+      - MemoryMemberUserMissingError — the userId doesn't resolve.
+    """
+    addMemoryMember(
+      memoryId: ID!
+      userId: ID!
+      role: MemoryMemberRole!
+    ): AddMemoryMemberPayload!
+
+    """
+    023-app-shape US4 — change the role on an existing team member.
+    Throws MemoryMemberNotFoundError when the row doesn't exist;
+    use addMemoryMember to upsert. Throws LastOwnerProtectedError
+    (FR-038) when demoting the sole remaining owner.
+
+    Caller-authority rule matches addMemoryMember.
+    """
+    updateMemoryMemberRole(
+      memoryId: ID!
+      userId: ID!
+      role: MemoryMemberRole!
+    ): UpdateMemoryMemberRolePayload!
+
+    """
+    023-app-shape US4 — remove a team member. Idempotent. Removing
+    the LAST owner is rejected with LastOwnerProtectedError (FR-038)
+    — group memories must always have ≥1 owner; the path to fully
+    empty one is to delete the Memory.
+
+    Removing the last non-owner does NOT delete the Memory (FR-031);
+    the row persists with its remaining owner(s).
+
+    Caller-authority: either an owner of the Memory, or the member
+    being removed (self-removal).
+    """
+    removeMemoryMember(
+      memoryId: ID!
+      userId: ID!
+    ): RemoveMemoryMemberPayload!
 
     """
     Publish a dependency edge from a parent Agent to an imported Agent
