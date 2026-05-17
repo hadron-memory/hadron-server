@@ -34,7 +34,22 @@ import {
   updateMemoryShareRole,
   MemoryShareNotFoundError,
 } from '../../../controller/operations/updateMemoryShareRole.js';
-import type { MemoryShareRole as MemoryShareRoleType } from '../../../generated/prisma/index.js';
+import {
+  addMemoryMember,
+  InvalidMemoryClassForMemberError,
+  MemoryNotFoundForMemberError,
+  MemoryMemberUserMissingError,
+} from '../../../controller/operations/addMemoryMember.js';
+import {
+  updateMemoryMemberRole,
+  MemoryMemberNotFoundError,
+  LastOwnerProtectedError,
+} from '../../../controller/operations/updateMemoryMemberRole.js';
+import { removeMemoryMember } from '../../../controller/operations/removeMemoryMember.js';
+import type {
+  MemoryShareRole as MemoryShareRoleType,
+  MemoryMemberRole as MemoryMemberRoleType,
+} from '../../../generated/prisma/index.js';
 import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
@@ -477,6 +492,62 @@ async function readPrimaryAgentField(
 // behalf via MCP) is supported by the access-control predicate but
 // not by this GraphQL surface — see joinApp.ts header for the
 // broader policy discussion.
+
+// ─── 023-app-shape US4 — MemoryMember caller-authority guards ──────────
+//
+// addMemoryMember / updateMemoryMemberRole require an existing OWNER on
+// the memory. removeMemoryMember accepts either an owner OR the member
+// being removed (self-removal).
+
+async function requireMemoryMemberOwner(
+  ctx: Context,
+  memoryId: string,
+): Promise<void> {
+  if (!ctx.userId) {
+    throw new GraphQLError('Authenticated user required', {
+      extensions: { code: 'UNAUTHENTICATED' },
+    });
+  }
+  // Don't-leak-metadata rule: surface a uniform FORBIDDEN for any
+  // unauthorized path. Mirrors requireMemorySharePrincipal — checks
+  // memory existence, soft-delete status, and class up-front so the
+  // membership row of a deleted or wrong-class memory can't be used
+  // to manage members. (Membership rows persist past Memory soft-
+  // delete; without this guard an owner could keep managing roles on
+  // a deleted memory.)
+  const memory = await ctx.db.memory.findUnique({
+    where: { id: memoryId },
+    select: { class: true, deletedAt: true },
+  });
+  if (!memory || memory.deletedAt || memory.class !== 'group') {
+    throw new GraphQLError('You are not authorized to manage members on this memory.', {
+      extensions: { code: 'FORBIDDEN' },
+    });
+  }
+  const member = await ctx.db.memoryMember.findUnique({
+    where: { memoryId_userId: { memoryId, userId: ctx.userId } },
+    select: { role: true },
+  });
+  if (!member || member.role !== 'owner') {
+    throw new GraphQLError('You are not authorized to manage members on this memory.', {
+      extensions: { code: 'FORBIDDEN' },
+    });
+  }
+}
+
+async function requireMemoryMemberOwnerOrSelf(
+  ctx: Context,
+  memoryId: string,
+  targetUserId: string,
+): Promise<void> {
+  if (!ctx.userId) {
+    throw new GraphQLError('Authenticated user required', {
+      extensions: { code: 'UNAUTHENTICATED' },
+    });
+  }
+  if (ctx.userId === targetUserId) return; // self-removal always permitted.
+  await requireMemoryMemberOwner(ctx, memoryId);
+}
 
 async function requireMemorySharePrincipal(
   ctx: Context,
@@ -1091,6 +1162,66 @@ export const resolvers = {
         orderBy: { createdAt: 'asc' },
       });
     },
+    // 023-app-shape US4: team membership rows on this memory. Empty
+    // for non-group-class memories. Visible to current members (any
+    // role), ADMIN/OWNER of the memory's owning org, and platform
+    // ADMIN/OWNER. Non-members of a group memory get an empty list
+    // even if they happen to be in the org but not on the team.
+    members: async (
+      g: { id: string; class?: string; organizationId?: string },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      // Partial-select-safe: some query paths (e.g. `appNodes`)
+      // select Memory with only { id, urn, name, organizationId }
+      // or even less. Fetch the missing scoping fields rather than
+      // silently returning `[]` for a real group memory.
+      let cls = g.class;
+      let orgId = g.organizationId;
+      if (cls === undefined || orgId === undefined) {
+        const m = await ctx.db.memory.findUnique({
+          where: { id: g.id },
+          select: { class: true, organizationId: true },
+        });
+        if (!m) return [];
+        cls = m.class;
+        orgId = m.organizationId;
+      }
+      if (cls !== 'group') return [];
+      const isPlatformAdmin =
+        ctx.roles?.includes('ADMIN') === true || ctx.roles?.includes('OWNER') === true;
+      if (!isPlatformAdmin) {
+        if (!ctx.userId) return [];
+        // Self-membership check (any role).
+        const selfMember = await ctx.db.memoryMember.findUnique({
+          where: { memoryId_userId: { memoryId: g.id, userId: ctx.userId } },
+          select: { userId: true },
+        });
+        if (!selfMember) {
+          // Fall back to org admin.
+          const orgMember = await ctx.db.orgMember.findUnique({
+            where: {
+              organizationId_userId: {
+                organizationId: orgId,
+                userId: ctx.userId,
+              },
+            },
+            select: { role: true, deletedAt: true },
+          });
+          if (
+            !orgMember ||
+            orgMember.deletedAt ||
+            (orgMember.role !== 'ADMIN' && orgMember.role !== 'OWNER')
+          ) {
+            return [];
+          }
+        }
+      }
+      return ctx.db.memoryMember.findMany({
+        where: { memoryId: g.id },
+        orderBy: { createdAt: 'asc' },
+      });
+    },
   },
   App: {
     createdAt: (a: { createdAt: Date | string }) => toISO(a.createdAt)!,
@@ -1279,6 +1410,15 @@ export const resolvers = {
       s.grantee ?? ctx.db.user.findUnique({ where: { id: s.granteeId } }),
     grantor: async (s: { grantorId: string; grantor?: unknown }, _: unknown, ctx: Context) =>
       s.grantor ?? ctx.db.user.findUnique({ where: { id: s.grantorId } }),
+  },
+  // 023-app-shape US4: symmetric team membership on group-class memory.
+  MemoryMember: {
+    createdAt: (m: { createdAt: Date | string }) => toISO(m.createdAt)!,
+    updatedAt: (m: { updatedAt?: Date | string | null }) => toISO(m.updatedAt ?? null),
+    memory: async (m: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
+      m.memory ?? ctx.db.memory.findUnique({ where: { id: m.memoryId } }),
+    user: async (m: { userId: string; user?: unknown }, _: unknown, ctx: Context) =>
+      m.user ?? ctx.db.user.findUnique({ where: { id: m.userId } }),
   },
   // 008-agent-installation: Agent dependency edge.
   AgentImport: {
@@ -3283,6 +3423,7 @@ export const resolvers = {
         writeBranch,
         visibility,
         type,
+        memoryClass,
       }: {
         orgId: string; name: string;
         shortDescription?: string; description?: string; tags?: string[];
@@ -3290,12 +3431,57 @@ export const resolvers = {
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
         type?: 'KNOWLEDGE' | 'AGENT_SYSTEM';
+        // GraphQL passes the full MemoryClass enum; the resolver
+        // allowlists the user-creatable values below.
+        memoryClass?: 'knowledge' | 'group' | 'system' | 'app' | 'personal';
       },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+
+      // 023-app-shape US4: createMemory only creates user-driven
+      // classes — `knowledge` (default) and `group`. The GraphQL enum
+      // exposes the full MemoryClass set for read paths, but the
+      // mutation's allowlist here rejects system / app / personal
+      // explicitly. Those classes auto-provision via different code
+      // paths (Agent.systemMemoryId; AgentSubscription/AppMember).
+      const requestedClass = memoryClass ?? 'knowledge';
+      if (requestedClass !== 'knowledge' && requestedClass !== 'group') {
+        throw new GraphQLError(
+          `createMemory does not accept class='${requestedClass}'. Only ` +
+            `'knowledge' and 'group' are user-creatable; '${requestedClass}' ` +
+            `auto-provisions via a different code path.`,
+          { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' } },
+        );
+      }
+      // 023-app-shape US4: group-class memories must carry GROUP
+      // visibility (enforced by the chk_memory_group_visibility CHECK
+      // constraint at the DB level; we surface a clearer error at the
+      // API layer instead of letting the constraint fire). The
+      // creator becomes the first owner via the bootstrap path below.
+      if (requestedClass === 'group') {
+        if (visibility !== undefined && visibility !== 'GROUP') {
+          throw new GraphQLError(
+            'Group-class memory must have visibility=GROUP (spec 023 FR-024).',
+            { extensions: { code: 'INVALID_GROUP_MEMORY_VISIBILITY' } },
+          );
+        }
+        if (!ctx.userId) {
+          throw new GraphQLError(
+            'Creating a group-class memory requires an authenticated user (the creator becomes the first owner).',
+            { extensions: { code: 'UNAUTHENTICATED' } },
+          );
+        }
+      } else if (visibility === 'GROUP') {
+        // Symmetric guard: non-group class can't claim GROUP visibility.
+        throw new GraphQLError(
+          'visibility=GROUP requires class=group (spec 023 FR-024).',
+          { extensions: { code: 'INVALID_GROUP_MEMORY_VISIBILITY' } },
+        );
+      }
+
       const memOrg = await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId }, select: { urn: true } });
       const memoryUrn = `${memOrg.urn}:${name}`;
       // Check for existing memory with the same URN
@@ -3307,35 +3493,58 @@ export const resolvers = {
           throw new Error(`A memory with URN "${memoryUrn}" already exists`);
         }
       }
-      const memory = await ctx.db.memory.create({
-        data: {
-          id: generateId(),
-          organizationId: resolvedOrgId,
-          urn: memoryUrn,
-          name,
-          shortDescription,
-          description,
-          tags: tags ?? [],
-          license,
-          category0,
-          category1,
-          category2,
-          iconUrl,
-          heroUrl,
-          homeUrl,
-          source,
-          readBranch,
-          writeBranch,
-          visibility: (visibility as MemoryVisibility) ?? 'PRIVATE',
-          type: type ?? 'KNOWLEDGE',
-          // 005-agent-subscription: explicit user-driven createMemory
-          // creates a knowledge-class memory by default. Personal-class
-          // memories are auto-provisioned via the AgentSubscription
-          // path; system-class via Agent.systemMemoryId.
-          class: 'knowledge',
-          createdBy: ctx.userId ?? ctx.clientId ?? null,
-        },
-        include: MEMORY_INCLUDE,
+
+      // For group-class memory: bootstrap the creator as the first
+      // owner in the same transaction as the Memory create, so the
+      // Memory is never persisted in a zero-owner state (which would
+      // be effectively unreachable to anyone, including the creator).
+      const memory = await ctx.db.$transaction(async (tx) => {
+        const created = await tx.memory.create({
+          data: {
+            id: generateId(),
+            organizationId: resolvedOrgId,
+            urn: memoryUrn,
+            name,
+            shortDescription,
+            description,
+            tags: tags ?? [],
+            license,
+            category0,
+            category1,
+            category2,
+            iconUrl,
+            heroUrl,
+            homeUrl,
+            source,
+            readBranch,
+            writeBranch,
+            visibility: requestedClass === 'group' ? 'GROUP' : ((visibility as MemoryVisibility) ?? 'PRIVATE'),
+            type: type ?? 'KNOWLEDGE',
+            // 005-agent-subscription: explicit user-driven createMemory
+            // creates a knowledge-class memory by default. Personal-class
+            // memories are auto-provisioned via the AgentSubscription
+            // path; system-class via Agent.systemMemoryId.
+            // 023-app-shape US4: a `memoryClass: 'group'` argument lets
+            // callers create group-class memories explicitly.
+            class: requestedClass,
+            // Group memories must have userId NULL — enforced by the
+            // chk_memory_group_no_owner CHECK; we set it explicitly here.
+            userId: requestedClass === 'group' ? null : undefined,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+          include: MEMORY_INCLUDE,
+        });
+        if (requestedClass === 'group' && ctx.userId) {
+          await tx.memoryMember.create({
+            data: {
+              memoryId: created.id,
+              userId: ctx.userId,
+              role: 'owner',
+              createdBy: ctx.userId,
+            },
+          });
+        }
+        return created;
       });
 
       // Create the root node for this memory
@@ -6050,6 +6259,96 @@ export const resolvers = {
         return { memoryShare };
       } catch (e: unknown) {
         if (e instanceof MemoryShareNotFoundError) {
+          throw new GraphQLError(e.message, {
+            extensions: { code: e.name },
+          });
+        }
+        throw e;
+      }
+    },
+
+    // 023-app-shape US4 — add a team member to a group-class memory.
+    // Caller MUST be an existing owner of the memory.
+    addMemoryMember: async (
+      _: unknown,
+      {
+        memoryId,
+        userId,
+        role,
+      }: { memoryId: string; userId: string; role: MemoryMemberRoleType },
+      ctx: Context,
+    ) => {
+      await requireMemoryMemberOwner(ctx, memoryId);
+      try {
+        const memoryMember = await addMemoryMember(ctx.db, {
+          memoryId,
+          userId,
+          role,
+          actorId: ctx.userId!,
+        });
+        return { memoryMember };
+      } catch (e: unknown) {
+        if (
+          e instanceof InvalidMemoryClassForMemberError ||
+          e instanceof MemoryNotFoundForMemberError ||
+          e instanceof MemoryMemberUserMissingError ||
+          e instanceof LastOwnerProtectedError
+        ) {
+          throw new GraphQLError((e as Error).message, {
+            extensions: { code: (e as Error).name },
+          });
+        }
+        throw e;
+      }
+    },
+
+    // 023-app-shape US4 — change the role on a team member. Enforces
+    // FR-038 last-owner protection.
+    updateMemoryMemberRole: async (
+      _: unknown,
+      {
+        memoryId,
+        userId,
+        role,
+      }: { memoryId: string; userId: string; role: MemoryMemberRoleType },
+      ctx: Context,
+    ) => {
+      await requireMemoryMemberOwner(ctx, memoryId);
+      try {
+        const memoryMember = await updateMemoryMemberRole(ctx.db, {
+          memoryId,
+          userId,
+          role,
+          actorId: ctx.userId!,
+        });
+        return { memoryMember };
+      } catch (e: unknown) {
+        if (
+          e instanceof MemoryMemberNotFoundError ||
+          e instanceof InvalidMemoryClassForMemberError ||
+          e instanceof MemoryNotFoundForMemberError ||
+          e instanceof LastOwnerProtectedError
+        ) {
+          throw new GraphQLError((e as Error).message, {
+            extensions: { code: (e as Error).name },
+          });
+        }
+        throw e;
+      }
+    },
+
+    // 023-app-shape US4 — remove a team member. Owner OR self-removal.
+    // Enforces FR-038 last-owner protection.
+    removeMemoryMember: async (
+      _: unknown,
+      { memoryId, userId }: { memoryId: string; userId: string },
+      ctx: Context,
+    ) => {
+      await requireMemoryMemberOwnerOrSelf(ctx, memoryId, userId);
+      try {
+        return await removeMemoryMember(ctx.db, { memoryId, userId });
+      } catch (e: unknown) {
+        if (e instanceof LastOwnerProtectedError) {
           throw new GraphQLError(e.message, {
             extensions: { code: e.name },
           });

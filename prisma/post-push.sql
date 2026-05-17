@@ -14,13 +14,43 @@ ALTER TABLE memories
   ADD CONSTRAINT chk_personal_visibility_user
   CHECK ((visibility = 'PERSONAL') = (user_id IS NOT NULL));
 
--- 008-agent-installation: app_id is required for class IN ('app', 'personal'),
--- forbidden for class IN ('system', 'knowledge').
+-- 008-agent-installation (extended by 023-app-shape): app_id is required
+-- for class IN ('app', 'personal'), forbidden for class IN ('system',
+-- 'knowledge', 'group'). 023 added 'group' as an org-scoped class with
+-- no app_id (FR-024).
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_class_app_id;
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_class_app_id
   CHECK (
     (class IN ('app', 'personal') AND app_id IS NOT NULL)
-    OR (class IN ('system', 'knowledge') AND app_id IS NULL)
+    OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
   );
+
+-- 023-app-shape FR-024: bidirectional invariant — class='group' ⇔
+-- visibility='GROUP'.
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_group_visibility;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_group_visibility
+  CHECK (
+    (class = 'group' AND visibility = 'GROUP')
+    OR
+    (class <> 'group' AND visibility <> 'GROUP')
+  );
+
+-- 023-app-shape FR-025: group memory has no single owner.
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_group_no_owner;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_group_no_owner
+  CHECK (class <> 'group' OR user_id IS NULL);
+
+-- 023-app-shape FR-004 / FR-032: personal memory carries the (App, Agent,
+-- User) scope. user_memory_of_agent_id (legacy column name; semantically
+-- agent_id) is required-non-null for personal class.
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_personal_agent_id;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_personal_agent_id
+  CHECK (class <> 'personal' OR user_memory_of_agent_id IS NOT NULL);

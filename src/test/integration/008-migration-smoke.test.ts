@@ -226,19 +226,40 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Recreate `app_agents` in its 023-app-shape form so subsequent test
+  // files in the same `vitest run` see a usable table. Without this,
+  // PR #129 / PR #130 / PR #134's tests fail in the full suite because
+  // this file drops the table that other suites depend on.
   await dropAppAgents();
+  await pgClient.query(`
+    CREATE TABLE "app_agents" (
+      "app_id"        TEXT         NOT NULL,
+      "agent_id"      TEXT         NOT NULL,
+      "created_at"    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "created_by"    TEXT,
+      "updated_at"    TIMESTAMP(3),
+      "updated_by"    TEXT,
+      CONSTRAINT "app_agents_pkey"          PRIMARY KEY ("app_id", "agent_id"),
+      CONSTRAINT "app_agents_app_id_fkey"   FOREIGN KEY ("app_id")   REFERENCES "apps"   ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+      CONSTRAINT "app_agents_agent_id_fkey" FOREIGN KEY ("agent_id") REFERENCES "agents" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+    )
+  `);
+  await pgClient.query(`CREATE INDEX "app_agents_agent_id_idx" ON "app_agents" ("agent_id")`);
   // Clean any rows the tests left in app/personal class with NULL app_id —
   // those are mid-backfill states that shouldn't persist past this file.
   await pgClient.query(`
     UPDATE memories SET class = 'knowledge', user_id = NULL, visibility = 'PRIVATE'
     WHERE class IN ('app', 'personal') AND app_id IS NULL
   `);
+  // 023-app-shape: `group` is the fifth class — must be allowed with
+  // app_id NULL alongside knowledge/system. Without 'group' in this
+  // allowlist the US4 acceptance tests fail in the full-suite run.
   await pgClient.query(`
     ALTER TABLE memories
       ADD CONSTRAINT chk_memory_class_app_id
       CHECK (
         (class IN ('app', 'personal') AND app_id IS NOT NULL)
-        OR (class IN ('system', 'knowledge') AND app_id IS NULL)
+        OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
       )
   `);
   await pgClient.end();
