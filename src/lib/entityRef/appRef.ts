@@ -20,11 +20,20 @@ export async function resolveAppRef(
     assertFullyQualifiedUrn(urn, 'app');
   }
   const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
-  const where = isId(normalized) ? { id: normalized } : { urn: normalized };
-  const app = await db.app.findUnique({
-    where,
-    select: { id: true, deletedAt: true },
-  });
+  // Spec 021 FR-027 removed `App.urn`'s @unique constraint in favor of
+  // a partial unique index restricted to `uninstalled_at IS NULL`. So
+  // `findUnique({ where: { urn } })` is no longer well-typed — use
+  // `findFirst` with the active-row filter for URN lookups. ID lookups
+  // still use the PK.
+  const app = isId(normalized)
+    ? await db.app.findUnique({
+        where: { id: normalized },
+        select: { id: true, deletedAt: true },
+      })
+    : await db.app.findFirst({
+        where: { urn: normalized, uninstalledAt: null },
+        select: { id: true, deletedAt: true },
+      });
   if (!app || app.deletedAt) {
     throw new AppNotFoundError(urn);
   }
