@@ -1996,12 +1996,13 @@ model AppLogEntry {
 model AppAgent {
   appId     String    @map("app_id")
   agentId   String    @map("agent_id")
+  // Audit fields mirror AppMember (no soft-delete). Uninstall is a
+  // hard row delete; predicate lookups use `findUnique` on the
+  // composite PK with no filter.
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
   updatedAt DateTime? @map("updated_at")
   updatedBy String?   @map("updated_by")
-  deletedAt DateTime? @map("deleted_at")
-  deletedBy String?   @map("deleted_by")
 
   app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
   agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
@@ -2032,12 +2033,12 @@ model MemoryShare {
   granteeId  String          @map("grantee_id")
   grantorId  String          @map("grantor_id")
   role       MemoryShareRole
+  // Audit fields (no soft-delete). Revoke is a hard row delete (FR-022);
+  // predicate lookups use `findUnique` on the composite PK.
   createdAt  DateTime        @default(now()) @map("created_at")
   createdBy  String?         @map("created_by")
   updatedAt  DateTime?       @map("updated_at")
   updatedBy  String?         @map("updated_by")
-  deletedAt  DateTime?       @map("deleted_at")
-  deletedBy  String?         @map("deleted_by")
 
   memory  Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   grantee User   @relation("MemorySharesGranted",   fields: [granteeId], references: [id], onDelete: Cascade)
@@ -2071,12 +2072,13 @@ model MemoryMember {
   memoryId  String           @map("memory_id")
   userId    String           @map("user_id")
   role      MemoryMemberRole
+  // Audit fields (no soft-delete). Remove is a hard row delete (FR-038
+  // protects the last owner; non-owner removal is unrestricted);
+  // predicate lookups use `findUnique` on the composite PK.
   createdAt DateTime         @default(now()) @map("created_at")
   createdBy String?          @map("created_by")
   updatedAt DateTime?        @map("updated_at")
   updatedBy String?          @map("updated_by")
-  deletedAt DateTime?        @map("deleted_at")
-  deletedBy String?          @map("deleted_by")
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   user   User   @relation("MemoryMemberships", fields: [userId], references: [id], onDelete: Cascade)

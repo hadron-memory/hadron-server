@@ -44,8 +44,15 @@ export type Op = 'read' | 'write';
 export type AuthContext = {
   callerUserId: string;
   callingAppId: string | null;
-  callingAgentId?: string;
-  actingForUserId?: string;
+  callingAgentId?: string | null;
+  /**
+   * Set when an Agent is acting on behalf of a principal. `null` and
+   * `undefined` both mean "no acting context" — the predicate uses
+   * `== null` checks throughout so callers can safely round-trip the
+   * field through JSON without worrying about which absent-value form
+   * arrives.
+   */
+  actingForUserId?: string | null;
 };
 
 export type AuthAllow = { allowed: true };
@@ -135,11 +142,17 @@ export async function resolveMemoryAuthorization(
   // ─── Step 1: License check (only for Agent-attributable memory) ───────
   //
   // The license check fires only when the Memory has a definite
-  // associated Agent. For app-class memory the check is SKIPPED (the
-  // App may host N Agents per US1; AppMember is the sufficient
-  // license, enforced in Step 2's `app` branch). For knowledge without
-  // an Agent association, visibility rules govern (Step 2's `knowledge`
-  // branch defers to the existing helper).
+  // associated Agent — which today means `personal`-class memory
+  // (where `userMemoryOfAgentId` is the scoping Agent per FR-004).
+  // The other classes skip this check by design:
+  //   - `app`     — AppMember of the Memory's App is the license
+  //                 (multi-Agent App per US1; no per-Agent gate).
+  //   - `group`   — MemoryMember on the Memory is the license
+  //                 (team membership, not per-Agent — US4).
+  //   - `system`  — read-only to every caller; access is class-gated.
+  //   - `knowledge` — visibility rules (PUBLIC/PRIVATE/ORGANIZATION)
+  //                 govern; the existing helper handles them.
+  // Add new classes to this comment AND to the dispatch in Step 2.
   const agentForLicense: string | null =
     memory.class === 'personal' ? memory.userMemoryOfAgentId : null;
 
@@ -211,12 +224,15 @@ async function resolvePersonalAccess(
 
   // 3a. Owner-bypass — direct user calls ONLY.
   //
-  // The `actingForUserId IS NULL` gate is load-bearing: it prevents
+  // The `actingForUserId == null` gate is load-bearing: it prevents
   // an Agent claiming `actingForUserId === memory.userId` from
   // bypassing Step 3b's AppMember + AppAgent gates and reading the
   // owner's memory from a context the owner has not consented to.
   // Agent-mediated owner access MUST flow through Step 3b.
-  if (ctx.callerUserId === memory.userId && ctx.actingForUserId === undefined) {
+  // We use `== null` (loose) so both `undefined` and `null` count as
+  // "no acting context" — the type accepts both for JSON round-trip
+  // safety.
+  if (ctx.callerUserId === memory.userId && ctx.actingForUserId == null) {
     return { allowed: true };
   }
 
@@ -224,17 +240,24 @@ async function resolvePersonalAccess(
 
   // 3b. Implicit Agent-write (FR-034) — physician's-office boundary.
   //
-  // All four conditions must hold:
-  //   - Agent is acting for the Memory's principal.
-  //   - The Agent is installed in the calling App (AppAgent row exists).
-  //   - The App in context matches the Memory's scoping App.
-  //   - The Agent in context matches the Memory's scoping Agent.
-  //   - The principal is an AppMember of the Memory's App (consent).
+  // All five conditions must hold for the implicit grant:
+  //   1. Agent is acting for the Memory's principal.
+  //   2. The App in context matches the Memory's scoping App.
+  //   3. The Agent in context matches the Memory's scoping Agent.
+  //   4. The Agent is installed in the calling App (AppAgent row exists).
+  //   5. The principal is an AppMember of the Memory's App (consent).
+  //
+  // When conditions 1–3 hold but 4 or 5 fails, return `no-share`
+  // directly: `effectiveCaller === memory.userId` in this branch, so
+  // a MemoryShare lookup would be "did the owner share with themselves"
+  // — vacuously null. Skipping it saves a DB round-trip and makes the
+  // denial reason map cleanly to the AppMember/AppAgent absence.
   if (
+    ctx.actingForUserId != null &&
     ctx.actingForUserId === memory.userId &&
     ctx.callingAppId !== null &&
     ctx.callingAppId === memory.appId &&
-    ctx.callingAgentId !== undefined &&
+    ctx.callingAgentId != null &&
     ctx.callingAgentId === memory.userMemoryOfAgentId
   ) {
     const [appAgent, appMember] = await Promise.all([
@@ -244,8 +267,7 @@ async function resolvePersonalAccess(
     if (appAgent !== null && appMember !== null) {
       return { allowed: true };
     }
-    // Fall through to MemoryShare lookup — the principal may have
-    // granted explicit cross-context access without an AppMember row.
+    return { allowed: false, reason: 'no-share' };
   }
 
   // 3c. Cross-user (FR-035 path): consult MemoryShare.

@@ -18,8 +18,6 @@ CREATE TABLE "app_agents" (
   "created_by" TEXT,
   "updated_at" TIMESTAMP,
   "updated_by" TEXT,
-  "deleted_at" TIMESTAMP,
-  "deleted_by" TEXT,
   CONSTRAINT "app_agents_pkey"          PRIMARY KEY ("app_id", "agent_id"),
   CONSTRAINT "app_agents_app_id_fkey"   FOREIGN KEY ("app_id")   REFERENCES "apps"   ("id") ON DELETE CASCADE,
   CONSTRAINT "app_agents_agent_id_fkey" FOREIGN KEY ("agent_id") REFERENCES "agents" ("id") ON DELETE CASCADE
@@ -37,8 +35,6 @@ CREATE TABLE "memory_shares" (
   "created_by" TEXT,
   "updated_at" TIMESTAMP,
   "updated_by" TEXT,
-  "deleted_at" TIMESTAMP,
-  "deleted_by" TEXT,
   CONSTRAINT "memory_shares_pkey"            PRIMARY KEY ("memory_id", "grantee_id"),
   CONSTRAINT "memory_shares_memory_id_fkey"  FOREIGN KEY ("memory_id")  REFERENCES "memories" ("id") ON DELETE CASCADE,
   CONSTRAINT "memory_shares_grantee_id_fkey" FOREIGN KEY ("grantee_id") REFERENCES "users"    ("id") ON DELETE CASCADE,
@@ -57,8 +53,6 @@ CREATE TABLE "memory_members" (
   "created_by" TEXT,
   "updated_at" TIMESTAMP,
   "updated_by" TEXT,
-  "deleted_at" TIMESTAMP,
-  "deleted_by" TEXT,
   CONSTRAINT "memory_members_pkey"           PRIMARY KEY ("memory_id", "user_id"),
   CONSTRAINT "memory_members_memory_id_fkey" FOREIGN KEY ("memory_id") REFERENCES "memories" ("id") ON DELETE CASCADE,
   CONSTRAINT "memory_members_user_id_fkey"   FOREIGN KEY ("user_id")   REFERENCES "users"    ("id") ON DELETE CASCADE
