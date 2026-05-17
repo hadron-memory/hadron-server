@@ -23,7 +23,7 @@
  * use `db.appAgent.findMany({ where: { appId } })` directly.
  */
 
-import type { Agent, PrismaClient, Prisma } from '../generated/prisma/index.js';
+import type { PrismaClient, Prisma } from '../generated/prisma/index.js';
 
 export async function getPrimaryAgentId(
   db: PrismaClient,
@@ -43,13 +43,15 @@ export async function getPrimaryAgent<
   db: PrismaClient,
   appId: string,
   args?: { include?: TInclude },
-): Promise<Agent | null> {
+): Promise<Prisma.AgentGetPayload<{ include: TInclude }> | null> {
   const agentId = await getPrimaryAgentId(db, appId);
   if (agentId === null) return null;
-  return db.agent.findUnique({
+  // Cast through unknown because the conditional include shape isn't
+  // narrowed by Prisma's overloads when `include` is optional/undefined.
+  return (await db.agent.findUnique({
     where: { id: agentId },
     include: args?.include,
-  });
+  })) as Prisma.AgentGetPayload<{ include: TInclude }> | null;
 }
 
 /**

@@ -299,18 +299,21 @@ export async function createDbPersonalMemory(
     // org (cross-org case: Alice's personal-alice org holds the memory; the
     // delivering App lives in OrgA). Look up by AppAgent join (023-app-shape
     // Phase 2b: App.agent_id is gone), preferring the memory's own org if
-    // any match exists.
+    // any match exists. Order by AppAgent.createdAt asc so the chosen
+    // appId is deterministic when multiple Apps install the same Agent.
     const sameOrg = await db.appAgent.findFirst({
       where: {
         agentId: opts.agentId,
         app: { organizationId: opts.organizationId, deletedAt: null },
       },
+      orderBy: { createdAt: 'asc' },
       select: { appId: true },
     });
     appId = sameOrg?.appId ?? null;
     if (!appId) {
       const anyOrg = await db.appAgent.findFirst({
         where: { agentId: opts.agentId, app: { deletedAt: null } },
+        orderBy: { createdAt: 'asc' },
         select: { appId: true },
       });
       appId = anyOrg?.appId ?? null;

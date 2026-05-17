@@ -19,7 +19,7 @@ import {
 } from '../../../controller/operations/publishAgentImport.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { isLifecycleActive } from '../../../lib/lifecycle.js';
-import { getPrimaryAgentId, isAgentInstalled } from '../../../lib/appAgent.js';
+import { getPrimaryAgent, getPrimaryAgentId, isAgentInstalled } from '../../../lib/appAgent.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import {
@@ -355,24 +355,103 @@ const ORG_INCLUDE = {
     orderBy: { name: 'asc' as const },
   },
   agents: { where: { deletedAt: null }, include: AGENT_INCLUDE, orderBy: { name: 'asc' as const } },
-  // App.agent eagerly loads memoryItems so the GraphQL non-null
-  // contract on Agent.memoryItems is satisfied even when the linked
-  // Agent is soft-deleted (the App keeps its agent reference; the
-  // schema requires memoryItems to be a list, not nullable).
-  apps: { where: { deletedAt: null }, include: { keys: { where: { revokedAt: null } }, agent: { include: AGENT_INCLUDE } }, orderBy: { name: 'asc' as const } },
+  // 023-app-shape Phase 2b: App↔Agent moved from direct FK to the
+  // AppAgent N:M join. Eager-load the AppAgent rows (with each Agent's
+  // memoryItems) so the GraphQL `App.agent` / `App.agents` /
+  // `App.installedAgentUrn` field resolvers can compute their result
+  // without re-querying. The first AppAgent row (orderBy createdAt asc)
+  // is treated as the "primary" agent for legacy single-Agent reads.
+  apps: {
+    where: { deletedAt: null },
+    include: {
+      keys: { where: { revokedAt: null } },
+      appAgents: {
+        orderBy: { createdAt: 'asc' as const },
+        include: { agent: { include: AGENT_INCLUDE } },
+      },
+    },
+    orderBy: { name: 'asc' as const },
+  },
   subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
   exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
 };
 
 const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
 
+// 023-app-shape Phase 2b: APP_INCLUDE eager-loads the AppAgent rows
+// (with each Agent's memoryItems) so the GraphQL `App.agent` /
+// `App.agents` / `App.installedAgentUrn` field resolvers can compute
+// their result without re-querying. The legacy `agent: { ... }` key
+// is gone because the direct FK was dropped; consumers that need the
+// "primary" Agent read it via the first appAgents row (orderBy
+// createdAt asc) or via `getPrimaryAgent` / `getPrimaryAgentId`.
 const APP_INCLUDE = {
   keys: { where: { revokedAt: null }, orderBy: { createdAt: 'desc' as const } },
-  agent: { include: AGENT_INCLUDE },
+  appAgents: {
+    orderBy: { createdAt: 'asc' as const },
+    include: { agent: { include: AGENT_INCLUDE } },
+  },
 };
 
 const toISO = (v: Date | string | null | undefined): string | null =>
   v == null ? null : v instanceof Date ? v.toISOString() : v;
+
+// ─── 023-app-shape Phase 2b — App field-resolver helpers ────────────────
+//
+// `App.agent` / `App.agentId` / `App.installedAgentUrn` / `App.agents`
+// are soft-deprecated convenience reads. They first try the eager-loaded
+// `appAgents` collection (populated by APP_INCLUDE / ORG_INCLUDE) and
+// fall back to `getPrimaryAgent` / `getPrimaryAgentId` re-fetches when
+// the field-resolver is invoked on a parent that wasn't loaded with the
+// include.
+
+type EagerAppAgentRow = { agent: { id: string; urn?: string } & Record<string, unknown> };
+
+function readPrimaryAppAgent(parent: { appAgents?: unknown }): EagerAppAgentRow | undefined {
+  const rows = parent.appAgents;
+  if (!Array.isArray(rows)) return undefined;
+  // APP_INCLUDE / ORG_INCLUDE order by createdAt asc; [0] is the primary.
+  return rows[0] as EagerAppAgentRow | undefined;
+}
+
+function readPrimaryAgentIdFromEager(parent: { appAgents?: unknown }): string | null | undefined {
+  if (parent.appAgents === undefined) return undefined;
+  const first = readPrimaryAppAgent(parent);
+  return first?.agent?.id ?? null;
+}
+
+function readPrimaryAgentRecordFromEager(
+  parent: { appAgents?: unknown },
+): unknown | undefined {
+  if (parent.appAgents === undefined) return undefined;
+  const first = readPrimaryAppAgent(parent);
+  return first?.agent ?? null;
+}
+
+function readAllAgentRecordsFromEager(
+  parent: { appAgents?: unknown },
+): unknown[] | undefined {
+  const rows = parent.appAgents;
+  if (!Array.isArray(rows)) return undefined;
+  return rows.map((r) => (r as EagerAppAgentRow).agent);
+}
+
+async function readPrimaryAgentField(
+  parent: { id: string; appAgents?: unknown },
+  ctx: Context,
+  field: 'urn',
+): Promise<string | null> {
+  const first = readPrimaryAppAgent(parent);
+  if (first?.agent && typeof first.agent.urn === 'string') {
+    return first.agent.urn;
+  }
+  // Fall back to a re-fetch only when the parent wasn't loaded with the include.
+  if (parent.appAgents === undefined) {
+    const primary = await getPrimaryAgent(ctx.db, parent.id, { include: undefined });
+    return primary?.[field] ?? null;
+  }
+  return null;
+}
 
 /**
  * Derive a human-readable title for a saved chat. Priority:
@@ -799,69 +878,63 @@ export const resolvers = {
       (a as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: a.organizationId } }),
     // Spec 021 US1: R2 canonical install URN combining App + Agent URNs.
-    // Returns null when no agent is attached (008 orphan apps; pre-009
-    // back-compat). Field-resolves the agent's urn from the DB only when
-    // it isn't already eager-loaded via APP_INCLUDE / ORG_INCLUDE.
+    // 023-app-shape Phase 2b: read the primary installed Agent's URN via
+    // the eager-loaded `appAgents` (preferred — APP_INCLUDE / ORG_INCLUDE
+    // both surface it), with a fallback to `getPrimaryAgent`. Returns
+    // null when no Agent is installed.
     installedAgentUrn: async (
-      a: { urn: string; agentId?: string | null; agent?: unknown },
+      a: { id: string; urn: string; appAgents?: unknown },
       _: unknown,
       ctx: Context,
     ) => {
-      let agentUrn: string | null = null;
-      if (a.agent && typeof a.agent === 'object' && a.agent !== null) {
-        const cached = (a.agent as { urn?: string }).urn;
-        if (typeof cached === 'string') agentUrn = cached;
-      }
-      if (!agentUrn && a.agentId) {
-        const fetched = await ctx.db.agent.findUnique({
-          where: { id: a.agentId },
-          select: { urn: true },
-        });
-        agentUrn = fetched?.urn ?? null;
-      }
+      const agentUrn = await readPrimaryAgentField(a, ctx, 'urn');
       if (!agentUrn) return null;
       return composeInstalledAgentUrn(a.urn, agentUrn);
     },
-    // 008-agent-installation: App.agent is the canonical resolver. The
-    // deprecated App.agents (plural) synthesizes a single-element array
-    // for source-compat with portal callers that haven't migrated yet.
+    // 023-app-shape Phase 2b: `App.agent` and `App.agents` are
+    // soft-deprecated convenience fields that resolve via the AppAgent
+    // join. `App.agent` returns the first installed Agent (orderBy
+    // createdAt asc); `App.agents` returns every installed Agent.
     //
-    // Agent.memoryItems is non-null in the schema, so a re-fetch here
-    // must include AGENT_INCLUDE — otherwise a downstream selection of
-    // `agent { memoryItems { ... } }` raises "Cannot return null for
-    // non-nullable field Agent.memoryItems" and bubbles up to the
-    // caller (most callers eagerly include via APP_INCLUDE / ORG_INCLUDE,
-    // but this branch is the safety net for the rest).
+    // Agent.memoryItems is non-null in the schema, so the resolved
+    // value must include AGENT_INCLUDE — `appAgents` from APP_INCLUDE /
+    // ORG_INCLUDE already does, and the fallback re-fetch via
+    // `getPrimaryAgent({ include: AGENT_INCLUDE })` does too.
+    agentId: async (
+      a: { id: string; appAgents?: unknown },
+      _: unknown,
+      ctx: Context,
+    ): Promise<string | null> => {
+      const id = readPrimaryAgentIdFromEager(a);
+      if (id !== undefined) return id;
+      return getPrimaryAgentId(ctx.db, a.id);
+    },
     agent: async (
-      a: { id: string; agentId?: string | null; agent?: unknown },
+      a: { id: string; appAgents?: unknown },
       _: unknown,
       ctx: Context,
     ) => {
-      if (a.agent !== undefined) return a.agent ?? null;
-      if (!a.agentId) return null;
-      return ctx.db.agent.findUnique({
-        where: { id: a.agentId },
-        include: AGENT_INCLUDE,
-      });
+      const eager = readPrimaryAgentRecordFromEager(a);
+      if (eager !== undefined) return eager;
+      return getPrimaryAgent(ctx.db, a.id, { include: AGENT_INCLUDE });
     },
     agents: async (
-      a: { id: string; agentId?: string | null; agent?: unknown },
+      a: { id: string; appAgents?: unknown },
       _: unknown,
       ctx: Context,
     ) => {
-      if (a.agent) {
-        const agent = a.agent as { deletedAt?: Date | null } | null;
-        return agent && !agent.deletedAt ? [agent] : [];
+      const eagerAll = readAllAgentRecordsFromEager(a);
+      if (eagerAll !== undefined) {
+        return eagerAll.filter((ag): ag is { deletedAt: Date | null } & object =>
+          ag !== null && !(ag as { deletedAt?: Date | null }).deletedAt,
+        );
       }
-      if (!a.agentId) return [];
-      // Match the singular App.agent re-fetch above: AGENT_INCLUDE so
-      // the returned Agent satisfies the non-null `memoryItems` contract
-      // when a downstream caller selects it.
-      const agent = await ctx.db.agent.findUnique({
-        where: { id: a.agentId },
-        include: AGENT_INCLUDE,
+      const rows = await ctx.db.appAgent.findMany({
+        where: { appId: a.id },
+        orderBy: { createdAt: 'asc' },
+        include: { agent: { include: AGENT_INCLUDE } },
       });
-      return agent && !agent.deletedAt ? [agent] : [];
+      return rows.map((r) => r.agent).filter((ag) => ag && !ag.deletedAt);
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
       return ctx.db.appMember.findMany({

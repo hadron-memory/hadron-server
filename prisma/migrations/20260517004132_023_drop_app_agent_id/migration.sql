@@ -18,11 +18,16 @@
 -- already populated `app_agents` for some Apps. The composite PK
 -- (app_id, agent_id) catches the duplicate cleanly.
 
+-- Use apps.created_at (NOT updated_at) for the AppAgent row's created_at.
+-- The "primary agent" helper orders AppAgent by createdAt asc; using
+-- apps.updated_at would let unrelated App updates flip which agent the
+-- primary helper returns. The original-install time is the only stable
+-- ordering source we have.
 INSERT INTO "app_agents" ("app_id", "agent_id", "created_at", "created_by")
 SELECT
   a."id",
   a."agent_id",
-  COALESCE(a."updated_at", a."created_at", CURRENT_TIMESTAMP),
+  COALESCE(a."created_at", CURRENT_TIMESTAMP),
   a."created_by"
 FROM "apps" a
 WHERE a."agent_id" IS NOT NULL

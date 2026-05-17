@@ -73,32 +73,36 @@ export async function provisionPersonalWorkspace(
   const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   const keyHash = createHash('sha256').update(rawKey).digest('hex');
   // 023-app-shape Phase 2b: App↔Agent is N:M via the reintroduced AppAgent
-  // join. Create the App, then immediately link the freshly-created Agent
-  // via an AppAgent row. Per-attached-memory write access remains governed
-  // by AgentMemoryItem.role.
-  const app = await db.app.create({
-    data: {
-      id: generateId(),
-      name: 'My Workstation',
-      urn: `${urn}:my-workstation`,
-      organizationId: org.id,
-      appType: 'WORKSTATION',
-      role: 'READER',
-      createdBy: userId,
-    },
-  });
-  await db.appAgent.create({
-    data: { appId: app.id, agentId: agent.id, createdBy: userId },
-  });
-  await db.appKey.create({
-    data: {
-      id: generateId(),
-      appId: app.id,
-      keyHash,
-      keyPreview: rawKey.slice(-4),
-      label: 'Initial setup key',
-      createdBy: userId,
-    },
+  // join. Create the App with a nested-write AppAgent row in the same
+  // statement so the App is never persisted in an orphan state (no
+  // installed agents). The AppKey is also created in the same transaction
+  // so partial failures roll back cleanly.
+  const app = await db.$transaction(async (tx) => {
+    const created = await tx.app.create({
+      data: {
+        id: generateId(),
+        name: 'My Workstation',
+        urn: `${urn}:my-workstation`,
+        organizationId: org.id,
+        appType: 'WORKSTATION',
+        role: 'READER',
+        createdBy: userId,
+        appAgents: {
+          create: { agentId: agent.id, createdBy: userId },
+        },
+      },
+    });
+    await tx.appKey.create({
+      data: {
+        id: generateId(),
+        appId: created.id,
+        keyHash,
+        keyPreview: rawKey.slice(-4),
+        label: 'Initial setup key',
+        createdBy: userId,
+      },
+    });
+    return created;
   });
 
   // 6. Store raw key for the setup page (shown once, then consumed)
