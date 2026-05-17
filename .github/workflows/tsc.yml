@@ -1,0 +1,59 @@
+name: TypeScript Type Check
+
+# Runs `tsc --noEmit` on every PR + every push to main.
+#
+# Catches type regressions that bypass author-side checks — e.g., the
+# pre-023 `App.urn` partial-unique drift in `src/lib/entityRef/appRef.ts`
+# that survived multiple PRs before being noticed. Prisma's `include`
+# typing is loose, so runtime-only crashes (App.agent on a dropped
+# relation) can also slip past local `tsc` runs that were stale on the
+# Prisma client; the `prisma generate` step here regenerates the client
+# from `schema.prisma` first to give a fresh baseline.
+
+on:
+  pull_request:
+    paths:
+      - '**.ts'
+      - '**.tsx'
+      - 'tsconfig.json'
+      - 'tsconfig.*.json'
+      - 'prisma/schema.prisma'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/tsc.yml'
+  push:
+    branches: [main]
+    paths:
+      - '**.ts'
+      - '**.tsx'
+      - 'tsconfig.json'
+      - 'tsconfig.*.json'
+      - 'prisma/schema.prisma'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/tsc.yml'
+
+jobs:
+  tsc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      # Regenerate the Prisma client from the current schema.prisma so
+      # type checks run against the post-PR shape, not a stale client
+      # cached from a previous branch.
+      - run: pnpm prisma generate
+
+      - name: tsc --noEmit
+        run: pnpm tsc --noEmit -p .
