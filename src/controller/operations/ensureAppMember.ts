@@ -20,6 +20,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { getPrimaryAgentId } from '../../lib/appAgent.js';
 
 export class InvalidRoleError extends Error {
   constructor(role: string, allowed: string[]) {
@@ -60,14 +61,20 @@ export async function ensureAppMember(
   role: string,
   ctx: { actorId?: string | null } = {},
 ): Promise<void> {
-  const app = await db.app.findUniqueOrThrow({
+  await db.app.findUniqueOrThrow({
     where: { id: appId },
-    select: { id: true, agentId: true },
+    select: { id: true },
   });
-  if (!app.agentId) throw new OrphanAppError(appId);
+  // 023-app-shape Phase 2b: App→Agent goes through AppAgent (N:M).
+  // For installation-policy enforcement at member-add time, use the
+  // primary installed Agent. Multi-Agent semantics (which Agent's
+  // policy gates which membership) will be revisited in the US1
+  // resolvers.
+  const primaryAgentId = await getPrimaryAgentId(db, appId);
+  if (primaryAgentId === null) throw new OrphanAppError(appId);
 
   const agent = await db.agent.findUniqueOrThrow({
-    where: { id: app.agentId },
+    where: { id: primaryAgentId },
     select: { installationPolicy: true },
   });
   const policy = agent.installationPolicy as unknown as InstallationPolicy;

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { getPrimaryAgentId } from '../../../lib/appAgent.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { cleanupAnonymousMemories } from '../../../jobs/cleanupAnonymousMemories.js';
@@ -87,8 +88,8 @@ beforeEach(async () => {
     },
   });
 
-  // 008: Authorize app to operate agent via App.agent_id direct FK.
-  await db.app.update({ where: { id: app.id }, data: { agentId: agent.id } });
+  // 023-app-shape Phase 2b: Authorize app to operate agent via AppAgent join.
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
 });
 
 // ---------------------------------------------------------------------------
@@ -175,17 +176,16 @@ describe('App CRUD', () => {
       { appId: app.id, agentId: agent.id },
       adminCtx(),
     );
-    // 008: App→Agent is a direct FK on App.agent_id; "removed" means NULL.
-    const afterRemove = await db.app.findUniqueOrThrow({ where: { id: app.id } });
-    expect(afterRemove.agentId).toBeNull();
+    // 023-app-shape Phase 2b: App→Agent is N:M via AppAgent; "removed"
+    // means the AppAgent row is gone.
+    expect(await getPrimaryAgentId(db, app.id)).toBeNull();
 
     await resolvers.Mutation.addAgentToApp(
       {},
       { appId: app.id, agentId: agent.id },
       adminCtx(),
     );
-    const afterAdd = await db.app.findUniqueOrThrow({ where: { id: app.id } });
-    expect(afterAdd.agentId).toBe(agent.id);
+    expect(await getPrimaryAgentId(db, app.id)).toBe(agent.id);
   });
 
   it('refuses to add an agent from a different org to an app', async () => {

@@ -56,7 +56,7 @@ beforeEach(async () => {
       organizationId: org.id,
       urn: `${org.urn}:list-app`,
       name: 'list-app',
-      agentId: agent.id,
+      appAgents: { create: { agentId: agent.id } },
     },
   });
   memory = await db.memory.create({

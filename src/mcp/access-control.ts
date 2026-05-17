@@ -2,27 +2,34 @@
  * MCP access-control: which memories can the caller read/write?
  *
  * Callers authenticate via an App Key and resolve to an `appId`; access is
- * gated by the App's direct `agent_id` FK (no longer an AppAgent join, after
- * 008-agent-installation). Per Constitution Principle V (Zero-Trust Apps),
- * every read and write is checked server-side here — Apps cannot self-attest.
+ * gated by the App's installed Agents (via the `AppAgent` N:M join from
+ * 023-app-shape; the pre-023 direct `App.agentId` FK was dropped in Phase 2b).
+ * Per Constitution Principle V (Zero-Trust Apps), every read and write is
+ * checked server-side here — Apps cannot self-attest.
  *
- * After 008-agent-installation:
- *   - AppAgent.role (OPERATE | DEVELOP) is gone. System memory is universally
- *     read-only from any App context (DEVELOP-from-App is no longer supported;
- *     edits happen in the Agent ownership surface). Per-attached-memory write
- *     caps remain governed by AgentMemoryItem.role.
- *   - Memory.class = 'personal' addresses on (app_id, user_id). The gate
- *     additionally requires Memory.app_id === auth.appId so a session through
- *     App A cannot read the personal memory at (B.id, user.id) for some other
- *     App B of the same Agent.
+ * After 023-app-shape Phase 2b:
+ *   - App ↔ Agent is N:M via `app_agents`. This module reads the "primary"
+ *     (first installed) Agent for legacy single-Agent paths; multi-Agent
+ *     dispatch ships with the US1 resolvers in their own PR.
+ *   - The new authorization predicate (`src/lib/auth/resolveMemoryAuthorization`)
+ *     is the long-term home for these decisions. The retrofit that delegates
+ *     `canReadMemory` / `canWriteToMemory` to the predicate is a separate
+ *     follow-up; this module keeps its own logic for now but uses the
+ *     AppAgent helpers from `src/lib/appAgent.ts`.
+ *
+ * Carried forward from 008-agent-installation:
+ *   - System memory is universally read-only from any App context
+ *     (DEVELOP-from-App is gone). Per-attached-memory write caps remain
+ *     governed by AgentMemoryItem.role.
  *   - Cross-org App↔Agent uses requires an active AgentOrgGrant; same-org
- *     installs (App.organization_id === Agent.organization_id) auto-pass.
+ *     installs auto-pass.
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { isLifecycleActive } from '../lib/lifecycle.js';
+import { isAgentInstalled } from '../lib/appAgent.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -68,13 +75,18 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
 // ---------------------------------------------------------------------------
 
 /**
- * Memory access for an App principal — reads App.agent_id directly (the
- * AppAgent join is gone), then folds the Agent's system memory + memoryItems
- * into the access map.
+ * Memory access for an App principal — reads the App's primary installed
+ * Agent (via the `app_agents` join from 023-app-shape Phase 2b), then folds
+ * that Agent's system memory + memoryItems into the access map.
+ *
+ * "Primary" is the first installed Agent (ordered by AppAgent.createdAt).
+ * Multi-Agent dispatch — where the URN in the request selects which
+ * installed Agent to evaluate — is the US1 work; this legacy path keeps
+ * single-Agent semantics until then.
  *
  * Cross-org gate: if the App's org and the Agent's org differ, an active
- * AgentOrgGrant(App.organization_id, App.agent_id) is required. Same-org
- * installations auto-pass.
+ * AgentOrgGrant(App.organization_id, primary-agent.id) is required.
+ * Same-org installations auto-pass.
  */
 export async function getAppMemoryAccess(
   db: PrismaClient,
@@ -85,38 +97,44 @@ export async function getAppMemoryAccess(
     select: {
       id: true,
       organizationId: true,
-      agentId: true,
-      agent: {
+      appAgents: {
+        orderBy: { createdAt: 'asc' },
+        take: 1,
         select: {
-          id: true,
-          organizationId: true,
-          systemMemoryId: true,
-          deletedAt: true,
-          memoryItems: {
-            where: { deletedAt: null, memory: { deletedAt: null } },
-            select: { memoryId: true, role: true },
+          agent: {
+            select: {
+              id: true,
+              organizationId: true,
+              systemMemoryId: true,
+              deletedAt: true,
+              memoryItems: {
+                where: { deletedAt: null, memory: { deletedAt: null } },
+                select: { memoryId: true, role: true },
+              },
+            },
           },
         },
       },
     },
   });
 
-  if (!app || !app.agent || app.agent.deletedAt) return new Map();
+  const primary = app?.appAgents[0]?.agent ?? null;
+  if (!app || !primary || primary.deletedAt) return new Map();
 
   // Cross-org gate: require active AgentOrgGrant when App and Agent live in
   // different orgs. Same-org installs auto-pass — the Agent owner has implicit
   // license to deploy it. The active-status predicate is shared across
   // AgentSubscription + AgentOrgGrant via isLifecycleActive (008 R-2).
-  if (app.organizationId !== app.agent.organizationId) {
+  if (app.organizationId !== primary.organizationId) {
     const grant = await db.agentOrgGrant.findUnique({
-      where: { orgId_agentId: { orgId: app.organizationId, agentId: app.agent.id } },
+      where: { orgId_agentId: { orgId: app.organizationId, agentId: primary.id } },
     });
     if (!grant || !isLifecycleActive(grant)) return new Map();
   }
 
   return foldAgentIntoAccessMap({
-    systemMemoryId: app.agent.systemMemoryId,
-    memoryItems: app.agent.memoryItems.map((item) => ({
+    systemMemoryId: primary.systemMemoryId,
+    memoryItems: primary.memoryItems.map((item) => ({
       memoryId: item.memoryId,
       role: (item as { role?: string | null }).role ?? 'read',
     })),
@@ -162,38 +180,35 @@ export async function canWriteToMemory(
       // Per-App isolation: a session through App A cannot write the personal
       // memory at (B.id, user.id) for some other App B of the same Agent.
       // Existing rows that pre-date the migration may have appId = NULL —
-      // accept them ONLY when the calling App's agentId matches the memory's
-      // userMemoryOfAgentId. Without that guard, an App for Agent Y could
-      // satisfy the AgentSubscription check (using its own agentId) and then
-      // touch a legacy memory that was actually created for Agent X.
-      const app = await db.app.findUnique({
-        where: { id: auth.appId },
-        select: { agentId: true },
-      });
+      // accept them ONLY when the calling App has the memory's Agent
+      // installed via AppAgent. Without that guard, an App for Agent Y could
+      // satisfy the AgentSubscription check (using one of its installed
+      // Agents) and then touch a legacy memory that was actually created
+      // for Agent X.
       if (memory.appId !== null) {
         if (memory.appId !== auth.appId) return false;
       } else {
-        // Legacy row: require the calling App's agent to match the memory's
-        // pre-008 agent pivot. If either side is null we can't prove the
-        // match, so deny — backfilling app_id (or upgrading to a strict
-        // isolation pass) is the path forward.
+        // Legacy row: require the calling App to have the memory's Agent
+        // installed. If userMemoryOfAgentId is null (pre-005 ghost row) we
+        // can't prove the match, so deny — backfilling app_id is the path
+        // forward.
         if (
-          !app?.agentId ||
           !memory.userMemoryOfAgentId ||
-          app.agentId !== memory.userMemoryOfAgentId
+          !(await isAgentInstalled(db, auth.appId, memory.userMemoryOfAgentId))
         ) {
           return false;
         }
       }
 
-      // Resolve the Agent for the AgentSubscription check via App.agentId.
-      const agentId = app?.agentId ?? memory.userMemoryOfAgentId;
-      if (!agentId || !memory.userId) return false;
+      // AgentSubscription check uses the memory's own Agent (chk_memory_personal_agent_id
+      // guarantees `userMemoryOfAgentId` is non-null for personal-class rows
+      // created post-023; legacy null rows already denied above).
+      if (!memory.userMemoryOfAgentId || !memory.userId) return false;
       const sub = await db.agentSubscription.findUnique({
         where: {
           userId_agentId: {
             userId: memory.userId,
-            agentId,
+            agentId: memory.userMemoryOfAgentId,
           },
         },
       });
@@ -232,30 +247,25 @@ export async function canReadMemory(
     if (auth.userId !== memory.userId) return false;
     if (auth.appId) {
       // Same legacy guard as canWriteToMemory: when memory.appId is NULL,
-      // require the calling App's agentId to match memory.userMemoryOfAgentId.
-      const app = await db.app.findUnique({
-        where: { id: auth.appId },
-        select: { agentId: true },
-      });
+      // require the calling App to have the memory's Agent installed via
+      // AppAgent.
       if (memory.appId !== null) {
         if (memory.appId !== auth.appId) return false;
       } else {
         if (
-          !app?.agentId ||
           !memory.userMemoryOfAgentId ||
-          app.agentId !== memory.userMemoryOfAgentId
+          !(await isAgentInstalled(db, auth.appId, memory.userMemoryOfAgentId))
         ) {
           return false;
         }
       }
 
-      const agentId = app?.agentId ?? memory.userMemoryOfAgentId;
-      if (!agentId || !memory.userId) return false;
+      if (!memory.userMemoryOfAgentId || !memory.userId) return false;
       const sub = await db.agentSubscription.findUnique({
         where: {
           userId_agentId: {
             userId: memory.userId,
-            agentId,
+            agentId: memory.userMemoryOfAgentId,
           },
         },
       });

@@ -22,6 +22,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import { getPrimaryAgentId } from '../../lib/appAgent.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
@@ -79,7 +80,7 @@ describe('009 createApp install path (same-org)', () => {
       adminCtx(bea.id),
     );
 
-    expect(app.agentId).toBe(mealplan.id);
+    expect((await getPrimaryAgentId(db, app.id))).toBe(mealplan.id);
     expect(app.organizationId).toBe(beaOrg.id);
 
     const grant = await db.agentOrgGrant.findUnique({
@@ -115,8 +116,8 @@ describe('009 createApp install path (same-org)', () => {
     );
 
     expect(appA.id).not.toBe(appB.id);
-    expect(appA.agentId).toBe(mealplan.id);
-    expect(appB.agentId).toBe(mealplan.id);
+    expect((await getPrimaryAgentId(db, appA.id))).toBe(mealplan.id);
+    expect((await getPrimaryAgentId(db, appB.id))).toBe(mealplan.id);
 
     const grants = await db.agentOrgGrant.findMany({
       where: { orgId: beaOrg.id, agentId: mealplan.id },

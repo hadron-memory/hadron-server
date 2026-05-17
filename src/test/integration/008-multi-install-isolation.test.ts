@@ -141,7 +141,7 @@ async function buildFixture(): Promise<MultiInstallFixture> {
       organizationId: mentorOrg.id,
       urn: `${mentorOrg.urn}:juno-app`,
       name: 'Juno @ MentorCo',
-      agentId: juno.id,
+      appAgents: { create: { agentId: juno.id } },
     },
   });
   const appB = await db.app.create({
@@ -150,7 +150,7 @@ async function buildFixture(): Promise<MultiInstallFixture> {
       organizationId: companyXOrg.id,
       urn: `${companyXOrg.urn}:juno-app`,
       name: 'Juno @ CompanyX',
-      agentId: juno.id,
+      appAgents: { create: { agentId: juno.id } },
     },
   });
   // Cross-org grant for App B (gate 1 in access-control).

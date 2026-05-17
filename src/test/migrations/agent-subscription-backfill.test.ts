@@ -152,7 +152,8 @@ describe('Memory.class backfill (FR-010)', () => {
     const app = await db.app.create({
       data: {
         id: generateId(), organizationId: org.id, urn: `${org.urn}:bf-app`,
-        name: 'bf-app', agentId: agent.id,
+        name: 'bf-app',
+        appAgents: { create: { agentId: agent.id } },
       },
     });
     const personalMemory = await db.memory.create({

@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import { getPrimaryAgentId } from '../../lib/appAgent.js';
 import { db } from '../../integrations/db/client.js';
 import {
   cleanDb,
@@ -143,7 +144,7 @@ describe('US1 Step (b): Org-X installs Mealplan via createApp (T032)', () => {
       },
       adminCtx(mike.id),
     );
-    expect(app.agentId).toBe(mealplan.id);
+    expect((await getPrimaryAgentId(db, app.id))).toBe(mealplan.id);
     expect(app.organizationId).toBe(orgX.id);
     expect(app.surfaces).toEqual(['chat']); // schema default
 
@@ -323,7 +324,7 @@ describe('US1 Step (f): system memory is universally read-only from an App conte
         organizationId: orgX.id,
         urn: `${orgX.urn}:mealplan`,
         name: 'Mealplan @ Org X',
-        agentId: mealplan.id,
+        appAgents: { create: { agentId: mealplan.id } },
       },
     });
     await createDbAppMember(db, app.id, mike.id, 'owner');

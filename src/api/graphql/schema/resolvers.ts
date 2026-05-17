@@ -19,6 +19,7 @@ import {
 } from '../../../controller/operations/publishAgentImport.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { isLifecycleActive } from '../../../lib/lifecycle.js';
+import { getPrimaryAgentId, isAgentInstalled } from '../../../lib/appAgent.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import {
@@ -1060,13 +1061,17 @@ export const resolvers = {
         });
         if (!member) return [];
       }
+      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. List Apps
+      // that have this Agent installed.
       return ctx.db.app.findMany({
-        where: { agentId: a.id, deletedAt: null },
+        where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
         orderBy: { createdAt: 'asc' },
       });
     },
     appCount: async (a: { id: string }, _: unknown, ctx: Context) =>
-      ctx.db.app.count({ where: { agentId: a.id, deletedAt: null } }),
+      ctx.db.app.count({
+        where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
+      }),
     orgGrants: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) {
@@ -1335,14 +1340,16 @@ export const resolvers = {
       });
       if (personalMemory) readableMemoryIds.push(personalMemory.id);
 
-      // TODO(008-amendment / 2026-05-12-user-installing-app §3): `App.agentId`
-      // is being dropped in favor of the reintroduced `AppAgent` join.
-      // Replace `app: { agentId: ... }` with
-      // `app: { agents: { some: { agentId: ... } } }` when the amendment lands.
+      // 023-app-shape Phase 2b: App↔Agent moved from `App.agentId` to the
+      // N:M `AppAgent` join. Match Apps that have the resolved Agent
+      // installed via the join.
       const sharedMemberships = await ctx.db.appMember.findMany({
         where: {
           userId: ctx.userId,
-          app: { agentId: resolvedAgentId, deletedAt: null },
+          app: {
+            appAgents: { some: { agentId: resolvedAgentId } },
+            deletedAt: null,
+          },
         },
         select: { app: { select: { id: true } } },
       });
@@ -1739,25 +1746,32 @@ export const resolvers = {
         ? {}
         : { type: { not: 'AGENT_SYSTEM' as const } };
 
-      // 008: App-keyed caller — App.agent_id is direct; load the App's Agent
-      // and surface its memoryItems. Orphan Apps (agent_id IS NULL) see zero
-      // memories.
+      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Surface
+      // memoryItems for every installed Agent (the "primary" notion is
+      // not load-bearing here — the resolver returns the union). Apps
+      // with no installed Agents see zero memories.
       if (ctx.appId) {
         const app = await ctx.db.app.findUnique({
           where: { id: ctx.appId },
           select: {
-            agent: {
-              include: {
-                memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
+            appAgents: {
+              select: {
+                agent: {
+                  include: {
+                    memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
+                  },
+                },
               },
             },
           },
         });
-        if (!app?.agent) return [];
+        if (!app || app.appAgents.length === 0) return [];
         const memoryMap = new Map<string, any>();
-        for (const item of app.agent.memoryItems) {
-          if (!includeAgentSystem && item.memory.type === 'AGENT_SYSTEM') continue;
-          memoryMap.set(item.memory.id, item.memory);
+        for (const aa of app.appAgents) {
+          for (const item of aa.agent.memoryItems) {
+            if (!includeAgentSystem && item.memory.type === 'AGENT_SYSTEM') continue;
+            memoryMap.set(item.memory.id, item.memory);
+          }
         }
         return Array.from(memoryMap.values());
       }
@@ -1920,16 +1934,23 @@ export const resolvers = {
       if (!isPlatformAdmin) {
         await requireOrgRole(ctx, app.organizationId, 'READER');
       }
-      // 008: App.agent_id is direct — load the App's single Agent and gather
-      // its memoryItems. Orphan Apps (agent_id IS NULL) have no accessible nodes.
-      const appWithAgent = await ctx.db.app.findUnique({
+      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Gather
+      // memoryItems for every installed Agent. Apps with no installed
+      // Agents have no accessible nodes.
+      const appWithAgents = await ctx.db.app.findUnique({
         where: { id: resolvedAppId },
         select: {
-          agent: { include: { memoryItems: true } },
+          appAgents: {
+            select: { agent: { select: { memoryItems: true } } },
+          },
         },
       });
       const memoryIds = [
-        ...new Set((appWithAgent?.agent?.memoryItems ?? []).map((m) => m.memoryId)),
+        ...new Set(
+          (appWithAgents?.appAgents ?? []).flatMap((aa) =>
+            aa.agent.memoryItems.map((m) => m.memoryId),
+          ),
+        ),
       ];
       if (memoryIds.length === 0) return [];
 
@@ -3709,16 +3730,17 @@ export const resolvers = {
             'Cannot create a shared chat — sign in as a user that belongs to an App that installs this Agent.',
           );
         }
-        // TODO(008-amendment / 2026-05-12-user-installing-app §3): `App.agentId`
-        // is being dropped in favor of the reintroduced `AppAgent` join.
-        // Replace `app: { agentId: ... }` with
-        // `app: { agents: { some: { agentId: ... } } }` when the amendment
-        // lands. With multi-Agent Apps, this query will return one App per
-        // membership-that-installs-the-Agent; today it returns at most one.
+        // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Find an
+        // App that the user is an AppMember of AND that has this Agent
+        // installed. With multi-Agent Apps, this may return any App that
+        // matches both conditions; today it returns at most one.
         const membership = await ctx.db.appMember.findFirst({
           where: {
             userId: ctx.userId,
-            app: { agentId: resolvedAgentId, deletedAt: null },
+            app: {
+              appAgents: { some: { agentId: resolvedAgentId } },
+              deletedAt: null,
+            },
           },
           select: {
             app: { select: { id: true, urn: true, name: true, organizationId: true } },
@@ -3788,7 +3810,7 @@ export const resolvers = {
             ownerOrgIds.length > 0
               ? await ctx.db.app.findFirst({
                   where: {
-                    agentId: resolvedAgentId,
+                    appAgents: { some: { agentId: resolvedAgentId } },
                     organizationId: { in: ownerOrgIds },
                     deletedAt: null,
                   },
@@ -5074,12 +5096,14 @@ export const resolvers = {
           throw new Error(`An app with URN "${appUrn}" already exists`);
         }
       }
+      // 023-app-shape Phase 2b: App↔Agent moved from `App.agentId` to the
+      // N:M `AppAgent` join. Create the App, then immediately link the
+      // requested Agent via an AppAgent row.
       const createdApp = await ctx.db.app.create({
         data: {
           organizationId: resolvedOrgId,
           name,
           urn: appUrn,
-          agentId: resolvedAgentId,
           surfaces: surfaces ?? undefined, // undefined → use the schema default ['chat']
           trainingMode: trainingMode ?? false,
           appType: appType ?? 'WORKSTATION',
@@ -5096,6 +5120,7 @@ export const resolvers = {
           sessionTimeoutSeconds: sessionTimeoutSeconds ?? 900,
           anonymousTtlDays: anonymousTtlDays ?? 7,
           createdBy: ctx.userId ?? null,
+          appAgents: { create: { agentId: resolvedAgentId, createdBy: ctx.userId ?? null } },
         },
         include: APP_INCLUDE,
       });
@@ -5133,7 +5158,7 @@ export const resolvers = {
           const existingDepApp = await ctx.db.app.findFirst({
             where: {
               organizationId: resolvedOrgId,
-              agentId: imp.importedAgentId,
+              appAgents: { some: { agentId: imp.importedAgentId } },
               deletedAt: null,
             },
             select: { id: true },
@@ -5175,10 +5200,12 @@ export const resolvers = {
               organizationId: resolvedOrgId,
               name: `${depAgent.name} (cascaded from ${name})`,
               urn: depUrn,
-              agentId: imp.importedAgentId,
               surfaces: ['chat'], // dep installs default to chat surface
               trainingMode: false,
               createdBy: ctx.userId ?? null,
+              appAgents: {
+                create: { agentId: imp.importedAgentId, createdBy: ctx.userId ?? null },
+              },
             },
           });
         }
@@ -5331,19 +5358,32 @@ export const resolvers = {
       if (agent.organizationId !== app.organizationId) {
         throw new Error('Agent must belong to the same organization as the App');
       }
-      // 008-agent-installation: App→Agent is a direct FK (App.agent_id), not
-      // an AppAgent join row. Auto-provision the AgentOrgGrant so cross-org
-      // gate 1 in access-control will clear (same-org installs auto-pass
-      // either way; this ensures the explicit grant exists for symmetry).
+      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Upsert the
+      // AppAgent row, and apply trainingMode (still per-App) if supplied.
+      // Auto-provision AgentOrgGrant so cross-org gate 1 in access-control
+      // clears (same-org installs auto-pass either way; the explicit grant
+      // exists for symmetry).
       await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
-      await ctx.db.app.update({
-        where: { id: resolvedAppId },
-        data: {
+      await ctx.db.appAgent.upsert({
+        where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } },
+        create: {
+          appId: resolvedAppId,
           agentId: resolvedAgentId,
-          ...(trainingMode !== undefined ? { trainingMode } : {}),
+          createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+        },
+        update: {
           updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
         },
       });
+      if (trainingMode !== undefined) {
+        await ctx.db.app.update({
+          where: { id: resolvedAppId },
+          data: {
+            trainingMode,
+            updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+          },
+        });
+      }
       return ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId }, include: APP_INCLUDE });
     },
 
@@ -5358,18 +5398,12 @@ export const resolvers = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
-      // 008: clear App.agent_id only if it currently points at the named
-      // Agent — keeps the call idempotent and prevents an unrelated agent
-      // from being detached by a stale request.
-      if (app.agentId === resolvedAgentId) {
-        await ctx.db.app.update({
-          where: { id: resolvedAppId },
-          data: {
-            agentId: null,
-            updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-          },
-        });
-      }
+      // 023-app-shape Phase 2b: delete the AppAgent row if it exists.
+      // Idempotent — deleteMany returns count and never throws on absent
+      // rows. The (App, Agent, *) memories persist as orphans per FR-005.
+      await ctx.db.appAgent.deleteMany({
+        where: { appId: resolvedAppId, agentId: resolvedAgentId },
+      });
       return ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId }, include: APP_INCLUDE });
     },
 
@@ -5659,7 +5693,9 @@ export const resolvers = {
       // 008: App→Agent is a direct FK; the App can operate exactly the Agent
       // referenced by App.agent_id (no AppAgent join). Orphan Apps (agent_id
       // IS NULL) cannot operate any agent.
-      if (!app.agentId || app.agentId !== agentId) {
+      // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
+      // that the requested Agent is installed in the calling App.
+      if (!(await isAgentInstalled(ctx.db, app.id, agentId))) {
         throw new Error('Forbidden: App is not allowed to operate this agent');
       }
 

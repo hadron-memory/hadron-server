@@ -53,7 +53,7 @@ async function setupAgent(installationPolicy: {
       organizationId: org.id,
       urn: `${org.urn}:app`,
       name: 'app',
-      agentId: agent.id,
+      appAgents: { create: { agentId: agent.id } },
     },
   });
   return { agentId: agent.id, appId: app.id };

@@ -22,6 +22,7 @@ import {
   createDbAgentImport,
 } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
+import { getPrimaryAgentId } from '../../lib/appAgent.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { publishAgentImport } from '../../controller/operations/publishAgentImport.js';
 import { removeAgentImport } from '../../controller/operations/removeAgentImport.js';
@@ -117,13 +118,15 @@ describe('T062: cascade install — required deps cascade; optional deps gate on
       { orgId: orgX.id, agentId: suite.id, name: 'Suite @ X' },
       adminCtx(bea.id),
     );
-    expect(suiteApp.agentId).toBe(suite.id);
+    expect((await getPrimaryAgentId(db, suiteApp.id))).toBe(suite.id);
 
     const xApps = await db.app.findMany({
       where: { organizationId: orgX.id, deletedAt: null },
       orderBy: { createdAt: 'asc' },
     });
-    const agentIds = xApps.map((a) => a.agentId);
+    const agentIds = await Promise.all(
+      xApps.map((a) => getPrimaryAgentId(db, a.id)),
+    );
     expect(agentIds).toContain(suite.id);
     expect(agentIds).toContain(calendar.id); // required → cascaded
     expect(agentIds).not.toContain(notes.id); // optional → skipped
@@ -157,7 +160,9 @@ describe('T062: cascade install — required deps cascade; optional deps gate on
     const xApps = await db.app.findMany({
       where: { organizationId: orgX.id, deletedAt: null },
     });
-    const agentIds = new Set(xApps.map((a) => a.agentId));
+    const agentIds = new Set(
+      await Promise.all(xApps.map((a) => getPrimaryAgentId(db, a.id))),
+    );
     expect(agentIds).toEqual(new Set([suite.id, calendar.id, notes.id]));
   });
 
@@ -214,7 +219,7 @@ describe('T063: cascade reuses an existing App in the same org for the same dep'
     );
 
     const calendarApps = await db.app.findMany({
-      where: { organizationId: orgX.id, agentId: calendar.id, deletedAt: null },
+      where: { organizationId: orgX.id, appAgents: { some: { agentId: calendar.id } }, deletedAt: null },
     });
     expect(calendarApps.length).toBe(1);
     expect(calendarApps[0].id).toBe(standaloneCalendar.id);
@@ -241,7 +246,7 @@ describe('T064: removeAgentImport leaves existing Apps in place; future installs
     );
     expect(
       await db.app.count({
-        where: { organizationId: orgX.id, agentId: calendar.id, deletedAt: null },
+        where: { organizationId: orgX.id, appAgents: { some: { agentId: calendar.id } }, deletedAt: null },
       }),
     ).toBe(1);
 
@@ -250,7 +255,7 @@ describe('T064: removeAgentImport leaves existing Apps in place; future installs
 
     expect(
       await db.app.count({
-        where: { organizationId: orgX.id, agentId: calendar.id, deletedAt: null },
+        where: { organizationId: orgX.id, appAgents: { some: { agentId: calendar.id } }, deletedAt: null },
       }),
     ).toBe(1);
     // The AgentImport edge is gone.
@@ -267,7 +272,7 @@ describe('T064: removeAgentImport leaves existing Apps in place; future installs
       adminCtx(bea.id),
     );
     const yCalendarApps = await db.app.findMany({
-      where: { organizationId: orgY.id, agentId: calendar.id, deletedAt: null },
+      where: { organizationId: orgY.id, appAgents: { some: { agentId: calendar.id } }, deletedAt: null },
     });
     expect(yCalendarApps.length).toBe(0);
   });
@@ -330,7 +335,7 @@ describe('T065: integration — full Suite/Calendar/Notes scenario (SC-006)', ()
       where: { organizationId: orgX.id, deletedAt: null },
       orderBy: { createdAt: 'asc' },
     });
-    expect(new Set(apps.map((a) => a.agentId))).toEqual(
+    expect(new Set(await Promise.all(apps.map((a) => getPrimaryAgentId(db, a.id))))).toEqual(
       new Set([suite.id, calendar.id, notes.id]),
     );
 
@@ -351,7 +356,7 @@ describe('T065: integration — full Suite/Calendar/Notes scenario (SC-006)', ()
     const yApps = await db.app.findMany({
       where: { organizationId: orgY.id, deletedAt: null },
     });
-    expect(new Set(yApps.map((a) => a.agentId))).toEqual(
+    expect(new Set(await Promise.all(yApps.map((a) => getPrimaryAgentId(db, a.id))))).toEqual(
       new Set([suite.id, calendar.id]),
     );
   });
