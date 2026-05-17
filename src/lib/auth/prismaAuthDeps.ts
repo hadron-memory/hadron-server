@@ -14,7 +14,7 @@
  * the boundary if needed.
  */
 
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '../../generated/prisma/index.js';
 import type { AuthDeps } from './resolveMemoryAuthorization.js';
 
 export function prismaAuthDeps(db: PrismaClient): AuthDeps {
