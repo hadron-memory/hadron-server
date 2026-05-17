@@ -195,6 +195,10 @@ enum MemoryVisibility {
   PRIVATE
   ORGANIZATION
   PERSONAL
+  /// 023-app-shape: bidirectional with `MemoryClass.group`. Enforced by
+  /// the `chk_memory_group_visibility` CHECK constraint:
+  /// `class = 'group' ⇔ visibility = 'GROUP'`.
+  GROUP
 }
 
 /// **Legacy two-way type** kept alongside the post-005 four-way
@@ -243,6 +247,34 @@ enum MemoryClass {
   app
   knowledge
   personal
+  /// 023-app-shape: symmetric team-shared memory. Governance is by
+  /// `MemoryMember` (list of users with roles `reader | writer | owner`),
+  /// not by a single Memory.userId owner. `Memory.userId IS NULL` for
+  /// group-class rows (enforced by `chk_memory_group_no_owner`). The
+  /// bidirectional invariant `class = 'group' ⇔ visibility = 'GROUP'`
+  /// is enforced by `chk_memory_group_visibility`.
+  group
+}
+
+/// 023-app-shape: role on a `MemoryShare` row (asymmetric cross-user
+/// grant for personal-class memory). `reader` permits read; `writer`
+/// permits read and write.
+enum MemoryShareRole {
+  reader
+  writer
+}
+
+/// 023-app-shape: role on a `MemoryMember` row (symmetric membership
+/// for group-class memory). `reader` permits read; `writer` permits
+/// read and write; `owner` adds management capabilities (add/remove
+/// members, change roles, delete/rename/configure the Memory) per
+/// spec 023 FR-036. The platform protects against zero-owner states:
+/// removing or demoting the sole remaining `owner` is rejected with
+/// `LAST_OWNER_PROTECTED` (FR-038).
+enum MemoryMemberRole {
+  reader
+  writer
+  owner
 }
 
 /// Asset virus-scan state. Downloads are gated on CLEAN. Transitions:
@@ -330,6 +362,10 @@ model User {
   ownedMemories             Memory[]                   @relation("UserMemoriesOwned")
   agentSubscriptions        AgentSubscription[]        @relation("UserAgentSubscriptions")
   appMemberships            AppMember[]                @relation("UserAppMemberships")
+  // 023-app-shape: per-Memory authorization back-relations.
+  memorySharesGranted       MemoryShare[]              @relation("MemorySharesGranted")
+  memorySharesByGrantor     MemoryShare[]              @relation("MemorySharesByGrantor")
+  memoryMemberships         MemoryMember[]             @relation("MemoryMemberships")
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -556,6 +592,13 @@ model Memory {
   // app_members, not in apps.
   app               App?                 @relation("AppMemories", fields: [appId], references: [id], onDelete: Cascade)
   sessions          Session[]            @relation("SessionMemory")
+  // 023-app-shape: per-Memory authorization primitives.
+  // `shares`      — populated only when `class = 'personal'` (FR-018);
+  //                 cross-user grants (asymmetric).
+  // `memberships` — populated only when `class = 'group'` (FR-027);
+  //                 symmetric team membership.
+  shares            MemoryShare[]
+  memberships       MemoryMember[]
 
   @@index([organizationId])
   @@index([userMemoryOfAgentId])
@@ -1029,6 +1072,10 @@ model Agent {
   // 008-agent-installation (2026-05-02): direct App→Agent FK replaces the
   // dropped AppAgent join. Imports / importedBy / orgGrants are new joins.
   apps              App[]
+  // 023-app-shape: N:M App↔Agent join, reintroduced for multi-Agent
+  // Apps. Co-exists with `App.agent` (the direct FK) during the
+  // transition.
+  appAgents         AppAgent[]
   imports           AgentImport[]       @relation("ParentAgent")
   importedBy        AgentImport[]       @relation("ImportedAgent")
   orgGrants         AgentOrgGrant[]
@@ -1616,6 +1663,12 @@ model App {
 
   organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   agent         Agent?         @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  // 023-app-shape: N:M App↔Agent join, reintroduced. Co-exists with
+  // `agentId` during the transition (see plan §"Phase 2b — drop
+  // App.agentId" for the consumer-retrofit follow-up). New install
+  // flows MUST write an AppAgent row; legacy code continues to read
+  // `App.agentId` until the retrofit completes.
+  appAgents     AppAgent[]
   keys          AppKey[]
   members       AppMember[]
   memories      Memory[]       @relation("AppMemories")
@@ -1916,4 +1969,121 @@ model AppLogEntry {
   @@index([level])
   @@index([createdAt])
   @@map("app_log")
+}
+
+// ─── 023-app-shape: multi-Agent App + per-Memory authorization ─────────
+
+/// N:M join between `App` and `Agent`, reintroduced by spec 023.
+///
+/// **No `role` column** — system memory is read-only to every App
+/// regardless (the pre-008 OPERATE/DEVELOP distinction stays deleted
+/// per spec 023 FR-003). **No `trainingMode` column** — training mode
+/// is a per-App setting and lives on `App.trainingMode` (spec 023
+/// FR-001; deviates from the 2026-05-12-user-installing-app summary
+/// §3 to avoid per-Agent conflicts on an App-wide setting).
+///
+/// **Transition note**: `App.agentId` is **not yet dropped**. New
+/// install flows (the `installAgentIntoApp` mutation introduced in
+/// spec 023 US1) MUST write an `AppAgent` row. Legacy code that reads
+/// `App.agentId` continues to work. The column-drop and consumer
+/// retrofit ship in a separate Phase 2b PR per the spec's plan.
+///
+/// **Cascade behavior**: hard `App` or `Agent` deletion cascades to
+/// the `AppAgent` row. Uninstalling an Agent from an App (deleting
+/// the row) does NOT cascade-delete the (app_id, agent_id, *) memories
+/// (FR-005; orphan retention preserved). Duplicate inserts for the
+/// same (app_id, agent_id) are rejected by the composite PK.
+model AppAgent {
+  appId     String    @map("app_id")
+  agentId   String    @map("agent_id")
+  // Audit fields mirror AppMember (no soft-delete). Uninstall is a
+  // hard row delete; predicate lookups use `findUnique` on the
+  // composite PK with no filter.
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @map("updated_at")
+  updatedBy String?   @map("updated_by")
+
+  app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([appId, agentId])
+  @@index([agentId])
+  @@map("app_agents")
+}
+
+/// Asymmetric cross-user grant for personal-class memory (spec 023
+/// US3 / FR-017–FR-022). Composite PK `(memoryId, granteeId)` — one
+/// row per (Memory, grantee).
+///
+/// **Scope**: applies ONLY to personal-class Memories (FR-018).
+/// Application-layer guard in `createMemoryShare.ts` enforces this.
+///
+/// **Grantor semantics** (FR-019): `grantorId` is the **principal**
+/// (`Memory.userId`), recorded explicitly so the row is
+/// self-describing without a JOIN to `memories` at read time. The
+/// API actor (which may be an App backend acting on the principal's
+/// behalf) is recorded in `createdBy`.
+///
+/// **No time-window** (FR-021): isolation between grantees over time
+/// is modeled by creating a new personal Memory per pairing — not by
+/// time-slicing one Memory.
+model MemoryShare {
+  memoryId   String          @map("memory_id")
+  granteeId  String          @map("grantee_id")
+  grantorId  String          @map("grantor_id")
+  role       MemoryShareRole
+  // Audit fields (no soft-delete). Revoke is a hard row delete (FR-022);
+  // predicate lookups use `findUnique` on the composite PK.
+  createdAt  DateTime        @default(now()) @map("created_at")
+  createdBy  String?         @map("created_by")
+  updatedAt  DateTime?       @map("updated_at")
+  updatedBy  String?         @map("updated_by")
+
+  memory  Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  grantee User   @relation("MemorySharesGranted",   fields: [granteeId], references: [id], onDelete: Cascade)
+  grantor User   @relation("MemorySharesByGrantor", fields: [grantorId], references: [id], onDelete: Cascade)
+
+  @@id([memoryId, granteeId])
+  @@index([granteeId])
+  @@index([grantorId])
+  @@map("memory_shares")
+}
+
+/// Symmetric team membership for group-class memory (spec 023 US4 /
+/// FR-026–FR-031). Composite PK `(memoryId, userId)` — one row per
+/// (Memory, member).
+///
+/// **Scope**: applies ONLY to group-class Memories (FR-027).
+/// Application-layer guard in `addMemoryMember.ts` enforces this.
+///
+/// **Role capabilities**:
+///   `reader` — read.
+///   `writer` — read + write nodes within the Memory.
+///   `owner`  — read + write + manage member list, delete/rename the
+///              Memory, change Memory configuration (FR-036).
+///
+/// **Last-owner protection** (FR-038): the platform rejects removal
+/// or demotion of the sole remaining `owner`. The MemoryMember row
+/// can still be deleted; the operation-layer guard enforces the
+/// invariant (`removeMemoryMember.ts`, `updateMemoryMemberRole.ts`).
+/// FR-031: removing the last non-owner does NOT delete the Memory.
+model MemoryMember {
+  memoryId  String           @map("memory_id")
+  userId    String           @map("user_id")
+  role      MemoryMemberRole
+  // Audit fields (no soft-delete). Remove is a hard row delete (FR-038
+  // protects the last owner; non-owner removal is unrestricted);
+  // predicate lookups use `findUnique` on the composite PK.
+  createdAt DateTime         @default(now()) @map("created_at")
+  createdBy String?          @map("created_by")
+  updatedAt DateTime?        @map("updated_at")
+  updatedBy String?          @map("updated_by")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  user   User   @relation("MemoryMemberships", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([memoryId, userId])
+  @@index([userId])
+  @@map("memory_members")
 }
