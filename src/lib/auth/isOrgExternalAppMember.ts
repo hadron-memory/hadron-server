@@ -3,9 +3,8 @@
  *
  * "Org-external" describes an AppMember who is NOT also an OrgMember
  * of the App's owning Organization. The B2C / therapy / consumer case:
- * Daisy enrolls in her therapist's "Know Yourself" App without joining
- * Org-Therapist; Alice uses MicroMentor's Juno App without being a
- * MicroMentor employee.
+ * a client of an operator-org enrolls in one of the operator's Apps
+ * without joining the operator's org.
  *
  * **Derived, not stored.** Per FR-011, no `appOnly` column is added to
  * the AppMember table — the predicate is computed at query time from
