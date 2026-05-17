@@ -129,6 +129,14 @@ describe('US1: install Agents into an App via AppAgent', () => {
   });
 
   it('supports multiple Agents in the same App under one credential (US1 step 6–8)', async () => {
+    // Snapshot the AppKey row count BEFORE installs so we can assert no
+    // new keys are minted by the install calls — proves "one credential
+    // serves all installed Agents."
+    const keysBefore = await db.appKey.findMany({
+      where: { appId: fx.appId },
+      select: { id: true },
+    });
+
     await resolvers.Mutation.installAgentIntoApp(
       {},
       { appId: fx.appId, agentId: fx.agentAId },
@@ -151,10 +159,14 @@ describe('US1: install Agents into an App via AppAgent', () => {
     });
     expect(rows.map((r) => r.agentId)).toEqual([fx.agentAId, fx.agentBId, fx.agentCId]);
 
-    // The App's credential (AppKey) doesn't change — proof that the
-    // multi-Agent install is "under one credential".
-    const keys = await db.appKey.findMany({ where: { appId: fx.appId } });
-    expect(keys.length).toBeLessThanOrEqual(1); // no new key was minted per install
+    // The App's AppKey set is unchanged — no new key was minted per
+    // install. Asserting set equality (not a "<=" threshold) so the
+    // test fails if an install ever side-effects key creation.
+    const keysAfter = await db.appKey.findMany({
+      where: { appId: fx.appId },
+      select: { id: true },
+    });
+    expect(new Set(keysAfter.map((k) => k.id))).toEqual(new Set(keysBefore.map((k) => k.id)));
   });
 
   it('rejects duplicate install with DUPLICATE_APP_AGENT (US1 step 3)', async () => {

@@ -491,14 +491,25 @@ async function installAgentIntoAppCore(
   const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appId);
   const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentId);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+  // Reject installs into an App that's soft-deleted or uninstalled
+  // (spec 021 FR-026 / spec 023 — install is meaningless without an
+  // active App). `resolveAppRef` already filters `deletedAt`, but a
+  // soft-uninstall (`uninstalledAt`) is the kind of state where the
+  // App still exists but is in a write-rejected lifecycle phase.
+  if (app.deletedAt || app.uninstalledAt) {
+    throw new Error('Cannot install Agent into a deleted or uninstalled App');
+  }
   await requireOrgRole(ctx, app.organizationId, 'ADMIN');
   // Agent must belong to the same org (same as pre-023 behavior).
   const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
   if (agent.organizationId !== app.organizationId) {
     throw new Error('Agent must belong to the same organization as the App');
   }
-  // Reject duplicate install with the typed code (spec 023 FR-001 +
-  // contracts/graphql-app-shape.md error-code list).
+  // Best-effort pre-check for the typed `DUPLICATE_APP_AGENT` error.
+  // The race-safe fallback lives inside the transaction below — under
+  // concurrent installs of the same (App, Agent), one of the two will
+  // hit Prisma's P2002 unique-constraint error on the AppAgent PK and
+  // we translate that to DuplicateAppAgentError there.
   const existing = await ctx.db.appAgent.findUnique({
     where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } },
     select: { appId: true },
@@ -506,20 +517,13 @@ async function installAgentIntoAppCore(
   if (existing) throw new DuplicateAppAgentError(resolvedAppId, resolvedAgentId);
   // Auto-provision AgentOrgGrant (cross-org gate symmetry).
   await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
-  // Wrap the AppAgent create + the trainingMode update in a single
-  // transaction so the App is never in a half-updated state.
+  // Wrap the App trainingMode update + the AppAgent create in a single
+  // transaction. The App update goes FIRST so a subsequent re-fetch of
+  // `appAgent.app` in the same response reflects the new trainingMode
+  // (avoiding stale-data-in-payload). The AppAgent create is in a
+  // try/catch that translates the P2002 unique violation (concurrent
+  // install) to the typed DuplicateAppAgentError.
   const created = await ctx.db.$transaction(async (tx) => {
-    const appAgent = await tx.appAgent.create({
-      data: {
-        appId: resolvedAppId,
-        agentId: resolvedAgentId,
-        createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-      },
-      include: {
-        app: true,
-        agent: { include: AGENT_INCLUDE },
-      },
-    });
     if (args.trainingMode !== undefined) {
       await tx.app.update({
         where: { id: resolvedAppId },
@@ -529,7 +533,27 @@ async function installAgentIntoAppCore(
         },
       });
     }
-    return appAgent;
+    try {
+      return await tx.appAgent.create({
+        data: {
+          appId: resolvedAppId,
+          agentId: resolvedAgentId,
+          createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+        },
+        include: {
+          app: true,
+          agent: { include: AGENT_INCLUDE },
+        },
+      });
+    } catch (e) {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        throw new DuplicateAppAgentError(resolvedAppId, resolvedAgentId);
+      }
+      throw e;
+    }
   });
   return {
     appId: resolvedAppId,
@@ -1054,13 +1078,19 @@ export const resolvers = {
         orderBy: { createdAt: 'desc' },
       });
     },
-    // 023-app-shape US1: AppAgent join rows for this App. Prefer the
-    // eager-loaded rows (via APP_INCLUDE / ORG_INCLUDE); re-fetch
-    // ordered by createdAt asc otherwise.
+    // 023-app-shape US1: AppAgent join rows for this App. Filters out
+    // join rows whose Agent is soft-deleted, keeping App.appAgents
+    // and App.agents in sync (App.agents already filters deletedAt;
+    // App.appAgents.map(aa => aa.agent) should return the same set).
     appAgents: async (a: { id: string; appAgents?: unknown }, _: unknown, ctx: Context) => {
-      if (Array.isArray(a.appAgents)) return a.appAgents;
+      if (Array.isArray(a.appAgents)) {
+        return a.appAgents.filter((aa) => {
+          const agent = (aa as { agent?: { deletedAt?: Date | null } | null }).agent;
+          return agent != null && !agent.deletedAt;
+        });
+      }
       return ctx.db.appAgent.findMany({
-        where: { appId: a.id },
+        where: { appId: a.id, agent: { deletedAt: null } },
         orderBy: { createdAt: 'asc' },
         include: { app: true, agent: { include: AGENT_INCLUDE } },
       });
@@ -1288,7 +1318,11 @@ export const resolvers = {
         if (!member) return [];
       }
       return ctx.db.appAgent.findMany({
-        where: { agentId: a.id, app: { deletedAt: null } },
+        where: {
+          agentId: a.id,
+          app: { deletedAt: null },
+          agent: { deletedAt: null },
+        },
         orderBy: { createdAt: 'asc' },
         include: { app: true, agent: { include: AGENT_INCLUDE } },
       });
