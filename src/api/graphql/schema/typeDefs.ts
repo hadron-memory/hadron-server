@@ -1289,17 +1289,15 @@ export const typeDefs = `#graphql
 
     # Memory management (org ADMIN)
     """
-    Create a Memory in an organization.
+    Create a memory in an organization. Accepts the entity's ID or URN
+    for orgId.
 
-    Accepts the entity's ID or URN.
-    """
-    """
-    Create a memory. Defaults to knowledge-class with PRIVATE
-    visibility. Pass memoryClass: group + visibility: GROUP to
-    create a group-class memory (023-app-shape US4); the calling
-    user is auto-added as the first owner. Personal-class and
-    system-class memories are NOT created via this mutation — they
-    auto-provision via AgentSubscription / Agent.systemMemoryId.
+    Defaults to knowledge-class with PRIVATE visibility. Pass
+    memoryClass: group + visibility: GROUP to create a group-class
+    memory (023-app-shape US4); the calling user is auto-added as
+    the first owner. Personal-class and system-class memories are
+    NOT created via this mutation — they auto-provision via
+    AgentSubscription / Agent.systemMemoryId.
     """
     createMemory(
       orgId: ID!
