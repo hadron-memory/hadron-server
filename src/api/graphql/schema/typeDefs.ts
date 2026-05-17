@@ -1819,6 +1819,9 @@ export const typeDefs = `#graphql
         (only reachable from non-GraphQL callers in v1 — the
         caller-authority guard short-circuits to FORBIDDEN first).
       - MemoryMemberUserMissingError — the userId doesn't resolve.
+      - LastOwnerProtectedError (FR-038) — reachable via the
+        idempotent upsert path when the call would demote an
+        existing sole owner to reader/writer.
     """
     addMemoryMember(
       memoryId: ID!
@@ -1833,6 +1836,17 @@ export const typeDefs = `#graphql
     (FR-038) when demoting the sole remaining owner.
 
     Caller-authority rule matches addMemoryMember.
+
+    Error codes (extensions.code, Error.name style):
+      - UNAUTHENTICATED — no logged-in user in context.
+      - FORBIDDEN — caller is not an owner of a live group memory.
+      - MemoryNotFoundForMemberError — memory absent or soft-deleted
+        (only reachable from non-GraphQL callers in v1 — the guard
+        short-circuits to FORBIDDEN first).
+      - InvalidMemoryClassForMemberError — memory is not group-class
+        (same; guard short-circuits to FORBIDDEN first).
+      - MemoryMemberNotFoundError — no row at (memoryId, userId).
+      - LastOwnerProtectedError (FR-038) — would demote the sole owner.
     """
     updateMemoryMemberRole(
       memoryId: ID!

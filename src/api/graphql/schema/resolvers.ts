@@ -508,14 +508,27 @@ async function requireMemoryMemberOwner(
       extensions: { code: 'UNAUTHENTICATED' },
     });
   }
+  // Don't-leak-metadata rule: surface a uniform FORBIDDEN for any
+  // unauthorized path. Mirrors requireMemorySharePrincipal — checks
+  // memory existence, soft-delete status, and class up-front so the
+  // membership row of a deleted or wrong-class memory can't be used
+  // to manage members. (Membership rows persist past Memory soft-
+  // delete; without this guard an owner could keep managing roles on
+  // a deleted memory.)
+  const memory = await ctx.db.memory.findUnique({
+    where: { id: memoryId },
+    select: { class: true, deletedAt: true },
+  });
+  if (!memory || memory.deletedAt || memory.class !== 'group') {
+    throw new GraphQLError('You are not authorized to manage members on this memory.', {
+      extensions: { code: 'FORBIDDEN' },
+    });
+  }
   const member = await ctx.db.memoryMember.findUnique({
     where: { memoryId_userId: { memoryId, userId: ctx.userId } },
     select: { role: true },
   });
   if (!member || member.role !== 'owner') {
-    // Uniform FORBIDDEN — don't leak "memory exists but you're not an
-    // owner" vs "memory doesn't exist" vs "memory isn't group-class"
-    // to non-owners.
     throw new GraphQLError('You are not authorized to manage members on this memory.', {
       extensions: { code: 'FORBIDDEN' },
     });
@@ -1155,11 +1168,26 @@ export const resolvers = {
     // ADMIN/OWNER. Non-members of a group memory get an empty list
     // even if they happen to be in the org but not on the team.
     members: async (
-      g: { id: string; class: string; organizationId: string },
+      g: { id: string; class?: string; organizationId?: string },
       _: unknown,
       ctx: Context,
     ) => {
-      if (g.class !== 'group') return [];
+      // Partial-select-safe: some query paths (e.g. `appNodes`)
+      // select Memory with only { id, urn, name, organizationId }
+      // or even less. Fetch the missing scoping fields rather than
+      // silently returning `[]` for a real group memory.
+      let cls = g.class;
+      let orgId = g.organizationId;
+      if (cls === undefined || orgId === undefined) {
+        const m = await ctx.db.memory.findUnique({
+          where: { id: g.id },
+          select: { class: true, organizationId: true },
+        });
+        if (!m) return [];
+        cls = m.class;
+        orgId = m.organizationId;
+      }
+      if (cls !== 'group') return [];
       const isPlatformAdmin =
         ctx.roles?.includes('ADMIN') === true || ctx.roles?.includes('OWNER') === true;
       if (!isPlatformAdmin) {
@@ -1174,7 +1202,7 @@ export const resolvers = {
           const orgMember = await ctx.db.orgMember.findUnique({
             where: {
               organizationId_userId: {
-                organizationId: g.organizationId,
+                organizationId: orgId,
                 userId: ctx.userId,
               },
             },
@@ -6297,6 +6325,8 @@ export const resolvers = {
       } catch (e: unknown) {
         if (
           e instanceof MemoryMemberNotFoundError ||
+          e instanceof InvalidMemoryClassForMemberError ||
+          e instanceof MemoryNotFoundForMemberError ||
           e instanceof LastOwnerProtectedError
         ) {
           throw new GraphQLError((e as Error).message, {
