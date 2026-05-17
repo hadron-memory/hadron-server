@@ -36,6 +36,11 @@ on:
 jobs:
   tsc:
     runs-on: ubuntu-latest
+    env:
+      # prisma.config.ts loader requires DATABASE_URL even though
+      # `prisma generate` doesn't connect to the DB. Dummy value;
+      # no actual connection is attempted.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/dummy
     steps:
       - uses: actions/checkout@v4
 
