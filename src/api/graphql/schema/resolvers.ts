@@ -20,6 +20,10 @@ import {
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { isLifecycleActive } from '../../../lib/lifecycle.js';
 import { getPrimaryAgent, getPrimaryAgentId, isAgentInstalled } from '../../../lib/appAgent.js';
+import { isOrgExternalAppMember } from '../../../lib/auth/isOrgExternalAppMember.js';
+import { joinApp, NoMemberRolesError, AppUninstalledError } from '../../../controller/operations/joinApp.js';
+import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import {
@@ -1142,6 +1146,37 @@ export const resolvers = {
       s.app ?? ctx.db.app.findUnique({ where: { id: s.appId } }),
     user: async (s: { userId: string; user?: unknown }, _: unknown, ctx: Context) =>
       s.user ?? ctx.db.user.findUnique({ where: { id: s.userId } }),
+    // 023-app-shape US2 / FR-011: derived from the absence of an
+    // OrgMember row in the App's owning Organization. No `appOnly`
+    // column on AppMember.
+    //
+    // The parent is ALREADY an AppMember row by GraphQL contract, so
+    // the resolver bypasses the wrapper helper's AppMember-existence
+    // check (which would be wasted work — pure N+1 on list fields
+    // like Organization.appMembers). The wrapper's contract still
+    // matters for auth-side callers that may not have a parent row.
+    isOrgExternal: async (
+      s: { appId: string; userId: string; app?: { organizationId?: string } | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      // Prefer the eager-loaded organizationId from APP_INCLUDE; fall
+      // back to a re-fetch otherwise.
+      const organizationId =
+        s.app?.organizationId ??
+        (
+          await ctx.db.app.findUnique({
+            where: { id: s.appId },
+            select: { organizationId: true },
+          })
+        )?.organizationId;
+      if (!organizationId) return false;
+      const orgMember = await ctx.db.orgMember.findFirst({
+        where: { userId: s.userId, organizationId, deletedAt: null },
+        select: { userId: true },
+      });
+      return orgMember === null;
+    },
   },
   // 008-agent-installation: Agent dependency edge.
   AgentImport: {
@@ -5761,6 +5796,72 @@ export const resolvers = {
         .delete({ where: { appId_userId: { appId: resolvedAppId, userId } } })
         .catch(() => {}); // idempotent: missing row → no-op
       return true;
+    },
+
+    // 023-app-shape US2: self-service user-level install. The
+    // currently-logged-in user joins the App as an AppMember.
+    //
+    // **No OrgMember check** (FR-009) — this is the affordance that
+    // unlocks B2C / therapy / consumer use cases. Maxmembers + role
+    // validation are delegated to `joinApp` → `ensureAppMember`.
+    joinApp: async (
+      _: unknown,
+      { appId }: { appId: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError('joinApp requires an authenticated user', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      // resolveAppRef rejects soft-deleted Apps; the controller layer
+      // additionally rejects via AppNotFoundError (race after
+      // resolveAppRef) and AppUninstalledError. All lifecycle checks
+      // live in the controller so direct callers get them too. The
+      // try/catch covers both resolveAppRef + joinApp because
+      // resolveAppRef can throw the typed errors we want to surface.
+      let resolvedAppId: string;
+      try {
+        ({ id: resolvedAppId } = await resolveAppRef(ctx.db, appId));
+        await joinApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
+      } catch (e: unknown) {
+        // Surface typed errors with their canonical messages (Constitution
+        // Principle III — plain-language banner-friendly).
+        if (
+          e instanceof InvalidRoleError ||
+          e instanceof MaxMembersExceededError ||
+          e instanceof OrphanAppError ||
+          e instanceof NoMemberRolesError ||
+          e instanceof AppNotFoundError ||
+          e instanceof AppUninstalledError
+        ) {
+          throw new GraphQLError((e as Error).message, {
+            extensions: { code: (e as Error).name },
+          });
+        }
+        throw e;
+      }
+      const appMember = await ctx.db.appMember.findUniqueOrThrow({
+        where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
+      });
+      return { appMember };
+    },
+
+    // 023-app-shape US2: self-service user-level uninstall. The
+    // currently-logged-in user leaves an App. Idempotent.
+    leaveApp: async (
+      _: unknown,
+      { appId }: { appId: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError('leaveApp requires an authenticated user', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      await leaveApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
+      return { appId: resolvedAppId, userId: ctx.userId };
     },
 
     // 008-agent-installation: AgentImport bundling. Per spec FR-005 +

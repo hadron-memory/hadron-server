@@ -259,6 +259,26 @@ export const typeDefs = `#graphql
     agentId: ID!
   }
 
+  """
+  Return shape for the joinApp mutation (023-app-shape US2). The
+  AppMember row is included so callers can read its derived
+  isOrgExternal flag without a re-query.
+  """
+  type JoinAppPayload {
+    appMember: AppMember!
+  }
+
+  """
+  Return shape for the leaveApp mutation (023-app-shape US2). The
+  user's personal-class Memory at (appId, userId) is NOT
+  cascade-deleted (spec 008 FR-015 orphan retention); it re-attaches
+  if the user later re-joins the same App.
+  """
+  type LeaveAppPayload {
+    appId: ID!
+    userId: ID!
+  }
+
   enum AppType {
     WORKSTATION
     CHATBOT
@@ -283,6 +303,15 @@ export const typeDefs = `#graphql
     app: App!
     user: User!
     role: String!
+    """
+    023-app-shape US2: true when this User is an AppMember of the App
+    but NOT an OrgMember of the App's owning Organization. Derived at
+    query time from the absence of an OrgMember row (per spec 023
+    FR-011 — no appOnly column is added to the AppMember table).
+    Unlocks the B2C / therapy / consumer use cases where end-users
+    use an App without joining the operator's org.
+    """
+    isOrgExternal: Boolean!
     createdAt: String!
     updatedAt: String
   }
@@ -1507,6 +1536,46 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     removeAppMember(appId: ID!, userId: ID!): Boolean!
+
+    """
+    023-app-shape US2 — user-level install. The currently-logged-in user
+    joins the App as an AppMember. NO OrgMember check (spec 023 FR-009)
+    so this works for B2C / consumer / therapy use cases where the
+    end-user is not in the App's operator org.
+
+    Role defaults to the first value in the Agent's
+    installationPolicy.memberRoles (the conventional "guest" or "owner"
+    slot). Idempotent — if the user is already an AppMember of the App,
+    the existing row is returned.
+
+    Error codes (GraphQLError extensions.code, Error.name style):
+      - UNAUTHENTICATED — no logged-in user in context.
+      - AppNotFoundError — the App does not exist or is soft-deleted.
+      - AppUninstalledError — the App is in the spec-021 soft-uninstall
+        lifecycle phase.
+      - OrphanAppError — the App has no installed Agents (so there's
+        no Agent.installationPolicy to consult).
+      - NoMemberRolesError — the primary Agent's
+        installation_policy.memberRoles is empty, so joinApp can't
+        pick a default role.
+      - MaxMembersExceededError — the Agent's maxMembers limit is hit.
+      - InvalidRoleError — the picked default role isn't accepted by
+        the Agent's policy (rare; would indicate a policy update
+        race).
+
+    Accepts the entity's ID or URN.
+    """
+    joinApp(appId: ID!): JoinAppPayload!
+
+    """
+    023-app-shape US2 — user-level uninstall. The currently-logged-in user
+    leaves an App. Idempotent (no-op when not a member). The user's
+    personal-class Memory at (appId, userId) is NOT cascade-deleted
+    per spec 008 FR-015 — it re-attaches if the user later re-joins.
+
+    Accepts the entity's ID or URN.
+    """
+    leaveApp(appId: ID!): LeaveAppPayload!
 
     """
     Publish a dependency edge from a parent Agent to an imported Agent
