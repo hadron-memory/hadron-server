@@ -491,19 +491,21 @@ async function installAgentIntoAppCore(
   const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appId);
   const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentId);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-  // Reject installs into an App that's soft-deleted or uninstalled
-  // (spec 021 FR-026 / spec 023 — install is meaningless without an
-  // active App). `resolveAppRef` already filters `deletedAt`, but a
-  // soft-uninstall (`uninstalledAt`) is the kind of state where the
-  // App still exists but is in a write-rejected lifecycle phase.
-  if (app.deletedAt || app.uninstalledAt) {
-    throw new Error('Cannot install Agent into a deleted or uninstalled App');
+  // `resolveAppRef` already filters `deletedAt`. The `uninstalledAt`
+  // case (spec 021 FR-026 — soft-uninstall) is a separate lifecycle
+  // phase where the App row exists but write operations are rejected.
+  if (app.uninstalledAt) {
+    throw new GraphQLError('Cannot install Agent into an uninstalled App.', {
+      extensions: { code: 'APP_UNINSTALLED', appId: resolvedAppId },
+    });
   }
   await requireOrgRole(ctx, app.organizationId, 'ADMIN');
   // Agent must belong to the same org (same as pre-023 behavior).
   const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
   if (agent.organizationId !== app.organizationId) {
-    throw new Error('Agent must belong to the same organization as the App');
+    throw new GraphQLError('Agent must belong to the same organization as the App.', {
+      extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
+    });
   }
   // Best-effort pre-check for the typed `DUPLICATE_APP_AGENT` error.
   // The race-safe fallback lives inside the transaction below — under
@@ -1082,12 +1084,19 @@ export const resolvers = {
     // join rows whose Agent is soft-deleted, keeping App.appAgents
     // and App.agents in sync (App.agents already filters deletedAt;
     // App.appAgents.map(aa => aa.agent) should return the same set).
-    appAgents: async (a: { id: string; appAgents?: unknown }, _: unknown, ctx: Context) => {
+    //
+    // The eager-loaded rows from APP_INCLUDE don't carry `aa.app`
+    // (it would be redundant — the parent IS that App). Attach the
+    // parent App onto each row so `AppAgent.app` resolves without an
+    // N+1 DB lookup per row.
+    appAgents: async (a: { id: string; appAgents?: unknown } & Record<string, unknown>, _: unknown, ctx: Context) => {
       if (Array.isArray(a.appAgents)) {
-        return a.appAgents.filter((aa) => {
-          const agent = (aa as { agent?: { deletedAt?: Date | null } | null }).agent;
-          return agent != null && !agent.deletedAt;
-        });
+        return a.appAgents
+          .filter((aa) => {
+            const agent = (aa as { agent?: { deletedAt?: Date | null } | null }).agent;
+            return agent != null && !agent.deletedAt;
+          })
+          .map((aa) => ({ ...(aa as object), app: a }));
       }
       return ctx.db.appAgent.findMany({
         where: { appId: a.id, agent: { deletedAt: null } },

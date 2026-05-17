@@ -102,4 +102,59 @@ describe('resolveAppRef', () => {
       UrnNotQualifiedError,
     );
   });
+
+  // ===================================================================
+  // spec 021 FR-027 — partial unique index on `apps.urn`. URN lookups
+  // resolve to the ACTIVE row only (`uninstalled_at IS NULL`); uninstall
+  // history rows sharing the same URN are not found by `resolveAppRef`.
+  // ID lookups still find any row regardless of uninstall status (the
+  // PK has no partial filter).
+  // ===================================================================
+
+  it('returns the active row when the URN is also held by an uninstalled history row', async () => {
+    const sharedUrn = `${orgId}:appref-shared-urn`;
+    await db.app.create({
+      data: {
+        organizationId: orgId,
+        urn: sharedUrn,
+        name: 'appref-shared-urn (old)',
+        uninstalledAt: new Date(),
+      },
+    });
+    const active = await db.app.create({
+      data: {
+        organizationId: orgId,
+        urn: sharedUrn,
+        name: 'appref-shared-urn',
+      },
+    });
+    const resolved = await resolveAppRef(db, sharedUrn);
+    expect(resolved.id).toBe(active.id);
+  });
+
+  it('throws AppNotFoundError on URN lookup when only an uninstalled row matches', async () => {
+    const sharedUrn = `${orgId}:appref-only-uninstalled`;
+    await db.app.create({
+      data: {
+        organizationId: orgId,
+        urn: sharedUrn,
+        name: 'appref-only-uninstalled',
+        uninstalledAt: new Date(),
+      },
+    });
+    await expect(resolveAppRef(db, sharedUrn)).rejects.toBeInstanceOf(AppNotFoundError);
+  });
+
+  it('finds an uninstalled App by ID (PK lookup ignores uninstalled_at)', async () => {
+    const uninstalled = await db.app.create({
+      data: {
+        organizationId: orgId,
+        urn: `${orgId}:appref-byid-uninstalled`,
+        name: 'appref-byid-uninstalled',
+        uninstalledAt: new Date(),
+      },
+    });
+    const resolved = await resolveAppRef(db, uninstalled.id);
+    expect(resolved.id).toBe(uninstalled.id);
+  });
 });
