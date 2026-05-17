@@ -262,19 +262,55 @@ describe('US2: AppMember without OrgMember', () => {
     expect(isExternal).toBe(false);
   });
 
-  it('isOrgExternalAppMember predicate works with explicit organizationId arg', async () => {
+  it('isOrgExternalAppMember predicate verifies BOTH AppMember-exists AND OrgMember-absent', async () => {
+    // Without an AppMember row, the predicate is false even though
+    // daisy is not an OrgMember of org-therapist. This matches the
+    // function's name: "org-external **AppMember**" — both halves
+    // must hold.
     expect(
       await isOrgExternalAppMember(db, {
         userId: fx.daisyUserId,
-        organizationId: fx.orgTherapistId,
-      }),
-    ).toBe(true);
-    expect(
-      await isOrgExternalAppMember(db, {
-        userId: fx.therapistUserId,
+        appId: fx.therapyAppId,
         organizationId: fx.orgTherapistId,
       }),
     ).toBe(false);
+
+    // Add the AppMember row → predicate flips to true.
+    await resolvers.Mutation.joinApp(
+      {},
+      { appId: fx.therapyAppId },
+      userCtx(fx.daisyUserId),
+    );
+    expect(
+      await isOrgExternalAppMember(db, {
+        userId: fx.daisyUserId,
+        appId: fx.therapyAppId,
+        organizationId: fx.orgTherapistId,
+      }),
+    ).toBe(true);
+
+    // therapist joining their own App stays "not org-external" because
+    // they're an OrgMember of the App's owning org.
+    await resolvers.Mutation.joinApp(
+      {},
+      { appId: fx.therapyAppId },
+      userCtx(fx.therapistUserId),
+    );
+    expect(
+      await isOrgExternalAppMember(db, {
+        userId: fx.therapistUserId,
+        appId: fx.therapyAppId,
+        organizationId: fx.orgTherapistId,
+      }),
+    ).toBe(false);
+
+    // organizationId is optional — works without it.
+    expect(
+      await isOrgExternalAppMember(db, {
+        userId: fx.daisyUserId,
+        appId: fx.therapyAppId,
+      }),
+    ).toBe(true);
   });
 
   it('leaveApp deletes the AppMember row idempotently', async () => {

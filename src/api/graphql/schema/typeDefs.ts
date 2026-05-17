@@ -1547,7 +1547,9 @@ export const typeDefs = `#graphql
     installationPolicy.memberRoles (the conventional "guest" or "owner"
     slot). Idempotent — if the user is already an AppMember of the App,
     the existing row is returned. Subject to the Agent's
-    installationPolicy.maxMembers limit (throws MAX_MEMBERS_EXCEEDED).
+    installationPolicy.maxMembers limit (throws GraphQLError with
+    extensions.code = MaxMembersExceededError, matching the
+    ensureAppMember surface).
 
     Accepts the entity's ID or URN.
     """

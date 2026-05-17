@@ -16,27 +16,40 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 
 /**
- * Returns true iff the User has an AppMember row in the App but no
- * OrgMember row in the App's owning Organization. Callers that already
- * know the App's organizationId can pass it directly to skip one DB
- * lookup.
+ * Returns true iff the User has an AppMember row in the App AND has
+ * NO OrgMember row in the App's owning Organization. Both halves must
+ * be checked — without the AppMember verification, the function would
+ * return `true` for any non-org-member regardless of whether they
+ * actually use the App, which would mis-name the predicate.
+ *
+ * `appId` is always required. `organizationId` is an optional
+ * optimization: when supplied, the App-row lookup is skipped (the
+ * caller is asserting it already knows the App's owning org id). This
+ * is meant for hot paths where the App row was just fetched anyway —
+ * e.g., an `AppMember` resolver where `parent.app.organizationId` is
+ * already loaded by the include.
  */
 export async function isOrgExternalAppMember(
   db: PrismaClient,
-  args: { userId: string; appId?: string; organizationId?: string },
+  args: { userId: string; appId: string; organizationId?: string },
 ): Promise<boolean> {
+  // First half: AppMember row must exist. Without this, the predicate
+  // would silently return true for any non-org-member, which is wrong
+  // relative to the function name.
+  const appMember = await db.appMember.findUnique({
+    where: { appId_userId: { appId: args.appId, userId: args.userId } },
+    select: { userId: true },
+  });
+  if (appMember === null) return false;
+
+  // Second half: NO OrgMember row in the App's owning org.
   let organizationId = args.organizationId;
   if (organizationId === undefined) {
-    if (args.appId === undefined) {
-      throw new Error(
-        'isOrgExternalAppMember requires either appId or organizationId',
-      );
-    }
     const app = await db.app.findUnique({
       where: { id: args.appId },
       select: { organizationId: true },
     });
-    if (!app) return false; // No App → no AppMember relation to speak of.
+    if (!app) return false; // App vanished mid-call — degenerate; report false.
     organizationId = app.organizationId;
   }
   const orgMember = await db.orgMember.findFirst({

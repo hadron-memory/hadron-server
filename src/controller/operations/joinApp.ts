@@ -43,6 +43,18 @@ export async function joinApp(
   db: PrismaClient,
   args: { appId: string; userId: string },
 ): Promise<{ appId: string; userId: string; role: string }> {
+  // Verify the App exists and isn't soft-deleted before either the
+  // idempotent return path OR the create path runs. Without this, an
+  // existing AppMember row for a since-deleted App would return a
+  // stale-looking row instead of failing cleanly.
+  const app = await db.app.findUnique({
+    where: { id: args.appId },
+    select: { id: true, deletedAt: true },
+  });
+  if (!app || app.deletedAt) {
+    throw new OrphanAppError(args.appId);
+  }
+
   // Idempotent: return the existing row if already a member, with no
   // role change. This is the spec's "re-join is a no-op" semantics.
   const existing = await db.appMember.findUnique({
