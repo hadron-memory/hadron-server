@@ -14,9 +14,26 @@
  * Idempotent — if the user already has an AppMember row, the existing
  * row is returned with no role change.
  *
- * Note: per spec 023 FR-012 the invite/accept ceremony is OUT OF SCOPE
- * for this spec. v1 joinApp is open — anyone with the App's id can
- * join. A later spec will gate this behind an invitation.
+ * **OPEN POLICY QUESTION (deferred to a separate design discussion):**
+ * spec 023 FR-012 puts the invite/accept ceremony out of scope, but
+ * the spec's MVP guidance also says an *admin-only* API is sufficient.
+ * This implementation goes further: v1 joinApp is open self-service —
+ * any authenticated user who knows the App's ID/URN can join. URNs
+ * are predictable (e.g., `org-therapist:therapy-app`), so the
+ * practical authorization gate is "guess the slug."
+ *
+ * This was flagged in the US2 PR review (concern 1) as a policy
+ * deviation that warrants its own design discussion + amendment. It
+ * is intentionally left open in v1 because Hadron is invite-only at
+ * the platform level (no anonymous signups), bounding the exposure.
+ * The follow-up work — to either codify the open-self-service
+ * semantics in the spec or gate joinApp behind an invitation flow —
+ * is tracked in hadron-concept STUBBED-app-member-invite-flow and
+ * the PR thread on hadron-server#132.
+ *
+ * TODO(023-us2-followup): land a design discussion + spec amendment
+ * that settles whether joinApp stays open, gains an invitation gate,
+ * or becomes admin-only.
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
