@@ -16,6 +16,7 @@ import {
   verifyMagicLink,
 } from './auth/index.js';
 import { resolveAuthContext } from './middleware/auth.js';
+import { mountOAuthRoutes } from './auth/oauth.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError } from './lib/urn.js';
@@ -38,6 +39,10 @@ export async function createServer(): Promise<Express> {
     }),
   );
   app.use(express.json());
+  // Form-encoded bodies for /oauth/authorize (consent POST) and /oauth/token
+  // per RFC 6749 §3.2 / §4.1.3. Mounted globally — Apollo's expressMiddleware
+  // and the MCP transport both ignore the parsed body.
+  app.use(express.urlencoded({ extended: false }));
 
   // ---------------------------------------------------------------------------
   // GitHub OAuth
@@ -45,14 +50,20 @@ export async function createServer(): Promise<Express> {
 
   const pendingStates = new Map<
     string,
-    { redirect: string; expiresAt: number }
+    { redirect: string; returnTo?: string; expiresAt: number }
   >();
 
   app.get('/auth/github', (req, res) => {
     const redirect = (req.query.redirect as string) || '/';
+    // `return_to` (D1b Option C): when present, the callback sets a
+    // server-domain `hadron_token` cookie and redirects here instead of
+    // bouncing through the portal. Used by /oauth/authorize to bootstrap
+    // a server-side session for the consent screen.
+    const returnTo = req.query.return_to as string | undefined;
     const state = crypto.randomBytes(16).toString('hex');
     pendingStates.set(state, {
       redirect,
+      returnTo,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
     res.redirect(buildAuthUrl(state));
@@ -147,6 +158,24 @@ export async function createServer(): Promise<Express> {
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         githubId: ghUser.id,
       });
+
+      // D1b Option C: if a server-local return_to was set on /auth/github,
+      // write the JWT as a `hadron_token` cookie on the SERVER's domain
+      // (not the portal's) and redirect there. Only follow server-local
+      // paths (must start with `/`) to avoid open-redirect.
+      if (pending.returnTo && pending.returnTo.startsWith('/')) {
+        // 7d matches JWT_EXPIRY default in src/auth/jwt.ts.
+        const sevenDaysSec = 7 * 24 * 60 * 60;
+        res.cookie('hadron_token', jwt, {
+          httpOnly: true,
+          sameSite: 'lax',
+          secure: req.protocol === 'https',
+          maxAge: sevenDaysSec * 1000,
+          path: '/',
+        });
+        res.redirect(pending.returnTo);
+        return;
+      }
 
       const frontendUrl =
         process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -700,6 +729,12 @@ export async function createServer(): Promise<Express> {
       }
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // OAuth 2.1 authorization server (D-2026-05-17-001 / D-2026-05-17-002)
+  // ---------------------------------------------------------------------------
+
+  mountOAuthRoutes(app, db);
 
   // ---------------------------------------------------------------------------
   // MCP endpoint (Streamable HTTP transport)

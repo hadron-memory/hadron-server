@@ -530,6 +530,25 @@ export const typeDefs = `#graphql
     rawKey: String!
   }
 
+  # User-owned API key (D-2026-05-17-001). Same shape as AppKey but
+  # resolves to a User. Used directly by portal users and as the token
+  # shape minted by the OAuth /token endpoint.
+  type UserApiKey {
+    id: ID!
+    userId: String!
+    keyPreview: String!
+    label: String
+    createdAt: String!
+    lastUsedAt: String
+    revokedAt: String
+  }
+
+  # Returned once at creation — the raw key is never stored
+  type UserApiKeyCreated {
+    key: UserApiKey!
+    rawKey: String!
+  }
+
   # Returned once at App creation / regenerateAppKey — the raw key is never stored
   type AppCreated {
     app: App!
@@ -1906,6 +1925,14 @@ export const typeDefs = `#graphql
     createAppKey(appId: ID!, label: String): AppKeyCreated!
     # AppKey is keyed by raw ID — no urn column. Stays ID-only.
     revokeAppKey(id: ID!): Boolean!
+
+    """
+    Mint a new user-owned API key (D-2026-05-17-001). Must be called by
+    an authenticated user (JWT auth). The raw key is returned once and
+    never readable again — store it client-side immediately.
+    """
+    createUserApiKey(label: String): UserApiKeyCreated!
+    revokeUserApiKey(id: ID!): Boolean!
 
     """
     005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's

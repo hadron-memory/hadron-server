@@ -1,6 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
-import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
+import {
+  APP_KEY_PREFIX,
+  USER_API_KEY_PREFIX,
+  hashAppKey,
+  hashUserApiKey,
+} from '../../../middleware/auth.js';
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
@@ -6452,6 +6457,48 @@ export const resolvers = {
       });
       await requireOrgRole(ctx, key.app.organizationId, 'ADMIN');
       await ctx.db.appKey.update({ where: { id }, data: { revokedAt: new Date() } });
+      return true;
+    },
+
+    // D-2026-05-17-001: user-owned API key issuance. Auth requires a
+    // resolved User on the context — i.e. JWT auth (portal session) or
+    // another hdr_user_ token. App-key callers are rejected: an App
+    // cannot mint a key on behalf of "the user" because no user is
+    // resolved in that path. The raw token is returned once.
+    createUserApiKey: async (
+      _: unknown,
+      { label }: { label?: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new Error('Authentication required: createUserApiKey must be called by a signed-in user.');
+      }
+      // Raw key format: hdr_user_<64 hex chars> — same entropy as AppKey.
+      const rawKey = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
+      const keyHash = hashUserApiKey(rawKey);
+      const keyPreview = rawKey.slice(0, 13) + '...' + rawKey.slice(-4);
+      const userApiKey = await ctx.db.userApiKey.create({
+        data: {
+          userId: ctx.userId,
+          keyHash,
+          keyPreview,
+          label: label ?? null,
+          createdBy: ctx.userId,
+        },
+      });
+      return { key: userApiKey, rawKey };
+    },
+
+    revokeUserApiKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      if (!ctx.userId) {
+        throw new Error('Authentication required: revokeUserApiKey must be called by a signed-in user.');
+      }
+      const key = await ctx.db.userApiKey.findUniqueOrThrow({ where: { id } });
+      // A user can only revoke their own keys (no admin override path for now).
+      if (key.userId !== ctx.userId) {
+        throw new Error('Forbidden: cannot revoke an API key owned by another user.');
+      }
+      await ctx.db.userApiKey.update({ where: { id }, data: { revokedAt: new Date() } });
       return true;
     },
 

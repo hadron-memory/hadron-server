@@ -366,6 +366,10 @@ model User {
   memorySharesGranted       MemoryShare[]              @relation("MemorySharesGranted")
   memorySharesByGrantor     MemoryShare[]              @relation("MemorySharesByGrantor")
   memoryMemberships         MemoryMember[]             @relation("MemoryMemberships")
+  // D-2026-05-17-001: user-owned API keys (incl. OAuth-minted tokens).
+  apiKeys                   UserApiKey[]
+  // D-2026-05-17-002: short-lived OAuth authorization codes.
+  authCodes                 AuthCode[]
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -1713,6 +1717,84 @@ model AppKey {
 
   @@index([appId])
   @@map("app_keys")
+}
+
+/// OAuth 2.1 client registry (D-2026-05-17-002). For the D1b
+/// prototype, DCR (RFC 7591) is intentionally not supported — clients
+/// are pre-registered via seed migration. All clients are public
+/// (`token_endpoint_auth_method=none`) so there is no client_secret;
+/// PKCE S256 is the only authentication.
+model OAuthClient {
+  id           String   @id @default(cuid())
+  /// The public client identifier used by the client in /authorize
+  /// and /token requests.
+  clientId     String   @unique @map("client_id")
+  clientName   String   @map("client_name")
+  /// Allowed redirect URIs. /authorize must reject any redirect_uri
+  /// not present here (per OAuth 2.1).
+  redirectUris String[] @map("redirect_uris")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  authCodes AuthCode[]
+
+  @@map("oauth_clients")
+}
+
+/// Short-lived authorization code issued by /oauth/authorize and
+/// redeemed at /oauth/token. Single-use; PKCE S256 challenge stored
+/// for verification at redemption time; RFC 8707 `resource` recorded
+/// so /token can confirm it matches.
+model AuthCode {
+  id            String    @id @default(cuid())
+  /// The opaque code value handed to the client; looked up at /token.
+  code          String    @unique
+  clientId      String    @map("client_id")
+  userId        String    @map("user_id")
+  redirectUri   String    @map("redirect_uri")
+  /// PKCE S256 challenge value (base64url, no padding).
+  codeChallenge String    @map("code_challenge")
+  /// RFC 8707 resource indicator captured at /authorize time.
+  resource      String
+  expiresAt     DateTime  @map("expires_at")
+  redeemedAt    DateTime? @map("redeemed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client OAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([clientId])
+  @@map("auth_codes")
+}
+
+/// User-owned API key — the credential primitive for user-scoped MCP
+/// access (D-2026-05-13-001, D-2026-05-17-001). Mirrors AppKey but
+/// resolves to a User instead of an App. The raw key is
+/// `hdr_user_<…>`; we store SHA-256 (not bcrypt) for the same reason
+/// AppKey does — direct hash lookup needs a deterministic hash, and
+/// the 256-bit raw key already makes dictionary attacks irrelevant.
+///
+/// Tokens issued by the OAuth /token endpoint share this shape and
+/// table — OAuth is "how the token got there," the credential is
+/// the same artifact at the server (D-2026-05-17-001).
+model UserApiKey {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  /// SHA-256 hash of the raw `hdr_user_<…>` key.
+  keyHash    String    @unique @map("key_hash")
+  /// Last 4 characters of the raw key for masked display.
+  keyPreview String    @map("key_preview")
+  /// Human-friendly name for this key.
+  label      String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  createdBy  String?   @map("created_by")
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_api_keys")
 }
 
 /// The User↔App membership join with a per-member role. Spec:

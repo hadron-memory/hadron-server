@@ -1958,9 +1958,17 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   // omitting `appId` from this check rejected every valid App Key with 401.
   const auth = await resolveAuthContext(req, db);
   if (!auth.appId && !auth.userId && !auth.clientId) {
-    // Signal Bearer-only auth so MCP/LLM SDKs don't probe for OAuth dynamic
-    // client registration (which would 404 at /register). Per RFC 6750 §3.
-    res.setHeader('WWW-Authenticate', 'Bearer realm="hadron", error="invalid_token"');
+    // Per RFC 9728 §5.1: advertise the protected-resource metadata URL
+    // so MCP-spec-compliant clients (Claude Desktop, MCP Inspector) can
+    // discover the OAuth authorization server and walk the OAuth dance.
+    // The legacy comment about avoiding /register probing predates D1b;
+    // /register is still a deliberate 404 (DCR not supported per §8).
+    const base = `${req.protocol}://${req.get('host') ?? 'localhost'}`;
+    const prmUrl = `${base}/.well-known/oauth-protected-resource`;
+    res.setHeader(
+      'WWW-Authenticate',
+      `Bearer realm="hadron", error="invalid_token", resource_metadata="${prmUrl}"`,
+    );
     res.status(401).json({ error: 'Authentication required' });
     return;
   }
