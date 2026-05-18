@@ -32,6 +32,14 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 export async function createServer(): Promise<Express> {
   const app = express();
 
+  // Trust upstream proxies (ngrok, cloudflared, prod load balancers) so
+  // `req.protocol` honors X-Forwarded-Proto. Without this, OAuth metadata
+  // and the /mcp WWW-Authenticate header advertise http:// URLs even when
+  // the client reached us over https://, which Claude Desktop refuses.
+  // D1b exploration: `true` is fine; a prod-grade setting (e.g. `1` for
+  // one hop, or specific subnets) is a follow-up if/when this graduates.
+  app.set('trust proxy', true);
+
   app.use(
     cors({
       origin: process.env.FRONTEND_URL || 'http://localhost:5173',
@@ -43,6 +51,14 @@ export async function createServer(): Promise<Express> {
   // per RFC 6749 §3.2 / §4.1.3. Mounted globally — Apollo's expressMiddleware
   // and the MCP transport both ignore the parsed body.
   app.use(express.urlencoded({ extended: false }));
+
+  // D1b diagnostic: log incoming request lines so we can tell whether
+  // remote MCP clients (Claude Desktop / MCP Inspector) actually reach
+  // the server through a tunnel. Remove before any non-exploratory merge.
+  app.use((req, _res, next) => {
+    console.log(`[req] ${req.method} ${req.originalUrl}  ua=${req.get('user-agent')?.slice(0, 60) ?? '-'}  origin=${req.get('origin') ?? '-'}`);
+    next();
+  });
 
   // ---------------------------------------------------------------------------
   // GitHub OAuth

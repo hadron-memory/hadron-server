@@ -143,17 +143,70 @@ export function mountOAuthRoutes(app: Express, db: PrismaClient): void {
   });
 
   // §5 — RFC 8414 Authorization Server Metadata.
-  // registration_endpoint is intentionally omitted (DCR not supported, §8).
+  // registration_endpoint advertised (DCR enabled §8 reinstated — Claude
+  // Desktop's backend bails on AS metadata that lacks it, since without
+  // pre-config it has no way to learn its client_id otherwise).
+  // token_endpoint_auth_methods_supported=["none"] signals public-client
+  // PKCE-only — RFC 8414's default of client_secret_basic would mislead
+  // clients into expecting a client secret.
   app.get('/.well-known/oauth-authorization-server', (req: Request, res: Response) => {
     const base = getBaseUrl(req);
     res.json({
       issuer: base,
       authorization_endpoint: `${base}/oauth/authorize`,
       token_endpoint: `${base}/oauth/token`,
+      registration_endpoint: `${base}/oauth/register`,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code'],
       code_challenge_methods_supported: ['S256'],
+      token_endpoint_auth_methods_supported: ['none'],
       scopes_supported: ['mcp'],
+    });
+  });
+
+  // §8 — RFC 7591 Dynamic Client Registration.
+  // Public clients only (token_endpoint_auth_method=none) — no client
+  // secret is issued. PKCE is the authentication. Note this is the
+  // OAuth-canonical /oauth/register path; the legacy /register at
+  // server.ts (a deliberate 404 + JSON error from before D1b) is left
+  // as-is for SDKs that probe the older path.
+  app.post('/oauth/register', async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const clientName = (typeof body.client_name === 'string' ? body.client_name : null) ?? 'Unnamed MCP Client';
+    const redirectUris = Array.isArray(body.redirect_uris)
+      ? (body.redirect_uris.filter((u) => typeof u === 'string') as string[])
+      : [];
+    const tokenAuthMethod = typeof body.token_endpoint_auth_method === 'string'
+      ? body.token_endpoint_auth_method
+      : 'none';
+
+    if (tokenAuthMethod !== 'none') {
+      res.status(400).json({
+        error: 'invalid_client_metadata',
+        error_description: 'Only token_endpoint_auth_method=none is supported (public clients / PKCE only)',
+      });
+      return;
+    }
+    if (!redirectUris.length) {
+      res.status(400).json({
+        error: 'invalid_redirect_uri',
+        error_description: 'At least one redirect_uri is required',
+      });
+      return;
+    }
+
+    const clientId = `dcr_${randomBytes(16).toString('hex')}`;
+    await db.oAuthClient.create({
+      data: { clientId, clientName, redirectUris },
+    });
+
+    res.status(201).json({
+      client_id: clientId,
+      client_name: clientName,
+      redirect_uris: redirectUris,
+      token_endpoint_auth_method: 'none',
+      grant_types: ['authorization_code'],
+      response_types: ['code'],
     });
   });
 
