@@ -1719,9 +1719,10 @@ model AppKey {
   @@map("app_keys")
 }
 
-/// OAuth 2.1 client registry (D-2026-05-17-002). For the D1b
-/// prototype, DCR (RFC 7591) is intentionally not supported — clients
-/// are pre-registered via seed migration. All clients are public
+/// OAuth 2.1 client registry (D-2026-05-17-002). Rows are populated
+/// either by RFC 7591 Dynamic Client Registration (POST /oauth/register
+/// — see src/auth/oauth.ts) or by seed migration for fixed clients used
+/// by local tests. All clients are public
 /// (`token_endpoint_auth_method=none`) so there is no client_secret;
 /// PKCE S256 is the only authentication.
 model OAuthClient {

@@ -47,10 +47,10 @@ export async function createServer(): Promise<Express> {
     }),
   );
   app.use(express.json());
-  // Form-encoded bodies for /oauth/authorize (consent POST) and /oauth/token
-  // per RFC 6749 §3.2 / §4.1.3. Mounted globally — Apollo's expressMiddleware
-  // and the MCP transport both ignore the parsed body.
-  app.use(express.urlencoded({ extended: false }));
+  // express.urlencoded is mounted route-scoped inside mountOAuthRoutes
+  // — RFC 6749 §3.2 / §4.1.3 form bodies are only expected on the OAuth
+  // POST endpoints. Keeping it off the global pipeline limits attack
+  // surface for other routes (GraphQL, MCP, webhooks).
 
   // D1b diagnostic: log incoming request lines so we can tell whether
   // remote MCP clients (Claude Desktop / MCP Inspector) actually reach

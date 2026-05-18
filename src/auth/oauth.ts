@@ -1,7 +1,8 @@
 // D-2026-05-17-001 / D-2026-05-17-002 — minimal OAuth 2.1 authorization
 // server for MCP clients. Public-client model (PKCE-only, no
-// client_secret). DCR is intentionally NOT supported — clients are
-// pre-registered via seed migration.
+// client_secret). DCR (RFC 7591) is supported for dynamic client
+// onboarding — required for clients like Claude Desktop that have no
+// pre-configured client_id for arbitrary servers.
 //
 // Endpoints:
 //   GET  /.well-known/oauth-protected-resource   (RFC 9728)
@@ -9,12 +10,13 @@
 //   GET  /oauth/authorize  (server-rendered consent page, Option C)
 //   POST /oauth/authorize  (consent decision → AuthCode + redirect)
 //   POST /oauth/token      (AuthCode + PKCE verifier → hdr_user_ token)
+//   POST /oauth/register   (RFC 7591 DCR → dcr_<…> client_id)
 //
 // Tokens minted at /token share the user_api_keys table with portal-
 // issued user API keys — same credential shape at the server (D1).
 
 import { createHash, randomBytes } from 'crypto';
-import type { Express, Request, Response } from 'express';
+import express, { type Express, type Request, type Response } from 'express';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { verifyJwt } from './jwt.js';
 import { hashUserApiKey, USER_API_KEY_PREFIX } from '../middleware/auth.js';
@@ -131,6 +133,11 @@ function renderConsentPage(opts: {
 }
 
 export function mountOAuthRoutes(app: Express, db: PrismaClient): void {
+  // Route-scoped form parser — only the OAuth POST endpoints that
+  // expect application/x-www-form-urlencoded bodies (RFC 6749 §3.2 /
+  // §4.1.3 and the consent HTML form). /oauth/register takes JSON.
+  const formBody = express.urlencoded({ extended: false });
+
   // §4 — RFC 9728 Protected Resource Metadata
   app.get('/.well-known/oauth-protected-resource', (req: Request, res: Response) => {
     const base = getBaseUrl(req);
@@ -193,6 +200,28 @@ export function mountOAuthRoutes(app: Express, db: PrismaClient): void {
         error_description: 'At least one redirect_uri is required',
       });
       return;
+    }
+    // RFC 7591 §2 + RFC 6749 §3.1.2: redirect URIs MUST be absolute
+    // URIs and MUST NOT include a fragment component. Validate before
+    // storing so a malformed value can't leak through /authorize later.
+    for (const uri of redirectUris) {
+      let parsed: URL;
+      try {
+        parsed = new URL(uri);
+      } catch {
+        res.status(400).json({
+          error: 'invalid_redirect_uri',
+          error_description: `redirect_uri is not an absolute URL: ${uri}`,
+        });
+        return;
+      }
+      if (parsed.hash) {
+        res.status(400).json({
+          error: 'invalid_redirect_uri',
+          error_description: `redirect_uri must not contain a fragment: ${uri}`,
+        });
+        return;
+      }
     }
 
     const clientId = `dcr_${randomBytes(16).toString('hex')}`;
@@ -290,7 +319,7 @@ export function mountOAuthRoutes(app: Express, db: PrismaClient): void {
   });
 
   // §6 — /authorize (POST consent decision).
-  app.post('/oauth/authorize', async (req: Request, res: Response) => {
+  app.post('/oauth/authorize', formBody, async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, string | undefined>;
     const { decision, client_id, redirect_uri, code_challenge, resource, state } = body;
 
@@ -321,6 +350,18 @@ export function mountOAuthRoutes(app: Express, db: PrismaClient): void {
       return;
     }
 
+    // Fail-closed on the decision parameter: only an explicit 'approve'
+    // is allowed to mint an AuthCode. A missing or unknown value
+    // (forged form post, browser-extension interference, future
+    // additional decisions) must not silently default to approval.
+    if (decision !== 'approve') {
+      res.status(400).json({
+        error: 'invalid_request',
+        error_description: 'decision must be "approve" or "deny"',
+      });
+      return;
+    }
+
     if (!code_challenge || !resource) {
       res.status(400).json({ error: 'invalid_request', error_description: 'Missing code_challenge or resource' });
       return;
@@ -347,7 +388,7 @@ export function mountOAuthRoutes(app: Express, db: PrismaClient): void {
 
   // §7 — /token. Exchanges an AuthCode + PKCE verifier for a
   // hdr_user_ access token (long-lived; no refresh per D6 out-of-v1).
-  app.post('/oauth/token', async (req: Request, res: Response) => {
+  app.post('/oauth/token', formBody, async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, string | undefined>;
     const { grant_type, code, redirect_uri, client_id, code_verifier, resource } = body;
 
@@ -396,10 +437,19 @@ export function mountOAuthRoutes(app: Express, db: PrismaClient): void {
       return;
     }
 
-    await db.authCode.update({
-      where: { id: authCode.id },
+    // OAuth 2.1 single-use enforcement, race-safe: atomic conditional
+    // update on redeemedAt=NULL. The earlier findUnique-then-update path
+    // had a TOCTOU window where two concurrent /token calls could both
+    // pass the redeemedAt check and both mint tokens. updateMany returns
+    // count=0 when the row was already redeemed by a concurrent caller.
+    const updateResult = await db.authCode.updateMany({
+      where: { id: authCode.id, redeemedAt: null },
       data: { redeemedAt: new Date() },
     });
+    if (updateResult.count === 0) {
+      res.status(400).json({ error: 'invalid_grant', error_description: 'Code already redeemed' });
+      return;
+    }
 
     // Same minting path as Mutation.createUserApiKey — the token shape
     // and storage are identical (D1).
