@@ -1,4 +1,0 @@
--- Rollback for 005-agent-subscription Part 1. Postgres can't remove an
--- enum value cleanly, so PERSONAL stays in MemoryVisibility — this is a
--- no-op rollback. The Part 2 down migration handles the rest of the
--- 005 schema reversal.
