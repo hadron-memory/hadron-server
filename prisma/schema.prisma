@@ -366,6 +366,9 @@ model User {
   memorySharesGranted       MemoryShare[]              @relation("MemorySharesGranted")
   memorySharesByGrantor     MemoryShare[]              @relation("MemorySharesByGrantor")
   memoryMemberships         MemoryMember[]             @relation("MemoryMemberships")
+  // 025-oauth-for-mcp: user-level credential + OAuth back-relations.
+  userApiKeys               UserApiKey[]
+  authCodes                 AuthCode[]
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -2072,4 +2075,143 @@ model MemoryMember {
   @@id([memoryId, userId])
   @@index([userId])
   @@map("memory_members")
+}
+
+/// User-owned API key — the credential primitive for user-scoped MCP
+/// access (spec 025-oauth-for-mcp; D-2026-05-13-001, D-2026-05-17-001).
+/// Mirrors AppKey but resolves to a User instead of an App. The raw key is
+/// `hdr_user_<…>`; we store SHA-256 (not bcrypt) for the same reason
+/// AppKey does — direct hash lookup needs a deterministic hash, and the
+/// 256-bit raw key (32 bytes / 64 hex chars) already makes dictionary
+/// attacks irrelevant.
+///
+/// Tokens issued by the OAuth /token endpoint share this shape and storage
+/// path so a single `resolveUserApiKey` middleware validates both
+/// portal-minted and OAuth-issued tokens (FR-015). The path the key
+/// arrived through is recorded in `issuedVia` (not `createdBy`); see the
+/// column docstrings.
+///
+/// **Audit fields omitted (matches AppKey precedent):** no `updatedAt` /
+/// `updatedBy` / `deletedAt` / `deletedBy`. UserApiKey rows are
+/// append-once with a single terminal state transition (revoked);
+/// `revokedAt` carries the lifecycle info, and there is no edit
+/// operation. Soft-delete is meaningless for a revocable credential.
+model UserApiKey {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  /// SHA-256 hash of the raw `hdr_user_<…>` key.
+  keyHash    String    @unique @map("key_hash")
+  /// Last 4 characters of the raw key for masked display.
+  keyPreview String    @map("key_preview")
+  /// Human-friendly name for this key.
+  label      String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  /// Actor that minted this key. Schema-wide convention: `User.id` of
+  /// the actor. For self-service v1 this equals `userId`; the column
+  /// exists for future admin-issued paths (where actor != owner).
+  createdBy  String?   @map("created_by")
+  /// Issuance-path discriminator: `'portal'` for createUserApiKey
+  /// GraphQL mutation; `'oauth:<client_id>'` for /oauth/token-issued
+  /// tokens. Distinct from `createdBy` so the audit-actor convention
+  /// is preserved.
+  issuedVia  String?   @map("issued_via")
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_api_keys")
+}
+
+/// OAuth 2.1 client registry (spec 025-oauth-for-mcp; D-2026-05-17-002).
+/// Rows are populated by `POST /oauth/register` (RFC 7591 DCR) or seeded
+/// explicitly. Public clients only (no `clientSecret`); PKCE S256 is the
+/// auth proof. Per Q-025-001, only the `'test'` row will be seeded by
+/// `prisma/seed.ts` (spec 025 task T009 — not yet in this PR);
+/// `'claude-desktop'` and other real clients self-register via DCR.
+///
+/// **PK note:** `clientId` is the PK (no separate cuid `id`) because
+/// `clientId` is the natural key — it's the public, immutable identifier
+/// the client sends on every `/authorize` / `/token` request and is
+/// referenced by `AuthCode.clientId` as the FK target. Precedent for a
+/// non-cuid PK: `Session.id` is caller-generated. Diverges from PR 137's
+/// reference (which carried a separate cuid `id`) — see
+/// `spec-kits/specs/025-oauth-for-mcp/data-model.md` §OAuthClient.
+///
+/// Carries the full standard audit-field set per the schema-top
+/// convention because edit / delete affordances are anticipated (admin
+/// "rename a client", "rotate redirect URIs", etc.); v1 has no such
+/// surface, but the columns are cheap to add now and would otherwise
+/// need a backfill later.
+model OAuthClient {
+  /// The public client identifier. DCR-registered:
+  /// `dcr_<32 hex>` (16 bytes / 128 bits). Seeded fixtures use stable
+  /// identifiers like `'test'`. Primary key.
+  clientId     String    @id @map("client_id")
+  clientName   String    @map("client_name")
+  /// Allowed redirect URIs. /authorize must reject any redirect_uri
+  /// not present here (OAuth 2.1 §3.1.2).
+  redirectUris String[]  @map("redirect_uris")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  createdBy    String?   @map("created_by")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  updatedBy    String?   @map("updated_by")
+  deletedAt    DateTime? @map("deleted_at")
+  deletedBy    String?   @map("deleted_by")
+
+  authCodes AuthCode[]
+
+  @@map("oauth_clients")
+}
+
+/// Short-lived OAuth authorization code (spec 025-oauth-for-mcp;
+/// RFC 6749 §4.1). Issued by `POST /oauth/authorize` on
+/// `decision=approve`, redeemed once at `POST /oauth/token`. Stores PKCE
+/// S256 challenge + RFC 8707 resource indicators for verification at
+/// redemption. Single-use via race-safe `updateMany`-with-conditional
+/// `redeemedAt: null` pattern (FR-013). PKCE / resource mismatch at
+/// /token also marks `redeemedAt` to prevent probing.
+///
+/// **Code storage:** the raw code value is hashed (SHA-256) before
+/// storage, matching `AppKey.keyHash` and `UserApiKey.keyHash` — auth
+/// codes are credentials in their 10-minute redemption window and should
+/// not be plaintext in the DB. `/oauth/authorize` returns the raw code
+/// to the client; `/oauth/token` hashes the supplied code and looks up
+/// by hash. Diverges from PR 137's reference (which stored plaintext)
+/// — see `spec-kits/specs/025-oauth-for-mcp/contracts/oauth-endpoints.md`
+/// §`POST /oauth/token`.
+///
+/// **Audit fields omitted (matches AppKey precedent):** no `updatedAt` /
+/// `updatedBy` / `deletedAt` / `deletedBy`. AuthCode rows are append-once
+/// with two terminal state transitions (redeemed / expired); `redeemedAt`
+/// and `expiresAt` carry the lifecycle info. Soft-delete is meaningless
+/// for a single-use, expiring credential.
+model AuthCode {
+  id            String    @id @default(cuid())
+  /// SHA-256 hash of the raw code value handed to the client. Looked up
+  /// by hash at /token to avoid plaintext credentials in the DB.
+  codeHash      String    @unique @map("code_hash")
+  clientId      String    @map("client_id")
+  userId        String    @map("user_id")
+  redirectUri   String    @map("redirect_uri")
+  /// PKCE S256 challenge value (base64url, no padding).
+  codeChallenge String    @map("code_challenge")
+  /// RFC 8707 resource indicator(s) captured at /authorize. Multi-valued
+  /// per RFC 8707 §2; v1 MCP usage populates a single element (the MCP
+  /// endpoint URL). Application enforces ≥1 element.
+  resource      String[]
+  expiresAt     DateTime  @map("expires_at")
+  redeemedAt    DateTime? @map("redeemed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  /// Actor that initiated the /authorize request that minted this code.
+  /// Resolves to the signed-in User; equals `userId` in self-service v1.
+  createdBy     String?   @map("created_by")
+
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client OAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([clientId])
+  @@map("auth_codes")
 }
