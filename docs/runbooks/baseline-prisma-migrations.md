@@ -49,25 +49,40 @@ Since hadron-server source is not deployed on alpha (Komodo builds
 images), the resolve must be run from a developer machine with
 access to prod's Postgres. The trust boundary is the SSH session.
 
-**From a laptop with SSH access to alpha:**
+**Important — why `prisma migrate resolve --applied` alone is NOT
+enough**: `migrate resolve --applied` only **inserts** a row into
+`_prisma_migrations`. After the baseline PR merges, the 39 old
+migration directories no longer exist on disk, but their rows are
+still in `_prisma_migrations`. The next `prisma migrate deploy` would
+fail with *"the following migrations have been applied but are
+missing from the local migrations directory"*. The pre-condition for
+a clean state is that `_prisma_migrations` contains **exactly the
+single `baseline_init` row** — which requires deleting the 39 old
+rows first.
+
+The procedure below does that explicitly.
 
 ```bash
-# 1. Open an SSH tunnel to alpha's Postgres.
-ssh -fN -L 25432:127.0.0.1:5432 root@alpha
-
-# 2. Configure pg_hba on alpha to accept the tunneled connection
-#    (one-time). If TCP-localhost peer auth isn't already set up,
-#    use the `postgres` shell account directly instead — see (3-alt).
-
-# 3. Run migrate resolve through the tunnel:
-DATABASE_URL='postgresql://postgres@127.0.0.1:25432/hadron' \
-  pnpm exec prisma migrate resolve --applied 20260519180903_baseline_init
-
-# 3-alt. Or directly on alpha via psql (no Prisma needed):
-#   - Compute the checksum locally:
+# 1. From the repo on a developer machine — compute the migration's
+#    SHA-256 checksum. Prisma's checksum is sensitive to line endings:
+#    if your local clone has CRLF (e.g. cloned on Windows without
+#    `core.autocrlf=input`), the computed hash will not match the
+#    file Prisma generates server-side. Verify with `file <path>` —
+#    should report "ASCII text" (not "CRLF").
+#
+#    Linux:
 CHECKSUM=$(sha256sum prisma/migrations/20260519180903_baseline_init/migration.sql | awk '{print $1}')
+#    macOS:
+# CHECKSUM=$(shasum -a 256 prisma/migrations/20260519180903_baseline_init/migration.sql | awk '{print $1}')
+
 echo "$CHECKSUM"
-#   - Then on alpha:
+# For the 2026-05-19 baseline, the expected checksum is:
+#   dfea48d30cfcbd04c99b03d7941e166416e4383011a07c502b712b3c2400f875
+# Mismatch = your file isn't byte-identical to the committed version
+# (usually CRLF line endings); DO NOT proceed.
+
+# 2. On alpha, run the transaction: delete the 39 stale rows and
+#    insert the single baseline row with the correct checksum.
 ssh root@alpha "sudo -u postgres psql -d hadron -c \"
   BEGIN;
   DELETE FROM _prisma_migrations;
@@ -76,18 +91,25 @@ ssh root@alpha "sudo -u postgres psql -d hadron -c \"
   COMMIT;
 \""
 
-# 4. Verify:
-ssh root@alpha "sudo -u postgres psql -d hadron -c \"SELECT migration_name, applied_steps_count, finished_at FROM _prisma_migrations;\""
-# Expected: exactly one row — 20260519180903_baseline_init.
-
-# 5. Close the tunnel:
-pkill -f "ssh -fN -L 25432"
+# 3. Verify — _prisma_migrations should have exactly one row.
+ssh root@alpha "sudo -u postgres psql -d hadron -c \"SELECT migration_name, applied_steps_count, finished_at, checksum FROM _prisma_migrations;\""
 ```
 
-After step 4, `prisma migrate deploy` runs from a server container
+After step 3, `prisma migrate deploy` runs from a server container
 will be a no-op (no pending migrations) until the next migration PR
 merges. That next PR's migration applies cleanly on top of the
 baseline.
+
+### Why not `prisma migrate resolve --applied`?
+
+The Prisma CLI provides `prisma migrate resolve --applied <name>`,
+which **inserts** a row into `_prisma_migrations` for the named
+migration. It does **not** delete other rows. After a baseline
+reset, the on-disk migration directories no longer match the existing
+rows in `_prisma_migrations`, and `migrate resolve` doesn't reconcile
+them. The next `migrate deploy` would refuse to proceed. The manual
+`DELETE` + `INSERT` is the only path that produces the required
+post-condition for a baseline reset.
 
 ## Backup before running
 
