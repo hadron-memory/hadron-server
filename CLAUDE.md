@@ -48,6 +48,18 @@ DATABASE_URL='postgresql://holger@localhost:5432/hadron_dev' pnpm tsx prisma/see
 psql postgresql://holger@localhost:5432/hadron_dev -v ON_ERROR_STOP=1 -f prisma/post-push.sql
 ```
 
+## Common environment variables
+
+| Variable | Used by | Default | Notes |
+|---|---|---|---|
+| `DATABASE_URL` | Prisma client | (none, required) | Per-DB connection string. `.env` sets the dev value; `vitest.config.ts` overrides for tests. |
+| `JWT_SECRET` | `src/auth/jwt.ts` | (none, required for signing) | HS256 secret. Per-host; `.env`-managed. |
+| `JWT_EXPIRY` | `src/auth/jwt.ts` | `7d` | jose-style duration string; the GitHub-OAuth callback's Option-C `hadron_token` cookie derives `maxAge` from the issued JWT's `exp` claim (so they expire together). |
+| `PORT` | `src/index.ts` | `4000` | Dev server listen port. |
+| `FRONTEND_URL` | `src/server.ts` CORS + OAuth redirect | `http://localhost:5173` | Portal origin for cross-origin auth flow. |
+| `TEST_PORT` | `prisma/seed.ts` (`'test'` OAuthClient redirectUri) | `4000` | Fixture-time port for Phase-2 OAuth integration tests' mock callback servers. **Distinct from `PORT`** — the dev server doesn't host this callback; Phase 2 tests spin up their own callback receiver and need a redirectUri that matches the seeded `OAuthClient('test')` row. |
+| `CLOUDFLARE_IPS_API_URL` / `CLOUDFLARE_IPS_CACHE_PATH` / `HADRON_MULTIPLE_APPS_DOCS_URL` | spec 025 — boot-policy + multi-app docs link | see `src/auth/cloudflare-ips.ts`, `src/mcp/server.ts` | Overrides for the production-hardened trust-proxy fetch + the multi-App-resolved error's docs URL. |
+
 ## Seed fixtures (post-008-agent-installation)
 
 `prisma/seed.ts` is anonymized — no real PII. The fixture set is built around

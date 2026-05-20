@@ -384,6 +384,52 @@ async function main() {
   });
   console.log(`  Created 2 personal memories for Mike (one per Juno install)`);
 
+  // ── Spec 025-oauth-for-mcp: OAuthClient seed (T009 / FR-023) ─────────
+  // Per Clarifications Q-025-001, only the 'test' OAuthClient row is
+  // seeded. 'claude-desktop' (and any other real client) is NOT
+  // pre-seeded — Claude Desktop self-registers via DCR and gets a
+  // dcr_<32 hex> id; a pre-seeded 'claude-desktop' row would be dead
+  // code that misleads future readers about how DCR actually works.
+  //
+  // Phase 2's /oauth/authorize + /oauth/token integration tests
+  // depend on this seed (PR 137's scripts/test-oauth-dance.ts used
+  // client_id='test' but no seed row existed — anyone else running
+  // the test got 400 invalid_client; FR-023 closes that gap).
+  //
+  // **redirect_uri path is `/callback`** per
+  // spec-kits/specs/025-oauth-for-mcp/contracts/migration-sql.md
+  // §"Seed-data update". Phase 2's integration tests MUST use
+  // exactly this path in their /authorize + /token redeem requests
+  // — OAuth 2.1 §6.3 requires byte-exact redirect_uri match.
+  //
+  // **TEST_PORT** is a fixture-time port for integration tests'
+  // mock callback servers (NOT the dev server's PORT, which is a
+  // separate concept — the dev server doesn't host this callback;
+  // Phase 2 tests spin up their own). Documented in CLAUDE.md
+  // under "Common environment variables".
+  //
+  // Upsert is keyed on clientId so re-running the seed is idempotent.
+  // The `update` block mirrors `create`'s values + clears any soft-
+  // delete state, so re-seeding after a TEST_PORT change refreshes
+  // the redirectUris (without this, the row would have stale URIs
+  // and Phase 2 tests would fail with invalid_redirect_uri).
+  const testPort = process.env.TEST_PORT ?? '4000';
+  const testClientFixture = {
+    clientName: 'Integration test client',
+    redirectUris: [`http://localhost:${testPort}/callback`],
+    deletedAt: null,
+    deletedBy: null,
+  };
+  await db.oAuthClient.upsert({
+    where: { clientId: 'test' },
+    create: {
+      clientId: 'test',
+      ...testClientFixture,
+    },
+    update: testClientFixture,
+  });
+  console.log(`  Seeded OAuthClient 'test' (redirectUris=[http://localhost:${testPort}/callback])`);
+
   // ── Final summary ──────────────────────────────────────────────────────
   console.log(`\nSeed complete!\n`);
   console.log(`AppKeys (paste into hadron-portal or .hadron/config.json):`);
