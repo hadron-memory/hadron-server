@@ -35,9 +35,9 @@ export const CONSENT_TEMPLATE = `<!doctype html>
     }
     @media (prefers-color-scheme: dark) {
       body { background: #1c1c1c; color: #e6e6e6; }
-      main { background: #262626 !important; border-color: #333 !important; }
-      code { background: #333 !important; }
-      button[name="decision"][value="deny"] { background: transparent !important; color: #e6e6e6 !important; border: 1px solid #555 !important; }
+      main { background: #262626; border-color: #333; }
+      code { background: #333; }
+      button[name="decision"][value="deny"] { background: transparent; color: #e6e6e6; border: 1px solid #555; }
     }
     main {
       max-width: 480px; width: 100%;
@@ -69,7 +69,7 @@ export const CONSENT_TEMPLATE = `<!doctype html>
       <li>Scope: <code>{{scope}}</code></li>
       <li>Resource: <code>{{resource}}</code></li>
     </ul>
-    <p>If you approve, the application will be issued an access token that can act on your behalf at the resource above.</p>
+    <p>If you approve, the application will be issued an authorization code that it can exchange for an access token to act on your behalf at the resource above.</p>
     <form method="post" action="/oauth/authorize" autocomplete="off">
       <input type="hidden" name="_csrf"                 value="{{csrfToken}}">
       <input type="hidden" name="client_id"             value="{{clientId}}">

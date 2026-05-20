@@ -274,6 +274,58 @@ describe('GET /oauth/authorize — post-validation redirects with OAuth error', 
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('invalid_request');
   });
+
+  it('multi-value scope → redirect with ?error=invalid_request (no silent default)', async () => {
+    // `?scope=mcp&scope=admin` lands as an array on req.query. The
+    // pre-fix code treated this as non-string and silently fell
+    // back to 'mcp', letting the misbehaving client through.
+    const params = new URLSearchParams(buildAuthorizeQuery());
+    params.delete('scope');
+    params.append('scope', 'mcp');
+    params.append('scope', 'admin');
+    const res = await getAuthorize(params.toString());
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get('location')!);
+    expect(url.origin + url.pathname).toBe(REGISTERED_REDIRECT);
+    expect(url.searchParams.get('error')).toBe('invalid_request');
+  });
+
+  it.each([
+    ['too short (42 chars)', 'a'.repeat(42)],
+    ['too long (129 chars)', 'a'.repeat(129)],
+    ['invalid base64url charset (contains "+")', 'a'.repeat(40) + '+++'],
+    ['invalid base64url charset (contains "=")', 'a'.repeat(40) + '==='],
+    ['invalid base64url charset (contains "/")', 'a'.repeat(40) + '///'],
+    ['whitespace inside', 'a'.repeat(40) + ' \t '],
+  ])(
+    'code_challenge %s → redirect with ?error=invalid_request',
+    async (_label, badChallenge) => {
+      // RFC 7636 §4.2: S256 challenges are exactly 43 chars
+      // (base64url-encoded SHA-256), permitted range 43-128, and
+      // restricted to the [A-Za-z0-9_-.~] charset. Rejecting at
+      // the gate is fail-fast — /token would also catch these
+      // but consent shouldn't even render for a malformed
+      // challenge.
+      const res = await getAuthorize(
+        buildAuthorizeQuery({ code_challenge: badChallenge }),
+      );
+      expect(res.status).toBe(302);
+      const url = new URL(res.headers.get('location')!);
+      expect(url.origin + url.pathname).toBe(REGISTERED_REDIRECT);
+      expect(url.searchParams.get('error')).toBe('invalid_request');
+    },
+  );
+
+  it('code_challenge at the 43-char min boundary is ACCEPTED', async () => {
+    // Negative-test counterpart for the rejection cases above:
+    // exactly 43 chars in the valid charset should still render
+    // the consent screen (otherwise the predicate is too tight).
+    const res = await getAuthorize(
+      buildAuthorizeQuery({ code_challenge: 'a'.repeat(43) }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/text\/html/);
+  });
 });
 
 // ── GET — Option-C sign-in redirect ──────────────────────────────────
@@ -539,6 +591,68 @@ describe('POST /oauth/authorize — open-redirect mitigation', () => {
     );
     expect(res.status).toBe(400);
     expect(await db.authCode.count()).toBe(0);
+  });
+
+  it('redirect_uri with pre-existing ?code= → response overwrites, not duplicates (parameter pollution)', async () => {
+    // RFC 6749 §3.1.2 doesn't prohibit registered redirect_uris
+    // with query strings. If the client registers
+    // `https://cb.example/?code=fixed`, the AS response must use
+    // `searchParams.set` (NOT `append`) for OAuth-reserved keys
+    // so the final Location header carries exactly one `code`
+    // param — ours, the authoritative one. Two `code` values
+    // is undefined-behavior territory for client parsers and a
+    // fixation-attack vector if the fixed value is attacker-
+    // controlled.
+    const pollutionRedirect = 'https://client.example.com/cb?code=fixed&state=stale';
+    const pollutionClientId = `dcr_${'b'.repeat(32)}`;
+    await db.oAuthClient.create({
+      data: {
+        clientId: pollutionClientId,
+        clientName: 'Pollution Test Client',
+        redirectUris: [pollutionRedirect],
+      },
+    });
+    const codeChallenge = 'a'.repeat(43);
+
+    // GET to seed CSRF.
+    const getRes = await getAuthorize(
+      buildAuthorizeQuery({
+        client_id: pollutionClientId,
+        redirect_uri: pollutionRedirect,
+        code_challenge: codeChallenge,
+      }),
+    );
+    expect(getRes.status).toBe(200);
+    const html = await getRes.text();
+    const csrfToken = html.match(/name="_csrf"\s+value="([^"]+)"/)![1];
+    const csrfCookieValue = getRes.headers
+      .get('set-cookie')!
+      .match(/_hadron_csrf=([^;]+)/)![1];
+
+    // POST approve → expect exactly one `code` param (ours), and
+    // the `state` param overwritten by our value.
+    const res = await postAuthorize(
+      {
+        _csrf: csrfToken,
+        decision: 'approve',
+        client_id: pollutionClientId,
+        redirect_uri: pollutionRedirect,
+        code_challenge: codeChallenge,
+        resource: RESOURCE_URL,
+        state: 'fresh-state',
+      },
+      { csrfCookieValue },
+    );
+    expect(res.status).toBe(302);
+    const location = res.headers.get('location')!;
+    const url = new URL(location);
+    // Exactly one `code` param, NOT 'fixed'.
+    expect(url.searchParams.getAll('code')).toHaveLength(1);
+    expect(url.searchParams.get('code')).not.toBe('fixed');
+    expect(url.searchParams.get('code')).toMatch(/^[0-9a-f]{64}$/);
+    // `state` overwritten by ours.
+    expect(url.searchParams.getAll('state')).toHaveLength(1);
+    expect(url.searchParams.get('state')).toBe('fresh-state');
   });
 
   it('POST without hadron_token cookie → CSRF 403 (session-bound token), no AuthCode', async () => {

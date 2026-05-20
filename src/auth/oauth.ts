@@ -396,6 +396,28 @@ export function renderConsent(params: ConsentParams): string {
 }
 
 /**
+ * Resolve the CSRF HMAC secret. **Fail-loud** in production when
+ * neither `CSRF_SECRET` nor `JWT_SECRET` is set — the original
+ * `|| 'dev-only-…'` fallback silently flowed into prod if the
+ * JWT boot-policy check ever changed or was bypassed. The dev
+ * secret must be unreachable in any deployment where real users
+ * are reaching the consent flow.
+ *
+ * Test and local dev fall back to a fixed dev secret; CI sets
+ * `NODE_ENV !== 'production'`.
+ */
+function resolveCsrfSecret(): string {
+  const secret = process.env.CSRF_SECRET || process.env.JWT_SECRET;
+  if (secret) return secret;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'CSRF_SECRET (or JWT_SECRET fallback) is required in production for /oauth/authorize',
+    );
+  }
+  return 'dev-only-csrf-secret-not-for-production';
+}
+
+/**
  * Build the `csrf-csrf` Double-Submit-Cookie protection utilities for
  * `POST /oauth/authorize`. Per REV-1 / FR-014.
  *
@@ -421,15 +443,7 @@ export function renderConsent(params: ConsentParams): string {
  *     the same path; lax sameSite alone isn't enough scope-wise).
  */
 function buildAuthorizeCsrfProtection(): DoubleCsrfUtilities {
-  const secret =
-    process.env.CSRF_SECRET ||
-    process.env.JWT_SECRET ||
-    // Test/dev convenience: when neither env var is set, the
-    // server is running in a context where CSRF protection isn't
-    // load-bearing (no real users). Production deployments set
-    // JWT_SECRET; the boot-policy check in src/auth/jwt.ts will
-    // already have refused to start without it.
-    'dev-only-csrf-secret-not-for-production';
+  const secret = resolveCsrfSecret();
   return doubleCsrf({
     getSecret: () => secret,
     getSessionIdentifier: (req) => {
@@ -475,15 +489,25 @@ async function getUserIdFromCookie(req: Request): Promise<string | null> {
 }
 
 /**
- * Build a redirect URL by appending query params to a base. Handles
- * the case where the base already has a query string (the
- * registered redirect_uri can legitimately include one, e.g.
+ * Build a redirect URL by setting OAuth-reserved query params on a
+ * base. Handles the case where the base already has a query string
+ * (the registered redirect_uri can legitimately include one, e.g.
  * `https://app.example.com/cb?env=prod`).
  *
- * Param values are URL-encoded by `URLSearchParams`. Empty / null /
- * undefined values are skipped so we don't emit
+ * Uses `searchParams.set` (NOT `append`) — the OAuth-reserved keys
+ * `code`, `error`, `state`, `error_description` are authoritative
+ * from THIS response. If the registered URI carries a pre-existing
+ * `?code=fixed`, that's a client-side mistake at best and a fixation
+ * attack at worst; either way our response is the source of truth.
+ * `set` overwrites any pre-existing value for the same key, so a
+ * tampered `?code=…` registered URI can't end up with two `code`
+ * params in the final redirect (RFC 6749 §3.1.2 doesn't prohibit
+ * registered URIs with query strings; client parsing of duplicate
+ * `code` is undefined).
+ *
+ * Empty / null / undefined values are skipped so we don't emit
  * `…?error=invalid_request&state=` (RFC 6749 §4.1.2 makes the
- * `state` param echo optional when the caller didn't send one).
+ * `state` echo optional when the caller didn't send one).
  */
 function buildRedirectWithParams(
   base: string,
@@ -492,7 +516,7 @@ function buildRedirectWithParams(
   const url = new URL(base);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== '') {
-      url.searchParams.append(key, value);
+      url.searchParams.set(key, value);
     }
   }
   return url.toString();
@@ -574,8 +598,28 @@ async function validateClientAndRedirectUri(
 
 /** v1 caps on the variable-size /authorize params. */
 const STATE_MAX_LENGTH = 512;
-const CODE_CHALLENGE_MAX_LENGTH = 128; // RFC 7636 §4.2
+/**
+ * PKCE S256 challenges are base64url-encoded SHA-256 outputs:
+ * exactly 43 chars without padding. RFC 7636 §4.2 mandates a
+ * 43–128 char range and the `[A-Z][a-z][0-9]-._~` charset
+ * ("base64url + unreserved"). Rejecting at the gate is fail-fast
+ * — the /token PKCE verifier would also reject a malformed
+ * challenge, but doing it here means consent never renders for
+ * a bad challenge.
+ */
+const CODE_CHALLENGE_MIN_LENGTH = 43;
+const CODE_CHALLENGE_MAX_LENGTH = 128;
+const CODE_CHALLENGE_CHARSET = /^[A-Za-z0-9\-._~]+$/;
 const RESOURCE_MAX_LENGTH = 2048;
+
+/** True iff `v` is a valid PKCE S256 code_challenge per RFC 7636 §4.2. */
+function isValidCodeChallenge(v: string): boolean {
+  return (
+    v.length >= CODE_CHALLENGE_MIN_LENGTH &&
+    v.length <= CODE_CHALLENGE_MAX_LENGTH &&
+    CODE_CHALLENGE_CHARSET.test(v)
+  );
+}
 
 /**
  * `GET /oauth/authorize` per the contract in contracts/oauth-endpoints.md.
@@ -636,7 +680,7 @@ function buildHandleAuthorizeGet(
       return;
     }
     const codeChallenge = typeof q.code_challenge === 'string' ? q.code_challenge : '';
-    if (codeChallenge.length === 0 || codeChallenge.length > CODE_CHALLENGE_MAX_LENGTH) {
+    if (codeChallenge.length === 0 || !isValidCodeChallenge(codeChallenge)) {
       redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
       return;
     }
@@ -648,6 +692,13 @@ function buildHandleAuthorizeGet(
     }
     const resource = typeof q.resource === 'string' ? q.resource : '';
     if (resource.length === 0 || resource.length > RESOURCE_MAX_LENGTH) {
+      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+      return;
+    }
+    // Repeated `?scope=` (Express qs parser yields an array) is
+    // a malformed request — fail loudly rather than silently
+    // coerce to the default 'mcp'.
+    if (Array.isArray(q.scope)) {
       redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
       return;
     }
@@ -724,7 +775,7 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   // 5. Re-validate the post-body shape. The GET handler should have
   // pre-validated these, but the form could be tampered with.
   const codeChallenge = typeof body.code_challenge === 'string' ? body.code_challenge : '';
-  if (codeChallenge.length === 0 || codeChallenge.length > CODE_CHALLENGE_MAX_LENGTH) {
+  if (codeChallenge.length === 0 || !isValidCodeChallenge(codeChallenge)) {
     redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
     return;
   }
