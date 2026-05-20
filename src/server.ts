@@ -20,6 +20,7 @@ import {
 import { resolveAuthContext } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
+import { mountOAuthRoutes } from './auth/oauth.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError } from './lib/urn.js';
@@ -279,6 +280,19 @@ export async function createServer(): Promise<Express> {
       res.status(500).json({ error: 'OAuth authentication failed' });
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // OAuth 2.1 Authorization Server (spec 025 Phase 2)
+  // ---------------------------------------------------------------------------
+
+  // Phase 2A advertises the RFC 9728 PRM + RFC 8414 AS metadata
+  // endpoints. /oauth/register, /oauth/authorize, /oauth/token land
+  // in later sub-PRs (2B/2C/2D). The metadata endpoint MUST advertise
+  // /oauth/register even before the handler exists — per EF-001,
+  // Claude Desktop silently bails when registration_endpoint is
+  // absent from AS metadata, so advertising it (even if the URL
+  // 404s until 2B lands) is what unblocks the OAuth dance discovery.
+  mountOAuthRoutes(app);
 
   // ---------------------------------------------------------------------------
   // Email magic-link auth
