@@ -16,6 +16,7 @@ import {
   verifyMagicLink,
 } from './auth/index.js';
 import { resolveAuthContext } from './middleware/auth.js';
+import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError } from './lib/urn.js';
@@ -31,21 +32,32 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 export async function createServer(): Promise<Express> {
   const app = express();
 
-  // Minimal trust-proxy for spec 025-oauth-for-mcp (FR-006). When the
-  // server is reached over a TLS-terminating proxy (Cloudflare tunnel,
-  // load balancer), Express needs `trust proxy` set for `req.protocol`
-  // to resolve to 'https' from X-Forwarded-Proto; otherwise the
-  // RFC 9728 `WWW-Authenticate: resource_metadata="..."` URL emitted
-  // on /mcp 401 (see src/mcp/server.ts) advertises an `http://` URL
-  // and Claude Desktop refuses to walk it (EF-003).
+  // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
+  // which upstream proxies it can trust so `req.protocol` resolves to
+  // 'https' via X-Forwarded-Proto (otherwise the RFC 9728
+  // `WWW-Authenticate: resource_metadata="..."` URL emitted on /mcp 401
+  // would be `http://` and Claude Desktop refuses non-HTTPS metadata;
+  // see EF-003) and `req.ip` returns the real client IP (matters for
+  // the /oauth/register per-IP rate limit in Phase 2).
   //
-  // **TODO(feat/025-phase-1-infra):** harden this to trust only
-  // Cloudflare's published IP ranges in production (boot-time fetch
-  // + fail-safe-stale cache + refuse boot in NODE_ENV=production with
-  // the permissive `true` setting). The current `true` value is a dev
-  // convenience and the right shape for local tunnel testing; the
-  // infra PR will replace it with the production-safe form.
-  app.set('trust proxy', true);
+  // - Dev: permissive `true` is fine for tunnel testing (cloudflared,
+  //   ngrok). Anyone on the dev box can spoof X-Forwarded-* but that's
+  //   not the production threat model.
+  // - Production: trust only Cloudflare's published IP ranges. The
+  //   list is fetched at boot from api.cloudflare.com/client/v4/ips
+  //   with a 5s timeout, disk-cached for fail-safe-stale, refreshed
+  //   daily (see src/auth/cloudflare-ips.ts and research §R-4).
+  //
+  // If the fetch AND cache both fail in NODE_ENV=production, boot
+  // refuses (fail-closed) — emitting permissive `true` URLs in prod
+  // is a security regression we won't accept silently. Dev tolerates
+  // the failure path by retaining the permissive setting.
+  if (process.env.NODE_ENV === 'production') {
+    const ips = await initCloudflareIps();
+    app.set('trust proxy', [...ips.ipv4_cidrs, ...ips.ipv6_cidrs]);
+  } else {
+    app.set('trust proxy', true);
+  }
 
   app.use(
     cors({
