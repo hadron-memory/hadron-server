@@ -42,6 +42,13 @@ export function getServerOrigin(req: Request): string | null {
  * clients (Claude Desktop, MCP Inspector) which Authorization Server
  * to use to obtain credentials for the `/mcp` resource.
  *
+ * Note: this builder bakes in the assumption that the Authorization
+ * Server and the Resource Server are co-located on the same origin.
+ * Today they are (Hadron runs both on the same listener). RFC 9728
+ * explicitly allows a split deployment (`authorization_servers` can
+ * be any URL); if that's ever needed, accept an explicit AS origin
+ * rather than reusing the resource origin.
+ *
  * Shape spec: <https://datatracker.ietf.org/doc/html/rfc9728#section-3>.
  */
 export function buildProtectedResourceMetadata(origin: string): Record<string, unknown> {
@@ -83,6 +90,14 @@ export function buildAuthorizationServerMetadata(origin: string): Record<string,
   };
 }
 
+/**
+ * Cache-Control value for discovery metadata. Metadata changes only
+ * when the AS surface itself changes, which is rare. A 1-day TTL
+ * keeps Cloudflare's edge + per-client caches from re-hitting Express
+ * for every probe (Claude Desktop refreshes on every reconnect).
+ */
+const DISCOVERY_CACHE_CONTROL = 'public, max-age=86400';
+
 /** Express request handler for PRM. Emits 400 when Host is missing. */
 export function handleProtectedResourceMetadata(req: Request, res: Response): void {
   const origin = getServerOrigin(req);
@@ -93,6 +108,7 @@ export function handleProtectedResourceMetadata(req: Request, res: Response): vo
     res.status(400).json({ error: 'Missing Host header' });
     return;
   }
+  res.setHeader('Cache-Control', DISCOVERY_CACHE_CONTROL);
   res.json(buildProtectedResourceMetadata(origin));
 }
 
@@ -103,6 +119,7 @@ export function handleAuthorizationServerMetadata(req: Request, res: Response): 
     res.status(400).json({ error: 'Missing Host header' });
     return;
   }
+  res.setHeader('Cache-Control', DISCOVERY_CACHE_CONTROL);
   res.json(buildAuthorizationServerMetadata(origin));
 }
 

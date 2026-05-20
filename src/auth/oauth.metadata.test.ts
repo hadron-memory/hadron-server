@@ -146,6 +146,14 @@ describe('GET /.well-known/oauth-protected-resource (PRM endpoint)', () => {
     });
   });
 
+  it('sets Cache-Control: public, max-age=86400 for CDN + client caches', async () => {
+    // Discovery metadata changes rarely; Claude Desktop refreshes on
+    // every reconnect. A 1-day TTL lets Cloudflare's edge serve the
+    // bulk of probes without hitting Express.
+    const res = await fetch(`${baseUrl}/.well-known/oauth-protected-resource`);
+    expect(res.headers.get('cache-control')).toBe('public, max-age=86400');
+  });
+
   // Missing-Host case is unit-tested against the exported handler
   // below (Node's built-in HTTP client always emits a Host header,
   // so a real-HTTP integration test can't reach this branch â€” the
@@ -162,9 +170,14 @@ describe('handleProtectedResourceMetadata + handleAuthorizationServerMetadata â€
     } as unknown as Request;
   }
 
-  function makeRes(): Response & { _status: number; _body: unknown } {
+  function makeRes(): Response & {
+    _status: number;
+    _body: unknown;
+    _headers: Record<string, string>;
+  } {
     let status = 200;
     let body: unknown;
+    const headers: Record<string, string> = {};
     const res = {
       status: vi.fn((c: number) => {
         status = c;
@@ -174,14 +187,25 @@ describe('handleProtectedResourceMetadata + handleAuthorizationServerMetadata â€
         body = p;
         return res;
       }),
+      setHeader: vi.fn((name: string, value: string) => {
+        headers[name] = value;
+        return res;
+      }),
       get _status() {
         return status;
       },
       get _body() {
         return body;
       },
+      get _headers() {
+        return headers;
+      },
     };
-    return res as unknown as Response & { _status: number; _body: unknown };
+    return res as unknown as Response & {
+      _status: number;
+      _body: unknown;
+      _headers: Record<string, string>;
+    };
   }
 
   it('PRM handler returns 400 + diagnostic when Host header is missing', () => {
@@ -243,11 +267,10 @@ describe('GET /.well-known/oauth-authorization-server (AS metadata endpoint)', (
     // hostname).
     const res = await fetch(`${baseUrl}/.well-known/oauth-authorization-server`);
     const body = (await res.json()) as Record<string, string>;
-    const expectedOrigin = baseUrl.replace(/^http:\/\//, 'http://');
-    expect(body.issuer).toBe(expectedOrigin);
-    expect(body.authorization_endpoint).toBe(`${expectedOrigin}/oauth/authorize`);
-    expect(body.token_endpoint).toBe(`${expectedOrigin}/oauth/token`);
-    expect(body.registration_endpoint).toBe(`${expectedOrigin}/oauth/register`);
+    expect(body.issuer).toBe(baseUrl);
+    expect(body.authorization_endpoint).toBe(`${baseUrl}/oauth/authorize`);
+    expect(body.token_endpoint).toBe(`${baseUrl}/oauth/token`);
+    expect(body.registration_endpoint).toBe(`${baseUrl}/oauth/register`);
   });
 
   it('responds without requiring authentication (discovery is unauthenticated per RFC 8414)', async () => {
@@ -256,5 +279,22 @@ describe('GET /.well-known/oauth-authorization-server (AS metadata endpoint)', (
     const res = await fetch(`${baseUrl}/.well-known/oauth-authorization-server`);
     expect(res.status).toBe(200);
     expect(res.status).not.toBe(401);
+  });
+
+  it('sets Cache-Control: public, max-age=86400 for CDN + client caches', async () => {
+    const res = await fetch(`${baseUrl}/.well-known/oauth-authorization-server`);
+    expect(res.headers.get('cache-control')).toBe('public, max-age=86400');
+  });
+});
+
+describe('advertised /oauth/* endpoints (Phase 2A advertises; 2B/2C/2D handle)', () => {
+  it('GET /oauth/register 404s today (handler lands in Phase 2B)', async () => {
+    // Discovery currently advertises /oauth/register so Claude Desktop's
+    // pre-OAuth probe finds it (EF-001), but the actual DCR handler
+    // ships in Phase 2B. This test pins the "advertised but not yet
+    // implemented" state so when 2B lands the maintainer is forced to
+    // update it â€” a regression-strong way to track the gap.
+    const res = await fetch(`${baseUrl}/oauth/register`, { method: 'GET' });
+    expect(res.status).toBe(404);
   });
 });
