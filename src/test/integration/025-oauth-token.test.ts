@@ -212,6 +212,28 @@ describe('POST /oauth/token — happy path', () => {
     expect(keys[0].label).toBe(`OAuth: ${TEST_CLIENT_ID}`);
   });
 
+  it('caps the OAuth label at USER_API_KEY_LABEL_MAX_LEN (defense in depth)', async () => {
+    // DCR (PR #154) caps client_name at 200 chars, so today the
+    // OAuth label is implicitly bounded. The label cap at the
+    // OAuth call site is defense in depth: if a future change
+    // relaxes DCR's cap (or a row is written via direct SQL), the
+    // OAuth label should still stay bounded. Force a 500-char
+    // clientName via direct DB update — bypassing DCR — to pin the
+    // call-site cap.
+    const longName = 'x'.repeat(500);
+    await db.oAuthClient.update({
+      where: { clientId: TEST_CLIENT_ID },
+      data: { clientName: longName },
+    });
+    const { rawCode, verifier } = await seedAuthCode();
+    const res = await postToken(defaultFields(rawCode, verifier));
+    expect(res.status).toBe(200);
+    const keys = await db.userApiKey.findMany({ where: { userId: testUser.id } });
+    // 200 is USER_API_KEY_LABEL_MAX_LEN; the "OAuth: " prefix counts.
+    expect(keys[0].label!.length).toBeLessThanOrEqual(200);
+    expect(keys[0].label!.startsWith('OAuth: ')).toBe(true);
+  });
+
   it('the issued token validates via resolveUserApiKey (FR-015 / SC-001 cross-format parity)', async () => {
     // The whole point of FR-015 is that an OAuth-minted token and a
     // portal-minted token are byte-identical at the credential layer:
@@ -282,6 +304,49 @@ describe('POST /oauth/token — grant_type + code lookup', () => {
     // No token minted on top of the redemption.
     expect(await db.userApiKey.count()).toBe(0);
     // Row still marked (the previous redemption stands).
+    await assertCodeRedeemed(authCodeId);
+  });
+
+  it('empty body (no fields at all) → 400 unsupported_grant_type', async () => {
+    // Pins the grant_type branch's treatment of a missing field as
+    // the same shape as "wrong grant_type". RFC 6749 §5.2 nominally
+    // would split this into invalid_request (missing) vs
+    // unsupported_grant_type (wrong); we collapse both into
+    // unsupported_grant_type for the same uniform-error privacy
+    // posture as the missing-code case.
+    const res = await postToken({});
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('unsupported_grant_type');
+    expect(await db.userApiKey.count()).toBe(0);
+    expect(await db.authCode.count()).toBe(0);
+  });
+
+  it('sequential redemption: redeem then re-redeem same code → 200 then 400 invalid_grant', async () => {
+    // The race test (025-oauth-token-race.test.ts) covers concurrent
+    // redemption; this is the simpler sequential case — a client
+    // that successfully exchanges a code and then (by bug or
+    // attacker action) tries the same code again must get
+    // `invalid_grant`, NOT another token. Implicit in the race
+    // contract but a direct test is clearer to read.
+    const { rawCode, verifier, authCodeId } = await seedAuthCode();
+    const firstRes = await postToken(defaultFields(rawCode, verifier));
+    expect(firstRes.status).toBe(200);
+    const firstBody = (await firstRes.json()) as { access_token: string };
+    expect(firstBody.access_token).toMatch(
+      new RegExp(`^${USER_API_KEY_PREFIX}[0-9a-f]{64}$`),
+    );
+
+    // Same code, immediately replayed. The atomic-claim updateMany's
+    // `redeemedAt: null` predicate must reject this — count=0 path.
+    const secondRes = await postToken(defaultFields(rawCode, verifier));
+    expect(secondRes.status).toBe(400);
+    const secondBody = (await secondRes.json()) as { error: string };
+    expect(secondBody.error).toBe('invalid_grant');
+
+    // Exactly ONE token across both attempts.
+    expect(await db.userApiKey.count()).toBe(1);
+    // Row's redeemedAt was set by the first redemption and stays.
     await assertCodeRedeemed(authCodeId);
   });
 });

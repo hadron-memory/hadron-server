@@ -41,7 +41,7 @@ import { decodeJwt } from 'jose';
 import { db } from '../integrations/db/client.js';
 import { verifyJwt } from './jwt.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
-import { mintUserApiKey } from '../middleware/auth.js';
+import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.js';
 
 /** Derive the canonical server origin from request headers. */
 export function getServerOrigin(req: Request): string | null {
@@ -842,6 +842,14 @@ function verifyPkceS256(verifier: string, storedChallenge: string): boolean {
   const computed = createHash('sha256').update(verifier).digest('base64url');
   const a = Buffer.from(computed, 'utf8');
   const b = Buffer.from(storedChallenge, 'utf8');
+  // The length check is necessary because `timingSafeEqual` throws
+  // on unequal-length inputs. It IS a mild timing oracle (an attacker
+  // could distinguish "wrong length" from "right length, wrong bytes"
+  // in nanoseconds) but it's not exploitable: SHA-256 base64url output
+  // is ALWAYS 43 chars, and `storedChallenge` came from /authorize's
+  // strict 43-char min validator (PR #157). A length mismatch here
+  // means the stored value was tampered with at the DB layer, which
+  // is outside the threat model this check defends against.
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
 }
@@ -921,6 +929,20 @@ function isValidCodeVerifier(v: string): boolean {
  */
 async function handleOAuthToken(req: Request, res: Response): Promise<void> {
   const body = (req.body ?? {}) as Record<string, unknown>;
+
+  // **Error-code privacy posture**: RFC 6749 §5.2 distinguishes
+  // `invalid_request` (missing required parameter) from `invalid_grant`
+  // (parameter present but credential is unknown / expired / mismatched).
+  // We deliberately collapse "missing code / client_id / redirect_uri /
+  // verifier" into `invalid_grant`, identical to the "present-but-
+  // unknown" path. The distinction would tell an attacker which
+  // branch they hit (was the credential malformed, or did it not
+  // match a real row?). Uniform `invalid_grant` keeps both
+  // indistinguishable. Spec-compliant clients should never
+  // differentiate retry logic on error code anyway. The
+  // `unsupported_grant_type` and `invalid_request` (multi-value
+  // resource) codes still surface where they're useful diagnostics
+  // for client developers without leaking back-end state.
 
   // 0. grant_type.
   if (body.grant_type !== 'authorization_code') {
@@ -1077,9 +1099,15 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
 
   let rawKey: string;
   try {
+    // Cap the label at the same length as the GraphQL resolver's
+    // user-supplied label. Today the implicit cap depends on DCR's
+    // 200-char client_name cap from PR #154; if that ever changes,
+    // we'd want the OAuth label to stay bounded regardless. Defense
+    // in depth via a single shared constant.
+    const label = `OAuth: ${clientNameForLabel}`.slice(0, USER_API_KEY_LABEL_MAX_LEN);
     const minted = await mintUserApiKey(db, {
       userId: authCode.userId,
-      label: `OAuth: ${clientNameForLabel}`,
+      label,
       createdBy: authCode.userId,
       issuedVia: `oauth:${authCode.clientId}`,
     });

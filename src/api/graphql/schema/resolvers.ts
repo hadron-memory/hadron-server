@@ -2,14 +2,10 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypt
 import { generateId } from '../../../lib/id.js';
 import {
   APP_KEY_PREFIX,
+  USER_API_KEY_LABEL_MAX_LEN,
   hashAppKey,
   mintUserApiKey,
 } from '../../../middleware/auth.js';
-
-// Maximum length for UserApiKey.label. The Prisma column is uncapped
-// TEXT; 200 chars is plenty for a human-readable display name and
-// prevents megabyte-sized labels from being persisted.
-const USER_API_KEY_LABEL_MAX_LEN = 200;
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';

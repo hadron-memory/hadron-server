@@ -22,6 +22,15 @@ export const APP_KEY_PREFIX = 'hdr_app_';
 // a User instead of an App. The raw key is `hdr_user_<64 hex chars>`.
 export const USER_API_KEY_PREFIX = 'hdr_user_';
 
+/**
+ * Cap on `UserApiKey.label`. The Prisma column is uncapped TEXT;
+ * 200 chars is plenty for a human-readable display name and prevents
+ * megabyte-sized labels from being persisted. Both `mintUserApiKey`
+ * callsites (GraphQL `createUserApiKey` + OAuth `/oauth/token`) cap
+ * the label they pass in.
+ */
+export const USER_API_KEY_LABEL_MAX_LEN = 200;
+
 export function hashAppKey(rawKey: string): string {
   return createHash('sha256').update(rawKey).digest('hex');
 }
