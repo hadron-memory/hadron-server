@@ -16,6 +16,7 @@ import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
+import { resolveUserApps } from '../auth/user-app-resolution.js';
 import {
   canReadMemory,
   canWriteToMemory,
@@ -1982,6 +1983,41 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     );
     res.status(401).json({ error: 'Authentication required' });
     return;
+  }
+
+  // Spec 025-oauth-for-mcp FR-020 / research §R-6 — App-identification
+  // resolution at the MCP boundary for user-credential callers
+  // (userId set but appId not set, i.e., JWT or hdr_user_<…> Bearer).
+  // App-key callers already have appId populated by the middleware
+  // and skip this block.
+  //
+  // Single-App default regime only — directory-aware and session-
+  // scoped regimes are carved out to sibling spec
+  // `02X-app-identification-regimes`. The handler MUST NOT silently
+  // pick when a user has 2+ Apps; it returns HTTP 409 with a typed
+  // `multiple_apps_resolved` body so the client can surface a clear
+  // error or (in a future sibling spec) prompt for selection.
+  if (auth.userId && !auth.appId) {
+    const apps = await resolveUserApps(auth.userId, db);
+    if (apps.length > 1) {
+      // Hadron-namespaced custom error code per research §R-6 (not in
+      // the MCP error vocabulary — the MCP spec's authentication
+      // errors are token-scoped, not resource-ambiguity-scoped).
+      res.status(409).json({
+        error: 'multiple_apps_resolved',
+        error_description:
+          'User has more than one Hadron App; this MCP client does not support App selection. See https://hadronmemory.com/docs/auth/multiple-apps-resolved for guidance.',
+      });
+      return;
+    }
+    if (apps.length === 1) {
+      auth.appId = apps[0].id;
+      auth.organizationId = apps[0].organizationId;
+    }
+    // Zero-App path: continue without setting appId (preserves existing
+    // JWT-without-App behavior; downstream App-scoped tool calls will
+    // fail with their existing errors). Zero-App handling is
+    // intentionally not in FR-020's scope.
   }
 
   // Session not found or no session — create a new one.
