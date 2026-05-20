@@ -145,6 +145,19 @@ export function handleAuthorizationServerMetadata(req: Request, res: Response): 
  * `error_description` field of the 400 response, so it's
  * human-readable but contains no PII.
  */
+/**
+ * Caps that bound the size of a single DCR request. Without these,
+ * Express's 100kb JSON limit still allows ~1500 URLs or a single
+ * ~50kb URL through — silly shapes that legitimate clients never
+ * send but that bloat the DB row.
+ *
+ * 20 redirect_uris is generous (Claude Desktop registers exactly 1);
+ * 2048 chars matches the most common URL-length cap in browsers and
+ * HTTP servers.
+ */
+const REDIRECT_URIS_MAX_ENTRIES = 20;
+const REDIRECT_URI_MAX_LENGTH = 2048;
+
 function validateRedirectUris(
   value: unknown,
 ):
@@ -153,10 +166,22 @@ function validateRedirectUris(
   if (!Array.isArray(value) || value.length === 0) {
     return { ok: false, cause: 'redirect_uris must be a non-empty array' };
   }
+  if (value.length > REDIRECT_URIS_MAX_ENTRIES) {
+    return {
+      ok: false,
+      cause: `redirect_uris must contain at most ${REDIRECT_URIS_MAX_ENTRIES} entries`,
+    };
+  }
   const uris: string[] = [];
   for (const entry of value) {
     if (typeof entry !== 'string' || entry.length === 0) {
       return { ok: false, cause: 'redirect_uris must contain only non-empty strings' };
+    }
+    if (entry.length > REDIRECT_URI_MAX_LENGTH) {
+      return {
+        ok: false,
+        cause: `each redirect_uri must be at most ${REDIRECT_URI_MAX_LENGTH} characters`,
+      };
     }
     let parsed: URL;
     try {
@@ -167,6 +192,10 @@ function validateRedirectUris(
         cause: `redirect_uri "${entry}" is not a valid absolute URL`,
       };
     }
+    // The `!parsed.host` check rejects `javascript:`, `data:`, and
+    // `file:` URLs — they parse successfully but have an empty host.
+    // This is the protocol-injection defense for the OAuth callback
+    // surface; a regression test pins it.
     if (!parsed.protocol || !parsed.host) {
       return {
         ok: false,
@@ -230,13 +259,31 @@ export async function handleClientRegistration(
   const clientId = `dcr_${randomBytes(16).toString('hex')}`;
   const issuedAt = Math.floor(Date.now() / 1000);
 
-  await db.oAuthClient.create({
-    data: {
-      clientId,
-      clientName,
-      redirectUris: validation.uris,
-    },
-  });
+  // Express 4 does NOT auto-forward rejected async-handler promises
+  // to its error middleware, so an unhandled DB failure (Prisma
+  // timeout, connection exhaustion, constraint regression in a
+  // future migration) would surface as `unhandledRejection` and —
+  // since Node 15 — crash the process. That turns a DB blip into a
+  // remote-attacker-controlled DOS for an unauthenticated endpoint.
+  // Catch + 500 keeps the failure mode local to the request.
+  try {
+    await db.oAuthClient.create({
+      data: {
+        clientId,
+        clientName,
+        redirectUris: validation.uris,
+      },
+    });
+  } catch (err) {
+    // Don't echo the DB error message back — it may name internal
+    // identifiers or constraints. `server_error` is RFC 7591 §3.2.2's
+    // catch-all error code.
+    res.status(500).json({
+      error: 'server_error',
+      error_description: 'Failed to persist registration',
+    });
+    return;
+  }
 
   res.status(201).json({
     client_id: clientId,
@@ -250,6 +297,14 @@ export async function handleClientRegistration(
 }
 
 // ── Rate-limit middleware factories (FR-019 / R-2) ───────────────────
+//
+// Multi-worker note: express-rate-limit defaults to an in-process
+// `MemoryStore`. In a pm2-cluster or k8s-replicas deployment, each
+// worker holds its own counter — effective burst becomes
+// `10 × workers/min/IP` rather than the documented 10/min/IP. That's
+// acceptable for Phase 2B (the limit exists to stop accidental DOS,
+// not to enforce a hard quota). If we ever need a true cluster-wide
+// ceiling, swap to a Redis store via `rate-limit-redis`.
 
 /**
  * Body shape returned by both rate-limit middlewares on exceedance.

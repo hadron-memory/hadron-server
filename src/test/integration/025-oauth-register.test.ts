@@ -21,7 +21,7 @@
  * thresholds.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { createServer as createHttpServer, type Server } from 'node:http';
@@ -34,6 +34,168 @@ import { cleanDb } from '../helpers.js';
 // ── Happy path + validation 400s (real createServer) ─────────────────
 
 describe('POST /oauth/register — happy path + validation', () => {
+  let server: Server;
+  let baseUrl: string;
+  // TEST-NET-3 (RFC 5737) — IPs reserved for documentation/test that
+  // will never appear in the wild. The happy-path block now has >10
+  // tests; the production burst limiter is 10/IP/min, so every test
+  // must claim a distinct synthetic client IP via X-F-F or the late
+  // tests in the block get 429'd by leftover counter state from the
+  // earlier tests (the router is built once via createServer; the
+  // limiter persists across tests in the block).
+  let nextIpOctet = 0;
+  const uniqueTestIp = () => `203.0.113.${(nextIpOctet = (nextIpOctet + 1) % 254)}`;
+
+  async function postRegister(body: unknown): Promise<Response> {
+    return fetch(`${baseUrl}/oauth/register`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-for': uniqueTestIp(),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  beforeAll(async () => {
+    const app = await createServer();
+    server = createHttpServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    baseUrl = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()));
+    });
+  });
+
+  beforeEach(async () => {
+    await cleanDb(db);
+  });
+
+  it('returns 201 + RFC 7591 body shape and persists the OAuthClient', async () => {
+    const res = await postRegister({
+      client_name: 'Some MCP Client',
+      redirect_uris: ['https://example.com/callback'],
+      token_endpoint_auth_method: 'none',
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      client_id: expect.stringMatching(/^dcr_[0-9a-f]{32}$/),
+      client_name: 'Some MCP Client',
+      redirect_uris: ['https://example.com/callback'],
+      token_endpoint_auth_method: 'none',
+      client_id_issued_at: expect.any(Number),
+    });
+    // Persisted row matches the response — single source of truth.
+    const row = await db.oAuthClient.findUniqueOrThrow({
+      where: { clientId: body.client_id as string },
+    });
+    expect(row.clientName).toBe('Some MCP Client');
+    expect(row.redirectUris).toEqual(['https://example.com/callback']);
+  });
+
+  it('falls back to "Unnamed MCP Client" when client_name is absent', async () => {
+    const res = await postRegister({ redirect_uris: ['https://example.com/cb'] });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { client_name: string };
+    expect(body.client_name).toBe('Unnamed MCP Client');
+  });
+
+  it('rejects missing redirect_uris → 400 invalid_redirect_uri', async () => {
+    const res = await postRegister({ client_name: 'X' });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe('invalid_redirect_uri');
+    expect(body.error_description).toMatch(/non-empty array/);
+  });
+
+  it('rejects empty redirect_uris array → 400', async () => {
+    const res = await postRegister({ redirect_uris: [] });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe('invalid_redirect_uri');
+  });
+
+  it('rejects relative redirect_uri → 400 invalid_redirect_uri', async () => {
+    const res = await postRegister({ redirect_uris: ['/callback'] });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; error_description: string };
+    expect(body.error).toBe('invalid_redirect_uri');
+    expect(body.error_description).toMatch(/not a valid absolute URL/);
+  });
+
+  it('rejects redirect_uri with fragment → 400 invalid_redirect_uri', async () => {
+    const res = await postRegister({ redirect_uris: ['https://example.com/cb#tok'] });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; error_description: string };
+    expect(body.error).toBe('invalid_redirect_uri');
+    expect(body.error_description).toMatch(/must not contain a fragment/);
+  });
+
+  it('rejects redirect_uris that contains non-string entries → 400', async () => {
+    const res = await postRegister({ redirect_uris: ['https://example.com/cb', 42] });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe('invalid_redirect_uri');
+  });
+
+  it('does NOT persist a row on validation failure', async () => {
+    const before = await db.oAuthClient.count();
+    const res = await postRegister({ redirect_uris: ['not-a-url'] });
+    expect(res.status).toBe(400);
+    expect(await db.oAuthClient.count()).toBe(before);
+  });
+
+  it.each([
+    ['javascript', 'javascript:alert(1)'],
+    ['data', 'data:text/html,<script>alert(1)</script>'],
+    ['file', 'file:///etc/passwd'],
+  ])(
+    'rejects protocol-injection scheme (%s) — empty host → 400',
+    async (_name, uri) => {
+      // These schemes parse successfully (URL accepts them) but
+      // resolve to an empty host. The `!parsed.host` check in
+      // validateRedirectUris is the load-bearing defense; this test
+      // regression-guards that line.
+      const res = await postRegister({ redirect_uris: [uri] });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; error_description: string };
+      expect(body.error).toBe('invalid_redirect_uri');
+      expect(body.error_description).toMatch(/scheme \+ authority/);
+    },
+  );
+
+  it('rejects redirect_uris array longer than the documented cap → 400', async () => {
+    const tooMany = Array.from({ length: 21 }, (_, i) => `https://example.com/cb${i}`);
+    const res = await postRegister({ redirect_uris: tooMany });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; error_description: string };
+    expect(body.error).toBe('invalid_redirect_uri');
+    expect(body.error_description).toMatch(/at most 20/);
+  });
+
+  it('rejects a single redirect_uri longer than 2048 chars → 400', async () => {
+    const longPath = 'x'.repeat(2100);
+    const res = await postRegister({
+      redirect_uris: [`https://example.com/${longPath}`],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; error_description: string };
+    expect(body.error).toBe('invalid_redirect_uri');
+    expect(body.error_description).toMatch(/at most 2048/);
+  });
+});
+
+// ── DB failure path (Issue #1 regression guard) ──────────────────────
+
+describe('POST /oauth/register — DB failure returns 500 (not a crash)', () => {
+  // Express 4 does not auto-forward rejected async-handler promises
+  // to error middleware. Before the try/catch landed, a thrown
+  // Prisma error crashed the process. This test pins the 500
+  // behavior so a future refactor that drops the try/catch fails
+  // here before it lands in production.
   let server: Server;
   let baseUrl: string;
 
@@ -55,109 +217,36 @@ describe('POST /oauth/register — happy path + validation', () => {
     await cleanDb(db);
   });
 
-  it('returns 201 + RFC 7591 body shape and persists the OAuthClient', async () => {
-    const res = await fetch(`${baseUrl}/oauth/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        client_name: 'Some MCP Client',
-        redirect_uris: ['https://example.com/callback'],
-        token_endpoint_auth_method: 'none',
-      }),
-    });
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body).toMatchObject({
-      client_id: expect.stringMatching(/^dcr_[0-9a-f]{32}$/),
-      client_name: 'Some MCP Client',
-      redirect_uris: ['https://example.com/callback'],
-      token_endpoint_auth_method: 'none',
-      client_id_issued_at: expect.any(Number),
-    });
-    // Persisted row matches the response — single source of truth.
-    const row = await db.oAuthClient.findUniqueOrThrow({
-      where: { clientId: body.client_id as string },
-    });
-    expect(row.clientName).toBe('Some MCP Client');
-    expect(row.redirectUris).toEqual(['https://example.com/callback']);
-  });
-
-  it('falls back to "Unnamed MCP Client" when client_name is absent', async () => {
-    const res = await fetch(`${baseUrl}/oauth/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ redirect_uris: ['https://example.com/cb'] }),
-    });
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { client_name: string };
-    expect(body.client_name).toBe('Unnamed MCP Client');
-  });
-
-  it('rejects missing redirect_uris → 400 invalid_redirect_uri', async () => {
-    const res = await fetch(`${baseUrl}/oauth/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ client_name: 'X' }),
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body.error).toBe('invalid_redirect_uri');
-    expect(body.error_description).toMatch(/non-empty array/);
-  });
-
-  it('rejects empty redirect_uris array → 400', async () => {
-    const res = await fetch(`${baseUrl}/oauth/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ redirect_uris: [] }),
-    });
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe('invalid_redirect_uri');
-  });
-
-  it('rejects relative redirect_uri → 400 invalid_redirect_uri', async () => {
-    const res = await fetch(`${baseUrl}/oauth/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ redirect_uris: ['/callback'] }),
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string; error_description: string };
-    expect(body.error).toBe('invalid_redirect_uri');
-    expect(body.error_description).toMatch(/not a valid absolute URL/);
-  });
-
-  it('rejects redirect_uri with fragment → 400 invalid_redirect_uri', async () => {
-    const res = await fetch(`${baseUrl}/oauth/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ redirect_uris: ['https://example.com/cb#tok'] }),
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string; error_description: string };
-    expect(body.error).toBe('invalid_redirect_uri');
-    expect(body.error_description).toMatch(/must not contain a fragment/);
-  });
-
-  it('rejects redirect_uris that contains non-string entries → 400', async () => {
-    const res = await fetch(`${baseUrl}/oauth/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ redirect_uris: ['https://example.com/cb', 42] }),
-    });
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe('invalid_redirect_uri');
-  });
-
-  it('does NOT persist a row on validation failure', async () => {
-    const before = await db.oAuthClient.count();
-    const res = await fetch(`${baseUrl}/oauth/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ redirect_uris: ['not-a-url'] }),
-    });
-    expect(res.status).toBe(400);
-    expect(await db.oAuthClient.count()).toBe(before);
+  it('returns 500 + server_error when oAuthClient.create throws', async () => {
+    const spy = vi
+      .spyOn(db.oAuthClient, 'create')
+      .mockRejectedValueOnce(new Error('simulated DB outage'));
+    try {
+      const res = await fetch(`${baseUrl}/oauth/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          client_name: 'X',
+          redirect_uris: ['https://example.com/cb'],
+        }),
+      });
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.error).toBe('server_error');
+      // The 500 body MUST NOT echo the raw DB error message (could
+      // leak internal identifiers / constraints).
+      expect(JSON.stringify(body)).not.toMatch(/simulated DB outage/);
+      // The next request must succeed — confirms the failure was
+      // contained to one request, not a process-level crash.
+      const followUp = await fetch(`${baseUrl}/oauth/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ redirect_uris: ['https://example.com/cb'] }),
+      });
+      expect(followUp.status).toBe(201);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
@@ -242,6 +331,29 @@ describe('POST /oauth/register — burst rate limit (10/min/IP)', () => {
     }
     expect((await send(ipA)).status).toBe(429);
     expect((await send(ipB)).status).toBe(201);
+  });
+
+  it('429 from burst limiter has Retry-After ≤ 60 (not 86400 — daily limiter has not run)', async () => {
+    // Pins middleware ordering: burst → daily → handler. If the
+    // ordering were reversed, the 11th request would be rejected by
+    // the daily limiter (Retry-After ~86400). The burst-window
+    // Retry-After (≤60) is the only value distinguishing the two
+    // limiters in the 429 response shape.
+    const clientIp = '198.51.100.12';
+    const send = () =>
+      fetch(`${baseUrl}/oauth/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': clientIp },
+        body: JSON.stringify({ redirect_uris: ['https://example.com/cb'] }),
+      });
+
+    for (let i = 0; i < 10; i++) {
+      expect((await send()).status).toBe(201);
+    }
+    const eleventh = await send();
+    expect(eleventh.status).toBe(429);
+    const retryAfter = Number(eleventh.headers.get('retry-after'));
+    expect(retryAfter).toBeLessThanOrEqual(60);
   });
 });
 
@@ -334,39 +446,45 @@ describe('POST /oauth/register — trust-proxy + rate-limit IP resolution', () =
   // 1.2.3.4, 103.21.244.10`. Express's trust-proxy logic peels off
   // the trusted hop and exposes `req.ip = "1.2.3.4"` (real client).
 
-  let server: Server;
-  let baseUrl: string;
+  let server: Server | null = null;
+  let baseUrl = '';
   const capturedIps: string[] = [];
 
-  beforeAll(async () => {
+  /**
+   * Spin up a fresh listener with the given trust-proxy config. Spy
+   * handler captures req.ip without touching the DB — the goal here
+   * is to pin req.ip resolution, not exercise persistence (covered
+   * by the happy-path suite). Returns nothing; mutates `server` +
+   * `baseUrl` so the test body uses them directly.
+   */
+  async function makeTestApp(trustProxy: string[]): Promise<void> {
     const app = express();
-    // Production-style: trust ONLY Cloudflare's CIDR. A request
-    // arriving from outside this CIDR with X-F-F set should NOT have
-    // X-F-F honored.
-    app.set('trust proxy', ['103.21.244.0/22']);
-    app.use(express.json());
-    // Spy handler captures req.ip without touching the DB. We don't
-    // use the real registration handler here because the goal is to
-    // pin req.ip resolution, not exercise the persistence path
-    // (which the happy-path suite already covers).
+    app.set('trust proxy', trustProxy);
     app.post('/oauth/register', (req, res) => {
       capturedIps.push(req.ip ?? '<unknown>');
       res.status(204).end();
     });
     server = createHttpServer(app);
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as AddressInfo).port;
     baseUrl = `http://127.0.0.1:${port}`;
-  });
-
-  afterAll(async () => {
-    await new Promise<void>((resolve, reject) => {
-      server.close((err) => (err ? reject(err) : resolve()));
-    });
-  });
+  }
 
   beforeEach(() => {
     capturedIps.length = 0;
+  });
+
+  afterEach(async () => {
+    // Fully await the listener teardown so the next test starts
+    // clean. server.close() is async; not awaiting can cause leaked
+    // open handles + flake on CI resource-leak detectors.
+    if (server) {
+      const s = server;
+      server = null;
+      await new Promise<void>((resolve, reject) => {
+        s.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
   });
 
   it('req.ip resolves to the REAL client IP, not the Cloudflare proxy', async () => {
@@ -382,17 +500,7 @@ describe('POST /oauth/register — trust-proxy + rate-limit IP resolution', () =
     // this models "the test runner stands in for Cloudflare". The
     // production setup is structurally identical: trust the
     // immediate-peer's CIDR; X-F-F is then a stack of upstream hops.
-    server.close();
-    const app = express();
-    app.set('trust proxy', ['127.0.0.1/32', '103.21.244.0/22']);
-    app.post('/oauth/register', (req, res) => {
-      capturedIps.push(req.ip ?? '<unknown>');
-      res.status(204).end();
-    });
-    server = createHttpServer(app);
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const port = (server.address() as AddressInfo).port;
-    baseUrl = `http://127.0.0.1:${port}`;
+    await makeTestApp(['127.0.0.1/32', '103.21.244.0/22']);
 
     const res = await fetch(`${baseUrl}/oauth/register`, {
       method: 'POST',
@@ -403,20 +511,10 @@ describe('POST /oauth/register — trust-proxy + rate-limit IP resolution', () =
   });
 
   it('untrusted X-F-F is IGNORED (req.ip stays at the immediate peer)', async () => {
-    // Restart the listener with ONLY the Cloudflare CIDR trusted
-    // (127.0.0.1 is NOT trusted this time). A spoofed X-F-F should
-    // be dropped — req.ip stays at the TCP source (127.0.0.1).
-    server.close();
-    const app = express();
-    app.set('trust proxy', ['103.21.244.0/22']);
-    app.post('/oauth/register', (req, res) => {
-      capturedIps.push(req.ip ?? '<unknown>');
-      res.status(204).end();
-    });
-    server = createHttpServer(app);
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const port = (server.address() as AddressInfo).port;
-    baseUrl = `http://127.0.0.1:${port}`;
+    // With ONLY the Cloudflare CIDR trusted (127.0.0.1 is NOT trusted
+    // this time), a spoofed X-F-F should be dropped — req.ip stays
+    // at the TCP source (127.0.0.1).
+    await makeTestApp(['103.21.244.0/22']);
 
     const res = await fetch(`${baseUrl}/oauth/register`, {
       method: 'POST',
