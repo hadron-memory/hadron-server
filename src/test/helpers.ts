@@ -42,6 +42,13 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.orgMember.deleteMany();
   await db.memory.deleteMany();
   await db.organization.deleteMany();
+  // Spec 025-oauth-for-mcp credential models. AuthCode FKs to both
+  // OAuthClient and User with onDelete: Cascade; UserApiKey FKs to
+  // User. Delete authCode first to keep cascades predictable across
+  // Postgres versions, then the parent rows.
+  await db.authCode.deleteMany();
+  await db.userApiKey.deleteMany();
+  await db.oAuthClient.deleteMany();
   await db.user.deleteMany();
 }
 
