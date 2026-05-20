@@ -3,7 +3,7 @@ import { SignJWT } from 'jose';
 import type { Request } from 'express';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
-import { resolveAuthContext } from './auth.js';
+import { resolveAuthContext, hashUserApiKey, USER_API_KEY_PREFIX } from './auth.js';
 
 // JWT_SECRET is set in vitest.config.ts env
 
@@ -233,6 +233,134 @@ describe('resolveAuthContext', () => {
       } as unknown as Request;
       const ctx = await resolveAuthContext(req, db);
       expect(ctx.sessionId).toBeUndefined();
+    });
+  });
+
+  // ── User API Key auth (spec 025-oauth-for-mcp) ──────────────────
+
+  describe('User API Key auth', () => {
+    async function createUserWithKey(
+      user: Partial<{ id: string; githubUsername: string | null; email: string | null }> = {},
+    ): Promise<{ userId: string; rawKey: string; keyId: string }> {
+      const { randomBytes } = await import('crypto');
+      const userId = user.id ?? `user-${randomBytes(4).toString('hex')}`;
+      const createdUser = await db.user.create({
+        data: {
+          id: userId,
+          githubUsername: user.githubUsername === undefined ? null : user.githubUsername,
+          email: user.email === undefined ? null : user.email,
+          roles: ['READER'],
+        },
+      });
+      const rawKey = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
+      const keyHash = hashUserApiKey(rawKey);
+      const apiKey = await db.userApiKey.create({
+        data: {
+          userId: createdUser.id,
+          keyHash,
+          keyPreview: rawKey.slice(-4),
+          label: 'test',
+          createdBy: createdUser.id,
+          issuedVia: 'portal',
+        },
+      });
+      return { userId: createdUser.id, rawKey, keyId: apiKey.id };
+    }
+
+    it('resolves a valid User API Key to user context', async () => {
+      const { userId, rawKey } = await createUserWithKey({
+        githubUsername: 'alice',
+      });
+      const ctx = await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
+      expect(ctx.userId).toBe(userId);
+      expect(ctx.clientId).toBe('github:alice');
+      expect(ctx.appId).toBeUndefined(); // App resolution lives downstream (FR-020)
+      expect(ctx.sessionId).toBeUndefined();
+    });
+
+    it('synthesizes clientId from githubUsername when present', async () => {
+      const { rawKey } = await createUserWithKey({ githubUsername: 'bob' });
+      const ctx = await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
+      expect(ctx.clientId).toBe('github:bob');
+    });
+
+    it('falls back to email-based clientId when githubUsername absent', async () => {
+      const { rawKey } = await createUserWithKey({
+        githubUsername: null,
+        email: 'carol@example.com',
+      });
+      const ctx = await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
+      expect(ctx.clientId).toBe('email:carol@example.com');
+    });
+
+    it('falls back to user:<id> when neither githubUsername nor email is set', async () => {
+      const { userId, rawKey } = await createUserWithKey({
+        id: 'user-fallback-1',
+        githubUsername: null,
+        email: null,
+      });
+      const ctx = await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
+      expect(ctx.clientId).toBe(`user:${userId}`);
+    });
+
+    it('returns empty context for a revoked User API Key (no info leak)', async () => {
+      const { rawKey, keyId } = await createUserWithKey({ githubUsername: 'dave' });
+      await db.userApiKey.update({
+        where: { id: keyId },
+        data: { revokedAt: new Date() },
+      });
+      const ctx = await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
+      expect(ctx).toEqual({});
+    });
+
+    it('returns empty context for a soft-deleted user', async () => {
+      const { rawKey, userId } = await createUserWithKey({ githubUsername: 'erin' });
+      await db.user.update({
+        where: { id: userId },
+        data: { deletedAt: new Date() },
+      });
+      const ctx = await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
+      expect(ctx).toEqual({});
+    });
+
+    it('returns empty context for an unknown User API Key', async () => {
+      const ctx = await resolveAuthContext(
+        makeReq(`Bearer ${USER_API_KEY_PREFIX}${'0'.repeat(64)}`),
+        db,
+      );
+      expect(ctx).toEqual({});
+    });
+
+    it('hashUserApiKey is deterministic over identical inputs', () => {
+      const raw = USER_API_KEY_PREFIX + 'a'.repeat(64);
+      expect(hashUserApiKey(raw)).toBe(hashUserApiKey(raw));
+    });
+
+    it('hashUserApiKey produces different hashes for different inputs', () => {
+      const a = USER_API_KEY_PREFIX + 'a'.repeat(64);
+      const b = USER_API_KEY_PREFIX + 'b'.repeat(64);
+      expect(hashUserApiKey(a)).not.toBe(hashUserApiKey(b));
+    });
+
+    it('updates lastUsedAt fire-and-forget on successful resolution', async () => {
+      const { rawKey, keyId } = await createUserWithKey({ githubUsername: 'frank' });
+      const before = await db.userApiKey.findUniqueOrThrow({ where: { id: keyId } });
+      expect(before.lastUsedAt).toBeNull();
+
+      await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
+
+      // Fire-and-forget — wait briefly for the deferred update to land.
+      await new Promise((r) => setTimeout(r, 50));
+
+      const after = await db.userApiKey.findUniqueOrThrow({ where: { id: keyId } });
+      expect(after.lastUsedAt).not.toBeNull();
+    });
+
+    it('does not surface appId for user-credential callers', async () => {
+      const { rawKey } = await createUserWithKey({ githubUsername: 'gina' });
+      const ctx = await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
+      expect(ctx.appId).toBeUndefined();
+      expect(ctx.organizationId).toBeUndefined();
     });
   });
 

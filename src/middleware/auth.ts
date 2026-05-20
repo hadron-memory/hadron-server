@@ -16,12 +16,22 @@ export interface AuthContext {
 // ambiguity. The raw key is `hdr_app_<64 hex chars>`.
 export const APP_KEY_PREFIX = 'hdr_app_';
 
+// User API Keys (spec 025-oauth-for-mcp): user-scoped credential issued
+// either portal-side (createUserApiKey GraphQL mutation) or by the OAuth
+// /token endpoint. Same SHA-256 hashing primitive as AppKey; resolves to
+// a User instead of an App. The raw key is `hdr_user_<64 hex chars>`.
+export const USER_API_KEY_PREFIX = 'hdr_user_';
+
 export function hashAppKey(rawKey: string): string {
   return createHash('sha256').update(rawKey).digest('hex');
 }
 
+export function hashUserApiKey(rawKey: string): string {
+  return createHash('sha256').update(rawKey).digest('hex');
+}
+
 // Resolve auth context from an incoming request.
-// JWTs (contain dots) → OAuth user; App Keys (hdr_app_ prefix) → App.
+// JWTs (contain dots) → OAuth user; `hdr_app_` → App; `hdr_user_` → User.
 export async function resolveAuthContext(
   req: Request,
   db: PrismaClient,
@@ -35,6 +45,10 @@ export async function resolveAuthContext(
     const sessionIdHeader = req.headers['x-hadron-session'];
     const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
     return resolveAppKey(token, db, sessionId);
+  }
+
+  if (token.startsWith(USER_API_KEY_PREFIX)) {
+    return resolveUserApiKey(token, db);
   }
 
   // JWTs have the form header.payload.signature — three base64url segments.
@@ -91,6 +105,50 @@ async function resolveAppKey(
   }
 
   return ctx;
+}
+
+async function resolveUserApiKey(
+  rawKey: string,
+  db: PrismaClient,
+): Promise<AuthContext> {
+  // Same hash-lookup pattern as AppKey: SHA-256 over the 256-bit raw key,
+  // direct lookup by hash. bcrypt would prevent the lookup; the raw key's
+  // entropy makes dictionary attacks against the hash a non-issue.
+  const keyHash = hashUserApiKey(rawKey);
+  const userApiKey = await db.userApiKey.findUnique({
+    where: { keyHash },
+    include: { user: true },
+  });
+  if (!userApiKey || userApiKey.revokedAt || userApiKey.user.deletedAt) {
+    // Revoked / deleted-user keys fail authentication identically to
+    // unknown keys — no information leakage per spec Edge Cases.
+    return {};
+  }
+
+  // Fire-and-forget lastUsedAt update; failures are non-fatal.
+  db.userApiKey
+    .update({ where: { id: userApiKey.id }, data: { lastUsedAt: new Date() } })
+    .catch(() => {});
+
+  // Synthesize clientId from the resolved User. Prefer GitHub username
+  // (matches the JWT path's `github:<username>`); fall back to email,
+  // then to the opaque user-id form.
+  const user = userApiKey.user;
+  const clientId = user.githubUsername
+    ? `github:${user.githubUsername}`
+    : user.email
+      ? `email:${user.email}`
+      : `user:${user.id}`;
+
+  return {
+    userId: user.id,
+    clientId,
+    // User keys carry no explicit roles in the auth context; resolvers
+    // consult User.roles directly when needed. App-scoped roles are
+    // not applicable — `appId` is intentionally absent (App resolution
+    // for user credentials happens at the MCP boundary per FR-020).
+    roles: user.roles as AuthContext['roles'],
+  };
 }
 
 async function resolveJwt(token: string): Promise<AuthContext> {
