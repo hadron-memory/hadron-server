@@ -6,6 +6,11 @@ import {
   hashAppKey,
   hashUserApiKey,
 } from '../../../middleware/auth.js';
+
+// Maximum length for UserApiKey.label. The Prisma column is uncapped
+// TEXT; 200 chars is plenty for a human-readable display name and
+// prevents megabyte-sized labels from being persisted.
+const USER_API_KEY_LABEL_MAX_LEN = 200;
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
@@ -2554,8 +2559,15 @@ export const resolvers = {
     },
 
     // 025-oauth-for-mcp FR-004: list caller's own user-scoped API keys
-    // (active + revoked). Powers Phase 3's portal revocation UI
-    // (SC-006). AppKey-resolved callers rejected (no user context).
+    // (active + revoked — deliberate difference from `appKeys` query,
+    // which returns active-only for the admin app-key list; this query
+    // powers the user's self-service audit log so revoked keys must
+    // remain visible). AppKey-resolved callers rejected (no user
+    // context).
+    //
+    // `id desc` tiebreaker on createdAt ties (cuid is monotonic-ish so
+    // this is effectively a fingerprint); guarantees deterministic
+    // ordering regardless of millisecond ties.
     myUserApiKeys: async (_: unknown, __: unknown, ctx: Context) => {
       if (!ctx.userId) {
         throw new GraphQLError(
@@ -2565,7 +2577,7 @@ export const resolvers = {
       }
       return ctx.db.userApiKey.findMany({
         where: { userId: ctx.userId },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       });
     },
   },
@@ -6501,6 +6513,15 @@ export const resolvers = {
           { extensions: { code: 'UNAUTHENTICATED' } },
         );
       }
+      // Cap label length to prevent unbounded TEXT writes. The Prisma
+      // column is uncapped; 200 chars is plenty for a human-readable
+      // display name (e.g., "MacBook Air — Claude Desktop").
+      if (label != null && label.length > USER_API_KEY_LABEL_MAX_LEN) {
+        throw new GraphQLError(
+          `Label exceeds ${USER_API_KEY_LABEL_MAX_LEN}-character limit.`,
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
       // Raw key format: hdr_user_<64 hex chars> (256 bits of entropy).
       // Same primitive as AppKey; resolves via the same middleware path.
       const rawKey = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
@@ -6520,8 +6541,19 @@ export const resolvers = {
     },
 
     // 025-oauth-for-mcp FR-004: revoke a user-scoped API key. Returns
-    // the updated row (REV-D3 — was Boolean! in PR 137). Idempotent on
+    // the updated row (D3 — was Boolean! in PR 137). Idempotent on
     // already-revoked keys.
+    //
+    // **Atomic + no-info-leak design** (PR #145 review):
+    // - The updateMany-with-conditional pattern (`where: { id, userId,
+    //   revokedAt: null }`) makes the write race-safe: under concurrent
+    //   calls, only one wins the revokedAt timestamp; the loser's
+    //   updateMany returns count=0 and no overwrite happens.
+    // - Scoping the subsequent read to `{ id, userId }` collapses the
+    //   cross-user case to NOT_FOUND, closing the id-enumeration
+    //   channel that a separate FORBIDDEN branch would have opened
+    //   (an attacker with a guess at someone else's key id would
+    //   otherwise learn that the id exists).
     revokeUserApiKey: async (
       _: unknown,
       { id }: { id: string },
@@ -6533,29 +6565,28 @@ export const resolvers = {
           { extensions: { code: 'UNAUTHENTICATED' } },
         );
       }
-      const key = await ctx.db.userApiKey.findUnique({ where: { id } });
-      if (!key) {
-        throw new GraphQLError(`UserApiKey ${id} not found`, {
+      // Atomic conditional revoke: only flips revokedAt on rows that
+      // (a) match the id, (b) are owned by the caller, AND
+      // (c) are not already revoked. Returns count=0 for any
+      // non-matching row, which we disambiguate below.
+      await ctx.db.userApiKey.updateMany({
+        where: { id, userId: ctx.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      // Read back via findFirst scoped to `{ id, userId }`. If the row
+      // is missing, the id is either unknown OR belongs to a different
+      // user — collapse both to NOT_FOUND. If present, return it
+      // unchanged (idempotent path: revokedAt was already set, so
+      // updateMany did nothing).
+      const row = await ctx.db.userApiKey.findFirst({
+        where: { id, userId: ctx.userId },
+      });
+      if (!row) {
+        throw new GraphQLError(`UserApiKey ${id} not found.`, {
           extensions: { code: 'NOT_FOUND' },
         });
       }
-      if (key.userId !== ctx.userId) {
-        // Ownership check — never reveal whether a different user owns
-        // the row (consistent with NOT_FOUND-style discretion is
-        // tempting, but the spec calls for FORBIDDEN here so the portal
-        // can show a meaningful error).
-        throw new GraphQLError('You do not own this key.', {
-          extensions: { code: 'FORBIDDEN' },
-        });
-      }
-      if (key.revokedAt) {
-        // Idempotent — return the existing row unchanged.
-        return key;
-      }
-      return ctx.db.userApiKey.update({
-        where: { id },
-        data: { revokedAt: new Date() },
-      });
+      return row;
     },
 
     // 005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's

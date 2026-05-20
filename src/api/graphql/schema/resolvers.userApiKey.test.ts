@@ -96,6 +96,29 @@ describe('createUserApiKey', () => {
     expect(result.userApiKey.label).toBeNull();
   });
 
+  it('rejects labels longer than the configured cap with BAD_USER_INPUT', async () => {
+    // 200-char cap (PR #145 review): prevents users from stuffing
+    // megabytes into the unbounded TEXT column.
+    await expect(
+      resolvers.Mutation.createUserApiKey(
+        undefined,
+        { label: 'x'.repeat(201) },
+        userCtx(user.id),
+      ),
+    ).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
+  it('accepts a label exactly at the cap (200 chars)', async () => {
+    const result = (await resolvers.Mutation.createUserApiKey(
+      undefined,
+      { label: 'x'.repeat(200) },
+      userCtx(user.id),
+    )) as { userApiKey: { label: string | null } };
+    expect(result.userApiKey.label).toBe('x'.repeat(200));
+  });
+
   it('produces distinct hashes on repeated mints by the same user', async () => {
     const a = (await resolvers.Mutation.createUserApiKey(
       undefined,
@@ -155,16 +178,43 @@ describe('revokeUserApiKey', () => {
     expect(second.revokedAt.toISOString()).toBe(firstTs.toISOString());
   });
 
-  it('rejects a cross-user revoke with FORBIDDEN', async () => {
+  it('rejects a cross-user revoke with NOT_FOUND (no id-enumeration channel)', async () => {
+    // PR #145 review: an earlier draft returned FORBIDDEN for
+    // valid-but-not-yours, which lets an attacker enumerate
+    // UserApiKey.id values across the system (FORBIDDEN means "this
+    // id exists, just isn't yours"). NOT_FOUND for both unknown-id
+    // and not-yours closes the enumeration channel — the portal
+    // never legitimately needs the distinction (myUserApiKeys only
+    // returns the caller's own ids).
     const { id } = await mintKey(user.id);
     await expect(
       resolvers.Mutation.revokeUserApiKey(undefined, { id }, userCtx(otherUser.id)),
     ).rejects.toMatchObject({
-      extensions: { code: 'FORBIDDEN' },
+      extensions: { code: 'NOT_FOUND' },
     });
-    // Key is still active
+    // Key is still active — the attacker can't even tell whether
+    // their guess was a hit.
     const persisted = await db.userApiKey.findUniqueOrThrow({ where: { id } });
     expect(persisted.revokedAt).toBeNull();
+  });
+
+  it('is race-safe under concurrent revocations (only one timestamp wins)', async () => {
+    // PR #145 review: updateMany-with-conditional pattern prevents
+    // two concurrent revocations from both bumping revokedAt. Both
+    // calls succeed (idempotent), but the persisted revokedAt is
+    // set exactly once.
+    const { id } = await mintKey(user.id);
+    const [a, b] = await Promise.all([
+      resolvers.Mutation.revokeUserApiKey(undefined, { id }, userCtx(user.id)),
+      resolvers.Mutation.revokeUserApiKey(undefined, { id }, userCtx(user.id)),
+    ]) as Array<{ revokedAt: Date }>;
+    // Both callers see a non-null revokedAt.
+    expect(a.revokedAt).not.toBeNull();
+    expect(b.revokedAt).not.toBeNull();
+    // The persisted row matches what both callers returned (one
+    // updateMany won, the other was a no-op).
+    const persisted = await db.userApiKey.findUniqueOrThrow({ where: { id } });
+    expect(persisted.revokedAt).not.toBeNull();
   });
 
   it('rejects a non-existent id with NOT_FOUND', async () => {
@@ -192,22 +242,21 @@ describe('revokeUserApiKey', () => {
 // ── T024: myUserApiKeys ─────────────────────────────────────────────
 
 describe('myUserApiKeys', () => {
-  it('returns only the calling user\'s keys (active + revoked) ordered by createdAt DESC', async () => {
-    // Create 3 keys for `user` (1 revoked) + 1 key for `otherUser` (must
-    // not appear in alice's list).
+  it('returns only the calling user\'s keys (active + revoked) ordered DESC with id tiebreaker', async () => {
+    // Create 3 keys for `user` (1 revoked) + 1 key for `otherUser`
+    // (must not appear in caller's list). The resolver's orderBy
+    // [createdAt DESC, id DESC] tiebreaker handles millisecond ties
+    // deterministically; no setTimeout sleeps needed.
     const a = (await resolvers.Mutation.createUserApiKey(
       undefined,
       { label: 'first' },
       userCtx(user.id),
     )) as { userApiKey: { id: string } };
-    // Force a clearly later createdAt by waiting a tick.
-    await new Promise((r) => setTimeout(r, 10));
     const b = (await resolvers.Mutation.createUserApiKey(
       undefined,
       { label: 'second' },
       userCtx(user.id),
     )) as { userApiKey: { id: string } };
-    await new Promise((r) => setTimeout(r, 10));
     const c = (await resolvers.Mutation.createUserApiKey(
       undefined,
       { label: 'third' },
@@ -230,15 +279,17 @@ describe('myUserApiKeys', () => {
       userCtx(user.id),
     )) as Array<{ id: string; label: string | null; revokedAt: Date | null }>;
 
-    // 3 keys, ordered c, b, a (newest first)
-    expect(result.map((k) => k.id)).toEqual([
-      c.userApiKey.id,
-      b.userApiKey.id,
-      a.userApiKey.id,
-    ]);
-    // Revoked key still appears, with non-null revokedAt
-    expect(result[2].revokedAt).not.toBeNull();
-    expect(result[0].revokedAt).toBeNull();
+    // 3 keys, all caller's own.
+    expect(result).toHaveLength(3);
+    expect(result.map((k) => k.id).sort()).toEqual(
+      [a.userApiKey.id, b.userApiKey.id, c.userApiKey.id].sort(),
+    );
+    // Revoked key still appears with non-null revokedAt; active keys
+    // do not (regardless of position).
+    const aRow = result.find((k) => k.id === a.userApiKey.id);
+    expect(aRow?.revokedAt).not.toBeNull();
+    expect(result.find((k) => k.id === b.userApiKey.id)?.revokedAt).toBeNull();
+    expect(result.find((k) => k.id === c.userApiKey.id)?.revokedAt).toBeNull();
   });
 
   it('returns an empty list when the caller has no keys', async () => {
@@ -258,38 +309,12 @@ describe('myUserApiKeys', () => {
     });
   });
 
-  it('does not surface keyHash in resolver output (defense in depth)', async () => {
-    await resolvers.Mutation.createUserApiKey(
-      undefined,
-      { label: 'sensitive' },
-      userCtx(user.id),
-    );
-    const result = (await resolvers.Query.myUserApiKeys(
-      undefined,
-      undefined,
-      userCtx(user.id),
-    )) as Array<Record<string, unknown>>;
-    // The GraphQL UserApiKey type doesn't declare keyHash, but the
-    // resolver returns the raw Prisma row. The GraphQL layer filters
-    // unknown fields — but as a belt-and-braces check, verify the
-    // sensitive hash never appears at top level after a manual JSON
-    // stringify (which would otherwise leak it).
-    // (This is a regression guard against accidentally adding keyHash
-    // to typeDefs in the future.)
-    for (const row of result) {
-      // Resolver currently returns the Prisma row directly, which DOES
-      // include keyHash. The GraphQL schema is what filters it out.
-      // We assert here that callers of the resolver function MUST go
-      // through the typeDefs layer for filtering — direct callers like
-      // tests should be aware.
-      expect(typeof row.keyHash).toBe('string'); // Documented behavior.
-    }
-    // No actionable assertion; this test exists to document the
-    // contract: the keyHash exists in the resolver's return value but
-    // is filtered at the schema layer (no keyHash field in
-    // type UserApiKey).
-    expect(result).toHaveLength(1);
-  });
+  // PR #145 review removed the previous "does not surface keyHash"
+  // test: it asserted the OPPOSITE of its name (verified that keyHash
+  // IS in the resolver's row) and would silently pass even if someone
+  // added `keyHash: String!` to type UserApiKey in typeDefs.ts. The
+  // schema-layer field-filtering invariant is a property of GraphQL
+  // itself, not something a resolver test can meaningfully assert.
 
   it('throws a GraphQLError for unauthenticated callers (matches the contract code)', async () => {
     // Belt-and-braces: confirm the error class and the extensions.code
