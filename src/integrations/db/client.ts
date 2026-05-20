@@ -1,10 +1,13 @@
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 
-// Models with composite primary keys and no `id` column.
+// Models with no auto-gen `id` column. Mostly composite-PK joins;
+// 025-oauth-for-mcp's OAuthClient is single-PK (clientId) but
+// likewise has no separate `id` field, so it belongs here too.
 // 008-agent-installation: AppMember, AgentImport, AgentOrgGrant.
 // 023-app-shape: AppAgent (re-introduced N:M join — PR #130),
 // MemoryShare (US3 — PR #133), MemoryMember (US4 — this PR).
+// 025-oauth-for-mcp: OAuthClient (clientId is the PK).
 const MODELS_WITHOUT_ID = new Set<string>([
   'AgentSubscription',
   'AppMember',
@@ -13,6 +16,7 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'AppAgent',
   'MemoryShare',
   'MemoryMember',
+  'OAuthClient',
 ]);
 
 const basePrisma = new PrismaClient();
