@@ -45,6 +45,12 @@ async function spawnServer(env: Record<string, string>, timeoutMs = 15_000): Pro
         // initCloudflareIps need to even start importing. The test
         // env vars below override per-test behavior.
         ...process.env,
+        // Inert DATABASE_URL by default — overridable per-test if
+        // needed. Prevents any accidental writes against the dev DB
+        // if the boot sequence ever ends up reaching Prisma-touching
+        // code (today the Cloudflare init throws before that, so
+        // this is defense-in-depth).
+        DATABASE_URL: 'postgresql://nobody@127.0.0.1:1/__nonexistent__',
         ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -113,17 +119,15 @@ describe('spec 025 FR-006: trust-proxy boot policy', () => {
   it(
     'boots successfully in NODE_ENV=production when the disk cache holds a valid list',
     async () => {
-      // API still unreachable, but the cache file holds a previously-
-      // fetched list. Boot MUST succeed (fail-safe-stale per R-4 /
-      // Q-025-011).
+      // API unreachable, but the cache file holds a previously-fetched
+      // list. The fallback-stale path MUST engage and the fail-closed
+      // path MUST NOT trip (per R-4 / Q-025-011).
       //
-      // We can't easily verify the full boot in CI (no DB / no port
-      // setup); instead we check that initCloudflareIps's warning
-      // message appears in stderr ("Boot fetch failed; using cached
-      // list…"), confirming the fallback path engaged. If the
-      // process then crashes for downstream reasons (DB unavailable,
-      // etc.), that's fine — we've already confirmed the cache
-      // fallback worked.
+      // We can't drive the full boot in CI (no DB), but we can pin
+      // two positive signals: the fallback-stale warning is emitted
+      // (proving the cache path engaged) AND the refuse-to-boot
+      // error is absent (proving fail-closed wasn't tripped). Both
+      // are checked below.
       const cacheDir = mkdtempSync(join(tmpdir(), '025-boot-policy-test-'));
       const cachePath = join(cacheDir, 'cloudflare-ips.json');
       const { writeFileSync } = await import('node:fs');
@@ -143,13 +147,13 @@ describe('spec 025 FR-006: trust-proxy boot policy', () => {
           PORT: '0',
         });
 
-        // The fallback path emits a stderr warning. Whether the child
-        // exits 0 or non-zero depends on downstream startup (DB
-        // probably succeeds in CI; if it doesn't, we still get the
-        // warning before the next failure).
-        expect(result.stderr).toMatch(/Boot fetch failed; using cached list/);
-        // NOT the fail-closed message — that's the assertion we
-        // didn't trip the refuse-to-boot path.
+        // Positive signal: the fallback-stale warning fires with the
+        // cached fetched_at timestamp interpolated. This is the
+        // load-bearing assertion that the cache fallback engaged.
+        expect(result.stderr).toMatch(
+          /Boot fetch failed; using cached list from 2026-05-19T00:00:00\.000Z/,
+        );
+        // Negative signal: fail-closed path was NOT taken.
         expect(result.stderr).not.toMatch(/Failed to load Cloudflare IP ranges/);
       } finally {
         rmSync(cacheDir, { recursive: true, force: true });

@@ -30,7 +30,7 @@
  * a real Cloudflare-published CIDR range from at most 24 hours ago.
  */
 
-import { writeFile, readFile, mkdir } from 'fs/promises';
+import { writeFile, readFile, mkdir, rename } from 'fs/promises';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 
@@ -69,7 +69,16 @@ function defaultCachePath(): string {
 /**
  * Fetch from the Cloudflare API with a bounded timeout. Returns null on
  * any failure (network error, timeout, HTTP non-2xx, malformed body,
- * `success: false`); the caller decides whether to fall back to cache.
+ * `success: false`, all-garbage CIDR entries); the caller decides
+ * whether to fall back to cache.
+ *
+ * **Filter-then-check ordering matters.** An earlier draft length-
+ * checked the raw arrays, then filtered for strings. A response of
+ * `[null, 0, "garbage"]` passed `length === 3` and was filtered to
+ * `[]`, producing an empty-but-valid CloudflareIps. The caller
+ * would then `app.set('trust proxy', [])` — equivalent to "trust
+ * nothing", which silently breaks X-Forwarded-* handling rather
+ * than refusing to boot (defeats the fail-closed invariant).
  */
 async function fetchFromApi(
   url: string,
@@ -89,10 +98,14 @@ async function fetchFromApi(
     const v4 = json.result?.ipv4_cidrs;
     const v6 = json.result?.ipv6_cidrs;
     if (!Array.isArray(v4) || !Array.isArray(v6)) return null;
-    if (v4.length === 0 && v6.length === 0) return null;
+    const ipv4_cidrs = v4.filter((c): c is string => typeof c === 'string');
+    const ipv6_cidrs = v6.filter((c): c is string => typeof c === 'string');
+    // Filter-then-check: if every entry was non-string garbage, the
+    // post-filter arrays are empty and we must fail-closed.
+    if (ipv4_cidrs.length === 0 && ipv6_cidrs.length === 0) return null;
     return {
-      ipv4_cidrs: v4.filter((c): c is string => typeof c === 'string'),
-      ipv6_cidrs: v6.filter((c): c is string => typeof c === 'string'),
+      ipv4_cidrs,
+      ipv6_cidrs,
       fetched_at: new Date().toISOString(),
     };
   } catch {
@@ -102,7 +115,12 @@ async function fetchFromApi(
   }
 }
 
-/** Read the disk cache. Returns null if absent, unreadable, or malformed. */
+/**
+ * Read the disk cache. Returns null if absent, unreadable, malformed,
+ * or all-garbage-after-filtering (same filter-then-check pattern as
+ * fetchFromApi above — a corrupted cache file mustn't bypass the
+ * fail-closed predicate).
+ */
 async function readCache(path: string): Promise<CloudflareIps | null> {
   try {
     const raw = await readFile(path, 'utf8');
@@ -115,9 +133,12 @@ async function readCache(path: string): Promise<CloudflareIps | null> {
     ) {
       return null;
     }
+    const ipv4_cidrs = parsed.ipv4_cidrs.filter((c): c is string => typeof c === 'string');
+    const ipv6_cidrs = parsed.ipv6_cidrs.filter((c): c is string => typeof c === 'string');
+    if (ipv4_cidrs.length === 0 && ipv6_cidrs.length === 0) return null;
     return {
-      ipv4_cidrs: parsed.ipv4_cidrs.filter((c): c is string => typeof c === 'string'),
-      ipv6_cidrs: parsed.ipv6_cidrs.filter((c): c is string => typeof c === 'string'),
+      ipv4_cidrs,
+      ipv6_cidrs,
       fetched_at: parsed.fetched_at,
     };
   } catch {
@@ -125,9 +146,19 @@ async function readCache(path: string): Promise<CloudflareIps | null> {
   }
 }
 
+/**
+ * Atomic cache write — writes to a tempfile alongside the target,
+ * then renames. Prevents a partially-written JSON if the writer is
+ * interrupted (process kill, OOM) or if multiple workers race on the
+ * same file (pm2 cluster, k8s replicas). Rename is atomic on the
+ * same filesystem per POSIX; partial reads can never see a half-
+ * written cache.
+ */
 async function writeCache(path: string, value: CloudflareIps): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(value, null, 2), 'utf8');
+  const tmpPath = `${path}.tmp-${process.pid}`;
+  await writeFile(tmpPath, JSON.stringify(value, null, 2), 'utf8');
+  await rename(tmpPath, path);
 }
 
 /**
@@ -145,6 +176,25 @@ export async function initCloudflareIps(opts: InitOptions = {}): Promise<Cloudfl
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = opts.fetchImpl ?? fetch;
 
+  // Operational footgun guard: the default cache path lives in
+  // os.tmpdir(), which is wiped on every container restart. In
+  // production, that turns the fail-safe-stale fallback into a
+  // single-point-of-failure (Cloudflare API down + container
+  // restart = refuse-to-boot). Operators MUST set
+  // CLOUDFLARE_IPS_CACHE_PATH to a persistent-volume path; warn
+  // if they haven't, so this surfaces in the boot log rather than
+  // discovered during a Cloudflare incident.
+  if (
+    process.env.NODE_ENV === 'production' &&
+    !process.env.CLOUDFLARE_IPS_CACHE_PATH &&
+    !opts.cachePath
+  ) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[cloudflare-ips] WARNING: NODE_ENV=production but CLOUDFLARE_IPS_CACHE_PATH is unset; using ephemeral os.tmpdir(). On container restart with the Cloudflare API unreachable, this server will fail-closed. Set CLOUDFLARE_IPS_CACHE_PATH to a persistent-volume path.',
+    );
+  }
+
   const fresh = await fetchFromApi(apiUrl, timeoutMs, fetchImpl);
   if (fresh) {
     cached = fresh;
@@ -153,6 +203,10 @@ export async function initCloudflareIps(opts: InitOptions = {}): Promise<Cloudfl
     } catch {
       // Cache write failures are non-fatal: we have the live list in memory.
     }
+    // eslint-disable-next-line no-console
+    console.log(
+      `[cloudflare-ips] Loaded ${fresh.ipv4_cidrs.length} IPv4 + ${fresh.ipv6_cidrs.length} IPv6 ranges from API.`,
+    );
   } else {
     const stale = await readCache(cachePath);
     if (!stale) {
@@ -163,7 +217,7 @@ export async function initCloudflareIps(opts: InitOptions = {}): Promise<Cloudfl
     cached = stale;
     // eslint-disable-next-line no-console
     console.warn(
-      `[cloudflare-ips] Boot fetch failed; using cached list from ${stale.fetched_at}. Will retry at next daily refresh.`,
+      `[cloudflare-ips] Boot fetch failed; using cached list from ${stale.fetched_at} (${stale.ipv4_cidrs.length} IPv4 + ${stale.ipv6_cidrs.length} IPv6 ranges). Will retry at next daily refresh.`,
     );
   }
 
@@ -172,7 +226,7 @@ export async function initCloudflareIps(opts: InitOptions = {}): Promise<Cloudfl
       void refreshInBackground({ apiUrl, cachePath, timeoutMs, fetchImpl });
     }, REFRESH_INTERVAL_MS);
     // Don't keep the event loop alive on this timer alone.
-    refreshTimer.unref?.();
+    refreshTimer.unref();
   }
 
   return cached;
