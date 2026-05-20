@@ -32,6 +32,19 @@ export function hashUserApiKey(rawKey: string): string {
 
 // Resolve auth context from an incoming request.
 // JWTs (contain dots) → OAuth user; `hdr_app_` → App; `hdr_user_` → User.
+//
+// **Bearer-token-only by design.** Spec 025 FR-007 sets a server-domain
+// `hadron_token` cookie via the GitHub OAuth callback's Option-C path
+// (see src/server.ts /auth/github/callback). That cookie exists so the
+// AS-domain /oauth/authorize consent screen (Phase 2) can authenticate
+// the user. It is **NOT** an alternative auth source for /mcp or
+// /graphql. This middleware MUST NOT learn to accept cookies — doing so
+// would silently bypass the explicit Bearer-token requirement at every
+// MCP and GraphQL boundary, and (worse) would expose those surfaces to
+// CSRF attacks (cookies travel automatically with cross-origin
+// requests; bearer tokens require explicit attachment). Any future
+// "cookie auth" feature MUST be scoped to a separate middleware
+// mounted only on the consent-screen routes.
 export async function resolveAuthContext(
   req: Request,
   db: PrismaClient,
