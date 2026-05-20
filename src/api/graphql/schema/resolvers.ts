@@ -2,9 +2,8 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypt
 import { generateId } from '../../../lib/id.js';
 import {
   APP_KEY_PREFIX,
-  USER_API_KEY_PREFIX,
   hashAppKey,
-  hashUserApiKey,
+  mintUserApiKey,
 } from '../../../middleware/auth.js';
 
 // Maximum length for UserApiKey.label. The Prisma column is uncapped
@@ -6522,20 +6521,14 @@ export const resolvers = {
           { extensions: { code: 'BAD_USER_INPUT' } },
         );
       }
-      // Raw key format: hdr_user_<64 hex chars> (256 bits of entropy).
-      // Same primitive as AppKey; resolves via the same middleware path.
-      const rawKey = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
-      const keyHash = hashUserApiKey(rawKey);
-      const keyPreview = rawKey.slice(-4);
-      const userApiKey = await ctx.db.userApiKey.create({
-        data: {
-          userId: ctx.userId,
-          keyHash,
-          keyPreview,
-          label: label ?? null,
-          createdBy: ctx.userId,
-          issuedVia: 'portal',
-        },
+      // Single insert path shared with the OAuth /token endpoint
+      // (FR-015) — both call mintUserApiKey so the prefix, entropy,
+      // hashing primitive, and persisted-field shape never drift.
+      const { rawKey, userApiKey } = await mintUserApiKey(ctx.db, {
+        userId: ctx.userId,
+        label: label ?? null,
+        createdBy: ctx.userId,
+        issuedVia: 'portal',
       });
       return { userApiKey, rawKey };
     },

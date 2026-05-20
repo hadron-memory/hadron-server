@@ -1,6 +1,6 @@
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import type { Request } from 'express';
-import type { PrismaClient } from '../generated/prisma/index.js';
+import type { PrismaClient, UserApiKey } from '../generated/prisma/index.js';
 import { verifyJwt } from '../auth/jwt.js';
 
 export interface AuthContext {
@@ -185,6 +185,65 @@ async function resolveUserApiKey(
     clientId,
     roles: validatedRoles,
   };
+}
+
+/**
+ * Single insert path for `UserApiKey` rows (spec 025 FR-015). Both the
+ * portal-side `createUserApiKey` GraphQL resolver and the OAuth
+ * `POST /oauth/token` handler call this so the hashing primitive,
+ * prefix, entropy, and persisted-field shape never drift between paths
+ * — that's the structural guarantee behind "single validation path"
+ * (FR-003): the token produced by either caller validates identically
+ * via `resolveUserApiKey` above.
+ *
+ * The raw key is returned exactly once. Callers MUST hand it to the
+ * end user immediately; only the hash is persisted, so a lost raw key
+ * is unrecoverable by design.
+ *
+ * Callers supply:
+ *   - `userId`     — owning User.id (FK to User)
+ *   - `label`      — caller-visible name (`null` allowed; capped at the
+ *                    callsite per surface — GraphQL resolver caps to
+ *                    USER_API_KEY_LABEL_MAX_LEN, OAuth path constructs
+ *                    a `"OAuth: <clientName>"` label)
+ *   - `createdBy`  — actor User.id (REV-2; usually equals `userId`)
+ *   - `issuedVia`  — path discriminator (REV-2; `'portal'` for the
+ *                    portal mutation, `'oauth:<clientId>'` for the
+ *                    OAuth token endpoint)
+ */
+export interface MintUserApiKeyInput {
+  userId: string;
+  label: string | null;
+  createdBy: string;
+  issuedVia: string;
+}
+
+export interface MintUserApiKeyResult {
+  rawKey: string;
+  userApiKey: UserApiKey;
+}
+
+export async function mintUserApiKey(
+  db: PrismaClient,
+  input: MintUserApiKeyInput,
+): Promise<MintUserApiKeyResult> {
+  // 32 bytes / 256 bits / 64 hex chars + the hdr_user_ prefix. Same
+  // entropy as AppKey; same length precheck in `resolveUserApiKey`
+  // above (USER_API_KEY_PREFIX.length + 64 chars).
+  const rawKey = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
+  const keyHash = hashUserApiKey(rawKey);
+  const keyPreview = rawKey.slice(-4);
+  const userApiKey = await db.userApiKey.create({
+    data: {
+      userId: input.userId,
+      keyHash,
+      keyPreview,
+      label: input.label,
+      createdBy: input.createdBy,
+      issuedVia: input.issuedVia,
+    },
+  });
+  return { rawKey, userApiKey };
 }
 
 async function resolveJwt(token: string): Promise<AuthContext> {
