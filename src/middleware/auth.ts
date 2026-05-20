@@ -107,10 +107,27 @@ async function resolveAppKey(
   return ctx;
 }
 
+// Valid runtime values for AuthContext.roles. Mirrors the Prisma `Role`
+// enum exactly (prisma/schema.prisma `enum Role { OWNER ADMIN
+// CONTRIBUTOR READER }`). Used to filter User.roles at the middleware
+// boundary so any drift between DB content and the type annotation
+// can't smuggle unknown role strings into request context.
+const ALLOWED_ROLES = new Set<NonNullable<AuthContext['roles']>[number]>([
+  'OWNER',
+  'ADMIN',
+  'CONTRIBUTOR',
+  'READER',
+]);
+
 async function resolveUserApiKey(
   rawKey: string,
   db: PrismaClient,
 ): Promise<AuthContext> {
+  // Length precheck: tokens are USER_API_KEY_PREFIX + 64 hex chars.
+  // Reject anything else without touching the DB — cheap defense
+  // against garbage-token probing.
+  if (rawKey.length !== USER_API_KEY_PREFIX.length + 64) return {};
+
   // Same hash-lookup pattern as AppKey: SHA-256 over the 256-bit raw key,
   // direct lookup by hash. bcrypt would prevent the lookup; the raw key's
   // entropy makes dictionary attacks against the hash a non-issue.
@@ -140,14 +157,20 @@ async function resolveUserApiKey(
       ? `email:${user.email}`
       : `user:${user.id}`;
 
+  // User.roles is typed Role[] by Prisma. Filter to the runtime
+  // allow-list as defense in depth against any DB drift (direct SQL,
+  // legacy data, future enum-value additions). `appId` is intentionally
+  // absent — App resolution for user credentials happens at the MCP
+  // boundary per FR-020, not in auth middleware.
+  const validatedRoles = (user.roles as readonly string[]).filter(
+    (r): r is NonNullable<AuthContext['roles']>[number] =>
+      ALLOWED_ROLES.has(r as NonNullable<AuthContext['roles']>[number]),
+  );
+
   return {
     userId: user.id,
     clientId,
-    // User keys carry no explicit roles in the auth context; resolvers
-    // consult User.roles directly when needed. App-scoped roles are
-    // not applicable — `appId` is intentionally absent (App resolution
-    // for user credentials happens at the MCP boundary per FR-020).
-    roles: user.roles as AuthContext['roles'],
+    roles: validatedRoles,
   };
 }
 

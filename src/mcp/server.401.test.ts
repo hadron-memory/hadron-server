@@ -142,7 +142,11 @@ describe('/mcp 401 + WWW-Authenticate (FR-005, RFC 9728)', () => {
     );
   });
 
-  it('falls back to "localhost" host when req.get("host") returns undefined', async () => {
+  it('returns 400 when Host header is missing (RFC 7230 §5.4)', async () => {
+    // HTTP/1.1 requires a Host header on every request; without one we
+    // can't synthesize a meaningful resource_metadata URL. Respond 400
+    // honestly rather than emit a partial URL that downstream clients
+    // would 404 against.
     const req = {
       method: 'POST',
       headers: {},
@@ -154,9 +158,9 @@ describe('/mcp 401 + WWW-Authenticate (FR-005, RFC 9728)', () => {
 
     await handleMcpRequest(req, res);
 
-    expect(res._status).toBe(401);
-    expect(res._headers['WWW-Authenticate']).toContain(
-      'resource_metadata="http://localhost/.well-known/oauth-protected-resource"',
-    );
+    expect(res._status).toBe(400);
+    expect(res._body).toEqual({ error: 'Missing Host header' });
+    // No WWW-Authenticate emitted for a malformed request.
+    expect(res._headers['WWW-Authenticate']).toBeUndefined();
   });
 });

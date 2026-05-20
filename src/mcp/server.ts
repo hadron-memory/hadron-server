@@ -1966,8 +1966,16 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     // Host is derived from req.protocol + req.get('host'); req.protocol
     // honors `app.set('trust proxy', …)` so the URL is HTTPS when the
     // server is reached over a TLS-terminating proxy.
-    const base = `${req.protocol}://${req.get('host') ?? 'localhost'}`;
-    const prmUrl = `${base}/.well-known/oauth-protected-resource`;
+    const host = req.get('host');
+    if (!host) {
+      // RFC 7230 §5.4 requires Host on every HTTP/1.1 request. A request
+      // without one is malformed; we can't synthesize a usable
+      // resource_metadata URL. Respond 400 honestly rather than emit a
+      // partially-formed URL that downstream clients would 404 against.
+      res.status(400).json({ error: 'Missing Host header' });
+      return;
+    }
+    const prmUrl = `${req.protocol}://${host}/.well-known/oauth-protected-resource`;
     res.setHeader(
       'WWW-Authenticate',
       `Bearer realm="hadron", error="invalid_token", resource_metadata="${prmUrl}"`,

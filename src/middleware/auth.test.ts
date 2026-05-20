@@ -349,10 +349,15 @@ describe('resolveAuthContext', () => {
 
       await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
 
-      // Fire-and-forget — wait briefly for the deferred update to land.
-      await new Promise((r) => setTimeout(r, 50));
-
-      const after = await db.userApiKey.findUniqueOrThrow({ where: { id: keyId } });
+      // Fire-and-forget; poll for the deferred update rather than a
+      // fixed sleep to avoid CI flake under load. Total budget: 1s,
+      // polled every 10ms.
+      let after = before;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        after = await db.userApiKey.findUniqueOrThrow({ where: { id: keyId } });
+        if (after.lastUsedAt) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
       expect(after.lastUsedAt).not.toBeNull();
     });
 

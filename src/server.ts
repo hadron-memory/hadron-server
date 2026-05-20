@@ -31,6 +31,22 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 export async function createServer(): Promise<Express> {
   const app = express();
 
+  // Minimal trust-proxy for spec 025-oauth-for-mcp (FR-006). When the
+  // server is reached over a TLS-terminating proxy (Cloudflare tunnel,
+  // load balancer), Express needs `trust proxy` set for `req.protocol`
+  // to resolve to 'https' from X-Forwarded-Proto; otherwise the
+  // RFC 9728 `WWW-Authenticate: resource_metadata="..."` URL emitted
+  // on /mcp 401 (see src/mcp/server.ts) advertises an `http://` URL
+  // and Claude Desktop refuses to walk it (EF-003).
+  //
+  // **TODO(feat/025-phase-1-infra):** harden this to trust only
+  // Cloudflare's published IP ranges in production (boot-time fetch
+  // + fail-safe-stale cache + refuse boot in NODE_ENV=production with
+  // the permissive `true` setting). The current `true` value is a dev
+  // convenience and the right shape for local tunnel testing; the
+  // infra PR will replace it with the production-safe form.
+  app.set('trust proxy', true);
+
   app.use(
     cors({
       origin: process.env.FRONTEND_URL || 'http://localhost:5173',
