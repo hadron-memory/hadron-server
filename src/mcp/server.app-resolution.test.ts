@@ -19,7 +19,13 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { handleMcpRequest } from './server.js';
-import { hashUserApiKey, USER_API_KEY_PREFIX } from '../middleware/auth.js';
+import {
+  APP_KEY_PREFIX,
+  USER_API_KEY_PREFIX,
+  hashAppKey,
+  hashUserApiKey,
+} from '../middleware/auth.js';
+import * as userAppResolution from '../auth/user-app-resolution.js';
 
 let user: { id: string };
 let org: { id: string; urn: string };
@@ -195,6 +201,40 @@ describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
     expect(res._body).not.toMatchObject({ error: 'multiple_apps_resolved' });
   });
 
+  it('populates auth.appId on the single-App path (positive contract check)', async () => {
+    // The earlier negative-only test ("does not return 409") couldn't
+    // distinguish "resolution worked" from "resolution silently
+    // skipped". Spy on resolveAppForRequest to assert the dispatch
+    // helper was called with the right userId and returned the
+    // expected resolved shape — which the production handler then
+    // uses to mutate auth.appId. This pins the positive contract.
+    const appId = await createAppForUser('alpha', user.id);
+    const rawKey = await mintUserApiKey(user.id);
+
+    const spy = vi.spyOn(userAppResolution, 'resolveAppForRequest');
+
+    const req = makeReq({ authorization: `Bearer ${rawKey}` });
+    const res = makeRes();
+
+    await handleMcpRequest(req, res);
+
+    // The spy fired with the user's id and returned a 'resolved'
+    // shape carrying the App's id + organizationId. The production
+    // handler reads this and mutates auth.appId / auth.organizationId
+    // (which downstream MCP tool calls consume).
+    expect(spy).toHaveBeenCalledOnce();
+    expect(spy).toHaveBeenCalledWith(user.id, expect.anything());
+    const result = await spy.mock.results[0].value;
+    expect(result).toEqual({
+      kind: 'resolved',
+      appId,
+      organizationId: org.id,
+    });
+    expect(res._status).not.toBe(409);
+
+    spy.mockRestore();
+  });
+
   it('skips App resolution entirely for AppKey-resolved callers (no 409 even with multiple App memberships under the same user)', async () => {
     // Build an AppKey-keyed App + create AppMember rows so the user
     // ALSO appears to be a member of 2+ Apps. The AppKey path
@@ -205,27 +245,35 @@ describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
     const appA = await createAppForUser('alpha', user.id);
     await createAppForUser('beta', user.id);
 
-    const { randomBytes, createHash } = await import('crypto');
-    const rawKey = 'hdr_app_' + randomBytes(32).toString('hex');
-    const keyHash = createHash('sha256').update(rawKey).digest('hex');
+    // Use the production hashing primitive instead of inlining the
+    // SHA-256 call — keeps the test resilient to future hash-algorithm
+    // refactors. Same `slice(-4)` keyPreview convention as
+    // createUserApiKey (PR #150 review consistency).
+    const { randomBytes } = await import('crypto');
+    const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
+    const keyHash = hashAppKey(rawKey);
     await db.appKey.create({
       data: {
         appId: appA,
         keyHash,
-        keyPreview: rawKey.slice(0, 12) + '...',
+        keyPreview: rawKey.slice(-4),
       },
     });
+
+    // Spy to assert resolveAppForRequest is NEVER called on this path
+    // (the gate `auth.userId && !auth.appId` is false for AppKey).
+    const spy = vi.spyOn(userAppResolution, 'resolveAppForRequest');
 
     const req = makeReq({ authorization: `Bearer ${rawKey}` });
     const res = makeRes();
 
     await handleMcpRequest(req, res);
 
-    // AppKey caller's appId was set by the middleware; FR-020 block
-    // gate (`auth.userId && !auth.appId`) is false; resolveUserApps
-    // is never called.
+    expect(spy).not.toHaveBeenCalled();
     expect(res._status).not.toBe(409);
     expect(res._body).not.toMatchObject({ error: 'multiple_apps_resolved' });
+
+    spy.mockRestore();
   });
 
   it('returns 401 + WWW-Authenticate for unauthenticated requests (App resolution does not interfere with the auth check)', async () => {

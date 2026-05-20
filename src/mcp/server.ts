@@ -16,7 +16,18 @@ import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
-import { resolveUserApps } from '../auth/user-app-resolution.js';
+import { resolveAppForRequest } from '../auth/user-app-resolution.js';
+
+// Spec 025-oauth-for-mcp / research §R-6: error_description in the
+// 409 multi-App response links to a docs page that explains the
+// situation + (eventually) lists the App-identification regimes
+// added by the sibling spec 02X-app-identification-regimes. The
+// page doesn't exist yet (T056 in Polish phase); the URL is
+// env-overrideable so docs reorganization doesn't require a code
+// change.
+const MULTIPLE_APPS_DOCS_URL =
+  process.env.HADRON_MULTIPLE_APPS_DOCS_URL ??
+  'https://hadronmemory.com/docs/auth/multiple-apps-resolved';
 import {
   canReadMemory,
   canWriteToMemory,
@@ -1997,27 +2008,43 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   // pick when a user has 2+ Apps; it returns HTTP 409 with a typed
   // `multiple_apps_resolved` body so the client can surface a clear
   // error or (in a future sibling spec) prompt for selection.
+  //
+  // **`auth` is mutated in place** on the resolved path. Today this
+  // is safe — `auth` is local to handleMcpRequest and downstream
+  // code reads the post-resolution state. If a future refactor
+  // passes `auth` to a logger or background task above this block,
+  // that consumer would see the pre-mutation (null appId) snapshot;
+  // either re-resolve or move the mutation into a returned context.
   if (auth.userId && !auth.appId) {
-    const apps = await resolveUserApps(auth.userId, db);
-    if (apps.length > 1) {
+    const resolution = await resolveAppForRequest(auth.userId, db);
+    if (resolution.kind === 'multi-app') {
       // Hadron-namespaced custom error code per research §R-6 (not in
       // the MCP error vocabulary — the MCP spec's authentication
       // errors are token-scoped, not resource-ambiguity-scoped).
+      // Log so operators can size demand for the sibling spec's
+      // multi-App regimes (how often does this fire? for which
+      // users?). When the project picks up a structured logger,
+      // replace console.warn with that.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[mcp] multiple_apps_resolved for userId=${auth.userId} (FR-020 / sibling spec 02X)`,
+      );
       res.status(409).json({
         error: 'multiple_apps_resolved',
         error_description:
-          'User has more than one Hadron App; this MCP client does not support App selection. See https://hadronmemory.com/docs/auth/multiple-apps-resolved for guidance.',
+          `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance.`,
       });
       return;
     }
-    if (apps.length === 1) {
-      auth.appId = apps[0].id;
-      auth.organizationId = apps[0].organizationId;
+    if (resolution.kind === 'resolved') {
+      auth.appId = resolution.appId;
+      auth.organizationId = resolution.organizationId;
     }
-    // Zero-App path: continue without setting appId (preserves existing
-    // JWT-without-App behavior; downstream App-scoped tool calls will
-    // fail with their existing errors). Zero-App handling is
-    // intentionally not in FR-020's scope.
+    // Zero-App path: resolution.kind === 'no-app'. Continue without
+    // setting appId (preserves existing JWT-without-App behavior;
+    // downstream App-scoped tool calls will fail with their existing
+    // errors). Zero-App handling is intentionally not in FR-020's
+    // scope.
   }
 
   // Session not found or no session — create a new one.

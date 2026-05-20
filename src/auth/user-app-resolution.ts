@@ -36,20 +36,49 @@ export interface ResolvedUserApp {
 }
 
 /**
- * Returns the set of Hadron Apps the given user has access to via
+ * Three-shape dispatch result for FR-020 at the MCP boundary.
+ * Callers (e.g., `handleMcpRequest`) act on each kind:
+ *  - `'resolved'`: populate `auth.appId` + `auth.organizationId`.
+ *  - `'no-app'`: pass through; downstream tool calls handle the
+ *    no-App state with their existing errors.
+ *  - `'multi-app'`: emit HTTP 409 + `multiple_apps_resolved`.
+ */
+export type AppResolution =
+  | { kind: 'resolved'; appId: string; organizationId: string }
+  | { kind: 'no-app' }
+  | { kind: 'multi-app' };
+
+/**
+ * Returns the **active** Hadron Apps the given user has access to via
  * AppMember rows. Order is by `createdAt` ascending (deterministic
  * but not load-bearing — the caller cares about cardinality).
  *
- * Returns an empty array for users who exist but have no AppMember
- * rows (e.g., brand-new users, users whose AppMember rows were all
- * removed).
+ * "Active" = neither soft-deleted (`app.deletedAt IS NULL`) nor
+ * soft-uninstalled (`app.uninstalledAt IS NULL`, per spec 021 FR-025).
+ * AppMember rows can persist past App lifecycle events; without the
+ * filter, a user with one active App and one historical (deleted or
+ * uninstalled) App would be 409'd by FR-020's multi-App dispatch
+ * — a false positive.
+ *
+ * Returns an empty array for users who exist but have no active
+ * AppMember rows.
  */
 export async function resolveUserApps(
   userId: string,
   db: PrismaClient,
 ): Promise<ResolvedUserApp[]> {
+  // TODO(post-Phase-1): consider per-userId caching with a short TTL
+  // (e.g., 30s). Today this runs once per user-credential MCP request;
+  // for the OAuth-Bearer hot path under Phase 2, a request-context
+  // memoization or short-TTL cache would shed the per-request DB hop.
+  // Revocation latency becomes the TTL, which is acceptable for
+  // App-scope changes (rare). Tracked here so the next eyes know
+  // it's been considered.
   const memberships = await db.appMember.findMany({
-    where: { userId },
+    where: {
+      userId,
+      app: { is: { deletedAt: null, uninstalledAt: null } },
+    },
     orderBy: { createdAt: 'asc' },
     select: {
       app: {
@@ -58,4 +87,26 @@ export async function resolveUserApps(
     },
   });
   return memberships.map((m) => m.app);
+}
+
+/**
+ * Wraps `resolveUserApps` in the FR-020 dispatch shape. Pure
+ * (no side effects beyond the DB read) so the handler's dispatch
+ * branches are testable in isolation — production code asserts on
+ * the returned `AppResolution`, tests do the same.
+ */
+export async function resolveAppForRequest(
+  userId: string,
+  db: PrismaClient,
+): Promise<AppResolution> {
+  const apps = await resolveUserApps(userId, db);
+  if (apps.length === 0) return { kind: 'no-app' };
+  if (apps.length === 1) {
+    return {
+      kind: 'resolved',
+      appId: apps[0].id,
+      organizationId: apps[0].organizationId,
+    };
+  }
+  return { kind: 'multi-app' };
 }
