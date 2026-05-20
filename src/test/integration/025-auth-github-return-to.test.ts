@@ -1,0 +1,121 @@
+/**
+ * Spec 025-oauth-for-mcp FR-007 — `/auth/github` Option-C `return_to`
+ * integration tests.
+ *
+ * Spins up the real Express app from `createServer()` on a random port
+ * and drives requests over HTTP. Asserts on the redirect / 400
+ * behavior of the GET endpoint; doesn't exercise the callback's
+ * cookie-set path because the callback exchanges with GitHub's API
+ * (would require mocking out an external dependency to test
+ * end-to-end). The predicate exhaustive unit tests live alongside
+ * the predicate at `src/auth/server-local-path.test.ts`.
+ *
+ * Task: T019 per tasks.md.
+ */
+
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import type { AddressInfo } from 'node:net';
+import { createServer as createHttpServer, type Server } from 'node:http';
+import { createServer } from '../../server.js';
+
+let server: Server;
+let baseUrl: string;
+
+beforeAll(async () => {
+  // createServer() returns the Express app. Wrap it in a Node HTTP
+  // server so we can bind a random port and tear down cleanly.
+  const app = await createServer();
+  server = createHttpServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  baseUrl = `http://127.0.0.1:${port}`;
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve, reject) => {
+    server.close((err) => (err ? reject(err) : resolve()));
+  });
+});
+
+/**
+ * Drive a request against /auth/github with redirects DISABLED so we
+ * can inspect the immediate response (the GET is supposed to issue a
+ * 302 to GitHub on the happy path; following it would hit the real
+ * GitHub auth URL which we don't want in tests).
+ */
+async function getAuthGithub(qs: string): Promise<Response> {
+  return fetch(`${baseUrl}/auth/github${qs}`, { redirect: 'manual' });
+}
+
+describe('/auth/github GET — Option-C return_to (FR-007)', () => {
+  // ── Accepted: server-local paths ──────────────────────────────────
+
+  it('accepts return_to=/oauth/authorize?state=abc (server-local with query)', async () => {
+    const res = await getAuthGithub(
+      '?return_to=' + encodeURIComponent('/oauth/authorize?state=abc'),
+    );
+    // Happy path: 302 to GitHub's auth URL with state.
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toMatch(/github\.com\/login\/oauth\/authorize/);
+  });
+
+  it('accepts return_to=/ (root path)', async () => {
+    const res = await getAuthGithub('?return_to=' + encodeURIComponent('/'));
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toMatch(/github\.com/);
+  });
+
+  it('accepts no return_to (existing portal flow unchanged)', async () => {
+    const res = await getAuthGithub('');
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toMatch(/github\.com/);
+  });
+
+  // ── Rejected: open-redirect to external origin ────────────────────
+
+  it('rejects return_to=https://evil.example with 400', async () => {
+    const res = await getAuthGithub(
+      '?return_to=' + encodeURIComponent('https://evil.example/grab-cookie'),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/Invalid return_to/);
+  });
+
+  // ── Rejected: protocol-relative ───────────────────────────────────
+
+  it('rejects return_to=//evil.example with 400', async () => {
+    const res = await getAuthGithub(
+      '?return_to=' + encodeURIComponent('//evil.example/grab-cookie'),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  // ── Rejected: backslash-normalization trick ───────────────────────
+
+  it('rejects return_to=/\\evil.example (backslash) with 400', async () => {
+    // Browser would normalize /\evil.example to //evil.example (per
+    // WHATWG URL parsing), turning a backslash-leading "path" into a
+    // protocol-relative URL pointing at evil.example.
+    const res = await getAuthGithub(
+      '?return_to=' + encodeURIComponent('/\\evil.example'),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  // ── Rejected: protocol-injection schemes ──────────────────────────
+
+  it('rejects return_to=javascript:alert(1) with 400', async () => {
+    const res = await getAuthGithub(
+      '?return_to=' + encodeURIComponent('javascript:alert(1)'),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects return_to=data:text/html,<script>… with 400', async () => {
+    const res = await getAuthGithub(
+      '?return_to=' + encodeURIComponent('data:text/html,<script>alert(1)</script>'),
+    );
+    expect(res.status).toBe(400);
+  });
+});

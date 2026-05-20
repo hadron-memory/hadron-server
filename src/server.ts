@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
+import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express, { type Express } from 'express';
 import { db } from './integrations/db/client.js';
@@ -17,6 +18,7 @@ import {
 } from './auth/index.js';
 import { resolveAuthContext } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
+import { isServerLocalPath } from './auth/server-local-path.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError } from './lib/urn.js';
@@ -67,20 +69,48 @@ export async function createServer(): Promise<Express> {
   );
   app.use(express.json());
 
+  // Spec 025-oauth-for-mcp FR-016: mount cookie-parser globally so the
+  // GitHub callback can set the `hadron_token` cookie (Option-C
+  // return_to), and so Phase 2's /oauth/authorize consent screen can
+  // read it. Replaces PR 137's hand-rolled `parseCookies`.
+  app.use(cookieParser());
+
   // ---------------------------------------------------------------------------
   // GitHub OAuth
   // ---------------------------------------------------------------------------
 
+  // Spec 025-oauth-for-mcp FR-007: pendingStates carries the OAuth
+  // state-CSRF token plus an optional `returnTo` (Option-C). When
+  // `returnTo` is set, the callback writes a server-domain
+  // `hadron_token` cookie and redirects to `returnTo` instead of
+  // bouncing the JWT through the frontend.
   const pendingStates = new Map<
     string,
-    { redirect: string; expiresAt: number }
+    { redirect: string; returnTo?: string; expiresAt: number }
   >();
 
   app.get('/auth/github', (req, res) => {
     const redirect = (req.query.redirect as string) || '/';
+
+    // Option-C: optional `return_to` query param routes the post-
+    // callback redirect through this server's domain (rather than the
+    // frontend). Validated with the strict server-local-path predicate
+    // — open-redirect mitigation per FR-007.
+    let returnTo: string | undefined;
+    if (req.query.return_to !== undefined) {
+      if (!isServerLocalPath(req.query.return_to)) {
+        res.status(400).json({
+          error: 'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash).',
+        });
+        return;
+      }
+      returnTo = req.query.return_to;
+    }
+
     const state = crypto.randomBytes(16).toString('hex');
     pendingStates.set(state, {
       redirect,
+      returnTo,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
     res.redirect(buildAuthUrl(state));
@@ -175,6 +205,24 @@ export async function createServer(): Promise<Express> {
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         githubId: ghUser.id,
       });
+
+      // Spec 025 FR-007 Option-C: when `returnTo` is set in the
+      // pending state, the caller wants to remain on the server
+      // domain (e.g., Phase 2's /oauth/authorize consent screen).
+      // Set the JWT as an HttpOnly `hadron_token` cookie on the
+      // server's own origin and redirect to the server-local path.
+      // The predicate in /auth/github already validated returnTo.
+      if (pending.returnTo) {
+        res.cookie('hadron_token', jwt, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'lax',
+          maxAge: 7 * 24 * 60 * 60 * 1000, // 7d, matching JWT TTL
+          path: '/',
+        });
+        res.redirect(pending.returnTo);
+        return;
+      }
 
       const frontendUrl =
         process.env.FRONTEND_URL || 'http://localhost:5173';
