@@ -1,6 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
-import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
+import {
+  APP_KEY_PREFIX,
+  USER_API_KEY_PREFIX,
+  hashAppKey,
+  hashUserApiKey,
+} from '../../../middleware/auth.js';
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
@@ -1462,6 +1467,13 @@ export const resolvers = {
     lastUsedAt: (k: { lastUsedAt?: Date | string | null }) => toISO(k.lastUsedAt ?? null),
     revokedAt: (k: { revokedAt?: Date | string | null }) => toISO(k.revokedAt ?? null),
   },
+  // 025-oauth-for-mcp: serialize timestamp fields the same way AppKey
+  // does. `userId` is intentionally NOT exposed (PR-137 delta D1).
+  UserApiKey: {
+    createdAt: (k: { createdAt: Date | string }) => toISO(k.createdAt)!,
+    lastUsedAt: (k: { lastUsedAt?: Date | string | null }) => toISO(k.lastUsedAt ?? null),
+    revokedAt: (k: { revokedAt?: Date | string | null }) => toISO(k.revokedAt ?? null),
+  },
   User: {
     linkedAt: (u: { linkedAt?: Date | string | null }) => toISO(u.linkedAt ?? null),
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
@@ -2537,6 +2549,22 @@ export const resolvers = {
       }
       return ctx.db.appKey.findMany({
         where: { appId: resolvedAppId, revokedAt: null },
+        orderBy: { createdAt: 'desc' },
+      });
+    },
+
+    // 025-oauth-for-mcp FR-004: list caller's own user-scoped API keys
+    // (active + revoked). Powers Phase 3's portal revocation UI
+    // (SC-006). AppKey-resolved callers rejected (no user context).
+    myUserApiKeys: async (_: unknown, __: unknown, ctx: Context) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'myUserApiKeys requires a user-scoped credential.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      return ctx.db.userApiKey.findMany({
+        where: { userId: ctx.userId },
         orderBy: { createdAt: 'desc' },
       });
     },
@@ -6453,6 +6481,81 @@ export const resolvers = {
       await requireOrgRole(ctx, key.app.organizationId, 'ADMIN');
       await ctx.db.appKey.update({ where: { id }, data: { revokedAt: new Date() } });
       return true;
+    },
+
+    // 025-oauth-for-mcp FR-004: mint a user-scoped API key. Self-service
+    // only — AppKey-resolved callers (no user in context) MUST be
+    // rejected. The raw key is returned exactly once; only the hash is
+    // persisted. `createdBy` is the actor's User.id (REV-2 reversal —
+    // matches the schema-wide audit-actor convention); `issuedVia` is
+    // the path discriminator (REV-2 — `'portal'` here, `'oauth:<id>'`
+    // for /oauth/token-issued tokens in Phase 2).
+    createUserApiKey: async (
+      _: unknown,
+      { label }: { label?: string | null },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'createUserApiKey requires a user-scoped credential; AppKey callers cannot mint user keys.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      // Raw key format: hdr_user_<64 hex chars> (256 bits of entropy).
+      // Same primitive as AppKey; resolves via the same middleware path.
+      const rawKey = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
+      const keyHash = hashUserApiKey(rawKey);
+      const keyPreview = rawKey.slice(-4);
+      const userApiKey = await ctx.db.userApiKey.create({
+        data: {
+          userId: ctx.userId,
+          keyHash,
+          keyPreview,
+          label: label ?? null,
+          createdBy: ctx.userId,
+          issuedVia: 'portal',
+        },
+      });
+      return { userApiKey, rawKey };
+    },
+
+    // 025-oauth-for-mcp FR-004: revoke a user-scoped API key. Returns
+    // the updated row (REV-D3 — was Boolean! in PR 137). Idempotent on
+    // already-revoked keys.
+    revokeUserApiKey: async (
+      _: unknown,
+      { id }: { id: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'revokeUserApiKey requires a user-scoped credential; AppKey callers cannot revoke user keys.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      const key = await ctx.db.userApiKey.findUnique({ where: { id } });
+      if (!key) {
+        throw new GraphQLError(`UserApiKey ${id} not found`, {
+          extensions: { code: 'NOT_FOUND' },
+        });
+      }
+      if (key.userId !== ctx.userId) {
+        // Ownership check — never reveal whether a different user owns
+        // the row (consistent with NOT_FOUND-style discretion is
+        // tempting, but the spec calls for FORBIDDEN here so the portal
+        // can show a meaningful error).
+        throw new GraphQLError('You do not own this key.', {
+          extensions: { code: 'FORBIDDEN' },
+        });
+      }
+      if (key.revokedAt) {
+        // Idempotent — return the existing row unchanged.
+        return key;
+      }
+      return ctx.db.userApiKey.update({
+        where: { id },
+        data: { revokedAt: new Date() },
+      });
     },
 
     // 005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's

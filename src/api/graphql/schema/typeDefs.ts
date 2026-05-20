@@ -530,6 +530,32 @@ export const typeDefs = `#graphql
     rawKey: String!
   }
 
+  # 025-oauth-for-mcp: user-scoped bearer-token credential. Mirrors the
+  # AppKey shape but resolves to a User instead of an App. Surfaced to
+  # the portal revocation UI (Phase 3) so users can audit + revoke
+  # their own keys. userId is intentionally absent — for self-service
+  # v1 the caller is always the owner; admin-tooling auditability is
+  # out of scope (see contracts/graphql-mutations.md, PR-137 delta D1).
+  type UserApiKey {
+    id: ID!
+    keyPreview: String!
+    label: String
+    createdAt: String!
+    lastUsedAt: String
+    revokedAt: String
+    # Issuance path: portal (createUserApiKey) or oauth:<client_id>
+    # (POST /oauth/token). Powers source labels in the revocation UI.
+    issuedVia: String
+  }
+
+  # Returned once at creation — the raw key is never stored.
+  # Renamed from PR 137's UserApiKeyCreated for Result-suffix
+  # consistency; nested field is userApiKey, not key (PR-137 delta D2).
+  type UserApiKeyCreateResult {
+    userApiKey: UserApiKey!
+    rawKey: String!
+  }
+
   # Returned once at App creation / regenerateAppKey — the raw key is never stored
   type AppCreated {
     app: App!
@@ -1125,6 +1151,15 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     appKeys(appId: ID!): [AppKey!]!
+
+    """
+    025-oauth-for-mcp FR-004: list the calling User's API keys (active
+    + revoked, createdAt DESC). Powers Phase 3's portal revocation UI
+    (SC-006). Rejected with UNAUTHENTICATED for AppKey-resolved
+    callers (no user in context). PR-137 review delta D5 — Query
+    not present in PR 137.
+    """
+    myUserApiKeys: [UserApiKey!]!
 
     """
     Agent AI config (org ADMIN) — returns the decrypted API key so the
@@ -1906,6 +1941,26 @@ export const typeDefs = `#graphql
     createAppKey(appId: ID!, label: String): AppKeyCreated!
     # AppKey is keyed by raw ID — no urn column. Stays ID-only.
     revokeAppKey(id: ID!): Boolean!
+
+    """
+    025-oauth-for-mcp FR-004: mint a new user-scoped API key for the
+    calling User. Returns the raw key exactly once (the server stores
+    only the SHA-256 hash). Rejected with UNAUTHENTICATED for AppKey-
+    resolved callers (no user in context). Per Clarifications, label
+    is optional (portal defaults to a placeholder when omitted).
+    """
+    createUserApiKey(label: String): UserApiKeyCreateResult!
+
+    """
+    025-oauth-for-mcp FR-004: revoke a user-scoped API key owned by
+    the calling User. Returns the updated UserApiKey so the portal
+    can render the new revokedAt without a refetch (PR-137 review
+    delta D3 — was Boolean). Idempotent for already-revoked keys;
+    rejected with FORBIDDEN if the key belongs to another user;
+    NOT_FOUND if id does not exist; UNAUTHENTICATED for AppKey-
+    resolved callers.
+    """
+    revokeUserApiKey(id: ID!): UserApiKey!
 
     """
     005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's
