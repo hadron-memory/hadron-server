@@ -11,6 +11,7 @@ describe('isServerLocalPath', () => {
     '/oauth/authorize?state=abc&code_challenge=xyz',
     '/path/with/multiple/segments',
     '/foo:bar',                       // colon in path is fine; only protocol-prefix matters
+    '/foo://bar',                     // ://-in-path is also fine — only the LEADING scheme triggers protocol detection (PR #149 review)
     '/with%20encoded%20chars',
     '/api/v1/resources/123',
     '/x?return_to=/y',                // nested query params with paths are OK
@@ -61,6 +62,20 @@ describe('isServerLocalPath', () => {
     expect(isServerLocalPath(value)).toBe(false);
   });
 
+  // ── Rejected: control-byte injection (CRLF, NUL, etc.) ────────────
+
+  it.each([
+    '/foo\nbar',                      // LF — could break res.redirect()'s Location header
+    '/foo\rbar',                      // CR — same
+    '/foo\r\nLocation: //evil.example', // explicit CRLF injection attempt
+    '/foo\x00bar',                    // NUL
+    '/foo\tbar',                      // TAB
+    '/foo\x7Fbar',                    // DEL (\x7F)
+    '/\x01foo',                       // SOH at second char
+  ])('rejects control-byte injection %j', (value) => {
+    expect(isServerLocalPath(value)).toBe(false);
+  });
+
   // ── Rejected: misc malformed ──────────────────────────────────────
 
   it.each([
@@ -68,7 +83,6 @@ describe('isServerLocalPath', () => {
     'no-leading-slash',
     'foo/bar',
     ' /leading-space',                // leading whitespace before /
-    'http://x.example/snuck://in',    // `://` substring → rejected by belt-and-braces check
   ])('rejects malformed %j', (value) => {
     expect(isServerLocalPath(value)).toBe(false);
   });

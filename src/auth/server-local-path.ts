@@ -27,16 +27,31 @@
  *   becomes equivalent to `//host` (protocol-relative).
  * - **Protocol-injection schemes**:
  *   `javascript:alert(1)`, `data:text/html,…`, `file://…` →
- *   no leading `/` → rejected (the leading-`/` check is sufficient,
- *   but we also explicitly look for `://` inside the value as
- *   belt-and-braces against creative encodings).
+ *   no leading `/` → rejected. The leading-`/` check is sufficient
+ *   on its own; an earlier draft also rejected any `://` substring
+ *   as belt-and-braces, but that bogusly rejected legitimate paths
+ *   like `/foo://bar` (the colon-in-path comment below applies to
+ *   protocol prefixes too — only the **leading** scheme matters).
+ *   PR #149 review caught and removed the `://` substring check.
+ *
+ * - **Control-byte injection** (`\x00`–`\x1F`, `\x7F`):
+ *   `/foo\nbar`, `/foo\x00bar`, `/foo\r\nLocation: //evil` →
+ *   rejected. Express URL-decodes `%0A`/`%0D`/`%00` from query
+ *   strings, so an attacker controls these bytes via `return_to`.
+ *   Node's HTTP layer would refuse a `res.redirect()` containing
+ *   CR/LF/NUL (turning the request into a 500 rather than a CRLF
+ *   header injection), but rejecting at the predicate level
+ *   converts the latent 500 into a clean 400 with a diagnostic.
  *
  * Accepted shapes: any string that starts with a single `/`,
  * second char neither `/` nor `\`, no embedded backslashes, no
- * `://` substring. `/`, `/app/setup`, `/oauth/authorize?state=…`,
- * `/foo:bar` (colon-in-path is fine — only protocols matter) all
- * pass.
+ * control bytes. `/`, `/app/setup`, `/oauth/authorize?state=…`,
+ * `/foo:bar`, `/foo://bar` (colon-in-path is fine — only the
+ * leading scheme matters for protocol detection) all pass.
  */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
+
 export function isServerLocalPath(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   if (value.length === 0) return false;
@@ -51,10 +66,9 @@ export function isServerLocalPath(value: unknown): value is string {
   // normalize `\` → `/`, so `/foo\\bar.example` could be coaxed
   // into a protocol-relative form on some clients.
   if (value.includes('\\')) return false;
-  // Belt-and-braces: a `://` anywhere in the value indicates a
-  // protocol prefix that snuck past the leading-/ check (e.g.,
-  // some browsers tolerate creative whitespace before the scheme).
-  // Legitimate server-local paths never contain `://`.
-  if (value.includes('://')) return false;
+  // Reject control bytes (\x00–\x1F + \x7F) anywhere. CRLF would
+  // otherwise crash res.redirect() at runtime; NUL and other
+  // control bytes have similar header-injection / parsing risks.
+  if (CONTROL_CHAR_RE.test(value)) return false;
   return true;
 }

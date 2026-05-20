@@ -118,4 +118,36 @@ describe('/auth/github GET — Option-C return_to (FR-007)', () => {
     );
     expect(res.status).toBe(400);
   });
+
+  // ── Negative control: cookie lifecycle ────────────────────────────
+
+  it('does NOT set the hadron_token cookie on the /auth/github GET response', async () => {
+    // The Option-C cookie is written only on the callback response,
+    // not on the initial /auth/github redirect to GitHub. A regression
+    // where the cookie leaked to the GET response would mean the
+    // server hands out the cookie without the user actually
+    // completing GitHub auth.
+    const res = await getAuthGithub(
+      '?return_to=' + encodeURIComponent('/oauth/authorize'),
+    );
+    expect(res.status).toBe(302);
+    // No Set-Cookie header (or at least no hadron_token cookie).
+    const setCookie = res.headers.get('set-cookie');
+    if (setCookie) {
+      expect(setCookie).not.toMatch(/\bhadron_token\b/);
+    }
+  });
+
+  // ── Control-byte rejection (CRLF injection class) ─────────────────
+
+  it('rejects return_to with embedded newline (CRLF-injection class)', async () => {
+    // Express URL-decodes %0A from query strings; without the
+    // predicate's control-byte filter (PR #149 review), this would
+    // pass to res.redirect() and crash Node's HTTP layer with a 500.
+    // The predicate now produces a clean 400 instead.
+    const res = await getAuthGithub(
+      '?return_to=' + encodeURIComponent('/foo\r\nLocation: //evil.example'),
+    );
+    expect(res.status).toBe(400);
+  });
 });

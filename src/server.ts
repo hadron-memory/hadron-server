@@ -4,6 +4,7 @@ import { expressMiddleware } from '@apollo/server/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express, { type Express } from 'express';
+import { decodeJwt } from 'jose';
 import { db } from './integrations/db/client.js';
 import { serializeJson } from './integrations/db/provider.js';
 import {
@@ -69,10 +70,13 @@ export async function createServer(): Promise<Express> {
   );
   app.use(express.json());
 
-  // Spec 025-oauth-for-mcp FR-016: mount cookie-parser globally so the
-  // GitHub callback can set the `hadron_token` cookie (Option-C
-  // return_to), and so Phase 2's /oauth/authorize consent screen can
-  // read it. Replaces PR 137's hand-rolled `parseCookies`.
+  // Spec 025-oauth-for-mcp FR-016: mount cookie-parser globally so
+  // downstream handlers can READ cookies via `req.cookies` (notably
+  // Phase 2's /oauth/authorize consent screen, which checks for the
+  // server-domain `hadron_token` cookie). Cookie *writing* via
+  // `res.cookie(...)` is provided by Express itself and doesn't need
+  // this middleware; we mount it now so it's ready for Phase 2.
+  // Replaces PR 137's hand-rolled `parseCookies` (R-3).
   app.use(cookieParser());
 
   // ---------------------------------------------------------------------------
@@ -95,23 +99,40 @@ export async function createServer(): Promise<Express> {
     // Option-C: optional `return_to` query param routes the post-
     // callback redirect through this server's domain (rather than the
     // frontend). Validated with the strict server-local-path predicate
-    // — open-redirect mitigation per FR-007.
+    // — open-redirect mitigation per FR-007. The candidate is bound
+    // to a local so the predicate's type-guard narrowing flows into
+    // the assignment below (without the local, TS sees two separate
+    // accesses of req.query.return_to and re-widens to the union).
     let returnTo: string | undefined;
-    if (req.query.return_to !== undefined) {
-      if (!isServerLocalPath(req.query.return_to)) {
+    const candidate = req.query.return_to;
+    if (candidate !== undefined) {
+      if (!isServerLocalPath(candidate)) {
         res.status(400).json({
-          error: 'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash).',
+          error: 'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
         });
         return;
       }
-      returnTo = req.query.return_to;
+      returnTo = candidate;
+    }
+
+    // Prune expired entries on every /auth/github hit. pendingStates
+    // is in-process memory; entries are deleted on a successful
+    // callback hit (line below the callback handler), but users who
+    // abandon the flow mid-redirect leave stale rows. O(n) sweep is
+    // cheap at our /auth/github call rate (a few per minute at peak).
+    // Multi-worker deploys (pm2 cluster, k8s replicas) don't share
+    // this map — flagged as a known limitation; revisit when an OAuth
+    // request rate justifies a Redis-backed store.
+    const now = Date.now();
+    for (const [s, p] of pendingStates) {
+      if (p.expiresAt < now) pendingStates.delete(s);
     }
 
     const state = crypto.randomBytes(16).toString('hex');
     pendingStates.set(state, {
       redirect,
       returnTo,
-      expiresAt: Date.now() + 10 * 60 * 1000,
+      expiresAt: now + 10 * 60 * 1000,
     });
     res.redirect(buildAuthUrl(state));
   });
@@ -212,12 +233,34 @@ export async function createServer(): Promise<Express> {
       // Set the JWT as an HttpOnly `hadron_token` cookie on the
       // server's own origin and redirect to the server-local path.
       // The predicate in /auth/github already validated returnTo.
+      //
+      // **Cookie maxAge is derived from the JWT's `exp` claim**
+      // (rather than hardcoded to 7d) so cookie lifetime tracks
+      // JWT_EXPIRY env var changes automatically. Both expire
+      // together; the cookie's HttpOnly bit prevents a stale token
+      // from being read after expiry by JavaScript anyway.
+      //
+      // **`path: '/'`** is a deliberately broad scope: hadron_token
+      // is the universal session cookie. /mcp does NOT consume
+      // cookies (resolveAuthContext reads Authorization headers
+      // only; see src/middleware/auth.ts), so this doesn't bypass
+      // the explicit Bearer-token requirement at the MCP boundary.
+      //
+      // **New-user handling differs from the standard flow**: the
+      // standard flow redirects new users to /app/setup; Option-C
+      // honors the caller's returnTo regardless of isNew, because
+      // the OAuth flow (the only Option-C caller in v1) needs to
+      // remain on the AS domain. Onboarding gating for new OAuth
+      // users is a Phase 2 concern (the consent screen can check
+      // user state and surface a setup hint inline).
       if (pending.returnTo) {
+        const { exp } = decodeJwt(jwt);
+        const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
         res.cookie('hadron_token', jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
-          maxAge: 7 * 24 * 60 * 60 * 1000, // 7d, matching JWT TTL
+          maxAge,
           path: '/',
         });
         res.redirect(pending.returnTo);
