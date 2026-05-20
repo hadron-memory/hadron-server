@@ -183,32 +183,39 @@ describe('spec 025 US6 — AppKey regression suite', () => {
 
   // ── GraphQL: AppKey callers rejected from user-scoped mutations ────
 
-  it('AppKey caller rejected from createUserApiKey with UNAUTHENTICATED (user-scoped only)', async () => {
-    // FR-004: only resolved-userId callers can mint user keys.
-    // AppKey caller (no userId in context) must be rejected, even
-    // though they have full auth in another sense (they hold a
-    // valid credential for an App). This is the "AppKey is App-
-    // scoped, hdr_user_<…> is user-scoped" boundary that US6
-    // protects.
-    //
-    // Deeper coverage: src/api/graphql/schema/resolvers.userApiKey.test.ts
-    // §"rejects AppKey-resolved callers with UNAUTHENTICATED".
-    await expect(
-      resolvers.Mutation.createUserApiKey(undefined, { label: 'attempt' }, appKeyCtx()),
-    ).rejects.toMatchObject({ extensions: { code: 'UNAUTHENTICATED' } });
-  });
-
-  it('AppKey caller rejected from revokeUserApiKey with UNAUTHENTICATED', async () => {
-    await expect(
-      resolvers.Mutation.revokeUserApiKey(undefined, { id: 'any' }, appKeyCtx()),
-    ).rejects.toMatchObject({ extensions: { code: 'UNAUTHENTICATED' } });
-  });
-
-  it('AppKey caller rejected from myUserApiKeys Query with UNAUTHENTICATED', async () => {
-    await expect(
-      resolvers.Query.myUserApiKeys(undefined, undefined, appKeyCtx()),
-    ).rejects.toMatchObject({ extensions: { code: 'UNAUTHENTICATED' } });
-  });
+  // FR-004: only resolved-userId callers can touch user-scoped
+  // operations. AppKey caller (no userId in context) MUST be
+  // rejected from each, even though they have full auth in another
+  // sense (they hold a valid credential for an App). This is the
+  // "AppKey is App-scoped, hdr_user_<…> is user-scoped" boundary
+  // that US6 protects.
+  //
+  // Deeper coverage: src/api/graphql/schema/resolvers.userApiKey.test.ts
+  // §"rejects AppKey-resolved callers with UNAUTHENTICATED" on
+  // each operation individually.
+  it.each([
+    [
+      'createUserApiKey',
+      (ctx: Context) =>
+        resolvers.Mutation.createUserApiKey(undefined, { label: 'attempt' }, ctx),
+    ],
+    [
+      'revokeUserApiKey',
+      (ctx: Context) =>
+        resolvers.Mutation.revokeUserApiKey(undefined, { id: 'any' }, ctx),
+    ],
+    [
+      'myUserApiKeys',
+      (ctx: Context) => resolvers.Query.myUserApiKeys(undefined, undefined, ctx),
+    ],
+  ])(
+    'AppKey caller rejected from %s with UNAUTHENTICATED (user-scoped only)',
+    async (_name, call) => {
+      await expect(call(appKeyCtx())).rejects.toMatchObject({
+        extensions: { code: 'UNAUTHENTICATED' },
+      });
+    },
+  );
 
   // ── Boundary: AppKey caller cannot impersonate user-key flows ──────
 

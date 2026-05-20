@@ -396,18 +396,37 @@ async function main() {
   // client_id='test' but no seed row existed — anyone else running
   // the test got 400 invalid_client; FR-023 closes that gap).
   //
+  // **redirect_uri path is `/callback`** per
+  // spec-kits/specs/025-oauth-for-mcp/contracts/migration-sql.md
+  // §"Seed-data update". Phase 2's integration tests MUST use
+  // exactly this path in their /authorize + /token redeem requests
+  // — OAuth 2.1 §6.3 requires byte-exact redirect_uri match.
+  //
+  // **TEST_PORT** is a fixture-time port for integration tests'
+  // mock callback servers (NOT the dev server's PORT, which is a
+  // separate concept — the dev server doesn't host this callback;
+  // Phase 2 tests spin up their own). Documented in CLAUDE.md
+  // under "Common environment variables".
+  //
   // Upsert is keyed on clientId so re-running the seed is idempotent.
-  // redirectUris uses TEST_PORT (with a default) so CI / local can
-  // override.
+  // The `update` block mirrors `create`'s values + clears any soft-
+  // delete state, so re-seeding after a TEST_PORT change refreshes
+  // the redirectUris (without this, the row would have stale URIs
+  // and Phase 2 tests would fail with invalid_redirect_uri).
   const testPort = process.env.TEST_PORT ?? '4000';
+  const testClientFixture = {
+    clientName: 'Integration test client',
+    redirectUris: [`http://localhost:${testPort}/callback`],
+    deletedAt: null,
+    deletedBy: null,
+  };
   await db.oAuthClient.upsert({
     where: { clientId: 'test' },
     create: {
       clientId: 'test',
-      clientName: 'Integration test client',
-      redirectUris: [`http://localhost:${testPort}/callback`],
+      ...testClientFixture,
     },
-    update: {},
+    update: testClientFixture,
   });
   console.log(`  Seeded OAuthClient 'test' (redirectUris=[http://localhost:${testPort}/callback])`);
 
