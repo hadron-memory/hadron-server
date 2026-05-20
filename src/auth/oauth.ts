@@ -6,8 +6,12 @@
  *   - `GET /.well-known/oauth-protected-resource` (PRM per RFC 9728)
  *   - `GET /.well-known/oauth-authorization-server` (AS metadata per RFC 8414)
  *
- * **Phase 2B (this commit):** Dynamic Client Registration —
+ * **Phase 2B:** Dynamic Client Registration —
  *   - `POST /oauth/register` (DCR per RFC 7591)
+ *
+ * **Phase 2C (this commit):** consent + AuthCode issuance —
+ *   - `GET  /oauth/authorize` (consent screen + Option-C sign-in)
+ *   - `POST /oauth/authorize` (CSRF-protected approve/deny + AuthCode mint)
  *
  * The AS metadata response is what Claude Desktop fetches before
  * walking the OAuth dance — see spec §"Design constraints from
@@ -17,23 +21,26 @@
  *   - **EF-001** — Claude Desktop's backend probes AS metadata and
  *     silently bails when `registration_endpoint` is absent. We MUST
  *     advertise the DCR endpoint (Phase 2A) AND it must respond
- *     successfully when the client follows up (Phase 2B, this PR).
+ *     successfully when the client follows up (Phase 2B).
  *   - **EF-002** — RFC 8414's default `token_endpoint_auth_methods_supported`
  *     is `["client_secret_basic"]`, which leads spec-compliant
  *     clients to expect a client secret. Public-client / PKCE-only
  *     auth issues no secret; we MUST explicitly declare `["none"]`.
  *
- * Phase 2C (/authorize) + 2D (/token) land in follow-on PRs; until
- * those ship, `POST /oauth/authorize` and `POST /oauth/token` will
- * 404. That's acceptable for Claude Desktop's discovery + registration
- * phases (which complete after this PR).
+ * Phase 2D (/token redemption) ships next. Until then, the AuthCode
+ * minted by `POST /oauth/authorize` can't be exchanged for a token —
+ * the dance reaches the redirect-with-code step but stops there.
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Express, Request, Response } from 'express';
-import { Router } from 'express';
+import express, { Router } from 'express';
 import rateLimit from 'express-rate-limit';
+import { doubleCsrf, type DoubleCsrfUtilities } from 'csrf-csrf';
+import { decodeJwt } from 'jose';
 import { db } from '../integrations/db/client.js';
+import { verifyJwt } from './jwt.js';
+import { CONSENT_TEMPLATE } from './consent.template.js';
 
 /** Derive the canonical server origin from request headers. */
 export function getServerOrigin(req: Request): string | null {
@@ -344,21 +351,497 @@ export function buildDcrDailyCapRateLimit() {
   });
 }
 
+// ── /oauth/authorize (FR-011 / FR-012 / FR-014) ──────────────────────
+
+/**
+ * HTML-escape a value for safe insertion into the consent template.
+ * Every consent-template substitution flows through this — there are
+ * no raw-insertion points in `consent.template.ts`.
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+interface ConsentParams {
+  clientName: string;
+  scope: string;
+  resource: string;
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  codeChallengeMethod: string;
+  state: string;
+  csrfToken: string;
+}
+
+/**
+ * Render the consent HTML. All values are HTML-escaped before
+ * substitution; `clientName` and `resource` in particular are
+ * attacker-influenced (DCR-supplied / caller-supplied) so escaping
+ * is load-bearing for the XSS posture.
+ */
+export function renderConsent(params: ConsentParams): string {
+  let html = CONSENT_TEMPLATE;
+  for (const [key, value] of Object.entries(params)) {
+    const placeholder = `{{${key}}}`;
+    const safe = escapeHtml(value ?? '');
+    html = html.split(placeholder).join(safe);
+  }
+  return html;
+}
+
+/**
+ * Resolve the CSRF HMAC secret. **Fail-loud** in production when
+ * neither `CSRF_SECRET` nor `JWT_SECRET` is set — the original
+ * `|| 'dev-only-…'` fallback silently flowed into prod if the
+ * JWT boot-policy check ever changed or was bypassed. The dev
+ * secret must be unreachable in any deployment where real users
+ * are reaching the consent flow.
+ *
+ * Test and local dev fall back to a fixed dev secret; CI sets
+ * `NODE_ENV !== 'production'`.
+ */
+function resolveCsrfSecret(): string {
+  const secret = process.env.CSRF_SECRET || process.env.JWT_SECRET;
+  if (secret) return secret;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'CSRF_SECRET (or JWT_SECRET fallback) is required in production for /oauth/authorize',
+    );
+  }
+  return 'dev-only-csrf-secret-not-for-production';
+}
+
+/**
+ * Build the `csrf-csrf` Double-Submit-Cookie protection utilities for
+ * `POST /oauth/authorize`. Per REV-1 / FR-014.
+ *
+ * Bound to the signed-in user via `getSessionIdentifier` (reads the
+ * `hadron_token` JWT's `sub`). `decodeJwt` is used (NOT `verifyJwt`)
+ * because csrf-csrf's hook is synchronous; this is safe because
+ * (a) the session id is only an HMAC input — it does NOT grant
+ * authorization, and (b) the handler verifies the JWT properly
+ * after CSRF passes. The actual access check is enforced by the
+ * handler's own `getUserIdFromCookie`, which DOES verify.
+ *
+ * The token is read from the form body (`_csrf` field) rather than
+ * the default `X-CSRF-Token` header — that's the only way the
+ * consent form (a plain HTML POST) can submit it.
+ *
+ * Cookie config:
+ *   - `httpOnly: true` — the cookie carries the second half of the
+ *     double-submit; not readable from JS so XSS can't forge it.
+ *   - `secure` in production, `sameSite: 'lax'` so the cookie does
+ *     survive the same-origin POST from the consent form.
+ *   - `path: '/'` so the cookie covers the entire AS surface (the
+ *     POST endpoint is at /oauth/authorize, set during the GET at
+ *     the same path; lax sameSite alone isn't enough scope-wise).
+ */
+function buildAuthorizeCsrfProtection(): DoubleCsrfUtilities {
+  const secret = resolveCsrfSecret();
+  return doubleCsrf({
+    getSecret: () => secret,
+    getSessionIdentifier: (req) => {
+      const token = req.cookies?.hadron_token;
+      if (typeof token !== 'string' || token.length === 0) return 'anonymous';
+      try {
+        const payload = decodeJwt(token);
+        return typeof payload.sub === 'string' ? payload.sub : 'anonymous';
+      } catch {
+        return 'anonymous';
+      }
+    },
+    cookieName: '_hadron_csrf',
+    cookieOptions: {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+    },
+    getCsrfTokenFromRequest: (req) => {
+      const body = req.body as Record<string, unknown> | undefined;
+      const v = body?._csrf;
+      return typeof v === 'string' ? v : '';
+    },
+  });
+}
+
+/**
+ * Extract the signed-in user's id from the `hadron_token` cookie.
+ * Returns `null` for "not signed in or invalid token" — the caller
+ * treats both as anonymous (which under Option-C means redirecting
+ * to `/auth/github`).
+ */
+async function getUserIdFromCookie(req: Request): Promise<string | null> {
+  const token = req.cookies?.hadron_token;
+  if (typeof token !== 'string' || token.length === 0) return null;
+  try {
+    const payload = await verifyJwt(token);
+    return typeof payload.sub === 'string' ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a redirect URL by setting OAuth-reserved query params on a
+ * base. Handles the case where the base already has a query string
+ * (the registered redirect_uri can legitimately include one, e.g.
+ * `https://app.example.com/cb?env=prod`).
+ *
+ * Uses `searchParams.set` (NOT `append`) — the OAuth-reserved keys
+ * `code`, `error`, `state`, `error_description` are authoritative
+ * from THIS response. If the registered URI carries a pre-existing
+ * `?code=fixed`, that's a client-side mistake at best and a fixation
+ * attack at worst; either way our response is the source of truth.
+ * `set` overwrites any pre-existing value for the same key, so a
+ * tampered `?code=…` registered URI can't end up with two `code`
+ * params in the final redirect (RFC 6749 §3.1.2 doesn't prohibit
+ * registered URIs with query strings; client parsing of duplicate
+ * `code` is undefined).
+ *
+ * Empty / null / undefined values are skipped so we don't emit
+ * `…?error=invalid_request&state=` (RFC 6749 §4.1.2 makes the
+ * `state` echo optional when the caller didn't send one).
+ */
+function buildRedirectWithParams(
+  base: string,
+  params: Record<string, string | undefined | null>,
+): string {
+  const url = new URL(base);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') {
+      url.searchParams.set(key, value);
+    }
+  }
+  return url.toString();
+}
+
+/**
+ * Post-client-validation error redirect. Used for any /authorize
+ * request shape error where we've ALREADY verified that
+ * `client_id` + `redirect_uri` are legitimate, so it's safe to
+ * redirect to the caller's URL with an OAuth-spec error parameter.
+ */
+function redirectWithOAuthError(
+  res: Response,
+  redirectUri: string,
+  error: string,
+  state: string | undefined,
+): void {
+  const url = buildRedirectWithParams(redirectUri, { error, state });
+  res.redirect(302, url);
+}
+
+interface ValidatedClient {
+  clientId: string;
+  clientName: string;
+  redirectUri: string;
+}
+
+/**
+ * Pre-redirect validation. Per FR-011: if `client_id` is unknown OR
+ * `redirect_uri` is not in the client's allow-list, respond `400`
+ * with JSON — do NOT redirect (the caller hasn't proved redirect_uri
+ * ownership, so any redirect at this point is an open-redirect vector).
+ *
+ * Returns the validated tuple on success; on failure, writes the
+ * 400 response and returns `null` so the caller short-circuits.
+ */
+async function validateClientAndRedirectUri(
+  res: Response,
+  rawClientId: unknown,
+  rawRedirectUri: unknown,
+): Promise<ValidatedClient | null> {
+  if (typeof rawClientId !== 'string' || rawClientId.length === 0) {
+    res.status(400).json({
+      error: 'invalid_client',
+      error_description: 'client_id is required',
+    });
+    return null;
+  }
+  if (typeof rawRedirectUri !== 'string' || rawRedirectUri.length === 0) {
+    res.status(400).json({
+      error: 'invalid_redirect_uri',
+      error_description: 'redirect_uri is required',
+    });
+    return null;
+  }
+  const client = await db.oAuthClient.findUnique({
+    where: { clientId: rawClientId },
+  });
+  if (!client || client.deletedAt) {
+    res.status(400).json({
+      error: 'invalid_client',
+      error_description: 'client_id is unknown',
+    });
+    return null;
+  }
+  if (!client.redirectUris.includes(rawRedirectUri)) {
+    res.status(400).json({
+      error: 'invalid_redirect_uri',
+      error_description: 'redirect_uri is not registered for this client',
+    });
+    return null;
+  }
+  return {
+    clientId: client.clientId,
+    clientName: client.clientName,
+    redirectUri: rawRedirectUri,
+  };
+}
+
+/** v1 caps on the variable-size /authorize params. */
+const STATE_MAX_LENGTH = 512;
+/**
+ * PKCE S256 challenges are base64url-encoded SHA-256 outputs:
+ * exactly 43 chars without padding. RFC 7636 §4.2 mandates a
+ * 43–128 char range and the `[A-Z][a-z][0-9]-._~` charset
+ * ("base64url + unreserved"). Rejecting at the gate is fail-fast
+ * — the /token PKCE verifier would also reject a malformed
+ * challenge, but doing it here means consent never renders for
+ * a bad challenge.
+ */
+const CODE_CHALLENGE_MIN_LENGTH = 43;
+const CODE_CHALLENGE_MAX_LENGTH = 128;
+const CODE_CHALLENGE_CHARSET = /^[A-Za-z0-9\-._~]+$/;
+const RESOURCE_MAX_LENGTH = 2048;
+
+/** True iff `v` is a valid PKCE S256 code_challenge per RFC 7636 §4.2. */
+function isValidCodeChallenge(v: string): boolean {
+  return (
+    v.length >= CODE_CHALLENGE_MIN_LENGTH &&
+    v.length <= CODE_CHALLENGE_MAX_LENGTH &&
+    CODE_CHALLENGE_CHARSET.test(v)
+  );
+}
+
+/**
+ * `GET /oauth/authorize` per the contract in contracts/oauth-endpoints.md.
+ * Validation order (load-bearing):
+ *   1. `client_id` + `redirect_uri` — pre-redirect 400 if invalid.
+ *   2. Sign-in check — Option-C bounce to /auth/github with return_to.
+ *   3. Other param shape — post-client-validated → redirect with
+ *      `?error=invalid_request|invalid_scope`.
+ *   4. Happy path — issue CSRF token + render consent HTML.
+ *
+ * `generateCsrfToken` is closured-in by `buildOAuthRouter` so each
+ * router instance binds to its own CSRF utilities.
+ */
+function buildHandleAuthorizeGet(
+  csrf: DoubleCsrfUtilities,
+): (req: Request, res: Response) => Promise<void> {
+  return async function handleAuthorizeGet(req: Request, res: Response): Promise<void> {
+    const q = req.query as Record<string, unknown>;
+
+    // 1. Pre-redirect validation.
+    const validated = await validateClientAndRedirectUri(res, q.client_id, q.redirect_uri);
+    if (!validated) return;
+    const { clientName, redirectUri } = validated;
+
+    // RFC 8707 §2 allows multiple `resource` values; v1 limits to 1.
+    if (Array.isArray(q.resource)) {
+      res.status(400).json({
+        error: 'invalid_request',
+        error_description: 'multiple resource values are not supported in v1',
+      });
+      return;
+    }
+
+    // Pre-redirect: capture state for echo. If state is malformed
+    // (not a string, or oversized) we drop it rather than try to
+    // echo garbage back.
+    const state =
+      typeof q.state === 'string' && q.state.length > 0 && q.state.length <= STATE_MAX_LENGTH
+        ? q.state
+        : '';
+
+    // 2. Sign-in check. Not signed in → Option-C bounce.
+    const userId = await getUserIdFromCookie(req);
+    if (!userId) {
+      // req.originalUrl is the path + query that hit Express
+      // (e.g., `/oauth/authorize?client_id=…&state=…`). The
+      // `/auth/github` handler's `isServerLocalPath` predicate
+      // accepts paths starting with `/` and not `//`, which
+      // matches.
+      res.redirect(302, `/auth/github?return_to=${encodeURIComponent(req.originalUrl)}`);
+      return;
+    }
+
+    // 3. Post-client-validation shape checks — redirect with OAuth error.
+    const responseType = typeof q.response_type === 'string' ? q.response_type : '';
+    if (responseType !== 'code') {
+      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+      return;
+    }
+    const codeChallenge = typeof q.code_challenge === 'string' ? q.code_challenge : '';
+    if (codeChallenge.length === 0 || !isValidCodeChallenge(codeChallenge)) {
+      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+      return;
+    }
+    const codeChallengeMethod =
+      typeof q.code_challenge_method === 'string' ? q.code_challenge_method : '';
+    if (codeChallengeMethod !== 'S256') {
+      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+      return;
+    }
+    const resource = typeof q.resource === 'string' ? q.resource : '';
+    if (resource.length === 0 || resource.length > RESOURCE_MAX_LENGTH) {
+      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+      return;
+    }
+    // Repeated `?scope=` (Express qs parser yields an array) is
+    // a malformed request — fail loudly rather than silently
+    // coerce to the default 'mcp'.
+    if (Array.isArray(q.scope)) {
+      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+      return;
+    }
+    const scope = typeof q.scope === 'string' && q.scope.length > 0 ? q.scope : 'mcp';
+    if (scope !== 'mcp') {
+      redirectWithOAuthError(res, redirectUri, 'invalid_scope', state);
+      return;
+    }
+
+    // 4. Happy path — issue CSRF token and render consent HTML.
+    const csrfToken = csrf.generateCsrfToken(req, res);
+    const html = renderConsent({
+      clientName,
+      scope,
+      resource,
+      clientId: validated.clientId,
+      redirectUri,
+      codeChallenge,
+      codeChallengeMethod,
+      state,
+      csrfToken,
+    });
+    res.type('html').send(html);
+  };
+}
+
+/**
+ * `POST /oauth/authorize` per FR-012 / FR-014. CSRF middleware has
+ * already validated `_csrf` (or rejected with 403). Re-validates
+ * `client_id` + `redirect_uri` (open-redirect mitigation — never
+ * trust the form data alone for the redirect target).
+ *
+ * `decision === 'approve'` is the ONLY decision that mints an
+ * AuthCode. Anything else — `'deny'`, `'yes'`, missing, malformed,
+ * other Unicode — falls through to the deny path. **Fail-closed.**
+ */
+async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+
+  // 1. Auth check — same as GET. Without a signed-in user we can't
+  // mint an AuthCode, but we ALSO can't safely redirect (we haven't
+  // re-validated the redirect_uri yet). Treat as 401.
+  const userId = await getUserIdFromCookie(req);
+  if (!userId) {
+    res.status(401).json({ error: 'unauthorized', error_description: 'Not signed in' });
+    return;
+  }
+
+  // 2. Re-validate client_id + redirect_uri (open-redirect mitigation).
+  const validated = await validateClientAndRedirectUri(res, body.client_id, body.redirect_uri);
+  if (!validated) return;
+  const { redirectUri } = validated;
+
+  // 3. RFC 8707 single-resource enforcement (v1).
+  if (Array.isArray(body.resource)) {
+    res.status(400).json({
+      error: 'invalid_request',
+      error_description: 'multiple resource values are not supported in v1',
+    });
+    return;
+  }
+
+  const state =
+    typeof body.state === 'string' && body.state.length > 0 && body.state.length <= STATE_MAX_LENGTH
+      ? body.state
+      : '';
+
+  // 4. Fail-closed decision check. ONLY literal 'approve' mints.
+  if (body.decision !== 'approve') {
+    redirectWithOAuthError(res, redirectUri, 'access_denied', state);
+    return;
+  }
+
+  // 5. Re-validate the post-body shape. The GET handler should have
+  // pre-validated these, but the form could be tampered with.
+  const codeChallenge = typeof body.code_challenge === 'string' ? body.code_challenge : '';
+  if (codeChallenge.length === 0 || !isValidCodeChallenge(codeChallenge)) {
+    redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+    return;
+  }
+  const resource = typeof body.resource === 'string' ? body.resource : '';
+  if (resource.length === 0 || resource.length > RESOURCE_MAX_LENGTH) {
+    redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+    return;
+  }
+
+  // 6. Mint the AuthCode.
+  // Per REV-5: store SHA-256(code), never plaintext. The raw `code`
+  // is handed to the client via the redirect query param exactly
+  // once; we only ever look it up by hash at /token.
+  // Per REV-3: resource is `String[]` — the v1 contract limits to
+  // one element but the storage shape is future-proof.
+  const rawCode = randomBytes(32).toString('hex'); // 64 hex / 256 bits entropy
+  const codeHash = createHash('sha256').update(rawCode).digest('hex');
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10-minute expiry
+
+  try {
+    await db.authCode.create({
+      data: {
+        codeHash,
+        clientId: validated.clientId,
+        userId,
+        redirectUri,
+        codeChallenge,
+        resource: [resource],
+        expiresAt,
+        createdBy: userId,
+      },
+    });
+  } catch {
+    // Same posture as /oauth/register: a thrown Prisma error must
+    // not become an unhandled rejection. 500 is the catch-all per
+    // RFC 7591 §3.2.2.
+    res.status(500).json({
+      error: 'server_error',
+      error_description: 'Failed to issue authorization code',
+    });
+    return;
+  }
+
+  // 7. Redirect with the RAW code (not the hash). Single-use; the
+  // /token handler atomically claims it via updateMany-with-conditional.
+  const url = buildRedirectWithParams(redirectUri, { code: rawCode, state });
+  res.redirect(302, url);
+}
+
 // ── Router assembly ──────────────────────────────────────────────────
 
 /**
  * Build the Express sub-router for the OAuth surface. Returns a fresh
- * `Router` instance with fresh rate-limit middleware each time —
- * production calls this exactly once during `createServer()`; tests
- * call it per-test so each test gets clean rate-limit counters.
+ * `Router` instance with fresh rate-limit middleware AND a fresh
+ * CSRF utility chain each time — production calls this exactly once
+ * during `createServer()`; tests call it per-test so each test gets
+ * clean rate-limit counters + cookie-bound CSRF tokens.
  *
  * Routes (paths are absolute from app root because the router is
  * mounted without a prefix in `mountOAuthRoutes`):
  *   - GET  /.well-known/oauth-protected-resource     (Phase 2A)
  *   - GET  /.well-known/oauth-authorization-server   (Phase 2A)
  *   - POST /oauth/register                            (Phase 2B)
- *   - POST /oauth/authorize  → Phase 2C
- *   - POST /oauth/token      → Phase 2D
+ *   - GET  /oauth/authorize                           (Phase 2C)
+ *   - POST /oauth/authorize                           (Phase 2C, CSRF-protected)
+ *   - POST /oauth/token                               → Phase 2D
  */
 export function buildOAuthRouter(): Router {
   const router = Router();
@@ -375,6 +858,23 @@ export function buildOAuthRouter(): Router {
     buildDcrPerIpRateLimit(),
     buildDcrDailyCapRateLimit(),
     handleClientRegistration,
+  );
+
+  // /oauth/authorize: GET renders the consent screen (after issuing
+  // a CSRF token cookie); POST processes the decision. Both depend
+  // on the `cookie-parser` middleware mounted in server.ts.
+  const csrf = buildAuthorizeCsrfProtection();
+  router.get('/oauth/authorize', buildHandleAuthorizeGet(csrf));
+  router.post(
+    '/oauth/authorize',
+    // The consent form is application/x-www-form-urlencoded.
+    // express.json (mounted globally in server.ts) does NOT parse
+    // form bodies; mount urlencoded here so both the CSRF
+    // middleware (reads body._csrf) and the handler see the form
+    // fields.
+    express.urlencoded({ extended: false }),
+    csrf.doubleCsrfProtection,
+    handleAuthorizePost,
   );
 
   return router;
