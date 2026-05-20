@@ -9,9 +9,13 @@
  * **Phase 2B:** Dynamic Client Registration —
  *   - `POST /oauth/register` (DCR per RFC 7591)
  *
- * **Phase 2C (this commit):** consent + AuthCode issuance —
+ * **Phase 2C:** consent + AuthCode issuance —
  *   - `GET  /oauth/authorize` (consent screen + Option-C sign-in)
  *   - `POST /oauth/authorize` (CSRF-protected approve/deny + AuthCode mint)
+ *
+ * **Phase 2D (this commit):** token redemption — the final piece that
+ * closes the OAuth dance —
+ *   - `POST /oauth/token` (PKCE verify + race-safe redemption + mint)
  *
  * The AS metadata response is what Claude Desktop fetches before
  * walking the OAuth dance — see spec §"Design constraints from
@@ -26,13 +30,9 @@
  *     is `["client_secret_basic"]`, which leads spec-compliant
  *     clients to expect a client secret. Public-client / PKCE-only
  *     auth issues no secret; we MUST explicitly declare `["none"]`.
- *
- * Phase 2D (/token redemption) ships next. Until then, the AuthCode
- * minted by `POST /oauth/authorize` can't be exchanged for a token —
- * the dance reaches the redirect-with-code step but stops there.
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Express, Request, Response } from 'express';
 import express, { Router } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -41,6 +41,7 @@ import { decodeJwt } from 'jose';
 import { db } from '../integrations/db/client.js';
 import { verifyJwt } from './jwt.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
+import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.js';
 
 /** Derive the canonical server origin from request headers. */
 export function getServerOrigin(req: Request): string | null {
@@ -825,6 +826,314 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   res.redirect(302, url);
 }
 
+// ── /oauth/token (FR-013, FR-015) ────────────────────────────────────
+
+/**
+ * Verify a PKCE S256 challenge/verifier pair per RFC 7636 §4.6.
+ *
+ *   challenge MUST equal base64url(sha256(verifier))
+ *
+ * `timingSafeEqual` defends against timing oracles on the comparison
+ * step (the attacker controls `verifier`; if equality were a
+ * short-circuit string compare, the attacker could byte-by-byte
+ * probe the stored `challenge`).
+ */
+function verifyPkceS256(verifier: string, storedChallenge: string): boolean {
+  const computed = createHash('sha256').update(verifier).digest('base64url');
+  const a = Buffer.from(computed, 'utf8');
+  const b = Buffer.from(storedChallenge, 'utf8');
+  // The length check is necessary because `timingSafeEqual` throws
+  // on unequal-length inputs. It IS a mild timing oracle (an attacker
+  // could distinguish "wrong length" from "right length, wrong bytes"
+  // in nanoseconds) but it's not exploitable: SHA-256 base64url output
+  // is ALWAYS 43 chars, and `storedChallenge` came from /authorize's
+  // strict 43-char min validator (PR #157). A length mismatch here
+  // means the stored value was tampered with at the DB layer, which
+  // is outside the threat model this check defends against.
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Defensive revocation. Per the spec Edge Cases, any non-match on a
+ * looked-up AuthCode that ISN'T just "code expired" → mark the row
+ * `redeemedAt = NOW()` so the same code can't be tried again with
+ * a different parameter set (probing defense). The same
+ * `updateMany`-with-conditional pattern as the normal redemption —
+ * race-safe + idempotent + no error if the row's already redeemed.
+ *
+ * Errors are intentionally swallowed: this is a defense-in-depth
+ * write, not a load-bearing step. The caller has already decided
+ * to fail the request; a DB hiccup here shouldn't change the
+ * response code.
+ */
+async function revokeAuthCodeByHash(codeHash: string): Promise<void> {
+  try {
+    await db.authCode.updateMany({
+      where: { codeHash, redeemedAt: null },
+      data: { redeemedAt: new Date() },
+    });
+  } catch {
+    // Swallow — see docstring.
+  }
+}
+
+/**
+ * PKCE-only verifier range per RFC 7636 §4.1: 43-128 chars, same
+ * unreserved-URI charset as the challenge. Without these caps a
+ * pathological client could send a multi-megabyte verifier and
+ * make SHA-256 work proportional to it.
+ */
+const CODE_VERIFIER_MIN_LENGTH = 43;
+const CODE_VERIFIER_MAX_LENGTH = 128;
+const CODE_VERIFIER_CHARSET = /^[A-Za-z0-9\-._~]+$/;
+
+function isValidCodeVerifier(v: string): boolean {
+  return (
+    v.length >= CODE_VERIFIER_MIN_LENGTH &&
+    v.length <= CODE_VERIFIER_MAX_LENGTH &&
+    CODE_VERIFIER_CHARSET.test(v)
+  );
+}
+
+/**
+ * `POST /oauth/token` — RFC 6749 §4.1.3 authorization-code exchange.
+ *
+ * Auth: none (public client; PKCE is the proof of possession).
+ *
+ * Validation order:
+ *   0. `grant_type` MUST be `'authorization_code'` (the only one
+ *      we support; refresh-token is stubbed per spec Out of Scope).
+ *   1. Look up AuthCode by `sha256(code)` (REV-5: plaintext code is
+ *      never stored, only its hash). Unknown / already redeemed →
+ *      400 `invalid_grant`.
+ *   2. Verify `client_id`, `redirect_uri`, and the single-element
+ *      `resource` array element-for-element (REV-3 storage shape).
+ *      Mismatch → 400 + revoke (probing defense).
+ *   3. PKCE: `base64url(sha256(verifier)) === storedChallenge`,
+ *      constant-time. Mismatch → 400 + revoke.
+ *   4. Expiry. Past → 400 (no revoke; already irretrievable).
+ *   5. Atomic claim via `updateMany({ where: { codeHash, redeemedAt:
+ *      null }, data: { redeemedAt: NOW() } })`. count !== 1 →
+ *      lost the race; some concurrent request just redeemed it →
+ *      400 `invalid_grant`. This is the SC-005 / R-9 race guard.
+ *   6. Mint a `hdr_user_*` token via the shared `mintUserApiKey`
+ *      helper (FR-015 — same insert path as the GraphQL
+ *      `createUserApiKey` resolver). `issuedVia: 'oauth:<clientId>'`
+ *      so the audit trail names the OAuth client that owns the
+ *      token.
+ *   7. Respond per RFC 6749 §5.1: `access_token`, `token_type:
+ *      'Bearer'`, `scope: 'mcp'`. No `expires_in` (opaque tokens
+ *      are long-lived per D-2026-05-17-001). No `refresh_token`
+ *      (spec Out of Scope).
+ */
+async function handleOAuthToken(req: Request, res: Response): Promise<void> {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+
+  // **Error-code privacy posture**: RFC 6749 §5.2 distinguishes
+  // `invalid_request` (missing required parameter) from `invalid_grant`
+  // (parameter present but credential is unknown / expired / mismatched).
+  // We deliberately collapse "missing code / client_id / redirect_uri /
+  // verifier" into `invalid_grant`, identical to the "present-but-
+  // unknown" path. The distinction would tell an attacker which
+  // branch they hit (was the credential malformed, or did it not
+  // match a real row?). Uniform `invalid_grant` keeps both
+  // indistinguishable. Spec-compliant clients should never
+  // differentiate retry logic on error code anyway. The
+  // `unsupported_grant_type` and `invalid_request` (multi-value
+  // resource) codes still surface where they're useful diagnostics
+  // for client developers without leaking back-end state.
+
+  // 0. grant_type.
+  if (body.grant_type !== 'authorization_code') {
+    res.status(400).json({
+      error: 'unsupported_grant_type',
+      error_description: 'only authorization_code is supported',
+    });
+    return;
+  }
+
+  // 1. Look up by hash.
+  const rawCode = typeof body.code === 'string' ? body.code : '';
+  if (rawCode.length === 0) {
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'code is required',
+    });
+    return;
+  }
+  const codeHash = createHash('sha256').update(rawCode).digest('hex');
+  const authCode = await db.authCode.findUnique({ where: { codeHash } });
+  if (!authCode) {
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'code is unknown',
+    });
+    return;
+  }
+  if (authCode.redeemedAt) {
+    // Spec Edge Case: already-redeemed code is indistinguishable
+    // from unknown to the caller (same response). The row stays
+    // marked so subsequent attempts hit this branch.
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'code is unknown',
+    });
+    return;
+  }
+
+  // 2. Bindings. Each mismatch revokes the code (probing defense).
+  const submittedClientId = typeof body.client_id === 'string' ? body.client_id : '';
+  if (submittedClientId !== authCode.clientId) {
+    await revokeAuthCodeByHash(codeHash);
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'client_id does not match the authorization code',
+    });
+    return;
+  }
+  const submittedRedirectUri =
+    typeof body.redirect_uri === 'string' ? body.redirect_uri : '';
+  if (submittedRedirectUri !== authCode.redirectUri) {
+    await revokeAuthCodeByHash(codeHash);
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'redirect_uri does not match the authorization code',
+    });
+    return;
+  }
+  // resource: REV-3 stored as String[]; v1 contract is exactly 1
+  // element (the same constraint as /authorize). Multi-occurrence
+  // in the request → reject.
+  if (Array.isArray(body.resource)) {
+    await revokeAuthCodeByHash(codeHash);
+    res.status(400).json({
+      error: 'invalid_request',
+      error_description: 'multiple resource values are not supported in v1',
+    });
+    return;
+  }
+  const submittedResource = typeof body.resource === 'string' ? body.resource : '';
+  if (
+    authCode.resource.length !== 1 ||
+    authCode.resource[0] !== submittedResource
+  ) {
+    await revokeAuthCodeByHash(codeHash);
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'resource does not match the authorization code',
+    });
+    return;
+  }
+
+  // 3. PKCE.
+  const codeVerifier = typeof body.code_verifier === 'string' ? body.code_verifier : '';
+  if (codeVerifier.length === 0 || !isValidCodeVerifier(codeVerifier)) {
+    await revokeAuthCodeByHash(codeHash);
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'PKCE code_verifier is malformed',
+    });
+    return;
+  }
+  if (!verifyPkceS256(codeVerifier, authCode.codeChallenge)) {
+    await revokeAuthCodeByHash(codeHash);
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'PKCE verification failed',
+    });
+    return;
+  }
+
+  // 4. Expiry. No revoke needed — the row is already unreachable
+  // by anyone via this code.
+  if (authCode.expiresAt.getTime() <= Date.now()) {
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'code has expired',
+    });
+    return;
+  }
+
+  // 5. Atomic claim (SC-005 / R-9 race guard).
+  // Postgres handles the UPDATE under the row lock; under concurrent
+  // attempts, exactly one query sees count=1 + the others see count=0.
+  // No transaction / SELECT FOR UPDATE needed — the conditional WHERE
+  // is the lock.
+  let claimedCount: number;
+  try {
+    const result = await db.authCode.updateMany({
+      where: { codeHash, redeemedAt: null },
+      data: { redeemedAt: new Date() },
+    });
+    claimedCount = result.count;
+  } catch {
+    res.status(500).json({
+      error: 'server_error',
+      error_description: 'failed to claim authorization code',
+    });
+    return;
+  }
+  if (claimedCount !== 1) {
+    // Lost the race. The other side just minted a token; we don't.
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'code is unknown',
+    });
+    return;
+  }
+
+  // 6. Mint via the shared FR-015 insert path.
+  // The client lookup is post-claim because: (a) we already validated
+  // submittedClientId against the AuthCode.clientId binding above, and
+  // (b) by claiming first, a concurrent client-deletion can't
+  // double-mint. RFC 7591 §2 leaves clientName optional, so fall back
+  // to clientId so the label never reads "OAuth: undefined".
+  const client = await db.oAuthClient.findUnique({
+    where: { clientId: authCode.clientId },
+  });
+  const clientNameForLabel =
+    client?.clientName && client.clientName.length > 0
+      ? client.clientName
+      : authCode.clientId;
+
+  let rawKey: string;
+  try {
+    // Cap the label at the same length as the GraphQL resolver's
+    // user-supplied label. Today the implicit cap depends on DCR's
+    // 200-char client_name cap from PR #154; if that ever changes,
+    // we'd want the OAuth label to stay bounded regardless. Defense
+    // in depth via a single shared constant.
+    const label = `OAuth: ${clientNameForLabel}`.slice(0, USER_API_KEY_LABEL_MAX_LEN);
+    const minted = await mintUserApiKey(db, {
+      userId: authCode.userId,
+      label,
+      createdBy: authCode.userId,
+      issuedVia: `oauth:${authCode.clientId}`,
+    });
+    rawKey = minted.rawKey;
+  } catch {
+    // The AuthCode is already claimed; we can't un-claim it
+    // safely. The user can retry the OAuth dance from scratch.
+    // Better to fail-loud than to silently leave them with a
+    // dead code.
+    res.status(500).json({
+      error: 'server_error',
+      error_description: 'failed to issue access token',
+    });
+    return;
+  }
+
+  // 7. RFC 6749 §5.1 token response. No `expires_in` — opaque
+  // tokens are long-lived per D-2026-05-17-001. No `refresh_token`
+  // — out of scope.
+  res.status(200).json({
+    access_token: rawKey,
+    token_type: 'Bearer',
+    scope: 'mcp',
+  });
+}
+
 // ── Router assembly ──────────────────────────────────────────────────
 
 /**
@@ -841,7 +1150,7 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
  *   - POST /oauth/register                            (Phase 2B)
  *   - GET  /oauth/authorize                           (Phase 2C)
  *   - POST /oauth/authorize                           (Phase 2C, CSRF-protected)
- *   - POST /oauth/token                               → Phase 2D
+ *   - POST /oauth/token                               (Phase 2D)
  */
 export function buildOAuthRouter(): Router {
   const router = Router();
@@ -875,6 +1184,15 @@ export function buildOAuthRouter(): Router {
     express.urlencoded({ extended: false }),
     csrf.doubleCsrfProtection,
     handleAuthorizePost,
+  );
+
+  // /oauth/token: form-encoded (RFC 6749 §4.1.3); unauthenticated
+  // (public client; PKCE is the proof). No CSRF — this is a
+  // machine-to-machine endpoint, not a browser-form endpoint.
+  router.post(
+    '/oauth/token',
+    express.urlencoded({ extended: false }),
+    handleOAuthToken,
   );
 
   return router;
