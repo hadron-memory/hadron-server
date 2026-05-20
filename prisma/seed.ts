@@ -384,6 +384,33 @@ async function main() {
   });
   console.log(`  Created 2 personal memories for Mike (one per Juno install)`);
 
+  // ── Spec 025-oauth-for-mcp: OAuthClient seed (T009 / FR-023) ─────────
+  // Per Clarifications Q-025-001, only the 'test' OAuthClient row is
+  // seeded. 'claude-desktop' (and any other real client) is NOT
+  // pre-seeded — Claude Desktop self-registers via DCR and gets a
+  // dcr_<32 hex> id; a pre-seeded 'claude-desktop' row would be dead
+  // code that misleads future readers about how DCR actually works.
+  //
+  // Phase 2's /oauth/authorize + /oauth/token integration tests
+  // depend on this seed (PR 137's scripts/test-oauth-dance.ts used
+  // client_id='test' but no seed row existed — anyone else running
+  // the test got 400 invalid_client; FR-023 closes that gap).
+  //
+  // Upsert is keyed on clientId so re-running the seed is idempotent.
+  // redirectUris uses TEST_PORT (with a default) so CI / local can
+  // override.
+  const testPort = process.env.TEST_PORT ?? '4000';
+  await db.oAuthClient.upsert({
+    where: { clientId: 'test' },
+    create: {
+      clientId: 'test',
+      clientName: 'Integration test client',
+      redirectUris: [`http://localhost:${testPort}/callback`],
+    },
+    update: {},
+  });
+  console.log(`  Seeded OAuthClient 'test' (redirectUris=[http://localhost:${testPort}/callback])`);
+
   // ── Final summary ──────────────────────────────────────────────────────
   console.log(`\nSeed complete!\n`);
   console.log(`AppKeys (paste into hadron-portal or .hadron/config.json):`);
