@@ -1,6 +1,16 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
-import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
+import {
+  APP_KEY_PREFIX,
+  USER_API_KEY_PREFIX,
+  hashAppKey,
+  hashUserApiKey,
+} from '../../../middleware/auth.js';
+
+// Maximum length for UserApiKey.label. The Prisma column is uncapped
+// TEXT; 200 chars is plenty for a human-readable display name and
+// prevents megabyte-sized labels from being persisted.
+const USER_API_KEY_LABEL_MAX_LEN = 200;
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
@@ -1462,6 +1472,13 @@ export const resolvers = {
     lastUsedAt: (k: { lastUsedAt?: Date | string | null }) => toISO(k.lastUsedAt ?? null),
     revokedAt: (k: { revokedAt?: Date | string | null }) => toISO(k.revokedAt ?? null),
   },
+  // 025-oauth-for-mcp: serialize timestamp fields the same way AppKey
+  // does. `userId` is intentionally NOT exposed (PR-137 delta D1).
+  UserApiKey: {
+    createdAt: (k: { createdAt: Date | string }) => toISO(k.createdAt)!,
+    lastUsedAt: (k: { lastUsedAt?: Date | string | null }) => toISO(k.lastUsedAt ?? null),
+    revokedAt: (k: { revokedAt?: Date | string | null }) => toISO(k.revokedAt ?? null),
+  },
   User: {
     linkedAt: (u: { linkedAt?: Date | string | null }) => toISO(u.linkedAt ?? null),
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
@@ -2538,6 +2555,29 @@ export const resolvers = {
       return ctx.db.appKey.findMany({
         where: { appId: resolvedAppId, revokedAt: null },
         orderBy: { createdAt: 'desc' },
+      });
+    },
+
+    // 025-oauth-for-mcp FR-004: list caller's own user-scoped API keys
+    // (active + revoked — deliberate difference from `appKeys` query,
+    // which returns active-only for the admin app-key list; this query
+    // powers the user's self-service audit log so revoked keys must
+    // remain visible). AppKey-resolved callers rejected (no user
+    // context).
+    //
+    // `id desc` tiebreaker on createdAt ties (cuid is monotonic-ish so
+    // this is effectively a fingerprint); guarantees deterministic
+    // ordering regardless of millisecond ties.
+    myUserApiKeys: async (_: unknown, __: unknown, ctx: Context) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'myUserApiKeys requires a user-scoped credential.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      return ctx.db.userApiKey.findMany({
+        where: { userId: ctx.userId },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       });
     },
   },
@@ -6453,6 +6493,100 @@ export const resolvers = {
       await requireOrgRole(ctx, key.app.organizationId, 'ADMIN');
       await ctx.db.appKey.update({ where: { id }, data: { revokedAt: new Date() } });
       return true;
+    },
+
+    // 025-oauth-for-mcp FR-004: mint a user-scoped API key. Self-service
+    // only — AppKey-resolved callers (no user in context) MUST be
+    // rejected. The raw key is returned exactly once; only the hash is
+    // persisted. `createdBy` is the actor's User.id (REV-2 reversal —
+    // matches the schema-wide audit-actor convention); `issuedVia` is
+    // the path discriminator (REV-2 — `'portal'` here, `'oauth:<id>'`
+    // for /oauth/token-issued tokens in Phase 2).
+    createUserApiKey: async (
+      _: unknown,
+      { label }: { label?: string | null },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'createUserApiKey requires a user-scoped credential; AppKey callers cannot mint user keys.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      // Cap label length to prevent unbounded TEXT writes. The Prisma
+      // column is uncapped; 200 chars is plenty for a human-readable
+      // display name (e.g., "MacBook Air — Claude Desktop").
+      if (label != null && label.length > USER_API_KEY_LABEL_MAX_LEN) {
+        throw new GraphQLError(
+          `Label exceeds ${USER_API_KEY_LABEL_MAX_LEN}-character limit.`,
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+      // Raw key format: hdr_user_<64 hex chars> (256 bits of entropy).
+      // Same primitive as AppKey; resolves via the same middleware path.
+      const rawKey = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
+      const keyHash = hashUserApiKey(rawKey);
+      const keyPreview = rawKey.slice(-4);
+      const userApiKey = await ctx.db.userApiKey.create({
+        data: {
+          userId: ctx.userId,
+          keyHash,
+          keyPreview,
+          label: label ?? null,
+          createdBy: ctx.userId,
+          issuedVia: 'portal',
+        },
+      });
+      return { userApiKey, rawKey };
+    },
+
+    // 025-oauth-for-mcp FR-004: revoke a user-scoped API key. Returns
+    // the updated row (D3 — was Boolean! in PR 137). Idempotent on
+    // already-revoked keys.
+    //
+    // **Atomic + no-info-leak design** (PR #145 review):
+    // - The updateMany-with-conditional pattern (`where: { id, userId,
+    //   revokedAt: null }`) makes the write race-safe: under concurrent
+    //   calls, only one wins the revokedAt timestamp; the loser's
+    //   updateMany returns count=0 and no overwrite happens.
+    // - Scoping the subsequent read to `{ id, userId }` collapses the
+    //   cross-user case to NOT_FOUND, closing the id-enumeration
+    //   channel that a separate FORBIDDEN branch would have opened
+    //   (an attacker with a guess at someone else's key id would
+    //   otherwise learn that the id exists).
+    revokeUserApiKey: async (
+      _: unknown,
+      { id }: { id: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'revokeUserApiKey requires a user-scoped credential; AppKey callers cannot revoke user keys.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      // Atomic conditional revoke: only flips revokedAt on rows that
+      // (a) match the id, (b) are owned by the caller, AND
+      // (c) are not already revoked. Returns count=0 for any
+      // non-matching row, which we disambiguate below.
+      await ctx.db.userApiKey.updateMany({
+        where: { id, userId: ctx.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      // Read back via findFirst scoped to `{ id, userId }`. If the row
+      // is missing, the id is either unknown OR belongs to a different
+      // user — collapse both to NOT_FOUND. If present, return it
+      // unchanged (idempotent path: revokedAt was already set, so
+      // updateMany did nothing).
+      const row = await ctx.db.userApiKey.findFirst({
+        where: { id, userId: ctx.userId },
+      });
+      if (!row) {
+        throw new GraphQLError(`UserApiKey ${id} not found.`, {
+          extensions: { code: 'NOT_FOUND' },
+        });
+      }
+      return row;
     },
 
     // 005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's
