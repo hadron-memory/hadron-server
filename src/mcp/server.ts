@@ -2157,7 +2157,7 @@ const transports = new Map<string, StreamableHTTPServerTransport>();
  * §Clarifications Q3; horizontal scale-out requires either sticky
  * sessions or persistent `McpSessionState` first.
  */
-export const activeAppByMcpSession = new Map<
+const activeAppByMcpSession = new Map<
   string,
   { appId: string; organizationId: string }
 >();
