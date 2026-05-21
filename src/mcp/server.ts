@@ -17,6 +17,7 @@ import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import { resolveAppForRequest } from '../auth/user-app-resolution.js';
+import { getServerOrigin } from '../auth/oauth.js';
 
 // Spec 025-oauth-for-mcp / research §R-6: error_description in the
 // 409 multi-App response links to a docs page that explains the
@@ -1975,11 +1976,17 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     // Advertise the protected-resource metadata URL per RFC 9728 §5.1 so
     // MCP-spec-compliant clients (Claude Desktop, MCP Inspector) can
     // discover the OAuth authorization server and walk the OAuth dance.
-    // Host is derived from req.protocol + req.get('host'); req.protocol
-    // honors `app.set('trust proxy', …)` so the URL is HTTPS when the
-    // server is reached over a TLS-terminating proxy.
-    const host = req.get('host');
-    if (!host) {
+    //
+    // Origin resolution is delegated to `getServerOrigin` so this path
+    // shares the same precedence as the discovery endpoints (the
+    // `HADRON_PUBLIC_BASE_URL` env var when set, else
+    // `req.protocol + req.get('host')`). Without that consolidation,
+    // a misconfigured deployment could emit an `https://` issuer in
+    // the AS metadata but an `http://` URL in this WWW-Authenticate
+    // header (or vice versa) — same root cause as the original
+    // catch-all "everything is http://" production bug.
+    const origin = getServerOrigin(req);
+    if (!origin) {
       // RFC 7230 §5.4 requires Host on every HTTP/1.1 request. A request
       // without one is malformed; we can't synthesize a usable
       // resource_metadata URL. Respond 400 honestly rather than emit a
@@ -1987,7 +1994,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       res.status(400).json({ error: 'Missing Host header' });
       return;
     }
-    const prmUrl = `${req.protocol}://${host}/.well-known/oauth-protected-resource`;
+    const prmUrl = `${origin}/.well-known/oauth-protected-resource`;
     res.setHeader(
       'WWW-Authenticate',
       `Bearer realm="hadron", error="invalid_token", resource_metadata="${prmUrl}"`,

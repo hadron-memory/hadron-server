@@ -449,19 +449,21 @@ describe('POST /oauth/register — trust-proxy + rate-limit IP resolution', () =
   let server: Server | null = null;
   let baseUrl = '';
   const capturedIps: string[] = [];
+  const capturedProtocols: string[] = [];
 
   /**
    * Spin up a fresh listener with the given trust-proxy config. Spy
-   * handler captures req.ip without touching the DB — the goal here
-   * is to pin req.ip resolution, not exercise persistence (covered
-   * by the happy-path suite). Returns nothing; mutates `server` +
-   * `baseUrl` so the test body uses them directly.
+   * handler captures req.ip + req.protocol without touching the DB —
+   * the goal here is to pin both attributions, not exercise
+   * persistence (covered by the happy-path suite). Returns nothing;
+   * mutates `server` + `baseUrl` so the test body uses them directly.
    */
   async function makeTestApp(trustProxy: string[]): Promise<void> {
     const app = express();
     app.set('trust proxy', trustProxy);
     app.post('/oauth/register', (req, res) => {
       capturedIps.push(req.ip ?? '<unknown>');
+      capturedProtocols.push(req.protocol);
       res.status(204).end();
     });
     server = createHttpServer(app);
@@ -472,6 +474,7 @@ describe('POST /oauth/register — trust-proxy + rate-limit IP resolution', () =
 
   beforeEach(() => {
     capturedIps.length = 0;
+    capturedProtocols.length = 0;
   });
 
   afterEach(async () => {
@@ -522,5 +525,47 @@ describe('POST /oauth/register — trust-proxy + rate-limit IP resolution', () =
     });
     expect(res.status).toBe(204);
     expect(capturedIps).toEqual(['127.0.0.1']);
+  });
+
+  // The companion of the IP test: same trust-proxy config, but asserts
+  // `req.protocol === 'https'` when the request arrives with
+  // `X-Forwarded-Proto: https` through a trusted hop. Closes the test
+  // gap surfaced by user-reported production behavior where every URL
+  // in OAuth metadata came back as `http://` even though the actual
+  // request was reaching the server over Cloudflare-terminated HTTPS.
+  // `getServerOrigin` consumes `req.protocol`, so a correct trust-proxy
+  // config is load-bearing for the metadata being HTTPS — EXCEPT when
+  // `HADRON_PUBLIC_BASE_URL` is set (which is the defense-in-depth
+  // path; see oauth.public-base-url.test.ts).
+  it('req.protocol resolves to "https" via X-Forwarded-Proto under a trusted CIDR', async () => {
+    await makeTestApp(['127.0.0.1/32', '103.21.244.0/22']);
+
+    const res = await fetch(`${baseUrl}/oauth/register`, {
+      method: 'POST',
+      headers: {
+        'x-forwarded-for': '1.2.3.4, 103.21.244.10',
+        'x-forwarded-proto': 'https',
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(capturedProtocols).toEqual(['https']);
+  });
+
+  it('untrusted X-Forwarded-Proto is IGNORED (req.protocol stays at the TCP scheme)', async () => {
+    // The IP-mitigation counterpart for protocol: a spoofed
+    // X-Forwarded-Proto from a non-trusted peer must not flip
+    // req.protocol. Otherwise an attacker could trivially convince
+    // the server that an http:// request is https://, breaking any
+    // protocol-conditioned logic downstream.
+    await makeTestApp(['103.21.244.0/22']);
+
+    const res = await fetch(`${baseUrl}/oauth/register`, {
+      method: 'POST',
+      headers: { 'x-forwarded-proto': 'https' },
+    });
+    expect(res.status).toBe(204);
+    // The test listener is plain HTTP (`server.listen` → http server),
+    // so the unspoofed TCP scheme is 'http'.
+    expect(capturedProtocols).toEqual(['http']);
   });
 });

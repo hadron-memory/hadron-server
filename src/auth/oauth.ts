@@ -43,8 +43,83 @@ import { verifyJwt } from './jwt.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
 import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.js';
 
-/** Derive the canonical server origin from request headers. */
+/**
+ * Validate a `HADRON_PUBLIC_BASE_URL` env-var value. Exported for direct
+ * unit testing. Returns the validated string when valid, `null` when
+ * unset, throws on malformed input.
+ *
+ * The strict shape is `scheme://host[:port]` with **no trailing slash**
+ * and **no path component**. Scheme MUST be lowercase `http://` or
+ * `https://` (canonical form for byte-equality comparison; see below).
+ * Host MUST be a DNS-safe ASCII hostname: alphanumerics, `.`, `-`.
+ * Explicitly NOT supported:
+ *   - underscores in hostnames (RFC 1035-style strictness; k8s service
+ *     DNS that uses `service_name.namespace.svc.cluster.local` won't
+ *     work — out of scope, widen the regex if needed)
+ *   - IPv6 bracket notation (`https://[::1]:4000`) — out of scope; v6-only
+ *     deployments would need to add `\[[0-9a-fA-F:]+\]` as a host
+ *     alternative
+ *   - uppercase or mixed-case schemes (`HTTPS://...`) — RFC 3986 says
+ *     schemes are case-insensitive but the OAuth issuer claim is
+ *     compared verbatim; we enforce canonical-lowercase to match
+ *
+ * Rationale for strictness: this string flows into RFC 8414's `issuer`
+ * field and is compared for exact equality by spec-compliant clients
+ * (Claude Desktop, MCP Inspector) against the issuer claim they cached
+ * at discovery time. A trailing slash, a path, a port mismatch, or a
+ * scheme-case difference all cause silent rejection at the client side.
+ * Failing loud at boot is the right posture.
+ */
+export function validatePublicBaseUrl(raw: string | undefined): string | null {
+  if (raw === undefined || raw === '') return null;
+  // Strict: lowercase scheme + DNS-style host + optional port. Explicitly
+  // NOT allowed: trailing slash, path, query (`?`), fragment (`#`), any
+  // whitespace, IPv6 bracket notation, underscores, uppercase scheme.
+  // The charset is the ASCII hostname subset (alphanumeric + `.` + `-`).
+  if (!/^https?:\/\/[A-Za-z0-9.\-]+(:\d+)?$/.test(raw)) {
+    throw new Error(
+      `HADRON_PUBLIC_BASE_URL must be of the form '<scheme>://<host>' or ` +
+        `'<scheme>://<host>:<port>' (scheme = lowercase http or https) ` +
+        `with no trailing slash, no path, no query, no fragment, ` +
+        `and no whitespace. Got: ${JSON.stringify(raw)}`,
+    );
+  }
+  return raw;
+}
+
+/**
+ * Resolved at module load. When set, every consumer of `getServerOrigin`
+ * uses this value verbatim — bypassing the per-request `req.protocol +
+ * req.get('host')` derivation. That removes the dependency on
+ * `trust proxy` + `X-Forwarded-Proto` correctness for OAuth metadata
+ * URLs, which are advertised once at discovery time and must be stable.
+ *
+ * Production deployments behind any TLS-terminating proxy (Cloudflare,
+ * load balancer, etc.) SHOULD set this. Without it, a single
+ * misconfigured request (or a momentary `trust proxy` mishap) emits
+ * `http://` URLs in the AS metadata, which Claude Desktop refuses to
+ * accept (EF-003).
+ *
+ * Local dev / tests leave it unset and use the per-request derivation
+ * (so the listener's random port is reflected naturally; setting a
+ * fixed value would break `127.0.0.1:<port>`-bound tests).
+ */
+const PUBLIC_BASE_URL = validatePublicBaseUrl(process.env.HADRON_PUBLIC_BASE_URL);
+
+/**
+ * Canonical server-origin resolver. Used by every public-facing URL
+ * builder (PRM, AS metadata, `/mcp` 401 `WWW-Authenticate`).
+ *
+ * Precedence:
+ *   1. `HADRON_PUBLIC_BASE_URL` env var (production-recommended).
+ *   2. `${req.protocol}://${req.get('host')}` (dev fallback).
+ *
+ * Returns `null` only when the env var is unset AND the request lacks
+ * a Host header (RFC 7230 §5.4 says that can't happen on a well-formed
+ * HTTP/1.1 request; the caller emits a 400 in that case).
+ */
 export function getServerOrigin(req: Request): string | null {
+  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
   const host = req.get('host');
   if (!host) return null;
   return `${req.protocol}://${host}`;
