@@ -16,8 +16,19 @@ import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
-import { resolveAppForRequest } from '../auth/user-app-resolution.js';
+import {
+  resolveAppForRequest,
+  resolveAppIdentifier,
+  resolveUserAppsWithMeta,
+  type AppResolution,
+} from '../auth/user-app-resolution.js';
 import { getServerOrigin } from '../auth/oauth.js';
+import {
+  APP_SELECTION_ERROR_CODES,
+  appSelectionError,
+  type AppSelectionErrorEnvelope,
+} from './app-selection-errors.js';
+import { mcpLog } from './mcp-log.js';
 
 // Spec 025-oauth-for-mcp / research §R-6: error_description in the
 // 409 multi-App response links to a docs page that explains the
@@ -220,7 +231,11 @@ async function resolveMemoryByUrn(
 // MCP Server factory — one McpServer per transport session
 // ---------------------------------------------------------------------------
 
-function createMcpServerInstance(auth: AuthContext): McpServer {
+function createMcpServerInstance(
+  auth: AuthContext,
+  getSessionId: () => string | undefined,
+  cachedAppResolution: AppResolution | null,
+): McpServer {
   const server = new McpServer(
     { name: 'hadron', version: '0.2.0' },
     { capabilities: { tools: {} } },
@@ -234,6 +249,54 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
   // discussion registry; revisit if usage stays "set, never read" past pilot.
   let activeMemoryUrn: string | undefined;
 
+  // Spec 026 — has the session called `h-list-apps` or `h-set-active-app`,
+  // or had a regime-(b) `initialize` envelope attempted? Toggles which
+  // error fires when a multi-App user calls an App-scoped tool without
+  // selection: typed `no_active_app` (new) vs. legacy
+  // `multiple_apps_resolved` text (FR-016 fall-through for un-migrated
+  // clients). The legacy text is preserved verbatim in the helper so
+  // SC-003 can track adoption — operators watching for the legacy phrase
+  // in logs / client traces see the migration trend.
+  let engagedWithNewSurface = false;
+
+  /**
+   * Spec 026 — resolve the active App for an App-scoped tool call.
+   * Returns `null` when the caller can proceed (auth.appId set, possibly
+   * via a freshly applied session-scoped selection). Returns an MCP
+   * tool-error envelope when the caller has no App scope.
+   *
+   * Mutates `auth.appId` / `auth.organizationId` when a session-scoped
+   * selection becomes active — so the existing tools' `if (!auth.appId)`
+   * checks downstream pass without per-tool plumbing.
+   */
+  function requireAppScope(): AppSelectionErrorEnvelope | null {
+    if (auth.appId) return null;
+    if (!auth.userId) return null; // truly unauth — let existing checks handle it
+
+    const sid = getSessionId();
+    if (sid) {
+      const sel = activeAppByMcpSession.get(sid);
+      if (sel) {
+        auth.appId = sel.appId;
+        auth.organizationId = sel.organizationId;
+        return null;
+      }
+    }
+
+    if (cachedAppResolution?.kind === 'multi-app') {
+      const message = engagedWithNewSurface
+        ? `No active Hadron App. Call h-list-apps to see options, then h-set-active-app with the one you want. If you're calling from a project directory, set 'app' in '.hadron/config.json'.`
+        : `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance. Or call h-list-apps to see your accessible Apps and h-set-active-app to pick one.`;
+      mcpLog('warn', engagedWithNewSurface ? 'no_active_app_typed_error' : 'multiple_apps_resolved_fallthrough', {
+        userId: auth.userId,
+        mcpSessionId: sid,
+      });
+      return appSelectionError(APP_SELECTION_ERROR_CODES.NO_ACTIVE_APP, message);
+    }
+
+    return null; // zero-App or other path — fall through
+  }
+
   // ── h-list-memories ──────────────────────────────────────────────────────
 
   server.tool(
@@ -241,6 +304,11 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
     'List all memories this caller has access to, with URN and access level (read-only or read-write).',
     {},
     async () => {
+      // Spec 026 — surface typed `no_active_app` error for multi-App
+      // OAuth callers who haven't selected, with the FR-016 legacy
+      // text as fall-through for un-engaged callers.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       if (!auth.clientId && !auth.appId) return textResult('Not authenticated.');
 
       const access = await getMemoryAccess(db, auth);
@@ -303,6 +371,135 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
       // findFirst({urn:activeMemoryUrn}) lookups).
       activeMemoryUrn = mem.urn;
       return textResult(`Active memory set to: ${formatUrn('memory', mem.urn)}`);
+    },
+  );
+
+  // ── h-list-apps (spec 026 regime c) ──────────────────────────────────────
+
+  server.tool(
+    'h-list-apps',
+    'List the Hadron Apps you have access to. Use this to find an App to pass to h-set-active-app, or to check what an `app` field in `.hadron/config.json` resolves to.',
+    {},
+    async () => {
+      engagedWithNewSurface = true;
+      if (!auth.userId && !auth.clientId && !auth.appId) {
+        return textResult('Not authenticated.');
+      }
+      // AppKey callers (appId set, no userId) — list returns the single App
+      // they're scoped to, for parity with the user-credential path.
+      if (auth.appId && !auth.userId) {
+        const app = await db.app.findUnique({
+          where: { id: auth.appId },
+          select: { id: true, urn: true, name: true },
+        });
+        if (!app) return textResult('No accessible apps.');
+        return textResult(
+          `1 accessible app:\n\n- **${formatUrn('app', app.urn)}** — ${app.name} (via App Key)`,
+        );
+      }
+
+      const apps = await resolveUserAppsWithMeta(auth.userId!, db);
+      if (apps.length === 0) {
+        return textResult(
+          'No accessible apps. Ask an App owner to add you, or visit the Hadron portal to create one.',
+        );
+      }
+      const lines = apps.map(
+        (a) => `- **${formatUrn('app', a.urn)}** — ${a.name} (role: ${a.role})`,
+      );
+      const header =
+        apps.length === 1
+          ? `1 accessible app:`
+          : `${apps.length} accessible apps:`;
+      const trailer =
+        apps.length === 1
+          ? `\n\n(You only have one App, so h-set-active-app isn't required — it's already the active one by default.)`
+          : '';
+      return textResult(`${header}\n\n${lines.join('\n')}${trailer}`);
+    },
+  );
+
+  // ── h-set-active-app (spec 026 regime c) ─────────────────────────────────
+
+  server.tool(
+    'h-set-active-app',
+    "Set the active Hadron App for this session. Subsequent tools (h-find-nodes, h-add-node, etc.) will use this as the App scope. Pass the App URN (e.g. 'urn:app:acme-corp:mealplan') or an App name that matches exactly one App you have access to. Use h-list-apps to see options.",
+    {
+      app: z
+        .string()
+        .describe(
+          "App URN or unambiguous App name. Pass the URN form for guaranteed match; pass the display name when it is unique across your Apps.",
+        ),
+    },
+    async ({ app }) => {
+      engagedWithNewSurface = true;
+      if (auth.appId && !auth.userId) {
+        // AppKey caller — App identity is in the credential.
+        return textResult(
+          'AppKey callers already carry App identity in the credential; h-set-active-app is not applicable.',
+        );
+      }
+      if (!auth.userId) {
+        return textResult('Not authenticated.');
+      }
+
+      const r = await resolveAppIdentifier(app, auth.userId, db);
+      const sid = getSessionId();
+
+      switch (r.kind) {
+        case 'resolved': {
+          if (sid) {
+            activeAppByMcpSession.set(sid, {
+              appId: r.app.id,
+              organizationId: r.app.organizationId,
+            });
+          }
+          auth.appId = r.app.id;
+          auth.organizationId = r.app.organizationId;
+          mcpLog('warn', 'regime_c_selection_set', {
+            userId: auth.userId,
+            mcpSessionId: sid,
+            appId: r.app.id,
+            appUrn: r.app.urn,
+          });
+          return textResult(
+            `Active App set to: **${formatUrn('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call h-set-active-app again with a different identifier to switch, or h-list-apps to see other options.`,
+          );
+        }
+        case 'ambiguous': {
+          const candidatesText = r.candidates
+            .map((c) => `  - ${formatUrn('app', c.urn)}`)
+            .join('\n');
+          mcpLog('warn', 'app_identifier_ambiguous', {
+            userId: auth.userId,
+            mcpSessionId: sid,
+            submittedIdentifier: app,
+            candidateCount: r.candidates.length,
+          });
+          return appSelectionError(
+            APP_SELECTION_ERROR_CODES.APP_IDENTIFIER_AMBIGUOUS,
+            `Multiple Apps match '${app}'. Try the URN form to disambiguate:\n${candidatesText}`,
+          );
+        }
+        case 'unavailable': {
+          return appSelectionError(
+            APP_SELECTION_ERROR_CODES.APP_UNAVAILABLE,
+            `App '${app}' is no longer available (${r.reason}). Ask the App owner to reinstall, or pick another with h-list-apps.`,
+          );
+        }
+        case 'not-member': {
+          return appSelectionError(
+            APP_SELECTION_ERROR_CODES.APP_NOT_FOUND,
+            `No accessible App matches '${app}'. Use h-list-apps to see what's available.`,
+          );
+        }
+        case 'not-found': {
+          return appSelectionError(
+            APP_SELECTION_ERROR_CODES.APP_NOT_FOUND,
+            `No accessible App matches '${app}'. Use h-list-apps to see what's available.`,
+          );
+        }
+      }
     },
   );
 
@@ -1952,6 +2149,20 @@ function createMcpServerInstance(auth: AuthContext): McpServer {
 const transports = new Map<string, StreamableHTTPServerTransport>();
 
 /**
+ * Spec 026 — per-MCP-session active App, used by both regime (b)
+ * (directory-aware, seeded from `initialize` capability parameter) and
+ * regime (c) (session-scoped, set by the `h-set-active-app` tool).
+ * Keyed by transport `sessionId`. Cleaned up in `transport.onclose`
+ * alongside `transports.delete(sid)`. Single-replica only per spec 026
+ * §Clarifications Q3; horizontal scale-out requires either sticky
+ * sessions or persistent `McpSessionState` first.
+ */
+export const activeAppByMcpSession = new Map<
+  string,
+  { appId: string; organizationId: string }
+>();
+
+/**
  * Handle MCP requests on the Express /mcp endpoint.
  * Authenticates via Bearer token, creates or reuses transport sessions.
  */
@@ -2003,55 +2214,42 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     return;
   }
 
-  // Spec 025-oauth-for-mcp FR-020 / research §R-6 — App-identification
-  // resolution at the MCP boundary for user-credential callers
-  // (userId set but appId not set, i.e., JWT or hdr_user_<…> Bearer).
-  // App-key callers already have appId populated by the middleware
-  // and skip this block.
+  // Spec 025 / 026 — App-identification resolution at the MCP boundary for
+  // user-credential callers (userId set, appId not set; JWT or
+  // hdr_user_<…> Bearer). App-key callers already have appId populated by
+  // the middleware and skip this block.
   //
-  // Single-App default regime only — directory-aware and session-
-  // scoped regimes are carved out to sibling spec
-  // `02X-app-identification-regimes`. The handler MUST NOT silently
-  // pick when a user has 2+ Apps; it returns HTTP 409 with a typed
-  // `multiple_apps_resolved` body so the client can surface a clear
-  // error or (in a future sibling spec) prompt for selection.
+  // **Spec-026 change** (relative to spec-025):
+  // - The legacy `multiple_apps_resolved` HTTP 409 NO LONGER fires here at
+  //   session-init time. Spec 026 requires multi-App sessions to OPEN so
+  //   the user can call `h-list-apps` + `h-set-active-app` to pick an App.
+  // - For multi-App users, `auth.appId` is left unset at session-init and
+  //   the resolution is cached for per-tool-call dispatch.
+  // - Single-App users continue to get `auth.appId` populated here (regime
+  //   `a` unchanged from spec 025).
+  // - The legacy 409 text survives as the FR-016 fall-through tool-error
+  //   envelope: an App-scoped tool call from a multi-App user who has NOT
+  //   touched the new selection surface gets that text in a tool error
+  //   instead of an HTTP 409.
   //
-  // **`auth` is mutated in place** on the resolved path. Today this
-  // is safe — `auth` is local to handleMcpRequest and downstream
-  // code reads the post-resolution state. If a future refactor
-  // passes `auth` to a logger or background task above this block,
-  // that consumer would see the pre-mutation (null appId) snapshot;
-  // either re-resolve or move the mutation into a returned context.
+  // **`auth` is mutated in place** on the resolved path. Today this is
+  // safe — `auth` is local to handleMcpRequest and the closure inside
+  // `createMcpServerInstance` reads the post-mutation state.
+  let cachedAppResolution: AppResolution | null = null;
   if (auth.userId && !auth.appId) {
-    const resolution = await resolveAppForRequest(auth.userId, db);
-    if (resolution.kind === 'multi-app') {
-      // Hadron-namespaced custom error code per research §R-6 (not in
-      // the MCP error vocabulary — the MCP spec's authentication
-      // errors are token-scoped, not resource-ambiguity-scoped).
-      // Log so operators can size demand for the sibling spec's
-      // multi-App regimes (how often does this fire? for which
-      // users?). When the project picks up a structured logger,
-      // replace console.warn with that.
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[mcp] multiple_apps_resolved for userId=${auth.userId} (FR-020 / sibling spec 02X)`,
-      );
-      res.status(409).json({
-        error: 'multiple_apps_resolved',
-        error_description:
-          `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance.`,
+    cachedAppResolution = await resolveAppForRequest(auth.userId, db);
+    if (cachedAppResolution.kind === 'resolved') {
+      auth.appId = cachedAppResolution.appId;
+      auth.organizationId = cachedAppResolution.organizationId;
+    }
+    if (cachedAppResolution.kind === 'multi-app') {
+      mcpLog('warn', 'multi_app_session_opened_without_selection', {
+        userId: auth.userId,
       });
-      return;
     }
-    if (resolution.kind === 'resolved') {
-      auth.appId = resolution.appId;
-      auth.organizationId = resolution.organizationId;
-    }
-    // Zero-App path: resolution.kind === 'no-app'. Continue without
-    // setting appId (preserves existing JWT-without-App behavior;
-    // downstream App-scoped tool calls will fail with their existing
-    // errors). Zero-App handling is intentionally not in FR-020's
-    // scope.
+    // 'no-app': continue without setting appId; downstream tool calls
+    // fail with their existing errors (zero-App fall-through unchanged
+    // from spec 025).
   }
 
   // Session not found or no session — create a new one.
@@ -2062,11 +2260,18 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       : () => randomUUID(),
   });
 
-  const mcpServer = createMcpServerInstance(auth);
+  const mcpServer = createMcpServerInstance(
+    auth,
+    () => transport.sessionId,
+    cachedAppResolution,
+  );
 
   transport.onclose = () => {
     const sid = transport.sessionId;
-    if (sid) transports.delete(sid);
+    if (sid) {
+      transports.delete(sid);
+      activeAppByMcpSession.delete(sid); // spec 026 — clear per-session active App
+    }
   };
 
   await mcpServer.connect(transport);
@@ -2093,5 +2298,6 @@ export async function handleMcpDelete(req: Request, res: Response): Promise<void
   const transport = transports.get(sessionId)!;
   await transport.close();
   transports.delete(sessionId);
+  activeAppByMcpSession.delete(sessionId); // spec 026 — DELETE path also clears
   res.status(200).json({ ok: true });
 }
