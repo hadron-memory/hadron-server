@@ -149,11 +149,16 @@ async function mintViaOAuth(): Promise<string> {
   const csrfTokenMatch = html.match(/name="_csrf"\s+value="([^"]+)"/);
   expect(csrfTokenMatch).not.toBeNull();
   const csrfToken = csrfTokenMatch![1];
-  const setCookie = getRes.headers.get('set-cookie');
-  expect(setCookie).not.toBeNull();
-  const csrfCookieMatch = setCookie!.match(/_hadron_csrf=([^;]+)/);
-  expect(csrfCookieMatch).not.toBeNull();
-  const csrfCookieValue = csrfCookieMatch![1];
+  // Use `getSetCookie()` rather than `get('set-cookie')`: per the
+  // Fetch spec the latter returns only the first value when multiple
+  // Set-Cookie headers exist, and undici's current join-with-`, `
+  // behavior is non-standard. `getSetCookie()` returns a string[]
+  // and is the spec-compliant accessor.
+  const csrfCookieLine = getRes.headers
+    .getSetCookie()
+    .find((c) => c.startsWith('_hadron_csrf='));
+  expect(csrfCookieLine, '_hadron_csrf cookie must be in Set-Cookie response').toBeDefined();
+  const csrfCookieValue = csrfCookieLine!.slice('_hadron_csrf='.length).split(';')[0];
 
   // 2. POST /oauth/authorize — approve.
   const approveBody = new URLSearchParams({
@@ -221,16 +226,27 @@ function makeMcpReq(authorization: string): Request {
   } as unknown as Request;
 }
 
+/**
+ * Per Node's `http.ServerResponse.setHeader`, the value can be a
+ * number, string, or readonly string[] (the array form is used for
+ * multi-valued headers like Set-Cookie). The mock stores values
+ * verbatim so callers can assert on whichever shape was passed; the
+ * tests in this file only need to read string headers, but typing
+ * the mock to the real surface keeps it correct if /mcp ever sets
+ * a multi-valued header.
+ */
+type HeaderValue = string | number | readonly string[];
+
 function makeMcpRes(): Response & {
   _status: number;
-  _headers: Record<string, string>;
+  _headers: Record<string, HeaderValue>;
   _body: unknown;
 } {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, HeaderValue> = {};
   let status = 200;
   let body: unknown;
   const res = {
-    setHeader: vi.fn((name: string, value: string) => {
+    setHeader: vi.fn((name: string, value: HeaderValue) => {
       headers[name] = value;
       return res;
     }),
@@ -254,7 +270,7 @@ function makeMcpRes(): Response & {
   };
   return res as unknown as Response & {
     _status: number;
-    _headers: Record<string, string>;
+    _headers: Record<string, HeaderValue>;
     _body: unknown;
   };
 }
