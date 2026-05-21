@@ -169,8 +169,8 @@ describe('getServerOrigin — BASE_URL precedence', () => {
     // Without filtering `/`, the strict validator throws at module
     // load during every vitest run, blocking the whole suite. `/` is
     // never a valid origin (no scheme, no host), so no legitimate
-    // caller would set it; treating it as unset costs nothing in
-    // production and unblocks tests.
+    // caller would set it intentionally.
+    vi.stubEnv('NODE_ENV', 'test');
     vi.stubEnv('BASE_URL', '/');
     const { getServerOrigin } = await import('./oauth.js');
     // Module-load must NOT throw, AND `getServerOrigin` must fall
@@ -182,5 +182,19 @@ describe('getServerOrigin — BASE_URL precedence', () => {
         name.toLowerCase() === 'host' ? '127.0.0.1:4000' : undefined,
     } as unknown as Request;
     expect(getServerOrigin(req)).toBe('http://127.0.0.1:4000');
+  });
+
+  it('BASE_URL === "/" outside test mode still throws (sentinel is test-scoped)', async () => {
+    // The carve-out must NOT weaken the fail-loud posture in
+    // production: if a real deployment somehow ended up with
+    // BASE_URL=/, the validator should still reject it. This test
+    // sets NODE_ENV=production so the sentinel filter is skipped
+    // and the validator sees `/` directly — which it rejects per
+    // the strict charset rule.
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('BASE_URL', '/');
+    await expect(import('./oauth.js')).rejects.toThrow(
+      /BASE_URL must be of the form/,
+    );
   });
 });

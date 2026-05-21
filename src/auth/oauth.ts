@@ -120,23 +120,32 @@ export function validateBaseUrl(raw: string | undefined): string | null {
  * Local dev / tests leave it unset and use the per-request derivation
  * (so the listener's random port is reflected naturally; setting a
  * fixed value would break `127.0.0.1:<port>`-bound tests). The other
- * `BASE_URL` consumers default to `http://localhost:${PORT ?? 4000}`
- * in that case; this consumer defaults to per-request derivation
- * because OAuth metadata needs to reflect the request's actual host
- * during local-dev cloudflared-tunnel testing.
+ * `BASE_URL` consumers have inconsistent unset-defaults:
+ * `src/auth/email.ts` and `src/auth/github.ts` both use
+ * `http://localhost:${process.env.PORT ?? 4000}`;
+ * `src/integrations/exchange/auth.ts` hardcodes
+ * `http://localhost:4000` regardless of `PORT`. This consumer takes
+ * a third path: per-request derivation, because OAuth metadata needs
+ * to reflect the request's actual host during local-dev cloudflared-
+ * tunnel testing. Centralizing the four consumers behind one helper
+ * is a known follow-up; see gemini's PR #163 review.
  */
 // Vite (which vitest is built on) owns the `BASE_URL` env var
 // globally: it derives the value from `config.base` (default `/`)
 // and writes it to `process.env.BASE_URL` for every test run, via
 // the same mechanism that exposes `import.meta.env.BASE_URL` to
-// browser code. We treat `/` as the Vite-sentinel-for-unset
-// because (a) `/` is never a valid origin (no scheme, no host) so
-// no legitimate caller would ever set it intentionally, and (b)
-// without this filter the strict validator throws at module load
-// during every vitest run, blocking the test suite. The collision
-// only matters in tests; production (Doppler-set value, no vitest)
-// is unaffected.
-const RAW_BASE_URL = process.env.BASE_URL === '/' ? undefined : process.env.BASE_URL;
+// browser code. Without filtering, the strict validator throws at
+// module load during every vitest run, blocking the test suite.
+//
+// The carve-out is **scoped to NODE_ENV === 'test'** so production
+// keeps its fail-loud posture: a production server that somehow
+// ended up with `BASE_URL=/` still throws at boot rather than
+// silently emitting derived-from-headers URLs. The collision is a
+// test-environment-specific tooling artifact; we treat it as one.
+const RAW_BASE_URL =
+  process.env.NODE_ENV === 'test' && process.env.BASE_URL === '/'
+    ? undefined
+    : process.env.BASE_URL;
 const BASE_URL_OVERRIDE = validateBaseUrl(RAW_BASE_URL);
 
 /**
