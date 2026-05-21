@@ -1,8 +1,8 @@
 /**
- * Spec 025 follow-up — `HADRON_PUBLIC_BASE_URL` env-var override.
+ * Spec 025 follow-up — `BASE_URL` env-var override.
  *
  * Two layers:
- *   - Unit tests on `validatePublicBaseUrl` (the parser/validator —
+ *   - Unit tests on `validateBaseUrl` (the parser/validator —
  *     pure function, easy to assert directly).
  *   - Module-load integration tests that exercise `getServerOrigin`'s
  *     env-var-aware behavior end-to-end. These use `vi.stubEnv` +
@@ -22,12 +22,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Request } from 'express';
 
-// ── Unit tests on validatePublicBaseUrl ──────────────────────────────
+// ── Unit tests on validateBaseUrl ──────────────────────────────
 
-describe('validatePublicBaseUrl (boot-time parser)', () => {
+describe('validateBaseUrl (boot-time parser)', () => {
   // Import the validator directly. Module-load env var is irrelevant
   // here — these tests pass the input as a function arg.
-  let validatePublicBaseUrl: (raw: string | undefined) => string | null;
+  let validateBaseUrl: (raw: string | undefined) => string | null;
 
   beforeEach(async () => {
     // Fresh import per test so the unrelated module-load IIFE doesn't
@@ -35,17 +35,17 @@ describe('validatePublicBaseUrl (boot-time parser)', () => {
     vi.resetModules();
     vi.unstubAllEnvs();
     const mod = await import('./oauth.js');
-    validatePublicBaseUrl = mod.validatePublicBaseUrl;
+    validateBaseUrl = mod.validateBaseUrl;
   });
 
   it('returns null when the input is undefined', () => {
-    expect(validatePublicBaseUrl(undefined)).toBeNull();
+    expect(validateBaseUrl(undefined)).toBeNull();
   });
 
   it('returns null when the input is the empty string', () => {
     // Production deployments commonly default to `''` for unset env
     // vars (e.g., docker-compose with no value); treat same as unset.
-    expect(validatePublicBaseUrl('')).toBeNull();
+    expect(validateBaseUrl('')).toBeNull();
   });
 
   it.each([
@@ -54,7 +54,7 @@ describe('validatePublicBaseUrl (boot-time parser)', () => {
     'http://localhost:4000', // local dev / cloudflared tunnel
     'https://hadron.example.org:443', // explicit default port
   ])('accepts well-formed origin %s', (input) => {
-    expect(validatePublicBaseUrl(input)).toBe(input);
+    expect(validateBaseUrl(input)).toBe(input);
   });
 
   it.each([
@@ -89,20 +89,20 @@ describe('validatePublicBaseUrl (boot-time parser)', () => {
     //     docstring as DNS-safe-hostnames-only.
     ['underscore in hostname', 'https://my_service.internal:4000'],
   ])('throws on malformed input (%s)', (_label, input) => {
-    expect(() => validatePublicBaseUrl(input)).toThrow(
-      /HADRON_PUBLIC_BASE_URL must be of the form/,
+    expect(() => validateBaseUrl(input)).toThrow(
+      /BASE_URL must be of the form/,
     );
   });
 
   it('throw message includes the offending value (verbatim, JSON-encoded)', () => {
     const bad = 'https://srv.hadronmemory.com/';
-    expect(() => validatePublicBaseUrl(bad)).toThrow(JSON.stringify(bad));
+    expect(() => validateBaseUrl(bad)).toThrow(JSON.stringify(bad));
   });
 });
 
 // ── Integration tests on getServerOrigin's env-var behavior ──────────
 
-describe('getServerOrigin — HADRON_PUBLIC_BASE_URL precedence', () => {
+describe('getServerOrigin — BASE_URL precedence', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.unstubAllEnvs();
@@ -122,8 +122,8 @@ describe('getServerOrigin — HADRON_PUBLIC_BASE_URL precedence', () => {
     } as unknown as Request;
   }
 
-  it('uses HADRON_PUBLIC_BASE_URL verbatim when set, ignoring request headers', async () => {
-    vi.stubEnv('HADRON_PUBLIC_BASE_URL', 'https://srv.hadronmemory.com');
+  it('uses BASE_URL verbatim when set, ignoring request headers', async () => {
+    vi.stubEnv('BASE_URL', 'https://srv.hadronmemory.com');
     const { getServerOrigin } = await import('./oauth.js');
     // Pathological request: claims http + a different host. The env
     // var must win — this is the whole point.
@@ -133,33 +133,54 @@ describe('getServerOrigin — HADRON_PUBLIC_BASE_URL precedence', () => {
 
   it('falls back to ${protocol}://${host} when env var is unset', async () => {
     // No stubEnv — env var is whatever the test runner inherited, but
-    // vitest's process env usually doesn't define HADRON_PUBLIC_BASE_URL.
+    // vitest's process env usually doesn't define BASE_URL.
     // Defensive: explicitly unstub anyway.
-    vi.stubEnv('HADRON_PUBLIC_BASE_URL', '');
+    vi.stubEnv('BASE_URL', '');
     const { getServerOrigin } = await import('./oauth.js');
     const req = makeReq('127.0.0.1:4000', 'http');
     expect(getServerOrigin(req)).toBe('http://127.0.0.1:4000');
   });
 
   it('returns null when env var is unset AND request has no Host header', async () => {
-    vi.stubEnv('HADRON_PUBLIC_BASE_URL', '');
+    vi.stubEnv('BASE_URL', '');
     const { getServerOrigin } = await import('./oauth.js');
     const req = makeReq(undefined, 'http');
     expect(getServerOrigin(req)).toBeNull();
   });
 
   it('with env var set, missing Host header is irrelevant (env wins)', async () => {
-    vi.stubEnv('HADRON_PUBLIC_BASE_URL', 'https://canonical.example');
+    vi.stubEnv('BASE_URL', 'https://canonical.example');
     const { getServerOrigin } = await import('./oauth.js');
     const req = makeReq(undefined, 'http');
     expect(getServerOrigin(req)).toBe('https://canonical.example');
   });
 
-  it('module load throws when HADRON_PUBLIC_BASE_URL is malformed', async () => {
-    vi.stubEnv('HADRON_PUBLIC_BASE_URL', 'not-a-url');
+  it('module load throws when BASE_URL is malformed', async () => {
+    vi.stubEnv('BASE_URL', 'not-a-url');
     // The import() promise rejects because the module's IIFE throws.
     await expect(import('./oauth.js')).rejects.toThrow(
-      /HADRON_PUBLIC_BASE_URL must be of the form/,
+      /BASE_URL must be of the form/,
     );
+  });
+
+  it('BASE_URL === "/" is treated as the Vite-sentinel for unset (test-mode collision avoidance)', async () => {
+    // Vite/vitest derives BASE_URL from config.base (default `/`) and
+    // writes it to process.env.BASE_URL globally during test runs.
+    // Without filtering `/`, the strict validator throws at module
+    // load during every vitest run, blocking the whole suite. `/` is
+    // never a valid origin (no scheme, no host), so no legitimate
+    // caller would set it; treating it as unset costs nothing in
+    // production and unblocks tests.
+    vi.stubEnv('BASE_URL', '/');
+    const { getServerOrigin } = await import('./oauth.js');
+    // Module-load must NOT throw, AND `getServerOrigin` must fall
+    // back to per-request derivation since the override is treated
+    // as unset.
+    const req = {
+      protocol: 'http',
+      get: (name: string) =>
+        name.toLowerCase() === 'host' ? '127.0.0.1:4000' : undefined,
+    } as unknown as Request;
+    expect(getServerOrigin(req)).toBe('http://127.0.0.1:4000');
   });
 });
