@@ -456,7 +456,7 @@ function createMcpServerInstance(
           }
           auth.appId = r.app.id;
           auth.organizationId = r.app.organizationId;
-          mcpLog('warn', 'regime_c_selection_set', {
+          mcpLog('info', 'regime_c_selection_set', {
             userId: auth.userId,
             mcpSessionId: sid,
             appId: r.app.id,
