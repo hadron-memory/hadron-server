@@ -49,28 +49,39 @@ import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.j
  * unset, throws on malformed input.
  *
  * The strict shape is `scheme://host[:port]` with **no trailing slash**
- * and **no path component**. Scheme MUST be `http://` or `https://`.
- * Host MUST be non-empty.
+ * and **no path component**. Scheme MUST be lowercase `http://` or
+ * `https://` (canonical form for byte-equality comparison; see below).
+ * Host MUST be a DNS-safe ASCII hostname: alphanumerics, `.`, `-`.
+ * Explicitly NOT supported:
+ *   - underscores in hostnames (RFC 1035-style strictness; k8s service
+ *     DNS that uses `service_name.namespace.svc.cluster.local` won't
+ *     work — out of scope, widen the regex if needed)
+ *   - IPv6 bracket notation (`https://[::1]:4000`) — out of scope; v6-only
+ *     deployments would need to add `\[[0-9a-fA-F:]+\]` as a host
+ *     alternative
+ *   - uppercase or mixed-case schemes (`HTTPS://...`) — RFC 3986 says
+ *     schemes are case-insensitive but the OAuth issuer claim is
+ *     compared verbatim; we enforce canonical-lowercase to match
  *
  * Rationale for strictness: this string flows into RFC 8414's `issuer`
  * field and is compared for exact equality by spec-compliant clients
  * (Claude Desktop, MCP Inspector) against the issuer claim they cached
- * at discovery time. A trailing slash, or a path, or a port mismatch
- * causes silent rejection at the client side. Failing loud at boot is
- * the right posture.
+ * at discovery time. A trailing slash, a path, a port mismatch, or a
+ * scheme-case difference all cause silent rejection at the client side.
+ * Failing loud at boot is the right posture.
  */
 export function validatePublicBaseUrl(raw: string | undefined): string | null {
   if (raw === undefined || raw === '') return null;
-  // Strict: scheme + DNS-style host + optional port. Explicitly NOT
-  // allowed: trailing slash, path, query (`?`), fragment (`#`), any
-  // whitespace, IPv6 bracket notation. The charset is the ASCII
-  // hostname subset (alphanumeric + `.` + `-`). IPv6 origins in this
-  // env var are out of scope; if needed, widen the regex carefully.
+  // Strict: lowercase scheme + DNS-style host + optional port. Explicitly
+  // NOT allowed: trailing slash, path, query (`?`), fragment (`#`), any
+  // whitespace, IPv6 bracket notation, underscores, uppercase scheme.
+  // The charset is the ASCII hostname subset (alphanumeric + `.` + `-`).
   if (!/^https?:\/\/[A-Za-z0-9.\-]+(:\d+)?$/.test(raw)) {
     throw new Error(
-      `HADRON_PUBLIC_BASE_URL must be of the form 'https://host' or ` +
-        `'https://host:port' with no trailing slash, no path, no query, ` +
-        `no fragment, and no whitespace. Got: ${JSON.stringify(raw)}`,
+      `HADRON_PUBLIC_BASE_URL must be of the form '<scheme>://<host>' or ` +
+        `'<scheme>://<host>:<port>' (scheme = lowercase http or https) ` +
+        `with no trailing slash, no path, no query, no fragment, ` +
+        `and no whitespace. Got: ${JSON.stringify(raw)}`,
     );
   }
   return raw;

@@ -69,6 +69,25 @@ describe('validatePublicBaseUrl (boot-time parser)', () => {
     ['protocol-relative', '//srv.hadronmemory.com'],
     ['leading space', ' https://srv.hadronmemory.com'],
     ['trailing space', 'https://srv.hadronmemory.com '],
+    // Pin two known-rejected cases explicitly so future maintainers
+    // don't loosen the regex thinking they're fixing a bug:
+    // (1) Uppercase scheme. RFC 3986 says schemes are case-insensitive,
+    //     but the OAuth issuer claim is compared verbatim by clients
+    //     (RFC 8414 §2). Canonical-lowercase is the strict posture.
+    ['uppercase scheme', 'HTTPS://srv.hadronmemory.com'],
+    ['mixed-case scheme', 'HtTpS://srv.hadronmemory.com'],
+    // (2) IPv6 host with bracket notation. Real shape per RFC 3986
+    //     §3.2.2 but explicitly out of scope for this env var (DNS-style
+    //     hostnames only). Operators with v6-only deployments would
+    //     need to widen the regex to add `\[[0-9a-fA-F:]+\]` as an
+    //     alternative for the host portion.
+    ['ipv6 host', 'https://[::1]:4000'],
+    ['ipv6 full address', 'https://[2001:db8::1]'],
+    // (3) Underscore in hostname. RFC 1035 forbids them; some internal
+    //     DNS (k8s service DNS like `service_name.namespace.svc.cluster.local`)
+    //     tolerates them in practice. Documented in the validator's
+    //     docstring as DNS-safe-hostnames-only.
+    ['underscore in hostname', 'https://my_service.internal:4000'],
   ])('throws on malformed input (%s)', (_label, input) => {
     expect(() => validatePublicBaseUrl(input)).toThrow(
       /HADRON_PUBLIC_BASE_URL must be of the form/,
