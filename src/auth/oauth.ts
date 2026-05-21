@@ -44,9 +44,21 @@ import { CONSENT_TEMPLATE } from './consent.template.js';
 import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.js';
 
 /**
- * Validate a `HADRON_PUBLIC_BASE_URL` env-var value. Exported for direct
- * unit testing. Returns the validated string when valid, `null` when
- * unset, throws on malformed input.
+ * Validate a `BASE_URL` env-var value for OAuth-metadata use. Exported
+ * for direct unit testing. Returns the validated string when valid,
+ * `null` when unset, throws on malformed input.
+ *
+ * Note: `BASE_URL` is also consumed by `src/auth/email.ts`,
+ * `src/auth/github.ts`, and `src/integrations/exchange/auth.ts`, where
+ * it's read without validation (default `http://localhost:${PORT}` on
+ * unset; raw concat into URLs). This OAuth-side validation is stricter
+ * because the value flows into RFC 8414's `issuer` field, which is
+ * byte-equality-compared by spec-compliant clients. The strictness
+ * doesn't impose anything on the other consumers — they still get
+ * `process.env.BASE_URL` raw — but it does mean a malformed
+ * production `BASE_URL` will refuse to boot via this module's IIFE.
+ * That's the right fail-loud posture: if `BASE_URL` is wrong here it's
+ * wrong everywhere else too.
  *
  * The strict shape is `scheme://host[:port]` with **no trailing slash**
  * and **no path component**. Scheme MUST be lowercase `http://` or
@@ -70,7 +82,7 @@ import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.j
  * scheme-case difference all cause silent rejection at the client side.
  * Failing loud at boot is the right posture.
  */
-export function validatePublicBaseUrl(raw: string | undefined): string | null {
+export function validateBaseUrl(raw: string | undefined): string | null {
   if (raw === undefined || raw === '') return null;
   // Strict: lowercase scheme + DNS-style host + optional port. Explicitly
   // NOT allowed: trailing slash, path, query (`?`), fragment (`#`), any
@@ -78,7 +90,7 @@ export function validatePublicBaseUrl(raw: string | undefined): string | null {
   // The charset is the ASCII hostname subset (alphanumeric + `.` + `-`).
   if (!/^https?:\/\/[A-Za-z0-9.\-]+(:\d+)?$/.test(raw)) {
     throw new Error(
-      `HADRON_PUBLIC_BASE_URL must be of the form '<scheme>://<host>' or ` +
+      `BASE_URL must be of the form '<scheme>://<host>' or ` +
         `'<scheme>://<host>:<port>' (scheme = lowercase http or https) ` +
         `with no trailing slash, no path, no query, no fragment, ` +
         `and no whitespace. Got: ${JSON.stringify(raw)}`,
@@ -94,6 +106,11 @@ export function validatePublicBaseUrl(raw: string | undefined): string | null {
  * `trust proxy` + `X-Forwarded-Proto` correctness for OAuth metadata
  * URLs, which are advertised once at discovery time and must be stable.
  *
+ * `BASE_URL` is the project-wide canonical-origin env var, also used
+ * by `src/auth/email.ts`, `src/auth/github.ts`, and
+ * `src/integrations/exchange/auth.ts`. Same value here so all server-
+ * emitted absolute URLs agree on the same origin.
+ *
  * Production deployments behind any TLS-terminating proxy (Cloudflare,
  * load balancer, etc.) SHOULD set this. Without it, a single
  * misconfigured request (or a momentary `trust proxy` mishap) emits
@@ -102,16 +119,41 @@ export function validatePublicBaseUrl(raw: string | undefined): string | null {
  *
  * Local dev / tests leave it unset and use the per-request derivation
  * (so the listener's random port is reflected naturally; setting a
- * fixed value would break `127.0.0.1:<port>`-bound tests).
+ * fixed value would break `127.0.0.1:<port>`-bound tests). The other
+ * `BASE_URL` consumers have inconsistent unset-defaults:
+ * `src/auth/email.ts` and `src/auth/github.ts` both use
+ * `http://localhost:${process.env.PORT ?? 4000}`;
+ * `src/integrations/exchange/auth.ts` hardcodes
+ * `http://localhost:4000` regardless of `PORT`. This consumer takes
+ * a third path: per-request derivation, because OAuth metadata needs
+ * to reflect the request's actual host during local-dev cloudflared-
+ * tunnel testing. Centralizing the four consumers behind one helper
+ * is a known follow-up; see gemini's PR #163 review.
  */
-const PUBLIC_BASE_URL = validatePublicBaseUrl(process.env.HADRON_PUBLIC_BASE_URL);
+// Vite (which vitest is built on) owns the `BASE_URL` env var
+// globally: it derives the value from `config.base` (default `/`)
+// and writes it to `process.env.BASE_URL` for every test run, via
+// the same mechanism that exposes `import.meta.env.BASE_URL` to
+// browser code. Without filtering, the strict validator throws at
+// module load during every vitest run, blocking the test suite.
+//
+// The carve-out is **scoped to NODE_ENV === 'test'** so production
+// keeps its fail-loud posture: a production server that somehow
+// ended up with `BASE_URL=/` still throws at boot rather than
+// silently emitting derived-from-headers URLs. The collision is a
+// test-environment-specific tooling artifact; we treat it as one.
+const RAW_BASE_URL =
+  process.env.NODE_ENV === 'test' && process.env.BASE_URL === '/'
+    ? undefined
+    : process.env.BASE_URL;
+const BASE_URL_OVERRIDE = validateBaseUrl(RAW_BASE_URL);
 
 /**
  * Canonical server-origin resolver. Used by every public-facing URL
  * builder (PRM, AS metadata, `/mcp` 401 `WWW-Authenticate`).
  *
  * Precedence:
- *   1. `HADRON_PUBLIC_BASE_URL` env var (production-recommended).
+ *   1. `BASE_URL` env var (production-recommended).
  *   2. `${req.protocol}://${req.get('host')}` (dev fallback).
  *
  * Returns `null` only when the env var is unset AND the request lacks
@@ -119,7 +161,7 @@ const PUBLIC_BASE_URL = validatePublicBaseUrl(process.env.HADRON_PUBLIC_BASE_URL
  * HTTP/1.1 request; the caller emits a 400 in that case).
  */
 export function getServerOrigin(req: Request): string | null {
-  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
+  if (BASE_URL_OVERRIDE) return BASE_URL_OVERRIDE;
   const host = req.get('host');
   if (!host) return null;
   return `${req.protocol}://${host}`;

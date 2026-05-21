@@ -1979,7 +1979,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     //
     // Origin resolution is delegated to `getServerOrigin` so this path
     // shares the same precedence as the discovery endpoints (the
-    // `HADRON_PUBLIC_BASE_URL` env var when set, else
+    // `BASE_URL` env var when set, else
     // `req.protocol + req.get('host')`). Without that consolidation,
     // a misconfigured deployment could emit an `https://` issuer in
     // the AS metadata but an `http://` URL in this WWW-Authenticate

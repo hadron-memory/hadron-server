@@ -535,8 +535,8 @@ describe('POST /oauth/register — trust-proxy + rate-limit IP resolution', () =
   // request was reaching the server over Cloudflare-terminated HTTPS.
   // `getServerOrigin` consumes `req.protocol`, so a correct trust-proxy
   // config is load-bearing for the metadata being HTTPS — EXCEPT when
-  // `HADRON_PUBLIC_BASE_URL` is set (which is the defense-in-depth
-  // path; see oauth.public-base-url.test.ts).
+  // `BASE_URL` is set (which is the defense-in-depth
+  // path; see oauth.base-url.test.ts).
   it('req.protocol resolves to "https" via X-Forwarded-Proto under a trusted CIDR', async () => {
     await makeTestApp(['127.0.0.1/32', '103.21.244.0/22']);
 
