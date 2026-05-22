@@ -304,12 +304,12 @@ function createMcpServerInstance(
     'List all memories this caller has access to, with URN and access level (read-only or read-write).',
     {},
     async () => {
-      // Spec 026 — surface typed `no_active_app` error for multi-App
-      // OAuth callers who haven't selected, with the FR-016 legacy
-      // text as fall-through for un-engaged callers.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      if (!auth.clientId && !auth.appId) return textResult('Not authenticated.');
+      // Spec 026 / D-2026-05-21-003: h-list-memories is advisory — it
+      // works without an active App. When auth.appId is unset but
+      // auth.userId is set (multi-App OAuth caller without selection),
+      // getMemoryAccess unions memory access across the user's
+      // accessible Apps. No requireAppScope() gate on purpose.
+      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
 
       const access = await getMemoryAccess(db, auth);
       if (access.size === 0) {
@@ -1438,6 +1438,12 @@ function createMcpServerInstance(
       prevSessionId: z.string().optional().describe('Previous session ID'),
     },
     async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
+      // context to attribute the session. Errors with typed [no_active_app]
+      // envelope for multi-App OAuth callers without selection.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
+
       const sessionId = generateId();
 
       const session = await db.session.create({
@@ -1478,6 +1484,10 @@ function createMcpServerInstance(
       errorCount: z.number().optional().describe('Number of errors encountered'),
     },
     async ({ id, summary, inputTokens, outputTokens, turnCount, errorCount }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool: paired with h-start-session.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
+
       const session = await db.session.findUnique({ where: { id } });
       if (!session) return textResult(`Session "${id}" not found.`);
 
@@ -1615,6 +1625,10 @@ function createMcpServerInstance(
       conversationName: z.string().optional().describe('Specific conversation to start (e.g. "onboarding"). If omitted, picks the first non-setup conversation.'),
     },
     async ({ agentId, userId, conversationName }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool: chat tools need
+      // an active App for persona/agent context.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const ctx = gqlCtx(userId);
         const result = await resolvers.Mutation.startChat(
@@ -1639,6 +1653,9 @@ function createMcpServerInstance(
       userMessage: z.string().describe("The user's message text"),
     },
     async ({ chatId, userMessage }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const ctx = gqlCtx();
         const result = await resolvers.Mutation.sendChatMessage(
@@ -1665,6 +1682,9 @@ function createMcpServerInstance(
       next_stage: z.string().nullable().optional().describe('Stage to transition to (null or omitted to stay in current stage)'),
     },
     async ({ chatId, message, data, next_stage }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const ctx = gqlCtx();
         const toolResponse = {
@@ -1693,6 +1713,9 @@ function createMcpServerInstance(
       agentId: z.string().describe('ID of the agent'),
     },
     async ({ agentId }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const agent = await db.agent.findUnique({ where: { id: agentId } });
         if (!agent) return textResult('Agent not found.');
@@ -1755,6 +1778,9 @@ function createMcpServerInstance(
       chatId: z.string().describe('Chat ID'),
     },
     async ({ chatId }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
@@ -1782,6 +1808,9 @@ function createMcpServerInstance(
       createdBy: z.enum(['ASSISTANT', 'USER']).optional().describe('Who identified this goal (default: ASSISTANT)'),
     },
     async ({ chatId, description, createdBy }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
@@ -1818,6 +1847,9 @@ function createMcpServerInstance(
       chatId: z.string().describe('Chat ID'),
     },
     async ({ chatId }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
@@ -1864,6 +1896,9 @@ function createMcpServerInstance(
       language: z.string().optional().describe('Language code (e.g. "en", "es"). Defaults to "en".'),
     },
     async ({ agentId, userStatement, matchedConversation, language }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const agent = await db.agent.findUnique({ where: { id: agentId } });
         if (!agent) return textResult('Agent not found.');
@@ -1931,6 +1966,9 @@ function createMcpServerInstance(
       expectedConversations: z.array(z.string()).optional().describe('Expected conversation path for validation (e.g. ["onboarding", "strategy"])'),
     },
     async ({ agentId, name, description, openingMessage, conversationName, followUpMessages, expectedConversations }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const agent = await db.agent.findUnique({ where: { id: agentId } });
         if (!agent) return textResult('Agent not found.');
@@ -1991,6 +2029,9 @@ function createMcpServerInstance(
       agentId: z.string().describe('ID of the agent'),
     },
     async ({ agentId }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const agent = await db.agent.findUnique({ where: { id: agentId } });
         if (!agent) return textResult('Agent not found.');
@@ -2028,6 +2069,9 @@ function createMcpServerInstance(
       chatId: z.string().optional().describe('Chat ID from a previous step. Omit on step 0 to start a new chat.'),
     },
     async ({ agentId, personaLoc, step, chatId }) => {
+      // Spec 026 / D-2026-05-21-003 strict tool.
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
       try {
         const agent = await db.agent.findUnique({ where: { id: agentId } });
         if (!agent) return textResult('Agent not found.');

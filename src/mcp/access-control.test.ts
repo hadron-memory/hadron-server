@@ -156,8 +156,48 @@ describe('getMemoryAccess (dispatch by principal kind)', () => {
     expect(access.has(systemMemoryId)).toBe(true);
   });
 
-  it('returns empty when no appId is set', async () => {
+  it('returns empty when no appId AND no userId is set', async () => {
     const auth: AuthContext = {};
+    const access = await getMemoryAccess(db, auth);
+    expect(access.size).toBe(0);
+  });
+
+  // Spec 026 / D-2026-05-21-003 advisory branch
+  it('returns cross-App union when auth.userId is set but auth.appId is not (advisory)', async () => {
+    // User is a member of two Apps, both linked to the same Agent.
+    // Each App grants access to the same memories (system + knowledge) via
+    // the App→AppAgent→Agent→memoryItems path. Without an active App,
+    // getMemoryAccess unions across both Apps; with both linked to the
+    // same Agent + memories, the union equals each App's individual set.
+    const { app: appA } = await createDbAppWithKey(db, 'app-cross-a', orgId);
+    await createDbAppAgent(db, appA.id, agentId);
+    const { app: appB } = await createDbAppWithKey(db, 'app-cross-b', orgId);
+    await createDbAppAgent(db, appB.id, agentId);
+
+    const user = await db.user.create({
+      data: { id: generateId(), name: 'cross-app-user' },
+    });
+    await db.appMember.create({
+      data: { appId: appA.id, userId: user.id, role: 'owner' },
+    });
+    await db.appMember.create({
+      data: { appId: appB.id, userId: user.id, role: 'owner' },
+    });
+
+    const auth: AuthContext = { userId: user.id };
+    const access = await getMemoryAccess(db, auth);
+
+    // Both memories accessible via the union — even though no active App is set.
+    expect(access.size).toBe(2);
+    expect(access.has(systemMemoryId)).toBe(true);
+    expect(access.has(knowledgeMemoryId)).toBe(true);
+  });
+
+  it('returns empty when userId is set but the user has no AppMember rows', async () => {
+    const user = await db.user.create({
+      data: { id: generateId(), name: 'no-apps-user' },
+    });
+    const auth: AuthContext = { userId: user.id };
     const access = await getMemoryAccess(db, auth);
     expect(access.size).toBe(0);
   });

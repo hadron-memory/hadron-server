@@ -30,6 +30,7 @@ import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { isLifecycleActive } from '../lib/lifecycle.js';
 import { isAgentInstalled } from '../lib/appAgent.js';
+import { resolveUserApps } from '../auth/user-app-resolution.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -150,6 +151,39 @@ export async function getMemoryAccess(
   auth: AuthContext,
 ): Promise<Map<string, string>> {
   if (auth.appId) return getAppMemoryAccess(db, auth.appId);
+
+  // Spec 026 / D-2026-05-21-003 advisory branch: when no active App is
+  // selected but the caller is an authenticated user (OAuth-issued or
+  // portal-issued bearer token), return the union of memory access across
+  // every App the user is a member of. App identity is a focusing concern,
+  // not access control — the user's total access is bounded by their
+  // AppMember rows regardless of which App is currently in focus.
+  // Personal-class memories are still strictly owned by Memory.userId
+  // (per the canReadMemory / canWriteToMemory predicates above) — this
+  // map only includes memories the user can reach via App membership;
+  // personal-class authorization is enforced separately.
+  if (auth.userId) {
+    const apps = await resolveUserApps(auth.userId, db);
+    if (apps.length === 0) return new Map();
+    const perAppMaps = await Promise.all(
+      apps.map((app) => getAppMemoryAccess(db, app.id)),
+    );
+    const merged = new Map<string, string>();
+    for (const perApp of perAppMaps) {
+      for (const [memoryId, level] of perApp) {
+        const existing = merged.get(memoryId);
+        // READ_WRITE wins over READ when the same memory appears via
+        // multiple App memberships (defensive — the data model makes
+        // this unlikely but not impossible if a user has two roles
+        // across two Apps that share a memory item).
+        if (!existing || (existing === 'READ' && level === 'READ_WRITE')) {
+          merged.set(memoryId, level);
+        }
+      }
+    }
+    return merged;
+  }
+
   return new Map();
 }
 
@@ -225,9 +259,12 @@ export async function canWriteToMemory(
     return true;
   }
 
-  // Non-personal memory: standard checks.
+  // Non-personal memory: standard checks. Per D-2026-05-21-003, when
+  // auth.appId is unset (multi-App OAuth caller without selection),
+  // getMemoryAccess unions across all the user's accessible Apps —
+  // the access map answers the question "does the caller have RW on
+  // this memory via *any* of their App memberships?"
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
-  if (!auth.appId) return false;
 
   const access = await getMemoryAccess(db, auth);
   return access.get(memoryId) === 'READ_WRITE';
@@ -283,8 +320,11 @@ export async function canReadMemory(
   }
 
   // Non-personal memory: ADMIN/OWNER bypass + access map check.
+  // Per D-2026-05-21-003, when auth.appId is unset (multi-App OAuth caller
+  // without selection), getMemoryAccess unions across all the user's
+  // accessible Apps — the access map answers "does the caller have read
+  // on this memory via *any* of their App memberships?"
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
-  if (!auth.appId) return false;
   const access = await getMemoryAccess(db, auth);
   return access.has(memoryId);
 }
@@ -301,8 +341,11 @@ export async function getAccessibleMemoryIds(
   auth: AuthContext,
 ): Promise<string[] | null> {
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return null;
-  if (!auth.appId) return [];
 
+  // Per D-2026-05-21-003 advisory branch: when no active App is selected
+  // but the caller is an authenticated user, getMemoryAccess unions across
+  // all the user's accessible Apps. Returns [] for unauthenticated callers
+  // and for users with no App memberships.
   const access = await getMemoryAccess(db, auth);
   return [...access.keys()];
 }
