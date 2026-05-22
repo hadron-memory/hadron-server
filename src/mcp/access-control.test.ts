@@ -156,10 +156,113 @@ describe('getMemoryAccess (dispatch by principal kind)', () => {
     expect(access.has(systemMemoryId)).toBe(true);
   });
 
-  it('returns empty when no appId is set', async () => {
+  it('returns empty when no appId AND no userId is set', async () => {
     const auth: AuthContext = {};
     const access = await getMemoryAccess(db, auth);
     expect(access.size).toBe(0);
+  });
+
+  // Spec 026 / D-2026-05-21-003 advisory branch
+  it('returns cross-App union when auth.userId is set but auth.appId is not (advisory)', async () => {
+    // User is a member of two Apps, both linked to the same Agent.
+    // Each App grants access to the same memories (system + knowledge) via
+    // the App→AppAgent→Agent→memoryItems path. Without an active App,
+    // getMemoryAccess unions across both Apps; with both linked to the
+    // same Agent + memories, the union equals each App's individual set.
+    const { app: appA } = await createDbAppWithKey(db, 'app-cross-a', orgId);
+    await createDbAppAgent(db, appA.id, agentId);
+    const { app: appB } = await createDbAppWithKey(db, 'app-cross-b', orgId);
+    await createDbAppAgent(db, appB.id, agentId);
+
+    const user = await db.user.create({
+      data: { id: generateId(), name: 'cross-app-user' },
+    });
+    await db.appMember.create({
+      data: { appId: appA.id, userId: user.id, role: 'owner' },
+    });
+    await db.appMember.create({
+      data: { appId: appB.id, userId: user.id, role: 'owner' },
+    });
+
+    const auth: AuthContext = { userId: user.id };
+    const access = await getMemoryAccess(db, auth);
+
+    // Both memories accessible via the union — even though no active App is set.
+    expect(access.size).toBe(2);
+    expect(access.has(systemMemoryId)).toBe(true);
+    expect(access.has(knowledgeMemoryId)).toBe(true);
+  });
+
+  it('returns empty when userId is set but the user has no AppMember rows', async () => {
+    const user = await db.user.create({
+      data: { id: generateId(), name: 'no-apps-user' },
+    });
+    const auth: AuthContext = { userId: user.id };
+    const access = await getMemoryAccess(db, auth);
+    expect(access.size).toBe(0);
+  });
+
+  // Pins D-2026-05-21-003 focus-vs-access distinction. Active App
+  // **narrows the view to that App's memories**, not the set of
+  // accessible memories — both paths reach the same memory IDs in this
+  // test because both Apps share the same Agent (so identical memory
+  // bindings). The shape of the returned map is what's load-bearing:
+  // (userId, no appId) returns the cross-App union, (userId, appId)
+  // returns the per-App view, and both are bounded by the user's
+  // AppMember rows. If a future change shifted authz semantics so the
+  // active-App view differed from the union in ways the user couldn't
+  // produce by switching active App, this test would catch it.
+  it('cross-App union without selection matches the per-App view when selecting either App', async () => {
+    const { app: appA } = await createDbAppWithKey(db, 'app-cmp-a', orgId);
+    await createDbAppAgent(db, appA.id, agentId);
+    const { app: appB } = await createDbAppWithKey(db, 'app-cmp-b', orgId);
+    await createDbAppAgent(db, appB.id, agentId);
+
+    const user = await db.user.create({
+      data: { id: generateId(), name: 'cmp-user' },
+    });
+    await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'owner' } });
+    await db.appMember.create({ data: { appId: appB.id, userId: user.id, role: 'owner' } });
+
+    const unionView = await getMemoryAccess(db, { userId: user.id });
+    const appAView = await getMemoryAccess(db, { userId: user.id, appId: appA.id, organizationId: orgId });
+    const appBView = await getMemoryAccess(db, { userId: user.id, appId: appB.id, organizationId: orgId });
+
+    // Both per-App views see the same memories (same Agent backing both
+    // Apps). The union view equals their (identical) set — no spurious
+    // memories appear in the cross-App view, no memories are missing.
+    expect([...unionView.keys()].sort()).toEqual([...appAView.keys()].sort());
+    expect([...unionView.keys()].sort()).toEqual([...appBView.keys()].sort());
+    expect(unionView.size).toBe(2);
+  });
+
+  // FR-016 / spec 021 partial-uniqueness — App.urn is unique only across
+  // active rows. A user with an uninstalled history App + an active
+  // re-install must see the active App's memory access, not the
+  // history row's. Regression test for the resolveAppIdentifier bug
+  // (separately tested in user-app-resolution.test.ts) applied at the
+  // access-control layer.
+  it('cross-App union via getMemoryAccess prefers the active App row for a re-installed App', async () => {
+    const { app: history } = await createDbAppWithKey(db, 'app-reinstall', orgId);
+    await createDbAppAgent(db, history.id, agentId);
+    // Uninstall the first row.
+    await db.app.update({ where: { id: history.id }, data: { uninstalledAt: new Date() } });
+    // Re-install with the same URN: new row, active.
+    const { app: active } = await createDbAppWithKey(db, 'app-reinstall', orgId);
+    await createDbAppAgent(db, active.id, agentId);
+
+    const user = await db.user.create({
+      data: { id: generateId(), name: 'reinstall-user' },
+    });
+    // Membership on the ACTIVE row.
+    await db.appMember.create({ data: { appId: active.id, userId: user.id, role: 'owner' } });
+
+    const access = await getMemoryAccess(db, { userId: user.id });
+    // The user IS a member of the active App → cross-App union returns
+    // its memories. resolveUserApps's filter (`app: { is: { deletedAt:
+    // null, uninstalledAt: null } }`) already excludes the history row;
+    // this test pins that downstream-of-resolveUserApps behavior.
+    expect(access.size).toBe(2);
   });
 });
 

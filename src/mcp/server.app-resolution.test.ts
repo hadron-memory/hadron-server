@@ -149,21 +149,36 @@ function makeRes(): Response & {
 }
 
 describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
-  it('returns 409 multiple_apps_resolved when a user-credential caller has 2+ Apps', async () => {
+  it('allows a multi-App user-credential session to OPEN (spec 026 refinement of spec 025\'s 409)', async () => {
+    // Spec 025 originally returned HTTP 409 `multiple_apps_resolved` here.
+    // Spec 026 §FR-016 refinement: the 409 is moved from session-init to
+    // per-tool-call layer (as an MCP tool-error envelope), so multi-App
+    // users can OPEN a session and call `h-list-apps` / `h-set-active-app`
+    // to pick an App. This unblocks Claude Desktop OAuth users —
+    // see specs/026-app-identification-regimes/spec.md §Background.
     await createAppForUser('alpha', user.id);
     await createAppForUser('beta', user.id);
     const rawKey = await mintUserApiKey(user.id);
+
+    const spy = vi.spyOn(userAppResolution, 'resolveAppForRequest');
 
     const req = makeReq({ authorization: `Bearer ${rawKey}` });
     const res = makeRes();
 
     await handleMcpRequest(req, res);
 
-    expect(res._status).toBe(409);
-    expect(res._body).toMatchObject({
-      error: 'multiple_apps_resolved',
-      error_description: expect.stringContaining('more than one Hadron App'),
-    });
+    // No 409 — the multi-App dispatch no longer short-circuits.
+    expect(res._status).not.toBe(409);
+    expect(res._body).not.toMatchObject({ error: 'multiple_apps_resolved' });
+
+    // The dispatch DID call resolveAppForRequest (so the resolution is
+    // cached for the per-tool-call requireAppScope helper). The cached
+    // resolution is 'multi-app' for this user.
+    expect(spy).toHaveBeenCalled();
+    const result = await spy.mock.results[0].value;
+    expect(result).toEqual({ kind: 'multi-app' });
+
+    spy.mockRestore();
   });
 
   it('does not return 409 for a user-credential caller with exactly one App (resolved automatically)', async () => {
