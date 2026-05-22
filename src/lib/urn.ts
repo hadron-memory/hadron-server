@@ -465,14 +465,15 @@ export function parseUrn(input: string): ParsedUrn {
     throw new UrnParseError(input, 'trailing-double-colon');
   }
 
-  // Mixed-grammar split: prefer `::` (canonical hierarchy separator per
-  // spec 021 D2), fall back to `:` for legacy single-colon URNs still
-  // flowing through during the migration window. Mirrors the same
-  // tolerance in `assertFullyQualifiedUrn` (line 337) — `parseUrn`
-  // previously rejected legacy bare values, which broke
-  // `formatCanonicalUrn`'s documented contract that pre-migration
-  // values (e.g. `acme.com:dev`) are accepted and canonicalized.
-  const rawSegments = path.includes('::') ? path.split('::') : path.split(':');
+  // Mixed-grammar split (delegated to `splitMixedGrammar`): prefer `::`
+  // (canonical hierarchy separator per spec 021 D2), fall back to `:`
+  // for legacy single-colon URNs still flowing through during the
+  // migration window. Mirrors the same tolerance in
+  // `assertFullyQualifiedUrn` — `parseUrn` previously rejected legacy
+  // bare values, which broke `formatCanonicalUrn`'s documented contract
+  // that pre-migration values (e.g. `acme.com:dev`) are accepted and
+  // canonicalized.
+  const rawSegments = splitMixedGrammar(path);
   if (rawSegments.some(s => s.length === 0)) {
     throw new UrnParseError(input, 'empty-segment');
   }
