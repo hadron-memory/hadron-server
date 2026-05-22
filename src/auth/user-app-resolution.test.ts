@@ -270,6 +270,34 @@ describe('resolveUserApps', () => {
       expect(r).toEqual({ kind: 'unavailable', reason: 'uninstalled' });
     });
 
+    // Regression for the spec-021 partial-uniqueness gotcha. `App.urn` is
+    // unique only across active rows (`apps_urn_active_uniq WHERE
+    // uninstalled_at IS NULL`). A re-installed App produces an active
+    // row + the original uninstalled history row sharing the same URN.
+    // Before the active-row-preferring lookup, `findFirst({ where:
+    // { urn: bare } })` could non-deterministically return the
+    // history row, misclassifying an active App as `unavailable.
+    // uninstalled`.
+    it('returns the active row, not the uninstalled history row, after a re-install', async () => {
+      // Install, uninstall (history row).
+      const historyId = await createAppWithMember('alpha', user.id);
+      await db.app.update({
+        where: { id: historyId },
+        data: { uninstalledAt: new Date() },
+      });
+      // Re-install — new row, same URN, active.
+      const activeId = await createAppWithMember('alpha', user.id);
+
+      const r = await resolveAppIdentifier(`${org.urn}:alpha`, user.id, db);
+      // Resolves to the active row, with full membership intact.
+      expect(r.kind).toBe('resolved');
+      if (r.kind === 'resolved') {
+        expect(r.app.id).toBe(activeId);
+        expect(r.app.id).not.toBe(historyId);
+        expect(r.app.role).toBe('owner');
+      }
+    });
+
     it('returns not-found when the URN names no real App', async () => {
       await createAppWithMember('alpha', user.id);
       const r = await resolveAppIdentifier(`${org.urn}:nonexistent`, user.id, db);

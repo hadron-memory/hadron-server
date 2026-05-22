@@ -18,9 +18,16 @@
  *      the same per-session map as regime c.
  *   3. `resolveAppForRequest` returns `'resolved'` for single-App users
  *      (regime a).
- *   4. `resolveAppForRequest` returns `'multi-app'` → typed `no_active_app`
- *      error if the session has engaged with regime-b/c surfaces, else the
- *      legacy `multiple_apps_resolved` 409 (spec 025 fall-through, FR-016).
+ *   4. `resolveAppForRequest` returns `'multi-app'` → session opens (the
+ *      spec-025 HTTP 409 at session-init is gone per spec 026 FR-010 +
+ *      R-N reversal). Per-strict-tool dispatch then surfaces either a
+ *      typed `[no_active_app]` envelope (engaged session — has used
+ *      `h-list-apps` / `h-set-active-app` / regime-b initialize-param)
+ *      or a `[multiple_apps_resolved]` envelope (un-engaged session,
+ *      FR-016 fall-through with the literal token preserved for SC-003
+ *      log-grep). Advisory tools (`h-list-memories`, `h-find-nodes`,
+ *      URN-input reads/writes) ignore the multi-app state and proceed
+ *      with the cross-App union access per D-2026-05-21-003.
  *   5. `resolveAppForRequest` returns `'no-app'` → existing zero-App
  *      fall-through unchanged.
  *
@@ -43,7 +50,10 @@ export interface ResolvedUserApp {
  *  - `'resolved'`: populate `auth.appId` + `auth.organizationId`.
  *  - `'no-app'`: pass through; downstream tool calls handle the
  *    no-App state with their existing errors.
- *  - `'multi-app'`: emit HTTP 409 + `multiple_apps_resolved`.
+ *  - `'multi-app'`: session opens; the dispatch caches the resolution
+ *    and `requireAppScope()` (called by strict-list tool bodies)
+ *    surfaces the `[no_active_app]` / `[multiple_apps_resolved]`
+ *    envelope per the engagement heuristic. Advisory tools ignore it.
  */
 export type AppResolution =
   | { kind: 'resolved'; appId: string; organizationId: string }
@@ -228,39 +238,57 @@ export async function resolveAppIdentifier(
   // URN-form path: look up by `App.urn` directly. This sidesteps the
   // user's accessible-Apps list so we can distinguish "the URN names a
   // real App you're not a member of" from "the URN names nothing".
+  //
+  // **Spec 021 partial-uniqueness**: `App.urn` is unique only across
+  // active rows (`apps_urn_active_uniq WHERE uninstalled_at IS NULL`,
+  // declared in the 021 migration; see `prisma/schema.prisma` line
+  // ~1583 for the schema-side comment). A re-installed App produces an
+  // active row + 1+ uninstalled history rows sharing the same URN.
+  // `findFirst({ where: { urn: bare } })` could non-deterministically
+  // return any of them, misclassifying an active App as
+  // `unavailable.uninstalled`. Two-step lookup matches PR #124's
+  // pattern: prefer the active row; fall back to history rows only to
+  // distinguish 'not-found' from 'unavailable'.
   if (isUrnForm(trimmed)) {
     const bare = stripUrnPrefix(trimmed);
-    const app = await db.app.findFirst({
+
+    const active = await db.app.findFirst({
+      where: { urn: bare, uninstalledAt: null, deletedAt: null },
+      select: { id: true, urn: true, name: true, organizationId: true },
+    });
+    if (active) {
+      const member = await db.appMember.findUnique({
+        where: { appId_userId: { appId: active.id, userId } },
+        select: { role: true },
+      });
+      if (!member) return { kind: 'not-member' };
+      return {
+        kind: 'resolved',
+        app: {
+          id: active.id,
+          urn: active.urn,
+          name: active.name,
+          organizationId: active.organizationId,
+          role: member.role,
+        },
+      };
+    }
+
+    // No active row → check history rows to distinguish 'not-found'
+    // from 'unavailable' (deleted vs. uninstalled). Prefer the most
+    // recent row to surface the latest lifecycle event.
+    const history = await db.app.findFirst({
       where: { urn: bare },
-      select: {
-        id: true,
-        urn: true,
-        name: true,
-        organizationId: true,
-        deletedAt: true,
-        uninstalledAt: true,
-      },
+      orderBy: { createdAt: 'desc' },
+      select: { deletedAt: true, uninstalledAt: true },
     });
-    if (!app) return { kind: 'not-found' };
-    if (app.deletedAt) return { kind: 'unavailable', reason: 'deleted' };
-    if (app.uninstalledAt) return { kind: 'unavailable', reason: 'uninstalled' };
+    if (!history) return { kind: 'not-found' };
+    if (history.deletedAt) return { kind: 'unavailable', reason: 'deleted' };
+    if (history.uninstalledAt) return { kind: 'unavailable', reason: 'uninstalled' };
 
-    const member = await db.appMember.findUnique({
-      where: { appId_userId: { appId: app.id, userId } },
-      select: { role: true },
-    });
-    if (!member) return { kind: 'not-member' };
-
-    return {
-      kind: 'resolved',
-      app: {
-        id: app.id,
-        urn: app.urn,
-        name: app.name,
-        organizationId: app.organizationId,
-        role: member.role,
-      },
-    };
+    // Defensive: a row exists with neither deletedAt nor uninstalledAt,
+    // yet didn't match the active-row query above. Shouldn't happen.
+    return { kind: 'not-found' };
   }
 
   // Short-form path: case-insensitive trim match against the caller's

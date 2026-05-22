@@ -284,14 +284,26 @@ function createMcpServerInstance(
     }
 
     if (cachedAppResolution?.kind === 'multi-app') {
-      const message = engagedWithNewSurface
-        ? `No active Hadron App. Call h-list-apps to see options, then h-set-active-app with the one you want. If you're calling from a project directory, set 'app' in '.hadron/config.json'.`
-        : `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance. Or call h-list-apps to see your accessible Apps and h-set-active-app to pick one.`;
-      mcpLog('warn', engagedWithNewSurface ? 'no_active_app_typed_error' : 'multiple_apps_resolved_fallthrough', {
-        userId: auth.userId,
-        mcpSessionId: sid,
-      });
-      return appSelectionError(APP_SELECTION_ERROR_CODES.NO_ACTIVE_APP, message);
+      // TODO(US3 — revocation cascade): cachedAppResolution is captured at
+      // session-init and may go stale within a long-lived session. A user
+      // whose multi-App status changes mid-session (one revocation reduces
+      // them to single-App; new install widens them to multi-App) won't
+      // see the cache invalidate. US3's revocation work is the natural
+      // place to add a per-call re-resolve OR an invalidation hook on
+      // AppMember mutations.
+      if (engagedWithNewSurface) {
+        const message = `No active Hadron App. Call h-list-apps to see options, then h-set-active-app with the one you want. If you're calling from a project directory, set 'app' in '.hadron/config.json'.`;
+        mcpLog('warn', 'no_active_app_typed_error', { userId: auth.userId, mcpSessionId: sid });
+        return appSelectionError(APP_SELECTION_ERROR_CODES.NO_ACTIVE_APP, message);
+      }
+      // FR-016 fall-through for un-engaged callers. The MULTIPLE_APPS_RESOLVED
+      // code carries the literal `multiple_apps_resolved` token in the
+      // envelope's `[<code>]` prefix so SC-003's production-log grep
+      // continues to work even when the legacy spec-025 HTTP 409 path is
+      // gone.
+      const message = `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance. Or call h-list-apps to see your accessible Apps and h-set-active-app to pick one.`;
+      mcpLog('warn', 'multiple_apps_resolved_fallthrough', { userId: auth.userId, mcpSessionId: sid });
+      return appSelectionError(APP_SELECTION_ERROR_CODES.MULTIPLE_APPS_RESOLVED, message);
     }
 
     return null; // zero-App or other path — fall through
@@ -381,10 +393,13 @@ function createMcpServerInstance(
     'List the Hadron Apps you have access to. Use this to find an App to pass to h-set-active-app, or to check what an `app` field in `.hadron/config.json` resolves to.',
     {},
     async () => {
-      engagedWithNewSurface = true;
+      // Auth gate first; only then mark the session "engaged" so an
+      // unauthenticated call can't flip the flag and influence a later
+      // re-authed request.
       if (!auth.userId && !auth.clientId && !auth.appId) {
         return textResult('Not authenticated.');
       }
+      engagedWithNewSurface = true;
       // AppKey callers (appId set, no userId) — list returns the single App
       // they're scoped to, for parity with the user-credential path.
       if (auth.appId && !auth.userId) {
@@ -398,7 +413,14 @@ function createMcpServerInstance(
         );
       }
 
-      const apps = await resolveUserAppsWithMeta(auth.userId!, db);
+      // Reaching here means we passed the auth gate AND are not AppKey-
+      // scoped. In all current auth paths, that implies auth.userId is
+      // set (OAuth bearer + portal-issued user-API-key both populate
+      // userId). The clientId-only-no-userId case is unreachable in
+      // production today; guard defensively so a future auth path that
+      // populates clientId without userId can't crash here.
+      if (!auth.userId) return textResult('No accessible apps.');
+      const apps = await resolveUserAppsWithMeta(auth.userId, db);
       if (apps.length === 0) {
         return textResult(
           'No accessible apps. Ask an App owner to add you, or visit the Hadron portal to create one.',
@@ -432,16 +454,20 @@ function createMcpServerInstance(
         ),
     },
     async ({ app }) => {
-      engagedWithNewSurface = true;
+      // Auth gate first; mark engaged only on real authenticated calls.
       if (auth.appId && !auth.userId) {
-        // AppKey caller — App identity is in the credential.
-        return textResult(
+        // AppKey caller — App identity is in the credential. Return an
+        // error envelope (not a plain text result) so disciplined clients
+        // can programmatically distinguish misuse from a successful no-op.
+        return appSelectionError(
+          APP_SELECTION_ERROR_CODES.APP_NOT_FOUND,
           'AppKey callers already carry App identity in the credential; h-set-active-app is not applicable.',
         );
       }
       if (!auth.userId) {
         return textResult('Not authenticated.');
       }
+      engagedWithNewSurface = true;
 
       const r = await resolveAppIdentifier(app, auth.userId, db);
       const sid = getSessionId();

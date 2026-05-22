@@ -27,7 +27,7 @@ describe('appSelectionError envelope builder (spec 026 §T008)', () => {
     );
   });
 
-  it('exports each of the 5 spec-026 codes', () => {
+  it('exports each of the 6 spec-026 codes', () => {
     const codes = Object.values(APP_SELECTION_ERROR_CODES);
     expect(codes).toEqual([
       'app_identifier_ambiguous',
@@ -35,12 +35,27 @@ describe('appSelectionError envelope builder (spec 026 §T008)', () => {
       'app_unavailable',
       'app_member_revoked',
       'no_active_app',
+      'multiple_apps_resolved',
     ]);
+  });
+
+  // FR-016 / SC-003 grep target preservation. The literal token
+  // `multiple_apps_resolved` MUST appear in the un-engaged-fall-through
+  // envelope's text so production-log greps continue to match. Pinning
+  // the prefix shape so a future refactor can't silently drop the
+  // literal token from the wire.
+  it('preserves the literal "multiple_apps_resolved" token in the un-engaged-fallthrough envelope', () => {
+    const e = appSelectionError(
+      APP_SELECTION_ERROR_CODES.MULTIPLE_APPS_RESOLVED,
+      'User has more than one Hadron App; this MCP client does not support App selection.',
+    );
+    expect(e.content[0].text).toMatch(/^\[multiple_apps_resolved\]/);
+    expect(e.content[0].text).toContain('multiple_apps_resolved');
   });
 });
 
 describe('extractErrorCode (test helper)', () => {
-  it('parses each of the 5 known codes from envelope text', () => {
+  it('parses each of the 6 known codes from envelope text', () => {
     for (const code of Object.values(APP_SELECTION_ERROR_CODES)) {
       const env = appSelectionError(code, 'msg');
       expect(extractErrorCode(env)).toBe(code);
