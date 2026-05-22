@@ -108,4 +108,7 @@ two-layer model without further setup:
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
+at `specs/030-oauth-portal-signin/plan.md` in the `spec-kits` repo
+(branch `030-oauth-portal-signin` in both `spec-kits/`, `hadron-server/`,
+and `hadron-portal/`).
 <!-- SPECKIT END -->

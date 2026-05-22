@@ -150,7 +150,19 @@ export async function createServer(): Promise<Express> {
     pendingStates.delete(state);
 
     if (!pending || pending.expiresAt < Date.now()) {
-      res.status(400).json({ error: 'Invalid or expired state' });
+      // Spec 030-oauth-portal-signin FR-010: surface a user-readable
+      // HTML page when the pending-state entry is missing (evicted,
+      // expired, or never inserted — e.g. a callback from a sign-in
+      // that started before a server restart). The consumer here is
+      // the user's browser, not an OAuth client; JSON renders as
+      // opaque text in the address bar, while HTML tells the user
+      // what happened and how to recover.
+      res
+        .status(400)
+        .type('html')
+        .send(
+          '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Sign-in session expired</title></head><body><main><h1>Sign-in session expired</h1><p>Your sign-in session expired or was lost before it completed. Please return to your MCP client and start the connection over.</p></main></body></html>',
+        );
       return;
     }
 

@@ -328,34 +328,17 @@ describe('GET /oauth/authorize — post-validation redirects with OAuth error', 
   });
 });
 
-// ── GET — Option-C sign-in redirect ──────────────────────────────────
-
-describe('GET /oauth/authorize — Option-C sign-in (FR-007)', () => {
-  it('no hadron_token cookie → redirect to /auth/github with return_to', async () => {
-    const q = buildAuthorizeQuery();
-    const res = await getAuthorize(q, { cookie: null });
-    expect(res.status).toBe(302);
-    const location = res.headers.get('location');
-    expect(location).not.toBeNull();
-    const url = new URL(location!, baseUrl);
-    expect(url.pathname).toBe('/auth/github');
-    const returnTo = url.searchParams.get('return_to');
-    expect(returnTo).not.toBeNull();
-    // return_to must round-trip back to /oauth/authorize with the
-    // original query intact.
-    expect(returnTo).toMatch(/^\/oauth\/authorize\?/);
-    expect(returnTo).toContain(`client_id=${testClientId}`);
-  });
-
-  it('malformed hadron_token cookie → also bounces to /auth/github', async () => {
-    const res = await getAuthorize(buildAuthorizeQuery(), {
-      cookie: 'hadron_token=not.a.valid.jwt',
-    });
-    expect(res.status).toBe(302);
-    const location = res.headers.get('location');
-    expect(location).toMatch(/^\/auth\/github\?return_to=/);
-  });
-});
+// ── GET — unauthenticated behavior moved to spec 030 ─────────────────
+//
+// The pre-030 "Option-C sign-in (FR-007)" tests that lived here
+// asserted a same-origin `302 → /auth/github?return_to=…` bounce for
+// the unauthenticated case. Spec 030-oauth-portal-signin replaced that
+// with a cross-origin `302 → ${FRONTEND_URL}/signin?redirect=…` to the
+// portal as the canonical sign-in surface. The new assertions live in
+// `src/test/integration/030-oauth-signin-portal-redirect.test.ts`;
+// the old expected-shape tests were removed rather than rewritten
+// because they referenced spec 025 FR-007 in current spec language,
+// which no longer describes shipped behavior.
 
 // ── GET — happy path: consent HTML render ────────────────────────────
 

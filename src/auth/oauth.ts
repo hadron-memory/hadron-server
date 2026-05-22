@@ -779,15 +779,24 @@ function buildHandleAuthorizeGet(
         ? q.state
         : '';
 
-    // 2. Sign-in check. Not signed in → Option-C bounce.
+    // 2. Sign-in check. Not signed in → redirect to portal `/signin`.
+    //
+    // Spec 030-oauth-portal-signin: the portal at `hadronmemory.com` is
+    // the canonical sign-in surface for the MCP OAuth dance. The
+    // pre-030 silent bounce to this server's own `/auth/github` is
+    // replaced by a cross-origin redirect to `${FRONTEND_URL}/signin`,
+    // carrying the original `/authorize` URL in a `redirect` query
+    // param. After portal sign-in completes, `/auth/callback`
+    // (hadron-portal) sets the shared `.hadronmemory.com`-domain
+    // cookie and redirects back here; the browser re-enters
+    // `/oauth/authorize` with the cookie now visible and proceeds to
+    // consent.
     const userId = await getUserIdFromCookie(req);
     if (!userId) {
-      // req.originalUrl is the path + query that hit Express
-      // (e.g., `/oauth/authorize?client_id=…&state=…`). The
-      // `/auth/github` handler's `isServerLocalPath` predicate
-      // accepts paths starting with `/` and not `//`, which
-      // matches.
-      res.redirect(302, `/auth/github?return_to=${encodeURIComponent(req.originalUrl)}`);
+      const portalBase = process.env.FRONTEND_URL || 'http://localhost:5173';
+      const signinUrl = new URL('/signin', portalBase);
+      signinUrl.searchParams.set('redirect', req.originalUrl);
+      res.redirect(302, signinUrl.toString());
       return;
     }
 
