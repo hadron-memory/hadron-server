@@ -445,7 +445,7 @@ function createMcpServerInstance(
 
   server.tool(
     'h-set-active-app',
-    "Set the active Hadron App for this session. Subsequent tools (h-find-nodes, h-add-node, etc.) will use this as the App scope. Pass the App URN (e.g. 'urn:app:acme-corp:mealplan') or an App name that matches exactly one App you have access to. Use h-list-apps to see options.",
+    "Set the active Hadron App for this session. Subsequent tools (h-find-nodes, h-add-node, etc.) will use this as the App scope. Pass the App URN (e.g. 'urn:app:acme-corp:notes') or an App name that matches exactly one App you have access to. Use h-list-apps to see options.",
     {
       app: z
         .string()
