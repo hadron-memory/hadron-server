@@ -3,7 +3,7 @@ import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import {
-  parseUrnInput, formatUrn, formatCanonicalUrn, validateUrnType,
+  parseUrnInput, formatUrn, validateUrnType,
   parseUrn, toParserCanonical, isParserCanonical,
   validateUserSlug, parseFor, UrnParseError,
   composeInstalledAgentUrn,
@@ -85,133 +85,6 @@ describe('formatUrn', () => {
 
   it('formats a node URN', () => {
     expect(formatUrn('node', 'micromentor.org:mmdata:services:admin')).toBe('urn:node:micromentor.org:mmdata:services:admin');
-  });
-});
-
-// Spec 027: canonical-form URN output wrapper. Replaces formatUrn at MCP
-// emission sites. Contract: spec-kits/specs/027-mcp-urn-canonical-form/
-// contracts/canonical-urn-output.md §1.
-describe('formatCanonicalUrn', () => {
-  describe('memory URNs', () => {
-    it('rewrites legacy single-colon bare form to canonical', () => {
-      expect(formatCanonicalUrn('memory', 'acme.com:dev')).toBe('urn:memory:acme.com::dev');
-    });
-
-    it('passes canonical bare form through unchanged', () => {
-      expect(formatCanonicalUrn('memory', 'acme.com::dev')).toBe('urn:memory:acme.com::dev');
-    });
-  });
-
-  describe('app URNs', () => {
-    it('rewrites legacy single-colon bare form to canonical', () => {
-      expect(formatCanonicalUrn('app', 'acme-corp:notes')).toBe('urn:app:acme-corp::notes');
-    });
-
-    it('passes canonical bare form through unchanged', () => {
-      expect(formatCanonicalUrn('app', 'acme-corp::notes')).toBe('urn:app:acme-corp::notes');
-    });
-  });
-
-  describe('node URNs', () => {
-    it('legacy 4-segment bare splits to 4 hierarchy levels (parser semantics)', () => {
-      // IMPORTANT: spec-021's parser has no way to know that
-      // `review:sort-imports` was originally a single multi-atom loc
-      // (pre-021 semantics). When given a legacy bare value with all
-      // single-colon separators, the parser interprets EVERY colon as a
-      // hierarchy separator. Callers that need the semantic "loc is the
-      // leaf" interpretation (e.g. nodeUrn in src/mcp/server.ts) MUST
-      // compose with explicit `::` between memory and loc — see the
-      // nodeUrn implementation for the pattern.
-      expect(formatCanonicalUrn('node', 'acme.com:dev:review:sort-imports')).toBe(
-        'urn:node:acme.com::dev::review::sort-imports',
-      );
-    });
-
-    it('canonical bare with multi-atom leaf preserves the leaf intact', () => {
-      expect(formatCanonicalUrn('node', 'acme.com::dev::review:sort-imports')).toBe(
-        'urn:node:acme.com::dev::review:sort-imports',
-      );
-    });
-
-    it('canonical bare with 3 hierarchy levels passes through unchanged', () => {
-      expect(formatCanonicalUrn('node', 'acme.com::dev::services')).toBe(
-        'urn:node:acme.com::dev::services',
-      );
-    });
-  });
-
-  describe('R2 install URNs (FR-014)', () => {
-    it('round-trips an R2-shaped agent install URN without corrupting the author segment', () => {
-      // R2 form: urn:agent:<install-org>::<app-slug>::<author-org>:<author-slug>
-      // The author-org/author-slug pair lives INSIDE a single path-segment,
-      // separated by `:` not `::`. A naive "replace all `:` with `::`" would
-      // corrupt this; the parser must split on `::` first and leave the
-      // inner `:` alone.
-      const bare = 'micromentor.org::coding-app::hadronmemory.com:coding-agent';
-      expect(formatCanonicalUrn('agent', bare)).toBe(
-        'urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
-      );
-    });
-  });
-
-  describe('input validation', () => {
-    it('throws on empty bareValue', () => {
-      expect(() => formatCanonicalUrn('memory', '')).toThrow(UrnParseError);
-      try {
-        formatCanonicalUrn('memory', '');
-      } catch (e) {
-        expect((e as UrnParseError).reason).toBe('empty-bare-value');
-      }
-    });
-
-    it('throws on whitespace-only bareValue', () => {
-      expect(() => formatCanonicalUrn('memory', '   ')).toThrow(UrnParseError);
-      try {
-        formatCanonicalUrn('memory', '   ');
-      } catch (e) {
-        expect((e as UrnParseError).reason).toBe('empty-bare-value');
-      }
-    });
-
-    it('throws when bareValue already includes urn: prefix', () => {
-      expect(() => formatCanonicalUrn('memory', 'urn:memory:foo::bar')).toThrow(UrnParseError);
-      try {
-        formatCanonicalUrn('memory', 'urn:memory:foo::bar');
-      } catch (e) {
-        expect((e as UrnParseError).reason).toBe('already-prefixed-bare-value');
-      }
-    });
-
-    it('propagates UrnParseError on unknown type', () => {
-      // 'xyz' is not in the spec-021 D1 registry. parseUrn rejects.
-      expect(() => formatCanonicalUrn('xyz' as never, 'foo')).toThrow(UrnParseError);
-    });
-
-    it('rejects bareValue carrying legacy loc: prefix', () => {
-      // loc: is fully deprecated per spec-021 FR-021; parseUrn rejects.
-      expect(() => formatCanonicalUrn('node', 'loc:foo:bar')).toThrow(UrnParseError);
-    });
-  });
-
-  describe('idempotence under canonicalization', () => {
-    it('passing the output back through toParserCanonical yields the same string', () => {
-      const out1 = formatCanonicalUrn('memory', 'acme.com:dev');
-      const out2 = toParserCanonical(out1);
-      expect(out1).toBe(out2);
-    });
-
-    it('applies cleanly to all valid type prefixes used by MCP', () => {
-      // Spec 027 affects MCP-emitted URNs of these types.
-      expect(formatCanonicalUrn('org', 'acme.com')).toBe('urn:org:acme.com');
-      expect(formatCanonicalUrn('memory', 'acme.com::dev')).toBe('urn:memory:acme.com::dev');
-      expect(formatCanonicalUrn('app', 'acme.com::coding')).toBe('urn:app:acme.com::coding');
-      expect(formatCanonicalUrn('agent', 'acme.com::coding-agent')).toBe(
-        'urn:agent:acme.com::coding-agent',
-      );
-      expect(formatCanonicalUrn('node', 'acme.com::dev::services:admin')).toBe(
-        'urn:node:acme.com::dev::services:admin',
-      );
-    });
   });
 });
 

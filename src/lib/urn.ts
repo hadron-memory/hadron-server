@@ -102,9 +102,7 @@ export type UrnParseErrorReason =
   | 'invalid-charset'          // a slug violates FR-016's charset
   | 'slug-too-long'            // a slug exceeds FR-017's 64-char limit
   | 'loc-segment-rejected'     // URN contains a `loc:` segment per FR-021
-  | 'invalid-segment-shape'    // a path-segment violates FR-020's internal-`:` count rules
-  | 'empty-bare-value'         // formatCanonicalUrn called with empty bareValue (spec 027 FR-005)
-  | 'already-prefixed-bare-value'; // formatCanonicalUrn bareValue starts with `urn:` (spec 027)
+  | 'invalid-segment-shape';   // a path-segment violates FR-020's internal-`:` count rules
 
 export class UrnParseError extends Error {
   constructor(
@@ -141,10 +139,10 @@ const MIN_HIERARCHY_SEGMENTS: Record<ExpectedUrnType, number> = {
 
 const MIN_SEGMENTS_HINT: Record<ExpectedUrnType, string> = {
   org: '1 hierarchy segment (e.g., "acme.com")',
-  memory: '2 hierarchy segments (org::memory, e.g., "acme.com::mmdata")',
-  agent: '2 hierarchy segments (org::agent-slug, e.g., "acme.com::coding-agent")',
-  app: '2 hierarchy segments (org::app-slug, e.g., "acme.com::dev-app")',
-  node: '3 hierarchy segments (org::memory::loc, e.g., "acme.com::mmdata::review:sort-imports")',
+  memory: '2 hierarchy segments (org:memory, e.g., "acme.com:mmdata")',
+  agent: '2 hierarchy segments (org:agent-slug, e.g., "acme.com:coding-agent")',
+  app: '2 hierarchy segments (org:app-slug, e.g., "acme.com:dev-app")',
+  node: '3 hierarchy segments (org:memory:loc, e.g., "acme.com:mmdata:review:sort-imports")',
 };
 
 /**
@@ -184,7 +182,7 @@ export class UrnNotQualifiedError extends Error {
   ) {
     const fixHint = expectedType
       ? `Expected a ${expectedType} URN with at least ${MIN_SEGMENTS_HINT[expectedType]}.`
-      : 'Use the canonical form "<org>::<memory>[::path]" — org and memory slugs are mandatory at the API boundary.';
+      : 'Use the canonical form "<org>:<memory>[:path]" — org and memory slugs are mandatory at the API boundary.';
     super(`URN "${offendingValue}" is not fully qualified. ${fixHint}`);
     this.name = 'UrnNotQualifiedError';
     this.offendingValue = offendingValue;
@@ -378,10 +376,6 @@ function messageFor(
       return `URN "${input}" contains a "loc:" segment. The "loc:" prefix is deprecated; rewrite the URN using the current grammar.`;
     case 'invalid-segment-shape':
       return `URN path-segment${cite} has the wrong number of ":"-separated parts for its position. See FR-020 internal-":" shape rules.`;
-    case 'empty-bare-value':
-      return `formatCanonicalUrn called with empty bareValue. A bare URN value MUST contain at least one slug atom.`;
-    case 'already-prefixed-bare-value':
-      return `formatCanonicalUrn bareValue${cite} starts with "urn:". Pass the bare value (no "urn:<type>:" prefix); the wrapper composes the prefix itself.`;
   }
 }
 
@@ -1095,45 +1089,6 @@ export function parseUrnInput(input: string): LegacyParsedUrn {
 /** Format a bare value as a typed URN string for display/output. */
 export function formatUrn(type: string, value: string): string {
   return `urn:${type}:${value}`;
-}
-
-/**
- * Compose and canonicalize a full URN from an entity type and a bare-stored
- * value. The bare value is whatever the entity's `urn` column persists —
- * single-colon hierarchy (legacy / pre-migration rows) or canonical `::`
- * hierarchy (post-migration rows). The output is always the spec-021
- * canonical-form URN with the `urn:<type>:` prefix.
- *
- * Use this from MCP output paths (and any other surface that emits URNs to
- * external consumers) instead of `formatUrn`, which is a dumb prepender
- * that preserves whatever hierarchy shape the stored value already had.
- *
- * Pre-migration bare values (e.g. `acme.com:dev`) are accepted and
- * canonicalized; post-migration bare values (e.g. `acme.com::dev`) pass
- * through unchanged. R2 install URNs round-trip without corruption — the
- * author-segment `:` is preserved inside the R2-embedded path-segment.
- *
- * Spec: 027-mcp-urn-canonical-form / contracts/canonical-urn-output.md §1.
- *
- * @throws UrnParseError with reason `empty-bare-value` if `bareValue` is
- *   empty or whitespace-only.
- * @throws UrnParseError with reason `already-prefixed-bare-value` if
- *   `bareValue` starts with `urn:` (the wrapper composes its own prefix).
- * @throws UrnParseError from `parseUrn(...)` for any acceptance violation
- *   per spec 021 (D1 registry, D2 grammar, D9 slug rules, D8 `loc:`
- *   deprecation).
- */
-export function formatCanonicalUrn(
-  type: CanonicalUrnType,
-  bareValue: string,
-): string {
-  if (bareValue == null || bareValue.trim().length === 0) {
-    throw new UrnParseError('', 'empty-bare-value');
-  }
-  if (bareValue.startsWith('urn:')) {
-    throw new UrnParseError(bareValue, 'already-prefixed-bare-value', bareValue);
-  }
-  return toParserCanonical(`urn:${type}:${bareValue}`);
 }
 
 /**

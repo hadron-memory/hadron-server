@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
   parseUrnInput,
-  formatCanonicalUrn,
+  formatUrn,
   assertFullyQualifiedUrn,
   splitNodeUrn,
   normalizeUrnForLookup,
@@ -144,22 +144,7 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
     memUrn = mem?.urn ?? memoryId;
     memoryUrnCache.set(memoryId, memUrn);
   }
-  // Spec 027: produce a canonical-form node URN regardless of how
-  // Memory.urn is stored (legacy `acme.com:dev` or canonical
-  // `acme.com::dev` depending on spec-021's per-row migration).
-  //
-  // Approach: canonicalize the memory URN first to obtain a known-shape
-  // canonical bare form, then attach the loc as the node's leaf
-  // path-segment with `::` as the explicit hierarchy separator. This
-  // preserves the semantic that `loc` is a single multi-atom leaf
-  // (e.g. `review:sort-imports`), rather than letting the parser
-  // re-split it as additional hierarchy levels. Calling
-  // formatCanonicalUrn('node', `${memUrn}:${loc}`) directly would
-  // produce `urn:node:acme.com::dev::review::sort-imports` (4 levels)
-  // for a legacy memUrn — parser-correct but semantically wrong.
-  const memCanonical = formatCanonicalUrn('memory', memUrn);
-  const bareMemCanonical = memCanonical.substring('urn:memory:'.length);
-  return `urn:node:${bareMemCanonical}::${loc}`;
+  return formatUrn('node', `${memUrn}:${loc}`);
 }
 
 function matchesQuery(
@@ -351,7 +336,7 @@ function createMcpServerInstance(
 
       const lines = memories.map((m) => {
         const level = access.get(m.id) === 'READ_WRITE' ? 'read-write' : 'read-only';
-        return `- **${formatCanonicalUrn('memory', m.urn)}** — ${m.name} (${level})`;
+        return `- **${formatUrn('memory', m.urn)}** — ${m.name} (${level})`;
       });
 
       return textResult(`${memories.length} accessible memories:\n\n${lines.join('\n')}`);
@@ -364,7 +349,7 @@ function createMcpServerInstance(
     'h-set-active-memory',
     'Set the active memory for this session. Subsequent tree tools will use this as the default scope.',
     {
-      memoryUrn: z.string().describe('Memory URN, e.g. hadronmemory.com::dev or urn:memory:hadronmemory.com::dev'),
+      memoryUrn: z.string().describe('Memory URN, e.g. hadronmemory.com:dev or urn:memory:hadronmemory.com:dev'),
     },
     async ({ memoryUrn }) => {
       // #100 #3: Memory.urn is stored bare ('hadronmemory.com:dev'). Storing
@@ -379,7 +364,7 @@ function createMcpServerInstance(
       if (parsed.type !== 'memory' && parsed.type !== 'unknown') {
         const prefix = parsed.type === 'loc' ? 'loc:' : `urn:${parsed.type}:`;
         return textResult(
-          `Expected a memory URN, got '${prefix}'. Pass 'hadronmemory.com::dev' or 'urn:memory:hadronmemory.com::dev'.`,
+          `Expected a memory URN, got '${prefix}'. Pass 'hadronmemory.com:dev' or 'urn:memory:hadronmemory.com:dev'.`,
         );
       }
 
@@ -397,7 +382,7 @@ function createMcpServerInstance(
       // Store the bare URN from the DB row (the canonical form for downstream
       // findFirst({urn:activeMemoryUrn}) lookups).
       activeMemoryUrn = mem.urn;
-      return textResult(`Active memory set to: ${formatCanonicalUrn('memory', mem.urn)}`);
+      return textResult(`Active memory set to: ${formatUrn('memory', mem.urn)}`);
     },
   );
 
@@ -424,7 +409,7 @@ function createMcpServerInstance(
         });
         if (!app) return textResult('No accessible apps.');
         return textResult(
-          `1 accessible app:\n\n- **${formatCanonicalUrn('app', app.urn)}** — ${app.name} (via App Key)`,
+          `1 accessible app:\n\n- **${formatUrn('app', app.urn)}** — ${app.name} (via App Key)`,
         );
       }
 
@@ -442,7 +427,7 @@ function createMcpServerInstance(
         );
       }
       const lines = apps.map(
-        (a) => `- **${formatCanonicalUrn('app', a.urn)}** — ${a.name} (role: ${a.role})`,
+        (a) => `- **${formatUrn('app', a.urn)}** — ${a.name} (role: ${a.role})`,
       );
       const header =
         apps.length === 1
@@ -460,7 +445,7 @@ function createMcpServerInstance(
 
   server.tool(
     'h-set-active-app',
-    "Set the active Hadron App for this session. Subsequent tools (h-find-nodes, h-add-node, etc.) will use this as the App scope. Pass the App URN (e.g. 'urn:app:acme-corp::notes') or an App name that matches exactly one App you have access to. Use h-list-apps to see options.",
+    "Set the active Hadron App for this session. Subsequent tools (h-find-nodes, h-add-node, etc.) will use this as the App scope. Pass the App URN (e.g. 'urn:app:acme-corp:notes') or an App name that matches exactly one App you have access to. Use h-list-apps to see options.",
     {
       app: z
         .string()
@@ -504,12 +489,12 @@ function createMcpServerInstance(
             appUrn: r.app.urn,
           });
           return textResult(
-            `Active App set to: **${formatCanonicalUrn('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call h-set-active-app again with a different identifier to switch, or h-list-apps to see other options.`,
+            `Active App set to: **${formatUrn('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call h-set-active-app again with a different identifier to switch, or h-list-apps to see other options.`,
           );
         }
         case 'ambiguous': {
           const candidatesText = r.candidates
-            .map((c) => `  - ${formatCanonicalUrn('app', c.urn)}`)
+            .map((c) => `  - ${formatUrn('app', c.urn)}`)
             .join('\n');
           mcpLog('warn', 'app_identifier_ambiguous', {
             userId: auth.userId,
@@ -548,9 +533,9 @@ function createMcpServerInstance(
 
   server.tool(
     'h-add-parent-node',
-    'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes. The URN MUST be fully qualified (org::memory::loc).',
+    'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes. The URN MUST be fully qualified (org:memory:loc).',
     {
-      urn: z.string().describe('Fully-qualified node URN for the new section, e.g. "acme.com::mmdata::services" or "acme.com::mmdata::services:db-helpers"'),
+      urn: z.string().describe('Fully-qualified node URN for the new section, e.g. "acme.com:mmdata:services" or "acme.com:mmdata:services:db-helpers"'),
       name: z.string().optional().describe('Display name (defaults to the last loc atom)'),
       description: z.string().optional().describe('What this section contains'),
       tags: z.array(z.string()).optional(),
@@ -713,8 +698,8 @@ function createMcpServerInstance(
 
   server.tool(
     'h-read-node',
-    'Read a node by its fully-qualified URN. The URN MUST be fully qualified (org::memory::loc).',
-    { urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::architecture" or "urn:node:acme.com::mmdata::architecture"') },
+    'Read a node by its fully-qualified URN. The URN MUST be fully qualified (org:memory:loc).',
+    { urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com:mmdata:architecture" or "urn:node:acme.com:mmdata:architecture"') },
     async ({ urn: rawUrn }) => {
       // Spec 022: qualification at the API boundary.
       try {
@@ -788,7 +773,7 @@ function createMcpServerInstance(
 
   server.tool(
     'h-read-next-node',
-    'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted. The URN MUST be fully qualified (org::memory::loc).',
+    'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted. The URN MUST be fully qualified (org:memory:loc).',
     {
       parent: z.string().describe('Fully-qualified parent node URN, e.g. "acme.com:mmdata:sections"'),
       current: z.string().optional().describe('Fully-qualified current child node URN (must be in the same memory as `parent`)'),
@@ -992,9 +977,9 @@ function createMcpServerInstance(
 
   server.tool(
     'h-add-node',
-    'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (org::memory::loc). Requires write access to the memory.',
+    'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (org:memory:loc). Requires write access to the memory.',
     {
-      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports" or "urn:node:acme.com::mmdata::review:sort-imports". Both bare and prefixed forms accepted. Relative-form URNs (no memory) are rejected.'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com:mmdata:review:sort-imports" or "urn:node:acme.com:mmdata:review:sort-imports". Both bare and prefixed forms accepted. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('Short description'),
@@ -1165,9 +1150,9 @@ function createMcpServerInstance(
 
   server.tool(
     'h-update-node',
-    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (org::memory::loc).',
+    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (org:memory:loc).',
     {
-      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports"'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com:mmdata:review:sort-imports"'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('New short description'),
@@ -1320,9 +1305,9 @@ function createMcpServerInstance(
 
   server.tool(
     'h-move-node',
-    'Move or rename a node, optionally across memories. The node keeps its stable ID so all edge references remain valid. Both URNs MUST be fully qualified (org::memory::loc).',
+    'Move or rename a node, optionally across memories. The node keeps its stable ID so all edge references remain valid. Both URNs MUST be fully qualified (org:memory:loc).',
     {
-      urn: z.string().describe('Current node fully-qualified URN, e.g. "acme.com::mmdata::services:db-helper"'),
+      urn: z.string().describe('Current node fully-qualified URN, e.g. "acme.com:mmdata:services:db-helper"'),
       targetUrn: z.string().describe('Destination node fully-qualified URN. Different memory in the target URN performs a cross-memory move.'),
     },
     async ({ urn: rawFrom, targetUrn: rawTo }) => {
@@ -1387,9 +1372,9 @@ function createMcpServerInstance(
 
   server.tool(
     'h-run-action',
-    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (org::memory::loc).',
+    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (org:memory:loc).',
     {
-      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::actions:review"'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com:mmdata:actions:review"'),
       args: z.record(z.string(), z.string()).optional().describe('Action arguments as key-value pairs'),
     },
     async ({ urn: rawUrn, args }) => {
