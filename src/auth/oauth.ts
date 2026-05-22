@@ -41,6 +41,7 @@ import { decodeJwt } from 'jose';
 import { db } from '../integrations/db/client.js';
 import { verifyJwt } from './jwt.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
+import { renderSigninPrompt } from './signin-prompt.template.js';
 import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.js';
 
 /**
@@ -779,15 +780,30 @@ function buildHandleAuthorizeGet(
         ? q.state
         : '';
 
-    // 2. Sign-in check. Not signed in → Option-C bounce.
+    // 2. Sign-in check. Not signed in → render the spec 029 prompt page.
+    //
+    // Pre-029 behavior was a silent `302 → /auth/github?return_to=…`
+    // bounce — issue #168 showed that left users staring at a blank
+    // or error state with no clue what to do. The prompt page names
+    // the requesting client and offers a single sign-in CTA whose
+    // href IS the same `/auth/github?return_to=…` URL the redirect
+    // used to point at. The receiving `/auth/github` handler still
+    // validates `return_to` via the existing `isServerLocalPath`
+    // predicate (spec 025 Option-C), so the state-preservation
+    // contract for client_id/state/code_challenge/scope/resource/
+    // redirect_uri is unchanged. See spec 029-oauth-signin-prompt.
     const userId = await getUserIdFromCookie(req);
     if (!userId) {
-      // req.originalUrl is the path + query that hit Express
-      // (e.g., `/oauth/authorize?client_id=…&state=…`). The
-      // `/auth/github` handler's `isServerLocalPath` predicate
-      // accepts paths starting with `/` and not `//`, which
-      // matches.
-      res.redirect(302, `/auth/github?return_to=${encodeURIComponent(req.originalUrl)}`);
+      const promptScope = typeof q.scope === 'string' && q.scope.length > 0 ? q.scope : 'mcp';
+      const promptResource = typeof q.resource === 'string' ? q.resource : '';
+      const html = renderSigninPrompt({
+        clientName,
+        redirectUri,
+        scope: promptScope,
+        resource: promptResource,
+        returnTo: req.originalUrl,
+      });
+      res.type('html').send(html);
       return;
     }
 

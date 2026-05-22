@@ -328,34 +328,16 @@ describe('GET /oauth/authorize — post-validation redirects with OAuth error', 
   });
 });
 
-// ── GET — Option-C sign-in redirect ──────────────────────────────────
-
-describe('GET /oauth/authorize — Option-C sign-in (FR-007)', () => {
-  it('no hadron_token cookie → redirect to /auth/github with return_to', async () => {
-    const q = buildAuthorizeQuery();
-    const res = await getAuthorize(q, { cookie: null });
-    expect(res.status).toBe(302);
-    const location = res.headers.get('location');
-    expect(location).not.toBeNull();
-    const url = new URL(location!, baseUrl);
-    expect(url.pathname).toBe('/auth/github');
-    const returnTo = url.searchParams.get('return_to');
-    expect(returnTo).not.toBeNull();
-    // return_to must round-trip back to /oauth/authorize with the
-    // original query intact.
-    expect(returnTo).toMatch(/^\/oauth\/authorize\?/);
-    expect(returnTo).toContain(`client_id=${testClientId}`);
-  });
-
-  it('malformed hadron_token cookie → also bounces to /auth/github', async () => {
-    const res = await getAuthorize(buildAuthorizeQuery(), {
-      cookie: 'hadron_token=not.a.valid.jwt',
-    });
-    expect(res.status).toBe(302);
-    const location = res.headers.get('location');
-    expect(location).toMatch(/^\/auth\/github\?return_to=/);
-  });
-});
+// ── GET — unauthenticated behavior moved to spec 029 ──────────────────
+//
+// The two "no hadron_token" / "malformed hadron_token" tests that used
+// to live here asserted the pre-029 silent `302 → /auth/github?return_to=…`
+// bounce. Spec 029-oauth-signin-prompt replaced that bounce with a
+// server-rendered prompt page (200 text/html). New assertions live in
+// `src/test/integration/029-oauth-signin-prompt.test.ts`; the
+// expected-shape pre-029 tests were removed rather than kept as
+// snapshot-of-old-behavior because they would have contradicted FR-007
+// in current spec language.
 
 // ── GET — happy path: consent HTML render ────────────────────────────
 
