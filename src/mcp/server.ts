@@ -158,7 +158,7 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
   // produce `urn:node:acme.com::dev::review::sort-imports` (4 levels)
   // for a legacy memUrn — parser-correct but semantically wrong.
   const memCanonical = formatCanonicalUrn('memory', memUrn);
-  const bareMemCanonical = memCanonical.substring('urn:memory:'.length);
+  const bareMemCanonical = memCanonical.replace(/^urn:memory:/, '');
   return `urn:node:${bareMemCanonical}::${loc}`;
 }
 

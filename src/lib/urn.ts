@@ -1133,7 +1133,21 @@ export function formatCanonicalUrn(
   if (bareValue.startsWith('urn:')) {
     throw new UrnParseError(bareValue, 'already-prefixed-bare-value', bareValue);
   }
-  return toParserCanonical(`urn:${type}:${bareValue}`);
+  // `parseUrn` splits the path on `::` only — see splitMixedGrammar usage
+  // at the top of parseUrn. Legacy bare values use single `:` between
+  // hierarchy levels (`acme.com:dev`) and would land in parseUrn as a
+  // single multi-atom path-segment, tripping `rejectInvalidSegmentShapes`
+  // (the org segment must have exactly 1 atom).
+  //
+  // Normalize the hierarchy separator before parsing: if the bare value
+  // contains NO `::`, it's pure legacy form — substitute `:` → `::`
+  // throughout. R2 install URNs (which have `::` between hierarchy levels
+  // AND `:` within a single path-segment, per spec-021 FR-014) already
+  // contain `::` and pass through untouched, preserving the intra-segment
+  // `:`. Mixed-grammar inputs (rare; would be a malformed handoff from
+  // upstream code) also pass through and let parseUrn surface the issue.
+  const path = bareValue.includes('::') ? bareValue : bareValue.split(':').join('::');
+  return toParserCanonical(`urn:${type}:${path}`);
 }
 
 /**

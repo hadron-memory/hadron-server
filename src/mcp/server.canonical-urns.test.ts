@@ -73,11 +73,15 @@ describe('spec 027: MCP surface URN canonical-form audit', () => {
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        // For each line, find any URN-literal that has 3+ colons total
-        // AND no `::` substring. We use a simple two-pass approach:
-        // 1) Find all `urn:<type>:...` substrings up to a closing quote.
-        // 2) For each, count colons; if 4+ and no `::`, it's a violation.
-        const urnLiteralRegex = /urn:(?:org|app|agent|memory|node)(?::[a-zA-Z0-9._-]+){3,}/g;
+        // For each line, find any URN-literal whose path uses single-`:`
+        // hierarchy (i.e. 2+ `:<atom>` repetitions and no `::` substring).
+        // `{2,}` catches 2-segment legacy URNs like `urn:memory:org:slug`
+        // and `urn:app:org:slug` — under spec 021 these become canonical
+        // `urn:memory:org::slug` etc. with `::` between hierarchy levels.
+        // The regex stops at `::` naturally: the atom-group requires an
+        // alphanumeric after the leading `:`, but the second `:` of a
+        // `::` pair isn't alphanumeric.
+        const urnLiteralRegex = /urn:(?:org|app|agent|memory|node)(?::[a-zA-Z0-9._-]+){2,}/g;
         let match: RegExpExecArray | null;
         while ((match = urnLiteralRegex.exec(line)) !== null) {
           const urn = match[0];
@@ -117,15 +121,17 @@ describe('spec 027: MCP surface URN canonical-form audit', () => {
     });
 
     it('server.ts does not import formatUrn', () => {
-      // The import block is plain code (not a comment), so we check
-      // the raw source for an import that names formatUrn from the urn
-      // module. A robust check: ensure no line containing `from '../lib/urn'`
-      // (or similar) also references the `formatUrn` symbol.
-      const importBlockMatch = rawSource.match(
-        /import\s*\{[^}]*\}\s*from\s*['"][^'"]*urn(?:\.js)?['"]/,
-      );
-      if (importBlockMatch) {
-        expect(importBlockMatch[0]).not.toMatch(/\bformatUrn\b/);
+      // The import block is plain code (not a comment). Check EVERY
+      // import from the urn module — there may be more than one (e.g.
+      // a type-only `import type { … }` alongside a value `import { … }`).
+      // For each match, assert that `formatUrn` doesn't appear in the
+      // import's binding list.
+      const importRegex = /import\s*(?:type\s*)?\{[^}]*\}\s*from\s*['"][^'"]*urn(?:\.js)?['"]/g;
+      const matches = rawSource.match(importRegex);
+      if (matches) {
+        for (const match of matches) {
+          expect(match).not.toMatch(/\bformatUrn\b/);
+        }
       }
     });
   });
