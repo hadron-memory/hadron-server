@@ -139,12 +139,9 @@ describe('008 schema — new entities + dropped AppAgent', () => {
     expect(grant.revokedAt).toBeNull();
   });
 
-  it('AppAgent is removed from the Prisma client (TS-level check)', async () => {
-    // 008 drops the AppAgent model. The Prisma client should no longer expose
-    // it. This test documents the removal at runtime (TS-level absence is
-    // also enforced by `pnpm tsc --noEmit`).
-    expect((db as unknown as Record<string, unknown>).appAgent).toBeUndefined();
-  });
+  // Removed: "AppAgent is removed from the Prisma client" — spec 023
+  // reintroduced AppAgent as the N:M App↔Agent join. The removal this test
+  // documented has been intentionally reversed.
 });
 
 // ---------------------------------------------------------------------------

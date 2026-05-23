@@ -294,6 +294,9 @@ describe('beginAssetUploadV2', () => {
         userId: user.id,
         // 008: chk_memory_class_app_id requires app_id for personal-class.
         appId: app.id,
+        // 023 FR-004/FR-032: chk_memory_personal_agent_id requires the
+        // (App, Agent, User) scope to be complete.
+        userMemoryOfAgentId: agent.id,
       },
     });
   });

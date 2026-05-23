@@ -583,6 +583,7 @@ describe('deleteMemory (spec 013)', () => {
     let owner: { id: string };
     let nonOwner: { id: string };
     let app: { id: string; urn: string };
+    let agent: { id: string };
     let personalMemory: { id: string };
 
     beforeEach(async () => {
@@ -600,7 +601,16 @@ describe('deleteMemory (spec 013)', () => {
       await db.orgMember.create({
         data: { organizationId: orgA.id, userId: nonOwner.id, role: 'CONTRIBUTOR' },
       });
-      // Personal-class memories require an App (chk_memory_class_app_id).
+      // Personal-class memories require an App (chk_memory_class_app_id) and
+      // an Agent pivot (chk_memory_personal_agent_id, 023 FR-004/FR-032).
+      agent = await db.agent.create({
+        data: {
+          id: generateId(),
+          name: 'test-agent',
+          urn: `${orgA.urn}:test-agent`,
+          organizationId: orgA.id,
+        },
+      });
       app = await db.app.create({
         data: {
           id: generateId(),
@@ -619,6 +629,7 @@ describe('deleteMemory (spec 013)', () => {
           visibility: 'PERSONAL',
           userId: owner.id,
           appId: app.id,
+          userMemoryOfAgentId: agent.id,
         },
       });
       personalMemory = { id: m.id };

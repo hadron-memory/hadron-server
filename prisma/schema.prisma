@@ -1971,11 +1971,11 @@ model AppLogEntry {
 /// FR-001; deviates from the 2026-05-12-user-installing-app summary
 /// §3 to avoid per-Agent conflicts on an App-wide setting).
 ///
-/// **Transition note**: `App.agentId` is **not yet dropped**. New
-/// install flows (the `installAgentIntoApp` mutation introduced in
-/// spec 023 US1) MUST write an `AppAgent` row. Legacy code that reads
-/// `App.agentId` continues to work. The column-drop and consumer
-/// retrofit ship in a separate Phase 2b PR per the spec's plan.
+/// **Transition note**: `App.agentId` was dropped and consumers
+/// retrofitted in Phase 2b ([hadron-server#129](https://github.com/hadron-memory/hadron-server/pull/129),
+/// 2026-05-17). Install flows go through the `installAgentIntoApp`
+/// mutation (spec 023 US1, [hadron-server#130](https://github.com/hadron-memory/hadron-server/pull/130))
+/// which writes an `AppAgent` row.
 ///
 /// **Cascade behavior**: hard `App` or `Agent` deletion cascades to
 /// the `AppAgent` row. Uninstalling an Agent from an App (deleting

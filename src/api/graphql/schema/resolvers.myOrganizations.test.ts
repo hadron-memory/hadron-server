@@ -103,13 +103,16 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
     const apps = (orgs[0] as { apps: unknown[] }).apps;
     expect(apps).toHaveLength(1);
 
-    // The App's agent field is still resolvable (singular form does not
-    // filter deletedAt — it's an audit/historical reference). The eager
-    // include must populate memoryItems so the GraphQL non-null contract
-    // on Agent.memoryItems is satisfied.
-    const linkedAgent = (apps[0] as { agent: unknown }).agent as
-      | { id: string; memoryItems: unknown[] }
-      | null;
+    // 023-app-shape: App.agent is no longer a Prisma scalar relation — it
+    // resolves via the AppAgent join through the App.agent resolver. Call
+    // the resolver to bridge from the eager Prisma payload to the GraphQL
+    // shape. The original regression (Agent.memoryItems non-null contract
+    // when the agent is soft-deleted) is still what we're guarding here.
+    const linkedAgent = (await resolvers.App.agent(
+      apps[0] as { id: string; appAgents?: unknown },
+      {},
+      ctx(user.id),
+    )) as { id: string; memoryItems: unknown[] } | null;
     expect(linkedAgent).not.toBeNull();
     expect(linkedAgent!.id).toBe(agent.id);
     expect(Array.isArray(linkedAgent!.memoryItems)).toBe(true);
@@ -160,10 +163,13 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
 
     const orgs = await resolvers.Query.myOrganizations({}, {}, ctx(user.id));
     const apps = (orgs[0] as { apps: unknown[] }).apps;
-    const linkedAgent = (apps[0] as { agent: unknown }).agent as {
-      id: string;
-      memoryItems: unknown[];
-    };
+    // 023-app-shape: invoke the App.agent resolver — see explanation in
+    // the soft-deleted-agent test above.
+    const linkedAgent = (await resolvers.App.agent(
+      apps[0] as { id: string; appAgents?: unknown },
+      {},
+      ctx(user.id),
+    )) as { id: string; memoryItems: unknown[] };
     expect(linkedAgent.id).toBe(agent.id);
     expect(linkedAgent.memoryItems).toHaveLength(1);
   });
