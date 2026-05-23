@@ -202,6 +202,47 @@ describe('formatCanonicalUrn', () => {
     });
   });
 
+  // Pins for the normalization rule added at src/lib/urn.ts:1140-1145.
+  // The type-specific tests above exercise rewriting incidentally; this
+  // block asserts the rule directly so a future refactor that reorders
+  // normalization vs. parsing can't silently change the contract.
+  describe('legacy-single-colon normalization (the rule)', () => {
+    it('promotes legacy single-colon bare to canonical double-colon', () => {
+      // The load-bearing positive case: input has no `::` anywhere, so
+      // every `:` is a hierarchy separator and gets promoted.
+      expect(formatCanonicalUrn('memory', 'acme.com:dev')).toBe(
+        'urn:memory:acme.com::dev',
+      );
+    });
+
+    it('passes through any input that already contains `::`', () => {
+      // The R2-install carve-out: once `::` appears, remaining `:` are
+      // content (e.g., inside the author-segment of an install URN), not
+      // hierarchy. Normalization stops touching them.
+      expect(
+        formatCanonicalUrn(
+          'agent',
+          'micromentor.org::coding-app::hadronmemory.com:coding-agent',
+        ),
+      ).toBe(
+        'urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
+      );
+    });
+
+    it('rejects partially-canonical mixed input via the parser', () => {
+      // Input like `a:b::c` slips past the normalizer (it has `::`), but
+      // the parser then rejects `a:b` as a non-spec segment shape for that
+      // hierarchy position (FR-020). This is the chosen contract: the
+      // normalizer doesn't second-guess mixed-form intent — it defers to
+      // the parser's strict validation. Pinning the rejection here so a
+      // future "helpful" normalizer rewrite can't silently swallow the
+      // mixed form.
+      expect(() => formatCanonicalUrn('node', 'a:b::c')).toThrow(
+        UrnParseError,
+      );
+    });
+  });
+
   describe('idempotence under canonicalization', () => {
     it('passing the output back through toParserCanonical yields the same string', () => {
       const out1 = formatCanonicalUrn('memory', 'acme.com:dev');
