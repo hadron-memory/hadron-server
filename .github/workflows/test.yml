@@ -1,0 +1,86 @@
+name: Unit Tests
+
+# Runs the full vitest suite on every PR + every push to main. The
+# parent issue (#148) was filed because the suite drifted to 67
+# failures across 12 files over four spec-025 PRs without anyone
+# noticing — nothing in CI was treating unit-test failures as
+# blocking. This workflow is the lasting fix (#176): once configured
+# as a required status check on `main`, any new red breaks the merge
+# button and stays surfaced.
+
+on:
+  pull_request:
+    paths:
+      - '**.ts'
+      - '**.tsx'
+      - 'prisma/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'vitest.config.ts'
+      - '.github/workflows/test.yml'
+  push:
+    branches: [main]
+    paths:
+      - '**.ts'
+      - '**.tsx'
+      - 'prisma/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'vitest.config.ts'
+      - '.github/workflows/test.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Used by `prisma db push` below. The vitest config reads
+      # `TEST_DATABASE_URL` (also set below) for the test runner's
+      # own connection.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hadron_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm prisma generate
+
+      - name: Sync test DB schema (db push + post-push.sql)
+        # `prisma db push` creates tables/columns/indexes but skips CHECK
+        # constraints (Prisma's schema language doesn't model them).
+        # `prisma/post-push.sql` adds the spec-005 / spec-008 / spec-023
+        # CHECKs the tests depend on. The vitest globalSetup also adds a
+        # subset of these IF NOT EXISTS; running post-push.sql first
+        # ensures the complete set lands in the canonical post-023 form.
+        run: |
+          pnpm prisma db push --skip-generate
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/post-push.sql
+
+      - name: Run vitest suite
+        # `vitest run` exits non-zero on any test failure, which fails
+        # the job. That's the entire point of this workflow. Once added
+        # to the protected-branch required-status-checks list, red here
+        # blocks the merge.
+        run: pnpm test
