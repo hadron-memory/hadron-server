@@ -258,6 +258,26 @@ describe('addAgentToApp accepts AppAgent fields', () => {
     expect(installedIds).toEqual(expect.arrayContaining([agentId, secondAgentId]));
     expect(updated.trainingMode).toBe(true);
   });
+
+  it('addAgentToApp rejects re-installing the same Agent with DUPLICATE_APP_AGENT', async () => {
+    // Pins the composite-PK contract that replaced the pre-023 idempotent
+    // upsert. Re-calling with an already-installed agent is a typed error,
+    // not a silent no-op — callers detect it via extensions.code.
+    const created = await resolvers.Mutation.createApp(
+      {},
+      { orgId, agentId, name: 'Dup App' },
+      adminCtx(),
+    );
+    await expect(
+      resolvers.Mutation.addAgentToApp(
+        {},
+        { appId: created.id, agentId },
+        adminCtx(),
+      ),
+    ).rejects.toMatchObject({
+      extensions: { code: 'DUPLICATE_APP_AGENT' },
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

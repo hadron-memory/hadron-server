@@ -88,6 +88,10 @@ describe('008-agent-installation — GraphQL field-removal regression (T041)', (
     }).getFields();
     const agentsField = fields.agents;
     expect(agentsField).toBeDefined();
+    // Pin the post-023 contract: the @deprecated annotation that pre-023
+    // carried (deprecationReason matched /App\.agent/) is gone. Without
+    // this assertion a stray @deprecated decoration would silently pass.
+    expect(agentsField.deprecationReason).toBeFalsy();
   });
 
   it('App.members and App.memberCount are part of the new surface', () => {
