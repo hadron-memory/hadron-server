@@ -115,15 +115,24 @@ describe('formatCanonicalUrn', () => {
   describe('node URNs', () => {
     it('legacy 4-segment bare splits to 4 hierarchy levels (parser semantics)', () => {
       // IMPORTANT: spec-021's parser has no way to know that
-      // `review:sort-imports` was originally a single multi-atom loc
+      // `services:sort-imports` was originally a single multi-atom loc
       // (pre-021 semantics). When given a legacy bare value with all
       // single-colon separators, the parser interprets EVERY colon as a
       // hierarchy separator. Callers that need the semantic "loc is the
       // leaf" interpretation (e.g. nodeUrn in src/mcp/server.ts) MUST
       // compose with explicit `::` between memory and loc — see the
       // nodeUrn implementation for the pattern.
-      expect(formatCanonicalUrn('node', 'acme.com:dev:review:sort-imports')).toBe(
-        'urn:node:acme.com::dev::review::sort-imports',
+      //
+      // Slug choice note: avoiding `review` here — it lives in the D1
+      // NODE_TYPES registry (a reserved word per FR-019), which the parser
+      // rejects as a slug at a hierarchy-position. `services` is a plain
+      // slug and exercises the same 4-level split semantics. (The
+      // adjacent test below — "multi-atom leaf preserves the leaf intact"
+      // — still uses `review:sort-imports` because there `review` sits
+      // inside a single path-segment as an atom, where reserved-word
+      // rejection doesn't apply.)
+      expect(formatCanonicalUrn('node', 'acme.com:dev:services:sort-imports')).toBe(
+        'urn:node:acme.com::dev::services::sort-imports',
       );
     });
 

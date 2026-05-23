@@ -367,7 +367,7 @@ function createMcpServerInstance(
       memoryUrn: z.string().describe('Memory URN, e.g. hadronmemory.com::dev or urn:memory:hadronmemory.com::dev'),
     },
     async ({ memoryUrn }) => {
-      // #100 #3: Memory.urn is stored bare ('hadronmemory.com:dev'). Storing
+      // #100 #3: Memory.urn is stored bare ('hadronmemory.com::dev'). Storing
       // the caller-supplied string verbatim makes every downstream
       // findFirst({urn:activeMemoryUrn}) silently miss when the caller passed
       // the canonical 'urn:memory:' form. Writes have fallback paths
