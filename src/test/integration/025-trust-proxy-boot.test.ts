@@ -34,8 +34,16 @@ interface SpawnResult {
  * the entry point).
  */
 async function spawnServer(env: Record<string, string>, timeoutMs = 15_000): Promise<SpawnResult> {
+  // Spawn `tsx` directly via the resolved binary in node_modules. We used to
+  // go through `pnpm exec tsx`, but pnpm 10+ runs an implicit `install`
+  // before `exec` and the install was failing on this repo's legacy
+  // package.json `pnpm` field (warnings + ERR_PNPM_IGNORED_BUILDS), which
+  // meant the server never spawned and the stderr assertions matched the
+  // pnpm warnings instead of the boot-policy log lines. Bypassing pnpm
+  // sidesteps both problems.
+  const tsxBin = join(REPO_ROOT, 'node_modules', '.bin', 'tsx');
   return new Promise((resolve) => {
-    const child = spawn('pnpm', ['exec', 'tsx', 'src/index.ts'], {
+    const child = spawn(tsxBin, ['src/index.ts'], {
       cwd: REPO_ROOT,
       env: {
         // Inherit shell essentials so node/pnpm/tsx can resolve.
@@ -51,6 +59,10 @@ async function spawnServer(env: Record<string, string>, timeoutMs = 15_000): Pro
         // code (today the Cloudflare init throws before that, so
         // this is defense-in-depth).
         DATABASE_URL: 'postgresql://nobody@127.0.0.1:1/__nonexistent__',
+        // src/auth/oauth.ts validates BASE_URL at module-import time —
+        // without it the child crashes before reaching the Cloudflare
+        // init path the boot policy under test exercises.
+        BASE_URL: 'http://127.0.0.1:4000',
         ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],

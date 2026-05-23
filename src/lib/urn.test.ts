@@ -115,15 +115,24 @@ describe('formatCanonicalUrn', () => {
   describe('node URNs', () => {
     it('legacy 4-segment bare splits to 4 hierarchy levels (parser semantics)', () => {
       // IMPORTANT: spec-021's parser has no way to know that
-      // `review:sort-imports` was originally a single multi-atom loc
+      // `services:sort-imports` was originally a single multi-atom loc
       // (pre-021 semantics). When given a legacy bare value with all
       // single-colon separators, the parser interprets EVERY colon as a
       // hierarchy separator. Callers that need the semantic "loc is the
       // leaf" interpretation (e.g. nodeUrn in src/mcp/server.ts) MUST
       // compose with explicit `::` between memory and loc — see the
       // nodeUrn implementation for the pattern.
-      expect(formatCanonicalUrn('node', 'acme.com:dev:review:sort-imports')).toBe(
-        'urn:node:acme.com::dev::review::sort-imports',
+      //
+      // Slug choice note: avoiding `review` here — it lives in the D1
+      // NODE_TYPES registry (a reserved word per FR-019), which the parser
+      // rejects as a slug at a hierarchy-position. `services` is a plain
+      // slug and exercises the same 4-level split semantics. (The
+      // adjacent test below — "multi-atom leaf preserves the leaf intact"
+      // — still uses `review:sort-imports` because there `review` sits
+      // inside a single path-segment as an atom, where reserved-word
+      // rejection doesn't apply.)
+      expect(formatCanonicalUrn('node', 'acme.com:dev:services:sort-imports')).toBe(
+        'urn:node:acme.com::dev::services::sort-imports',
       );
     });
 
@@ -190,6 +199,47 @@ describe('formatCanonicalUrn', () => {
     it('rejects bareValue carrying legacy loc: prefix', () => {
       // loc: is fully deprecated per spec-021 FR-021; parseUrn rejects.
       expect(() => formatCanonicalUrn('node', 'loc:foo:bar')).toThrow(UrnParseError);
+    });
+  });
+
+  // Pins for the normalization rule added at src/lib/urn.ts:1140-1145.
+  // The type-specific tests above exercise rewriting incidentally; this
+  // block asserts the rule directly so a future refactor that reorders
+  // normalization vs. parsing can't silently change the contract.
+  describe('legacy-single-colon normalization (the rule)', () => {
+    it('promotes legacy single-colon bare to canonical double-colon', () => {
+      // The load-bearing positive case: input has no `::` anywhere, so
+      // every `:` is a hierarchy separator and gets promoted.
+      expect(formatCanonicalUrn('memory', 'acme.com:dev')).toBe(
+        'urn:memory:acme.com::dev',
+      );
+    });
+
+    it('passes through any input that already contains `::`', () => {
+      // The R2-install carve-out: once `::` appears, remaining `:` are
+      // content (e.g., inside the author-segment of an install URN), not
+      // hierarchy. Normalization stops touching them.
+      expect(
+        formatCanonicalUrn(
+          'agent',
+          'micromentor.org::coding-app::hadronmemory.com:coding-agent',
+        ),
+      ).toBe(
+        'urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
+      );
+    });
+
+    it('rejects partially-canonical mixed input via the parser', () => {
+      // Input like `a:b::c` slips past the normalizer (it has `::`), but
+      // the parser then rejects `a:b` as a non-spec segment shape for that
+      // hierarchy position (FR-020). This is the chosen contract: the
+      // normalizer doesn't second-guess mixed-form intent — it defers to
+      // the parser's strict validation. Pinning the rejection here so a
+      // future "helpful" normalizer rewrite can't silently swallow the
+      // mixed form.
+      expect(() => formatCanonicalUrn('node', 'a:b::c')).toThrow(
+        UrnParseError,
+      );
     });
   });
 

@@ -1133,7 +1133,17 @@ export function formatCanonicalUrn(
   if (bareValue.startsWith('urn:')) {
     throw new UrnParseError(bareValue, 'already-prefixed-bare-value', bareValue);
   }
-  return toParserCanonical(`urn:${type}:${bareValue}`);
+  // Promote legacy single-colon hierarchy to canonical `::` separators
+  // (e.g. `acme.com:dev` → `acme.com::dev`) so the strict spec-021 parser
+  // accepts pre-migration bare values. We only rewrite when the input
+  // contains NO `::` at all — once any canonical separator is present,
+  // the remaining single colons are intentional (e.g. R2 install URNs
+  // carry an inner `:` inside the author segment:
+  // `<install-org>::<app>::<author-org>:<agent-slug>`).
+  const normalized = bareValue.includes('::')
+    ? bareValue
+    : bareValue.split(':').join('::');
+  return toParserCanonical(`urn:${type}:${normalized}`);
 }
 
 /**
