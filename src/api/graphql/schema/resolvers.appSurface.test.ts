@@ -30,6 +30,10 @@ import { resolvers, type Context } from './resolvers.js';
 let orgId: string;
 let memoryId: string;
 let agentId: string;
+// 023-app-shape: createApp installs `agentId` as the App's first Agent via the
+// AppAgent join. Tests that exercise addAgentToApp use this second agent to
+// avoid DuplicateAppAgentError on the composite PK.
+let secondAgentId: string;
 let user: { id: string };
 
 function ctx(overrides: Partial<Context> = {}): Context {
@@ -60,6 +64,15 @@ beforeEach(async () => {
     },
   });
   agentId = agent.id;
+  const secondAgent = await db.agent.create({
+    data: {
+      id: generateId(),
+      organizationId: orgId,
+      urn: `${orgId}:vega`,
+      name: 'vega',
+    },
+  });
+  secondAgentId = secondAgent.id;
   // Wire the agent up to the test memory so appNodes can see something
   await db.agentMemoryItem.create({
     data: { agentId, memoryId, role: 'read-write' },
@@ -176,7 +189,11 @@ describe('updateApp updates absorbed Station fields', () => {
 // ---------------------------------------------------------------------------
 
 describe('addAgentToApp accepts AppAgent fields', () => {
-  it('persists role=DEVELOP + subscriptionType=READ_WRITE + trainingMode=true', async () => {
+  // 023-app-shape: createApp installs the first Agent via AppAgent. These
+  // tests use `secondAgentId` for the addAgentToApp call to avoid the
+  // DuplicateAppAgentError that re-adding the same agent would hit on the
+  // composite PK.
+  it('persists trainingMode=true alongside the second Agent install', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       { orgId, agentId, name: 'AppAgent Test' },
@@ -186,15 +203,20 @@ describe('addAgentToApp accepts AppAgent fields', () => {
       {},
       {
         appId: created.id,
-        agentId,
+        agentId: secondAgentId,
         trainingMode: true,
       },
       adminCtx(),
     );
-    // 008: AppAgent join is gone — App.agent_id is the FK. The legacy role
-    // arg is gone too (T034) — system memory is universally read-only.
+    // 023-app-shape FR-001: trainingMode is on App (per-App), not AppAgent.
+    // 023-app-shape FR-003: no role column on AppAgent — system memory is
+    // universally read-only.
     const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
     expect(await getPrimaryAgentId(db, updated.id)).toBe(agentId);
+    const secondaryInstalled = await db.appAgent.findUnique({
+      where: { appId_agentId: { appId: updated.id, agentId: secondAgentId } },
+    });
+    expect(secondaryInstalled).not.toBeNull();
     expect(updated.trainingMode).toBe(true);
   });
 
@@ -206,7 +228,7 @@ describe('addAgentToApp accepts AppAgent fields', () => {
     );
     await resolvers.Mutation.addAgentToApp(
       {},
-      { appId: created.id, agentId },
+      { appId: created.id, agentId: secondAgentId },
       adminCtx(),
     );
     const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
@@ -214,24 +236,26 @@ describe('addAgentToApp accepts AppAgent fields', () => {
     expect(updated.trainingMode).toBe(false);
   });
 
-  it('re-running addAgentToApp updates App.agent_id idempotently', async () => {
+  it('addAgentToApp installs a second Agent and propagates trainingMode', async () => {
+    // Renamed from the pre-023 "idempotently updates App.agent_id" test —
+    // App.agent_id is gone; "idempotency" doesn't apply to a composite-PK
+    // join. The behavior worth covering is that adding a second Agent
+    // succeeds and trainingMode propagates from the call.
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, agentId, name: 'Upsert App' },
+      { orgId, agentId, name: 'Install App' },
       adminCtx(),
     );
     await resolvers.Mutation.addAgentToApp(
       {},
-      { appId: created.id, agentId },
-      adminCtx(),
-    );
-    await resolvers.Mutation.addAgentToApp(
-      {},
-      { appId: created.id, agentId, trainingMode: true },
+      { appId: created.id, agentId: secondAgentId, trainingMode: true },
       adminCtx(),
     );
     const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
-    expect(await getPrimaryAgentId(db, updated.id)).toBe(agentId);
+    const installedIds = (
+      await db.appAgent.findMany({ where: { appId: updated.id }, select: { agentId: true } })
+    ).map((r) => r.agentId);
+    expect(installedIds).toEqual(expect.arrayContaining([agentId, secondAgentId]));
     expect(updated.trainingMode).toBe(true);
   });
 });
@@ -532,17 +556,20 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
       where: { id: created.id },
       select: { urn: true },
     });
-    const agentStored = await db.agent.findUniqueOrThrow({
-      where: { id: agentId },
+    const secondStored = await db.agent.findUniqueOrThrow({
+      where: { id: secondAgentId },
       select: { urn: true },
     });
+    // Install the *second* agent via URN — createApp already installed `agentId`.
     await resolvers.Mutation.addAgentToApp(
       {},
-      { appId: appStored.urn, agentId: agentStored.urn },
+      { appId: appStored.urn, agentId: secondStored.urn },
       adminCtx(),
     );
-    const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
-    expect(await getPrimaryAgentId(db, updated.id)).toBe(agentId);
+    const installed = await db.appAgent.findUnique({
+      where: { appId_agentId: { appId: created.id, agentId: secondAgentId } },
+    });
+    expect(installed).not.toBeNull();
   });
 
   it('removeAgentFromApp accepts URNs for both appId and agentId', async () => {
@@ -551,9 +578,11 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
       { orgId, agentId, name: 'urn-remove-agent' },
       adminCtx(),
     );
+    // Install the second agent so there are 2 AppAgent rows; then remove
+    // the first via URN. Final state: only the second agent remains.
     await resolvers.Mutation.addAgentToApp(
       {},
-      { appId: created.id, agentId },
+      { appId: created.id, agentId: secondAgentId },
       adminCtx(),
     );
     const appStored = await db.app.findUniqueOrThrow({
@@ -569,8 +598,11 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
       { appId: appStored.urn, agentId: agentStored.urn },
       adminCtx(),
     );
-    const updated = await db.app.findUniqueOrThrow({ where: { id: created.id } });
-    expect(await getPrimaryAgentId(db, updated.id)).toBeNull();
+    const remaining = await db.appAgent.findMany({
+      where: { appId: created.id },
+      select: { agentId: true },
+    });
+    expect(remaining.map((r) => r.agentId)).toEqual([secondAgentId]);
   });
 
   it('createAppKey accepts a URN as appId', async () => {

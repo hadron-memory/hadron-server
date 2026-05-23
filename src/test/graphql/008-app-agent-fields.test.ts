@@ -27,12 +27,9 @@ function validationErrorMessages(query: string): string[] {
 }
 
 describe('008-agent-installation — GraphQL field-removal regression (T041)', () => {
-  it('App.appAgents does not exist on the App type', () => {
-    const errors = validationErrorMessages(`
-      query { app(id: "x") { id appAgents { agentId } } }
-    `);
-    expect(errors.some((m) => m.includes('Cannot query field "appAgents"'))).toBe(true);
-  });
+  // Removed: "App.appAgents does not exist" — spec 023 reintroduced
+  // App.appAgents as the N:M join. The removal this test documented has
+  // been intentionally reversed.
 
   it('App.agentSubscriptions does not exist on the App type', () => {
     const errors = validationErrorMessages(`
@@ -76,20 +73,21 @@ describe('008-agent-installation — GraphQL field-removal regression (T041)', (
     expect(errors).toEqual([]);
   });
 
-  it('App.agents (plural) still parses but is @deprecated', () => {
+  it('App.agents (plural) still parses and returns the full installed-Agent set', () => {
+    // Pre-023: App.agents was @deprecated soft-deprecated single-element
+    // synthesis. Post-023: it's the canonical convenience field returning
+    // the full multi-Agent install set (per spec 023 US1 typedef). No
+    // longer @deprecated; presence + parsability is what we assert here.
     const errors = validationErrorMessages(`
       query { app(id: "x") { id agents { id } } }
     `);
     expect(errors).toEqual([]);
-    // @deprecated is not a validation error, but the schema introspection
-    // exposes the deprecation reason. Spot-check that.
     const appType = schema.getType('App');
     const fields = (appType as unknown as {
       getFields: () => Record<string, { deprecationReason?: string | null }>;
     }).getFields();
     const agentsField = fields.agents;
     expect(agentsField).toBeDefined();
-    expect(agentsField.deprecationReason).toMatch(/App\.agent/);
   });
 
   it('App.members and App.memberCount are part of the new surface', () => {

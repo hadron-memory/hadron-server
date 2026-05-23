@@ -69,6 +69,9 @@ beforeEach(async () => {
       visibility: 'PERSONAL',
       userId: user.id,
       appId: app.id,
+      // 023 FR-004/FR-032: chk_memory_personal_agent_id requires the
+      // (App, Agent, User) scope to be complete.
+      userMemoryOfAgentId: agent.id,
     },
   });
 });
