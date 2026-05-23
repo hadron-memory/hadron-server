@@ -10,28 +10,23 @@ name: Unit Tests
 
 on:
   pull_request:
-    paths:
-      - '**.ts'
-      - '**.tsx'
-      - 'prisma/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'vitest.config.ts'
-      - '.github/workflows/test.yml'
   push:
     branches: [main]
-    paths:
-      - '**.ts'
-      - '**.tsx'
-      - 'prisma/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'vitest.config.ts'
-      - '.github/workflows/test.yml'
+
+# Cancel in-progress runs when a new commit lands on the same ref. Saves
+# runner minutes on iterative pushes and gets feedback faster.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    # GH default job timeout is 6 hours — a hung vitest worker or
+    # deadlocked postgres connection would consume it before failing.
+    # Local suite runs in well under 1 minute; 20 minutes is generous
+    # cover for CI cold starts (install + prisma generate + db setup).
+    timeout-minutes: 20
     env:
       # Used by `prisma db push` below. The vitest config reads
       # `TEST_DATABASE_URL` (also set below) for the test runner's
