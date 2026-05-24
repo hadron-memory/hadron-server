@@ -490,6 +490,17 @@ export const typeDefs = `#graphql
     Company Brain gap that wasn't covered by the four legacy classes.
     """
     group
+    """
+    RESERVED for an upcoming spec'd "encrypted-by-default" class.
+    Today: same (app_id, agent_id, user_id) scope as personal,
+    stored in plaintext, minus the MemoryShare path (single-owner,
+    not shareable). DO NOT store secret material here until the
+    encryption spec ships. Auto-provisioning is not implemented —
+    createMemory rejects this class; production cannot create rows
+    yet. The class is exposed on the enum so read paths don't
+    break the day the spec'd work lands.
+    """
+    private
   }
 
   # 017-chat-visibility-and-personal-memory: a chat is created in one

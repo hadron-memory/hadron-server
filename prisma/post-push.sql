@@ -15,15 +15,17 @@ ALTER TABLE memories
   CHECK ((visibility = 'PERSONAL') = (user_id IS NOT NULL));
 
 -- 008-agent-installation (extended by 023-app-shape): app_id is required
--- for class IN ('app', 'personal'), forbidden for class IN ('system',
--- 'knowledge', 'group'). 023 added 'group' as an org-scoped class with
--- no app_id (FR-024).
+-- for class IN ('app', 'personal', 'private'), forbidden for class IN
+-- ('system', 'knowledge', 'group'). 023 added 'group' as an org-scoped
+-- class with no app_id (FR-024). 'private' (added 2026-05-24) shares the
+-- (App, Agent, User) scope shape with 'personal' but is single-owner and
+-- not shareable; an upcoming spec will pin down the encryption model.
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_class_app_id;
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_class_app_id
   CHECK (
-    (class IN ('app', 'personal') AND app_id IS NOT NULL)
+    (class IN ('app', 'personal', 'private') AND app_id IS NOT NULL)
     OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
   );
 
@@ -48,9 +50,14 @@ ALTER TABLE memories
 
 -- 023-app-shape FR-004 / FR-032: personal memory carries the (App, Agent,
 -- User) scope. user_memory_of_agent_id (legacy column name; semantically
--- agent_id) is required-non-null for personal class.
+-- agent_id) is required-non-null for personal class. 'private' (added
+-- 2026-05-24) shares the same scope shape and is covered here too.
+--
+-- NAMING DEBT: the constraint name still says "personal" but now also covers
+-- 'private'. Rename to e.g. chk_memory_user_scoped_agent_id when next touching
+-- this constraint.
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_personal_agent_id;
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_personal_agent_id
-  CHECK (class <> 'personal' OR user_memory_of_agent_id IS NOT NULL);
+  CHECK (class NOT IN ('personal', 'private') OR user_memory_of_agent_id IS NOT NULL);

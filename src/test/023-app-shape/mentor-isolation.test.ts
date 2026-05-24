@@ -339,6 +339,41 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     expect((caught as GraphQLError).extensions?.code).toBe('FORBIDDEN');
   });
 
+  it('createMemoryShare rejects private-class memory at the class-check (the "not shareable" invariant is enforced upstream)', async () => {
+    // Owner calls createMemoryShare on her own private memory — the
+    // caller-authority guard passes (memory.userId === ctx.userId), and
+    // the controller's class check then throws InvalidMemoryClassForShareError.
+    // This is the test the auth predicate's `class-not-shareable` denial
+    // assumes is in place: shares simply cannot be created for private
+    // memories, so denying with `class-not-shareable` is correct (a
+    // remedial share isn't possible).
+    const privateMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: fx.orgId,
+        urn: `${fx.appId}:alice:private-1`,
+        name: 'alice private',
+        class: 'private',
+        visibility: 'PERSONAL',
+        userId: fx.aliceId,
+        appId: fx.appId,
+        userMemoryOfAgentId: fx.agentId,
+      },
+    });
+    let caught: unknown;
+    try {
+      await resolvers.Mutation.createMemoryShare(
+        {},
+        { memoryId: privateMem.id, granteeId: fx.mentorAId, role: 'reader' },
+        userCtx(fx.aliceId),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(GraphQLError);
+    expect((caught as GraphQLError).extensions?.code).toBe('InvalidMemoryClassForShareError');
+  });
+
   it('createMemoryShare rejects callers who are not the principal (FORBIDDEN)', async () => {
     let caught: unknown;
     try {

@@ -275,9 +275,10 @@ export function validateChatScopeInvariants(args: {
   /** From the chat-root node's `data`. */
   scope: 'private' | 'shared' | undefined;
   /** From the holding `Memory.class`. The full `MemoryClass` enum is
-   *  accepted so callers don't need to narrow; `group`-class memory
-   *  is explicitly rejected as it does not hold chat-roots (spec 023). */
-  memoryClass: 'personal' | 'app' | 'knowledge' | 'system' | 'group';
+   *  accepted so callers don't need to narrow; `group` and `private`
+   *  class memory are explicitly rejected as they do not hold
+   *  chat-roots (spec 023; `private` added 2026-05-24). */
+  memoryClass: 'personal' | 'app' | 'knowledge' | 'system' | 'group' | 'private';
   /** True during the migration window — treats missing `scope` as
    *  `private` for any non-shared memory class. */
   allowMissingScope?: boolean;
@@ -286,11 +287,14 @@ export function validateChatScopeInvariants(args: {
 
   // 023-app-shape: group-class memory is for team-shared collaborative
   // content, not chat-roots. A chat-root landing on a group memory is
-  // corruption regardless of scope.
-  if (memoryClass === 'group') {
+  // corruption regardless of scope. `private`-class (added 2026-05-24)
+  // is for secure single-owner records and likewise does not hold
+  // chat-roots — chats live on personal/knowledge (private chats) or
+  // app (shared chats).
+  if (memoryClass === 'group' || memoryClass === 'private') {
     throw new ChatScopeError(
       'CHAT_MEMORY_OUT_OF_SCOPE',
-      `Chat-root cannot live on a group-class memory (spec 023).`,
+      `Chat-root cannot live on a ${memoryClass}-class memory.`,
     );
   }
 

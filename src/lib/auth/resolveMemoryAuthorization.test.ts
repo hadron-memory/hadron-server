@@ -132,6 +132,18 @@ function knowledgeMemory(overrides: Partial<MemoryForAuth> = {}): MemoryForAuth 
   };
 }
 
+function privateMemory(overrides: Partial<MemoryForAuth> = {}): MemoryForAuth {
+  return {
+    id: 'mem-private-1',
+    class: 'private',
+    visibility: 'PERSONAL',
+    userId: 'alice',
+    appId: 'app-juno-mm',
+    userMemoryOfAgentId: 'juno',
+    ...overrides,
+  };
+}
+
 function ctx(overrides: Partial<AuthContext> = {}): AuthContext {
   return {
     callerUserId: 'alice',
@@ -369,6 +381,124 @@ describe('resolveMemoryAuthorization', () => {
       ctx({ callerUserId: 'alice' }),
     );
     expect(result).toEqual({ allowed: false, reason: 'invalid-context' });
+  });
+
+  // ─── Private-class tests (added 2026-05-24) ──────────────────────────
+  //
+  // Private is single-owner and not shareable by design — same scoping
+  // shape as personal (App, Agent, User), same license gate, same
+  // owner-bypass + Agent-on-behalf branch, but NO MemoryShare fallback.
+  // The distinct `class-not-shareable` denial reason lets observability
+  // tell "no share row found" (personal) apart from "share is impossible
+  // by class invariant" (private).
+
+  it('private: license denial fires before any per-class branch', async () => {
+    const result = await run(emptyState(), privateMemory(), ctx({ callerUserId: 'alice' }));
+    expect(result).toEqual({ allowed: false, reason: 'no-subscription' });
+  });
+
+  it('private: owner direct-call is allowed (owner-bypass mirror of personal)', async () => {
+    const s = stateWithAliceSub();
+    expect(await run(s, privateMemory({ userId: 'alice' }), ctx({ callerUserId: 'alice' }), 'read')).toEqual({
+      allowed: true,
+    });
+    expect(await run(s, privateMemory({ userId: 'alice' }), ctx({ callerUserId: 'alice' }), 'write')).toEqual({
+      allowed: true,
+    });
+  });
+
+  it('private: non-owner direct-call is denied with class-not-shareable (no share path)', async () => {
+    // mentor-a has a valid sub but is NOT the owner; private has no
+    // MemoryShare path, so even adding a share row should not change the
+    // result — the rejection reason names the class invariant.
+    const s = stateWithAliceSub();
+    s.subscriptions.set('mentor-a:juno', ACTIVE_SUB);
+    s.memoryShares.set('mem-private-1:mentor-a', { role: 'writer' }); // would help personal
+    const result = await run(s, privateMemory({ userId: 'alice' }), ctx({ callerUserId: 'mentor-a' }));
+    expect(result).toEqual({ allowed: false, reason: 'class-not-shareable' });
+  });
+
+  it('private: Agent-mediated happy path allows when (App, Agent) match + AppAgent + AppMember present', async () => {
+    const s = stateWithAliceSub();
+    s.appAgents.add('app-juno-mm:juno');
+    s.appMembers.set('app-juno-mm:alice', { role: 'mentee' });
+    const result = await run(
+      s,
+      privateMemory(),
+      ctx({
+        callerUserId: 'app-backend',
+        callingAppId: 'app-juno-mm',
+        callingAgentId: 'juno',
+        actingForUserId: 'alice',
+      }),
+      'write',
+    );
+    expect(result).toEqual({ allowed: true });
+  });
+
+  it('private: Agent-mediated denies when callingAppId mismatches Memory App', async () => {
+    const s = stateWithAliceSub();
+    s.appAgents.add('app-other:juno');
+    s.appMembers.set('app-other:alice', { role: 'mentee' });
+    const result = await run(
+      s,
+      privateMemory({ appId: 'app-juno-mm' }),
+      ctx({
+        callerUserId: 'app-backend',
+        callingAppId: 'app-other', // mismatched
+        callingAgentId: 'juno',
+        actingForUserId: 'alice',
+      }),
+    );
+    expect(result).toEqual({ allowed: false, reason: 'class-not-shareable' });
+  });
+
+  it('private: Agent-mediated denies when AppAgent revocation check fails', async () => {
+    const s = stateWithAliceSub();
+    // No app_agents entry — Agent uninstalled / never installed in this App.
+    s.appMembers.set('app-juno-mm:alice', { role: 'mentee' });
+    const result = await run(
+      s,
+      privateMemory(),
+      ctx({
+        callerUserId: 'app-backend',
+        callingAppId: 'app-juno-mm',
+        callingAgentId: 'juno',
+        actingForUserId: 'alice',
+      }),
+    );
+    expect(result).toEqual({ allowed: false, reason: 'class-not-shareable' });
+  });
+
+  it('private: Agent-mediated denies when AppMember revocation check fails', async () => {
+    const s = stateWithAliceSub();
+    s.appAgents.add('app-juno-mm:juno');
+    // No app_members entry for alice — principal has been removed from the App.
+    const result = await run(
+      s,
+      privateMemory(),
+      ctx({
+        callerUserId: 'app-backend',
+        callingAppId: 'app-juno-mm',
+        callingAgentId: 'juno',
+        actingForUserId: 'alice',
+      }),
+    );
+    expect(result).toEqual({ allowed: false, reason: 'class-not-shareable' });
+  });
+
+  it('private: null appId or null userMemoryOfAgentId yields invalid-context', async () => {
+    const s = stateWithAliceSub();
+    // userId differs from caller so we don't short-circuit via owner-bypass.
+    const r1 = await run(s, privateMemory({ appId: null, userId: 'mallory' }), ctx({ callerUserId: 'alice' }));
+    expect(r1).toEqual({ allowed: false, reason: 'invalid-context' });
+    // userMemoryOfAgentId NULL trips the license guard before per-class dispatch.
+    const r2 = await run(
+      s,
+      privateMemory({ userMemoryOfAgentId: null }),
+      ctx({ callerUserId: 'alice' }),
+    );
+    expect(r2).toEqual({ allowed: false, reason: 'invalid-context' });
   });
 
   // 16. Group — role enforcement (reader/writer/owner).

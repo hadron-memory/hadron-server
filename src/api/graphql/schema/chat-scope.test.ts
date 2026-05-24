@@ -470,4 +470,24 @@ describe('validateChatScopeInvariants', () => {
       }),
     ).toThrow(ChatScopeError);
   });
+
+  it('rejects private + private and shared + private (chat-roots never live on private-class memory)', () => {
+    // `private` is for secure single-owner records, not chat content.
+    // The rejection mirrors the existing `group`-class rejection.
+    expect(() =>
+      validateChatScopeInvariants({ scope: 'private', memoryClass: 'private' }),
+    ).toThrow(ChatScopeError);
+    expect(() =>
+      validateChatScopeInvariants({ scope: 'shared', memoryClass: 'private' }),
+    ).toThrow(ChatScopeError);
+    // Even with the legacy migration flag, private should not be tolerated —
+    // legacy chats only ever lived in personal or knowledge memory.
+    expect(() =>
+      validateChatScopeInvariants({
+        scope: undefined,
+        memoryClass: 'private',
+        allowMissingScope: true,
+      }),
+    ).toThrow(ChatScopeError);
+  });
 });
