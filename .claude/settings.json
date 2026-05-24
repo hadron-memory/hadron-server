@@ -7,7 +7,19 @@
       "Bash(git stash *)",
       "Bash(pnpm tsc *)",
       "Bash(pnpm db:test-setup)",
-      "Bash(gh repo *)"
+      "Bash(gh repo *)",
+      "Bash(pnpm test)",
+      "Bash(pnpm test *)",
+      "Bash(pnpm exec tsc --noEmit *)",
+      "Bash(pnpm exec vitest run *)",
+      "Bash(npx tsc --noEmit *)",
+      "Bash(npx vitest run *)",
+      "mcp__hadron__h-find-nodes",
+      "mcp__hadron__h-list-nodes",
+      "mcp__hadron__h-read-node",
+      "mcp__hadron__h-set-active-memory",
+      "mcp__claude_ai_Hadron__h-find-nodes",
+      "mcp__claude_ai_Hadron__h-read-node"
     ]
   }
 }
