@@ -263,14 +263,16 @@ describe('T049: access-control gate 3 enforces Memory.app_id === auth.appId', ()
          WHERE class = 'personal' AND app_id IS NULL
       `);
       // 023-app-shape extended this CHECK to include 'group' in the
-      // no-app-id branch. Re-add the constraint in its post-023 form so
-      // subsequent tests (which may create group-class memories) don't
-      // trip on the pre-023 shape.
+      // no-app-id branch; 2026-05-24 added 'private' on the app-id-
+      // required side. Re-add the constraint in its CURRENT form so
+      // subsequent tests (which may create group- or private-class
+      // memories) don't trip on a stale shape. Must stay in sync with
+      // prisma/post-push.sql + src/test/globalSetup.ts.
       await db.$executeRawUnsafe(`
         ALTER TABLE memories
           ADD CONSTRAINT chk_memory_class_app_id
           CHECK (
-            (class IN ('app', 'personal') AND app_id IS NOT NULL)
+            (class IN ('app', 'personal', 'private') AND app_id IS NOT NULL)
             OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
           )
       `);
