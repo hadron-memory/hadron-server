@@ -491,10 +491,14 @@ export const typeDefs = `#graphql
     """
     group
     """
-    Secure per-user records keyed on (app_id, agent_id, user_id) —
-    same scope shape as personal, but single-owner and not shareable
-    via MemoryShare. Encrypted-by-default semantics to be pinned down
-    in a follow-up spec.
+    RESERVED for an upcoming spec'd "encrypted-by-default" class.
+    Today: same (app_id, agent_id, user_id) scope as personal,
+    stored in plaintext, minus the MemoryShare path (single-owner,
+    not shareable). DO NOT store secret material here until the
+    encryption spec ships. Auto-provisioning is not implemented —
+    createMemory rejects this class; production cannot create rows
+    yet. The class is exposed on the enum so read paths don't
+    break the day the spec'd work lands.
     """
     private
   }

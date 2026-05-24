@@ -66,6 +66,7 @@ export type AuthDeny = {
     | 'not-app-member' // app-class read/write requires AppMember of memory's App
     | 'insufficient-role' // membership exists but role doesn't permit op (e.g., reader → write)
     | 'wrong-class' // op is invalid for class (e.g., write to system)
+    | 'class-not-shareable' // private-class denied to non-owner; share is not a possible remedy
     | 'invalid-context'; // request context is malformed
 };
 
@@ -218,7 +219,7 @@ export async function resolveMemoryAuthorization(
       return resolveGroupAccess(deps, memory, ctx, op);
 
     case 'private':
-      return resolvePrivateAccess(deps, memory, ctx);
+      return resolvePrivateAccess(deps, memory, ctx, op);
 
     default: {
       // Exhaustiveness check. If `MemoryClass` gains another value, the
@@ -336,11 +337,17 @@ async function resolveGroupAccess(
  * Agent-on-behalf branch (with the same AppAgent/AppMember revocation
  * checks as personal) still apply; without the Agent-mediated branch
  * the data would be unreachable from any MCP session.
+ *
+ * `op` is accepted for signature parity with the other resolvers and
+ * to future-proof the contract; the policy here is read/write-symmetric
+ * today (the allowing branches grant both), but a future spec may
+ * tighten writes — keep the param wired so callers don't churn.
  */
 async function resolvePrivateAccess(
   deps: AuthDeps,
   memory: MemoryForAuth,
   ctx: AuthContext,
+  _op: Op,
 ): Promise<AuthResult> {
   if (
     memory.userId === null ||
@@ -374,7 +381,10 @@ async function resolvePrivateAccess(
       return { allowed: true };
     }
   }
-  // No share path — `private` is single-owner by design. Reuse the
-  // `no-share` reason for monitoring symmetry with personal denials.
-  return { allowed: false, reason: 'no-share' };
+  // No share path — `private` is single-owner by design. Use the
+  // distinct `class-not-shareable` reason so observability can tell
+  // "no share row found" (personal) apart from "share is impossible
+  // by class invariant" (private). Adding a share is not a valid
+  // remedy for this denial.
+  return { allowed: false, reason: 'class-not-shareable' };
 }

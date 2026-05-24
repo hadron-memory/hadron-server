@@ -52,6 +52,10 @@ ALTER TABLE memories
 -- User) scope. user_memory_of_agent_id (legacy column name; semantically
 -- agent_id) is required-non-null for personal class. 'private' (added
 -- 2026-05-24) shares the same scope shape and is covered here too.
+--
+-- NAMING DEBT: the constraint name still says "personal" but now also covers
+-- 'private'. Rename to e.g. chk_memory_user_scoped_agent_id when next touching
+-- this constraint.
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_personal_agent_id;
 ALTER TABLE memories

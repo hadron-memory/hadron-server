@@ -3468,8 +3468,10 @@ export const resolvers = {
         type?: 'KNOWLEDGE' | 'AGENT_SYSTEM';
         // GraphQL passes the full MemoryClass enum; the resolver
         // allowlists the user-creatable values below. `private` (added
-        // 2026-05-24) auto-provisions on the same path as `personal`
-        // and is rejected here for direct user creation.
+        // 2026-05-24) is exposed on the enum for read paths but is
+        // NOT user-creatable here and has no auto-provisioning path
+        // yet — the encryption / provisioning model is deferred to a
+        // follow-up spec.
         memoryClass?: 'knowledge' | 'group' | 'system' | 'app' | 'personal' | 'private';
       },
       ctx: Context,
