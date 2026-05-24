@@ -3467,8 +3467,10 @@ export const resolvers = {
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
         type?: 'KNOWLEDGE' | 'AGENT_SYSTEM';
         // GraphQL passes the full MemoryClass enum; the resolver
-        // allowlists the user-creatable values below.
-        memoryClass?: 'knowledge' | 'group' | 'system' | 'app' | 'personal';
+        // allowlists the user-creatable values below. `private` (added
+        // 2026-05-24) auto-provisions on the same path as `personal`
+        // and is rejected here for direct user creation.
+        memoryClass?: 'knowledge' | 'group' | 'system' | 'app' | 'personal' | 'private';
       },
       ctx: Context,
     ) => {
@@ -3673,12 +3675,14 @@ export const resolvers = {
       // constraint enforces visibility=PERSONAL ⇔ userId IS NOT NULL;
       // class=personal → visibility=PERSONAL is application-enforced.
       // Only the owner deletes — matches parent constitution Invariant 13.
-      // All other classes (system/app/knowledge) gate on org-admin role on
-      // the parent org. Authz runs first so unauthorized callers can't probe
-      // row state via the AGENT_SYSTEM guard or idempotency short-circuit.
-      if (memory.class === 'personal') {
+      // Private-class memories (added 2026-05-24) follow the same
+      // single-owner delete rule. All other classes (system/app/knowledge/
+      // group) gate on org-admin role on the parent org. Authz runs first
+      // so unauthorized callers can't probe row state via the AGENT_SYSTEM
+      // guard or idempotency short-circuit.
+      if (memory.class === 'personal' || memory.class === 'private') {
         if (!ctx.userId || memory.userId !== ctx.userId) {
-          throw new Error('Forbidden: only the owner can delete a personal memory');
+          throw new Error(`Forbidden: only the owner can delete a ${memory.class} memory`);
         }
       } else {
         await requireOrgRole(ctx, memory.organizationId, 'ADMIN');

@@ -1,0 +1,11 @@
+-- Add 'private' to the MemoryClass enum.
+--
+-- Postgres 12+ allows ALTER TYPE ... ADD VALUE inside a transaction, but the
+-- newly-added value cannot be referenced in the SAME transaction. Prisma wraps
+-- each migration file in its own transaction, so the CHECK-constraint update
+-- that references 'private' lives in the next migration
+-- (20260524120100_memory_class_app_id_for_private).
+--
+-- IF NOT EXISTS makes this safe to re-run against a database where the value
+-- was already added out-of-band (e.g., a hand-fixed environment).
+ALTER TYPE "MemoryClass" ADD VALUE IF NOT EXISTS 'private';

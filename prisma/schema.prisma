@@ -239,9 +239,11 @@ enum MemoryType {
 ///   knowledge  — reference content the Agent reads from. Per-Agent
 ///                (not per-App); two installs of the same Agent share
 ///                the same knowledge memory.
-///   personal   — per-user records keyed on (app_id, user_id) post-008.
+///   personal   — per-user records keyed on (app_id, user_id).
 ///                The per-App pivot is what gives multi-install
 ///                Mike-on-two-orgs clean isolation. Strict ownership.
+///   private    — secure per-user records keyed on (app_id, user_id).
+///                Encrypted by default; single owner, not shareable.
 enum MemoryClass {
   system
   app
@@ -254,6 +256,7 @@ enum MemoryClass {
   /// bidirectional invariant `class = 'group' ⇔ visibility = 'GROUP'`
   /// is enforced by `chk_memory_group_visibility`.
   group
+  private
 }
 
 /// 023-app-shape: role on a `MemoryShare` row (asymmetric cross-user

@@ -195,6 +195,12 @@ export async function getMemoryAccess(
  * additionally need (a) Memory.app_id === auth.appId (per-App isolation),
  * and (b) an active AgentSubscription(user, app.agent_id).
  *
+ * Private-class memories (added 2026-05-24): same gates as personal in
+ * this legacy access-control layer — strict ownership, App-isolation,
+ * AgentSubscription. The "not shareable" semantic is enforced one layer
+ * up (the MemoryShare create path rejects non-personal classes), so the
+ * gates here are identical to personal's.
+ *
  * Other memory classes: ADMIN/OWNER bypass + App.agent_id-derived membership +
  * AgentMemoryItem.role caps.
  */
@@ -208,7 +214,7 @@ export async function canWriteToMemory(
     select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true },
   });
 
-  if (memory?.class === 'personal') {
+  if (memory?.class === 'personal' || memory?.class === 'private') {
     if (auth.userId !== memory.userId) return false;
     if (auth.appId) {
       // Per-App isolation: a session through App A cannot write the personal
@@ -275,7 +281,8 @@ export async function canWriteToMemory(
  *
  * Personal-class memories enforce strict ownership (FR-016) — even ADMIN/OWNER
  * cannot read another user's personal memory. The 008 per-App isolation
- * (Memory.app_id === auth.appId) also applies.
+ * (Memory.app_id === auth.appId) also applies. Private-class memories
+ * (added 2026-05-24) follow the same rules in this layer.
  */
 export async function canReadMemory(
   db: PrismaClient,
@@ -288,7 +295,7 @@ export async function canReadMemory(
   });
   if (!memory) return false;
 
-  if (memory.class === 'personal') {
+  if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId) return false;
     if (auth.appId) {
       // Same legacy guard as canWriteToMemory: when memory.appId is NULL,

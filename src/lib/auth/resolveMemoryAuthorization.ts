@@ -74,7 +74,7 @@ export type AuthResult = AuthAllow | AuthDeny;
 /** Minimal Memory shape needed by the predicate. */
 export type MemoryForAuth = {
   id: string;
-  class: 'system' | 'app' | 'knowledge' | 'personal' | 'group';
+  class: 'system' | 'app' | 'knowledge' | 'personal' | 'group' | 'private';
   visibility: 'PUBLIC' | 'PRIVATE' | 'ORGANIZATION' | 'PERSONAL' | 'GROUP';
   userId: string | null;
   appId: string | null;
@@ -152,8 +152,11 @@ export async function resolveMemoryAuthorization(
   //   - `system`  — read-only to every caller; access is class-gated.
   //   - `knowledge` — visibility rules (PUBLIC/PRIVATE/ORGANIZATION)
   //                 govern; the existing helper handles them.
-  // Add new classes to this comment AND to the dispatch in Step 2.
-  if (memory.class === 'personal') {
+  // `private` (added 2026-05-24) also has a definite Agent — same
+  // (App, Agent, User) scope as personal — so the same license check
+  // applies. Add new classes to this comment AND to the dispatch in
+  // Step 2.
+  if (memory.class === 'personal' || memory.class === 'private') {
     // FR-004 / chk_memory_personal_agent_id should guarantee this column
     // is non-null for every personal-class row. If we encounter a row
     // where it's null (legacy data predating the CHECK, or future
@@ -213,6 +216,9 @@ export async function resolveMemoryAuthorization(
 
     case 'group':
       return resolveGroupAccess(deps, memory, ctx, op);
+
+    case 'private':
+      return resolvePrivateAccess(deps, memory, ctx);
 
     default: {
       // Exhaustiveness check. If `MemoryClass` gains another value, the
@@ -318,4 +324,57 @@ async function resolveGroupAccess(
   if (op === 'read') return { allowed: true };
   if (member.role === 'writer' || member.role === 'owner') return { allowed: true };
   return { allowed: false, reason: 'insufficient-role' };
+}
+
+/**
+ * `private`-class access: single owner, not shareable.
+ *
+ * Same (App, Agent, User) scope shape as personal, so the up-front
+ * license check in `resolveMemoryAuthorization` covers both. The
+ * difference from personal is that `private` has **no MemoryShare
+ * path** — the class is single-owner by design. Owner-bypass and the
+ * Agent-on-behalf branch (with the same AppAgent/AppMember revocation
+ * checks as personal) still apply; without the Agent-mediated branch
+ * the data would be unreachable from any MCP session.
+ */
+async function resolvePrivateAccess(
+  deps: AuthDeps,
+  memory: MemoryForAuth,
+  ctx: AuthContext,
+): Promise<AuthResult> {
+  if (
+    memory.userId === null ||
+    memory.appId === null ||
+    memory.userMemoryOfAgentId === null
+  ) {
+    return { allowed: false, reason: 'invalid-context' };
+  }
+  // Direct user call: owner-bypass.
+  if (ctx.callerUserId === memory.userId && ctx.actingForUserId == null) {
+    return { allowed: true };
+  }
+  // Agent-mediated: principal must be acting for themselves, the
+  // calling (App, Agent) must match the Memory's scoping (App, Agent),
+  // and both revocation checks (Agent still installed, principal still
+  // an AppMember) must pass — same physician's-office boundary as
+  // personal class.
+  if (
+    ctx.actingForUserId != null &&
+    ctx.actingForUserId === memory.userId &&
+    ctx.callingAppId !== null &&
+    ctx.callingAppId === memory.appId &&
+    ctx.callingAgentId != null &&
+    ctx.callingAgentId === memory.userMemoryOfAgentId
+  ) {
+    const [appAgent, appMember] = await Promise.all([
+      deps.getAppAgent(ctx.callingAppId, ctx.callingAgentId),
+      deps.getAppMember(memory.appId, memory.userId),
+    ]);
+    if (appAgent !== null && appMember !== null) {
+      return { allowed: true };
+    }
+  }
+  // No share path — `private` is single-owner by design. Reuse the
+  // `no-share` reason for monitoring symmetry with personal denials.
+  return { allowed: false, reason: 'no-share' };
 }

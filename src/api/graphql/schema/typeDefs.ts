@@ -490,6 +490,13 @@ export const typeDefs = `#graphql
     Company Brain gap that wasn't covered by the four legacy classes.
     """
     group
+    """
+    Secure per-user records keyed on (app_id, agent_id, user_id) —
+    same scope shape as personal, but single-owner and not shareable
+    via MemoryShare. Encrypted-by-default semantics to be pinned down
+    in a follow-up spec.
+    """
+    private
   }
 
   # 017-chat-visibility-and-personal-memory: a chat is created in one
