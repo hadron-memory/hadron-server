@@ -102,6 +102,123 @@ export async function resolveEdgeRefs(
 }
 
 /**
+ * Add a single outgoing edge from `sourceUrn` to `targetUrn`, non-
+ * destructively (other edges on the source are left alone) and
+ * idempotently (re-running with the same triple is a no-op against
+ * the `@@unique([sourceId, targetId, label])` composite). Backs the
+ * `h-add-edge` MCP tool — extracted so the auth-gated flow (resolve
+ * source → check write → resolve target → check read → upsert) is
+ * directly testable without wiring a full MCP transport handshake.
+ *
+ * Returns either a `{ urn }`-shaped success carrying the canonical
+ * URNs of both endpoints (useful for cross-memory edges where the
+ * target's memory differs from the source's), or a `{ error }`-shaped
+ * miss with a caller-facing message. Errors use the same wording the
+ * tool surface emits, so the helper IS the contract for the MCP
+ * response text.
+ *
+ * Security: target-memory read access is checked explicitly with
+ * `canReadMemory` — `resolveNodeRef` is a pure DB lookup with no
+ * auth context, so without this gate a caller could probe foreign-
+ * memory node existence via the `Edge target not found` vs success
+ * distinction. The unauthorized-target branch returns the same
+ * `Edge target not found` wording as the genuine miss to keep the
+ * channel closed.
+ */
+export type AddEdgeResult =
+  | { error: string }
+  | { sourceUrn: string; targetUrn: string; label: string };
+
+export async function addEdge(args: {
+  sourceUrn: string;
+  targetUrn: string;
+  label: string;
+  auth: AuthContext;
+}): Promise<AddEdgeResult> {
+  const { sourceUrn: rawSource, targetUrn: rawTarget, label, auth } = args;
+
+  // Spec 022: qualification at the API boundary. Source MUST be a
+  // fully-qualified URN — we need to recover the memory URN from it
+  // for the write-permission check, so an ID-shape source isn't
+  // accepted. Target accepts ID-shape per spec-007 dispatch.
+  try {
+    assertFullyQualifiedUrn(rawSource, 'node');
+  } catch (e) {
+    if (e instanceof UrnNotQualifiedError) return { error: `Source: ${e.message}` };
+    throw e;
+  }
+  try {
+    if (!isId(rawTarget)) {
+      assertFullyQualifiedUrn(rawTarget, 'node');
+    }
+  } catch (e) {
+    if (e instanceof UrnNotQualifiedError) return { error: `Target: ${e.message}` };
+    throw e;
+  }
+
+  // Resolve source strictly — h-add-edge never auto-creates the
+  // source (use h-add-node for that).
+  const { memoryUrn: sourceMemoryUrn, loc: sourceLoc } = splitNodeUrn(rawSource);
+  const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
+  if (!sourceMem) {
+    return { error: `Source memory not found: "${sourceMemoryUrn}".` };
+  }
+  const sourceNode = await db.node.findUnique({
+    where: { loc_memoryId: { loc: sourceLoc, memoryId: sourceMem.id } },
+    select: { id: true, deletedAt: true },
+  });
+  if (!sourceNode || sourceNode.deletedAt) {
+    return { error: `Source node not found: "${rawSource}".` };
+  }
+
+  if (!(await canWriteToMemory(db, auth, sourceMem.id))) {
+    return { error: 'Write access denied for source memory.' };
+  }
+
+  let targetNodeId: string;
+  try {
+    ({ id: targetNodeId } = await resolveNodeRef(db, rawTarget, sourceMem.id));
+  } catch (e) {
+    if (e instanceof NodeNotFoundError) {
+      return { error: `Edge target not found: "${e.ref}"` };
+    }
+    throw e;
+  }
+
+  // Fetch the target's memory + loc once; reused for the
+  // canReadMemory gate AND the success-message URN rendering.
+  const target = await db.node.findUnique({
+    where: { id: targetNodeId },
+    select: { loc: true, memoryId: true },
+  });
+  if (!target || !(await canReadMemory(db, auth, target.memoryId))) {
+    return { error: `Edge target not found: "${rawTarget}"` };
+  }
+
+  await db.edge.upsert({
+    where: {
+      sourceId_targetId_label: {
+        sourceId: sourceNode.id,
+        targetId: targetNodeId,
+        label,
+      },
+    },
+    create: {
+      id: generateId(),
+      sourceId: sourceNode.id,
+      targetId: targetNodeId,
+      label,
+      createdBy: auth.clientId ?? null,
+    },
+    update: {},
+  });
+
+  const savedSourceUrn = await nodeUrn(sourceLoc, sourceMem.id);
+  const savedTargetUrn = await nodeUrn(target.loc, target.memoryId);
+  return { sourceUrn: savedSourceUrn, targetUrn: savedTargetUrn, label };
+}
+
+/**
  * Replace the outgoing edges of `sourceNodeId` with `resolved`, in a
  * single `$transaction` so we never observe a state where the
  * existing edges are gone but the new ones are missing.
@@ -186,8 +303,36 @@ async function resolveLocFromUrn(
   rawInput: string,
   accessibleMemoryIds: string[] | null,
 ): Promise<{ loc: string; memoryId?: string }> {
-  // Strip urn:node: or loc: prefix if present
+  // For an explicit `urn:node:<org>::<memory>::<loc>` input (canonical
+  // OR legacy hierarchy), route through splitNodeUrn so the memory/loc
+  // boundary is recovered correctly. The fallback prefix-strip below
+  // uses `mem.urn + ':'` to detect the boundary, which mis-parses
+  // canonical inputs in two ways:
+  //   - If Memory.urn is legacy (`acme.com:dev`), the input
+  //     `acme.com::dev::loc` doesn't start with `acme.com:dev:` and
+  //     never matches.
+  //   - If Memory.urn is canonical (`acme.com::dev`), the input
+  //     starts with `acme.com::dev:` (one trailing colon, not two),
+  //     so the strip leaves a leading `:` in the returned loc.
+  // Either way, callers (h-list-nodes / h-find-nodes) end up with a
+  // bogus prefix that breaks depth math and `startsWith(prefix + ':')`
+  // scoping. splitNodeUrn handles both grammars uniformly.
   const parsed = parseUrnInput(rawInput);
+  if (parsed.type === 'node') {
+    try {
+      const { memoryUrn, loc } = splitNodeUrn(rawInput);
+      const mem = await resolveMemoryByUrn(memoryUrn);
+      if (mem && (!accessibleMemoryIds || accessibleMemoryIds.includes(mem.id))) {
+        return { loc, memoryId: mem.id };
+      }
+      // Memory unknown / inaccessible — fall through to the legacy
+      // best-effort path below so behavior degrades gracefully for the
+      // (rare) caller passing a stale or out-of-scope URN.
+    } catch {
+      // splitNodeUrn rejects malformed inputs — fall through.
+    }
+  }
+
   const input = parsed.value;
 
   // First, try as-is — it might already be a valid loc
@@ -230,12 +375,22 @@ async function resolveMemoryByUrn(
   const parsed = parseUrnInput(rawUrn.trim());
   if (parsed.type !== 'memory' && parsed.type !== 'unknown') return null;
   if (!parsed.value) return null;
-  // Spec 021 migration window: DB stores legacy `:`-form URNs on pre-
-  // migrated rows. Normalize canonical `::` input to legacy form so the
-  // lookup matches; see `normalizeUrnForLookup` for the rationale.
-  const normalized = normalizeUrnForLookup(parsed.value);
+  // Spec 021 migration window: Memory.urn rows may be stored in either
+  // legacy (`acme.com:dev`) or canonical (`acme.com::dev`) form. Match
+  // BOTH so a canonical-form input doesn't miss a legacy-stored row and
+  // vice versa. Previously this normalized to legacy only and used an
+  // equality lookup — that broke for the canonical-stored case, which
+  // the resolveNodeRef tests in this PR already exercise (and the
+  // h-add-edge source path inherits the same hazard via splitNodeUrn).
+  const legacyForm = normalizeUrnForLookup(parsed.value);
+  const canonicalForm = legacyForm.includes(':')
+    ? legacyForm.split(':').join('::')
+    : legacyForm;
   return await db.memory.findFirst({
-    where: { urn: normalized, deletedAt: null },
+    where: {
+      deletedAt: null,
+      OR: [{ urn: legacyForm }, { urn: canonicalForm }],
+    },
     select: { id: true, urn: true },
   });
 }
@@ -1020,12 +1175,28 @@ function createMcpServerInstance(
         return textResult(`No child nodes found under "${prefix || memoryUrn}".`);
       }
 
-      // Sort so parents render before children. Within a memory, lex
-      // order on loc accomplishes that; across memories, sort by
-      // memoryId first to keep each memory's subtree contiguous.
+      // Sort so parents render before children. Across memories, sort
+      // by memoryId first to keep each memory's subtree contiguous.
+      // Within a memory, compare loc SEGMENT-BY-SEGMENT instead of
+      // running localeCompare on the full string: `:` is ASCII 58, so
+      // a sibling like `services-helper` (ASCII `-` = 45) or any digit
+      // sorts BEFORE `services:db` (a child of `services`) under a
+      // naive string compare, splitting parents from their descendants
+      // in the rendered tree. Segment-by-segment compare keeps the
+      // hierarchy intact: same prefix → shorter path wins (parent
+      // first), then break the tie at the first differing segment.
+      const compareLocs = (a: string, b: string): number => {
+        const aParts = a.split(':');
+        const bParts = b.split(':');
+        const minLen = Math.min(aParts.length, bParts.length);
+        for (let i = 0; i < minLen; i++) {
+          if (aParts[i] !== bParts[i]) return aParts[i].localeCompare(bParts[i]);
+        }
+        return aParts.length - bParts.length;
+      };
       const sortedRows = Array.from(visibleByKey.values()).sort((a, b) => {
         if (a.memoryId !== b.memoryId) return a.memoryId.localeCompare(b.memoryId);
-        return a.loc.localeCompare(b.loc);
+        return compareLocs(a.loc, b.loc);
       });
 
       const lines = await Promise.all(sortedRows.map(async (row) => {
@@ -1393,99 +1564,18 @@ function createMcpServerInstance(
 
   server.tool(
     'h-add-edge',
-    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike h-update-node, which replaces the full edge set). Idempotent: re-running with the same (source, target, label) is a no-op. Both URNs MUST be fully qualified (org::memory::loc) or an ID-shape value. Cross-memory edges are supported.',
+    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike h-update-node, which replaces the full edge set). Idempotent: re-running with the same (source, target, label) is a no-op. The source URN MUST be a fully-qualified node URN (org::memory::loc) — ID-shape sources are rejected because the write-permission check needs the source memory, which is derived from the URN. The target URN may be fully-qualified OR an ID-shape value. Both endpoints must already exist — use h-add-node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
     {
-      sourceUrn: z.string().describe('Fully-qualified source node URN, e.g. "acme.com::mmdata::services:db-helper". The source node must already exist.'),
-      targetUrn: z.string().describe('Fully-qualified target node URN. The target must already exist; use h-add-node first if it does not.'),
+      sourceUrn: z.string().describe('Fully-qualified source node URN, e.g. "acme.com::mmdata::services:db-helper". ID-shape sources are not accepted (the source\'s memory must be recoverable from the URN for the permission check). The source node must already exist; this tool will not create it.'),
+      targetUrn: z.string().describe('Fully-qualified target node URN OR an ID-shape value. The target must already exist; use h-add-node first if it does not.'),
       label: z.string().describe('Relationship label, e.g. "depends-on", "documents", "supersedes".'),
     },
-    async ({ sourceUrn: rawSource, targetUrn: rawTarget, label }) => {
-      // Spec 022: qualification at the API boundary for both endpoints.
-      try {
-        assertFullyQualifiedUrn(rawSource, 'node');
-      } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Source: ${e.message}`);
-        throw e;
-      }
-      try {
-        if (!isId(rawTarget)) {
-          assertFullyQualifiedUrn(rawTarget, 'node');
-        }
-      } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Target: ${e.message}`);
-        throw e;
-      }
-
-      // Resolve source node strictly — h-add-edge attaches an edge to an
-      // existing node and never auto-creates the source (use h-add-node
-      // for that).
-      const { memoryUrn: sourceMemoryUrn, loc: sourceLoc } = splitNodeUrn(rawSource);
-      const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
-      if (!sourceMem) {
-        return textResult(`Source memory not found: "${sourceMemoryUrn}".`);
-      }
-      const sourceNode = await db.node.findUnique({
-        where: { loc_memoryId: { loc: sourceLoc, memoryId: sourceMem.id } },
-        select: { id: true, deletedAt: true },
-      });
-      if (!sourceNode || sourceNode.deletedAt) {
-        return textResult(`Source node not found: "${rawSource}".`);
-      }
-
-      // Edge writes hang off the source's memory, so write permission
-      // is checked there. Cross-memory edges only require read access
-      // on the target memory (the target row is referenced, not mutated)
-      // — that read check happens implicitly when resolveNodeRef looks
-      // up the target.
-      if (!(await canWriteToMemory(db, auth, sourceMem.id))) {
-        return textResult('Write access denied for source memory.');
-      }
-
-      // Resolve target through the same path edge-array writes use, so
-      // canonical `::` URNs, legacy `:` URNs, and ID-shape values all
-      // dispatch identically (issue #183 main fix).
-      let targetNodeId: string;
-      try {
-        ({ id: targetNodeId } = await resolveNodeRef(db, rawTarget, sourceMem.id));
-      } catch (e) {
-        if (e instanceof NodeNotFoundError) {
-          return textResult(`Edge target not found: "${e.ref}"`);
-        }
-        throw e;
-      }
-
-      // Idempotent upsert against the @@unique([sourceId, targetId, label])
-      // composite — re-running with the same triple no-ops cleanly.
-      await db.edge.upsert({
-        where: {
-          sourceId_targetId_label: {
-            sourceId: sourceNode.id,
-            targetId: targetNodeId,
-            label,
-          },
-        },
-        create: {
-          id: generateId(),
-          sourceId: sourceNode.id,
-          targetId: targetNodeId,
-          label,
-          createdBy: auth.clientId ?? null,
-        },
-        update: {},
-      });
-
-      // Surface both endpoints' canonical URNs so the caller can verify
-      // the edge landed where intended (especially useful for cross-
-      // memory edges where the target memory may differ from source).
-      const target = await db.node.findUnique({
-        where: { id: targetNodeId },
-        select: { loc: true, memoryId: true },
-      });
-      const savedSourceUrn = await nodeUrn(sourceLoc, sourceMem.id);
-      const savedTargetUrn = target
-        ? await nodeUrn(target.loc, target.memoryId)
-        : rawTarget;
-      return textResult(`Edge saved: ${savedSourceUrn} → ${savedTargetUrn} (${label})`);
+    async ({ sourceUrn, targetUrn, label }) => {
+      const result = await addEdge({ sourceUrn, targetUrn, label, auth });
+      if ('error' in result) return textResult(result.error);
+      return textResult(
+        `Edge saved: ${result.sourceUrn} → ${result.targetUrn} (${result.label})`,
+      );
     },
   );
 

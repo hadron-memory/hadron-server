@@ -295,19 +295,20 @@ describe('resolveNodeRef', () => {
   it('resolves a canonical URN against a canonical-stored Memory.urn', async () => {
     // Migration-window robustness: Memory.urn may be stored in either
     // legacy (`:`) or canonical (`::`) form per spec 021 D2. The
-    // resolver must hit either via `normalizeUrnForLookup` + an OR on
-    // the canonical literal.
+    // resolver must hit either via the OR on both literal forms.
+    // Names + URN slug start with `noderef-test-` so the beforeEach
+    // prefix-deleteMany on the NEXT test sweeps these rows cleanly —
+    // no manual cleanup needed here.
     const canonicalOrg = await db.organization.create({
       data: {
         name: 'noderef-test-canonical-org',
         urn: `noderef-test-canon-${Date.now()}`,
       },
     });
-    const canonicalMemUrn = `${canonicalOrg.urn}::canon-mem`;
     const canonicalMem = await db.memory.create({
       data: {
         organizationId: canonicalOrg.id,
-        urn: canonicalMemUrn,
+        urn: `${canonicalOrg.urn}::canon-mem`,
         name: 'noderef-test-canon-mem',
         class: 'knowledge',
       },
@@ -316,15 +317,24 @@ describe('resolveNodeRef', () => {
       data: { memoryId: canonicalMem.id, loc: 'chats:vocabulary', name: 'vocab' },
     });
 
-    // Canonical input that should round-trip to the canonical-stored memory.
     const ref = `urn:node:${canonicalOrg.urn}::canon-mem::chats:vocabulary`;
     const result = await resolveNodeRef(db, ref);
     expect(result).toEqual({ id: node.id });
+  });
 
-    // Cleanup happens via the beforeEach prefix-deleteMany on the next test.
-    await db.node.deleteMany({ where: { id: node.id } });
-    await db.memory.deleteMany({ where: { id: canonicalMem.id } });
-    await db.organization.deleteMany({ where: { id: canonicalOrg.id } });
+  it('mixed-grammar `<org>:<memory>::<loc>` input falls through cleanly (issue #183 review)', async () => {
+    // Pin the behavior: when the split heuristic sees `::`, it commits
+    // to canonical splitting — `'org:memory::loc'.split('::')` gives
+    // `['org:memory', 'loc']` (only 2 parts), so we don't treat it as
+    // a memory-prefixed input and fall through to short-loc resolution
+    // against `contextMemoryId`. The intent is "don't bake mixed forms
+    // into anything that could later canonicalize them"; the
+    // observable contract is "mixed-grammar inputs miss cleanly with
+    // NodeNotFoundError" rather than silently routing somewhere
+    // surprising.
+    await expect(
+      resolveNodeRef(db, `${memoryUrn}::noderef-test-services:missing`, memoryId),
+    ).rejects.toBeInstanceOf(NodeNotFoundError);
   });
 
   it('with contextMemoryId, ID-shape input still bypasses qualification (spec 007 dispatch)', async () => {
