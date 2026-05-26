@@ -615,9 +615,9 @@ function createMcpServerInstance(
 
   server.tool(
     'h-find-nodes',
-    'Search for nodes by name, tags, or description.',
+    'Substring/keyword search across node name, loc, description, and tags. ALL whitespace-separated terms must appear (case-insensitive) somewhere in those fields — no semantic / vector search, no fuzzy matching, no stemming. Multi-word natural-language queries that don\'t share literal substrings with the corpus will return zero hits; pick discriminating keywords. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory.',
     {
-      query: z.string().describe('Search query'),
+      query: z.string().describe('Whitespace-separated keywords; each must literally appear (case-insensitive) in name/loc/description/tags. Not a natural-language or semantic query.'),
       parentRel: z.string().optional().describe('Scope search to this subtree'),
       memoryUrn: z.string().optional().describe('Scope search to this memory'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
@@ -952,35 +952,102 @@ function createMcpServerInstance(
 
       const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
 
-      // Deduplicate
-      const byLoc = new Map<string, typeof allNodes[0]>();
+      // Deduplicate by (memoryId, loc): prefer canonical (isLink=false)
+      // over link nodes. Multi-memory listings (memoryUrn unset, parentRel
+      // resolving without a memoryId) can legitimately have the same loc
+      // in two different memories, so the key MUST include memoryId.
+      const dedupKey = (memId: string, loc: string) => `${memId}::${loc}`;
+      const byKey = new Map<string, typeof allNodes[0]>();
       for (const n of allNodes) {
-        const existing = byLoc.get(n.loc);
-        if (!existing || (existing.isLink && !n.isLink)) byLoc.set(n.loc, n);
+        const k = dedupKey(n.memoryId, n.loc);
+        const existing = byKey.get(k);
+        if (!existing || (existing.isLink && !n.isLink)) byKey.set(k, n);
       }
-      const nodes = Array.from(byLoc.values());
+      const nodes = Array.from(byKey.values());
 
-      // Filter to requested depth
+      // Depth math: prefix has `prefixDepth` segments; a node's depth-
+      // relative-to-prefix is the number of segments BEYOND the prefix
+      // (1 = direct child).
       const prefixDepth = prefix ? prefix.split(':').length : 0;
-      const filtered = nodes.filter((n) => {
-        const nodeDepth = n.loc.split(':').length - prefixDepth;
-        return nodeDepth > 0 && nodeDepth <= maxDepth;
-      });
+      const depthRelative = (loc: string) => loc.split(':').length - prefixDepth;
+      const isWithinScope = (loc: string) =>
+        !prefix || loc === prefix || loc.startsWith(prefix + ':');
 
-      if (filtered.length === 0) {
+      // Issue #183 (#3, #4): render a true tree rather than a flat
+      // depth-from-colons list.
+      //   - Indent reflects actual parent depth in this view (a depth-2
+      //     loc following an unrelated depth-1 loc no longer LOOKS like
+      //     a child of it — the previous renderer indented purely by
+      //     colon count, which made orphaned subtrees appear nested
+      //     under the previous row).
+      //   - Missing intermediate parents are synthesized so a node
+      //     added bottom-up (e.g. `data-model:entities:user` with no
+      //     `data-model:entities`) shows the gap explicitly instead of
+      //     leaving the descendant visually floating.
+      interface TreeRow {
+        loc: string;
+        depth: number;
+        node: typeof allNodes[0] | null; // null = synthesized intermediate
+        memoryId: string;
+      }
+      const realByKey = new Map(nodes.map((n) => [dedupKey(n.memoryId, n.loc), n] as const));
+      const visibleByKey = new Map<string, TreeRow>();
+
+      for (const n of nodes) {
+        const d = depthRelative(n.loc);
+        if (d <= 0 || d > maxDepth) continue;
+        const k = dedupKey(n.memoryId, n.loc);
+        visibleByKey.set(k, { loc: n.loc, depth: d, node: n, memoryId: n.memoryId });
+
+        // Walk up the parent chain WITHIN this memory and add missing
+        // intermediates as synthesized rows. Stop at prefix (or root).
+        let cur = n.loc;
+        while (true) {
+          const idx = cur.lastIndexOf(':');
+          if (idx === -1) break;
+          cur = cur.substring(0, idx);
+          const pd = depthRelative(cur);
+          if (pd <= 0) break;
+          if (!isWithinScope(cur)) break;
+          const pk = dedupKey(n.memoryId, cur);
+          if (visibleByKey.has(pk)) break;
+          const real = realByKey.get(pk) ?? null;
+          visibleByKey.set(pk, { loc: cur, depth: pd, node: real, memoryId: n.memoryId });
+        }
+      }
+
+      if (visibleByKey.size === 0) {
         return textResult(`No child nodes found under "${prefix || memoryUrn}".`);
       }
 
-      // Compute child counts and render tree
-      const lines = await Promise.all(filtered.map(async (n) => {
-        const nodeDepth = n.loc.split(':').length - prefixDepth - 1;
-        const indent = '  '.repeat(nodeDepth);
+      // Sort so parents render before children. Within a memory, lex
+      // order on loc accomplishes that; across memories, sort by
+      // memoryId first to keep each memory's subtree contiguous.
+      const sortedRows = Array.from(visibleByKey.values()).sort((a, b) => {
+        if (a.memoryId !== b.memoryId) return a.memoryId.localeCompare(b.memoryId);
+        return a.loc.localeCompare(b.loc);
+      });
+
+      const lines = await Promise.all(sortedRows.map(async (row) => {
+        const indent = '  '.repeat(row.depth - 1);
+        // Direct-child count uses the full node set (not just visible
+        // rows) so the hint reflects what's actually in the memory,
+        // even when the depth window hides them.
+        const childPrefix = row.loc + ':';
+        const rowSegCount = row.loc.split(':').length;
         const childCount = nodes.filter((c) =>
-          c.loc.startsWith(n.loc + ':') && c.loc.split(':').length === n.loc.split(':').length + 1
+          c.memoryId === row.memoryId &&
+          c.loc.startsWith(childPrefix) &&
+          c.loc.split(':').length === rowSegCount + 1,
         ).length;
         const childInfo = childCount > 0 ? ` (${childCount} children)` : '';
-        const nUrn = await nodeUrn(n.loc, n.memoryId);
-        return `${indent}├── ${nUrn} — ${n.name}${childInfo}`;
+        const nUrn = await nodeUrn(row.loc, row.memoryId);
+        if (row.node) {
+          return `${indent}├── ${nUrn} — ${row.node.name}${childInfo}`;
+        }
+        // Synthesized intermediate. Surface the gap explicitly rather
+        // than silently rendering it as a real row.
+        return `${indent}├── ${nUrn} — (missing — use h-add-parent-node to materialize)${childInfo}`;
       }));
 
       const header = `Tree: ${prefix || memoryUrn}`;
@@ -1313,6 +1380,112 @@ function createMcpServerInstance(
 
       const updatedUrn = await nodeUrn(loc, existing.memoryId);
       return textResult(`Node updated: ${updatedUrn}`);
+    },
+  );
+
+  // ── h-add-edge ───────────────────────────────────────────────────────────
+  //
+  // Issue #183 — h-update-node.edges replaces the full outgoing-edge set,
+  // which means the only way to add a single edge to an existing node
+  // without h-add-edge is to re-send EVERY existing edge plus the new
+  // one. Easy to drop edges by accident. This tool fills that gap with
+  // an idempotent single-edge upsert that leaves all other edges alone.
+
+  server.tool(
+    'h-add-edge',
+    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike h-update-node, which replaces the full edge set). Idempotent: re-running with the same (source, target, label) is a no-op. Both URNs MUST be fully qualified (org::memory::loc) or an ID-shape value. Cross-memory edges are supported.',
+    {
+      sourceUrn: z.string().describe('Fully-qualified source node URN, e.g. "acme.com::mmdata::services:db-helper". The source node must already exist.'),
+      targetUrn: z.string().describe('Fully-qualified target node URN. The target must already exist; use h-add-node first if it does not.'),
+      label: z.string().describe('Relationship label, e.g. "depends-on", "documents", "supersedes".'),
+    },
+    async ({ sourceUrn: rawSource, targetUrn: rawTarget, label }) => {
+      // Spec 022: qualification at the API boundary for both endpoints.
+      try {
+        assertFullyQualifiedUrn(rawSource, 'node');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(`Source: ${e.message}`);
+        throw e;
+      }
+      try {
+        if (!isId(rawTarget)) {
+          assertFullyQualifiedUrn(rawTarget, 'node');
+        }
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(`Target: ${e.message}`);
+        throw e;
+      }
+
+      // Resolve source node strictly — h-add-edge attaches an edge to an
+      // existing node and never auto-creates the source (use h-add-node
+      // for that).
+      const { memoryUrn: sourceMemoryUrn, loc: sourceLoc } = splitNodeUrn(rawSource);
+      const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
+      if (!sourceMem) {
+        return textResult(`Source memory not found: "${sourceMemoryUrn}".`);
+      }
+      const sourceNode = await db.node.findUnique({
+        where: { loc_memoryId: { loc: sourceLoc, memoryId: sourceMem.id } },
+        select: { id: true, deletedAt: true },
+      });
+      if (!sourceNode || sourceNode.deletedAt) {
+        return textResult(`Source node not found: "${rawSource}".`);
+      }
+
+      // Edge writes hang off the source's memory, so write permission
+      // is checked there. Cross-memory edges only require read access
+      // on the target memory (the target row is referenced, not mutated)
+      // — that read check happens implicitly when resolveNodeRef looks
+      // up the target.
+      if (!(await canWriteToMemory(db, auth, sourceMem.id))) {
+        return textResult('Write access denied for source memory.');
+      }
+
+      // Resolve target through the same path edge-array writes use, so
+      // canonical `::` URNs, legacy `:` URNs, and ID-shape values all
+      // dispatch identically (issue #183 main fix).
+      let targetNodeId: string;
+      try {
+        ({ id: targetNodeId } = await resolveNodeRef(db, rawTarget, sourceMem.id));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) {
+          return textResult(`Edge target not found: "${e.ref}"`);
+        }
+        throw e;
+      }
+
+      // Idempotent upsert against the @@unique([sourceId, targetId, label])
+      // composite — re-running with the same triple no-ops cleanly.
+      await db.edge.upsert({
+        where: {
+          sourceId_targetId_label: {
+            sourceId: sourceNode.id,
+            targetId: targetNodeId,
+            label,
+          },
+        },
+        create: {
+          id: generateId(),
+          sourceId: sourceNode.id,
+          targetId: targetNodeId,
+          label,
+          createdBy: auth.clientId ?? null,
+        },
+        update: {},
+      });
+
+      // Surface both endpoints' canonical URNs so the caller can verify
+      // the edge landed where intended (especially useful for cross-
+      // memory edges where the target memory may differ from source).
+      const target = await db.node.findUnique({
+        where: { id: targetNodeId },
+        select: { loc: true, memoryId: true },
+      });
+      const savedSourceUrn = await nodeUrn(sourceLoc, sourceMem.id);
+      const savedTargetUrn = target
+        ? await nodeUrn(target.loc, target.memoryId)
+        : rawTarget;
+      return textResult(`Edge saved: ${savedSourceUrn} → ${savedTargetUrn} (${label})`);
     },
   );
 

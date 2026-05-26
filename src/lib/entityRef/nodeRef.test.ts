@@ -245,6 +245,88 @@ describe('resolveNodeRef', () => {
     expect(result).toEqual({ id: node.id });
   });
 
+  // ===================================================================
+  // Issue #183 — canonical `::` URN inputs as edge targets.
+  //
+  // h-read-node accepts canonical-form node URNs (it routes through
+  // `splitNodeUrn`, which understands `::`). The edge-target lookup
+  // used a colon-naive `parts = ref.split(':')` and produced malformed
+  // memory URNs (empty segments) for `::`-separated inputs — so the
+  // same URN the read path happily resolved was rejected on write with
+  // "Edge target not found". This block locks that asymmetry shut.
+  // ===================================================================
+
+  it('resolves a canonical `<org>::<memory>::<loc>` bare URN (issue #183)', async () => {
+    const node = await db.node.create({
+      data: { memoryId, loc: 'noderef-test-services:db', name: 'db' },
+    });
+    // memoryUrn is legacy-form (`<org>:<memorySlug>`) in storage; the
+    // input uses canonical `::` between org/memory and between memory
+    // and loc. Within the loc, `:` atoms preserve their meaning.
+    const canonicalRef = `${memoryUrn.replace(':', '::')}::${node.loc}`;
+    expect(canonicalRef.split('::').length).toBeGreaterThanOrEqual(3);
+
+    const result = await resolveNodeRef(db, canonicalRef, memoryId);
+    expect(result).toEqual({ id: node.id });
+  });
+
+  it('resolves a canonical `urn:node:<org>::<memory>::<loc>` prefixed URN (issue #183)', async () => {
+    const node = await db.node.create({
+      data: { memoryId, loc: 'noderef-test-services:db', name: 'db' },
+    });
+    const canonicalRef = `urn:node:${memoryUrn.replace(':', '::')}::${node.loc}`;
+
+    const result = await resolveNodeRef(db, canonicalRef, memoryId);
+    expect(result).toEqual({ id: node.id });
+  });
+
+  it('resolves a canonical URN without contextMemoryId (API-boundary path)', async () => {
+    const node = await db.node.create({
+      data: { memoryId, loc: 'noderef-test-services:db', name: 'db' },
+    });
+    const canonicalRef = `urn:node:${memoryUrn.replace(':', '::')}::${node.loc}`;
+
+    // No contextMemoryId — exercises the spec-022 API-boundary path
+    // with a canonical-form input.
+    const result = await resolveNodeRef(db, canonicalRef);
+    expect(result).toEqual({ id: node.id });
+  });
+
+  it('resolves a canonical URN against a canonical-stored Memory.urn', async () => {
+    // Migration-window robustness: Memory.urn may be stored in either
+    // legacy (`:`) or canonical (`::`) form per spec 021 D2. The
+    // resolver must hit either via `normalizeUrnForLookup` + an OR on
+    // the canonical literal.
+    const canonicalOrg = await db.organization.create({
+      data: {
+        name: 'noderef-test-canonical-org',
+        urn: `noderef-test-canon-${Date.now()}`,
+      },
+    });
+    const canonicalMemUrn = `${canonicalOrg.urn}::canon-mem`;
+    const canonicalMem = await db.memory.create({
+      data: {
+        organizationId: canonicalOrg.id,
+        urn: canonicalMemUrn,
+        name: 'noderef-test-canon-mem',
+        class: 'knowledge',
+      },
+    });
+    const node = await db.node.create({
+      data: { memoryId: canonicalMem.id, loc: 'chats:vocabulary', name: 'vocab' },
+    });
+
+    // Canonical input that should round-trip to the canonical-stored memory.
+    const ref = `urn:node:${canonicalOrg.urn}::canon-mem::chats:vocabulary`;
+    const result = await resolveNodeRef(db, ref);
+    expect(result).toEqual({ id: node.id });
+
+    // Cleanup happens via the beforeEach prefix-deleteMany on the next test.
+    await db.node.deleteMany({ where: { id: node.id } });
+    await db.memory.deleteMany({ where: { id: canonicalMem.id } });
+    await db.organization.deleteMany({ where: { id: canonicalOrg.id } });
+  });
+
   it('with contextMemoryId, ID-shape input still bypasses qualification (spec 007 dispatch)', async () => {
     const node = await db.node.create({
       data: { memoryId, loc: 'noderef-test-services:db', name: 'db' },
