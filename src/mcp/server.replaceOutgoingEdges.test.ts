@@ -103,6 +103,38 @@ describe('resolveEdgeRefs — nested target', () => {
   });
 });
 
+describe('resolveEdgeRefs — canonical `::` URN inputs (#183)', () => {
+  // h-read-node accepts canonical-form node URNs (it routes through
+  // `splitNodeUrn`, which understands `::`). The edge-target resolver
+  // used a colon-naive `.split(':')` and produced empty segments for
+  // those same inputs — they silently failed with "Edge target not
+  // found". Lock the symmetry shut: any URN the read path accepts MUST
+  // resolve as an edge target.
+
+  it('resolves a canonical `<org>::<memory>::<loc>` bare URN', async () => {
+    // memory.urn is stored bare in legacy form (`<org>:<memory>`);
+    // construct the canonical-form input the way h-read-node would
+    // round-trip it.
+    const canonicalRef = `${memory.urn.replace(':', '::')}::${nested.loc}`;
+    expect(await resolveAndWrite(canonicalRef)).toBeNull();
+    expect(await db.edge.count({ where: { sourceId: source.id, targetId: nested.id } })).toBe(1);
+  });
+
+  it('resolves a canonical `urn:node:<org>::<memory>::<loc>` prefixed URN', async () => {
+    const canonicalRef = `urn:node:${memory.urn.replace(':', '::')}::${nested.loc}`;
+    expect(await resolveAndWrite(canonicalRef)).toBeNull();
+    expect(await db.edge.count({ where: { sourceId: source.id, targetId: nested.id } })).toBe(1);
+  });
+
+  it('resolves a canonical URN with a single-segment loc (the issue-#183 repro)', async () => {
+    // The original bug report's exact shape: a top-level loc
+    // referenced via the canonical separator the read path produces.
+    const canonicalRef = `${memory.urn.replace(':', '::')}::${topLevel.loc}`;
+    expect(await resolveAndWrite(canonicalRef)).toBeNull();
+    expect(await db.edge.count({ where: { sourceId: source.id, targetId: topLevel.id } })).toBe(1);
+  });
+});
+
 describe('resolveEdgeRefs — error handling', () => {
   it('returns an error for an unresolvable short loc and writes nothing', async () => {
     const r = await resolveEdgeRefs([{ targetId: 'does-not-exist', label: 'x' }], memory.id);

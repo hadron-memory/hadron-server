@@ -104,11 +104,33 @@ export async function resolveNodeRef(
   // actually names a live memory (otherwise fall through to short-loc
   // resolution, which preserves short locs that legitimately contain
   // colons).
-  const parts = normalized.split(':');
+  //
+  // Issue #183: prefer canonical `::` as the hierarchy separator (spec
+  // 021 D2). When the input contains `::`, split on `::` so the
+  // memory/loc boundary is unambiguous regardless of any `:` atoms
+  // inside the loc itself (e.g. `chats:vocabulary`). Fall back to
+  // single-`:` for legacy / pre-021 inputs still in flight. Without
+  // this, canonical-form URNs that `h-read-node` happily accepts
+  // (because it routes through `splitNodeUrn`) silently failed as
+  // edge targets — the colon-naive `.split(':')` produced empty
+  // segments, the memory lookup missed, and the resolver fell
+  // through to short-loc resolution against `contextMemoryId` (where
+  // it failed again).
+  const parts = normalized.includes('::')
+    ? normalized.split('::')
+    : normalized.split(':');
   if (parts.length >= 3) {
-    const memoryUrn = parts.slice(0, 2).join(':');
-    const memory = await db.memory.findUnique({
-      where: { urn: memoryUrn },
+    // First two segments are <org>:<memorySlug>. Memory rows are
+    // stored bare (`<org>:<memorySlug>`) but may live in either
+    // legacy (`:`) or canonical (`::`) form during the spec-021
+    // migration window — the OR matches whichever form is on disk.
+    const memory = await db.memory.findFirst({
+      where: {
+        OR: [
+          { urn: `${parts[0]}:${parts[1]}` },
+          { urn: `${parts[0]}::${parts[1]}` },
+        ],
+      },
       select: { id: true, deletedAt: true },
     });
     if (memory) {
@@ -116,6 +138,10 @@ export async function resolveNodeRef(
       // `<memory-urn>:<loc>` and resolve strictly — soft-deleted
       // memories produce a clean miss rather than a fall-through that
       // could resolve to the wrong node in `contextMemoryId`.
+      //
+      // The loc joins the remaining segments with single `:` because
+      // locs are stored that way (atoms inside a loc are colon-
+      // separated; `::` is only the memory/loc boundary separator).
       if (memory.deletedAt) throw new NodeNotFoundError(ref);
       const loc = parts.slice(2).join(':');
       const node = await db.node.findUnique({
