@@ -63,6 +63,49 @@ function textResult(text: string) {
 }
 
 /**
+ * Hadron MCP server version — single source of truth. Used both as the
+ * `version` field in the McpServer constructor (the MCP initialize
+ * response's server identity) and in the deployment-info diagnostics
+ * surface (h-server-info / h-set-active-memory success message).
+ *
+ * Bump in lockstep with package.json's version when the MCP surface
+ * changes in a way callers should be able to detect.
+ */
+export const HADRON_SERVER_VERSION = '0.3.0';
+
+/**
+ * Diagnostics surface — answers "which hadron-server am I talking to?"
+ * from the agent side. Agents can call h-server-info (this exact object,
+ * formatted) to see the bound deployment URL + version; h-set-active-
+ * memory's success message also includes it inline.
+ *
+ * Motivated by #187 / #190 (dual-MCP-namespace divergence): when
+ * `mcp__hadron__*` and `mcp__claude_ai_Hadron__*` are bound to different
+ * hadron-server instances backed by different databases, agents had no
+ * server-side way to notice they'd reached the wrong one. Exposing the
+ * BASE_URL lets a transcript reader (or the agent itself, on the next
+ * call) see the mismatch directly.
+ *
+ * Intentionally does NOT expose the DATABASE_URL — the connection
+ * string may carry credentials. If a future need arises to disambiguate
+ * two deployments that share a BASE_URL but point at different DBs, add
+ * a separate `dbName` field that parses the path segment only.
+ */
+export interface DeploymentInfo {
+  baseUrl: string;
+  version: string;
+}
+
+export function getDeploymentInfo(): DeploymentInfo {
+  return {
+    baseUrl:
+      process.env.BASE_URL ??
+      `http://localhost:${process.env.PORT ?? 4000}`,
+    version: HADRON_SERVER_VERSION,
+  };
+}
+
+/**
  * Test-only harness — invoke a registered MCP tool by name without
  * spinning up an HTTP transport. Behavioral tests use this to exercise
  * the full closure inside `createMcpServerInstance` (including `auth`
@@ -473,7 +516,7 @@ export function createMcpServerInstance(
   cachedAppResolution: AppResolution | null,
 ): McpServer {
   const server = new McpServer(
-    { name: 'hadron', version: '0.2.0' },
+    { name: 'hadron', version: HADRON_SERVER_VERSION },
     { capabilities: { tools: {} } },
   );
 
@@ -618,7 +661,47 @@ export function createMcpServerInstance(
       // Store the bare URN from the DB row (the canonical form for downstream
       // findFirst({urn:activeMemoryUrn}) lookups).
       activeMemoryUrn = mem.urn;
-      return textResult(`Active memory set to: ${formatCanonicalUrn('memory', mem.urn)}`);
+
+      // #187 / #190 — include the bound deployment URL + server version
+      // in the success message so an agent (or a transcript reader) can
+      // notice they've reached the wrong hadron-server when two
+      // namespaces (`mcp__hadron__*` vs `mcp__claude_ai_Hadron__*`) are
+      // bound to different deployments. Cheap to surface, hard to
+      // ignore in transcripts. Full diagnostic dump lives on h-server-
+      // info; this is the inline hint.
+      const dep = getDeploymentInfo();
+      return textResult(
+        `Active memory set to: ${formatCanonicalUrn('memory', mem.urn)} ` +
+          `(server: ${dep.baseUrl}, version: ${dep.version}).`,
+      );
+    },
+  );
+
+  // ── h-server-info ────────────────────────────────────────────────────────
+  //
+  // #187 / #190 — exposes the bound deployment URL + hadron-server
+  // version so an agent can answer "which server am I talking to?"
+  // without needing to issue any other tool calls. Doesn't require an
+  // active App, doesn't require an active memory, doesn't even require
+  // read access on any memory — it returns server identity only, never
+  // any per-tenant data. Safe to expose to every caller.
+  //
+  // Intentionally does NOT include DATABASE_URL (may carry credentials).
+  // If a future need arises to disambiguate two deployments that share
+  // a BASE_URL but point at different DBs, the helper's docstring
+  // explains how to add a path-only `dbName` field.
+
+  server.tool(
+    'h-server-info',
+    'Returns the identity of the hadron-server this MCP session is bound to: the deployment URL and server version. Useful when a caller has two MCP namespaces wired up and needs to know which one a tool call landed on (see #190 for context). No arguments. Returns plain key:value pairs. Does NOT require an active App or any memory access.',
+    {},
+    async () => {
+      const dep = getDeploymentInfo();
+      const lines = [
+        `server: ${dep.baseUrl}`,
+        `version: ${dep.version}`,
+      ];
+      return textResult(lines.join('\n'));
     },
   );
 
