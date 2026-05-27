@@ -62,6 +62,65 @@ function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
 
+/**
+ * Test-only harness — invoke a registered MCP tool by name without
+ * spinning up an HTTP transport. Behavioral tests use this to exercise
+ * the full closure inside `createMcpServerInstance` (including `auth`
+ * binding) while skipping the transport, JSON-RPC framing, and zod
+ * validation that the SDK does in production.
+ *
+ * The SDK's `_registeredTools` is `private` at the type level but is a
+ * plain object at runtime. Coupling is deliberately narrow — if the SDK
+ * renames the field, this single helper breaks loudly, rather than
+ * every behavioral test in the suite.
+ */
+export interface TestableMcpServer {
+  callTool(
+    name: string,
+    args?: unknown,
+  ): Promise<{ content: Array<{ type: string; text: string }> }>;
+  callToolText(name: string, args?: unknown): Promise<string>;
+}
+
+export function createTestableMcpServer(
+  auth: AuthContext,
+  opts?: { sessionId?: string; cachedAppResolution?: AppResolution | null },
+): TestableMcpServer {
+  const server = createMcpServerInstance(
+    auth,
+    () => opts?.sessionId,
+    opts?.cachedAppResolution ?? null,
+  );
+  const tools = (server as unknown as {
+    _registeredTools: Record<
+      string,
+      {
+        handler: (
+          args: unknown,
+          extra: unknown,
+        ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+        enabled: boolean;
+      }
+    >;
+  })._registeredTools;
+
+  return {
+    async callTool(name: string, args: unknown = {}) {
+      const tool = tools[name];
+      if (!tool) throw new Error(`Tool not registered: ${name}`);
+      if (!tool.enabled) throw new Error(`Tool disabled: ${name}`);
+      return tool.handler(args, {});
+    },
+    async callToolText(name: string, args: unknown = {}) {
+      const result = await this.callTool(name, args);
+      return result.content
+        .filter((c) => c.type === 'text')
+        .map((c) => c.text)
+        .join('\n');
+    },
+  };
+}
+
 /** A single resolved edge ready to be written to the database. */
 export type ResolvedEdge = { targetNodeId: string; label: string };
 
@@ -279,11 +338,18 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
   return `urn:node:${bareMemCanonical}::${loc}`;
 }
 
-function matchesQuery(
+export function matchesQuery(
   node: { name: string; loc: string; description: string | null; tags: string[] },
   query: string,
 ): boolean {
-  const terms = query.toLowerCase().split(/\s+/);
+  // Issue #170: `*` and empty string are "match all". Without this an
+  // agent surveying a memory will reasonably try `query: "*"` first,
+  // get "No nodes found", and proceed to write — overlooking the
+  // existing tree. Now `*` (and trimmed-empty) surface every node so
+  // the agent can see what's already there.
+  const trimmed = query.trim();
+  if (trimmed === '' || trimmed === '*') return true;
+  const terms = trimmed.toLowerCase().split(/\s+/);
   const haystack = [node.name, node.loc, node.description || '', ...node.tags]
     .join(' ')
     .toLowerCase();
@@ -401,7 +467,7 @@ async function resolveMemoryByUrn(
 // MCP Server factory — one McpServer per transport session
 // ---------------------------------------------------------------------------
 
-function createMcpServerInstance(
+export function createMcpServerInstance(
   auth: AuthContext,
   getSessionId: () => string | undefined,
   cachedAppResolution: AppResolution | null,
@@ -770,9 +836,9 @@ function createMcpServerInstance(
 
   server.tool(
     'h-find-nodes',
-    'Substring/keyword search across node name, loc, description, and tags. ALL whitespace-separated terms must appear (case-insensitive) somewhere in those fields — no semantic / vector search, no fuzzy matching, no stemming. Multi-word natural-language queries that don\'t share literal substrings with the corpus will return zero hits; pick discriminating keywords. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory.',
+    'Substring/keyword search across node name, loc, description, and tags. ALL whitespace-separated terms must appear (case-insensitive) somewhere in those fields — no semantic / vector search, no fuzzy matching, no stemming, and node BODY content is NOT indexed. Multi-word natural-language queries that don\'t share literal substrings with the corpus will return zero hits; pick discriminating keywords. Pass `query: "*"` (or `""`) to match every node — useful as a first survey before adding to a memory. To browse the tree structure, use `h-list-nodes` instead. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory. Soft-deleted nodes are excluded.',
     {
-      query: z.string().describe('Whitespace-separated keywords; each must literally appear (case-insensitive) in name/loc/description/tags. Not a natural-language or semantic query.'),
+      query: z.string().describe('Whitespace-separated keywords; each must literally appear (case-insensitive) in name/loc/description/tags. Not a natural-language or semantic query, and body content is NOT searched. Use "*" or "" to match all nodes (survey mode).'),
       parentRel: z.string().optional().describe('Scope search to this subtree'),
       memoryUrn: z.string().optional().describe('Scope search to this memory'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
@@ -793,7 +859,11 @@ function createMcpServerInstance(
       const trimmedParentRel = parentRel?.trim();
 
       const memoryIds = await getAccessibleMemoryIds(db, auth);
-      const where: Record<string, unknown> = {};
+      // Issue #180 Bug 2: exclude tombstoned nodes from the search index.
+      // Before this filter, soft-deleted nodes continued to surface through
+      // find/read, so callers had no reliable way to "make a node go away"
+      // short of hard-deleting the row.
+      const where: Record<string, unknown> = { deletedAt: null };
       if (memoryIds) where.memoryId = { in: memoryIds };
 
       // Scope to memory URN if provided. Spec 022 (FR-003): no fallback to
@@ -816,6 +886,18 @@ function createMcpServerInstance(
             `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
           );
         }
+        // #188 (Gemini): the prior `where.memoryId = mem.id` override
+        // bypassed the access-scoped filter set above — any authenticated
+        // caller could search any memory by URN. Route through
+        // canReadMemory so personal/private memories (FR-016 strict
+        // ownership; ADMIN/OWNER do NOT bypass) and non-admin scope-map
+        // gating both apply. Match h-read-node's "not found" phrasing
+        // so the response doesn't distinguish absence from denial.
+        if (!(await canReadMemory(db, auth, mem.id))) {
+          return textResult(
+            `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
+          );
+        }
         where.memoryId = mem.id;
       }
 
@@ -823,13 +905,40 @@ function createMcpServerInstance(
       if (trimmedParentRel) {
         const resolvedParent = await resolveLocFromUrn(trimmedParentRel, memoryIds);
         where.loc = { startsWith: resolvedParent.loc };
-        if (resolvedParent.memoryId) where.memoryId = resolvedParent.memoryId;
+        // #188 (Gemini): same BOLA shape as the memoryUrn branch.
+        // resolveLocFromUrn already gates the URN-typed path on
+        // accessibleMemoryIds, but ADMIN/OWNER pass accessibleMemoryIds
+        // as null (= "see all"), which still leaks personal/private
+        // memories. canReadMemory enforces both gates uniformly.
+        if (resolvedParent.memoryId) {
+          if (!(await canReadMemory(db, auth, resolvedParent.memoryId))) {
+            return textResult(
+              `Node "${trimmedParentRel}" not found.`,
+            );
+          }
+          where.memoryId = resolvedParent.memoryId;
+        }
       }
 
       const allNodes = await db.node.findMany({
         where,
         take: 1000,
-        include: brief ? { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } } : undefined,
+        // #180 Bug 2: when `brief` includes edges, hide edges whose
+        // target/source is soft-deleted. The edge itself isn't soft-
+        // deleted on its own column; the gate is whether the node on
+        // the other end is alive.
+        include: brief
+          ? {
+              outgoingEdges: {
+                include: { target: true },
+                where: { target: { deletedAt: null } },
+              },
+              incomingEdges: {
+                include: { source: true },
+                where: { source: { deletedAt: null } },
+              },
+            }
+          : undefined,
       });
       // Deduplicate by loc: prefer canonical (isLink=false) over link nodes
       const byLoc = new Map<string, typeof allNodes[0]>();
@@ -888,11 +997,24 @@ function createMcpServerInstance(
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
 
-      const node = await db.node.findUnique({
-        where: { loc_memoryId: { loc, memoryId: memory.id } },
+      // #180 Bug 2: soft-deleted nodes are not addressable via read.
+      // findFirst with explicit deletedAt: null instead of findUnique so
+      // tombstoned rows return "not found" rather than leaking their last
+      // content.
+      const node = await db.node.findFirst({
+        where: { loc, memoryId: memory.id, deletedAt: null },
         include: {
-          outgoingEdges: { include: { target: true } },
-          incomingEdges: { include: { source: true } },
+          // Filter edges whose other-end node is soft-deleted; dangling
+          // tombstones in the Related / Referenced-by section are no
+          // more useful than the deleted node itself.
+          outgoingEdges: {
+            include: { target: true },
+            where: { target: { deletedAt: null } },
+          },
+          incomingEdges: {
+            include: { source: true },
+            where: { source: { deletedAt: null } },
+          },
         },
       });
       if (!node) {
@@ -921,10 +1043,14 @@ function createMcpServerInstance(
         const sourceUrn = await nodeUrn(e.source.loc, (e.source as any).memoryId);
         return `  - ${sourceUrn} (${e.source.name}) — ${e.label}`;
       }));
+      // #186: surface nodeType so callers can tell `parent` from `info`
+      // (portal rendering + tool dispatch both branch on this; without it
+      // there's no way to detect a node mis-typed at creation time).
       const meta = [
         `**${node.name}**`,
         urn,
         node.description ? `> ${node.description}` : '',
+        `Type: ${node.nodeType}`,
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',
         node.properties ? `Properties: ${JSON.stringify(node.properties)}` : '',
@@ -976,7 +1102,9 @@ function createMcpServerInstance(
       const prefix = parentLoc + ':';
 
       const allNodes = await db.node.findMany({
-        where: { memoryId: memory.id, loc: { startsWith: prefix } },
+        // #180 Bug 2: skip tombstoned children so `next` doesn't land on
+        // a soft-deleted row and either error or expose stale content.
+        where: { memoryId: memory.id, loc: { startsWith: prefix }, deletedAt: null },
         orderBy: { loc: 'asc' },
       });
       // Direct children only (no further colons after prefix)
@@ -1015,8 +1143,15 @@ function createMcpServerInstance(
       const node = await db.node.findUnique({
         where: { id: next.id },
         include: {
-          outgoingEdges: { include: { target: true } },
-          incomingEdges: { include: { source: true } },
+          // #180 Bug 2: hide edges whose other end is tombstoned.
+          outgoingEdges: {
+            include: { target: true },
+            where: { target: { deletedAt: null } },
+          },
+          incomingEdges: {
+            include: { source: true },
+            where: { source: { deletedAt: null } },
+          },
         },
       });
       if (!node) return textResult('Node not found.');
@@ -1026,10 +1161,12 @@ function createMcpServerInstance(
         const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
         return `  - ${targetUrn} (${e.target.name}) — ${e.label}`;
       }));
+      // #186: nodeType in the meta block, mirroring h-read-node's format.
       const meta = [
         `**${node.name}**`,
         urn,
         node.description ? `> ${node.description}` : '',
+        `Type: ${node.nodeType}`,
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',
         outEdgeLines.length ? `Related:\n${outEdgeLines.join('\n')}` : '',
@@ -1078,6 +1215,13 @@ function createMcpServerInstance(
         const resolved = await resolveLocFromUrn(trimmedParentRel, memoryIds);
         prefix = resolved.loc;
         memoryId = resolved.memoryId;
+        // #188 (Gemini): canReadMemory gate matches h-find-nodes.
+        // resolveLocFromUrn's accessibleMemoryIds filter handles non-
+        // admin scope, but ADMIN/OWNER pass null and would otherwise
+        // be able to browse another user's personal/private memory.
+        if (memoryId && !(await canReadMemory(db, auth, memoryId))) {
+          return textResult(`Node "${trimmedParentRel}" not found.`);
+        }
       } else {
         prefix = '';
         // Find memory by URN. #100 #3: route through resolveMemoryByUrn so
@@ -1096,11 +1240,23 @@ function createMcpServerInstance(
               `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
             );
           }
+          // #188 (Gemini): canReadMemory gate — same shape as the
+          // h-find-nodes memoryUrn branch.
+          if (!(await canReadMemory(db, auth, mem.id))) {
+            return textResult(
+              `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
+            );
+          }
           memoryId = mem.id;
         }
       }
 
-      const where: Record<string, unknown> = {};
+      // #180 Bug 2: tombstoned nodes are not part of the live tree, so
+      // they shouldn't show up in browse output. (Their absence also
+      // means a parent ceases to be "implicit" once its only child is
+      // soft-deleted — the synthesize-parent pass below operates on the
+      // filtered set.)
+      const where: Record<string, unknown> = { deletedAt: null };
       if (prefix) where.loc = { startsWith: prefix + ':' };
       if (memoryId) where.memoryId = memoryId;
       else if (memoryIds) where.memoryId = { in: memoryIds };
@@ -1150,12 +1306,22 @@ function createMcpServerInstance(
 
       for (const n of nodes) {
         const d = depthRelative(n.loc);
-        if (d <= 0 || d > maxDepth) continue;
+        if (d <= 0) continue;
         const k = dedupKey(n.memoryId, n.loc);
-        visibleByKey.set(k, { loc: n.loc, depth: d, node: n, memoryId: n.memoryId });
+        // Only nodes within the depth window become visible rows; deeper
+        // nodes still feed the synthesize-parent walk so their in-window
+        // ancestors materialize (#185 F4 — a depth-2 orphan must surface
+        // its missing depth-1 parent at maxDepth=1).
+        if (d <= maxDepth) {
+          visibleByKey.set(k, { loc: n.loc, depth: d, node: n, memoryId: n.memoryId });
+        }
 
         // Walk up the parent chain WITHIN this memory and add missing
-        // intermediates as synthesized rows. Stop at prefix (or root).
+        // intermediates as synthesized rows for ancestors that fall in
+        // the depth window. Before #185 F4 this loop early-exited any
+        // node deeper than maxDepth, so implicit parents at depth=1
+        // with only depth=2+ children rendered as gaps — agents read
+        // those gaps as "data lost."
         let cur = n.loc;
         while (true) {
           const idx = cur.lastIndexOf(':');
@@ -1164,6 +1330,7 @@ function createMcpServerInstance(
           const pd = depthRelative(cur);
           if (pd <= 0) break;
           if (!isWithinScope(cur)) break;
+          if (pd > maxDepth) continue; // ancestor out of window; keep walking up
           const pk = dedupKey(n.memoryId, cur);
           if (visibleByKey.has(pk)) break;
           const real = realByKey.get(pk) ?? null;
