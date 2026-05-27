@@ -1746,16 +1746,148 @@ export function createMcpServerInstance(
     },
   );
 
+  // ── h-delete-node ────────────────────────────────────────────────────────
+  //
+  // #180 Bug 1 — agents had no way to remove a node they created in error.
+  // Soft-delete is the default (matches the schema convention everywhere
+  // else); `hard: true` opts into the row delete (cascades through Edge,
+  // PendingEdge, NodeVersion per the Node-FK relations; UsageEvent rows
+  // SetNull on `nodeId` so audit history is preserved).
+  //
+  // Refuses if the node has descendants (by URN hierarchy) unless the
+  // caller passes `recursive: true`. The refusal envelope includes the
+  // descendant count so agents can decide what to do. This is the safest
+  // default: an `archive` node with 19 children should not vanish as a
+  // side-effect of a single delete call.
+
+  server.tool(
+    'h-delete-node',
+    'Delete a node. Soft-delete by default (sets deletedAt; node disappears from find/read/list and is excluded from Related/Referenced-by edge surfaces). Pass `hard: true` to remove the row entirely (cascades to Edge / PendingEdge / NodeVersion; UsageEvent.nodeId is preserved as NULL for audit history). Refuses if the node has descendants under its URN prefix unless `recursive: true` is passed. The URN MUST be fully qualified (org::memory::loc).',
+    {
+      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports".'),
+      hard: z.boolean().optional().describe('Default false (soft-delete sets deletedAt). Pass true to delete the row entirely; cascades to Edge / PendingEdge / NodeVersion. Irreversible.'),
+      recursive: z.boolean().optional().describe('Default false (refuses if the node has descendants). Pass true to apply the same soft/hard mode to every descendant under the node\'s URN prefix.'),
+    },
+    async ({ urn: rawUrn, hard, recursive }) => {
+      try {
+        assertFullyQualifiedUrn(rawUrn, 'node');
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        throw e;
+      }
+
+      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const memory = await resolveMemoryByUrn(memoryUrn);
+      if (!memory) {
+        return textResult(`Node "${rawUrn}" not found.`);
+      }
+      if (!(await canWriteToMemory(db, auth, memory.id))) {
+        // Match the "not found" phrasing used elsewhere on access denial
+        // so the response doesn't distinguish absence from denial.
+        return textResult(`Node "${rawUrn}" not found.`);
+      }
+
+      // Find the node by (loc, memoryId). Already-tombstoned nodes are
+      // treated as not-found for soft-delete (idempotent no-op shape) but
+      // are addressable for hard-delete so callers can compact them.
+      const existing = await db.node.findUnique({
+        where: { loc_memoryId: { loc, memoryId: memory.id } },
+      });
+      if (!existing) return textResult(`Node "${rawUrn}" not found.`);
+      if (existing.deletedAt && !hard) {
+        return textResult(
+          `Node "${rawUrn}" is already soft-deleted. Pass hard: true to remove the row entirely.`,
+        );
+      }
+
+      // Descendants by URN hierarchy: loc startsWith node.loc + ':'.
+      // Soft-delete refuses based on LIVE descendants; hard-delete
+      // refuses based on the union (a tombstoned descendant still has
+      // an FK that the row delete would cascade through, which is
+      // surprising if the caller didn't ask for it).
+      const descendantWhere = {
+        memoryId: memory.id,
+        loc: { startsWith: loc + ':' },
+        ...(hard ? {} : { deletedAt: null }),
+      };
+      const descendantCount = await db.node.count({ where: descendantWhere });
+      if (descendantCount > 0 && !recursive) {
+        const mode = hard ? 'hard delete' : 'soft delete';
+        return textResult(
+          `Node "${rawUrn}" has ${descendantCount} descendant(s). ` +
+            `${mode} refuses without recursive: true. ` +
+            `Pass recursive: true to apply the same ${hard ? 'hard' : 'soft'} delete to every descendant.`,
+        );
+      }
+
+      if (hard) {
+        // Hard delete — cascades via Prisma onDelete: Cascade on Edge,
+        // PendingEdge, NodeVersion. UsageEvent.nodeId is SetNull so the
+        // event row survives with a null FK.
+        if (recursive && descendantCount > 0) {
+          await db.node.deleteMany({
+            where: {
+              memoryId: memory.id,
+              OR: [
+                { id: existing.id },
+                { loc: { startsWith: loc + ':' } },
+              ],
+            },
+          });
+        } else {
+          await db.node.delete({ where: { id: existing.id } });
+        }
+      } else {
+        // Soft delete — set deletedAt + deletedBy on the node (and on
+        // every live descendant if recursive). Edges remain in the DB;
+        // the PR-188 include filters on h-find-nodes / h-read-node /
+        // h-list-nodes hide them via the target/source deletedAt gate.
+        const now = new Date();
+        const deletedBy = auth.userId ?? auth.clientId ?? null;
+        if (recursive && descendantCount > 0) {
+          await db.node.updateMany({
+            where: {
+              memoryId: memory.id,
+              deletedAt: null,
+              OR: [
+                { id: existing.id },
+                { loc: { startsWith: loc + ':' } },
+              ],
+            },
+            data: { deletedAt: now, deletedBy },
+          });
+        } else {
+          await db.node.update({
+            where: { id: existing.id },
+            data: { deletedAt: now, deletedBy },
+          });
+        }
+      }
+
+      const totalAffected = (recursive ? descendantCount : 0) + 1;
+      const mode = hard ? 'Hard-deleted' : 'Soft-deleted';
+      const suffix =
+        recursive && descendantCount > 0
+          ? ` (1 node + ${descendantCount} descendant(s) = ${totalAffected} total)`
+          : '';
+      return textResult(`${mode} "${rawUrn}"${suffix}.`);
+    },
+  );
+
   // ── h-move-node ──────────────────────────────────────────────────────────
 
   server.tool(
     'h-move-node',
-    'Move or rename a node, optionally across memories. The node keeps its stable ID so all edge references remain valid. Both URNs MUST be fully qualified (org::memory::loc).',
+    'Move or rename a node, optionally across memories. The node keeps its stable ID so all edge references remain valid. ' +
+      'Collision policy: if a live node already exists at `targetUrn`, the call refuses with a clear error. Pass `overwrite: true` to soft-delete the existing target node first and then move into its place (hard-overwrite is not supported — use h-delete-node with hard: true first if you need that). ' +
+      'Descendants of the source node are NOT moved automatically; they remain at their original locs and become children of an implicit parent at the old prefix. Move them explicitly if needed. ' +
+      'Both URNs MUST be fully qualified (org::memory::loc). On success returns the moved node\'s record: new URN, name, type, tags, edge counts, and immediate-child count.',
     {
       urn: z.string().describe('Current node fully-qualified URN, e.g. "acme.com::mmdata::services:db-helper"'),
       targetUrn: z.string().describe('Destination node fully-qualified URN. Different memory in the target URN performs a cross-memory move.'),
+      overwrite: z.boolean().optional().describe('Default false (refuses on collision). Pass true to soft-delete an existing live target node before moving; the move then proceeds into the freed URN slot.'),
     },
-    async ({ urn: rawFrom, targetUrn: rawTo }) => {
+    async ({ urn: rawFrom, targetUrn: rawTo, overwrite }) => {
       // Spec 022: qualification at the API boundary for both source and target.
       try {
         assertFullyQualifiedUrn(rawFrom, 'node');
@@ -1800,6 +1932,52 @@ export function createMcpServerInstance(
         return textResult('Write access denied for target memory.');
       }
 
+      // #185 F2 — collision policy. The previous behavior was a raw
+      // Prisma unique-constraint violation on `(loc, memoryId)`; agents
+      // saw the stack trace rather than a clean envelope. Pre-check for
+      // a node at the destination and produce a typed error / soft-
+      // delete-and-evict before the move.
+      //
+      // The `(loc, memoryId)` unique constraint is shape-only — it does
+      // NOT filter on deletedAt — so a tombstoned occupant still blocks
+      // a same-URN update. We always re-stamp an evicted occupant to a
+      // unique-suffixed loc to clear the slot, whether the occupant was
+      // (a) live and we're overwriting, or (b) already tombstoned.
+      if (!(toLoc === fromLoc && toMemory.id === fromMemory.id)) {
+        const existingTarget = await db.node.findUnique({
+          where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
+        });
+        if (existingTarget && !existingTarget.deletedAt && !overwrite) {
+          const targetUrn = await nodeUrn(toLoc, toMemory.id);
+          return textResult(
+            `URN_ALREADY_EXISTS: A live node already occupies "${targetUrn}". ` +
+              `Pass overwrite: true to soft-delete it first and move into its place, ` +
+              `or use h-delete-node (hard: true) to compact it before retrying.`,
+          );
+        }
+        if (existingTarget) {
+          // Either (a) live + overwrite=true → tombstone it now, or
+          // (b) already tombstoned → just evict the loc. Either way,
+          // re-stamp the occupant to a unique-suffixed archive loc so
+          // the source can claim the slot. Soft-delete preserves audit
+          // trail; if the caller wanted hard, they can call h-delete-
+          // node (hard: true) separately before retrying the move.
+          const archivedLoc = `${toLoc}__deleted-${existingTarget.id.slice(0, 8)}`;
+          await db.node.update({
+            where: { id: existingTarget.id },
+            data: {
+              loc: archivedLoc,
+              ...(existingTarget.deletedAt
+                ? {}
+                : {
+                    deletedAt: new Date(),
+                    deletedBy: auth.userId ?? auth.clientId ?? null,
+                  }),
+            },
+          });
+        }
+      }
+
       const newName = toLoc.split(':').pop()!;
 
       await db.node.update({
@@ -1807,9 +1985,55 @@ export function createMcpServerInstance(
         data: { loc: toLoc, name: newName, memoryId: toMemory.id },
       });
 
+      // #185 F1 — return the moved node's record so callers don't have
+      // to issue a follow-up h-read-node just to verify name/tags/edge
+      // count survived the move. Includes a direct-child count so a
+      // post-move batch curator can confirm the descendants stayed put
+      // at their original locs.
+      const moved = await db.node.findUnique({
+        where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
+        include: {
+          outgoingEdges: {
+            where: { target: { deletedAt: null } },
+            select: { id: true },
+          },
+          incomingEdges: {
+            where: { source: { deletedAt: null } },
+            select: { id: true },
+          },
+        },
+      });
+
       const fromUrn = await nodeUrn(fromLoc, fromMemory.id);
       const toUrn = await nodeUrn(toLoc, toMemory.id);
-      return textResult(`Moved "${fromUrn}" → "${toUrn}"`);
+
+      if (!moved) {
+        // Shouldn't happen — the update succeeded above — but defend
+        // against the race rather than crash the response shape.
+        return textResult(`Moved "${fromUrn}" → "${toUrn}".`);
+      }
+
+      const childCount = await db.node.count({
+        where: {
+          memoryId: toMemory.id,
+          loc: { startsWith: toLoc + ':' },
+          deletedAt: null,
+        },
+      });
+
+      const lines = [
+        `Moved "${fromUrn}" → "${toUrn}".`,
+        ``,
+        `**${moved.name}**`,
+        toUrn,
+        moved.description ? `> ${moved.description}` : '',
+        `Type: ${moved.nodeType}`,
+        moved.tags.length ? `Tags: ${moved.tags.join(', ')}` : '',
+        `Edges: ${moved.outgoingEdges.length} outgoing, ${moved.incomingEdges.length} incoming.`,
+        `Children: ${childCount} immediate descendant(s) (NOT moved — still under the old prefix).`,
+      ].filter(Boolean);
+
+      return textResult(lines.join('\n'));
     },
   );
 
