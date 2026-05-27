@@ -1,6 +1,10 @@
 # Agent dev guide — hadron-server
 
-Quick reference for AI agents working in this repo. Updated 2026-05-02.
+Call the `h-read-node` MCP tool with `urn: "urn:node:hadronmemory.com::dev::instructions"` to
+load the project introduction (what Hadron is, URN grammar, the platform-specs corpus, core
+architecture). Read it before doing any work in this repo.
+
+Quick reference for AI agents working in this repo. Updated 2026-05-26.
 
 ## Local Postgres setup
 
@@ -92,8 +96,6 @@ two-layer model without further setup:
 
 ## Things to know before editing
 
-- **No `Station*`**: spec 003 dropped this entity. CI grep gate enforces
-  no reintroduction. If you see `station` anywhere in `src/`, that's a bug.
 - **Bidirectional Memory invariant**: `visibility = 'PERSONAL' ⇔ user_id IS NOT NULL`.
   Enforced by `chk_personal_visibility_user`. Set both fields together.
 - **008 Memory app_id invariant**: `class IN ('app','personal') ⇔ app_id IS NOT NULL`.
