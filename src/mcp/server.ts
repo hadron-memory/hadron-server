@@ -62,6 +62,65 @@ function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
 
+/**
+ * Test-only harness — invoke a registered MCP tool by name without
+ * spinning up an HTTP transport. Behavioral tests use this to exercise
+ * the full closure inside `createMcpServerInstance` (including `auth`
+ * binding) while skipping the transport, JSON-RPC framing, and zod
+ * validation that the SDK does in production.
+ *
+ * The SDK's `_registeredTools` is `private` at the type level but is a
+ * plain object at runtime. Coupling is deliberately narrow — if the SDK
+ * renames the field, this single helper breaks loudly, rather than
+ * every behavioral test in the suite.
+ */
+export interface TestableMcpServer {
+  callTool(
+    name: string,
+    args?: unknown,
+  ): Promise<{ content: Array<{ type: string; text: string }> }>;
+  callToolText(name: string, args?: unknown): Promise<string>;
+}
+
+export function createTestableMcpServer(
+  auth: AuthContext,
+  opts?: { sessionId?: string; cachedAppResolution?: AppResolution | null },
+): TestableMcpServer {
+  const server = createMcpServerInstance(
+    auth,
+    () => opts?.sessionId,
+    opts?.cachedAppResolution ?? null,
+  );
+  const tools = (server as unknown as {
+    _registeredTools: Record<
+      string,
+      {
+        handler: (
+          args: unknown,
+          extra: unknown,
+        ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+        enabled: boolean;
+      }
+    >;
+  })._registeredTools;
+
+  return {
+    async callTool(name: string, args: unknown = {}) {
+      const tool = tools[name];
+      if (!tool) throw new Error(`Tool not registered: ${name}`);
+      if (!tool.enabled) throw new Error(`Tool disabled: ${name}`);
+      return tool.handler(args, {});
+    },
+    async callToolText(name: string, args: unknown = {}) {
+      const result = await this.callTool(name, args);
+      return result.content
+        .filter((c) => c.type === 'text')
+        .map((c) => c.text)
+        .join('\n');
+    },
+  };
+}
+
 /** A single resolved edge ready to be written to the database. */
 export type ResolvedEdge = { targetNodeId: string; label: string };
 
@@ -408,7 +467,7 @@ async function resolveMemoryByUrn(
 // MCP Server factory — one McpServer per transport session
 // ---------------------------------------------------------------------------
 
-function createMcpServerInstance(
+export function createMcpServerInstance(
   auth: AuthContext,
   getSessionId: () => string | undefined,
   cachedAppResolution: AppResolution | null,
@@ -827,6 +886,18 @@ function createMcpServerInstance(
             `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
           );
         }
+        // #188 (Gemini): the prior `where.memoryId = mem.id` override
+        // bypassed the access-scoped filter set above — any authenticated
+        // caller could search any memory by URN. Route through
+        // canReadMemory so personal/private memories (FR-016 strict
+        // ownership; ADMIN/OWNER do NOT bypass) and non-admin scope-map
+        // gating both apply. Match h-read-node's "not found" phrasing
+        // so the response doesn't distinguish absence from denial.
+        if (!(await canReadMemory(db, auth, mem.id))) {
+          return textResult(
+            `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
+          );
+        }
         where.memoryId = mem.id;
       }
 
@@ -834,7 +905,19 @@ function createMcpServerInstance(
       if (trimmedParentRel) {
         const resolvedParent = await resolveLocFromUrn(trimmedParentRel, memoryIds);
         where.loc = { startsWith: resolvedParent.loc };
-        if (resolvedParent.memoryId) where.memoryId = resolvedParent.memoryId;
+        // #188 (Gemini): same BOLA shape as the memoryUrn branch.
+        // resolveLocFromUrn already gates the URN-typed path on
+        // accessibleMemoryIds, but ADMIN/OWNER pass accessibleMemoryIds
+        // as null (= "see all"), which still leaks personal/private
+        // memories. canReadMemory enforces both gates uniformly.
+        if (resolvedParent.memoryId) {
+          if (!(await canReadMemory(db, auth, resolvedParent.memoryId))) {
+            return textResult(
+              `Node "${trimmedParentRel}" not found.`,
+            );
+          }
+          where.memoryId = resolvedParent.memoryId;
+        }
       }
 
       const allNodes = await db.node.findMany({
@@ -1132,6 +1215,13 @@ function createMcpServerInstance(
         const resolved = await resolveLocFromUrn(trimmedParentRel, memoryIds);
         prefix = resolved.loc;
         memoryId = resolved.memoryId;
+        // #188 (Gemini): canReadMemory gate matches h-find-nodes.
+        // resolveLocFromUrn's accessibleMemoryIds filter handles non-
+        // admin scope, but ADMIN/OWNER pass null and would otherwise
+        // be able to browse another user's personal/private memory.
+        if (memoryId && !(await canReadMemory(db, auth, memoryId))) {
+          return textResult(`Node "${trimmedParentRel}" not found.`);
+        }
       } else {
         prefix = '';
         // Find memory by URN. #100 #3: route through resolveMemoryByUrn so
@@ -1146,6 +1236,13 @@ function createMcpServerInstance(
           }
           const mem = await resolveMemoryByUrn(memoryUrn);
           if (!mem) {
+            return textResult(
+              `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
+            );
+          }
+          // #188 (Gemini): canReadMemory gate — same shape as the
+          // h-find-nodes memoryUrn branch.
+          if (!(await canReadMemory(db, auth, mem.id))) {
             return textResult(
               `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
             );
