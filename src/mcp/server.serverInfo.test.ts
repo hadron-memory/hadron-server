@@ -34,36 +34,57 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
   syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }),
 }));
 
-describe('getDeploymentInfo (#187 / #190 diagnostics)', () => {
-  const savedBaseUrl = process.env.BASE_URL;
-  const savedPort = process.env.PORT;
+// All env mutations in this file route through vi.stubEnv so a single
+// vi.unstubAllEnvs() restores everything cleanly — direct
+// `process.env.X = ...` / `delete process.env.X` would leak state to
+// later test files sharing the same worker (Vitest reuses workers).
+// PR-191 review (Gemini + Copilot) caught the prior pattern.
 
+describe('getDeploymentInfo (#187 / #190 diagnostics)', () => {
   afterEach(() => {
-    if (savedBaseUrl === undefined) delete process.env.BASE_URL;
-    else process.env.BASE_URL = savedBaseUrl;
-    if (savedPort === undefined) delete process.env.PORT;
-    else process.env.PORT = savedPort;
+    vi.unstubAllEnvs();
   });
 
   it('returns BASE_URL when set', () => {
-    process.env.BASE_URL = 'https://alpha.hadronmemory.com';
+    vi.stubEnv('BASE_URL', 'https://alpha.hadronmemory.com');
     const info = getDeploymentInfo();
     expect(info.baseUrl).toBe('https://alpha.hadronmemory.com');
     expect(info.version).toBe(HADRON_SERVER_VERSION);
   });
 
   it('falls back to http://localhost:${PORT} when BASE_URL is unset (auth/* convention)', () => {
-    delete process.env.BASE_URL;
-    process.env.PORT = '4321';
+    vi.stubEnv('BASE_URL', undefined);
+    vi.stubEnv('PORT', '4321');
     const info = getDeploymentInfo();
     expect(info.baseUrl).toBe('http://localhost:4321');
   });
 
   it('falls back to http://localhost:4000 when both BASE_URL and PORT are unset', () => {
-    delete process.env.BASE_URL;
-    delete process.env.PORT;
+    vi.stubEnv('BASE_URL', undefined);
+    vi.stubEnv('PORT', undefined);
     const info = getDeploymentInfo();
     expect(info.baseUrl).toBe('http://localhost:4000');
+  });
+
+  it('treats BASE_URL="" as effectively-unset and falls back', () => {
+    // Without this guard an empty BASE_URL silently propagates into
+    // `server: ` lines — exactly the wrong-server-but-no-way-to-tell
+    // symptom this surface exists to fix. Gemini review on PR-191
+    // flagged it; pinned here.
+    vi.stubEnv('BASE_URL', '');
+    vi.stubEnv('PORT', '5000');
+    const info = getDeploymentInfo();
+    expect(info.baseUrl).toBe('http://localhost:5000');
+  });
+
+  it('treats BASE_URL="/" as effectively-unset (Vitest globalSetup sentinel)', () => {
+    // Mirrors src/auth/oauth.ts's special-case for the `"/"` sentinel
+    // that Vitest's globalSetup leaves behind in test runs without an
+    // explicit BASE_URL.
+    vi.stubEnv('BASE_URL', '/');
+    vi.stubEnv('PORT', '5001');
+    const info = getDeploymentInfo();
+    expect(info.baseUrl).toBe('http://localhost:5001');
   });
 });
 
@@ -122,8 +143,12 @@ describe('h-set-active-memory — includes deployment info in success message (#
     );
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('success message names the bound server URL and version', async () => {
-    process.env.BASE_URL = 'https://beta.hadronmemory.com';
+    vi.stubEnv('BASE_URL', 'https://beta.hadronmemory.com');
     const auth: AuthContext = {
       userId: admin.id,
       roles: ['ADMIN'],
@@ -137,8 +162,6 @@ describe('h-set-active-memory — includes deployment info in success message (#
     expect(text).toMatch(/Active memory set to:/);
     expect(text).toMatch(/server: https:\/\/beta\.hadronmemory\.com/);
     expect(text).toMatch(new RegExp(`version: ${HADRON_SERVER_VERSION}`));
-
-    delete process.env.BASE_URL;
   });
 });
 
@@ -152,8 +175,12 @@ describe('h-server-info — returns server identity (#187 / #190)', () => {
     });
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('returns server URL and version with no other side data', async () => {
-    process.env.BASE_URL = 'https://gamma.hadronmemory.com';
+    vi.stubEnv('BASE_URL', 'https://gamma.hadronmemory.com');
     const auth: AuthContext = {
       userId: admin.id,
       roles: ['ADMIN'],
@@ -164,15 +191,15 @@ describe('h-server-info — returns server identity (#187 / #190)', () => {
 
     expect(text).toMatch(/^server: https:\/\/gamma\.hadronmemory\.com$/m);
     expect(text).toMatch(new RegExp(`^version: ${HADRON_SERVER_VERSION}$`, 'm'));
-
-    delete process.env.BASE_URL;
   });
 
   it('does not leak DATABASE_URL or any credential-bearing value', async () => {
     // If a future contributor adds `db: ${process.env.DATABASE_URL}` or
     // similar to the response, this regression test catches it.
-    process.env.DATABASE_URL =
-      'postgresql://my-secret-user:my-secret-pass@my-host:5432/my-db';
+    vi.stubEnv(
+      'DATABASE_URL',
+      'postgresql://my-secret-user:my-secret-pass@my-host:5432/my-db',
+    );
 
     const auth: AuthContext = {
       userId: admin.id,

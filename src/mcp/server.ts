@@ -63,13 +63,23 @@ function textResult(text: string) {
 }
 
 /**
- * Hadron MCP server version — single source of truth. Used both as the
- * `version` field in the McpServer constructor (the MCP initialize
- * response's server identity) and in the deployment-info diagnostics
- * surface (h-server-info / h-set-active-memory success message).
+ * Hadron MCP server version — single source of truth for the MCP-
+ * protocol-level server identity. Used both as the `version` field in
+ * the McpServer constructor (the MCP initialize response's server
+ * identity) and in the deployment-info diagnostics surface (h-server-
+ * info / h-set-active-memory success message).
  *
- * Bump in lockstep with package.json's version when the MCP surface
- * changes in a way callers should be able to detect.
+ * Bump when the MCP tool surface changes in a way callers should be
+ * able to detect: new tool added, tool removed or renamed, response-
+ * shape break, semantics change that would surprise a previously-
+ * working caller.
+ *
+ * Intentionally NOT tied to `package.json`'s version — that tracks the
+ * repo's release identity (deploy / npm-publish cadence), and the two
+ * may legitimately diverge. The MCP-protocol-level identity is its
+ * own contract: callers care about "what tools and shapes does this
+ * server expose?", not "what release of the hadron-server repo am I
+ * talking to?"
  */
 export const HADRON_SERVER_VERSION = '0.3.0';
 
@@ -97,12 +107,19 @@ export interface DeploymentInfo {
 }
 
 export function getDeploymentInfo(): DeploymentInfo {
-  return {
-    baseUrl:
-      process.env.BASE_URL ??
-      `http://localhost:${process.env.PORT ?? 4000}`,
-    version: HADRON_SERVER_VERSION,
-  };
+  // Treat empty string and `"/"` as effectively-unset, matching the
+  // pattern in src/auth/oauth.ts which special-cases `BASE_URL === '/'`
+  // (a known sentinel left by Vitest's globalSetup when no explicit
+  // value is configured). Without this guard a single empty/`"/"`
+  // value silently propagates into `server: ` lines and h-server-info
+  // output — exactly the wrong-server-but-no-way-to-tell symptom this
+  // surface exists to fix. Gemini review caught this on PR-191.
+  const raw = process.env.BASE_URL;
+  const baseUrl =
+    raw && raw !== '/'
+      ? raw
+      : `http://localhost:${process.env.PORT ?? 4000}`;
+  return { baseUrl, version: HADRON_SERVER_VERSION };
 }
 
 /**
