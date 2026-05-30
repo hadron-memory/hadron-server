@@ -733,6 +733,16 @@ model Node {
   loc         String
   isLink      Boolean   @default(false) @map("is_link")
   description String?
+  /// Paragraph-length summary of this node — used as a richer preview in
+  /// `h-find-nodes` results, as an opt-in alternative content surface on
+  /// `h-read-node` via `contentScope`, and as the substrate for the
+  /// upcoming RAG / vector-retrieval layer (spec 031). Cap is 2000 chars,
+  /// enforced at the API boundary (not as a DB CHECK). When `content` is
+  /// null/empty AND `abstract` is non-null, `h-read-node` with default
+  /// `contentScope` substitutes the abstract for the body slot and emits
+  /// a `Source: abstract-fallback` line in the meta block — see spec 031
+  /// FR-005 + edge cases.
+  abstract    String?
   /// The topic content (topic.md full text).
   content     String?
   /// SHA256(yaml+md)[0:8] for change detection.
