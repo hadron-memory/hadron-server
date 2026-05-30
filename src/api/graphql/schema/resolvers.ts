@@ -2720,10 +2720,17 @@ export const resolvers = {
         if (!key) {
           throw new Error('SESSION_EXPIRED: memory is encrypted but no active session key is available');
         }
+        // Spec 031 — `abstract` joins the encrypted-fields set; rationale
+        // in nodeCrypto.ts EncryptedNodeFields doc-comment.
         const enc = encryptNodeFieldsWithKey(
-          { content: nodeFields.content ?? null, data: nodeFields.data ?? null },
+          {
+            abstract: (nodeFields as { abstract?: string | null }).abstract ?? null,
+            content: nodeFields.content ?? null,
+            data: nodeFields.data ?? null,
+          },
           key,
         );
+        (nodeFields as Record<string, unknown>).abstract = enc.abstract ?? undefined;
         (nodeFields as Record<string, unknown>).content = enc.content ?? undefined;
         (nodeFields as Record<string, unknown>).data = enc.data ?? undefined;
       }

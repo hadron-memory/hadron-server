@@ -1179,10 +1179,13 @@ export function createMcpServerInstance(
       // transport boundary, but defensive validation here catches direct-
       // handler callers (e.g. createTestableMcpServer's _registeredTools
       // shortcut, which bypasses the transport's zod parsing) and any
-      // future internal caller. Throws the typed `InvalidContentScopeError`
-      // so the class is the single source of truth for both the message
-      // and any future GraphQL `extensions.code` mapping; the MCP boundary
-      // catches and returns its `message` as a tool-result string.
+      // future internal caller. Constructs the typed
+      // `InvalidContentScopeError` and returns its `message` as a tool-
+      // result string — the class is the single source of truth for
+      // both the message and any future GraphQL `extensions.code` mapping
+      // (the MCP convention is "return error text," not "throw" — the
+      // GraphQL surface, when it adds contentScope, would throw + the
+      // formatter would map name → extensions.code).
       if (
         contentScope !== undefined &&
         contentScope !== 'content' &&
@@ -1601,7 +1604,7 @@ export function createMcpServerInstance(
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('Short description'),
-      abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Always surfaced in h-find-nodes previews; opt-in on h-read-node via contentScope. Empty + whitespace-only values normalize to null. Spec 031.'),
+      abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on h-read-node via the contentScope parameter. (h-find-nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
       seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
       tags: z.array(z.string()).optional().describe('Tags'),
@@ -1787,7 +1790,7 @@ export function createMcpServerInstance(
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('New short description'),
-      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Spec 031.'),
+      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on h-read-node via contentScope; h-find-nodes preview surfacing ships in spec 031 US2. Spec 031.'),
       content: z.string().optional().describe('New markdown content'),
       seq: z.number().optional().describe('New sort order among siblings'),
       tags: z.array(z.string()).optional().describe('Replace tags'),

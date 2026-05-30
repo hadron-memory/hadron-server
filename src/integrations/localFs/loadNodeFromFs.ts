@@ -42,12 +42,22 @@ interface NodeYaml {
  * untrimmed so intentional surrounding whitespace on real paragraphs is
  * lossless.
  *
- * Defensive type coercion: YAML's `parse` is loose about types — a
- * `abstract: 42` line yields a number, not a string. Coerce to string
- * first so `.trim()` doesn't blow up at runtime on malformed input.
+ * Defensive type handling: the `yaml` package's `parse` is loose about
+ * types. Scalar non-strings (number, boolean) get coerced via `String()`
+ * so `.trim()` doesn't blow up. Objects and arrays — which would yield
+ * "[object Object]" / "1,2,3" via `String()` and silently persist as the
+ * node's abstract — are rejected as `null` instead. PR-201 round-2
+ * surfaced the object/array gap.
  */
 function normalizeImportedAbstract(raw: unknown): string | null {
   if (raw == null) return null;
+  // Objects and arrays would yield "[object Object]" / a comma-joined
+  // string via String() — silently persisting garbage. Treat them as
+  // "no usable abstract" (same as null/empty). A future spec that
+  // formally rejects malformed input with a typed error could wrap
+  // this in InvalidAbstractTypeError; today's choice matches the
+  // empty-string handling and keeps the bad-input failure mode quiet.
+  if (typeof raw === 'object') return null;
   const str = String(raw);
   if (str.length > 2000) {
     throw new NodeAbstractTooLongError(str.length);

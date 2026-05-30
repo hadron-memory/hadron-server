@@ -204,6 +204,50 @@ describe('upsertNode with encryption', () => {
     expect(raw?.data).toMatchObject({ __enc: expect.any(String) });
   });
 
+  it('spec 031 — abstract is encrypted at rest and returned plaintext to the caller', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const session = await resolvers.Mutation.startAgentSession(
+      {},
+      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      appCtx(secretApp.id),
+    );
+    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+
+    const ABSTRACT_PLAINTEXT =
+      'Paragraph-length summary that would leak ~2000 chars of content if stored plaintext.';
+
+    const upserted = await resolvers.Mutation.upsertNode(
+      {},
+      {
+        input: {
+          memoryId: session.memoryId!,
+          loc: 'sensitive',
+          name: 'sensitive',
+          abstract: ABSTRACT_PLAINTEXT,
+          content: 'Body — also encrypted under the same key.',
+        },
+      },
+      sessionCtx,
+    );
+    // The returned node is plaintext for both fields.
+    expect(upserted.abstract).toBe(ABSTRACT_PLAINTEXT);
+    expect(upserted.content).toBe('Body — also encrypted under the same key.');
+
+    // The DB row carries ciphertext for both, with the `enc:v1:` marker.
+    const raw = await db.node.findUnique({ where: { id: upserted.id } });
+    expect(raw?.abstract).not.toBe(ABSTRACT_PLAINTEXT);
+    expect(raw?.abstract?.startsWith('enc:v1:')).toBe(true);
+    expect(raw?.content?.startsWith('enc:v1:')).toBe(true);
+
+    // Round-trip via a read through nodeById returns plaintext.
+    const read = await resolvers.Query.nodeById(
+      {},
+      { id: upserted.id },
+      sessionCtx,
+    );
+    expect(read?.abstract).toBe(ABSTRACT_PLAINTEXT);
+  });
+
   it('throws when writing to an encrypted memory without an active session', async () => {
     const key = generateDataKey().raw.toString('base64');
     const session = await resolvers.Mutation.startAgentSession(

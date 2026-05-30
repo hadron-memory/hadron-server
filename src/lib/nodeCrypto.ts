@@ -15,8 +15,17 @@ import { sessionKeyCache } from './sessionKeyCache.js';
  * Fields on a Node that are encrypted at rest when the memory is encrypted.
  * Everything else (name, loc, description, tags, nodeType, seq, etc.) stays
  * plaintext so queries, tree displays, and structural ops keep working.
+ *
+ * Spec 031 — `abstract` joins this set. Rationale: the abstract is a
+ * paragraph-length summary of `content`, so leaking it plaintext on an
+ * encrypted memory would defeat the encryption guarantee for the most
+ * informative ~2000 chars per node (the same data the RAG follow-up will
+ * vectorize). Trade-off: h-find-nodes previews and any future RAG/preview
+ * surface on encrypted memories require an active session key, the same
+ * way `content` reads already do. Documented in PR-201 review round-2.
  */
 export interface EncryptedNodeFields {
+  abstract: string | null;
   content: string | null;
   data: unknown | null;
 }
@@ -59,6 +68,12 @@ function applyEncryption<T extends Partial<EncryptedNodeFields>>(
   key: EncryptionKey,
 ): T {
   const out: T = { ...payload };
+  // Spec 031 — abstract is encrypted under the same envelope as content.
+  if (payload.abstract !== undefined && payload.abstract !== null) {
+    if (!isCiphertext(payload.abstract)) {
+      out.abstract = markCiphertext(encryptString(payload.abstract, key));
+    }
+  }
   if (payload.content !== undefined && payload.content !== null) {
     if (!isCiphertext(payload.content)) {
       out.content = markCiphertext(encryptString(payload.content, key));
@@ -107,6 +122,10 @@ function applyDecryption<T extends Partial<EncryptedNodeFields>>(
   node: T,
   key: EncryptionKey,
 ): T {
+  // Spec 031 — abstract decrypts under the same envelope as content.
+  if (node.abstract != null && isCiphertext(node.abstract)) {
+    node.abstract = decryptString(stripCiphertextPrefix(node.abstract), key);
+  }
   if (node.content != null && isCiphertext(node.content)) {
     node.content = decryptString(stripCiphertextPrefix(node.content), key);
   }
