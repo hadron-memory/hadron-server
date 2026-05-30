@@ -77,6 +77,17 @@ describe('getDeploymentInfo (#187 / #190 diagnostics)', () => {
     expect(info.baseUrl).toBe('http://localhost:5000');
   });
 
+  it('treats PORT="" as effectively-unset and falls back to 4000', () => {
+    // Parallel to the BASE_URL="" guard above. PORT was previously
+    // resolved with `??` which only catches null/undefined and lets
+    // empty-string slip through, producing `http://localhost:`. PR-194
+    // review caught it; pinned here.
+    vi.stubEnv('BASE_URL', undefined);
+    vi.stubEnv('PORT', '');
+    const info = getDeploymentInfo();
+    expect(info.baseUrl).toBe('http://localhost:4000');
+  });
+
   it('treats BASE_URL="/" as effectively-unset (Vitest globalSetup sentinel)', () => {
     // Mirrors src/auth/oauth.ts's special-case for the `"/"` sentinel
     // that Vitest's globalSetup leaves behind in test runs without an
