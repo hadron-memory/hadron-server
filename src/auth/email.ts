@@ -28,8 +28,13 @@ export async function sendMagicLink(
     data: { id: generateId(), email: email.toLowerCase(), token, expiresAt },
   });
 
+  // `||` (not `??`) so empty-string BASE_URL / PORT — e.g. shell `BASE_URL= node ...`
+  // or `vi.stubEnv('PORT', '')` — fall back instead of producing `http://localhost:`.
+  // Symmetric with src/mcp/server.ts:getDeploymentInfo and src/auth/github.ts.
+  // Centralization across the four `BASE_URL` consumers is a known follow-up
+  // (see src/auth/oauth.ts docstring + CLAUDE.md BASE_URL row).
   const baseUrl =
-    process.env.BASE_URL ?? `http://localhost:${process.env.PORT ?? 4000}`;
+    process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
   let verifyUrl = `${baseUrl}/auth/email/verify?token=${token}`;
   if (redirect) verifyUrl += `&redirect=${encodeURIComponent(redirect)}`;
 

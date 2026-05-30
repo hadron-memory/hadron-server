@@ -225,12 +225,15 @@ describe('h-server-info — returns server identity (#187 / #190)', () => {
     expect(text).not.toContain('postgresql://');
   });
 
-  it('works for an unauthenticated-shape caller (server identity is not tenant data)', async () => {
-    // h-server-info should be answerable even when auth is minimal —
-    // it returns server identity, not per-tenant data. We pin this
-    // explicitly so a future "require active App" decoration doesn't
-    // silently break the use case (transcript reader inspecting a
-    // failed-auth session).
+  it('pins absence of tool-level auth gating (transport gates at /mcp; per-tool decoration is intentionally absent)', async () => {
+    // NOT a claim that anonymous access works end-to-end — the transport
+    // (handleMcpRequest at /mcp) rejects requests without an AuthContext
+    // with 401 + RFC 9728 PRM. This test bypasses the transport on
+    // purpose via createTestableMcpServer's _registeredTools shortcut,
+    // and pins that the tool body itself has no auth decoration. A
+    // future "require active App" check added here would silently break
+    // the transcript-reader use case (inspecting a failed-auth session)
+    // even after transport auth succeeds.
     const auth: AuthContext = {
       roles: [],
       clientId: 'anonymous',
