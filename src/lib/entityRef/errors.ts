@@ -69,6 +69,48 @@ export class NodeLocConflictError extends Error {
   }
 }
 
+/**
+ * Surfaced by `h-add-node`, `h-update-node`, `upsertNode` (GraphQL), and
+ * the node.yaml importer when an `abstract` argument exceeds the spec-031
+ * 2000-character cap. The cap is API-boundary validation (not a DB CHECK)
+ * per data-model.md V1 / research D2 — "caps are validation, not
+ * invariants." Carries the offending length so the user-facing message
+ * can be actionable.
+ *
+ * GraphQL `extensions.code: 'NodeAbstractTooLongError'` per constitution
+ * S2 (typed-error boundary).
+ */
+export class NodeAbstractTooLongError extends Error {
+  public readonly max = 2000;
+  constructor(public readonly length: number) {
+    super(
+      `Abstract exceeds 2000-character cap (got ${length} chars). ` +
+        `Use a shorter summary or expand 'content' for the long form.`,
+    );
+    this.name = 'NodeAbstractTooLongError';
+  }
+}
+
+/**
+ * Surfaced by `h-read-node` when `contentScope` is outside the allowed
+ * enum (`'content' | 'abstract' | 'all'`). Zod's `.enum()` produces the
+ * validation error at the MCP boundary; this class exists for the
+ * GraphQL surface and for any internal caller that re-validates.
+ *
+ * GraphQL `extensions.code: 'InvalidContentScopeError'` per constitution
+ * S2.
+ */
+export class InvalidContentScopeError extends Error {
+  public readonly allowed = ['content', 'abstract', 'all'] as const;
+  constructor(public readonly value: string) {
+    super(
+      `Invalid contentScope: ${JSON.stringify(value)}. ` +
+        `Allowed values: 'content' | 'abstract' | 'all'.`,
+    );
+    this.name = 'InvalidContentScopeError';
+  }
+}
+
 // Re-export from sibling modules so callers can import error classes
 // from a single place.
 export { InvalidLocError } from '../validateLoc.js';

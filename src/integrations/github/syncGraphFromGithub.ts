@@ -92,6 +92,10 @@ export const syncGraphFromGithub = async (
           alias: node.alias ?? null,
           isLink: node.isLink ?? false,
           description: node.description ?? null,
+          // Spec 031 — abstract round-trips through the importer. Already
+          // normalized (trim-then-check) by loadNodeFromFs before reaching
+          // here; just pass through.
+          abstract: node.abstract ?? null,
           content: node.content ?? null,
           contentHash: node.contentHash ?? null,
           tags: serializeTags(node.tags ?? []) as string[],

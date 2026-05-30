@@ -16,6 +16,8 @@ export interface NodeForGit {
   name: string;
   alias?: string | null;
   description?: string | null;
+  /** Paragraph-length summary. Spec 031. Written to YAML frontmatter as `abstract`. */
+  abstract?: string | null;
   content?: string | null;
   tags: string[];
   outgoingEdges: Array<{ target: { id: string }; label: string | null }>;
@@ -140,6 +142,11 @@ export async function writeNodeToGit(
   const frontmatter: Record<string, unknown> = { name: node.name, id: node.id };
   if (node.alias) frontmatter.alias = node.alias;
   if (node.description) frontmatter.description = node.description;
+  // Spec 031 — abstract round-trips through YAML frontmatter. Omitted
+  // when null so absent-in-YAML stays equivalent to NULL in the DB (and
+  // a node that never had an abstract has no `abstract:` line cluttering
+  // its frontmatter).
+  if (node.abstract) frontmatter.abstract = node.abstract;
   if (node.tags.length > 0) frontmatter.tags = node.tags;
 
   // Preserve existing frontmatter fields we don't manage (urn, author, etc.)

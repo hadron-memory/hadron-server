@@ -1465,6 +1465,11 @@ model NodeVersion {
   name        String
   alias       String?
   description String?
+  /// Paragraph summary at the time of the snapshot. Spec 031.
+  /// Added in the US1 implementation when the live `Node.abstract`
+  /// column landed — version history would otherwise silently drop
+  /// abstract edits.
+  abstract    String?
   content     String?
   tags        String[]
   /// Free-form author label (typically a User.id, but may be an

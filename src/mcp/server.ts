@@ -48,7 +48,7 @@ import {
 } from './access-control.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
-import { NodeNotFoundError } from '../lib/entityRef/errors.js';
+import { NodeNotFoundError, NodeAbstractTooLongError } from '../lib/entityRef/errors.js';
 import { isId } from '../lib/entityRef/shape.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { SessionType } from '../generated/prisma/index.js';
@@ -1092,9 +1092,15 @@ export function createMcpServerInstance(
 
   server.tool(
     'h-read-node',
-    'Read a node by its fully-qualified URN. The URN MUST be fully qualified (org::memory::loc).',
-    { urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::architecture" or "urn:node:acme.com::mmdata::architecture"') },
-    async ({ urn: rawUrn }) => {
+    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (org::memory::loc). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. Spec 031.",
+    {
+      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::architecture" or "urn:node:acme.com::mmdata::architecture"'),
+      contentScope: z
+        .enum(['content', 'abstract', 'all'])
+        .optional()
+        .describe("Selects what the response includes. 'content' (default): meta block + body, with abstract substituted into the body slot when content is null/empty (Source: abstract-fallback line appears). 'abstract': meta block + abstract, no body. 'all': meta block + abstract + body."),
+    },
+    async ({ urn: rawUrn, contentScope }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -1158,6 +1164,33 @@ export function createMcpServerInstance(
         const sourceUrn = await nodeUrn(e.source.loc, (e.source as any).memoryId);
         return `  - ${sourceUrn} (${e.source.name}) — ${e.label}`;
       }));
+      // Spec 031 — contentScope-driven response shape. Default 'content'
+      // preserves pre-spec output byte-for-byte when content is non-empty
+      // (or when content AND abstract are both null). Content-fallback fires
+      // ONLY under 'content' scope when content is null/empty AND abstract
+      // is non-null — and ONLY then does the meta block carry a
+      // `Source: abstract-fallback` line.
+      //
+      // Defensive enum check: zod validates the same set at the MCP
+      // transport boundary, but defensive validation here catches direct-
+      // handler callers (testable harness, internal callers) that bypass
+      // the schema.
+      if (
+        contentScope !== undefined &&
+        contentScope !== 'content' &&
+        contentScope !== 'abstract' &&
+        contentScope !== 'all'
+      ) {
+        return textResult(
+          `Invalid contentScope: ${JSON.stringify(contentScope)}. ` +
+            `Allowed values: 'content' | 'abstract' | 'all'.`,
+        );
+      }
+      const scope = contentScope ?? 'content';
+      const hasContent = !!(node.content && node.content.length > 0);
+      const hasAbstract = !!(node.abstract && node.abstract.length > 0);
+      const isFallback = scope === 'content' && !hasContent && hasAbstract;
+
       // #186: surface nodeType so callers can tell `parent` from `info`
       // (portal rendering + tool dispatch both branch on this; without it
       // there's no way to detect a node mis-typed at creation time).
@@ -1166,6 +1199,7 @@ export function createMcpServerInstance(
         urn,
         node.description ? `> ${node.description}` : '',
         `Type: ${node.nodeType}`,
+        isFallback ? 'Source: abstract-fallback' : '',
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',
         node.properties ? `Properties: ${JSON.stringify(node.properties)}` : '',
@@ -1176,7 +1210,31 @@ export function createMcpServerInstance(
         .filter(Boolean)
         .join('\n');
 
-      return textResult(meta + '\n\n---\n\n' + (node.content || ''));
+      // Render the response per the 12-cell matrix in
+      // specs/031-node-abstract-field/contracts/h-read-node.md.
+      if (scope === 'abstract') {
+        // meta + abstract (no `---`, no body). Meta alone when abstract null.
+        return hasAbstract
+          ? textResult(`${meta}\n\n${node.abstract}`)
+          : textResult(meta);
+      }
+      if (scope === 'all') {
+        // Sections collapse cleanly when components are missing:
+        //   both present  → meta + abstract + --- + content
+        //   only abstract → meta + abstract  (no `---`)
+        //   only content  → meta + --- + content
+        //   both null     → meta alone
+        const parts: string[] = [meta];
+        if (hasAbstract) parts.push(node.abstract!);
+        if (hasContent) parts.push(`---\n\n${node.content}`);
+        return textResult(parts.join('\n\n'));
+      }
+      // scope === 'content' (default)
+      // Body slot is filled by content when present, else by abstract
+      // (fallback rule), else empty string (byte-identical pre-spec when
+      // content is null AND abstract is null).
+      const body = hasContent ? node.content! : isFallback ? node.abstract! : '';
+      return textResult(meta + '\n\n---\n\n' + body);
     },
   );
 
@@ -1508,6 +1566,25 @@ export function createMcpServerInstance(
     },
   );
 
+  // Spec 031 — normalize an inbound `abstract` value before the DB write.
+  // Length cap on the raw input; then trim-then-check (empty AND
+  // whitespace-only collapse to null; non-empty trimmed values persist
+  // untrimmed so intentional surrounding whitespace on real paragraphs
+  // is lossless). `undefined` (key absent on h-update-node) is passed
+  // through unchanged so the caller can implement "omitted = preserve"
+  // by spreading conditionally. The throw is the typed-error class —
+  // the MCP transport catches and surfaces the error message to the
+  // caller as a tool-result error.
+  function normalizeAbstract(raw: string | null | undefined): string | null | undefined {
+    if (raw === undefined) return undefined;
+    if (raw === null) return null;
+    if (raw.length > 2000) {
+      throw new NodeAbstractTooLongError(raw.length);
+    }
+    if (raw.trim() === '') return null;
+    return raw;
+  }
+
   // ── h-add-node ───────────────────────────────────────────────────────────
 
   server.tool(
@@ -1518,6 +1595,7 @@ export function createMcpServerInstance(
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('Short description'),
+      abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Always surfaced in h-find-nodes previews; opt-in on h-read-node via contentScope. Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
       seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
       tags: z.array(z.string()).optional().describe('Tags'),
@@ -1530,7 +1608,7 @@ export function createMcpServerInstance(
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
-    async ({ urn: rawUrn, name, nodeType, description, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
       // Spec 022: enforce qualification at the API boundary. Relative-form
       // URNs (e.g., `review:sort-imports` without org+memory) reject here
       // before any DB lookup runs.
@@ -1591,6 +1669,15 @@ export function createMcpServerInstance(
 
       const existing = await db.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
 
+      // Spec 031 — length-cap + trim-then-check the abstract before write.
+      let normalizedAbstract: string | null;
+      try {
+        normalizedAbstract = normalizeAbstract(abstract) ?? null;
+      } catch (e) {
+        if (e instanceof NodeAbstractTooLongError) return textResult(e.message);
+        throw e;
+      }
+
       const upserted = await db.node.upsert({
         where: { loc_memoryId: { loc, memoryId } },
         create: {
@@ -1600,6 +1687,7 @@ export function createMcpServerInstance(
           name,
           nodeType: nodeType ?? 'info',
           description: description ?? null,
+          abstract: normalizedAbstract,
           content: content ?? null,
           seq: seq ?? null,
           tags: tags ?? [],
@@ -1613,6 +1701,7 @@ export function createMcpServerInstance(
           name,
           ...(nodeType ? { nodeType } : {}),
           description: description ?? null,
+          abstract: normalizedAbstract,
           content: content ?? null,
           seq: seq ?? null,
           tags: tags ?? [],
@@ -1668,6 +1757,7 @@ export function createMcpServerInstance(
           name: nodeForGit.name,
           alias: nodeForGit.alias,
           description: nodeForGit.description,
+          abstract: nodeForGit.abstract,
           content: nodeForGit.content,
           tags: nodeForGit.tags as string[],
           outgoingEdges: nodeForGit.outgoingEdges ?? [],
@@ -1691,6 +1781,7 @@ export function createMcpServerInstance(
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('New short description'),
+      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Spec 031.'),
       content: z.string().optional().describe('New markdown content'),
       seq: z.number().optional().describe('New sort order among siblings'),
       tags: z.array(z.string()).optional().describe('Replace tags'),
@@ -1704,7 +1795,7 @@ export function createMcpServerInstance(
       })).optional().describe('Replace outgoing edges'),
       reason: z.string().optional().describe('Why this change was made (stored in version history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, description, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, name, nodeType, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -1757,6 +1848,17 @@ export function createMcpServerInstance(
         resolvedEdges = r.resolved;
       }
 
+      // Spec 031 — length-cap + trim-then-check the abstract BEFORE the
+      // version snapshot, so an over-cap abstract aborts cleanly without
+      // mutating either the row or the version history.
+      let normalizedAbstract: string | null | undefined;
+      try {
+        normalizedAbstract = normalizeAbstract(abstract);
+      } catch (e) {
+        if (e instanceof NodeAbstractTooLongError) return textResult(e.message);
+        throw e;
+      }
+
       // Snapshot current state for version history
       await db.nodeVersion.create({
         data: {
@@ -1766,6 +1868,7 @@ export function createMcpServerInstance(
           name: existing.name,
           alias: existing.alias,
           description: existing.description,
+          abstract: existing.abstract,
           content: existing.content,
           tags: existing.tags as string[],
           editedBy: reason ?? (auth.clientId ?? null),
@@ -1778,6 +1881,7 @@ export function createMcpServerInstance(
       if (name !== undefined) data.name = name;
       if (nodeType !== undefined) data.nodeType = nodeType;
       if (description !== undefined) data.description = description;
+      if (normalizedAbstract !== undefined) data.abstract = normalizedAbstract;
       if (content !== undefined) data.content = content;
       if (seq !== undefined) data.seq = seq;
       if (tags !== undefined) data.tags = tags;
@@ -1823,6 +1927,7 @@ export function createMcpServerInstance(
           name: updatedNode.name,
           alias: updatedNode.alias,
           description: updatedNode.description,
+          abstract: updatedNode.abstract,
           content: updatedNode.content,
           tags: updatedNode.tags as string[],
           outgoingEdges: updatedNode.outgoingEdges ?? [],
@@ -2457,8 +2562,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             issues.push(`[broken-ref] ${nUrn} → id:${edge.targetId} (${edge.label})`);
           }
         }
-        if (!node.description && !node.content) {
-          issues.push(`[sparse] ${nUrn} — no description and no content`);
+        // Spec 031 FR-011 — abstract counts as legitimate content for the
+        // validator's "this node has zero text" intent. A node carrying
+        // only an abstract (e.g., a nodeType='abstract' archive whose
+        // source is gone) is NOT sparse.
+        if (!node.description && !node.content && !node.abstract) {
+          issues.push(`[sparse] ${nUrn} — no description, content, or abstract`);
         }
       }
 

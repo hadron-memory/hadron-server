@@ -73,7 +73,7 @@ import {
   composeInstalledAgentUrn,
 } from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
-import { NodeLocConflictError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { NodeLocConflictError, NodeNotFoundError, NodeAbstractTooLongError } from '../../../lib/entityRef/errors.js';
 import { compileTemplate } from '../../../lib/template.js';
 import {
   validateEdgeCondition,
@@ -2610,6 +2610,25 @@ export const resolvers = {
         throw e;
       }
 
+      // Spec 031 — abstract validation + normalization. Length-cap check on
+      // the raw input first; then trim-then-check normalization (empty +
+      // whitespace-only collapse to null; non-empty trimmed values persist
+      // untrimmed so intentional surrounding whitespace on real paragraphs
+      // is lossless). Applied at the resolver layer so this surface
+      // matches the MCP h-add-node / h-update-node semantics. `undefined`
+      // (key absent) means "preserve existing" and bypasses both checks.
+      if (input.abstract !== undefined && input.abstract !== null) {
+        if (input.abstract.length > 2000) {
+          const err = new NodeAbstractTooLongError(input.abstract.length);
+          throw new GraphQLError(err.message, {
+            extensions: { code: err.name, length: err.length, max: err.max },
+          });
+        }
+        if (input.abstract.trim() === '') {
+          input.abstract = null;
+        }
+      }
+
       // Reject saves whose extraction-spec arrays would write into the
       // reserved exception namespace (spec 001-edge-condition-spec FR-013).
       throwOnReservedExtractionSpec(input.data);
@@ -2667,6 +2686,7 @@ export const resolvers = {
             name: existing.name,
             alias: existing.alias,
             description: existing.description,
+            abstract: existing.abstract,
             content: existing.content,
             tags: existing.tags as string[],
             editedBy: ctx.clientId ?? ctx.userId ?? null,
@@ -2756,6 +2776,7 @@ export const resolvers = {
         name: finalNode.name,
         alias: finalNode.alias,
         description: finalNode.description,
+        abstract: finalNode.abstract,
         content: finalNode.content,
         tags: deserializeTags(finalNode.tags) as string[],
         outgoingEdges: finalNode.outgoingEdges ?? [],
@@ -6996,6 +7017,8 @@ interface NodeInput {
   name: string;
   alias?: string;
   description?: string;
+  /** Paragraph-length summary. Spec 031. Optional; `null` clears, omitted preserves. */
+  abstract?: string | null;
   content?: string;
   data?: Record<string, unknown>;
   seq?: number;

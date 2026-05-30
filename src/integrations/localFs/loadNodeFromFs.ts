@@ -9,12 +9,31 @@ interface NodeYaml {
   urn?: string;
   type?: string;
   description?: string;
+  /** Paragraph-length summary. Spec 031. Distinct from `description`. */
+  abstract?: string;
+  /**
+   * Legacy alias historically read into `description` when no
+   * `description` key existed. Predates the spec-031 `abstract` field
+   * and remains for back-compat. New writers use `abstract` for paragraph
+   * summaries and `description` for one-line headlines.
+   */
   summary?: string;
   tags?: string[];
   nodes?: Array<{ id: string; rel: string; loc?: string }>;
   alias?: string;
   author?: string;
   contentHash?: string;
+}
+
+/**
+ * Trim-then-check normalization for the imported abstract (FR-009
+ * extended). Mirrors the resolver + MCP write paths so import → export
+ * → re-import is byte-identical for the persisted value.
+ */
+function normalizeImportedAbstract(raw: string | undefined): string | null {
+  if (raw == null) return null;
+  if (raw.trim() === '') return null;
+  return raw;
 }
 
 interface EdgeEntry {
@@ -95,6 +114,7 @@ async function loadFrontmatterNode(
       isLink: meta.type === 'link',
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
+      abstract: normalizeImportedAbstract(meta.abstract),
       content,
       contentHash: meta.contentHash ?? null,
       tags: meta.tags ?? [],
@@ -131,6 +151,7 @@ async function loadLegacyNode(
       isLink: meta.type === 'link',
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
+      abstract: normalizeImportedAbstract(meta.abstract),
       content: content?.trim() ?? null,
       contentHash: meta.contentHash ?? null,
       tags: meta.tags ?? [],

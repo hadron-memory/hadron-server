@@ -6,6 +6,8 @@ export interface Node {
   name: string;
   alias: string | null;
   description: string | null;
+  /** Paragraph-length summary. Spec 031. */
+  abstract: string | null;
   content: string | null;
   contentHash: string | null;
   tokens: number | null;
