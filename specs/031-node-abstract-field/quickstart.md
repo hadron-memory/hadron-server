@@ -104,20 +104,29 @@ because there is none). The missing `---` separator is the structural signal tha
 real body. NO `Source:` line — fallback semantics only apply under `'content'` scope, and this is
 `'all'` scope.
 
-### Step 8: Find the node by a term that's only in the abstract
+### Step 8: ~~Find the node by a term that's only in the abstract~~ — DEFERRED to RAG follow-up
+
+US3 / FR-007 (search haystack extension to include abstract) was **deferred during the PR-196
+review**. Search acceleration over abstract content is the natural job of the upcoming RAG /
+vector-retrieval layer; this spec does not extend the substring haystack. To verify the deferral:
 
 ```
 h-find-nodes
-  query: novel
+  query: <a unique term that appears ONLY in the abstract — e.g. "novel" if used above>
 ```
 
-**Expected**: the archive node from Step 5 appears in the results. Pre-spec, this query would
-return zero hits (the word "novel" only appears in the abstract). Post-spec, the search haystack
-includes abstract content (FR-007) and recovers the hit.
+**Expected**: zero hits. The abstract is NOT searched against — same as pre-spec. Skip ahead to
+Step 9 (preview-rendering verification, which IS in scope).
 
-### Step 9: Verify preview includes the abstract
+### Step 9: Verify preview includes the abstract for a node found by name
 
-The result list for the query above renders each hit with:
+```
+h-find-nodes
+  query: archive            # matches the Step-5 archive node by its name
+```
+
+**Expected**: the archive node appears in results. Its preview renders with the description as
+the headline AND the abstract as a paragraph block:
 
 ```
 <urn> — <name>
@@ -125,21 +134,21 @@ The result list for the query above renders each hit with:
   | <abstract>
 ```
 
-The `| ` prefix on the abstract lines distinguishes it from `> ` on description (per research.md
-D5a). Multi-paragraph abstracts get the prefix on each line.
+The `| ` prefix on the abstract distinguishes it from `> ` on description (per research.md D5a).
+Multi-paragraph abstracts get the prefix on each line.
 
-### Step 10: Brief-mode excludes abstract from response
+### Step 10: Brief-mode excludes abstract from response (and from search — symmetric)
 
 ```
 h-find-nodes
-  query: novel
+  query: archive
   brief: true
 ```
 
-**Expected**: the archive node still appears (the haystack still includes abstract for search
-purposes), but the response shape is index-only: name + description + edges. No `| <abstract>`
-lines. The existing `brief` docstring ("Return index info only: name, description, edges") is
-still accurate.
+**Expected**: the archive node still appears (because the query matches its name), but the
+response shape is index-only: name + description + edges. No `| <abstract>` lines. The existing
+`brief` docstring ("Return index info only: name, description, edges") is accurate unchanged.
+Brief mode is symmetric: doesn't return abstract, doesn't search abstract.
 
 ### Step 11: Partial-update preserves abstract
 
@@ -179,6 +188,28 @@ h-read-node
 
 **Expected**: response is meta block alone. No abstract section. The column is now `NULL`. The
 node's content (from Step 1) is still there — verify with default `contentScope`.
+
+### Step 12a: Whitespace-only abstract normalizes to NULL (FR-009 extended)
+
+```
+h-add-node
+  urn: hadronmemory.com::dev::test:whitespace-only
+  name: Whitespace abstract
+  abstract: "   \n\n   "        # whitespace only
+```
+
+Then:
+
+```
+h-read-node
+  urn: hadronmemory.com::dev::test:whitespace-only
+  contentScope: abstract
+```
+
+**Expected**: response is meta block alone — the abstract was normalized to NULL at write time
+(trim-then-check). No abstract section.
+
+Cleanup: `h-delete-node urn=hadronmemory.com::dev::test:whitespace-only hard=true`
 
 ### Step 13: Length-cap rejection
 
@@ -245,9 +276,10 @@ h-delete-node
 | Step 3 abstract-scope read | n/a | meta + abstract, no `---`, no body |
 | Step 4 all-scope read | n/a | meta + abstract + `---` + body |
 | Step 6 fallback read | meta + `---` + empty | meta + `Source: abstract-fallback` + `---` + abstract |
-| Step 8 search recall | zero hits | the archive node appears |
-| Step 9 preview shape | description-only | description + abstract block |
-| Step 10 brief mode | unchanged | unchanged (excludes abstract from response, includes in search) |
+| Step 8 search recall | zero hits | **still zero hits — US3 deferred to RAG follow-up** |
+| Step 9 preview shape | description-only | description + abstract block when found by other means |
+| Step 10 brief mode | unchanged | unchanged — symmetric: doesn't return AND doesn't search abstract |
+| Step 12a whitespace normalization | n/a | persists as NULL (trim-then-check, FR-009 extended) |
 | Steps 11, 12 update semantics | n/a | partial-update preserves; null clears |
 | Step 13 length cap | n/a | rejected with typed error |
 | Step 14 invalid scope | n/a | rejected with typed error |

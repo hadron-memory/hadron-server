@@ -1,11 +1,11 @@
 # Contract: `h-update-node` — abstract parameter with partial-update semantics
 
-Spec source: FR-004, FR-008, FR-009.
+Spec source: FR-004, FR-008, FR-009 (extended per PR-196 review for whitespace-only).
 
 ## Input surface delta
 
-The zod input schema at [server.ts:1674-1690](../../../src/mcp/server.ts#L1674-L1690) gains one
-optional parameter, positioned after `description`:
+The zod input schema for `'h-update-node'` (find via `server.tool('h-update-node'` in
+`src/mcp/server.ts`) gains one optional parameter, positioned after `description`:
 
 ```typescript
 {
@@ -34,19 +34,23 @@ Three possible argument states, three behaviors:
 |----------------|----------|
 | `abstract` field absent from request body | Preserve existing column value. No update emitted for this column. |
 | `abstract: null` | Clear the column (`SET abstract = NULL`). |
-| `abstract: "..."` | Replace the column value. Empty string normalizes to `null` per FR-009. |
+| `abstract: "..."` | Replace the column value. Empty string AND whitespace-only normalize to `null` per FR-009 (extended PR-196). |
 
 This matches the existing convention for `description` / `content` per spec Assumptions ("Partial-
 update semantics match the existing convention for `description` / `content` on `h-update-node`:
 omitted field = preserve, explicit `null` = clear, explicit string = replace").
 
-**Implementation note**: zod's `.optional()` produces `undefined` for omitted fields. The resolver
-distinguishes `undefined` (preserve) from `null` (clear) when building the Prisma update payload:
+**Implementation note** *(illustrative — not load-bearing; integrate with existing patterns)*:
+zod's `.optional()` produces `undefined` for omitted fields. The resolver distinguishes
+`undefined` (preserve) from `null` (clear) when building the Prisma update payload, AND applies
+the trim-then-check normalization for non-null strings:
 
 ```typescript
 const updateData: Prisma.NodeUpdateInput = {
   // ... other fields ...
-  ...(abstract !== undefined && { abstract: abstract === '' ? null : abstract }),
+  ...(abstract !== undefined && {
+    abstract: abstract === null || abstract.trim() === '' ? null : abstract,
+  }),
 };
 ```
 
@@ -77,4 +81,6 @@ applies to abstract updates as it does to any other column update — gets recor
 - US1 acceptance scenario 8 — `abstract: null` clears the column.
 - Length-cap rejection at 2001 chars.
 - Empty-string `abstract: ''` → normalizes to null.
+- Whitespace-only `abstract: '   '` → normalizes to null (FR-009 extension).
+- Intentional leading-whitespace abstract (`'  This is real.'`) → persists as-is.
 - `NodeVersion` snapshot captures the prior abstract value.

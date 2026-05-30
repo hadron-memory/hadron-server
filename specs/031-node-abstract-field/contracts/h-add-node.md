@@ -1,11 +1,11 @@
 # Contract: `h-add-node` — abstract parameter
 
-Spec source: FR-001, FR-003, FR-008, FR-009.
+Spec source: FR-001, FR-003, FR-008, FR-009 (extended per PR-196 review for whitespace-only).
 
 ## Input surface delta
 
-The zod input schema at [server.ts:1501-1517](../../../src/mcp/server.ts#L1501-L1517) gains one
-optional parameter, positioned after `description`:
+The zod input schema for `'h-add-node'` (find via `server.tool('h-add-node'` in
+`src/mcp/server.ts`) gains one optional parameter, positioned after `description`:
 
 ```typescript
 {
@@ -24,9 +24,11 @@ optional parameter, positioned after `description`:
 
 ## Behavior
 
-1. **Empty string normalization**: if `abstract === ''`, persist `null` instead. (Mirrors
-   `description` / `content` handling.) Applied AFTER zod validation (an empty string passes
-   `max(2000)`).
+1. **Empty + whitespace-only normalization (FR-009 extended)**: if `abstract.trim() === ''` —
+   covering both `''` and whitespace-only inputs (e.g. `'   '`, `'\n\n'`) — persist `null`
+   instead. When non-empty after trim, persist the original (untrimmed) value so intentional
+   leading/trailing whitespace is preserved. Applied AFTER zod length-cap validation (a
+   whitespace-only string passes `max(2000)`; it then becomes `null`).
 2. **Persistence**: the value goes into the `nodes.abstract` column via the existing upsert path.
    No additional indirection.
 3. **Audit**: existing `createdAt`/`createdBy`/`updatedAt`/`updatedBy` machinery applies — no new
@@ -55,4 +57,7 @@ verify the abstract round-trip use `h-read-node` with `contentScope: 'abstract'`
 - US1 acceptance scenario 6 — node created WITHOUT `abstract` arg has `abstract IS NULL`.
 - Length-cap rejection at 2001 chars.
 - Empty-string `abstract: ''` → persists as `null`.
+- Whitespace-only `abstract: '   '` → persists as `null` (FR-009 extension).
+- Intentional leading-whitespace abstract (`'  This is real.'`) → persists as-is, NOT
+  normalized (trim is for the emptiness check only, not for the persisted value).
 - Round-trip via `h-read-node` (contentScope='abstract').

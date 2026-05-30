@@ -5,8 +5,8 @@ scenarios 3–6 and 10–13.
 
 ## Input surface delta
 
-The zod input schema at [server.ts:1081](../../../src/mcp/server.ts#L1081) gains one optional
-parameter:
+The zod input schema for `'h-read-node'` (find via `server.tool('h-read-node'` in
+`src/mcp/server.ts`) gains one optional parameter:
 
 ```typescript
 {
@@ -46,7 +46,9 @@ The full nine-cell matrix:
 
 ## Meta block layout
 
-Existing meta block at [server.ts:1149-1162](../../../src/mcp/server.ts#L1149-L1162):
+The existing meta block lives inside the `'h-read-node'` tool handler in `src/mcp/server.ts` as a
+filtered string-array join. Find the meta-line array (search for `Type: ${node.nodeType}` inside
+the `h-read-node` tool body). Pre-spec shape:
 
 ```
 **<name>**
@@ -81,7 +83,7 @@ The Source line follows the same conditional-emission pattern as the existing li
 the meta array, `.filter(Boolean).join('\n')`). When the fallback condition isn't met, no line is
 emitted — no blank line, no placeholder.
 
-## Implementation sketch
+## Implementation sketch *(illustrative — not load-bearing; integrate with existing patterns)*
 
 ```typescript
 const requestedScope = contentScope ?? 'content';

@@ -7,6 +7,8 @@
 
 Add an optional `abstract` text column to the `Node` Prisma model + GraphQL type. Wire it through five MCP tools (`h-add-node`, `h-update-node`, `h-read-node`, `h-find-nodes`, `h-validate`), the node.yaml importer/exporter, and the existing access-control + audit paths. Most of the work is mechanical column-plumbing; the load-bearing logic lives in two places: (1) `h-read-node`'s new `contentScope` parameter with the asymmetric content-fallback rule + `Source: abstract-fallback` meta marker, and (2) `h-find-nodes`' preview rendering with `brief: true` as the off-switch. Backwards-compat is preserved by FR-005's default-mode byte-identical promise.
 
+**PR-196 review amendments (2026-05-30)**: US3 / FR-007 (search haystack extension) deferred to the RAG / vector-retrieval follow-up. `h-find-nodes` gains preview surfacing of the abstract (US2 / FR-006) but its substring haystack is unchanged. FR-009 extended to normalize whitespace-only abstracts to NULL (trim-then-check). GraphQL surface is `upsertNode(input: NodeInput!)` with `NodeInput.abstract` field, not `createNode`/`updateNode` (verified empirically against typeDefs.ts).
+
 ## Technical Context
 
 - **Language/Version**: TypeScript 5.x on Node.js ≥ 22 (per server constitution S1)

@@ -45,9 +45,12 @@
   The boundary held is: *what the spec promises* (tool shape, response shape, validation rules,
   cross-tool interactions) belongs here; *how the implementation gets built* (Prisma column type,
   migration mechanics, file layout, index decisions) belongs in plan.md.
-- Spec references concrete file paths (`schema.prisma:721`, `server.ts:939`, `server.ts:2445`)
-  as anchors for reviewers — they point at the existing code surfaces this spec extends, not at
-  implementation prescriptions.
+- Spec references concrete file paths with line numbers (e.g. `schema.prisma:721`,
+  `server.ts:2445`) as anchors for reviewers — they point at the existing code surfaces this spec
+  extends, not at implementation prescriptions. **Plan + contracts use symbolic anchors**
+  (function name, tool-registration block, named conditional) instead of line numbers because
+  those docs target the edit sites and need to stay accurate as `server.ts` accumulates edits
+  (PR-196 review item 1).
 - Three NEEDS-CLARIFICATION-worthy questions were resolved into Assumptions with explicit
   rationale instead of marked inline: (1) length cap (2000 chars), (2) auto-derivation from content
   (no), (3) preview replacement vs augmentation (augmentation).

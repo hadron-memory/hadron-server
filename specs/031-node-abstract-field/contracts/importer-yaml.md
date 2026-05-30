@@ -4,7 +4,9 @@ Spec source: FR-010.
 
 ## Importer surface — `src/integrations/github/syncGraphFromGithub.ts`
 
-The importer reads YAML node files and upserts them into the DB. Currently maps:
+The importer reads YAML node files and upserts them into the DB. Find the field-mapping block in
+`src/integrations/github/syncGraphFromGithub.ts` (search for `description: node.description` —
+adjacent lines map `content`, `contentHash`, `tags`). Currently maps:
 
 ```typescript
 {
@@ -16,20 +18,27 @@ The importer reads YAML node files and upserts them into the DB. Currently maps:
 }
 ```
 
-(per [syncGraphFromGithub.ts:94-97](../../../src/integrations/github/syncGraphFromGithub.ts#L94-L97))
-
-Post-spec, abstract joins the map:
+Post-spec, abstract joins the map — with the trim-then-check normalization applied at import
+time (FR-009 extension):
 
 ```typescript
 {
   description: node.description ?? null,
-  abstract: node.abstract ?? null,    // ← NEW
+  abstract: normalizeAbstract(node.abstract),    // ← NEW; trims, normalizes whitespace-only to null
   content: node.content ?? null,
   contentHash: node.contentHash ?? null,
   tags: serializeTags(node.tags ?? []) as string[],
   // ...
 }
+
+function normalizeAbstract(raw: string | null | undefined): string | null {
+  if (raw == null) return null;
+  if (raw.trim() === '') return null;
+  return raw;  // preserves intentional leading/trailing whitespace
+}
 ```
+
+*(Sketch is illustrative — fold into whatever the importer's existing normalization pattern is.)*
 
 ## YAML schema
 
@@ -50,10 +59,10 @@ content: |
 tags: [auth, security]
 ```
 
-The `abstract` key is optional. Absent → DB column is `NULL`. Empty string normalizes to `NULL`
-during import (FR-009). Length cap (2000 chars per FR-008) is enforced at import time — files
-with over-long abstracts fail the import with `NodeAbstractTooLongError` wrapped in the upstream
-sync error envelope.
+The `abstract` key is optional. Absent → DB column is `NULL`. Empty string AND whitespace-only
+normalize to `NULL` during import (FR-009 extended PR-196). Length cap (2000 chars per FR-008) is
+enforced at import time — files with over-long abstracts fail the import with
+`NodeAbstractTooLongError` wrapped in the upstream sync error envelope.
 
 ## Exporter surface — `src/integrations/github/writeNodeToGit.ts`
 

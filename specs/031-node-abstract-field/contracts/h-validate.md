@@ -4,8 +4,8 @@ Spec source: FR-011.
 
 ## Current behavior
 
-The sparse-node check at
-[server.ts:2445](../../../src/mcp/server.ts#L2445) currently is:
+The sparse-node check inside the `'h-validate'` tool handler in `src/mcp/server.ts` (find the
+conditional `!node.description && !node.content` within the `h-validate` tool body) currently is:
 
 ```typescript
 if (!node.description && !node.content) {
@@ -31,8 +31,9 @@ abstract counts as legitimate content for the validator's "this node has zero te
 
 ## Selection delta
 
-The `select` clause at [server.ts:2624](../../../src/mcp/server.ts#L2624) that pulls nodes for the
-validator MUST include `abstract`:
+The `select` clause inside `h-validate` that pulls nodes for the validator (find via the Prisma
+`db.node.findMany({ ... select: { id: true, loc: true, name: true, description: true, ... } })`
+call within the `h-validate` tool body) MUST include `abstract`:
 
 ```typescript
 const nodes = await db.node.findMany({
@@ -49,6 +50,13 @@ const nodes = await db.node.findMany({
   },
 });
 ```
+
+**Bandwidth note** (PR-196 review item 9): adding `abstract` to the select widens the per-node
+payload by up to 2000 chars. For a memory with N nodes, `h-validate` pulls `O(N × avg_abstract_
+size)` extra bytes. For typical memory sizes (hundreds to a few thousand nodes), this is noise
+relative to the existing `description` + `content` projection. If `h-validate` ever needs to
+scale to memories with tens of thousands of nodes, consider streaming or a two-pass approach (id-
+only first, then per-node fetch on-demand). Out of scope here.
 
 ## Issue message wording
 

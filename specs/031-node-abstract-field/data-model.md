@@ -6,8 +6,8 @@ validation rules that ride on top of the schema.
 
 ## Prisma model diff — `prisma/schema.prisma`
 
-The `Node` model at [schema.prisma:721-781](../../prisma/schema.prisma#L721-L781) gains one new
-column between `description` (line 735) and `content` (line 737):
+The `Node` model (find via `model Node {` in `prisma/schema.prisma`) gains one new column,
+positioned between the existing `description` and `content` fields:
 
 ```prisma
 model Node {
@@ -62,8 +62,19 @@ convention used by recent migrations.
 ALTER TABLE "nodes" ADD COLUMN "abstract" TEXT;
 ```
 
-**Online-safe**: Adding a nullable column with no default is metadata-only on Postgres ≥ 11. Zero
-table rewrite, zero row lock beyond the brief catalog update. Safe at any production scale.
+**Online-safe** with one operational caveat (PR-196 review item 5): adding a nullable column with
+no default is metadata-only on Postgres ≥ 11 — zero table rewrite, zero row lock at the data
+level. BUT `ALTER TABLE` still takes an `ACCESS EXCLUSIVE` lock on `nodes` for the catalog update
+itself. Under normal load this is milliseconds; under lock contention (a long-running transaction
+already holding any other lock on `nodes`, or a stuck read), the ALTER queues behind it and every
+new request touching `nodes` queues behind the ALTER. Operational recommendation:
+
+- Run the migration off-peak.
+- Use `SET LOCAL lock_timeout = '5s';` before the ALTER so the migration aborts cleanly rather
+  than queueing the entire request pool. Operator can retry after investigating the contention.
+
+Migration tooling should support setting `lock_timeout` per-statement; if not, do it inline in the
+SQL file.
 
 **No backfill**: Existing rows backfill to `NULL`. Spec FR-001 makes this explicit ("The column is
 additive — no existing column changes shape or semantics").
@@ -73,8 +84,8 @@ included in the migration file (no down-migration convention in this repo).
 
 ## GraphQL schema diff — `src/api/graphql/schema/typeDefs.ts`
 
-`Node` type at [typeDefs.ts:55-79](../../src/api/graphql/schema/typeDefs.ts#L55) gains the
-`abstract` field between `description` (line 63) and `content` (line 64):
+The `Node` type (find via `type Node {` in `src/api/graphql/schema/typeDefs.ts`) gains the
+`abstract` field, positioned between the existing `description` and `content` fields:
 
 ```graphql
 type Node {
@@ -97,18 +108,47 @@ type Node {
 `NodeAbstractTooLongError` reference per S3 (no raw backticks in `typeDefs.ts`). Co-canonical with
 `hadron-docs` per refinement II.
 
-**Mutation arguments**: If GraphQL `createNode` / `updateNode` resolvers exist in the surface
-(they may; check during implementation), each gains an optional `abstract: String` argument
-matching the partial-update semantics from the MCP layer:
+**Mutation surface** (verified 2026-05-30 against `typeDefs.ts`): the GraphQL write path for
+nodes is a single mutation `upsertNode(input: NodeInput!): Node!`, and `NodeInput` (find via
+`input NodeInput {`) gains an optional `abstract: String` field positioned between `description`
+and `content`:
 
-- `createNode(abstract: "...")` — persists.
-- `updateNode(id, abstract: null)` — clears.
-- `updateNode(id, abstract: "new")` — replaces.
-- `updateNode(id)` (no abstract field) — preserves existing.
+```graphql
+input NodeInput {
+  id: String
+  memoryId: String!
+  nodeType: String
+  loc: String!
+  name: String!
+  alias: String
+  description: String
+  abstract: String          # ← NEW
+  content: String
+  seq: Int
+  tags: [String!]
+  properties: JSON
+  data: JSON
+  ownerRepo: String
+  llmModel: String
+  aiAgent: String
+  edges: [NodeEdgeInput!]
+  createOnly: Boolean
+}
+```
 
-GraphQL doesn't distinguish "field omitted" from "field set to null" the way MCP's JSON does — the
-update resolver MUST inspect the parsed args object for key presence, not just value-null. (This
-is the same pattern `description`/`content` use today; abstract joins it.)
+Same partial-update semantics as the MCP layer:
+
+- `upsertNode(input: { ..., abstract: "..." })` — persists.
+- `upsertNode(input: { ..., abstract: null })` — clears (when updating an existing row).
+- `upsertNode(input: { ... })` without `abstract` key — preserves existing.
+
+GraphQL doesn't distinguish "field omitted" from "field set to null" at the resolver-args level
+the way MCP's JSON does — the resolver MUST inspect the parsed input object for key presence (
+`'abstract' in input`), not just value-null. The existing `description` and `content` handling in
+the `upsertNode` resolver is the model; `abstract` joins it.
+
+`createOnly: Boolean` (existing flag on `NodeInput`) is orthogonal to the new field; abstract
+write behavior is the same under `createOnly: true` and `false`.
 
 **Query side**: No new arguments on existing queries. Read tools that return `Node` automatically
 include `abstract` when callers request it.
@@ -141,18 +181,31 @@ integration handles enum validation). The typed error class exists so that any p
 that re-validates (e.g., an internal caller bypassing the MCP boundary) has the canonical error
 class to throw.
 
-### V3 — Empty-string normalization (FR-009)
+### V3 — Empty + whitespace-only normalization (FR-009, extended PR-196)
 
-`abstract: ""` is normalized to `NULL` at write time. Implementation: in the resolver / tool body,
-before the DB write:
+Both `abstract: ""` (empty string) AND whitespace-only abstracts (e.g., `"   "`, `"\n\n"`, tabs)
+are normalized to `NULL` at write time. Implementation: trim leading + trailing whitespace; if the
+trimmed value is empty, persist `NULL`:
 
 ```typescript
-const normalizedAbstract = abstract === '' ? null : abstract;
+const trimmed = abstract?.trim() ?? '';
+const normalizedAbstract = trimmed === '' ? null : abstract;
 ```
 
-This mirrors how `description` and `content` are treated in the existing write paths. The
-normalization is applied AFTER length-cap validation (an empty string passes the cap; it then
-becomes null).
+Note the asymmetry — we normalize to `NULL` based on the *trimmed* value, but persist the
+*untrimmed* value when non-empty. This preserves intentional leading/trailing whitespace on a
+real paragraph (rare, but lossless), while preventing ghost-whitespace abstracts from polluting
+previews.
+
+Validation order:
+
+1. Length-cap check on the raw input (`abstract.length > 2000 → NodeAbstractTooLongError`).
+2. Trim-then-check normalization.
+3. DB write.
+
+This mirrors how `description` and `content` are treated in the existing write paths (though
+those don't currently trim — abstract sets the convention for the trim-then-check rule; future
+clean-up could backport it).
 
 ## Audit + soft-delete (FR-012)
 

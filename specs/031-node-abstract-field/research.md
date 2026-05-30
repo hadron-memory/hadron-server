@@ -5,6 +5,17 @@ considered. The spec already resolved the major axes during `/speckit-specify` a
 review cycle; this file consolidates them and records the few Phase-0-specific decisions that
 emerged from looking at the code surfaces.
 
+**Reading note**: This document and the `contracts/` siblings reference existing code surfaces by
+**symbolic name** (function, tool-registration block, zod schema name) rather than line numbers,
+so the docs don't rot as `src/mcp/server.ts` and friends accumulate edits. Implementation should
+grep for the named anchor; line numbers are not load-bearing. (PR-196 review item 1.)
+
+**Code sketches throughout these docs are illustrative, not load-bearing.** They show the
+*shape* of the change to a particular surface (where to slot a new branch, what the response
+matrix looks like, etc.); the implementer is expected to integrate them with the surrounding code
+idiomatically, including respecting any N+1 or batching patterns that have been resolved
+elsewhere since the sketch was written.
+
 ## D1 — Column placement on `Node`
 
 **Decision**: `abstract` is added immediately after `description` and before `content` in both
@@ -64,7 +75,9 @@ proper `extensions.code`.
 ## D4 — `Source: abstract-fallback` marker placement in the meta block
 
 **Decision**: The marker line is emitted immediately after `Type:` in the meta block ordering. The
-existing meta block in [server.ts:1149-1162](../../src/mcp/server.ts#L1149-L1162) is:
+existing meta block is built in the `h-read-node` tool handler in `src/mcp/server.ts` as a
+filtered string-array join — find the `metaLines` (or similarly-named) array at the tool-
+registration block keyed by `'h-read-node'`. Pre-spec shape:
 
 ```
 **name**
@@ -109,9 +122,10 @@ golden-file fixtures and snapshot tests don't have to handle position variance.
 
 **Decision**: When `brief: false` (default) AND `abstract IS NOT NULL`, the preview emits the
 existing description line followed by the abstract on the next visual block. Concretely, the
-existing preview renderer in [server.ts:1056-1075](../../src/mcp/server.ts#L1056-L1075) appends two
-lines per node: `<urn> — <name>` and `  <description>` (indented). Post-spec, when an abstract is
-present, a third indented block of abstract text follows:
+existing preview renderer lives inside the `'h-find-nodes'` tool-registration block in
+`src/mcp/server.ts` (search for `server.tool('h-find-nodes'`) and appends two lines per node:
+`<urn> — <name>` and `  > <description>` (indented). Post-spec, when an abstract is present, a
+third indented block of abstract text follows:
 
 ```
 <urn> — <name>
@@ -140,10 +154,10 @@ friendly for the rare consumer that wants to extract preview sections from tool 
 
 ## D6 — `h-validate` sparse-node rule extension
 
-**Decision**: The existing sparse-node check at [server.ts:2445](../../src/mcp/server.ts#L2445)
-(`if (!node.description && !node.content)`) extends to `if (!node.description && !node.content &&
-!node.abstract)`. The reported issue message also changes to mention all three fields: "no
-description, content, or abstract".
+**Decision**: The existing sparse-node check inside the `'h-validate'` tool-registration block in
+`src/mcp/server.ts` (search for the conditional `!node.description && !node.content`) extends to
+`if (!node.description && !node.content && !node.abstract)`. The reported issue message also
+changes to mention all three fields: "no description, content, or abstract".
 
 **Rationale**: Per FR-011 — a node carrying only an abstract is not sparse. The abstract is
 legitimate content for the validator's "this node has zero text" intent.
@@ -169,14 +183,19 @@ serializing/deserializing node text columns is the right model; abstract joins t
 
 ## D8 — GraphQL `Node.abstract` exposure
 
-**Decision**: Add `abstract: String` to the `Node` type in `typeDefs.ts:55-79`, positioned
-between `description` and `content` (mirroring Prisma layout per D1). Resolver passes the column
-through unchanged. The 2000-char cap is enforced at the mutation argument level (zod or a typed
-error in the resolver — both paths land at `NodeAbstractTooLongError`).
+**Decision**: Add `abstract: String` to the `Node` type in `src/api/graphql/schema/typeDefs.ts`,
+positioned between `description` and `content` (mirroring Prisma layout per D1). Resolver passes
+the column through unchanged. The 2000-char cap is enforced at the mutation argument level (zod
+or a typed error in the resolver — both paths land at `NodeAbstractTooLongError`).
 
-The mutations that accept node text input (`createNode` / `updateNode` resolvers — if they exist
-in the GraphQL surface; many tools go through MCP only) gain an optional `abstract: String`
-argument with the same partial-update semantics as the MCP layer.
+**Mutation surface** (verified 2026-05-30 against the actual typeDefs.ts): the GraphQL write path
+for nodes is a single mutation `upsertNode(input: NodeInput!): Node!`, NOT separate `createNode` /
+`updateNode` mutations as originally posited. The `NodeInput` input type (find at `input
+NodeInput {` in `typeDefs.ts`) gains an optional `abstract: String` field, positioned between
+`description` and `content`. Same partial-update semantics: omitted → preserve, `null` → clear,
+string → replace (after trim-then-check normalization per FR-009). The existing `createOnly:
+Boolean` flag on `NodeInput` distinguishes "reject on collision" from "upsert"; it does not
+interact with the new abstract field.
 
 **Rationale**: GraphQL surface parity with MCP — GraphQL callers (portal, programmatic users)
 should be able to read and write abstracts without dropping to MCP. Doc-comment on the field cites
@@ -191,21 +210,25 @@ spec 031 per constitution refinement II.
 **Decision**: Three test files carry the abstract coverage:
 
 1. **`src/mcp/server.findReadList.test.ts`** (extend existing) — adds cases for `h-find-nodes`
-   preview rendering with/without abstract, `brief: true` carve-out, and `h-list-nodes` byte-
-   identical assertion.
+   preview rendering with/without abstract, `brief: true` byte-identical carve-out, and
+   `h-list-nodes` byte-identical assertion. NO search-recall tests over abstract content (per
+   PR-196 deferral of US3/FR-007).
 2. **`src/mcp/server.nodeAbstract.test.ts`** (NEW) — the dedicated abstract-surface test file.
    Covers: round-trip on `h-add-node` + `h-update-node` + `h-read-node`; all three `contentScope`
    values × abstract-state × content-state cells (matrix snapshot fixtures); the `Source:
    abstract-fallback` marker emission; partial-update semantics (`null` clears, omitted
    preserves); length-cap rejection (NodeAbstractTooLongError); invalid contentScope rejection
-   (InvalidContentScopeError); `h-validate` sparse-node rule with abstract present/absent.
-3. **`src/test/integration/node-abstract.test.ts`** (NEW) — GraphQL mutation/query integration
-   pinning the same matrix against the GraphQL surface (per constitution refinement I — graph-
-   touching mutations get integration tests).
+   (InvalidContentScopeError); empty-string AND whitespace-only normalization to NULL (FR-009);
+   `h-validate` sparse-node rule with abstract present/absent.
+3. **`src/test/integration/node-abstract.test.ts`** (NEW) — GraphQL `upsertNode` mutation +
+   `node(id)` query integration pinning the same matrix against the GraphQL surface (per
+   constitution refinement I — graph-touching mutations get integration tests). Includes
+   `NodeInput.abstract` round-trip + length-cap rejection over GraphQL.
 
 **Rationale**: Dedicated test file (`server.nodeAbstract.test.ts`) keeps the matrix coverage
 discoverable and reviewable. Existing files get small extensions for the rendering changes that
-naturally live there.
+naturally live there. The integration file targets `upsertNode` (the actual GraphQL write
+surface) rather than the originally-posited createNode/updateNode pair (D8 update).
 
 **Alternatives considered**:
 - One big file extending `server.findReadList.test.ts`: would balloon that file; matrix coverage
@@ -214,12 +237,17 @@ naturally live there.
 
 ## D10 — Performance posture
 
-**Decision**: No index added in v1. The existing `h-find-nodes` haystack scan is `O(n)` in the
-memory's node count, dominated by I/O; adding one more text-column concat is in the noise. If
-profiling post-launch shows p50/p95 movement, a trigram GIN index across name/loc/description/
-tags/abstract is the follow-up — out of scope for this spec.
+**Decision**: No index added in v1. Per the PR-196 deferral of US3/FR-007, the abstract is also
+NOT added to `h-find-nodes`' haystack — so search performance is byte-identical to pre-spec for
+this surface. Search recall over abstract content is the natural job of the upcoming RAG /
+vector-retrieval layer (see spec Background); we deliberately don't ship a trigram-or-vector
+acceleration here that would compete with that follow-up.
 
 **Rationale**: Spec Assumptions section already commits to this. Premature indexing adds migration
 complexity and a write-amplification cost we'd pay forever for a problem we don't know we have.
+And shipping substring acceleration over abstract immediately before the RAG layer arrives would
+build infrastructure we'd then shadow with semantic search.
 
-**Alternatives considered**: Pre-emptive trigram index — rejected per the above.
+**Alternatives considered**: Pre-emptive trigram index — rejected per the above. Extending
+`h-find-nodes` haystack to include abstract without an index (the original US3) — deferred to
+RAG follow-up per PR-196 review.
