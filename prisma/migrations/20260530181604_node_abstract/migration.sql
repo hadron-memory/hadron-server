@@ -15,7 +15,21 @@
 -- request pool. This is the first migration in this repo to set
 -- lock_timeout — see specs/031-node-abstract-field/data-model.md "Online-
 -- safe with one operational caveat" for the operational guidance.
+--
+-- Runner-independence: the BEGIN/COMMIT wrapper is REQUIRED for `SET LOCAL`
+-- to take effect. Per CLAUDE.md this repo uses `prisma db push` (not
+-- `prisma migrate deploy`) on dev/test, and production migration runners
+-- vary; psql -f does NOT auto-wrap files in a transaction, so without the
+-- explicit BEGIN/COMMIT, `SET LOCAL` would emit `WARNING: SET LOCAL can
+-- only be used in transaction blocks` and the lock_timeout would silently
+-- have no effect — exactly the failure mode this migration is trying to
+-- prevent. PR-199 review surfaced this. The convention for any future
+-- migration that needs SET LOCAL is to wrap explicitly.
+
+BEGIN;
 
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE "nodes" ADD COLUMN "abstract" TEXT;
+
+COMMIT;
