@@ -3,8 +3,9 @@
  * spec FR-002 — concurrent first-contacts converge on a single row.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
+import { Prisma } from '../../generated/prisma/index.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { ensureAgentSubscription } from './ensureAgentSubscription.js';
@@ -64,5 +65,62 @@ describe('ensureAgentSubscription', () => {
     });
     // The upsert's `update: {}` clause is a no-op — revokedAt stays.
     expect(sub.revokedAt).toEqual(revokedAt);
+  });
+
+  // The four tests below force the catch path deterministically. The
+  // SC-006 concurrent test above flushes the real race, but in any given
+  // run the race may not actually fire — these tests guarantee a future
+  // refactor can't silently delete or weaken the catch.
+
+  it('treats a P2002 on the (userId, agentId) composite PK as success', async () => {
+    const spy = vi.spyOn(db.agentSubscription, 'upsert').mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '6.19.2',
+        meta: { target: ['userId', 'agentId'] },
+      }),
+    );
+    await expect(ensureAgentSubscription(db, userId, agentId)).resolves.toBeUndefined();
+    spy.mockRestore();
+  });
+
+  it('treats a P2002 with snake_case target on the same composite PK as success', async () => {
+    const spy = vi.spyOn(db.agentSubscription, 'upsert').mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '6.19.2',
+        meta: { target: ['user_id', 'agent_id'] },
+      }),
+    );
+    await expect(ensureAgentSubscription(db, userId, agentId)).resolves.toBeUndefined();
+    spy.mockRestore();
+  });
+
+  it('re-throws non-P2002 Prisma errors (e.g. P2003 FK violation)', async () => {
+    const spy = vi.spyOn(db.agentSubscription, 'upsert').mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Foreign key constraint failed', {
+        code: 'P2003',
+        clientVersion: '6.19.2',
+        meta: { field_name: 'AgentSubscription_userId_fkey' },
+      }),
+    );
+    await expect(ensureAgentSubscription(db, userId, agentId)).rejects.toMatchObject({
+      code: 'P2003',
+    });
+    spy.mockRestore();
+  });
+
+  it('re-throws P2002 from an unrelated unique constraint (defensive against future @unique fields)', async () => {
+    const spy = vi.spyOn(db.agentSubscription, 'upsert').mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '6.19.2',
+        meta: { target: ['stripeSubscriptionId'] },
+      }),
+    );
+    await expect(ensureAgentSubscription(db, userId, agentId)).rejects.toMatchObject({
+      code: 'P2002',
+    });
+    spy.mockRestore();
   });
 });

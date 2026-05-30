@@ -733,6 +733,15 @@ model Node {
   loc         String
   isLink      Boolean   @default(false) @map("is_link")
   description String?
+  /// Paragraph-length summary of this node. Cap is 2000 characters,
+  /// enforced at the API boundary (not as a DB CHECK — caps are
+  /// validation, not invariants). Surfacing rules across MCP tools
+  /// (find/read/list/validate), the `Source: abstract-fallback` marker
+  /// on `h-read-node` content-scope fallback, and the RAG-substrate
+  /// motivation are documented in spec 031 (FR-005 + edge cases). That
+  /// is the load-bearing reference; this comment is the cold-read
+  /// pointer for someone scanning the schema.
+  abstract    String?
   /// The topic content (topic.md full text).
   content     String?
   /// SHA256(yaml+md)[0:8] for change detection.

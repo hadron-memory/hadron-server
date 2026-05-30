@@ -2,9 +2,14 @@
 
 Call the `h-read-node` MCP tool with `urn: "urn:node:hadronmemory.com::dev::instructions"` to
 load the project introduction (what Hadron is, URN grammar, the platform-specs corpus, core
-architecture). Read it before doing any work in this repo.
+architecture). Read it once per session.
 
-Quick reference for AI agents working in this repo. Updated 2026-05-26.
+Then, at the start of **every change** — before drafting a plan — call
+`h-read-node` with `urn: "urn:node:hadronmemory.com::dev::start-here"`. It's a
+symptom-to-pattern routing index into the findings, conventions, ops, and
+review branches.
+
+Quick reference for AI agents working in this repo. Updated 2026-05-30.
 
 ## Local Postgres setup
 
