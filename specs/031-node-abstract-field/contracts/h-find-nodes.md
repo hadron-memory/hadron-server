@@ -36,32 +36,46 @@ and it doesn't search against it either.
 
 ## Preview shape delta (FR-006)
 
+**Correction (PR-197 review)**: the original draft of this contract showed `> <description>`
+prefix on the description line and `<urn> — <name>` as the header. Both wrong — the actual
+preview format in the `h-find-nodes` tool body has a `- **<urn>** — <name>` header and an
+indented `  <description>` line (two-space indent, NO `>` prefix; `>` is `h-read-node`'s
+convention, not find-nodes'). This contract is now aligned with the real code.
+
 The existing preview renderer lives inside the `'h-find-nodes'` tool body in `src/mcp/server.ts`
-(search for `server.tool('h-find-nodes'` and find the result-rendering block). Per-result, it
-currently emits:
+(search for `server.tool('h-find-nodes'` and find the per-hit rendering block — currently
+`limited.map(async (n) => { const parts = [...] })`). Per-result, it currently emits:
 
 ```
-<urn> — <name>
-  > <description>          ← when description is non-null
+- **<urn>** — <name>
+  <description>            ← when description is non-null (two-space indent, no prefix)
+  Tags: <tags>             ← when tags is non-empty
 ```
 
 Post-spec (when `brief: false`, the default):
 
 ```
-<urn> — <name>
-  > <description>          ← when description is non-null
-  | <abstract>             ← NEW, when abstract is non-null AND brief: false
+- **<urn>** — <name>
+  <description>            ← unchanged
+  <abstract>               ← NEW, when abstract is non-null AND brief: false
+  Tags: <tags>
 ```
 
-- The `> ` prefix on description is preserved (existing quote-mark convention for the headline).
-- The `| ` prefix on abstract distinguishes it as a paragraph block (per research.md D5a). See
-  research.md note: empirical verification in a markdown-rendering client is recommended before
-  freezing this choice.
-- Multi-paragraph abstracts (rare, but allowed up to 2000 chars) get the prefix on EACH line.
+- The `<description>` line preserves its existing two-space indent + no-prefix format.
+- The `<abstract>` block uses the same two-space indent + no-prefix format (per the actual
+  description convention — visual distinction comes from the abstract being multi-line vs
+  description being a single line).
+- Multi-paragraph abstracts (rare, but allowed up to 2000 chars) get the two-space indent on
+  EACH line.
 - When abstract is `null`, no line is emitted — preview is byte-identical to pre-spec.
+- The `Tags:` line continues to appear last when tags is non-empty.
 
 When `brief: true`, the abstract is excluded from the response shape entirely — same as pre-spec
 brief mode.
+
+(Research.md D5a originally suggested a `| ` prefix to visually distinguish abstract from
+description. PR-197 review surfaced that description uses no prefix in find-nodes — adding one
+to abstract would have been an inconsistency. D5a is updated separately to reflect this choice.)
 
 ## Implementation sketch *(illustrative — not load-bearing; integrate with existing patterns)*
 
@@ -75,19 +89,21 @@ const nodes = await db.node.findMany({
 // Filter via matchesQuery — UNCHANGED haystack, abstract NOT added
 const hits = nodes.filter((n) => matchesQuery(n, terms));
 
-// Preview render
-const lines: string[] = [];
-for (const n of hits) {
+// Preview render — matches the existing format in src/mcp/server.ts
+const lines = await Promise.all(hits.map(async (n) => {
   const urn = await nodeUrn(n.loc, n.memoryId);   // illustrative — respect any batched-urn
                                                     // pattern that has resolved the existing
                                                     // N+1 here
-  lines.push(`${urn} — ${n.name}`);
-  if (n.description) lines.push(`  > ${n.description}`);
+  const parts = [`- **${urn}** — ${n.name}`];
+  if (n.description) parts.push(`  ${n.description}`);
   if (!brief && n.abstract) {                     // brief is the off-switch for preview
-    const abstractLines = n.abstract.split('\n').map((l) => `  | ${l}`);
-    lines.push(...abstractLines);
+    const abstractLines = n.abstract.split('\n').map((l) => `  ${l}`);
+    parts.push(...abstractLines);
   }
-}
+  if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
+  // ... existing brief-mode edge rendering follows unchanged ...
+  return parts.join('\n');
+}));
 ```
 
 The sketch above shows the *shape* of the preview-rendering change. The existing per-result

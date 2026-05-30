@@ -138,19 +138,54 @@ a different prefix (`| ` or similar — see D5a) so visual scanning distinguishe
 
 ### D5a — Abstract prefix character
 
-**Decision**: Use `  | ` (two-space indent + pipe + space) to prefix each line of the abstract in
-preview rendering. Multi-paragraph abstracts (rare, but allowed up to 2000 chars) get the prefix
-on each line.
+**Decision (revised 2026-05-30 per PR-197 review)**: Use `  ` (two-space indent + no character
+prefix) — the same format as the existing `<description>` line in `h-find-nodes` previews. No
+`| `, no `> `, just an indented block.
 
-**Rationale**: `> ` is established for description (quote-mark for the one-line headline). `| `
-visually distinguishes the abstract as a paragraph block, isn't already in use, and is parse-
-friendly for the rare consumer that wants to extract preview sections from tool output.
+**Why revised**: the original D5a posited `| ` as a way to distinguish abstract from a `> `-
+prefixed description. PR-197 review surfaced that `> ` is `h-read-node`'s convention, NOT
+`h-find-nodes`'. The actual find-nodes description format is `  ${description}` (two-space
+indent, no prefix). Adding `| ` to abstract would have introduced a NEW prefix in a tool that
+doesn't use prefixes. The right convention is "match what's already there" — both description
+and abstract are simply indented blocks beneath the per-hit header.
+
+Multi-paragraph abstracts (rare, but allowed up to 2000 chars) get the two-space indent on each
+line; visual distinction between description (single line) and abstract (multi-line) comes from
+the abstract's natural length, not from a prefix character.
+
+**Rationale**: consistency with the surrounding tool format. Avoids introducing a NEW visual
+convention in a contract that exists to extend an existing surface.
 
 **Alternatives considered**:
-- Reuse `> ` for both: lines blur together; reader can't tell where description ends and abstract
-  begins.
-- Use `## Abstract` as a header: heavyweight for a list-of-hits preview; clashes with markdown
-  rendering in clients that render the tool response as markdown.
+- Original `| ` proposal: rejected because it would have introduced a prefix in a tool that
+  doesn't use them.
+- Reusing `> `: same problem — `> ` belongs to `h-read-node`, not find-nodes.
+- Use `## Abstract` as a header: still heavyweight for a list-of-hits preview.
+
+### D11 — Whitespace-only abstract normalization
+
+**Decision (2026-05-30 per PR-196 review)**: Trim-then-check normalization. The server trims
+leading + trailing whitespace from the input; if the trimmed value is empty, persist `NULL`.
+Non-empty trimmed values are persisted **as-is (untrimmed)**, preserving intentional surrounding
+whitespace on real paragraphs.
+
+**Rationale**: prevents ghost-whitespace abstracts from polluting find-nodes previews while
+keeping the persisted value lossless for real content. Symmetric across MCP write paths
+(`h-add-node`, `h-update-node`), GraphQL (`upsertNode` resolver), and the node.yaml importer.
+
+**Validation order**:
+1. Length-cap check on the **raw** input (`abstract.length > 2000 → NodeAbstractTooLongError`).
+2. Trim-then-check normalization (whitespace-only → `null`; otherwise keep raw value).
+3. DB write.
+
+**FR codification**: FR-009 was extended in PR-196 round-1 review to cover whitespace-only.
+Implementation surfaces this in `data-model.md` V3.
+
+**Alternatives considered**:
+- Don't trim (persist `"   "` as-is): more honest about not silently mangling input but leaves
+  ghost-whitespace abstracts in previews. Worse agent UX.
+- Trim and persist trimmed value: symmetric and simpler, but loses intentional leading/trailing
+  whitespace on real paragraphs. Lossy round-trip for the rare but legitimate case.
 
 ## D6 — `h-validate` sparse-node rule extension
 
