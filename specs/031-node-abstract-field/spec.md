@@ -7,7 +7,7 @@ target-repositories:
 
 **Feature Branch**: `031-node-abstract-field`
 **Created**: 2026-05-28
-**Status**: Draft
+**Status**: Shipped 2026-05-30 — spec [#194](https://github.com/hadron-memory/hadron-server/pull/194), plan [#196](https://github.com/hadron-memory/hadron-server/pull/196), tasks [#197](https://github.com/hadron-memory/hadron-server/pull/197), foundation [#199](https://github.com/hadron-memory/hadron-server/pull/199), US1 [#201](https://github.com/hadron-memory/hadron-server/pull/201), US2 [#202](https://github.com/hadron-memory/hadron-server/pull/202)
 **Input**: User description: "add-node-abstract" (clarified during specify: add an optional
 `abstract` column on `Node` for a paragraph-length summary, distinct from one-line `description` and
 full `content`. Always surfaced in `h-find-nodes` previews; opt-in on `h-read-node` via a new
@@ -279,6 +279,24 @@ where `brief: true` returned hits the caller couldn't explain (PR-196 review ite
 - **FR-012**: Soft-delete, restore, and the audit columns (`createdAt/By`, `updatedAt/By`,
   `deletedAt/By`) MUST treat `abstract` identically to other text columns. Updating only `abstract`
   bumps `updatedAt/By` per existing rules.
+- **FR-013** (added during PR-201 round-2 review): `abstract` MUST participate in the
+  memory-level encryption surface (`EncryptedNodeFields` in `src/lib/nodeCrypto.ts`) alongside
+  `content` and `data`. Rationale: abstract is a paragraph-length summary of content; leaving it
+  plaintext on encrypted memories would defeat the encryption guarantee for the most informative
+  ~2000 chars per node. Implementation: `applyEncryption` / `applyDecryption` thread `abstract`
+  through the same `enc:v1:` envelope. Trade-off: h-find-nodes preview surfacing of abstract on
+  encrypted memories (and any future RAG vectorization) requires an active session key — same
+  constraint `content` already has. **Known gap**: the MCP write paths (`h-add-node` /
+  `h-update-node`) don't invoke the encryption path; only GraphQL `upsertNode` does. This is a
+  pre-existing surface asymmetry (predates spec 031) and is **out of scope** for this spec — to
+  be addressed by a follow-up encryption spec.
+- **FR-014** (added during PR-201 round-2 review): The node.yaml importer MUST defensively reject
+  non-scalar `abstract` values (objects, arrays). Rationale: YAML's loose typing means a shape
+  like `abstract:\n  nested: true` parses as an object; naive `String(...)` coercion would yield
+  `"[object Object]"` (15 chars) that bypasses both the length cap (FR-008) and the trim-empty
+  normalization (FR-009) and silently corrupts the persisted abstract. Implementation: importer
+  treats `typeof raw === 'object'` as "no abstract" (normalizes to `NULL`), parallel to the
+  empty-string handling.
 
 ### Entity Impact
 
@@ -289,6 +307,13 @@ where `brief: true` returned hits the caller couldn't explain (PR-196 review ite
   constraint. Existing rows backfill to `NULL`. No index added in v1 (search remains a sequential
   scan over the text haystack today; if abstract search materially shifts query latency, a trigram
   index is a follow-up, not in scope here).
+- **NodeVersion** ([schema.prisma:1461](../../prisma/schema.prisma#L1461)) — adds the matching
+  optional text column `abstract` so audit-history snapshots capture abstract changes alongside
+  description / content / tags. **Not in the original plan** — surfaced during US1 implementation
+  (PR-201). NodeVersion is a curated subset of Node columns built by hand in each snapshot site
+  (`upsertNode`, `restoreNodeVersion`, `h-update-node`, `h-move-node`), so a new Node scalar that
+  needs version history MUST also be added to NodeVersion + every snapshot call site + the
+  `restoreNodeVersion` write path. Without this, restores silently drop the new column.
 
 **Source of truth**: `hadron-server/prisma/schema.prisma` (Prisma schema + migration tracked in
 tasks.md).
@@ -306,10 +331,12 @@ tasks.md).
   byte-identical to pre-spec for every node. `h-read-node` with default `contentScope` (or
   `'content'`) is byte-identical to pre-spec for every node; `'abstract'` and `'all'` surface the
   abstract per FR-005 — all four shapes confirmed by golden-file / snapshot tests.
-- **SC-003**: Search recall improves measurably for abstract-only terms. A keyword that appears ONLY
-  in a node's abstract (not in name/loc/description/tags) returns that node from `h-find-nodes`
-  post-spec; the same query returns zero hits pre-spec. Demonstrated by a regression test seeded
-  with such a node.
+- **SC-003**: ~~Search recall improves measurably for abstract-only terms.~~ **DEFERRED with FR-007
+  / US3 to the RAG follow-up (2026-05-30, PR-196 review)**. Tracked as an integration-test
+  fixture in the deferred state: a regression test confirms that a keyword appearing ONLY in a
+  node's abstract returns zero hits today (pinning the pre-spec haystack invariant; see the
+  US3-deferral test in `src/mcp/server.findReadList.test.ts`). The "improves measurably"
+  language is reserved for the RAG spec that ships semantic / vectorized search.
 - **SC-004**: Zero behavior change for any pre-spec node (which by definition has `abstract IS
   NULL`). Every default-mode output (`h-find-nodes` default, `h-list-nodes` default, `h-read-node`
   with default `contentScope` or `'content'`) for a node whose abstract is `NULL` is byte-identical
