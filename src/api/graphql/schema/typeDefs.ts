@@ -61,6 +61,8 @@ export const typeDefs = `#graphql
     name: String!
     alias: String
     description: String
+    "Paragraph-length summary of this node. Opt-in on h-read-node via the contentScope parameter. h-find-nodes preview surfacing ships in spec 031 US2 — not yet live. Never surfaced in h-list-nodes. Cap is 2000 characters; longer values are rejected with NodeAbstractTooLongError. Empty + whitespace-only values normalize to null. Spec 031."
+    abstract: String
     content: String
     tokens: Int
     tags: [String!]!
@@ -860,6 +862,8 @@ export const typeDefs = `#graphql
     name: String!
     alias: String
     description: String
+    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract (h-read-node opt-in via contentScope; h-find-nodes preview ships in US2). Optional. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."
+    abstract: String
     content: String
     seq: Int
     tags: [String!]

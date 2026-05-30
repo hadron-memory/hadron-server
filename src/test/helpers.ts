@@ -363,6 +363,8 @@ interface NodeMeta {
   name: string;
   description?: string;
   summary?: string;
+  /** Paragraph-length summary. Spec 031. */
+  abstract?: string | number;
   alias?: string;
   tags?: string[];
   nodes?: Array<{ id: string; rel: string }>;

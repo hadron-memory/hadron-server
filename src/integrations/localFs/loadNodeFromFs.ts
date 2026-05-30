@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join, relative, sep, basename, dirname } from 'path';
 import { parse } from 'yaml';
 import type { Node } from '../../index.d.js';
+import { NodeAbstractTooLongError } from '../../lib/entityRef/errors.js';
 
 interface NodeYaml {
   id: string;
@@ -9,12 +10,60 @@ interface NodeYaml {
   urn?: string;
   type?: string;
   description?: string;
+  /** Paragraph-length summary. Spec 031. Distinct from `description`. */
+  abstract?: string;
+  /**
+   * Legacy alias historically read into `description` when no
+   * `description` key existed. Predates the spec-031 `abstract` field
+   * and remains for back-compat. New writers use `abstract` for paragraph
+   * summaries and `description` for one-line headlines.
+   */
   summary?: string;
   tags?: string[];
   nodes?: Array<{ id: string; rel: string; loc?: string }>;
   alias?: string;
   author?: string;
   contentHash?: string;
+}
+
+/**
+ * Length cap + trim-then-check normalization for the imported abstract.
+ * Mirrors the resolver + MCP write paths so import → export → re-import
+ * is byte-identical for the persisted value.
+ *
+ * Per FR-008: the 2000-char cap applies at every write surface, including
+ * import. Over-cap YAML values throw `NodeAbstractTooLongError`; the sync
+ * envelope catches and reports per the existing per-node try/catch in
+ * loadGraphFromFs (errors don't poison the whole import — the bad node
+ * is skipped with a warning).
+ *
+ * Per FR-009 (extended PR-196): trim-then-check normalizes empty and
+ * whitespace-only values to null; non-empty trimmed values persist
+ * untrimmed so intentional surrounding whitespace on real paragraphs is
+ * lossless.
+ *
+ * Defensive type handling: the `yaml` package's `parse` is loose about
+ * types. Scalar non-strings (number, boolean) get coerced via `String()`
+ * so `.trim()` doesn't blow up. Objects and arrays — which would yield
+ * "[object Object]" / "1,2,3" via `String()` and silently persist as the
+ * node's abstract — are rejected as `null` instead. PR-201 round-2
+ * surfaced the object/array gap.
+ */
+function normalizeImportedAbstract(raw: unknown): string | null {
+  if (raw == null) return null;
+  // Objects and arrays would yield "[object Object]" / a comma-joined
+  // string via String() — silently persisting garbage. Treat them as
+  // "no usable abstract" (same as null/empty). A future spec that
+  // formally rejects malformed input with a typed error could wrap
+  // this in InvalidAbstractTypeError; today's choice matches the
+  // empty-string handling and keeps the bad-input failure mode quiet.
+  if (typeof raw === 'object') return null;
+  const str = String(raw);
+  if (str.length > 2000) {
+    throw new NodeAbstractTooLongError(str.length);
+  }
+  if (str.trim() === '') return null;
+  return str;
 }
 
 interface EdgeEntry {
@@ -95,6 +144,7 @@ async function loadFrontmatterNode(
       isLink: meta.type === 'link',
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
+      abstract: normalizeImportedAbstract(meta.abstract),
       content,
       contentHash: meta.contentHash ?? null,
       tags: meta.tags ?? [],
@@ -131,6 +181,7 @@ async function loadLegacyNode(
       isLink: meta.type === 'link',
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
+      abstract: normalizeImportedAbstract(meta.abstract),
       content: content?.trim() ?? null,
       contentHash: meta.contentHash ?? null,
       tags: meta.tags ?? [],
