@@ -519,3 +519,130 @@ describe('#170 — h-find-nodes wildcard survey end-to-end', () => {
     expect(text).not.toContain(fx.nodes.tombstonedIncomingSource.loc);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Spec 031 US2 — h-find-nodes preview surfaces the abstract
+// ---------------------------------------------------------------------------
+
+describe('spec 031 US2 — h-find-nodes preview includes the abstract', () => {
+  const SHORT_ABSTRACT =
+    'Paragraph-length summary that should appear in the preview as an indented block beneath the description line.';
+  const MULTI_LINE_ABSTRACT = 'First paragraph.\n\nSecond paragraph.';
+
+  it('US2.1 — preview emits the abstract as a two-space-indented block beneath the description (no `>` prefix)', async () => {
+    await db.node.update({
+      where: { id: fx.nodes.findingsDeep.id },
+      data: { abstract: SHORT_ABSTRACT },
+    });
+
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('h-find-nodes', {
+      query: 'finding',
+      memoryUrn: fx.memory.urn,
+    });
+
+    // Description line preserved (two-space indent, no `>` prefix).
+    expect(text).toContain('  bottom of a 3-level subtree with no materialized parents');
+    // Abstract line emitted with the same two-space indent (no prefix).
+    expect(text).toContain(`  ${SHORT_ABSTRACT}`);
+    // The abstract must follow the description in the preview block (the
+    // hit's description appears before its abstract line).
+    const descPos = text.indexOf('  bottom of a 3-level');
+    const absPos = text.indexOf(`  ${SHORT_ABSTRACT}`);
+    expect(descPos).toBeGreaterThan(-1);
+    expect(absPos).toBeGreaterThan(descPos);
+  });
+
+  it('US2.2 — node without abstract renders byte-identically to pre-spec preview', async () => {
+    // archive node — no abstract by default; description set in the fixture.
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('h-find-nodes', {
+      query: 'archive',
+      memoryUrn: fx.memory.urn,
+    });
+
+    // The archive node has only `nodeType: 'parent'` (no description, no
+    // abstract). Preview must contain its urn + name only — no extra
+    // body lines from this hit.
+    expect(text).toContain(fx.nodes.archive.loc);
+    expect(text).toContain('Archive');
+    // No bare-quoted abstract markers anywhere (would be a false-emit bug).
+    expect(text).not.toContain('Source: abstract-fallback');
+  });
+
+  it('US2.3 — multi-line abstract gets the two-space indent on every line', async () => {
+    await db.node.update({
+      where: { id: fx.nodes.witness.id },
+      data: { abstract: MULTI_LINE_ABSTRACT },
+    });
+
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('h-find-nodes', {
+      query: 'witness',
+      memoryUrn: fx.memory.urn,
+    });
+
+    // Each line of the multi-paragraph abstract gets the two-space prefix.
+    expect(text).toContain('  First paragraph.');
+    expect(text).toContain('  Second paragraph.');
+  });
+
+  it('US2.3b — CRLF line endings split cleanly (no trailing \\r mid-output)', async () => {
+    // Windows clients / certain text areas submit CRLF; the renderer must
+    // strip the `\r` so it doesn't print as a carriage return mid-line.
+    // PR-202 review.
+    await db.node.update({
+      where: { id: fx.nodes.witness.id },
+      data: { abstract: 'Windows-line.\r\nSecond windows-line.' },
+    });
+
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('h-find-nodes', {
+      query: 'witness',
+      memoryUrn: fx.memory.urn,
+    });
+
+    expect(text).toContain('  Windows-line.');
+    expect(text).toContain('  Second windows-line.');
+    // No stray \r characters anywhere in the rendered output.
+    expect(text).not.toContain('\r');
+  });
+
+  it('US2.4 — `brief: true` excludes the abstract from the response (preserves the brief contract)', async () => {
+    await db.node.update({
+      where: { id: fx.nodes.findingsDeep.id },
+      data: { abstract: SHORT_ABSTRACT },
+    });
+
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('h-find-nodes', {
+      query: 'finding',
+      brief: true,
+      memoryUrn: fx.memory.urn,
+    });
+
+    // The hit is present.
+    expect(text).toContain(fx.nodes.findingsDeep.loc);
+    // BUT the abstract is excluded from the brief response.
+    expect(text).not.toContain(SHORT_ABSTRACT);
+  });
+
+  it('US2 — search haystack is unchanged: a term appearing only in the abstract does NOT match (US3 deferred to RAG)', async () => {
+    const UNIQUE_TERM = 'flibbertigibbet'; // appears nowhere else
+    await db.node.update({
+      where: { id: fx.nodes.witness.id },
+      data: { abstract: `${UNIQUE_TERM} text only in the abstract` },
+    });
+
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('h-find-nodes', {
+      query: UNIQUE_TERM,
+      memoryUrn: fx.memory.urn,
+    });
+
+    // Per PR-196 US3 deferral: abstract is NOT part of the substring
+    // haystack. Searching for an abstract-only term must return zero
+    // hits — same behavior as pre-spec.
+    expect(text).toContain('No nodes found');
+  });
+});
