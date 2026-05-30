@@ -121,13 +121,15 @@ export function validateBaseUrl(raw: string | undefined): string | null {
  * (so the listener's random port is reflected naturally; setting a
  * fixed value would break `127.0.0.1:<port>`-bound tests). The other
  * `BASE_URL` consumers have inconsistent unset-defaults:
- * `src/auth/email.ts` and `src/auth/github.ts` both use
- * `http://localhost:${process.env.PORT ?? 4000}`;
+ * `src/auth/email.ts`, `src/auth/github.ts`, and
+ * `src/mcp/server.ts:getDeploymentInfo` all use
+ * `http://localhost:${process.env.PORT || 4000}` (with `||` so empty
+ * strings fall back — PR-194 review aligned the three);
  * `src/integrations/exchange/auth.ts` hardcodes
  * `http://localhost:4000` regardless of `PORT`. This consumer takes
- * a third path: per-request derivation, because OAuth metadata needs
+ * a fourth path: per-request derivation, because OAuth metadata needs
  * to reflect the request's actual host during local-dev cloudflared-
- * tunnel testing. Centralizing the four consumers behind one helper
+ * tunnel testing. Centralizing the consumers behind one helper
  * is a known follow-up; see gemini's PR #163 review.
  */
 // Vite (which vitest is built on) owns the `BASE_URL` env var

@@ -77,6 +77,17 @@ describe('getDeploymentInfo (#187 / #190 diagnostics)', () => {
     expect(info.baseUrl).toBe('http://localhost:5000');
   });
 
+  it('treats PORT="" as effectively-unset and falls back to 4000', () => {
+    // Parallel to the BASE_URL="" guard above. PORT was previously
+    // resolved with `??` which only catches null/undefined and lets
+    // empty-string slip through, producing `http://localhost:`. PR-194
+    // review caught it; pinned here.
+    vi.stubEnv('BASE_URL', undefined);
+    vi.stubEnv('PORT', '');
+    const info = getDeploymentInfo();
+    expect(info.baseUrl).toBe('http://localhost:4000');
+  });
+
   it('treats BASE_URL="/" as effectively-unset (Vitest globalSetup sentinel)', () => {
     // Mirrors src/auth/oauth.ts's special-case for the `"/"` sentinel
     // that Vitest's globalSetup leaves behind in test runs without an
@@ -214,12 +225,15 @@ describe('h-server-info — returns server identity (#187 / #190)', () => {
     expect(text).not.toContain('postgresql://');
   });
 
-  it('works for an unauthenticated-shape caller (server identity is not tenant data)', async () => {
-    // h-server-info should be answerable even when auth is minimal —
-    // it returns server identity, not per-tenant data. We pin this
-    // explicitly so a future "require active App" decoration doesn't
-    // silently break the use case (transcript reader inspecting a
-    // failed-auth session).
+  it('pins absence of tool-level auth gating (transport gates at /mcp; per-tool decoration is intentionally absent)', async () => {
+    // NOT a claim that anonymous access works end-to-end — the transport
+    // (handleMcpRequest at /mcp) rejects requests without an AuthContext
+    // with 401 + RFC 9728 PRM. This test bypasses the transport on
+    // purpose via createTestableMcpServer's _registeredTools shortcut,
+    // and pins that the tool body itself has no auth decoration. A
+    // future "require active App" check added here would silently break
+    // the transcript-reader use case (inspecting a failed-auth session)
+    // even after transport auth succeeds.
     const auth: AuthContext = {
       roles: [],
       clientId: 'anonymous',

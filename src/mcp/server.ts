@@ -115,10 +115,14 @@ export function getDeploymentInfo(): DeploymentInfo {
   // output — exactly the wrong-server-but-no-way-to-tell symptom this
   // surface exists to fix. Gemini review caught this on PR-191.
   const raw = process.env.BASE_URL;
+  // PORT uses `||` (not `??`) so an empty-string PORT — e.g. shell `PORT= node ...`
+  // or `vi.stubEnv('PORT', '')` — falls back to 4000. Symmetric with the
+  // empty-string handling on BASE_URL above; `??` would only catch null/undefined
+  // and let `""` slip through, producing `http://localhost:`. PR-194 review.
   const baseUrl =
     raw && raw !== '/'
       ? raw
-      : `http://localhost:${process.env.PORT ?? 4000}`;
+      : `http://localhost:${process.env.PORT || 4000}`;
   return { baseUrl, version: HADRON_SERVER_VERSION };
 }
 
@@ -701,7 +705,18 @@ export function createMcpServerInstance(
   // without needing to issue any other tool calls. Doesn't require an
   // active App, doesn't require an active memory, doesn't even require
   // read access on any memory — it returns server identity only, never
-  // any per-tenant data. Safe to expose to every caller.
+  // any per-tenant data.
+  //
+  // Auth layering — the tool itself does NOT add gating because the MCP
+  // transport already requires a valid AuthContext (App Key, User API Key,
+  // or JWT bearer) to reach any tool invocation. handleMcpRequest at the
+  // /mcp boundary rejects requests with no auth principal via a 401 +
+  // RFC 9728 protected-resource metadata. So "no tool-level auth gate" is
+  // a deliberate layering choice (gate at the transport, not per-tool),
+  // not an exposure. The unit test pinning the "works for unauthenticated-
+  // shape caller" case bypasses the transport on purpose — it pins that a
+  // future "require active App" decoration on this tool can't silently
+  // break the transcript-reader use case after auth succeeds upstream.
   //
   // Intentionally does NOT include DATABASE_URL (may carry credentials).
   // If a future need arises to disambiguate two deployments that share
