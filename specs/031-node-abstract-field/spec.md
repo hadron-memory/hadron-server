@@ -99,15 +99,17 @@ that omit the parameter retain `NULL` and exhibit no change in any `contentScope
    error citing the allowed values (`'content' | 'abstract' | 'all'`).
 10. **Given** a node with `abstract: "Paper abstract text."` and `content: NULL` (or empty), **When**
     `h-read-node` is invoked with default `contentScope` (or `'content'`), **Then** the response is
-    meta block + `---` + the abstract text — the content-fallback rule fills the body slot from the
-    abstract.
+    meta block (including a `Source: abstract-fallback` line) + `---` + the abstract text — the
+    content-fallback rule fills the body slot from the abstract, and the marker tells the caller it
+    happened.
 11. **Given** a node with `abstract: "..."` and `content: NULL`, **When** `h-read-node` is invoked
     with `contentScope: 'abstract'`, **Then** the response is meta block + abstract (the
     `'abstract'` scope never falls back to content; the inverse is asymmetric to `'content'`).
 12. **Given** a node with `abstract: "..."` and `content: NULL`, **When** `h-read-node` is invoked
     with `contentScope: 'all'`, **Then** the response is meta block + abstract (no `---`, because
-    there is no body) — the response collapses to the same shape as `contentScope: 'abstract'` for
-    this node.
+    there is no body, and no `Source: abstract-fallback` marker since fallback only applies under
+    `'content'`) — the response collapses to the same shape as `contentScope: 'abstract'` for this
+    node.
 13. **Given** a node with `abstract: NULL` and `content: NULL` (a sparse node), **When**
     `h-read-node` is invoked with default `contentScope`, **Then** the response is meta block +
     `---` + empty body — byte-identical to pre-spec output for sparse nodes.
@@ -210,10 +212,11 @@ Run `h-find-nodes` for that term. Pre-spec: zero hits. Post-spec: the node is re
   typed validation error naming the allowed values. The DB is not touched.
 - **Content-less node with an abstract under default `contentScope`** (the common
   `nodeType='abstract'` case where the source is archived): the abstract fills the body slot per
-  FR-005 — response is meta block + `---` + abstract. The caller does not need to know the
-  difference; the abstract IS the content for this node. Callers that need to distinguish "got
-  body" from "got fallback abstract" can use `contentScope: 'all'`, which collapses to meta +
-  abstract (no `---`) when there is no body — the missing separator is the signal.
+  FR-005, and the meta block carries a `Source: abstract-fallback` line so callers (humans or
+  agents) can tell at a glance that the body slot was filled from the abstract rather than from
+  real content. The marker is the primary disambiguation channel; callers that still want
+  structural disambiguation can additionally use `contentScope: 'all'`, which collapses to meta +
+  abstract (no `---`) when there is no body.
 - **Content-less node with an abstract under `contentScope: 'all'`**: meta block + abstract, no
   `---`, no body. The collapsed shape distinguishes this case from a body-having node.
 
@@ -227,7 +230,7 @@ Run `h-find-nodes` for that term. Pre-spec: zero hits. Post-spec: the node is re
   separately-persisted fields. Any may be `NULL`. No derivation rule (e.g., "abstract = first
   paragraph of content") is applied automatically.
 - **FR-003**: `h-add-node` MUST accept an optional `abstract` parameter and persist it verbatim (
-  after the length-cap and empty-string normalization rules in FR-007 and FR-008).
+  after the length-cap and empty-string normalization rules in FR-008 and FR-009).
 - **FR-004**: `h-update-node` MUST accept an optional `abstract` parameter with partial-update
   semantics: omitted = preserve, `null` = clear, string = replace.
 - **FR-005**: `h-read-node` MUST accept an optional `contentScope` parameter with allowed values
@@ -242,6 +245,12 @@ Run `h-find-nodes` for that term. Pre-spec: zero hits. Post-spec: the node is re
         2. the node's `abstract` value when `content` is null/empty AND `abstract` is non-null (
            fallback); OR
         3. empty string when both `content` and `abstract` are null/empty (pre-spec behavior).
+
+      When case (2) fires, the meta block MUST include an additional line `Source:
+      abstract-fallback` (positioned with the other meta lines, e.g. near `Type:`). This is a
+      parse-friendly signal so callers can distinguish "got real body" from "got fallback
+      abstract" without depending on shape-level inference. The marker MUST NOT appear in cases (1)
+      or (3), and MUST NOT appear under any other `contentScope` value (see below).
     - `'abstract'` — meta block + abstract paragraph. No `---` separator. No body. If `abstract` is
       `NULL`, the response is meta block alone (no fallback to `content`).
     - `'all'` — meta block + abstract paragraph (when non-null) + `---` + body (when non-null /
@@ -365,8 +374,10 @@ tasks.md).
   abstract fills the body slot — the abstract IS the content for these nodes, and callers (humans
   or agents) get something useful instead of an empty body. This matches the schema doc's
   long-standing intent for `nodeType='abstract'` ("may be the only representation if the source is
-  archived"). The inverse fallback — `'abstract'` returning content when the abstract is `NULL` —
-  is **not** added: the caller explicitly asked for the abstract, and silently substituting content
-  would surprise them (especially small-LLM callers using `'abstract'` as a cheap peek). Callers
-  that want a "give me something" semantics use the default `'content'` scope; callers that want
-  full disambiguation use `'all'`.
+  archived"). The fallback is signalled explicitly via a `Source: abstract-fallback` line in the
+  meta block (parse-friendly — callers don't have to infer from shape). The inverse fallback —
+  `'abstract'` returning content when the abstract is `NULL` — is **not** added: the caller
+  explicitly asked for the abstract, and silently substituting content would surprise them (
+  especially small-LLM callers using `'abstract'` as a cheap peek). Callers that want a "give me
+  something" semantics use the default `'content'` scope; callers that want full disambiguation
+  use `'all'`.
