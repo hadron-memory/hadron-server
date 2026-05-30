@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join, relative, sep, basename, dirname } from 'path';
 import { parse } from 'yaml';
 import type { Node } from '../../index.d.js';
+import { NodeAbstractTooLongError } from '../../lib/entityRef/errors.js';
 
 interface NodeYaml {
   id: string;
@@ -26,14 +27,33 @@ interface NodeYaml {
 }
 
 /**
- * Trim-then-check normalization for the imported abstract (FR-009
- * extended). Mirrors the resolver + MCP write paths so import → export
- * → re-import is byte-identical for the persisted value.
+ * Length cap + trim-then-check normalization for the imported abstract.
+ * Mirrors the resolver + MCP write paths so import → export → re-import
+ * is byte-identical for the persisted value.
+ *
+ * Per FR-008: the 2000-char cap applies at every write surface, including
+ * import. Over-cap YAML values throw `NodeAbstractTooLongError`; the sync
+ * envelope catches and reports per the existing per-node try/catch in
+ * loadGraphFromFs (errors don't poison the whole import — the bad node
+ * is skipped with a warning).
+ *
+ * Per FR-009 (extended PR-196): trim-then-check normalizes empty and
+ * whitespace-only values to null; non-empty trimmed values persist
+ * untrimmed so intentional surrounding whitespace on real paragraphs is
+ * lossless.
+ *
+ * Defensive type coercion: YAML's `parse` is loose about types — a
+ * `abstract: 42` line yields a number, not a string. Coerce to string
+ * first so `.trim()` doesn't blow up at runtime on malformed input.
  */
-function normalizeImportedAbstract(raw: string | undefined): string | null {
+function normalizeImportedAbstract(raw: unknown): string | null {
   if (raw == null) return null;
-  if (raw.trim() === '') return null;
-  return raw;
+  const str = String(raw);
+  if (str.length > 2000) {
+    throw new NodeAbstractTooLongError(str.length);
+  }
+  if (str.trim() === '') return null;
+  return str;
 }
 
 interface EdgeEntry {

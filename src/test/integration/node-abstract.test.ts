@@ -246,6 +246,90 @@ describe('upsertNode — createOnly + abstract', () => {
   });
 });
 
+// ───── restoreNodeVersion + abstract round-trip ───────────────────────────
+
+describe('restoreNodeVersion — abstract round-trips through history', () => {
+  it('restoring a version with a non-null abstract reverts the node abstract to that value', async () => {
+    // Initial state: abstract A
+    const created = await upsertNode({ loc: 'rv1', name: 'rv1', abstract: 'A' });
+
+    // Capture v1 (records "A") by performing an update that triggers a snapshot.
+    await upsertNode({ loc: 'rv1', name: 'rv1', abstract: 'B' });
+
+    // The NodeVersion just created snapshotted the pre-update state ("A").
+    const versions = await db.nodeVersion.findMany({
+      where: { nodeId: created.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(versions.length).toBeGreaterThanOrEqual(1);
+    const vA = versions[0];
+    expect(vA.abstract).toBe('A');
+
+    // Restore that version. Node abstract should revert to "A".
+    const restored = await resolvers.Mutation.restoreNodeVersion(
+      {},
+      { versionId: vA.id },
+      fx.ctx,
+    );
+    expect(restored.abstract).toBe('A');
+    expect(await persistedAbstract('rv1')).toBe('A');
+  });
+
+  it("restoring a version with NULL abstract clears the node's current abstract", async () => {
+    // v1 state: no abstract
+    const created = await upsertNode({ loc: 'rv2', name: 'rv2' });
+
+    // Update to give the node an abstract — snapshot captures the pre-update NULL.
+    await upsertNode({ loc: 'rv2', name: 'rv2', abstract: 'Later.' });
+
+    const versions = await db.nodeVersion.findMany({
+      where: { nodeId: created.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    const vNullAbs = versions[0];
+    expect(vNullAbs.abstract).toBeNull();
+
+    const restored = await resolvers.Mutation.restoreNodeVersion(
+      {},
+      { versionId: vNullAbs.id },
+      fx.ctx,
+    );
+    expect(restored.abstract).toBeNull();
+    expect(await persistedAbstract('rv2')).toBeNull();
+  });
+
+  it('pre-restore snapshot captures the current abstract', async () => {
+    // Initial state: abstract X
+    const created = await upsertNode({ loc: 'rv3', name: 'rv3', abstract: 'X' });
+
+    // Bump to "Y" so we have a prior version (with abstract X) to restore.
+    await upsertNode({ loc: 'rv3', name: 'rv3', abstract: 'Y' });
+
+    const versions = await db.nodeVersion.findMany({
+      where: { nodeId: created.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    const vX = versions[0];
+
+    // Restore vX — node abstract becomes "X", but the pre-restore snapshot
+    // must record the CURRENT abstract ("Y") so we can round-trip back.
+    await resolvers.Mutation.restoreNodeVersion(
+      {},
+      { versionId: vX.id },
+      fx.ctx,
+    );
+
+    const versionsAfterRestore = await db.nodeVersion.findMany({
+      where: { nodeId: created.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    // The newest version row was created by the restore — its abstract
+    // must equal the pre-restore live state ("Y").
+    const newest = versionsAfterRestore[versionsAfterRestore.length - 1];
+    expect(newest.abstract).toBe('Y');
+  });
+});
+
 // node(loc) query coverage intentionally omitted — `Mutation.upsertNode`'s
 // own return value (asserted above) plus the DB-level `persistedAbstract`
 // check already prove the column round-trips through GraphQL. The

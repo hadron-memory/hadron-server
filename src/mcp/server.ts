@@ -48,7 +48,11 @@ import {
 } from './access-control.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
-import { NodeNotFoundError, NodeAbstractTooLongError } from '../lib/entityRef/errors.js';
+import {
+  NodeNotFoundError,
+  NodeAbstractTooLongError,
+  InvalidContentScopeError,
+} from '../lib/entityRef/errors.js';
 import { isId } from '../lib/entityRef/shape.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { SessionType } from '../generated/prisma/index.js';
@@ -1173,18 +1177,20 @@ export function createMcpServerInstance(
       //
       // Defensive enum check: zod validates the same set at the MCP
       // transport boundary, but defensive validation here catches direct-
-      // handler callers (testable harness, internal callers) that bypass
-      // the schema.
+      // handler callers (e.g. createTestableMcpServer's _registeredTools
+      // shortcut, which bypasses the transport's zod parsing) and any
+      // future internal caller. Throws the typed `InvalidContentScopeError`
+      // so the class is the single source of truth for both the message
+      // and any future GraphQL `extensions.code` mapping; the MCP boundary
+      // catches and returns its `message` as a tool-result string.
       if (
         contentScope !== undefined &&
         contentScope !== 'content' &&
         contentScope !== 'abstract' &&
         contentScope !== 'all'
       ) {
-        return textResult(
-          `Invalid contentScope: ${JSON.stringify(contentScope)}. ` +
-            `Allowed values: 'content' | 'abstract' | 'all'.`,
-        );
+        const err = new InvalidContentScopeError(String(contentScope));
+        return textResult(err.message);
       }
       const scope = contentScope ?? 'content';
       const hasContent = !!(node.content && node.content.length > 0);
@@ -2274,7 +2280,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
         // NodeVersion snapshot of the pre-move state — mirrors the
         // pattern h-update-node already follows. Loc / name / memoryId
-        // changes are audit-worthy.
+        // changes are audit-worthy. Spec 031 — `abstract` is included so
+        // version history captures the pre-move state in full.
         await tx.nodeVersion.create({
           data: {
             id: generateId(),
@@ -2283,6 +2290,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             name: existing.name,
             alias: existing.alias,
             description: existing.description,
+            abstract: existing.abstract,
             content: existing.content,
             tags: existing.tags as string[],
             editedBy: auth.clientId ?? null,

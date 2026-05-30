@@ -68,6 +68,70 @@ describe('loadNodeFromFs', () => {
     expect(node.description).toBe('A summary');
   });
 
+  // ─── Spec 031 — abstract import behavior ─────────────────────────────
+
+  it('imports the abstract field from node.yaml frontmatter', async () => {
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    mkdirSync(nodeDir, { recursive: true });
+    writeNodeFiles(nodeDir, {
+      name: 'graph',
+      abstract: 'A paragraph-length summary.',
+    });
+
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect(node.abstract).toBe('A paragraph-length summary.');
+  });
+
+  it('normalizes whitespace-only abstract to null at import time (FR-009)', async () => {
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    mkdirSync(nodeDir, { recursive: true });
+    writeNodeFiles(nodeDir, { name: 'graph', abstract: '   \n\t  ' });
+
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect(node.abstract).toBeNull();
+  });
+
+  it('preserves intentional leading whitespace on a real abstract paragraph', async () => {
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    mkdirSync(nodeDir, { recursive: true });
+    const padded = '  This abstract starts with spaces.';
+    writeNodeFiles(nodeDir, { name: 'graph', abstract: padded });
+
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect(node.abstract).toBe(padded);
+  });
+
+  it('rejects an abstract longer than 2000 characters at import time (FR-008)', async () => {
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    mkdirSync(nodeDir, { recursive: true });
+    const overlong = 'x'.repeat(2001);
+    writeNodeFiles(nodeDir, { name: 'graph', abstract: overlong });
+
+    await expect(
+      loadNodeFromFs(nodeDir, graphRoot, 'test/repo'),
+    ).rejects.toThrow(/2000/);
+  });
+
+  it('coerces non-string abstract values defensively (e.g. accidental YAML number)', async () => {
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    mkdirSync(nodeDir, { recursive: true });
+    // js-yaml will parse `abstract: 42` as the number 42; the normalizer
+    // must coerce-then-trim rather than blow up at runtime.
+    writeNodeFiles(nodeDir, { name: 'graph', abstract: 42 });
+
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect(node.abstract).toBe('42');
+  });
+
+  it('returns null abstract when the YAML key is absent', async () => {
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    mkdirSync(nodeDir, { recursive: true });
+    writeNodeFiles(nodeDir, { name: 'graph' });
+
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect(node.abstract).toBeNull();
+  });
+
   it('returns empty tags array when tags is absent', async () => {
     const nodeDir = join(graphRoot, 'org', 'graph');
     mkdirSync(nodeDir, { recursive: true });

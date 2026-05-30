@@ -2610,13 +2610,20 @@ export const resolvers = {
         throw e;
       }
 
-      // Spec 031 — abstract validation + normalization. Length-cap check on
-      // the raw input first; then trim-then-check normalization (empty +
-      // whitespace-only collapse to null; non-empty trimmed values persist
-      // untrimmed so intentional surrounding whitespace on real paragraphs
-      // is lossless). Applied at the resolver layer so this surface
-      // matches the MCP h-add-node / h-update-node semantics. `undefined`
-      // (key absent) means "preserve existing" and bypasses both checks.
+      // Spec 031 — abstract validation + normalization. Length-cap check
+      // on the raw input first; then trim-then-check normalization (empty
+      // + whitespace-only collapse to null; non-empty trimmed values
+      // persist untrimmed so intentional surrounding whitespace on real
+      // paragraphs is lossless). Applied at the resolver layer so this
+      // surface matches the MCP h-add-node / h-update-node semantics.
+      // `undefined` (key absent) means "preserve existing" and bypasses
+      // both checks.
+      //
+      // The normalized value is reassigned back onto `input.abstract`
+      // BELOW (after validation), but we compute it in a local first so
+      // the resolver doesn't observe a mutated args object before its
+      // validation has settled (defense against future GraphQL runners
+      // that freeze args).
       if (input.abstract !== undefined && input.abstract !== null) {
         if (input.abstract.length > 2000) {
           const err = new NodeAbstractTooLongError(input.abstract.length);
@@ -2624,9 +2631,9 @@ export const resolvers = {
             extensions: { code: err.name, length: err.length, max: err.max },
           });
         }
-        if (input.abstract.trim() === '') {
-          input.abstract = null;
-        }
+        const normalized: string | null =
+          input.abstract.trim() === '' ? null : input.abstract;
+        input = { ...input, abstract: normalized };
       }
 
       // Reject saves whose extraction-spec arrays would write into the
@@ -4075,7 +4082,9 @@ export const resolvers = {
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
 
-      // Snapshot current state before restoring
+      // Snapshot current state before restoring. Spec 031 — `abstract`
+      // must be captured here too; without it, a round-trip restore (then
+      // restoring this snapshot) silently drops abstract.
       await ctx.db.nodeVersion.create({
         data: {
           id: generateId(),
@@ -4084,6 +4093,7 @@ export const resolvers = {
           name: node.name,
           alias: node.alias,
           description: node.description,
+          abstract: node.abstract,
           content: node.content,
           tags: node.tags as string[],
           editedBy: ctx.clientId ?? ctx.userId ?? null,
@@ -4091,13 +4101,17 @@ export const resolvers = {
         },
       });
 
-      // Restore the node to the version's state
+      // Restore the node to the version's state. Spec 031 — `abstract`
+      // is part of the restored state; without it, restoring a version
+      // that had a non-null abstract leaves the node's current abstract
+      // unchanged (and vice versa).
       return ctx.db.node.update({
         where: { id: node.id },
         data: {
           name: version.name,
           alias: version.alias,
           description: version.description,
+          abstract: version.abstract,
           content: version.content,
           tags: version.tags as string[],
         },
