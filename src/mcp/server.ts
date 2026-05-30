@@ -1077,6 +1077,19 @@ export function createMcpServerInstance(
         const urn = await nodeUrn(n.loc, n.memoryId);
         const parts = [`- **${urn}** — ${n.name}`];
         if (n.description) parts.push(`  ${n.description}`);
+        // Spec 031 US2 — surface the abstract as a two-space-indented block
+        // beneath the description (no `>` prefix; matches the existing
+        // description-line format in this tool — h-read-node uses `>` but
+        // h-find-nodes never has). Multi-paragraph abstracts get the
+        // prefix on each line. Excluded from brief mode (preserves the
+        // existing brief contract; index-info-only). Per PR-196 US3
+        // deferral, the matchesQuery haystack is NOT extended — abstract
+        // is preview-only, not searchable, until the RAG follow-up.
+        if (!brief && n.abstract) {
+          for (const absLine of (n.abstract as string).split('\n')) {
+            parts.push(`  ${absLine}`);
+          }
+        }
         if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
         if (brief && n.outgoingEdges?.length) {
           const edgeStrs = await Promise.all(n.outgoingEdges.map(async (e: any) => {
