@@ -1086,7 +1086,10 @@ export function createMcpServerInstance(
         // deferral, the matchesQuery haystack is NOT extended — abstract
         // is preview-only, not searchable, until the RAG follow-up.
         if (!brief && n.abstract) {
-          for (const absLine of (n.abstract as string).split('\n')) {
+          // `/\r?\n/` rather than `'\n'` so CRLF-terminated lines (common
+          // from Windows clients / certain text areas) don't leave a
+          // trailing `\r` embedded mid-output. PR-202 review.
+          for (const absLine of (n.abstract as string).split(/\r?\n/)) {
             parts.push(`  ${absLine}`);
           }
         }

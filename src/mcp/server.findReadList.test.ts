@@ -587,6 +587,27 @@ describe('spec 031 US2 — h-find-nodes preview includes the abstract', () => {
     expect(text).toContain('  Second paragraph.');
   });
 
+  it('US2.3b — CRLF line endings split cleanly (no trailing \\r mid-output)', async () => {
+    // Windows clients / certain text areas submit CRLF; the renderer must
+    // strip the `\r` so it doesn't print as a carriage return mid-line.
+    // PR-202 review.
+    await db.node.update({
+      where: { id: fx.nodes.witness.id },
+      data: { abstract: 'Windows-line.\r\nSecond windows-line.' },
+    });
+
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('h-find-nodes', {
+      query: 'witness',
+      memoryUrn: fx.memory.urn,
+    });
+
+    expect(text).toContain('  Windows-line.');
+    expect(text).toContain('  Second windows-line.');
+    // No stray \r characters anywhere in the rendered output.
+    expect(text).not.toContain('\r');
+  });
+
   it('US2.4 — `brief: true` excludes the abstract from the response (preserves the brief contract)', async () => {
     await db.node.update({
       where: { id: fx.nodes.findingsDeep.id },
