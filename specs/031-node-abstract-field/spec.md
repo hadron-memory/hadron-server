@@ -143,37 +143,26 @@ abstract; the second's looks identical to its pre-spec form.
 2. **Given** a node with only `description` (abstract `NULL`), **When** `h-find-nodes` renders its
    preview, **Then** the output is byte-identical to today's behavior.
 3. **Given** `brief: true` on `h-find-nodes`, **When** the response is emitted, **Then** the
-   abstract is NOT included in the response (preserves the brief contract), even though the
-   abstract IS still part of the search haystack (see US3).
+   abstract is NOT included in the response — preserves the brief contract byte-for-byte (and per
+   the PR-196 deferral of US3, the abstract is not part of the search haystack either, so brief
+   mode has no asymmetric-search footgun).
 4. **Given** `h-list-nodes` emits the tree, **When** a node has an abstract, **Then** the tree
    output is byte-identical to pre-spec — `h-list-nodes` does not surface the abstract.
 
 ---
 
-### User Story 3 — Keyword search matches against abstract content (Priority: P3)
+### User Story 3 — ~~Keyword search matches against abstract content~~ — **DEFERRED to RAG follow-up (2026-05-30)**
 
-`h-find-nodes` already does substring/keyword matching across `name`, `loc`, `description`, and
-`tags` (per the tool's own contract in [server.ts:939](../../src/mcp/server.ts#L939)). After this
-spec, the search haystack also includes the abstract. Agents searching for a term that appears only
-in a node's abstract — not in its name, loc, or tags — get a hit they would have missed before.
+US3 originally extended `h-find-nodes`' substring/keyword haystack to include the abstract.
+**Deferred during plan review (PR #196)**: search-acceleration over abstracts is the natural job
+of the upcoming RAG / vector-retrieval layer (per the spec Background), and a substring index
+extension here would either duplicate that work or compete with it. In this spec, the abstract is
+preview-only at the search surface — agents see it in result previews (US2) but searches do NOT
+match against abstract content. A term appearing only in the abstract continues to produce zero
+hits via `h-find-nodes` until the RAG layer ships. This also eliminates the agent-surprise mode
+where `brief: true` returned hits the caller couldn't explain (PR-196 review item 3).
 
-**Why this priority**: Search recall is a real win but strictly additive on top of US2. Without US2,
-the abstract is invisible. Without US3, the abstract is visible but not searchable — still useful.
-Shipping P3 separately keeps the search-behavior change isolated for measurement.
-
-**Independent Test**: Seed a node with a unique discriminator term appearing ONLY in its abstract.
-Run `h-find-nodes` for that term. Pre-spec: zero hits. Post-spec: the node is returned.
-
-**Acceptance Scenarios**:
-
-1. **Given** a node with a unique term `"deduplication"` appearing only in its abstract (not in
-   name/loc/description/tags), **When** `h-find-nodes` is called with `query: "deduplication"`, *
-   *Then** the node appears in the results.
-2. **Given** the existing search semantics (substring, case-insensitive, ALL whitespace-separated
-   terms must appear), **When** the haystack is extended to include `abstract`, **Then** every node
-   that matched pre-spec still matches (search is monotonically additive — no removals).
-3. **Given** a `query: "*"` survey, **When** the haystack changes, **Then** the result set is
-   identical to today (survey mode matches every live node regardless of haystack content).
+**Original requirement**: dropped. See FR-007 below — also marked deferred.
 
 ---
 
@@ -199,10 +188,11 @@ Run `h-find-nodes` for that term. Pre-spec: zero hits. Post-spec: the node is re
 - **`h-update-node` with `abstract` field omitted**: omission means "leave it alone" (partial-update
   semantics), consistent with how `description` and `content` behave today. To clear, the caller
   passes `abstract: null` explicitly.
-- **Search interaction with `brief: true`**: the existing `brief` mode on `h-find-nodes` returns "
-  index info only: name, description, edges". When `brief: true`, the abstract is NOT included in
-  the response (preserves the contract). The abstract IS still searched against, however — `brief`
-  controls output shape, not the search haystack.
+- **Search interaction with `brief: true`**: the existing `brief` mode on `h-find-nodes` returns
+  "index info only: name, description, edges". When `brief: true`, the abstract is NOT included in
+  the response. Per the PR-196 deferral of US3, the abstract is also not part of the search
+  haystack, so brief mode is symmetric: it doesn't return the abstract, and it doesn't search
+  against it either. The existing docstring remains accurate unchanged.
 - **`contentScope: 'abstract'` on a node with `NULL` abstract**: response is the meta block alone,
   no error. The caller asked for the abstract; the node has none; the response says so by omission.
   No fallback to content (asymmetric to the `'content'`-fallback rule per FR-005).
@@ -261,22 +251,26 @@ Run `h-find-nodes` for that term. Pre-spec: zero hits. Post-spec: the node is re
 - **FR-006**: `h-find-nodes` MUST surface `abstract` in its preview output when non-null AND when
   `brief: false` (the default). Preview shape: description remains the one-line headline; abstract
   appears as a paragraph preview beneath it. Nodes with `abstract IS NULL` MUST render
-  byte-identically to pre-spec output. `brief: true` is the off-switch — the abstract is excluded
-  from the response shape per FR-007. `h-list-nodes` is explicitly NOT extended — tree output
-  remains byte-identical to pre-spec for every node regardless of abstract value (the tree's
-  line-density is the tool's job; paragraph previews belong in find/read, not list).
-- **FR-007**: `h-find-nodes` search MUST include `abstract` in its substring/keyword haystack (
-  joined with name, loc, description, tags). Existing search semantics — ALL whitespace-separated
-  terms must appear, case-insensitive, no fuzzy / no stemming — apply unchanged. `brief: true` mode
-  preserves its existing response shape (excludes the abstract from the response) but still searches
-  against it. The existing tool docstring on the `brief` parameter ("Return index info only: name,
-  description, edges") MUST NOT be revised — it remains accurate post-spec because brief
-  deliberately excludes the abstract.
+  byte-identically to pre-spec output. `brief: true` is the off-switch — when set, the response
+  shape excludes the abstract entirely (same shape as pre-spec brief mode). `h-list-nodes` is
+  explicitly NOT extended — tree output remains byte-identical to pre-spec for every node
+  regardless of abstract value (the tree's line-density is the tool's job; paragraph previews
+  belong in find/read, not list).
+- **FR-007**: ~~`h-find-nodes` search MUST include `abstract` in its substring/keyword haystack.~~
+  **DEFERRED to RAG follow-up (2026-05-30, PR-196 review)**. The substring search haystack
+  remains `name + loc + description + tags` (pre-spec behavior); abstract is NOT searched. Search
+  acceleration over abstract content is the natural job of the upcoming RAG / vector-retrieval
+  layer; a substring extension here would either duplicate that work or compete with it. The
+  existing `brief` docstring (`"Return index info only: name, description, edges"`) remains
+  accurate and unchanged. See deferred US3 above.
 - **FR-008**: System MUST reject `abstract` values longer than 2000 characters with a clear, typed
   validation error citing the cap and the offending length. The cap applies on both create and
   update.
-- **FR-009**: `abstract: ""` (empty string) MUST be normalized to `NULL` at write time (parity with
-  how the existing text columns treat semantic absence).
+- **FR-009**: `abstract: ""` (empty string) AND `abstract: "<whitespace-only>"` (e.g., `"   "`,
+  `"\n\n"`) MUST both be normalized to `NULL` at write time. Implementation: trim leading +
+  trailing whitespace; if the trimmed value is empty, persist `NULL`. Parity with how the existing
+  text columns treat semantic absence, and prevents ghost-whitespace abstracts from polluting
+  previews. (Whitespace-handling clarified in PR-196 review.)
 - **FR-010**: The node.yaml importer/exporter MUST round-trip `abstract` symmetrically. An
   export-then-import cycle preserves the value byte-for-byte; absent in YAML = `NULL`.
 - **FR-011**: `h-validate`'s sparse-node check MUST be extended: a node is sparse iff it has no
@@ -350,16 +344,17 @@ tasks.md).
   UI (rendering the abstract in tree hover, list cards, etc.) is a follow-up gated on this spec but
   not in scope here — once the API returns `abstract`, portal rendering is a localized component
   change that doesn't need a separate spec unless it requires non-trivial UX work.
-- **Search remains a sequential text scan.** No trigram or full-text index is added in this spec.
-  Existing `h-find-nodes` performance budget (linear in node count, dominated by I/O) is assumed
-  sufficient with one more text field in the haystack. If profiling shows the additional column
-  materially shifts p50/p95, indexing is a follow-up spec.
+- **Search remains a sequential text scan over the pre-spec haystack.** Per the PR-196 deferral
+  of US3/FR-007, the abstract is NOT added to the `h-find-nodes` haystack in this spec. Search
+  performance is unchanged from pre-spec. Search recall over abstract content is the natural job
+  of the upcoming RAG / vector-retrieval layer (see Background).
 - **Partial-update semantics match the existing convention** for `description` / `content` on
   `h-update-node`: omitted field = preserve, explicit `null` = clear, explicit string = replace. No
   new convention is introduced.
-- **`brief: true` on `h-find-nodes` continues to exclude body-like content** from the response (
-  preserves the existing contract that brief mode returns "index info only"). The abstract is
-  searched against but not returned in brief responses.
+- **`brief: true` on `h-find-nodes` continues to exclude body-like content** from the response and
+  to preserve the pre-spec haystack. With US3 deferred, brief mode is symmetric: doesn't return
+  the abstract, doesn't search against it. The existing docstring (`"Return index info only:
+  name, description, edges"`) remains accurate unchanged.
 - **Read/find asymmetry on abstract surfacing is intentional.** `h-find-nodes` always shows the
   abstract in previews (when present); `h-read-node` shows it only when the caller opts in via
   `contentScope`. Rationale: find-nodes is the triage tool where richer preview *is* the job, and
