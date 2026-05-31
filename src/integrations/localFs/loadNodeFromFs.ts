@@ -52,6 +52,17 @@ interface NodeYaml {
  * for the round-trip path. Missing key, null, object, number, boolean
  * all fall through to "recompute from content" (same defensive pattern
  * as spec 031's `normalizeImportedAbstract` object-rejection).
+ *
+ * Deliberate choice — non-string falls through SILENTLY rather than
+ * emitting the mismatch-warning. Rationale: a non-string value cannot
+ * have come from a hadron-server export (we only ever write string or
+ * omit), so the failure mode is "human or third-party YAML producer
+ * mis-typed the key" — which is structurally indistinguishable from
+ * "key missing" rather than from "tampering with a real hash." Treating
+ * both as "no usable hash, fall back to first-time-import semantics"
+ * keeps the warning channel focused on the case that actually matters:
+ * a producer that supplied a string-shaped hash disagreeing with the
+ * computed value (PR-209 review note #4).
  */
 function reconcileAbstractOriginHash(
   normalizedAbstract: string | null,

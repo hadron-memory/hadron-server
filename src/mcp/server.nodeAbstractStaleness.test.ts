@@ -247,4 +247,25 @@ describe('NodeVersion snapshots capture abstractOriginHash', () => {
     expect(versions.length).toBeGreaterThanOrEqual(1);
     expect(versions[0].abstractOriginHash).toBe(computeContentHash('Y'));
   });
+
+  it('h-move-node snapshot captures existing.abstractOriginHash', async () => {
+    // Spec 031 lesson + PR-209 Copilot review: every NodeVersion.create
+    // site must be exercised. Without this test, a future refactor that
+    // drops the column from the h-move-node snapshot won't be caught.
+    await addNode({ loc: 'v2', abstract: 'X', content: 'Y' });
+    const before = await readRow('v2');
+    const srv = createTestableMcpServer(adminAuth());
+    await srv.callToolText('h-move-node', {
+      urn: 'stale-org::stalemem::v2',
+      targetUrn: 'stale-org::stalemem::v2moved',
+    });
+    const versions = await db.nodeVersion.findMany({
+      where: { nodeId: before!.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(versions.length).toBeGreaterThanOrEqual(1);
+    expect(versions[versions.length - 1].abstractOriginHash).toBe(
+      computeContentHash('Y'),
+    );
+  });
 });

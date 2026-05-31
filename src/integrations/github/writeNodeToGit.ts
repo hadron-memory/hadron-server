@@ -152,8 +152,15 @@ export async function writeNodeToGit(
   // its frontmatter).
   if (node.abstract) frontmatter.abstract = node.abstract;
   // Spec 032 — export the hash so re-import round-trips preserve staleness.
-  // Omitted when null per the same omit-on-null convention as `abstract`.
-  if (node.abstractOriginHash) frontmatter.abstractOriginHash = node.abstractOriginHash;
+  // Omitted when null (omit-on-null convention) but NOT on empty string:
+  // the importer accepts any string-shaped YAML value (only `typeof !==
+  // 'string'` falls through to recompute), so a hypothetical empty-string
+  // hash from a malformed producer that lands on first import must
+  // round-trip on next export. Nullish check is symmetric with how the
+  // importer treats the value. Note: `abstract` above uses a truthy
+  // check, but its write-path normalizer collapses empty → null before
+  // reaching the exporter, so the parallel issue can't fire there.
+  if (node.abstractOriginHash != null) frontmatter.abstractOriginHash = node.abstractOriginHash;
   if (node.tags.length > 0) frontmatter.tags = node.tags;
 
   // Preserve existing frontmatter fields we don't manage (urn, author, etc.)

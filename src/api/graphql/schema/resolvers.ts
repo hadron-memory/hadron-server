@@ -2728,37 +2728,42 @@ export const resolvers = {
 
       // Spec 032 — compute abstractOriginHash. MUST happen on PLAINTEXT
       // content (FR-009), so this runs BEFORE the encryption block below
-      // that mutates nodeFields.content to ciphertext. For partial updates
-      // where abstract is supplied but content is not, the hash is
-      // computed against `existing.content` decrypted to plaintext first
-      // (FR-003 reset case).
+      // that mutates nodeFields.content to ciphertext.
       //
       // Matrix per contracts/h-update-node.md:
       //   - input.abstract === undefined  → preserve hash (omit from payload)
       //   - input.abstract === null       → clear hash
       //   - input.abstract is string      → hash from current content
-      //     (current = input.content if supplied else existing.content)
-      let postUpdatePlaintextContent: string | null;
-      if (input.content !== undefined) {
-        postUpdatePlaintextContent = input.content;
-      } else if (existing) {
-        // Decrypt existing.content for hash computation on encrypted memories.
-        // decryptNodeFields mutates in place; safe because we only use the
-        // result for hashing, not for writing back as plaintext.
-        if (memEncInfo.isEncrypted) {
-          decryptNodeFields(existing, memEncInfo);
-        }
-        postUpdatePlaintextContent = existing.content;
-      } else {
-        postUpdatePlaintextContent = null;
-      }
-
+      //     (current = input.content if supplied else existing.content
+      //     decrypted to plaintext — FR-003 reset case)
+      //
+      // Gating the decrypt on `input.abstract is string` (Gemini review,
+      // PR-209): avoids a per-upsert decryptString call on encrypted
+      // memories when the caller didn't touch `abstract`, which is the
+      // common case for unrelated field updates.
       let nextAbstractOriginHash: string | null | undefined;
       if (input.abstract === undefined) {
         nextAbstractOriginHash = undefined; // preserve
       } else if (input.abstract === null) {
         nextAbstractOriginHash = null;
       } else {
+        let postUpdatePlaintextContent: string | null;
+        if (input.content !== undefined) {
+          postUpdatePlaintextContent = input.content;
+        } else if (existing) {
+          // Decrypt existing.content for hash computation on encrypted
+          // memories. decryptNodeFields mutates `existing` in place;
+          // existing.content is PLAINTEXT after this line — do NOT use
+          // it as DB ground truth past this point. Safe today because
+          // the upsert writes from `nodeFields` (caller input), not
+          // from `existing`.
+          if (memEncInfo.isEncrypted) {
+            decryptNodeFields(existing, memEncInfo);
+          }
+          postUpdatePlaintextContent = existing.content;
+        } else {
+          postUpdatePlaintextContent = null;
+        }
         nextAbstractOriginHash = computeContentHash(postUpdatePlaintextContent);
       }
 
