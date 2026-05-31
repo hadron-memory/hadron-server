@@ -1062,6 +1062,11 @@ async function loadPublishedSnapshot(
 export const resolvers = {
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
+    createdAt: (n: { createdAt: Date | string }) => toISO(n.createdAt)!,
+    updatedAt: (n: { updatedAt: Date | string }) => toISO(n.updatedAt)!,
+  },
+  NodeVersion: {
+    createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
   },
   Asset: {
     uploadedAt: (a: { uploadedAt: Date | string }) => toISO(a.uploadedAt)!,
@@ -1646,6 +1651,7 @@ export const resolvers = {
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
+    createdAt: (ue: { createdAt: Date | string }) => toISO(ue.createdAt)!,
   },
 
   Query: {
