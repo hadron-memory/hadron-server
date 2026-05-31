@@ -1113,7 +1113,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'h-read-node',
-    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (org::memory::loc). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. Spec 031.",
+    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (org::memory::loc). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; not emitted on encrypted memories in v1 — see #206). Spec 031 + 032.",
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::architecture" or "urn:node:acme.com::mmdata::architecture"'),
       contentScope: z
@@ -1157,6 +1157,11 @@ export function createMcpServerInstance(
             include: { source: true },
             where: { source: { deletedAt: null } },
           },
+          // Spec 032 — encryption gate for the abstract-stale predicate
+          // (FR-010). Riding the node fetch avoids a second round-trip
+          // (PR-210 review). resolveMemoryByUrn above doesn't carry
+          // `isEncrypted` and changing it has a wider blast radius.
+          memory: { select: { isEncrypted: true } },
         },
       });
       if (!node) {
@@ -1217,6 +1222,40 @@ export function createMcpServerInstance(
       const hasAbstract = !!(node.abstract && node.abstract.length > 0);
       const isFallback = scope === 'content' && !hasContent && hasAbstract;
 
+      // Spec 032 FR-010 — `Source: abstract-stale` marker.
+      //
+      // Encryption gate: the MCP read path does NOT call
+      // `decryptNodesBatch` today (asymmetry tracked by #206). On an
+      // encrypted memory, `node.content` may be ciphertext, and
+      // `computeContentHash(ciphertext)` would compare unequal to every
+      // plaintext-derived `abstractOriginHash` (false-positive on every
+      // node). v1 skips the predicate on encrypted memories; the
+      // encryption-parity follow-up lifts the gate by adding a decrypt
+      // step before this point. Symmetric with the h-validate gate (US3).
+      //
+      // Scope gate: FR-010 condition e — the marker only fires under
+      // scopes that surface the abstract. Default `'content'` scope
+      // omits it (the abstract isn't in the response, so alarming
+      // would be unrelatable). Hoisting the gate above the predicate
+      // (PR-210 review) skips the hash recomputation on the default-
+      // scope read path entirely — preserves byte-identical-pre-spec
+      // behaviour at zero cost.
+      const shouldCheckStale = scope === 'abstract' || scope === 'all';
+      let includeStaleMarker = false;
+      if (
+        shouldCheckStale &&
+        !node.memory.isEncrypted &&
+        hasAbstract &&
+        hasContent &&
+        node.abstractOriginHash != null
+      ) {
+        // The explicit `abstractOriginHash != null` above is load-bearing
+        // for legacy nodes — without it, `null !== "abc12345"` is `true`
+        // and the marker would fire on every pre-spec-032 row.
+        includeStaleMarker =
+          node.abstractOriginHash !== computeContentHash(node.content);
+      }
+
       // #186: surface nodeType so callers can tell `parent` from `info`
       // (portal rendering + tool dispatch both branch on this; without it
       // there's no way to detect a node mis-typed at creation time).
@@ -1226,6 +1265,7 @@ export function createMcpServerInstance(
         node.description ? `> ${node.description}` : '',
         `Type: ${node.nodeType}`,
         isFallback ? 'Source: abstract-fallback' : '',
+        includeStaleMarker ? 'Source: abstract-stale' : '',
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
         node.seq !== null ? `Seq: ${node.seq}` : '',
         node.properties ? `Properties: ${JSON.stringify(node.properties)}` : '',
