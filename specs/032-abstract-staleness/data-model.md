@@ -139,6 +139,8 @@ const isStale =
 
 (The `null` check on `abstractOriginHash` is the load-bearing guard against false positives on legacy nodes — pre-spec rows have null `abstractOriginHash` even when abstract + content are both populated; without the explicit guard, `null !== "abc12345"` evaluates `true` and the marker fires falsely. PR-207 review item 5 caught the gap in the original spec.)
 
+**v1 encryption gate (MCP surface)**: on the MCP read path (`h-read-node`, `h-validate`), the predicate is additionally short-circuited by a `!memory.isEncrypted` clause. The MCP surface does not call `decryptNodesBatch` today (asymmetry tracked by [#206](https://github.com/hadron-memory/hadron-server/issues/206)), so `node.content` is ciphertext on encrypted memories and `computeContentHash(ciphertext)` compares unequal to every plaintext-derived `abstractOriginHash` (false-positive on every node). The GraphQL `nodeById` read path is not affected (it does decrypt). The gate lifts on the MCP surface once the encryption-parity follow-up adds a decrypt step before the predicate. Tracked by [#211](https://github.com/hadron-memory/hadron-server/issues/211).
+
 ## Hash computation — `src/lib/contentHash.ts` (NEW)
 
 Per research D3:

@@ -8,7 +8,9 @@ Spec source: FR-010, plus US2 acceptance scenarios.
 
 ## Behaviour
 
-Compute staleness once at the top of the response-shape branch, after the node has been decrypted (if applicable):
+The predicate runs on `node.content` as-stored. **The MCP read path does NOT call `decryptNodesBatch` today** (asymmetry tracked by [#206](https://github.com/hadron-memory/hadron-server/issues/206)) — on encrypted memories `node.content` is ciphertext, and `computeContentHash(ciphertext)` would compare unequal to every plaintext-derived `abstractOriginHash` (false-positive on every node). **v1 short-circuits the predicate on encrypted memories** via a `!memory.isEncrypted` gate; the encryption-parity follow-up lifts the gate by adding a decrypt step before the predicate. This contract was originally drafted under the assumption that h-read-node already decrypted — it does not, and the gate is the safe v1 posture. Symmetric with the h-validate gate (US3).
+
+Compute staleness once at the top of the response-shape branch:
 
 ```typescript
 import { computeContentHash } from '../lib/contentHash.js';
@@ -17,6 +19,12 @@ const hasContent = !!(node.content && node.content.length > 0);
 const hasAbstract = !!(node.abstract && node.abstract.length > 0);
 const isFallback = scope === 'content' && !hasContent && hasAbstract;
 
+// Scope gate hoisted ABOVE the predicate so the default 'content' scope
+// skips the encryption check, the null-hash guard, AND the SHA-256
+// recomputation entirely — byte-identical-pre-spec read path stays
+// zero-cost (PR-210 review).
+const shouldCheckStale = scope === 'abstract' || scope === 'all';
+
 // Spec 032 — staleness check. Note the comparison is against a
 // COMPUTED-AT-READ value, NOT the stored Node.contentHash column (which
 // has its own domain from external producers; see data-model.md "What
@@ -24,11 +32,17 @@ const isFallback = scope === 'content' && !hasContent && hasAbstract;
 // abstractOriginHash is load-bearing: legacy nodes have null hash even
 // when abstract + content are populated, and `null !== "abc12345"`
 // evaluates true — that would fire the marker falsely without the guard.
-const isStale =
+let includeStaleMarker = false;
+if (
+  shouldCheckStale &&
+  !node.memory.isEncrypted &&     // v1 gate; see #206
   hasAbstract &&
   hasContent &&
-  node.abstractOriginHash != null &&
-  node.abstractOriginHash !== computeContentHash(node.content);
+  node.abstractOriginHash != null
+) {
+  includeStaleMarker =
+    node.abstractOriginHash !== computeContentHash(node.content);
+}
 
 // Marker emission:
 //   - Source: abstract-fallback fires under default scope + content-less
@@ -37,8 +51,9 @@ const isStale =
 //     abstract, IF the node is stale (spec 032 FR-010)
 //   The two are mutually exclusive in practice — fallback requires
 //   content IS NULL, stale requires content IS NOT NULL.
-const includeStaleMarker = isStale && (scope === 'abstract' || scope === 'all');
 ```
+
+The `memory.isEncrypted` value rides the same `db.node.findFirst` round-trip via `include: { memory: { select: { isEncrypted: true } } }` — no extra DB query (PR-210 review).
 
 ## Meta block placement
 
@@ -98,4 +113,4 @@ const metaLines = [
 - Stale node, `contentScope: 'content'` (default): NO marker (abstract isn't in response).
 - Content-less abstract-having node, default scope: `Source: abstract-fallback` from spec 031; NO `Source: abstract-stale`.
 - Legacy node (`abstractOriginHash IS NULL`, abstract + content both populated): NO marker — staleness check short-circuits.
-- Encrypted memory: staleness signal works end-to-end (decrypt → compute → compare; marker emits if stale).
+- Encrypted memory: marker is SUPPRESSED in v1 (the `!memory.isEncrypted` gate skips the predicate entirely). When the encryption-parity follow-up ([#206](https://github.com/hadron-memory/hadron-server/issues/206)) lands and adds a decrypt step before the predicate, this test flips to "marker emits if stale on encrypted memories too" — tracked alongside [#211](https://github.com/hadron-memory/hadron-server/issues/211).
