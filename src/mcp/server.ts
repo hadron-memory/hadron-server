@@ -47,6 +47,7 @@ import {
   getMemoryAccess,
 } from './access-control.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
+import { computeContentHash } from '../lib/contentHash.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import {
   NodeNotFoundError,
@@ -1703,6 +1704,15 @@ export function createMcpServerInstance(
         throw e;
       }
 
+      // Spec 032 — h-add-node is upsert-semantically a fresh write: every
+      // call writes the full set of provided fields. If the caller is
+      // supplying an abstract, the hash is recomputed from the supplied
+      // content (FR-003). Null/empty content with an abstract yields null
+      // hash (FR-007). No abstract → no hash (FR-006). Hash is computed
+      // on plaintext content (FR-009).
+      const nextAbstractOriginHash: string | null =
+        normalizedAbstract !== null ? computeContentHash(content ?? null) : null;
+
       const upserted = await db.node.upsert({
         where: { loc_memoryId: { loc, memoryId } },
         create: {
@@ -1713,6 +1723,7 @@ export function createMcpServerInstance(
           nodeType: nodeType ?? 'info',
           description: description ?? null,
           abstract: normalizedAbstract,
+          abstractOriginHash: nextAbstractOriginHash,
           content: content ?? null,
           seq: seq ?? null,
           tags: tags ?? [],
@@ -1727,6 +1738,7 @@ export function createMcpServerInstance(
           ...(nodeType ? { nodeType } : {}),
           description: description ?? null,
           abstract: normalizedAbstract,
+          abstractOriginHash: nextAbstractOriginHash,
           content: content ?? null,
           seq: seq ?? null,
           tags: tags ?? [],
@@ -1783,6 +1795,7 @@ export function createMcpServerInstance(
           alias: nodeForGit.alias,
           description: nodeForGit.description,
           abstract: nodeForGit.abstract,
+          abstractOriginHash: nodeForGit.abstractOriginHash,
           content: nodeForGit.content,
           tags: nodeForGit.tags as string[],
           outgoingEdges: nodeForGit.outgoingEdges ?? [],
@@ -1807,7 +1820,7 @@ export function createMcpServerInstance(
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on h-read-node via contentScope; h-find-nodes preview surfacing ships in spec 031 US2. Spec 031.'),
-      content: z.string().optional().describe('New markdown content'),
+      content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007).'),
       seq: z.number().optional().describe('New sort order among siblings'),
       tags: z.array(z.string()).optional().describe('Replace tags'),
       properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
@@ -1884,7 +1897,9 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      // Snapshot current state for version history
+      // Snapshot current state for version history.
+      // Spec 032 — capture existing.abstractOriginHash so the version
+      // history round-trips the staleness signal.
       await db.nodeVersion.create({
         data: {
           id: generateId(),
@@ -1894,6 +1909,7 @@ export function createMcpServerInstance(
           alias: existing.alias,
           description: existing.description,
           abstract: existing.abstract,
+          abstractOriginHash: existing.abstractOriginHash,
           content: existing.content,
           tags: existing.tags as string[],
           editedBy: reason ?? (auth.clientId ?? null),
@@ -1901,12 +1917,31 @@ export function createMcpServerInstance(
         },
       }).catch(() => {});
 
+      // Spec 032 — abstractOriginHash partial-update matrix (9 rows from
+      // the contract). Drives off whether `normalizedAbstract` was
+      // supplied (undefined = preserve, null = clear, string = set).
+      //
+      // Encryption posture: MCP write path stores content plaintext
+      // today (encryption parity for MCP is deferred — see #206), so
+      // `existing.content` IS plaintext. Hash always computed on
+      // plaintext per FR-009.
+      let nextAbstractOriginHash: string | null | undefined;
+      if (normalizedAbstract === undefined) {
+        nextAbstractOriginHash = undefined;
+      } else if (normalizedAbstract === null) {
+        nextAbstractOriginHash = null;
+      } else {
+        const nextContent = content !== undefined ? content : existing.content;
+        nextAbstractOriginHash = computeContentHash(nextContent ?? null);
+      }
+
       // Build partial update — only fields that were provided
       const data: Record<string, unknown> = {};
       if (name !== undefined) data.name = name;
       if (nodeType !== undefined) data.nodeType = nodeType;
       if (description !== undefined) data.description = description;
       if (normalizedAbstract !== undefined) data.abstract = normalizedAbstract;
+      if (nextAbstractOriginHash !== undefined) data.abstractOriginHash = nextAbstractOriginHash;
       if (content !== undefined) data.content = content;
       if (seq !== undefined) data.seq = seq;
       if (tags !== undefined) data.tags = tags;
@@ -1953,6 +1988,7 @@ export function createMcpServerInstance(
           alias: updatedNode.alias,
           description: updatedNode.description,
           abstract: updatedNode.abstract,
+          abstractOriginHash: updatedNode.abstractOriginHash,
           content: updatedNode.content,
           tags: updatedNode.tags as string[],
           outgoingEdges: updatedNode.outgoingEdges ?? [],
@@ -2300,7 +2336,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // NodeVersion snapshot of the pre-move state — mirrors the
         // pattern h-update-node already follows. Loc / name / memoryId
         // changes are audit-worthy. Spec 031 — `abstract` is included so
-        // version history captures the pre-move state in full.
+        // version history captures the pre-move state in full. Spec 032
+        // — `abstractOriginHash` joins on the same logic (every snapshot
+        // site must include new columns; spec 031 lesson).
         await tx.nodeVersion.create({
           data: {
             id: generateId(),
@@ -2310,6 +2348,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             alias: existing.alias,
             description: existing.description,
             abstract: existing.abstract,
+            abstractOriginHash: existing.abstractOriginHash,
             content: existing.content,
             tags: existing.tags as string[],
             editedBy: auth.clientId ?? null,

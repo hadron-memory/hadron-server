@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
+import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   APP_KEY_PREFIX,
   USER_API_KEY_LABEL_MAX_LEN,
@@ -2700,6 +2701,9 @@ export const resolvers = {
             alias: existing.alias,
             description: existing.description,
             abstract: existing.abstract,
+            // Spec 032 — snapshot captures the hash so restoreNodeVersion
+            // round-trips it.
+            abstractOriginHash: existing.abstractOriginHash,
             content: existing.content,
             tags: existing.tags as string[],
             editedBy: ctx.clientId ?? ctx.userId ?? null,
@@ -2721,6 +2725,43 @@ export const resolvers = {
       // If the target memory is encrypted, encrypt content and data before
       // writing. Throws SESSION_EXPIRED if no session key is cached.
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, input.memoryId);
+
+      // Spec 032 — compute abstractOriginHash. MUST happen on PLAINTEXT
+      // content (FR-009), so this runs BEFORE the encryption block below
+      // that mutates nodeFields.content to ciphertext. For partial updates
+      // where abstract is supplied but content is not, the hash is
+      // computed against `existing.content` decrypted to plaintext first
+      // (FR-003 reset case).
+      //
+      // Matrix per contracts/h-update-node.md:
+      //   - input.abstract === undefined  → preserve hash (omit from payload)
+      //   - input.abstract === null       → clear hash
+      //   - input.abstract is string      → hash from current content
+      //     (current = input.content if supplied else existing.content)
+      let postUpdatePlaintextContent: string | null;
+      if (input.content !== undefined) {
+        postUpdatePlaintextContent = input.content;
+      } else if (existing) {
+        // Decrypt existing.content for hash computation on encrypted memories.
+        // decryptNodeFields mutates in place; safe because we only use the
+        // result for hashing, not for writing back as plaintext.
+        if (memEncInfo.isEncrypted) {
+          decryptNodeFields(existing, memEncInfo);
+        }
+        postUpdatePlaintextContent = existing.content;
+      } else {
+        postUpdatePlaintextContent = null;
+      }
+
+      let nextAbstractOriginHash: string | null | undefined;
+      if (input.abstract === undefined) {
+        nextAbstractOriginHash = undefined; // preserve
+      } else if (input.abstract === null) {
+        nextAbstractOriginHash = null;
+      } else {
+        nextAbstractOriginHash = computeContentHash(postUpdatePlaintextContent);
+      }
+
       if (memEncInfo.isEncrypted) {
         const key = sessionKeyCache.getByMemoryId(memEncInfo.id);
         if (!key) {
@@ -2748,10 +2789,35 @@ export const resolvers = {
       const updateExtras: Record<string, unknown> = isResurrect
         ? { deletedAt: null, deletedBy: null }
         : {};
+      // Spec 032 — inject abstractOriginHash into the payload. For
+      // partial updates we use Prisma's "omit undefined → leave column
+      // untouched" semantic for the preserve case. Stripping any
+      // caller-supplied abstractOriginHash from nodeFields is
+      // belt-and-suspenders (NodeInput doesn't expose the field, so
+      // this is defense-in-depth for any future code path).
+      const hashPayload =
+        nextAbstractOriginHash === undefined
+          ? {}
+          : { abstractOriginHash: nextAbstractOriginHash };
+      const {
+        abstractOriginHash: _stripCallerSupplied,
+        ...nodeFieldsClean
+      } = nodeFields as Record<string, unknown>;
       const node = await ctx.db.node.upsert({
         where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-        create: { ...nodeFields, id, tags, createdBy } as Prisma.NodeUncheckedCreateInput,
-        update: { ...nodeFields, tags, ...updateExtras } as Prisma.NodeUncheckedUpdateInput,
+        create: {
+          ...nodeFieldsClean,
+          id,
+          tags,
+          createdBy,
+          ...hashPayload,
+        } as Prisma.NodeUncheckedCreateInput,
+        update: {
+          ...nodeFieldsClean,
+          tags,
+          ...updateExtras,
+          ...hashPayload,
+        } as Prisma.NodeUncheckedUpdateInput,
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
 
@@ -2797,6 +2863,7 @@ export const resolvers = {
         alias: finalNode.alias,
         description: finalNode.description,
         abstract: finalNode.abstract,
+        abstractOriginHash: finalNode.abstractOriginHash,
         content: finalNode.content,
         tags: deserializeTags(finalNode.tags) as string[],
         outgoingEdges: finalNode.outgoingEdges ?? [],
@@ -4097,7 +4164,8 @@ export const resolvers = {
 
       // Snapshot current state before restoring. Spec 031 — `abstract`
       // must be captured here too; without it, a round-trip restore (then
-      // restoring this snapshot) silently drops abstract.
+      // restoring this snapshot) silently drops abstract. Spec 032 — same
+      // for `abstractOriginHash`.
       await ctx.db.nodeVersion.create({
         data: {
           id: generateId(),
@@ -4107,6 +4175,7 @@ export const resolvers = {
           alias: node.alias,
           description: node.description,
           abstract: node.abstract,
+          abstractOriginHash: node.abstractOriginHash,
           content: node.content,
           tags: node.tags as string[],
           editedBy: ctx.clientId ?? ctx.userId ?? null,
@@ -4117,7 +4186,10 @@ export const resolvers = {
       // Restore the node to the version's state. Spec 031 — `abstract`
       // is part of the restored state; without it, restoring a version
       // that had a non-null abstract leaves the node's current abstract
-      // unchanged (and vice versa).
+      // unchanged (and vice versa). Spec 032 — `abstractOriginHash`
+      // applied verbatim per plan D4 (no recomputation on restore;
+      // legacy null hashes short-circuit the staleness check via the
+      // NOT NULL guard in h-read-node).
       return ctx.db.node.update({
         where: { id: node.id },
         data: {
@@ -4125,6 +4197,7 @@ export const resolvers = {
           alias: version.alias,
           description: version.description,
           abstract: version.abstract,
+          abstractOriginHash: version.abstractOriginHash,
           content: version.content,
           tags: version.tags as string[],
         },

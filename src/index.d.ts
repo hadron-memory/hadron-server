@@ -8,6 +8,10 @@ export interface Node {
   description: string | null;
   /** Paragraph-length summary. Spec 031. */
   abstract: string | null;
+  /** Spec 032 — fingerprint of `content` at the time `abstract` was authored.
+   *  Read-tools compare against `computeContentHash(content)` to detect stale
+   *  abstracts. System-managed; never accepted from caller input. */
+  abstractOriginHash: string | null;
   content: string | null;
   contentHash: string | null;
   tokens: number | null;

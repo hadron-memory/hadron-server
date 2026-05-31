@@ -18,6 +18,10 @@ export interface NodeForGit {
   description?: string | null;
   /** Paragraph-length summary. Spec 031. Written to YAML frontmatter as `abstract`. */
   abstract?: string | null;
+  /** Spec 032 — fingerprint exported alongside `abstract` so the
+   *  round-trip preserves the staleness signal byte-for-byte. Omitted
+   *  from YAML frontmatter when null (consistent with `abstract`). */
+  abstractOriginHash?: string | null;
   content?: string | null;
   tags: string[];
   outgoingEdges: Array<{ target: { id: string }; label: string | null }>;
@@ -147,6 +151,9 @@ export async function writeNodeToGit(
   // a node that never had an abstract has no `abstract:` line cluttering
   // its frontmatter).
   if (node.abstract) frontmatter.abstract = node.abstract;
+  // Spec 032 — export the hash so re-import round-trips preserve staleness.
+  // Omitted when null per the same omit-on-null convention as `abstract`.
+  if (node.abstractOriginHash) frontmatter.abstractOriginHash = node.abstractOriginHash;
   if (node.tags.length > 0) frontmatter.tags = node.tags;
 
   // Preserve existing frontmatter fields we don't manage (urn, author, etc.)

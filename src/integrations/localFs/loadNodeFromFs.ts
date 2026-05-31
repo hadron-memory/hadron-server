@@ -3,6 +3,7 @@ import { join, relative, sep, basename, dirname } from 'path';
 import { parse } from 'yaml';
 import type { Node } from '../../index.d.js';
 import { NodeAbstractTooLongError } from '../../lib/entityRef/errors.js';
+import { computeContentHash } from '../../lib/contentHash.js';
 
 interface NodeYaml {
   id: string;
@@ -12,6 +13,14 @@ interface NodeYaml {
   description?: string;
   /** Paragraph-length summary. Spec 031. Distinct from `description`. */
   abstract?: string;
+  /**
+   * Spec 032 — fingerprint of `content` at the time `abstract` was
+   * authored. Present in YAML round-trip from a hadron-server export;
+   * may be absent in YAML authored by hand (importer recomputes from
+   * `content` in that case). Defensive: non-string values fall through
+   * to recompute.
+   */
+  abstractOriginHash?: string;
   /**
    * Legacy alias historically read into `description` when no
    * `description` key existed. Predates the spec-031 `abstract` field
@@ -24,6 +33,49 @@ interface NodeYaml {
   alias?: string;
   author?: string;
   contentHash?: string;
+}
+
+/**
+ * Spec 032 FR-013 — reconcile the YAML's `abstractOriginHash` against
+ * the hash computed from imported content.
+ *
+ * Trust model: the YAML producer is in the trust boundary (the importer
+ * is a privileged sync surface), so when the YAML carries a hash that
+ * disagrees with the recomputed value we accept the YAML value and emit
+ * a warning. This preserves round-trip integrity of legitimately-stale
+ * exports while surfacing tampering observability in the sync log.
+ *
+ * Per FR-006 parallel: if there is no abstract, there is no hash —
+ * regardless of what the YAML says.
+ *
+ * Defensive type handling: only a string-shaped YAML value is considered
+ * for the round-trip path. Missing key, null, object, number, boolean
+ * all fall through to "recompute from content" (same defensive pattern
+ * as spec 031's `normalizeImportedAbstract` object-rejection).
+ */
+function reconcileAbstractOriginHash(
+  normalizedAbstract: string | null,
+  content: string | null,
+  yamlHash: unknown,
+  loc: string,
+): string | null {
+  if (normalizedAbstract === null) {
+    return null;
+  }
+  const computed = computeContentHash(content);
+  if (typeof yamlHash !== 'string') {
+    return computed;
+  }
+  if (yamlHash === computed) {
+    return yamlHash;
+  }
+  console.warn(
+    `[loadNodeFromFs] abstractOriginHash mismatch for loc=${loc}: ` +
+      `YAML claims ${yamlHash}, computed ${computed}. Accepting YAML ` +
+      `value (FR-013 round-trip preservation); possible tampering ` +
+      `or legitimate exported-stale state.`,
+  );
+  return yamlHash;
 }
 
 /**
@@ -136,6 +188,14 @@ async function loadFrontmatterNode(
     .map((e) => normalizeEdgeEntry(e));
   const edges = sidecarEdges.length > 0 ? sidecarEdges : fmEdges;
 
+  const abstract = normalizeImportedAbstract(meta.abstract);
+  const abstractOriginHash = reconcileAbstractOriginHash(
+    abstract,
+    content,
+    meta.abstractOriginHash,
+    loc,
+  );
+
   return {
     node: {
       id: meta.id,
@@ -144,7 +204,8 @@ async function loadFrontmatterNode(
       isLink: meta.type === 'link',
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
-      abstract: normalizeImportedAbstract(meta.abstract),
+      abstract,
+      abstractOriginHash,
       content,
       contentHash: meta.contentHash ?? null,
       tags: meta.tags ?? [],
@@ -173,6 +234,15 @@ async function loadLegacyNode(
     .filter((e) => !!e.id)
     .map((e) => normalizeEdgeEntry(e));
 
+  const abstract = normalizeImportedAbstract(meta.abstract);
+  const normalizedContent = content?.trim() ?? null;
+  const abstractOriginHash = reconcileAbstractOriginHash(
+    abstract,
+    normalizedContent,
+    meta.abstractOriginHash,
+    loc,
+  );
+
   return {
     node: {
       id: meta.id,
@@ -181,8 +251,9 @@ async function loadLegacyNode(
       isLink: meta.type === 'link',
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
-      abstract: normalizeImportedAbstract(meta.abstract),
-      content: content?.trim() ?? null,
+      abstract,
+      abstractOriginHash,
+      content: normalizedContent,
       contentHash: meta.contentHash ?? null,
       tags: meta.tags ?? [],
       ownerRepo,

@@ -334,3 +334,129 @@ describe('restoreNodeVersion — abstract round-trips through history', () => {
 // own return value (asserted above) plus the DB-level `persistedAbstract`
 // check already prove the column round-trips through GraphQL. The
 // node(loc) URN-resolution surface is covered elsewhere.
+
+// ─── Spec 032 — abstractOriginHash via GraphQL ──────────────────────────
+
+import { computeContentHash } from '../../lib/contentHash.js';
+
+async function persistedHash(loc: string): Promise<string | null> {
+  const node = await db.node.findFirst({
+    where: { loc, memoryId: fx.memory.id, deletedAt: null },
+    select: { abstractOriginHash: true },
+  });
+  return node?.abstractOriginHash ?? null;
+}
+
+describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
+  it('fresh abstract + content: hash = computeContentHash(content)', async () => {
+    await upsertNode({ loc: 's1', name: 's1', abstract: 'A', content: 'B' });
+    expect(await persistedHash('s1')).toBe(computeContentHash('B'));
+  });
+
+  it('content-only update: hash preserved (staleness arms)', async () => {
+    await upsertNode({ loc: 's2', name: 's2', abstract: 'A', content: 'B' });
+    await upsertNode({ loc: 's2', name: 's2', content: "B'" });
+    expect(await persistedHash('s2')).toBe(computeContentHash('B'));
+  });
+
+  it('abstract-only update: hash recomputed from existing content', async () => {
+    await upsertNode({ loc: 's3', name: 's3', abstract: 'A', content: 'B' });
+    // update content WITHOUT abstract field
+    await upsertNode({ loc: 's3', name: 's3', content: "B'" });
+    // refresh abstract; expected to reset hash to current content's hash
+    await upsertNode({ loc: 's3', name: 's3', abstract: "A'" });
+    expect(await persistedHash('s3')).toBe(computeContentHash("B'"));
+  });
+
+  it('abstract cleared: hash cleared', async () => {
+    await upsertNode({ loc: 's4', name: 's4', abstract: 'A', content: 'B' });
+    await upsertNode({ loc: 's4', name: 's4', abstract: null });
+    expect(await persistedHash('s4')).toBeNull();
+  });
+
+  it('returned Node object exposes abstractOriginHash', async () => {
+    const node = await upsertNode({ loc: 's5', name: 's5', abstract: 'A', content: 'B' });
+    expect((node as { abstractOriginHash: string | null }).abstractOriginHash).toBe(
+      computeContentHash('B'),
+    );
+  });
+});
+
+describe('spec 032 — restoreNodeVersion round-trips abstractOriginHash', () => {
+  it("restores the version's stored hash verbatim", async () => {
+    const created = await upsertNode({ loc: 'rv-h', name: 'rv-h', abstract: 'A', content: 'B' });
+    // Trigger snapshot via an update
+    await upsertNode({ loc: 'rv-h', name: 'rv-h', abstract: 'A2' });
+
+    const versions = await db.nodeVersion.findMany({
+      where: { nodeId: created.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    const v0 = versions[0];
+    expect(v0.abstractOriginHash).toBe(computeContentHash('B'));
+
+    const restored = await resolvers.Mutation.restoreNodeVersion(
+      {},
+      { versionId: v0.id },
+      fx.ctx,
+    );
+    // After restore, the live row should have the version's stored hash.
+    expect((restored as { abstractOriginHash: string | null }).abstractOriginHash).toBe(
+      computeContentHash('B'),
+    );
+  });
+
+  it("pre-restore snapshot captures the live row's current hash", async () => {
+    const created = await upsertNode({ loc: 'rv-h2', name: 'rv-h2', abstract: 'A', content: 'B' });
+    await upsertNode({ loc: 'rv-h2', name: 'rv-h2', abstract: 'A2', content: "B'" });
+
+    const versions = await db.nodeVersion.findMany({
+      where: { nodeId: created.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    const v0 = versions[0]; // captures hash(B)
+
+    // Restore the original. This creates a NEW NodeVersion snapshot
+    // capturing the pre-restore live state (which has hash(B')).
+    await resolvers.Mutation.restoreNodeVersion({}, { versionId: v0.id }, fx.ctx);
+
+    const allVersions = await db.nodeVersion.findMany({
+      where: { nodeId: created.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    const newest = allVersions[allVersions.length - 1];
+    expect(newest.abstractOriginHash).toBe(computeContentHash("B'"));
+  });
+});
+
+describe('spec 032 — SC-005 GraphQL exposure is read-only', () => {
+  it('NodeInput does NOT expose abstractOriginHash (system-managed)', async () => {
+    // Try to query the GraphQL schema's type map for NodeInput.
+    // We can't introspect via the gqlSchema directly in test fixture without
+    // a running server; use a runtime-level assertion: pass an input shape
+    // that includes abstractOriginHash and assert that the resolver's
+    // typing doesn't accept it (TypeScript would catch it; runtime
+    // doesn't enforce GraphQL input types). For end-to-end coverage of
+    // the schema-level absence, see the contract documentation.
+    //
+    // Implementation-level invariant: any attempt to pass
+    // abstractOriginHash via the input object MUST be ignored by the
+    // resolver. Test: write to the column via input, verify it didn't
+    // override the system-managed value.
+    await upsertNode({
+      loc: 'sc5',
+      name: 'sc5',
+      abstract: 'A',
+      content: 'B',
+      // NodeInput intentionally doesn't expose abstractOriginHash. The
+      // upsertNode helper here takes Record<string, unknown> so TS
+      // doesn't catch the extra property — the assertion below is the
+      // load-bearing check: the resolver MUST strip it so the system-
+      // managed value wins.
+      abstractOriginHash: 'tampered',
+    });
+    // The system-managed value should be computeContentHash('B'),
+    // NOT the tampered value the caller tried to inject.
+    expect(await persistedHash('sc5')).toBe(computeContentHash('B'));
+  });
+});
