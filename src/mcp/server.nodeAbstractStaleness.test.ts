@@ -379,3 +379,89 @@ describe('h-read-node — `Source: abstract-stale` marker (US2)', () => {
     expect(out).not.toContain('Source: abstract-stale');
   });
 });
+
+// ─── US3: h-validate `[stale-abstract]` warning (FR-011) ────────────────
+
+/**
+ * h-validate scans the memory and emits one warning line per stale node.
+ * Predicate mirrors h-read-node's (US2): four clauses + the `!= null`
+ * legacy short-circuit + the `!memory.isEncrypted` gate.
+ *
+ * Encryption gate: h-validate doesn't decrypt — staleness on encrypted
+ * memories would compare a plaintext hash against the hash of ciphertext
+ * content and fire false-positives on every node. v1 skips the check on
+ * encrypted memories; the encryption-parity follow-up (#206) lifts the
+ * gate.
+ */
+async function validate() {
+  const srv = createTestableMcpServer(adminAuth());
+  return srv.callToolText('h-validate', { memoryUrn: 'stale-org::stalemem' });
+}
+
+describe('h-validate — `[stale-abstract]` warning (US3)', () => {
+  it('flags a single stale node', async () => {
+    await addNode({ loc: 'v-stale', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'v-stale', content: "Y'" });
+    const out = await validate();
+    expect(out).toContain('[stale-abstract]');
+    expect(out).toContain('v-stale');
+  });
+
+  it('zero `[stale-abstract]` warnings on a clean memory', async () => {
+    await addNode({ loc: 'v-fresh', abstract: 'X', content: 'Y' });
+    const out = await validate();
+    expect(out).not.toContain('[stale-abstract]');
+  });
+
+  it('mixed memory reports each issue type with its own tag', async () => {
+    // sparse: no description / content / abstract
+    await addNode({ loc: 'm-sparse' });
+    // stale: content updated without refreshing the abstract
+    await addNode({ loc: 'm-stale', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'm-stale', content: "Y'" });
+    // fresh control node: should not appear in issues
+    await addNode({ loc: 'm-fresh', abstract: 'A', content: 'B' });
+
+    const out = await validate();
+    expect(out).toContain('[sparse]');
+    expect(out).toContain('m-sparse');
+    expect(out).toContain('[stale-abstract]');
+    expect(out).toContain('m-stale');
+    // The fresh node is not flagged for staleness; m-fresh should appear
+    // nowhere as a stale-abstract subject.
+    expect(out).not.toMatch(/\[stale-abstract\][^\n]*m-fresh/);
+    // Spec 032 broken-ref coverage lives in the preexisting h-validate
+    // tests; this scenario focuses on the multi-issue-type interaction
+    // between sparse and stale-abstract (the two scopes 031 + 032 own).
+  });
+
+  it('legacy node (abstractOriginHash IS NULL): zero `[stale-abstract]` warnings', async () => {
+    // Simulate a pre-spec-032 row: abstract + content both populated,
+    // hash NULL. The explicit `!= null` guard short-circuits the
+    // predicate so legacy data never lights up the validator.
+    await addNode({ loc: 'v-legacy', abstract: 'X', content: 'Y' });
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'v-legacy', memoryId: fx.memory.id } },
+      data: { abstractOriginHash: null },
+    });
+    const out = await validate();
+    expect(out).not.toContain('[stale-abstract]');
+  });
+
+  it('encrypted memory: zero `[stale-abstract]` warnings (v1 gate, deferred to #206)', async () => {
+    // Seed a stale node on a plaintext memory, then flip the memory to
+    // encrypted. h-validate doesn't decrypt; computing the hash against
+    // (possibly-)ciphertext content would false-positive on every node.
+    // The gate suppresses the check entirely until the encryption-parity
+    // follow-up lifts it. No try/finally needed — cleanDb in beforeEach
+    // recreates the memory row for the next test.
+    await addNode({ loc: 'v-enc', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'v-enc', content: "Y'" });
+    await db.memory.update({
+      where: { id: fx.memory.id },
+      data: { isEncrypted: true },
+    });
+    const out = await validate();
+    expect(out).not.toContain('[stale-abstract]');
+  });
+});
