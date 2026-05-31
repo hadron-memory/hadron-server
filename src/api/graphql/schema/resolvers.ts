@@ -1065,6 +1065,9 @@ export const resolvers = {
     createdAt: (n: { createdAt: Date | string }) => toISO(n.createdAt)!,
     updatedAt: (n: { updatedAt: Date | string }) => toISO(n.updatedAt)!,
   },
+  NodeVersion: {
+    createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
+  },
   Asset: {
     uploadedAt: (a: { uploadedAt: Date | string }) => toISO(a.uploadedAt)!,
     deletedAt: (a: { deletedAt?: Date | string | null }) => toISO(a.deletedAt),
@@ -1648,6 +1651,7 @@ export const resolvers = {
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
+    createdAt: (ue: { createdAt: Date | string }) => toISO(ue.createdAt)!,
   },
 
   Query: {
