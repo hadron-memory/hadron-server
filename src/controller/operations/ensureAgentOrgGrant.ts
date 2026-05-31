@@ -8,8 +8,12 @@
  *   - `publishAgentImport` mutation when a Builder declares a dep import.
  *
  * Idempotency comes from the composite UNIQUE primary key (`org_id`,
- * `agent_id`) plus Prisma's `upsert`: concurrent first-contact requests
- * for the same `(orgId, agentId)` converge on a single row.
+ * `agent_id`). Prisma's `upsert` is not race-safe under concurrent
+ * first-contacts (two transactions can both observe "no row" and both
+ * INSERT, with one raising P2002 — see prisma/prisma#3242). Since
+ * `update: {}` is a no-op, catching P2002 lands us in exactly the
+ * post-condition this function promises: a single row exists for
+ * (orgId, agentId). The fix mirrors `ensureAgentSubscription` (#198).
  *
  * v1 auto-provisions on first contact regardless of cross-org or same-org
  * — a future spec adds the explicit "subscribe to Agent" UX for the
@@ -18,22 +22,47 @@
  * case is currently auto-approved because there's no marketplace yet.
  */
 
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 
 export async function ensureAgentOrgGrant(
   db: PrismaClient,
   orgId: string,
   agentId: string,
 ): Promise<void> {
-  await db.agentOrgGrant.upsert({
-    where: { orgId_agentId: { orgId, agentId } },
-    create: {
-      orgId,
-      agentId,
-      // v1 default: activate immediately on creation since billing is out
-      // of scope. Mirrors the AgentSubscription pattern from 005.
-      activatedAt: new Date(),
-    },
-    update: {},
-  });
+  try {
+    await db.agentOrgGrant.upsert({
+      where: { orgId_agentId: { orgId, agentId } },
+      create: {
+        orgId,
+        agentId,
+        // v1 default: activate immediately on creation since billing is out
+        // of scope. Mirrors the AgentSubscription pattern from 005.
+        activatedAt: new Date(),
+      },
+      update: {},
+    });
+  } catch (err) {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === 'P2002' &&
+      isCompositePkViolation(err.meta)
+    ) {
+      return;
+    }
+    throw err;
+  }
+}
+
+function isCompositePkViolation(meta: unknown): boolean {
+  if (!meta || typeof meta !== 'object' || !('target' in meta)) return false;
+  const target = (meta as { target?: unknown }).target;
+  if (!Array.isArray(target) || target.length !== 2) return false;
+  const fields = new Set(target.map(String));
+  // Prisma emits target as field names (camelCase) on @@id; tolerate
+  // snake_case mapping as a hedge — the same composite-PK constraint
+  // can surface either way across Prisma engine versions.
+  return (
+    (fields.has('orgId') && fields.has('agentId')) ||
+    (fields.has('org_id') && fields.has('agent_id'))
+  );
 }
