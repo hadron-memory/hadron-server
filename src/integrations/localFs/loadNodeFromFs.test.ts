@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'path';
 import { mkdirSync, writeFileSync } from 'fs';
 import { stringify } from 'yaml';
@@ -353,5 +353,106 @@ describe('loadNodeFromFs — frontmatter format', () => {
     expect(edges[0]).toEqual({ targetId: 'plain-target', label: 'goes-to' });
     expect(edges[0]).not.toHaveProperty('condition');
     expect(edges[0]).not.toHaveProperty('priority');
+  });
+});
+
+// ─── Spec 032 — abstractOriginHash validate-on-import (FR-013) ──────────
+
+describe('loadNodeFromFs — abstractOriginHash validate-and-warn (spec 032)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('without an abstractOriginHash key: importer recomputes from content', async () => {
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    mkdirSync(nodeDir, { recursive: true });
+    writeNodeFiles(
+      nodeDir,
+      { name: 'graph', abstract: 'Summary of the body.' },
+      'Body content.',
+    );
+
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    const { computeContentHash } = await import('../../lib/contentHash.js');
+    expect((node as { abstractOriginHash: string | null }).abstractOriginHash).toBe(
+      computeContentHash('Body content.'),
+    );
+  });
+
+  it('with a matching abstractOriginHash key: clean round-trip, no warning', async () => {
+    const { computeContentHash } = await import('../../lib/contentHash.js');
+    const body = 'Body content.';
+    const matchingHash = computeContentHash(body);
+
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    const nodeMetaDir = join(nodeDir, '.node');
+    mkdirSync(nodeMetaDir, { recursive: true });
+    writeFileSync(
+      join(nodeMetaDir, 'node.yaml'),
+      `id: aaaa00000000000000000000000000000001\nname: graph\nabstract: Summary.\nabstractOriginHash: ${matchingHash}\n`,
+      'utf-8',
+    );
+    writeFileSync(join(nodeMetaDir, 'topic.md'), body, 'utf-8');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect((node as { abstractOriginHash: string | null }).abstractOriginHash).toBe(matchingHash);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('with a mismatching abstractOriginHash key: accept YAML value + emit warning', async () => {
+    const tamperedHash = 'deadbeef';
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    const nodeMetaDir = join(nodeDir, '.node');
+    mkdirSync(nodeMetaDir, { recursive: true });
+    writeFileSync(
+      join(nodeMetaDir, 'node.yaml'),
+      `id: bbbb00000000000000000000000000000002\nname: graph\nabstract: Summary.\nabstractOriginHash: ${tamperedHash}\n`,
+      'utf-8',
+    );
+    writeFileSync(join(nodeMetaDir, 'topic.md'), 'Body that does not match tampered hash.', 'utf-8');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect((node as { abstractOriginHash: string | null }).abstractOriginHash).toBe(tamperedHash);
+    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy.mock.calls[0][0]).toMatch(/abstractOriginHash mismatch/);
+  });
+
+  it('with abstract: null: abstractOriginHash forced to null regardless of YAML', async () => {
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    const nodeMetaDir = join(nodeDir, '.node');
+    mkdirSync(nodeMetaDir, { recursive: true });
+    writeFileSync(
+      join(nodeMetaDir, 'node.yaml'),
+      `id: cccc00000000000000000000000000000003\nname: graph\nabstractOriginHash: deadbeef\n`,
+      'utf-8',
+    );
+    writeFileSync(join(nodeMetaDir, 'topic.md'), 'Body.', 'utf-8');
+
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect((node as { abstractOriginHash: string | null }).abstractOriginHash).toBeNull();
+  });
+
+  it('non-string abstractOriginHash (number / object / array): falls through to recompute', async () => {
+    const { computeContentHash } = await import('../../lib/contentHash.js');
+    const body = 'Body.';
+    const nodeDir = join(graphRoot, 'org', 'graph');
+    const nodeMetaDir = join(nodeDir, '.node');
+    mkdirSync(nodeMetaDir, { recursive: true });
+    writeFileSync(
+      join(nodeMetaDir, 'node.yaml'),
+      `id: dddd00000000000000000000000000000004\nname: graph\nabstract: Summary.\nabstractOriginHash:\n  nested: true\n`,
+      'utf-8',
+    );
+    writeFileSync(join(nodeMetaDir, 'topic.md'), body, 'utf-8');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect((node as { abstractOriginHash: string | null }).abstractOriginHash).toBe(
+      computeContentHash(body),
+    );
+    // No warning — non-string is treated as "missing", not "tampered".
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });

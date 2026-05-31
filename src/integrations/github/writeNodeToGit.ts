@@ -18,6 +18,10 @@ export interface NodeForGit {
   description?: string | null;
   /** Paragraph-length summary. Spec 031. Written to YAML frontmatter as `abstract`. */
   abstract?: string | null;
+  /** Spec 032 — fingerprint exported alongside `abstract` so the
+   *  round-trip preserves the staleness signal byte-for-byte. Omitted
+   *  from YAML frontmatter when null (consistent with `abstract`). */
+  abstractOriginHash?: string | null;
   content?: string | null;
   tags: string[];
   outgoingEdges: Array<{ target: { id: string }; label: string | null }>;
@@ -147,6 +151,16 @@ export async function writeNodeToGit(
   // a node that never had an abstract has no `abstract:` line cluttering
   // its frontmatter).
   if (node.abstract) frontmatter.abstract = node.abstract;
+  // Spec 032 — export the hash so re-import round-trips preserve staleness.
+  // Omitted when null (omit-on-null convention) but NOT on empty string:
+  // the importer accepts any string-shaped YAML value (only `typeof !==
+  // 'string'` falls through to recompute), so a hypothetical empty-string
+  // hash from a malformed producer that lands on first import must
+  // round-trip on next export. Nullish check is symmetric with how the
+  // importer treats the value. Note: `abstract` above uses a truthy
+  // check, but its write-path normalizer collapses empty → null before
+  // reaching the exporter, so the parallel issue can't fire there.
+  if (node.abstractOriginHash != null) frontmatter.abstractOriginHash = node.abstractOriginHash;
   if (node.tags.length > 0) frontmatter.tags = node.tags;
 
   // Preserve existing frontmatter fields we don't manage (urn, author, etc.)

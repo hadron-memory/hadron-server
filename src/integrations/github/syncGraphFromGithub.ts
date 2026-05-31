@@ -96,6 +96,11 @@ export const syncGraphFromGithub = async (
           // normalized (trim-then-check) by loadNodeFromFs before reaching
           // here; just pass through.
           abstract: node.abstract ?? null,
+          // Spec 032 — abstractOriginHash round-trips through the importer.
+          // loadNodeFromFs runs FR-013 reconcile (match → keep, mismatch →
+          // accept-and-warn, missing/non-string → recompute, abstract-null
+          // → null). Pass-through preserves the staleness state on disk.
+          abstractOriginHash: node.abstractOriginHash ?? null,
           content: node.content ?? null,
           contentHash: node.contentHash ?? null,
           tags: serializeTags(node.tags ?? []) as string[],

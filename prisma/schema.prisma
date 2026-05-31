@@ -744,8 +744,23 @@ model Node {
   abstract    String?
   /// The topic content (topic.md full text).
   content     String?
-  /// SHA256(yaml+md)[0:8] for change detection.
+  /// SHA256(yaml+md)[0:8] for change detection. Set by external
+  /// producers (YAML frontmatter via importer, Git sync). UNCHANGED by
+  /// spec 032 — that spec adds `abstractOriginHash` below as a separate
+  /// column with its own domain (SHA256(content)[0:8]); the two are
+  /// never compared against each other.
   contentHash String?   @map("content_hash")
+  /// Spec 032 — fingerprint of `content` value at the time `abstract`
+  /// was authored. SHA-256 of plaintext content truncated to 8 hex
+  /// chars (same width as `contentHash`, different domain). At read
+  /// time, compared against `computeContentHash(node.content)` (via
+  /// `src/lib/contentHash.ts`) to detect staleness; when the two
+  /// values differ AND `abstractOriginHash` is non-null, the abstract
+  /// may not reflect current content. Surfaced by `h-read-node`'s
+  /// `Source: abstract-stale` marker, `h-validate`'s `[stale-abstract]`
+  /// warning, and the upcoming RAG layer. System-managed: never
+  /// settable via GraphQL `NodeInput`.
+  abstractOriginHash String? @map("abstract_origin_hash")
   /// Number of input tokens.
   tokens      Int?
   /// Classification tags.
@@ -1470,6 +1485,12 @@ model NodeVersion {
   /// column landed — version history would otherwise silently drop
   /// abstract edits.
   abstract    String?
+  /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
+  /// version capture. Restored verbatim by `restoreNodeVersion`;
+  /// legacy versions (pre-spec) have NULL here, which short-circuits
+  /// the staleness check on the live row after restore (no false
+  /// positives).
+  abstractOriginHash String? @map("abstract_origin_hash")
   content     String?
   tags        String[]
   /// Free-form author label (typically a User.id, but may be an
