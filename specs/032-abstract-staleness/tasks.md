@@ -91,11 +91,27 @@ Single-project layout per [plan.md](./plan.md):
 
 ### Tests for User Story 2
 
-- [ ] T020 [US2] Extend `src/mcp/server.nodeAbstractStaleness.test.ts` with the 6 US2 acceptance scenarios per [contracts/h-read-node.md](./contracts/h-read-node.md) "Test coverage": fresh node + `'all'` (no marker); stale + `'all'` (marker present); stale + `'abstract'` (marker present); stale + `'content'` default (no marker); content-less abstract-having node (spec 031 fallback) under default (`Source: abstract-fallback` only, NOT `abstract-stale`); legacy null-hash node (no marker). Plus encrypted-memory round-trip in `src/api/graphql/schema/resolvers.encryption.test.ts` extending the existing fixture.
+- [ ] T020 [US2] Extend `src/mcp/server.nodeAbstractStaleness.test.ts` with the 6 US2 acceptance scenarios per [contracts/h-read-node.md](./contracts/h-read-node.md) "Test coverage": fresh node + `'all'` (no marker); stale + `'all'` (marker present); stale + `'abstract'` (marker present); stale + `'content'` default (no marker); content-less abstract-having node (spec 031 fallback) under default (`Source: abstract-fallback` only, NOT `abstract-stale`); legacy null-hash node (no marker). Plus an encrypted-memory test in `src/api/graphql/schema/resolvers.encryption.test.ts` extending the existing fixture: the staleness predicate evaluates on **plaintext** content because `h-read-node`'s existing `decryptNodesBatch` call runs before the predicate; assert that a fresh-then-stale write cycle on an encrypted memory surfaces the marker on the next read just like on a non-encrypted memory.
 
 ### Implementation for User Story 2
 
-- [ ] T021 [US2] In `src/mcp/server.ts`, extend the `h-read-node` tool-registration block per [contracts/h-read-node.md](./contracts/h-read-node.md): compute `isStale` after the existing `isFallback` computation (using `computeContentHash(node.content)`, NOT the stored `contentHash` column); add `includeStaleMarker ? 'Source: abstract-stale' : ''` line to the meta-block array adjacent to the existing `isFallback ? 'Source: abstract-fallback' : ''` line. Depends on T004.
+- [ ] T021 [US2] In `src/mcp/server.ts`, extend the `h-read-node` tool-registration block per [contracts/h-read-node.md](./contracts/h-read-node.md). The staleness check runs AFTER `decryptNodesBatch` (already invoked on the read path per spec 031), so `node.content` is plaintext at this point on both encrypted and non-encrypted memories. Sketch:
+
+  ```typescript
+  // Four-clause guard (FR-010 conditions a–d + FR-007 ghost-case
+  // short-circuit). The explicit `abstractOriginHash != null` is the
+  // load-bearing one for legacy nodes.
+  const isStale =
+    !!(node.abstract && node.abstract.length > 0) &&
+    !!(node.content && node.content.length > 0) &&
+    node.abstractOriginHash != null &&
+    node.abstractOriginHash !== computeContentHash(node.content);
+
+  // Marker emission gated by scope (FR-010 condition e).
+  const includeStaleMarker = isStale && (scope === 'abstract' || scope === 'all');
+  ```
+
+  Add the `includeStaleMarker ? 'Source: abstract-stale' : ''` entry to the meta-block array adjacent to the existing `isFallback ? 'Source: abstract-fallback' : ''` entry (the two are mutually exclusive in practice — fallback requires content null; stale requires content non-null). Depends on T004.
 - [ ] T022 [US2] Run US2 tests green: `DATABASE_URL='postgresql://holger@localhost:5432/hadron_test' pnpm vitest run src/mcp/server.nodeAbstractStaleness.test.ts src/api/graphql/schema/resolvers.encryption.test.ts`. All assertions pass.
 
 **Checkpoint**: US2 fully functional. Stale nodes surface the marker on opt-in reads; fresh and legacy nodes render byte-identical to pre-spec; encrypted-memory case verified.
@@ -110,11 +126,31 @@ Single-project layout per [plan.md](./plan.md):
 
 ### Tests for User Story 3
 
-- [ ] T023 [US3] Extend `src/mcp/server.nodeAbstractStaleness.test.ts` with the 5 US3 acceptance scenarios per [contracts/h-validate.md](./contracts/h-validate.md) "Test coverage": single stale node flagged; clean memory produces zero `[stale-abstract]` warnings; mixed memory (sparse + broken + stale) reports all three with their own tags; legacy-dominated memory produces zero warnings (short-circuit on null hash); encrypted memory's predicate evaluates correctly without decryption (`abstractOriginHash` is plaintext metadata).
+- [ ] T023 [US3] Extend `src/mcp/server.nodeAbstractStaleness.test.ts` with the 5 US3 acceptance scenarios per [contracts/h-validate.md](./contracts/h-validate.md) "Test coverage": single stale node flagged; clean memory produces zero `[stale-abstract]` warnings; mixed memory (sparse + broken + stale) reports all three with their own tags; legacy-dominated memory produces zero warnings (short-circuit on null hash); **encrypted memory produces zero `[stale-abstract]` warnings** (h-validate doesn't decrypt and the staleness predicate requires plaintext content, so v1 skips the check on encrypted memories — see T024). PR-208 review caught the original "evaluates without decryption" wording as a contradiction; v1 design is **skip-on-encrypted**, encryption-parity follow-up adds the check.
 
 ### Implementation for User Story 3
 
-- [ ] T024 [US3] In `src/mcp/server.ts`, extend the `h-validate` tool-registration block per [contracts/h-validate.md](./contracts/h-validate.md): add the stale-abstract check inside the existing per-node loop using the same predicate as `h-read-node`. No `db.node.findMany` select change needed — `include` mode auto-projects the new column. Depends on T004.
+- [ ] T024 [US3] In `src/mcp/server.ts`, extend the `h-validate` tool-registration block per [contracts/h-validate.md](./contracts/h-validate.md): add the stale-abstract check inside the existing per-node loop using the same predicate as `h-read-node` (T021). **Gate the check on `!memory.isEncrypted`** — h-validate doesn't invoke `decryptNodesBatch`, so on encrypted memories `node.content` is ciphertext and `computeContentHash(node.content)` would compare unequal to every `abstractOriginHash` (false-positive on every node). v1 skips the staleness check entirely for encrypted memories; the encryption-parity follow-up will add a decrypt step before the predicate. Sketch:
+
+  ```typescript
+  // Existing checks: sparse-node, broken-edge (unchanged) ...
+
+  // Spec 032 stale-abstract check, gated on non-encrypted memories
+  // (h-validate doesn't decrypt content; staleness on encrypted memories
+  // is deferred to the encryption-parity follow-up — see PR-208 review).
+  if (!memory.isEncrypted) {
+    if (
+      node.abstract != null && node.abstract.length > 0 &&
+      node.content != null && node.content.length > 0 &&
+      node.abstractOriginHash != null &&
+      node.abstractOriginHash !== computeContentHash(node.content)
+    ) {
+      issues.push(`[stale-abstract] ${nUrn} — abstract may not reflect current content`);
+    }
+  }
+  ```
+
+  No `db.node.findMany` select change needed — `include` mode auto-projects the new column. Depends on T004.
 - [ ] T025 [US3] Run US3 tests green: `DATABASE_URL='postgresql://holger@localhost:5432/hadron_test' pnpm vitest run src/mcp/server.nodeAbstractStaleness.test.ts`. All assertions pass.
 
 **Checkpoint**: US3 fully functional. Bulk staleness detection available via `h-validate`; no false positives on fresh or legacy nodes; mixed memories report all issue types with their own tags.
@@ -200,7 +236,14 @@ T016 → T017 → T018 → T019 (test-run)
 3. Complete Phase 3: US1
 4. **STOP and VALIDATE**: Run [quickstart.md](./quickstart.md) Steps 1 + 3 + 7 (the DB-inspection steps that prove the hash is being maintained correctly across write paths). Skip steps 2 / 4 / 5 / 6 / 8 / 9 (those require US2 / US3 surfacing). Step 11 (version restore) IS demoable in MVP — the hash round-trips through NodeVersion.
 
-US1 alone is a coherent shippable increment — the column exists, every write surface maintains it, version history captures it, GraphQL exposes it read-only. The staleness signal is **observable** (you can compare DB columns to see staleness) even before any tool **surfaces** it. The RAG follow-up consumes this column directly and doesn't need US2/US3 to be live.
+US1 alone is a coherent shippable increment — the column exists, every write surface maintains it, version history captures it, GraphQL exposes it read-only. The staleness signal is **observable** (you can compute the predicate yourself by comparing `abstractOriginHash` against `computeContentHash(node.content)`) even before any tool **surfaces** it.
+
+**RAG-consumer note** (PR-208 review clarification): "US1 alone unblocks RAG" does not mean the RAG layer reads a pre-computed staleness boolean. The column exposes the **origin of the comparison** (the hash at time of authoring), not the comparison **result**. The RAG layer must:
+1. Read `abstractOriginHash` from the row.
+2. Compute `computeContentHash(node.content)` itself (using the same shared helper).
+3. Treat divergence as the staleness signal.
+
+This is by design (per data-model.md "What is NOT" — no derived `is_stale` column). US2 and US3 surface the computed signal on read tools for human / agent consumers; the RAG layer does its own composition.
 
 ### Incremental delivery
 
