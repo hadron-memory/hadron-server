@@ -317,12 +317,16 @@ describe('h-read-node — `Source: abstract-stale` marker (US2)', () => {
     expect(out).toContain("Y'"); // updated content still rendered
   });
 
-  it("stale node + 'abstract': marker present", async () => {
+  it("stale node + 'abstract': marker present, content absent", async () => {
     await addNode({ loc: 'r3', abstract: 'X', content: 'Y' });
     await updateNode({ loc: 'r3', content: "Y'" });
     const out = await readNode('r3', 'abstract');
     expect(out).toContain('Source: abstract-stale');
     expect(out).toContain('X');
+    // 'abstract' scope must NOT render the body — the whole point of the
+    // scope. PR-210 review #4: assert the body absence rather than rely
+    // on spec 031's scope-shape tests elsewhere.
+    expect(out).not.toContain("Y'");
   });
 
   it("stale node + 'content' default: no marker (abstract not in response)", async () => {
@@ -361,23 +365,17 @@ describe('h-read-node — `Source: abstract-stale` marker (US2)', () => {
     // (possibly-)ciphertext content would false-positive. The gate skips
     // the predicate entirely; the marker MUST NOT emit on any read of
     // an encrypted memory in v1.
+    //
+    // No try/finally reset needed — `beforeEach` calls `cleanDb` which
+    // drops and recreates the memory row, so the `isEncrypted: true`
+    // mutation here doesn't leak across tests.
     await addNode({ loc: 'r7', abstract: 'X', content: 'Y' });
     await updateNode({ loc: 'r7', content: "Y'" });
     await db.memory.update({
       where: { id: fx.memory.id },
       data: { isEncrypted: true },
     });
-    try {
-      const out = await readNode('r7', 'all');
-      expect(out).not.toContain('Source: abstract-stale');
-    } finally {
-      // Reset for subsequent tests in this describe block — beforeEach
-      // wipes everything, but this paranoid restore covers any future
-      // re-ordering.
-      await db.memory.update({
-        where: { id: fx.memory.id },
-        data: { isEncrypted: false },
-      });
-    }
+    const out = await readNode('r7', 'all');
+    expect(out).not.toContain('Source: abstract-stale');
   });
 });

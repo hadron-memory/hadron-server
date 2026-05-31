@@ -1157,6 +1157,11 @@ export function createMcpServerInstance(
             include: { source: true },
             where: { source: { deletedAt: null } },
           },
+          // Spec 032 — encryption gate for the abstract-stale predicate
+          // (FR-010). Riding the node fetch avoids a second round-trip
+          // (PR-210 review). resolveMemoryByUrn above doesn't carry
+          // `isEncrypted` and changing it has a wider blast radius.
+          memory: { select: { isEncrypted: true } },
         },
       });
       if (!node) {
@@ -1227,24 +1232,29 @@ export function createMcpServerInstance(
       // node). v1 skips the predicate on encrypted memories; the
       // encryption-parity follow-up lifts the gate by adding a decrypt
       // step before this point. Symmetric with the h-validate gate (US3).
-      const memEnc = await db.memory.findUnique({
-        where: { id: memory.id },
-        select: { isEncrypted: true },
-      });
-      // Four-clause staleness predicate (FR-010 conditions a–d). The
-      // explicit `abstractOriginHash != null` is load-bearing for legacy
-      // nodes — without it, `null !== "abc12345"` is `true` and the
-      // marker would fire on every pre-spec-032 row.
-      const isStale =
-        !memEnc?.isEncrypted &&
+      //
+      // Scope gate: FR-010 condition e — the marker only fires under
+      // scopes that surface the abstract. Default `'content'` scope
+      // omits it (the abstract isn't in the response, so alarming
+      // would be unrelatable). Hoisting the gate above the predicate
+      // (PR-210 review) skips the hash recomputation on the default-
+      // scope read path entirely — preserves byte-identical-pre-spec
+      // behaviour at zero cost.
+      const shouldCheckStale = scope === 'abstract' || scope === 'all';
+      let includeStaleMarker = false;
+      if (
+        shouldCheckStale &&
+        !node.memory.isEncrypted &&
         hasAbstract &&
         hasContent &&
-        node.abstractOriginHash != null &&
-        node.abstractOriginHash !== computeContentHash(node.content);
-      // FR-010 condition e — marker only fires under scopes that surface
-      // the abstract; default 'content' scope omits it (the abstract isn't
-      // in the response, so alarming would be unrelatable).
-      const includeStaleMarker = isStale && (scope === 'abstract' || scope === 'all');
+        node.abstractOriginHash != null
+      ) {
+        // The explicit `abstractOriginHash != null` above is load-bearing
+        // for legacy nodes — without it, `null !== "abc12345"` is `true`
+        // and the marker would fire on every pre-spec-032 row.
+        includeStaleMarker =
+          node.abstractOriginHash !== computeContentHash(node.content);
+      }
 
       // #186: surface nodeType so callers can tell `parent` from `info`
       // (portal rendering + tool dispatch both branch on this; without it
