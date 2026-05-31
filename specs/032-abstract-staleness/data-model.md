@@ -8,22 +8,29 @@ Two models gain the same nullable text column. The migration adds the column to 
 
 ### `Node` model
 
-Find via `model Node {` in `prisma/schema.prisma`. New column positioned adjacent to the existing `contentHash` field (the two hashes belong visually together):
+Find via `model Node {` in `prisma/schema.prisma`. New column positioned adjacent to the existing `contentHash` field (the two hashes are conceptually adjacent — though they serve different purposes; see "What is NOT" section below):
 
 ```prisma
 model Node {
   // ... existing fields including `abstract` (from spec 031) and `content` ...
 
-  /// SHA256(content)[0:8] for change detection.
+  /// SHA256(yaml+md)[0:8] for change detection. Set by external producers
+  /// (YAML frontmatter / Git sync). UNCHANGED by spec 032 — spec 032 does
+  /// NOT modify this column's domain or producers. See spec 032 "What is
+  /// NOT in this data model" for why staleness uses a separate read-time
+  /// comparison instead.
   contentHash      String?  @map("content_hash")
   /// Spec 032 — fingerprint of the `content` value at the time the
-  /// abstract was authored (matches `contentHash` format: SHA-256 truncated
-  /// to 8 hex chars). When `contentHash != abstractOriginHash` AND both
-  /// are non-null, the abstract is stale (it summarises an older content
-  /// version). The staleness signal is the contract that `h-read-node`'s
-  /// `Source: abstract-stale` marker, `h-validate`'s `[stale-abstract]`
-  /// warning, and the upcoming RAG layer all consume. System-managed:
-  /// never settable via GraphQL `NodeInput`. See spec 032 FR-001 + FR-012.
+  /// abstract was authored. SHA-256 of plaintext content, truncated to
+  /// the first 8 hex chars (matches contentHash's width but is computed
+  /// over content directly, not over yaml+md). Compared at read time
+  /// against `computeContentHash(node.content)` to detect staleness; when
+  /// the two values differ AND both are non-null, the abstract may not
+  /// reflect current content. The staleness signal is consumed by
+  /// `h-read-node`'s `Source: abstract-stale` marker, `h-validate`'s
+  /// `[stale-abstract]` warning, and the upcoming RAG layer. System-
+  /// managed: never settable via GraphQL `NodeInput`. See spec 032
+  /// FR-001 + FR-012.
   abstractOriginHash String? @map("abstract_origin_hash")
 
   // ... rest unchanged ...
@@ -116,18 +123,21 @@ type Node {
 
 No new validation gates. `abstractOriginHash` is computed server-side from already-validated content; there's no caller-supplied input to validate beyond what spec 031 already covers (the length cap on `abstract` and `content` is unchanged).
 
-The **staleness check** is read-side computation, not a validation gate:
+The **staleness check** is read-side computation, not a validation gate, AND it compares against a computed-at-read value (NOT against the stored `Node.contentHash` column — see "What is NOT in this data model" below):
 
 ```typescript
+import { computeContentHash } from '../lib/contentHash.js';
+
 const isStale =
   node.abstract != null &&
+  node.abstract.length > 0 &&
   node.content != null &&
-  node.abstractOriginHash != null &&
-  node.contentHash != null &&
-  node.abstractOriginHash !== node.contentHash;
+  node.content.length > 0 &&
+  node.abstractOriginHash != null &&             // explicit null check (FR-010 condition c)
+  node.abstractOriginHash !== computeContentHash(node.content);
 ```
 
-(In practice the `null` checks on the hash columns are belt-and-suspenders — when abstract/content are non-null, the hash columns should also be populated by the write path. The defensive null check covers (a) legacy nodes from before this spec ships, and (b) future migration scenarios where a hash is intentionally cleared.)
+(The `null` check on `abstractOriginHash` is the load-bearing guard against false positives on legacy nodes — pre-spec rows have null `abstractOriginHash` even when abstract + content are both populated; without the explicit guard, `null !== "abc12345"` evaluates `true` and the marker fires falsely. PR-207 review item 5 caught the gap in the original spec.)
 
 ## Hash computation — `src/lib/contentHash.ts` (NEW)
 
@@ -171,8 +181,8 @@ Soft-delete: same as content/abstract — preserved on the tombstoned row; resto
 ## What is NOT in this data model
 
 - **No CHECK constraint** on `abstractOriginHash` format / length (it's machine-generated; a CHECK adds maintenance for no real protection).
-- **No index** on `abstractOriginHash` or `contentHash` for staleness scans (research D10).
+- **No index** on `abstractOriginHash` for staleness scans (research D10). Read-time hash computation is O(content length) per node — cheap on individual reads, negligible for `h-validate`'s per-memory iteration over M nodes.
 - **No derived `is_stale` column** (storage + sync-failure surface for negligible read-time savings).
-- **No update to `Node.contentHash` write semantics** in this spec. `contentHash` continues to be set wherever it is today (importer, Git sync). If the implementer notices `contentHash` is unset on some server-side write paths, that's a pre-existing gap worth fixing in a separate change.
+- **`Node.contentHash` is NOT touched by this spec.** This is the load-bearing scoping decision from PR-207 review item 1. The existing `contentHash` column has its own documented domain (`SHA256(yaml+md)[0:8]`) and is set by external producers (YAML frontmatter, Git sync); silently redefining it to `SHA256(content)[0:8]` would break round-trip consumers who depend on the old shape. The staleness check therefore compares `abstractOriginHash` against `computeContentHash(node.content)` (computed at read time using the new helper), NOT against the stored `Node.contentHash` column. The two columns live in different hash domains and serve different purposes; they coexist without interfering.
 - **No new typed error class.** Staleness is observable, not throwable.
 - **No new MCP tool.** Two existing read tools (`h-read-node`, `h-validate`) gain new output; no new tool surface.

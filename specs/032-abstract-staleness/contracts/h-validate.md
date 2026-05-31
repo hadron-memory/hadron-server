@@ -7,19 +7,23 @@ Spec source: FR-011, plus US3 acceptance scenarios.
 Inside the existing per-node loop in `h-validate` (find via the `h-validate` tool body in `src/mcp/server.ts`, near the existing sparse-node and broken-edge checks), add a third check using the same staleness predicate as `h-read-node`:
 
 ```typescript
+import { computeContentHash } from '../lib/contentHash.js';
+
 // Existing checks: sparse-node, broken-edge
 if (!node.description && !node.content && !node.abstract) {
   issues.push(`[sparse] ${nUrn} — no description, content, or abstract`);
 }
 // ... broken-edge check ...
 
-// Spec 032 — stale-abstract warning (FR-011)
+// Spec 032 — stale-abstract warning (FR-011). Compares against a
+// COMPUTED-AT-READ value, not the stored Node.contentHash column.
+// The explicit abstractOriginHash != null guard prevents false
+// positives on legacy nodes (PR-207 review item 5).
 if (
-  node.abstract != null &&
-  node.content != null &&
+  node.abstract != null && node.abstract.length > 0 &&
+  node.content != null && node.content.length > 0 &&
   node.abstractOriginHash != null &&
-  node.contentHash != null &&
-  node.abstractOriginHash !== node.contentHash
+  node.abstractOriginHash !== computeContentHash(node.content)
 ) {
   issues.push(`[stale-abstract] ${nUrn} — abstract may not reflect current content`);
 }

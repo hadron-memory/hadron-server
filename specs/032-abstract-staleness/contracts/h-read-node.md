@@ -11,17 +11,24 @@ Spec source: FR-010, plus US2 acceptance scenarios.
 Compute staleness once at the top of the response-shape branch, after the node has been decrypted (if applicable):
 
 ```typescript
+import { computeContentHash } from '../lib/contentHash.js';
+
 const hasContent = !!(node.content && node.content.length > 0);
 const hasAbstract = !!(node.abstract && node.abstract.length > 0);
 const isFallback = scope === 'content' && !hasContent && hasAbstract;
-// Spec 032 — staleness check. Requires both columns populated and both
-// hashes populated; legacy nodes (NULL hashes) naturally short-circuit.
+
+// Spec 032 — staleness check. Note the comparison is against a
+// COMPUTED-AT-READ value, NOT the stored Node.contentHash column (which
+// has its own domain from external producers; see data-model.md "What
+// is NOT in this data model"). The explicit `!= null` on
+// abstractOriginHash is load-bearing: legacy nodes have null hash even
+// when abstract + content are populated, and `null !== "abc12345"`
+// evaluates true — that would fire the marker falsely without the guard.
 const isStale =
   hasAbstract &&
   hasContent &&
   node.abstractOriginHash != null &&
-  node.contentHash != null &&
-  node.abstractOriginHash !== node.contentHash;
+  node.abstractOriginHash !== computeContentHash(node.content);
 
 // Marker emission:
 //   - Source: abstract-fallback fires under default scope + content-less

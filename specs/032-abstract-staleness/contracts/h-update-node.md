@@ -8,21 +8,25 @@ Spec source: FR-003, FR-004, FR-005, FR-006, FR-007.
 
 ## Behaviour matrix
 
-`h-update-node` is a partial update; the abstractOriginHash semantics depend on which of `abstract` / `content` were supplied:
+`h-update-node` is a partial update; the abstractOriginHash semantics depend on which of `abstract` / `content` were supplied. The matrix below covers only `abstractOriginHash` behaviour — `Node.contentHash` is **NOT** touched by this spec (see data-model.md):
 
-| `abstract` field | `content` field | Behaviour on abstractOriginHash | Behaviour on contentHash |
-|---|---|---|---|
-| absent | absent | preserve existing | preserve existing |
-| absent | string `Y'` | **preserve existing** (FR-004 — staleness signal arms) | update to `computeContentHash("Y'")` |
-| absent | `null` | preserve existing (FR-007 — ghost-hash case; doesn't fire staleness because content is null) | update to `null` |
-| string `X'` | absent | **set to `computeContentHash(current content)`** (FR-003 — author affirms abstract matches current content) | preserve existing |
-| string `X'` | string `Y'` | **set to `computeContentHash("Y'")`** (FR-005 — both writes match) | update to `computeContentHash("Y'")` |
-| string `X'` | `null` | set to `null` (FR-007 — no content = no hash) | update to `null` |
-| `null` | absent | **set to `null`** (FR-006 — no abstract = no hash) | preserve existing |
-| `null` | string `Y'` | set to `null` (FR-006) | update to `computeContentHash("Y'")` |
-| `null` | `null` | both null | both null |
+| `abstract` field | `content` field | Behaviour on abstractOriginHash |
+|---|---|---|
+| absent | absent | preserve existing |
+| absent | string `Y'` | **preserve existing** (FR-004 — staleness signal arms; the stored hash will compare unequal to `computeContentHash("Y'")` at next read) |
+| absent | `null` | preserve existing (FR-007 — ghost-hash; doesn't fire staleness because the read-time check requires content non-null) |
+| string `X'` | absent | **set to `computeContentHash(existing.content)`** (FR-003 — author affirms abstract matches **current** content; "current" = existing because content wasn't supplied) |
+| string `X'` | string `Y'` | **set to `computeContentHash("Y'")`** (FR-005 — both writes match) |
+| string `X'` | `null` | set to `null` (FR-007 — no content = no hash) |
+| `null` | absent | **set to `null`** (FR-006 — no abstract = no hash) |
+| `null` | string `Y'` | set to `null` (FR-006) |
+| `null` | `null` | hash set to null |
 
-The load-bearing row is the second: **content updated without abstract → abstractOriginHash is left untouched**. The stored hash now differs from the new contentHash; the staleness signal is armed.
+The load-bearing row is the second: **content updated without abstract → abstractOriginHash is left untouched**. The stored hash will compare unequal to `computeContentHash(new content)` at next read; the staleness signal is armed.
+
+### Schema scope expansion — `content: null` and `abstract: null` must both be valid inputs
+
+The existing `h-update-node` zod schema (per spec 031) declares `content: z.string().optional()`. This matrix's rows that send `content: null` require `content: z.string().nullable().optional()`. Same change is already in place for `abstract` per spec 031 (clearing via `null`); this contract adds the parallel change to `content`. **The zod schema delta MUST land with this contract** (PR-207 review item 3 caught the omission). The plan/tasks treat this as a one-line schema widening, not a feature scope expansion — it's the existing partial-update convention reaching its consistent shape.
 
 ## Implementation sketch *(illustrative — not load-bearing; integrate with existing patterns)*
 
@@ -31,13 +35,20 @@ import { computeContentHash } from '../lib/contentHash.js';
 
 // ... existing length-cap + trim-then-check on abstract ...
 
-// Read current state once for the partial-update decision.
+// On encrypted memories, existing.content arrives ciphertext via
+// db.node.findUnique (no decryptNodeFields call in h-update-node today
+// — pre-existing surface asymmetry per spec 031 round-2 review and
+// gap-tracking issue #206). For non-encrypted memories OR for encrypted
+// memories accessed via MCP today (where content is stored plaintext
+// per the same asymmetry), `existing.content` IS plaintext.
+// When the MCP encryption-parity follow-up ships, this sketch grows
+// a `decryptNodeFields(existing, memEncInfo)` call here.
 const currentContent = existing.content;
 
 // abstractOriginHash semantics:
 let nextAbstractOriginHash: string | null | undefined;
 if (normalizedAbstract === undefined) {
-  // abstract not supplied — preserve unless content also got cleared
+  // abstract not supplied — preserve
   nextAbstractOriginHash = undefined; // Prisma: leave column untouched
 } else if (normalizedAbstract === null) {
   // abstract cleared — clear the hash too
@@ -50,21 +61,14 @@ if (normalizedAbstract === undefined) {
   nextAbstractOriginHash = computeContentHash(nextContent);
 }
 
-// contentHash semantics: always reflect the post-update content value
-let nextContentHash: string | null | undefined;
-if (content === undefined) {
-  nextContentHash = undefined; // preserve
-} else {
-  nextContentHash = computeContentHash(content);
-}
-
 const data: Prisma.NodeUpdateInput = {
   // ... other partial-update fields ...
   ...(normalizedAbstract !== undefined && { abstract: normalizedAbstract }),
   ...(nextAbstractOriginHash !== undefined && {
     abstractOriginHash: nextAbstractOriginHash,
   }),
-  ...(content !== undefined && { content, contentHash: nextContentHash }),
+  ...(content !== undefined && { content }),
+  // contentHash is NOT touched — see data-model.md
 };
 ```
 

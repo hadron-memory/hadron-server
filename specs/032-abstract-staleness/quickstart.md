@@ -24,13 +24,15 @@ h-add-node
     This is the body that the abstract above is supposed to summarise.
 ```
 
-**Expected**: success. Inspect the DB row to confirm both hashes match:
+**Expected**: success. Inspect the DB row to confirm the stored hash matches what `computeContentHash` would produce on current content:
 
 ```
-psql -d hadron_dev -c "select abstract_origin_hash, content_hash from nodes where loc = 'test:staleness';"
+psql -d hadron_dev -c "select n.abstract_origin_hash, encode(digest(n.content::bytea, 'sha256'), 'hex')::text as live_content_hash_full from nodes n join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev';"
 ```
 
-Both columns should be 8-char hex strings AND equal to each other. Fresh state.
+The first 8 chars of `live_content_hash_full` should equal `abstract_origin_hash`. Fresh state.
+
+(SQL note: the live-content hash is computed by Postgres for inspection only — at runtime, the server's `computeContentHash` helper performs the same computation in TypeScript. The two ways agree because both are SHA-256 of the same bytes.)
 
 ### Step 2 — Read with `contentScope: 'all'`: no staleness marker
 
@@ -57,10 +59,10 @@ h-update-node
 **Expected**: success. Inspect the DB row again:
 
 ```
-psql -d hadron_dev -c "select abstract_origin_hash, content_hash from nodes where loc = 'test:staleness';"
+psql -d hadron_dev -c "select n.abstract_origin_hash, encode(digest(n.content::bytea, 'sha256'), 'hex')::text as live_content_hash_full from nodes n join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev';"
 ```
 
-The two hashes should now **differ**. `abstract_origin_hash` is unchanged from Step 1 (the original content's hash). `content_hash` is the new content's hash. The staleness signal is armed.
+The first 8 chars of `live_content_hash_full` should now **differ** from `abstract_origin_hash`. `abstract_origin_hash` is unchanged from Step 1 (the original content's hash); `live_content_hash_full` reflects the new content. The staleness signal is armed.
 
 ### Step 4 — Read with `contentScope: 'all'`: marker now appears
 
@@ -102,10 +104,10 @@ h-update-node
 **Expected**: success. Inspect the DB row:
 
 ```
-psql -d hadron_dev -c "select abstract_origin_hash, content_hash from nodes where loc = 'test:staleness';"
+psql -d hadron_dev -c "select n.abstract_origin_hash, encode(digest(n.content::bytea, 'sha256'), 'hex')::text as live_content_hash_full from nodes n join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev';"
 ```
 
-Both hashes should be equal again — the refresh affirms "this abstract matches current content."
+The first 8 chars of `live_content_hash_full` should equal `abstract_origin_hash` again — the refresh affirms "this abstract matches current content."
 
 ### Step 8 — Read with `contentScope: 'all'`: marker gone
 
@@ -131,7 +133,7 @@ h-validate
 Find a node created BEFORE this spec shipped (any node with `abstract IS NOT NULL` from spec 031's era — likely none in dev, but if any exist):
 
 ```
-psql -d hadron_dev -c "select loc from nodes where abstract is not null and abstract_origin_hash is null limit 1;"
+psql -d hadron_dev -c "select n.loc from nodes n join memories m on m.id = n.memory_id where n.abstract is not null and n.abstract_origin_hash is null and m.urn = 'hadronmemory.com::dev' limit 1;"
 ```
 
 If a row exists, read it with `contentScope: 'all'`: NO marker. The legacy null-hash short-circuits the staleness check — no false positive on pre-spec content (FR-007 + SC-004).
@@ -159,7 +161,7 @@ h-update-node
 Find the version ID:
 
 ```
-psql -d hadron_dev -c "select id from node_versions where node_id = (select id from nodes where loc = 'test:staleness') order by created_at desc limit 1 offset 1;"
+psql -d hadron_dev -c "select v.id from node_versions v join nodes n on n.id = v.node_id join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev' order by v.created_at desc limit 1 offset 1;"
 ```
 
 Then call `restoreNodeVersion` via GraphQL (or whatever the portal surface uses).
@@ -178,13 +180,13 @@ h-delete-node
 
 | Step | Check | Expected |
 |---|---|---|
-| 1 | DB row after fresh write | both hashes populated, equal |
+| 1 | DB row after fresh write | `abstract_origin_hash` matches first 8 chars of `sha256(content)` |
 | 2 | h-read-node 'all' fresh | no `Source: abstract-stale` |
-| 3 | DB row after content-only update | hashes differ; signal armed |
+| 3 | DB row after content-only update | stored hash no longer matches `sha256(content)`; signal armed |
 | 4 | h-read-node 'all' stale | `Source: abstract-stale` present |
 | 5 | h-read-node default stale | no marker (abstract not in response) |
 | 6 | h-validate stale | `[stale-abstract]` warning for this node only |
-| 7 | DB row after abstract refresh | hashes equal again |
+| 7 | DB row after abstract refresh | stored hash matches `sha256(content)` again |
 | 8 | h-read-node 'all' refreshed | no marker |
 | 9 | h-validate refreshed | clean |
 | 10 | Legacy node | no marker (short-circuit) |

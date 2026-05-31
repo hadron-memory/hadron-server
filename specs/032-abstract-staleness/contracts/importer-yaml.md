@@ -21,7 +21,7 @@ interface NodeYaml {
 }
 ```
 
-### Importer behaviour
+### Importer behaviour (FR-013 validate-on-import model)
 
 When parsing a node's frontmatter:
 
@@ -30,22 +30,42 @@ import { computeContentHash } from '../../lib/contentHash.js';
 
 // ... existing parse + normalize ...
 
-// Spec 032 — handle abstractOriginHash per FR-013:
-//   - YAML carries the key → trust the value (preserves staleness state
-//     across export → import round-trips, even when the YAML was edited
-//     externally and the hash no longer matches content)
-//   - YAML omits the key → recompute from imported content (treats the
-//     YAML as a fresh authored write; safe default)
-//   - The abstract is null → abstractOriginHash MUST be null regardless
-//     of what YAML says (parallel to the FR-006 write-path rule)
-let abstractOriginHash: string | null;
 const normalizedAbstract = normalizeImportedAbstract(meta.abstract);
+let abstractOriginHash: string | null;
+
 if (normalizedAbstract === null) {
+  // No abstract → no hash (parallel to FR-006 write-path rule)
   abstractOriginHash = null;
-} else if (typeof meta.abstractOriginHash === 'string') {
-  abstractOriginHash = meta.abstractOriginHash;
 } else {
-  abstractOriginHash = computeContentHash(content);
+  // Compute the canonical hash from the imported content.
+  const computed = computeContentHash(content);
+  const yamlHash = meta.abstractOriginHash;
+
+  // Defensive type handling (only `string` is acceptable; null/object/
+  // number/array all fall through to "recompute" — same pattern as
+  // spec 031's normalizeImportedAbstract rejection).
+  if (typeof yamlHash !== 'string') {
+    // YAML omits the key OR carries a malformed value → recompute
+    // (treats the import as a fresh authored write — safe default).
+    abstractOriginHash = computed;
+  } else if (yamlHash === computed) {
+    // YAML value matches our recomputed value — clean round-trip.
+    abstractOriginHash = yamlHash;
+  } else {
+    // YAML carries a hash that disagrees with computed(content).
+    // This means EITHER the export captured a legitimately-stale
+    // state (content updated after abstract on the source side) OR
+    // the YAML was tampered with externally. Accept the YAML value
+    // (preserves round-trip integrity of legitimately-stale exports)
+    // but emit a warning in the sync log so tampering is observable.
+    console.warn(
+      `[loadNodeFromFs] abstractOriginHash mismatch for loc=${loc}: ` +
+        `YAML claims ${yamlHash}, computed ${computed}. Accepting YAML ` +
+        `value (FR-013 round-trip preservation); possible tampering ` +
+        `or legitimate exported-stale state.`,
+    );
+    abstractOriginHash = yamlHash;
+  }
 }
 
 return {
@@ -54,28 +74,18 @@ return {
     abstract: normalizedAbstract,
     abstractOriginHash,
     content,
-    contentHash: computeContentHash(content),
+    // contentHash is NOT touched by this spec — existing semantics preserved
     // ... rest ...
   },
   edges,
 };
 ```
 
-(The `computeContentHash(content)` call for `contentHash` is the spec-032-implicit fix for "server doesn't compute contentHash today" — the importer was the only server-side surface that previously stored contentHash, and it pulled it from `meta.contentHash`. Now the importer computes it from content with a fallback to the YAML value. Documented as a side-effect in research D3; not a separate FR.)
+**Trust model**: the YAML producer is in the trust boundary (the importer is a privileged sync surface), so the importer accepts a YAML-supplied hash even when it disagrees with the recomputed value. The warning is observability — it surfaces the disagreement in the sync log without blocking the import. PR-207 review item additional-1 surfaced this design space; FR-013 codifies the middle-ground "accept + warn" choice.
 
 ### Defensive type handling
 
-The same `typeof raw === 'object'` rejection from spec 031's `normalizeImportedAbstract` applies for `abstractOriginHash` too — YAML's loose typing means a frontmatter shape like `abstractOriginHash:\n  nested: true` would parse as an object. Reject defensively:
-
-```typescript
-const yamlHash = meta.abstractOriginHash;
-if (typeof yamlHash === 'string') {
-  abstractOriginHash = yamlHash;
-} else if (yamlHash == null || typeof yamlHash === 'object') {
-  // Missing or malformed → recompute (or null if no content)
-  abstractOriginHash = computeContentHash(content);
-}
-```
+The `typeof yamlHash !== 'string'` check above covers all malformed shapes (null, object, array, number, boolean) by falling through to the "recompute" branch. Same pattern as spec 031's `normalizeImportedAbstract` object-rejection (PR-201 round-2 fix). The check is universal: only a string-shaped YAML value is even considered for the round-trip path.
 
 ## Exporter surface — `src/integrations/github/writeNodeToGit.ts`
 
@@ -119,23 +129,24 @@ The `upsertNode` resolver and the MCP write paths that call `writeNodeToGit(...)
 
 ## Round-trip property
 
-Per FR-013 + SC-006:
+Per FR-013 + SC-006 (validate-on-import with accept + warn):
 
 1. Write a node with `abstract: "X"`, `content: "Y"` (hash `hash("Y")` stored).
 2. Update only content to `"Y'"` (`abstractOriginHash` stays at `hash("Y")` — stale).
 3. Export to YAML: frontmatter contains `abstractOriginHash: <hash("Y")>` AND content body of `"Y'"`.
-4. Re-import: live row's `abstractOriginHash = hash("Y")`, `content = "Y'"`, `contentHash = hash("Y'")`.
+4. Re-import: importer computes `hash("Y'")`, compares to YAML's `hash("Y")` → mismatch → emit warning in sync log, accept YAML value. Live row: `abstractOriginHash = hash("Y")`, `content = "Y'"`.
 5. Read with `contentScope: 'all'`: `Source: abstract-stale` marker present.
 
-The staleness state survives the round-trip. Without FR-013, the importer would recompute `abstractOriginHash` from imported content (`= hash("Y'")`), masking the staleness.
+The staleness state survives the round-trip; the warning surfaces the disagreement during import. Without FR-013's accept-on-mismatch, the importer would silently recompute (= `hash("Y'")`), masking the staleness — exactly the failure mode the spec exists to prevent.
 
 ## Test coverage
 
 (in `src/integrations/localFs/loadNodeFromFs.test.ts`)
 
-- YAML with `abstractOriginHash:` populated: importer trusts the value (doesn't recompute).
-- YAML without `abstractOriginHash:` key: importer recomputes from content.
+- YAML with `abstractOriginHash:` that **matches** the computed hash of imported content: clean round-trip, no warning emitted.
+- YAML with `abstractOriginHash:` that **disagrees** with computed: importer accepts the YAML value AND emits a warning (assert via `vi.spyOn(console, 'warn')`).
+- YAML without `abstractOriginHash:` key: importer recomputes from content; no warning (this is the "first-time import" case, not a tampering signal).
 - YAML with `abstract` absent: importer sets `abstractOriginHash = null` regardless of what YAML says.
-- YAML with object-shaped `abstractOriginHash:`: defensive rejection → recompute (parallel to spec 031's object-rejection in `normalizeImportedAbstract`).
+- YAML with non-string `abstractOriginHash:` (number, boolean, object, array): defensive fall-through to recompute (parallel to spec 031's object-rejection in `normalizeImportedAbstract`); no warning (treated same as "missing").
 
-And the round-trip test extending an existing fixture in `src/test/integration/node-abstract.test.ts`: write → export → import → verify staleness state preserved.
+And the round-trip test extending an existing fixture in `src/test/integration/node-abstract.test.ts`: write stale node → export → import → verify (a) staleness state preserved AND (b) the disagreement warning fired.

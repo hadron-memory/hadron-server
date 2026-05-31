@@ -24,7 +24,7 @@ if (normalizedAbstract !== null) {
 }
 ```
 
-Add to both `create` and `update` branches of the upsert:
+Add to both `create` and `update` branches of the upsert. **Do NOT touch the existing `contentHash` field** — its semantics belong to external producers (data-model.md "What is NOT in this data model"):
 
 ```typescript
 const upserted = await db.node.upsert({
@@ -34,7 +34,9 @@ const upserted = await db.node.upsert({
     abstract: normalizedAbstract,
     abstractOriginHash: nextAbstractOriginHash,
     content: content ?? null,
-    contentHash: computeContentHash(content),  // also maintain contentHash server-side
+    // contentHash is NOT set here — left to external producers per
+    // existing semantics. The staleness check uses
+    // computeContentHash(node.content) at read time instead.
     // ... rest ...
   },
   update: {
@@ -42,13 +44,12 @@ const upserted = await db.node.upsert({
     abstract: normalizedAbstract,
     abstractOriginHash: nextAbstractOriginHash,
     content: content ?? null,
-    contentHash: computeContentHash(content),
     // ... rest ...
   },
 });
 ```
 
-**`h-add-node` is upsert-semantically a "fresh write"**: every call writes the full set of provided fields. There's no "preserve existing abstractOriginHash" branch — if the caller is supplying both `abstract` and `content`, both hashes get recomputed; if the caller omits one, the column goes to null per the existing zod-coerced semantics.
+**`h-add-node` is upsert-semantically a "fresh write"**: every call writes the full set of provided fields. There's no "preserve existing abstractOriginHash" branch — if the caller is supplying both `abstract` and `content`, the hash gets recomputed; if the caller omits abstract, `abstractOriginHash` goes to null.
 
 ## Edge cases
 
