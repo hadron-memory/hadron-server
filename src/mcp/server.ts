@@ -2633,7 +2633,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'h-validate',
-    'Check a memory for broken edge references and nodes with missing content. The memory URN MUST be fully qualified.',
+    'Check a memory for broken edge references, sparse nodes, and stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (h-validate does not decrypt; tracked by #206).',
     {
       memoryUrn: z.string().describe('Fully-qualified memory URN, e.g. "acme.com:mmdata"'),
     },
@@ -2653,6 +2653,22 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!(await canReadMemory(db, auth, memory.id))) {
         return textResult('Access denied for this memory.');
       }
+
+      // Spec 032 FR-011 — encryption gate for the stale-abstract check.
+      // h-validate does NOT call decryptNodesBatch, so on encrypted
+      // memories `node.content` is ciphertext and
+      // `computeContentHash(ciphertext)` would compare unequal to every
+      // plaintext-derived abstractOriginHash (false-positive on every
+      // node). v1 skips the check; the #206 encryption-parity follow-up
+      // adds a decrypt step before this loop. Symmetric with the
+      // h-read-node gate (US2). Riding the existing nodes findMany
+      // (memory column auto-projected via separate findUnique) keeps
+      // the wider blast radius of changing resolveMemoryByUrn contained.
+      const memEnc = await db.memory.findUnique({
+        where: { id: memory.id },
+        select: { isEncrypted: true },
+      });
+      const checkStale = !memEnc?.isEncrypted;
 
       const nodes = await db.node.findMany({
         where: { memoryId: memory.id },
@@ -2674,6 +2690,20 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // source is gone) is NOT sparse.
         if (!node.description && !node.content && !node.abstract) {
           issues.push(`[sparse] ${nUrn} — no description, content, or abstract`);
+        }
+        // Spec 032 FR-011 — stale-abstract warning. Mirrors the
+        // h-read-node predicate (US2). The explicit `abstractOriginHash
+        // != null` guard short-circuits legacy pre-spec-032 rows so the
+        // validator stays quiet by design on data that pre-dates the
+        // signal (PR-207 review item 5).
+        if (
+          checkStale &&
+          node.abstract != null && node.abstract.length > 0 &&
+          node.content != null && node.content.length > 0 &&
+          node.abstractOriginHash != null &&
+          node.abstractOriginHash !== computeContentHash(node.content)
+        ) {
+          issues.push(`[stale-abstract] ${nUrn} — abstract may not reflect current content`);
         }
       }
 
