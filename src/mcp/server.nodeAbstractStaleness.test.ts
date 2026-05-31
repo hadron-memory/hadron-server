@@ -269,3 +269,115 @@ describe('NodeVersion snapshots capture abstractOriginHash', () => {
     );
   });
 });
+
+// ─── US2: h-read-node `Source: abstract-stale` marker (FR-010) ─────────
+
+/**
+ * The US2 marker behaviour matrix per contracts/h-read-node.md:
+ *
+ *   - fresh + 'all'                         → no marker
+ *   - stale + 'all'                         → marker present
+ *   - stale + 'abstract'                    → marker present
+ *   - stale + 'content' (default)           → no marker (abstract not in response)
+ *   - content-less abstract-having + default → `Source: abstract-fallback`
+ *                                             only, NOT `abstract-stale` (no
+ *                                             content to be stale against)
+ *   - legacy (abstractOriginHash IS NULL)   → no marker (short-circuit on the
+ *                                             explicit `!= null` guard)
+ *
+ * Plus the encryption gate: on encrypted memories the MCP read path does
+ * NOT call `decryptNodesBatch` (asymmetry tracked by #206), so computing
+ * `computeContentHash(node.content)` against ciphertext would false-
+ * positive on every node. v1 skips the staleness check entirely on
+ * encrypted memories — symmetric with the h-validate gate (US3). The
+ * encryption-parity follow-up lifts the gate.
+ */
+async function readNode(loc: string, contentScope?: 'content' | 'abstract' | 'all') {
+  const srv = createTestableMcpServer(adminAuth());
+  const params: Record<string, unknown> = {
+    urn: `stale-org::stalemem::${loc}`,
+  };
+  if (contentScope !== undefined) params.contentScope = contentScope;
+  return srv.callToolText('h-read-node', params);
+}
+
+describe('h-read-node — `Source: abstract-stale` marker (US2)', () => {
+  it("fresh node + 'all': no `Source: abstract-stale`", async () => {
+    await addNode({ loc: 'r1', abstract: 'X', content: 'Y' });
+    const out = await readNode('r1', 'all');
+    expect(out).not.toContain('Source: abstract-stale');
+  });
+
+  it("stale node + 'all': marker present", async () => {
+    await addNode({ loc: 'r2', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'r2', content: "Y'" });
+    const out = await readNode('r2', 'all');
+    expect(out).toContain('Source: abstract-stale');
+    expect(out).toContain('X'); // abstract still rendered
+    expect(out).toContain("Y'"); // updated content still rendered
+  });
+
+  it("stale node + 'abstract': marker present", async () => {
+    await addNode({ loc: 'r3', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'r3', content: "Y'" });
+    const out = await readNode('r3', 'abstract');
+    expect(out).toContain('Source: abstract-stale');
+    expect(out).toContain('X');
+  });
+
+  it("stale node + 'content' default: no marker (abstract not in response)", async () => {
+    await addNode({ loc: 'r4', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'r4', content: "Y'" });
+    const out = await readNode('r4');
+    expect(out).not.toContain('Source: abstract-stale');
+  });
+
+  it("content-less abstract-having node + default: `abstract-fallback` only, NOT `abstract-stale`", async () => {
+    // Seed with abstract only — no content. Spec 031 fallback applies;
+    // staleness check requires content non-null, so it short-circuits.
+    await addNode({ loc: 'r5', abstract: 'X' });
+    const out = await readNode('r5');
+    expect(out).toContain('Source: abstract-fallback');
+    expect(out).not.toContain('Source: abstract-stale');
+  });
+
+  it("legacy node (abstractOriginHash IS NULL): no marker, even when abstract + content disagree", async () => {
+    // Simulate a legacy row: abstract + content both populated, hash NULL
+    // (the spec-031 era, before spec 032 shipped). The explicit `!= null`
+    // guard on the staleness predicate must short-circuit.
+    await addNode({ loc: 'r6', abstract: 'X', content: 'Y' });
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'r6', memoryId: fx.memory.id } },
+      data: { abstractOriginHash: null },
+    });
+    const out = await readNode('r6', 'all');
+    expect(out).not.toContain('Source: abstract-stale');
+  });
+
+  it('encrypted memory: marker is SUPPRESSED (v1 gate, deferred to #206 encryption-parity)', async () => {
+    // Mark the memory encrypted AFTER seeding plaintext content + a stale
+    // hash. The gate is `!memory.isEncrypted` — on an encrypted memory,
+    // h-read-node doesn't decrypt today, so computing hash from
+    // (possibly-)ciphertext content would false-positive. The gate skips
+    // the predicate entirely; the marker MUST NOT emit on any read of
+    // an encrypted memory in v1.
+    await addNode({ loc: 'r7', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'r7', content: "Y'" });
+    await db.memory.update({
+      where: { id: fx.memory.id },
+      data: { isEncrypted: true },
+    });
+    try {
+      const out = await readNode('r7', 'all');
+      expect(out).not.toContain('Source: abstract-stale');
+    } finally {
+      // Reset for subsequent tests in this describe block — beforeEach
+      // wipes everything, but this paranoid restore covers any future
+      // re-ordering.
+      await db.memory.update({
+        where: { id: fx.memory.id },
+        data: { isEncrypted: false },
+      });
+    }
+  });
+});
