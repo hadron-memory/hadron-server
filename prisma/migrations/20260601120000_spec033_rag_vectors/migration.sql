@@ -50,7 +50,10 @@ CREATE TABLE "node_embeddings" (
     "char_start" INTEGER,
     "char_end" INTEGER,
     "chunk_text" TEXT,
-    "embedding" vector(768) NOT NULL,
+    -- Nullable to match the Prisma schema (a required Unsupported field breaks
+    -- the $allModels client extension). Rows are only ever inserted via raw SQL,
+    -- which always supplies the vector.
+    "embedding" vector(768),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "node_embeddings_pkey" PRIMARY KEY ("id")

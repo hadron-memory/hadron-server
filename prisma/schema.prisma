@@ -885,11 +885,12 @@ model NodeEmbedding {
   charEnd    Int?    @map("char_end")
   chunkText  String? @map("chunk_text")
   // ── the vector — pgvector; Prisma has no native type ──
-  // Declared OPTIONAL in Prisma (a REQUIRED Unsupported field would drop the
-  // model from client create/upsert and break the $allModels extension in
-  // src/integrations/db/client.ts). NOT NULL is enforced at the DB level
-  // (migration + post-push.sql `SET NOT NULL`); rows are only ever inserted via
-  // raw SQL, which always supplies the vector — so the optionality is cosmetic.
+  // Declared OPTIONAL (and nullable in the DB) on purpose: a REQUIRED Unsupported
+  // field drops the model from Prisma's client create/upsert and breaks the
+  // $allModels extension in src/integrations/db/client.ts. Keeping schema and DB
+  // both nullable means migrations and schema.prisma agree (the migration-smoke
+  // test). Rows are only ever inserted via raw SQL, which always supplies the
+  // vector, so a NULL embedding never occurs in practice.
   embedding Unsupported("vector(768)")?
   createdAt DateTime @default(now()) @map("created_at")
 

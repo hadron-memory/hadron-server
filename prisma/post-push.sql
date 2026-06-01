@@ -67,11 +67,6 @@ ALTER TABLE memories
 -- kept here so a bare psql -f post-push.sql is self-sufficient).
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- The vector column is declared OPTIONAL in schema.prisma (Prisma typing
--- constraint), so `db push` creates it nullable. Enforce NOT NULL here — rows
--- are only ever inserted via raw SQL, which always supplies the vector.
-ALTER TABLE node_embeddings ALTER COLUMN embedding SET NOT NULL;
-
 -- HNSW index for cosine similarity (pgvector defaults pinned).
 CREATE INDEX IF NOT EXISTS node_embeddings_embedding_hnsw
   ON node_embeddings USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
