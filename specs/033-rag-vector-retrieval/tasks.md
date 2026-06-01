@@ -1,0 +1,235 @@
+---
+description: "Task list for spec 033 — RAG vector retrieval"
+---
+
+# Tasks: RAG vector retrieval
+
+**Input**: Design documents from `specs/033-rag-vector-retrieval/`
+**Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/ (all present)
+
+**Tests**: REQUIRED. Constitution Principle I mandates integration tests against `hadron_test` for every MCP tool + GraphQL mutation touching the graph/access-control; the spec's Success Criteria (SC-001..SC-010) are the test contracts. Test tasks are included per story.
+
+**Organization**: by user story (spec.md US1–US5) for independent implementation/testing. Phases map to plan.md's 6 implementation slices.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: parallelizable (different files, no incomplete-task dependency)
+- **[Story]**: US1–US5 (user-story phases only)
+- Exact file paths included
+
+## Path Conventions
+
+Single web-service (hadron-server). Source at `src/`, schema at `prisma/`, tests at `src/test/`. Paths from plan.md "Project Structure".
+
+---
+
+## Phase 1: Setup (shared infrastructure)
+
+**Purpose**: pgvector availability + Prisma enablement + embedding env wiring. The pgvector prerequisite gates everything.
+
+- [ ] T001 [P] Switch the dev/test Postgres image from `postgres:17-alpine` to `pgvector/pgvector:pg17` in `docker-compose.yaml` (same data dir; required for `CREATE EXTENSION vector`)
+- [ ] T002 [P] Enable pgvector in `prisma/schema.prisma`: add `previewFeatures = ["postgresqlExtensions"]` to the `generator client` block and `extensions = [vector]` to the `datasource db` block
+- [ ] T003 [P] Add embedding env vars to `.env.example` and the CLAUDE.md env-var table: `EMBEDDING_API_URL`, `EMBEDDING_MODEL` (default `nomic-embed-text-v1.5`), `EMBEDDING_DIM` (default `768`), `EMBEDDING_API_KEY` (optional)
+- [ ] T004 **External / hadron-cloud (coordination, not code in this repo)**: install the pgvector package on the prod Postgres host via hadron-cloud infra-as-code; MUST land before `prisma migrate deploy` runs the spec-033 migration in prod (see plan.md risks)
+
+**Checkpoint**: pgvector available locally; Prisma can express the `vector` extension.
+
+---
+
+## Phase 2: Foundational (blocking prerequisites for ALL stories)
+
+**Purpose**: the single schema migration (enums, Memory config columns, Node markers, `NodeEmbedding` table), CHECK constraints, the embedding client, typed errors. No user story can begin until this is done.
+
+**⚠️ CRITICAL**: blocks Phase 3+.
+
+- [ ] T005 Add `EmbeddingSource` (`abstract` | `contentChunks @map("content_chunks")` | `both`) and `EmbeddingKind` (`abstract` | `chunk`) enums to `prisma/schema.prisma` (data-model.md §1–2)
+- [ ] T006 Add Memory config columns to the `Memory` model in `prisma/schema.prisma`: `vectorIndexEnabled` (default false), `embeddingSource` (default `abstract`), `chunkTokens?`, `chunkOverlap?`, `forceFixedSize` (default false), `vectorIndexEncryptedAckAt?` (data-model.md §3)
+- [ ] T007 Add Node marker columns to the `Node` model in `prisma/schema.prisma`: `embeddingPendingAt?`, `embeddingFailedAt?`, `embeddingAttempts` (default 0), `embeddingError?` (data-model.md §4)
+- [ ] T008 Add the `NodeEmbedding` model to `prisma/schema.prisma`: own `id`, `nodeId`/`memoryId`, `kind`, `model`, `dim`, chunk locators (`chunkIndex?`/`charStart?`/`charEnd?`/`chunkText?`), `embedding Unsupported("vector(768)")`, relations with `onDelete: Cascade`, `@@unique([nodeId, kind, chunkIndex])`, `@@index([nodeId])`, `@@index([memoryId])` (data-model.md §5)
+- [ ] T009 Create migration `prisma/migrations/<ts>_spec033_rag/migration.sql` (hand-authored header recording intent, per constitution II): `CREATE EXTENSION IF NOT EXISTS vector`; all columns + enums + `node_embeddings` table; HNSW index `USING hnsw (embedding vector_cosine_ops)`; partial unique index `ON node_embeddings (node_id) WHERE kind='abstract'`; partial marker indexes (`WHERE embedding_pending_at IS NOT NULL`, `WHERE embedding_failed_at IS NOT NULL`); CHECK constraints `chk_memory_vector_encrypted_ack`, `chk_memory_chunk_tokens_positive`, `chk_memory_chunk_overlap_valid`
+- [ ] T010 Mirror the non-schema DDL (CREATE EXTENSION, HNSW + partial + abstract-unique indexes, the three CHECK constraints) into `prisma/post-push.sql` (dev/test path; constitution S5)
+- [ ] T011 Update `src/test/globalSetup.ts` to `CREATE EXTENSION vector` and apply the indexes + CHECK constraints so `hadron_test` matches (constitution S5)
+- [ ] T012 Run `prisma db push` on `hadron_dev` + apply `post-push.sql`, regenerate the Prisma client, and confirm the `Unsupported("vector(768)")` column compiles under strict TS
+- [ ] T013 [P] Implement the `EmbeddingClient` HTTP impl in `src/lib/embedding/client.ts`: `embed(texts, purpose)` POSTing to `EMBEDDING_API_URL`, applying the nomic `search_document: `/`search_query: ` prefix by `purpose`, batching, optional `Authorization: Bearer`, and a returned-dimension == `dim` guard (throws on mismatch) — contracts/embedding-worker.md
+- [ ] T014 [P] Implement embedding config/factory in `src/lib/embedding/index.ts` (read env, construct the client, expose `model`/`dim`)
+- [ ] T015 [P] Add typed errors `EncryptedVectorIndexNotAcknowledgedError` and `InvalidChunkConfigError` to `src/lib/entityRef/errors.ts` (constitution S2/III)
+- [ ] T016 [P] Constraint-presence regression test in `src/test/integration/033-constraints.test.ts`: assert `chk_memory_vector_encrypted_ack`, `chk_memory_chunk_tokens_positive`, `chk_memory_chunk_overlap_valid`, and the `node_embeddings_abstract_uniq` partial index exist (constitution S5)
+- [ ] T017 [P] Unit test for `EmbeddingClient` in `src/test/unit/033-embedding-client.test.ts`: asserts the correct prefix per purpose and dimension-mismatch rejection
+
+**Checkpoint**: schema + pgvector + client ready. User stories can begin.
+
+---
+
+## Phase 3: User Story 1 — Semantic vector search over abstracts (Priority: P1) 🎯 MVP
+
+**Goal**: opt a memory in → abstracts embedded async on write → `mode:vector` returns nodes ranked by meaning. End-to-end MVP.
+
+**Independent Test**: opt a memory into `vectorIndexEnabled`, write nodes with distinct abstracts, let the worker drain, `h-find-nodes mode:vector query:"…"` ranks the semantically-closest node first (incl. a zero-keyword-overlap query).
+
+### Tests for User Story 1 ⚠️ (write first, expect fail)
+
+- [ ] T018 [P] [US1] Integration test: semantic retrieval, ≥5 query/seed pairs incl. one zero-keyword-overlap (SC-001) in `src/test/integration/033-us1-vector-search.test.ts`
+- [ ] T019 [P] [US1] Integration test: write returns before `embedding_pending_at` is cleared — non-blocking (SC-002) in `src/test/integration/033-us1-nonblocking.test.ts`
+- [ ] T020 [P] [US1] Integration test: forced embed-API failure → retried → zero nodes permanently lost (SC-003) in `src/test/integration/033-us1-failure-recovery.test.ts`
+- [ ] T021 [P] [US1] Integration test: opt-in after seeding → backfill sweep embeds existing nodes (SC-004) in `src/test/integration/033-us1-backfill.test.ts`
+- [ ] T022 [P] [US1] Integration test: `mode:vector` on an unindexed memory → empty + `[no_vector_index]` flag, not an error (SC-008) in `src/test/integration/033-us1-no-index.test.ts`
+
+### Implementation for User Story 1
+
+- [ ] T023 [US1] Implement `upsertVectors` (abstract path) in `src/services/embedding/upsertVectors.ts`: raw-SQL `DELETE … WHERE node_id=$ AND kind='abstract'` then `INSERT … $1::vector` for the abstract embedding
+- [ ] T024 [US1] Implement `embedNode` in `src/jobs/embedNodes.ts`: resolve effective config, pick source text (in-closure plaintext or row), abstract embedding, **latest-wins** content-hash recheck, and **permanent (`encrypted-no-plaintext`) vs transient** failure handling per contracts/embedding-worker.md
+- [ ] T025 [US1] Implement `drainEmbeddingQueue` + `startEmbeddingWorkerLoop` in `src/jobs/embedNodes.ts` (select `WHERE embedding_pending_at IS NOT NULL`, attempts cap; mirrors `cleanupAnonymousMemories`) — depends on T024
+- [ ] T026 [US1] Implement write-path enqueue + `setImmediate` prompt-drain in `src/services/embedding/enqueue.ts` (set `embedding_pending_at` in the write; post-response embed with in-closure plaintext)
+- [ ] T027 [US1] Hook the marker/enqueue into GraphQL `upsertNode` (at the plaintext-before-encryption seam, `resolvers.ts:~2767`) and `restoreNodeVersion` in `src/api/graphql/schema/resolvers.ts`
+- [ ] T028 [US1] Hook the marker/enqueue into MCP `h-add-node` (`server.ts:~1754`) and `h-update-node` (`server.ts:~1975`) in `src/mcp/server.ts`
+- [ ] T029 [US1] Hook the marker into the importer write in `src/integrations/localFs/loadNodeFromFs.ts`
+- [ ] T030 [US1] Implement `vectorSearch` node-level query in `src/services/embedding/vectorSearch.ts`: ANN inner query (HNSW-served `ORDER BY <=> LIMIT candidateK`) then dedupe/`MIN` to ranked node ids, joining `nodes` for `deleted_at IS NULL`, scoped `WHERE memory_id=$` (contracts/embedding-worker.md)
+- [ ] T031 [US1] Extend `h-find-nodes` in `src/mcp/server.ts`: add `mode` to the zod schema, dispatch `mode:vector`, embed the query (`search_query:` prefix), render ranked node hits, and emit the `[no_vector_index]` note line when the memory has no index (FR-021)
+- [ ] T032 [US1] Add the GraphQL `nodeSearch` query (vector mode) + `NodeSearchResult` type (`nodes`/`reason`/`degraded`) + `SearchMode`/`SearchGranularity` enums in `src/api/graphql/schema/typeDefs.ts` (doc-comments, no raw backticks — S3) and its resolver in `src/api/graphql/schema/resolvers.ts`; leave the legacy `nodes` query untouched
+- [ ] T033 [US1] Extend `createMemory`/`updateMemory` in `resolvers.ts` to accept `vectorIndexEnabled`/`embeddingSource`, gate via access control, and stamp `embedding_pending_at` on all live nodes when enabling or changing source (backfill, FR-004/FR-008); add the Memory config read fields + mutation inputs to `typeDefs.ts`
+- [ ] T034 [US1] Start `startEmbeddingWorkerLoop` from `src/server.ts`; add a startup warning when `vectorIndexEnabled` memories exist but `EMBEDDING_API_URL` is unset
+
+**Checkpoint**: vector search works end-to-end on abstracts. MVP demoable.
+
+---
+
+## Phase 4: User Story 2 — Content-chunk retrieval (Priority: P2)
+
+**Goal**: `embeddingSource: content-chunks|both` → content chunked (structure-aware/fixed-size) + embedded; node-level default, chunk-level passages opt-in.
+
+**Independent Test**: structured doc chunks along sections, unstructured by fixed windows; `granularity:chunk` returns passages with char offset + chunk index + parent URN; dial changes move boundaries.
+
+### Tests for User Story 2 ⚠️
+
+- [ ] T035 [P] [US2] Integration test: chunk-level passages with correct char offset, chunk index, parent URN; node-level collapses same hits (SC-005) in `src/test/integration/033-us2-chunk-retrieval.test.ts`
+- [ ] T036 [P] [US2] Integration test: auto strategy selection + `chunkTokens`/`chunkOverlap`/`forceFixedSize` change boundaries (SC-006) in `src/test/integration/033-us2-chunking.test.ts`
+- [ ] T037 [P] [US2] Unit test for `chunkNode` (structure-aware vs fixed-size, overlap, char offsets) in `src/test/unit/033-chunking.test.ts`
+
+### Implementation for User Story 2
+
+- [ ] T038 [P] [US2] Implement `chunkNode(content, {chunkTokens, chunkOverlap, forceFixedSize})` in `src/lib/chunking.ts`: markdown-heading structure-aware default + fixed-size token-window fallback (defaults 512/64), char-offset/`chunkIndex` locators (D-R4)
+- [ ] T039 [US2] Extend `upsertVectors` (`src/services/embedding/upsertVectors.ts`) with the chunk path: delete+insert `kind='chunk'` rows carrying locators
+- [ ] T040 [US2] Extend `embedNode` (`src/jobs/embedNodes.ts`) to honor `embeddingSource` `contentChunks`/`both` (chunk + abstract) and re-derive chunks on content edit (FR-017)
+- [ ] T041 [US2] Add the chunk-level query to `vectorSearch` (`src/services/embedding/vectorSearch.ts`) returning passages (span + char offsets + parent URN), and the node-level collapse for chunk hits
+- [ ] T042 [US2] Extend `h-find-nodes` (`src/mcp/server.ts`) with the `granularity` param and passage rendering (`[chunk N @ chars a–b]`); add `granularity` to `nodeSearch` in `typeDefs.ts`/`resolvers.ts`
+- [ ] T043 [US2] Extend `createMemory`/`updateMemory` (`resolvers.ts`) with `chunkTokens`/`chunkOverlap`/`forceFixedSize` inputs + validation throwing `InvalidChunkConfigError`; add fields to `typeDefs.ts`
+
+**Checkpoint**: chunk indexing + passage retrieval work; US1 still green.
+
+---
+
+## Phase 5: User Story 3 — One surface: keyword, vector, hybrid + expand (Priority: P2)
+
+**Goal**: `mode: keyword|vector|hybrid` + `expand` on one tool; RRF fusion; graph expansion.
+
+**Independent Test**: keyword vs semantic divergence test shows hybrid placing a both-signal node above single-signal; `expand:1` appends neighbors unscored.
+
+### Tests for User Story 3 ⚠️
+
+- [ ] T044 [P] [US3] Integration test: no-`mode` == keyword (snapshot) and `mode:hybrid` RRF ordering on divergent keyword/semantic relevance (SC-007) in `src/test/integration/033-us3-hybrid.test.ts`
+- [ ] T045 [P] [US3] Integration test: `expand:1` appends undirected all-edge-type neighbors unscored after ranked hits; `mode:hybrid` on unindexed → keyword hits + `[degraded:no_vector_index]` in `src/test/integration/033-us3-expand-degraded.test.ts`
+- [ ] T046 [P] [US3] Unit test for RRF determinism + keyword relevance ranking in `src/test/unit/033-rrf.test.ts`
+
+### Implementation for User Story 3
+
+- [ ] T047 [P] [US3] Implement `rrf.ts` in `src/lib/rrf.ts`: reciprocal-rank fusion, `k=60` fixed, taking pre-ranked keyword + vector lists
+- [ ] T048 [US3] Add keyword relevance ranking for RRF (distinct query terms matched, then term frequency, `loc` tiebreak) in `src/mcp/server.ts` so fusion isn't biased by the alphabetical-by-`loc` default order
+- [ ] T049 [US3] Implement the `expand: <depth>` BFS helper (undirected, all edge types, neighbors appended unscored) and wire into `h-find-nodes` (`src/mcp/server.ts`) and `nodeSearch` (`resolvers.ts`)
+- [ ] T050 [US3] Wire `mode:keyword` (explicit) + `mode:hybrid` dispatch + `[degraded:no_vector_index]` flag into `h-find-nodes` (`src/mcp/server.ts`) and `nodeSearch` (`resolvers.ts`)
+
+**Checkpoint**: all three modes + expand work on both MCP and GraphQL.
+
+---
+
+## Phase 6: User Story 4 — Staleness served-and-marked on vector hits (Priority: P3)
+
+**Goal**: stale abstract-vector hits served + marked (spec 032 predicate, abstract-only); chunk hits unmarked; self-heal via re-embed-on-write.
+
+**Independent Test**: content-only edit → stale-marked hit before re-embed drains → marker clears after drain; chunk hits never marked.
+
+### Tests for User Story 4 ⚠️
+
+- [ ] T051 [P] [US4] Integration test: stale abstract hit served + `Source: abstract-stale`; chunk hits unmarked; self-heal after re-embed; encrypted-memory hit still markable (SC-009) in `src/test/integration/033-us4-staleness.test.ts`
+
+### Implementation for User Story 4
+
+- [ ] T052 [US4] In `vectorSearch`/`h-find-nodes` result rendering, apply the spec-032 predicate (`abstractOriginHash != computeContentHash(node.content)` via `src/lib/contentHash.ts`) to **abstract**-vector hits and emit the `Source: abstract-stale` marker; ensure **chunk** hits never carry it (`src/services/embedding/vectorSearch.ts`, `src/mcp/server.ts`)
+
+**Checkpoint**: staleness signal on vector hits; self-healing verified.
+
+---
+
+## Phase 7: User Story 5 — Encrypted-memory opt-in, disclosed (Priority: P3)
+
+**Goal**: encrypted memories indexable only behind an explicit, disclosed acknowledgment; revoke removes vectors + clears markers; #206 sweep boundary surfaced.
+
+**Independent Test**: enabling on encrypted without ack → `EncryptedVectorIndexNotAcknowledgedError`; with ack → indexed; un-acked stores nothing; revoke removes vectors.
+
+### Tests for User Story 5 ⚠️
+
+- [ ] T053 [P] [US5] Integration test: enable-on-encrypted without ack errors; with `acknowledgeVectorInversionRisk` succeeds + sets `vectorIndexEncryptedAckAt`; un-acked stores no vectors; revoke removes vectors + clears markers (SC-010) in `src/test/integration/033-us5-encrypted.test.ts`
+
+### Implementation for User Story 5
+
+- [ ] T054 [US5] Extend `createMemory`/`updateMemory` (`resolvers.ts`): when enabling on an `isEncrypted` memory, require `acknowledgeVectorInversionRisk: true` (set `vectorIndexEncryptedAckAt = now()`) else throw `EncryptedVectorIndexNotAcknowledgedError`; include the four-point disclosure text (contracts/memory-config.md); add the input to `typeDefs.ts`
+- [ ] T055 [US5] Implement revoke/disable in `resolvers.ts`: on `vectorIndexEnabled → false`, delete the memory's `node_embeddings` rows AND clear `embeddingPendingAt`/`embeddingFailedAt`/`embeddingError`/`embeddingAttempts` on its nodes (so the worker stops selecting them)
+- [ ] T056 [US5] Confirm the `embedNode` encrypted-via-GraphQL **permanent-failure** path (`encrypted-no-plaintext (#206)`) clears pending + sets failed without retry (assert against T024) and is covered by T053
+
+**Checkpoint**: encrypted opt-in gated + disclosed; revocation complete.
+
+---
+
+## Phase 8: Polish & cross-cutting
+
+- [ ] T057 [P] Add a hadron-docs page (and `typeDefs` doc-comments final pass) for the vector-index config + the encrypted-memory inversion disclosure (constitution II)
+- [ ] T058 [P] Surface embedding-failure diagnosability in `h-validate` (`src/mcp/server.ts`): report nodes with `embedding_failed_at` set (incl. the #206 permanent-failure class) so an empty index is diagnosable
+- [ ] T059 [P] Performance sanity: `EXPLAIN ANALYZE` confirms the HNSW index serves the vector query (no full scan) — record in quickstart.md
+- [ ] T060 [P] Verify the runtime Node version is ≥ 22 (constitution S1) and bump the Dockerfile base image if still `node:20`
+- [ ] T061 Run the quickstart.md smoke test end-to-end against `hadron_dev` (Ollama + nomic-embed-text)
+
+---
+
+## Dependencies & Execution Order
+
+### Phase dependencies
+
+- **Setup (P1)**: T001–T003 parallel; T004 is external (hadron-cloud) and gates only prod deploy, not local dev/tests.
+- **Foundational (P2)**: depends on Setup. T005–T008 (schema edits, same file → sequential) → T009 (migration) → T010/T011 (post-push + globalSetup) → T012 (db push + generate). T013–T017 [P] alongside once the client compiles. **Blocks all user stories.**
+- **User Stories (P3–P7)**: all depend on Foundational. US1 is the spine (worker + search + config); US2–US5 extend US1's services/handlers.
+- **Polish (P8)**: after the desired stories.
+
+### User-story dependencies
+
+- **US1 (P1)**: after Foundational. Self-contained MVP.
+- **US2 (P2)**: extends US1's `upsertVectors`/`embedNode`/`vectorSearch`/`h-find-nodes`/config — sequence after US1 (shared files).
+- **US3 (P2)**: extends US1's search dispatch + adds `rrf.ts` — after US1 (independent of US2; `rrf.ts` is parallelizable).
+- **US4 (P3)**: extends US1/US2 result rendering — after US1 (US2 if testing chunk-unmarked).
+- **US5 (P3)**: extends US1's config mutation — after US1.
+
+### Within a story
+
+- Tests first (expect fail) → services → handlers/resolvers → integration. Same-file tasks are sequential; different-file tasks marked [P].
+
+### Parallel opportunities
+
+- Setup T001–T003; Foundational T013–T017; each story's test tasks; `chunking.ts` (T038), `rrf.ts` (T047) are standalone-parallel within their stories.
+- After Foundational, US3's `rrf.ts`/`chunking.ts`-independent pieces can progress alongside US1 if staffed; but US2–US5 mostly touch US1's files, so default to sequential by priority.
+
+---
+
+## Implementation strategy
+
+### MVP first (US1 only)
+
+1. Phase 1 Setup → 2. Phase 2 Foundational (CRITICAL — pgvector + schema + client) → 3. Phase 3 US1 → **STOP & validate** semantic search end-to-end → demo.
+
+### Incremental delivery
+
+US1 (MVP) → US2 (chunks) → US3 (hybrid/keyword/expand) → US4 (staleness) → US5 (encrypted opt-in). Each is an independently testable increment that doesn't break the prior.
+
+### Notes
+
+- [P] = different files, no incomplete-task dependency. Most US2–US5 tasks touch files US1 created, so they are NOT [P] across stories.
+- pgvector availability (T001/T004) is the one hard external gate — do it first.
+- Commit per task or logical group; stop at any checkpoint to validate a story independently.
+- Constitution: integration tests against `hadron_test` (which now `CREATE EXTENSION vector` in globalSetup); typed errors at the GraphQL boundary; CHECK constraints in all three places + regression test (T016); no raw backticks in `typeDefs.ts` doc-comments.
