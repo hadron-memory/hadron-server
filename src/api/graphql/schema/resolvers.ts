@@ -5,7 +5,8 @@ import {
   enqueueNodeEmbedding,
   backfillMemoryEmbeddings,
 } from '../../../services/embedding/enqueue.js';
-import { deleteMemoryVectors } from '../../../services/embedding/vectors.js';
+import { deleteMemoryVectors, vectorSearchNodes } from '../../../services/embedding/vectors.js';
+import { getEmbeddingClient, isEmbeddingConfigured } from '../../../lib/embedding/index.js';
 import {
   APP_KEY_PREFIX,
   USER_API_KEY_LABEL_MAX_LEN,
@@ -1745,6 +1746,128 @@ export const resolvers = {
         (typePriority[a.nodeType] ?? 1) - (typePriority[b.nodeType] ?? 1)
       );
       return sorted.slice(offset ?? 0, (offset ?? 0) + (limit ?? 100));
+    },
+
+    /**
+     * Spec 033 — vector/hybrid-aware search. The legacy `nodes` query stays
+     * keyword-only (`[Node!]!`); `nodeSearch` is the structured envelope
+     * surface that returns `{ nodes, reason, degraded }` so flag conditions
+     * stay machine-readable (the MCP path renders them as text lines).
+     *
+     * v1 / US1 scope (this resolver):
+     *   - mode: vector (and the default when mode is omitted) is fully wired.
+     *   - mode: keyword / hybrid throw GraphQLError until US3 (T050) lands
+     *     them. Throwing keeps the schema stable AND tells the caller exactly
+     *     when each capability arrives — silently returning empty would
+     *     conflate "not implemented yet" with "no hits."
+     *   - granularity: chunk and expand>0 throw the same way until US2 (T042)
+     *     and US3 (T049) respectively.
+     *
+     * Access control mirrors the keyword `nodes` query — `getAccessibleMemoryIds`
+     * gates the memory scope, and the raw-SQL similarity query is scoped to
+     * those IDs (never cross-memory).
+     */
+    nodeSearch: async (
+      _: unknown,
+      {
+        query,
+        memoryUrn,
+        mode,
+        expand,
+        granularity,
+        limit,
+      }: {
+        query: string;
+        memoryUrn?: string;
+        mode?: 'keyword' | 'vector' | 'hybrid';
+        expand?: number;
+        granularity?: 'node' | 'chunk';
+        limit?: number;
+      },
+      ctx: Context,
+    ) => {
+      const effectiveMode = mode ?? 'vector';
+      if (effectiveMode === 'keyword' || effectiveMode === 'hybrid') {
+        throw new GraphQLError(
+          `nodeSearch mode:${effectiveMode} ships in spec 033 US3 (T050). For keyword search today, use the legacy nodes(search:) query.`,
+          { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
+        );
+      }
+      if (granularity === 'chunk') {
+        throw new GraphQLError(
+          'nodeSearch granularity:chunk ships in spec 033 US2 (T042).',
+          { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
+        );
+      }
+      if (expand != null && expand > 0) {
+        throw new GraphQLError(
+          'nodeSearch expand>0 ships in spec 033 US3 (T049).',
+          { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
+        );
+      }
+
+      // Resolve scope: a single memory by URN (with access check), or the
+      // full accessible set when memoryUrn is omitted.
+      let scopeIds: string[];
+      const accessible = await getAccessibleMemoryIds(ctx);
+      if (memoryUrn) {
+        const { id } = await resolveMemoryRef(ctx.db, memoryUrn);
+        if (accessible !== null && !accessible.includes(id)) {
+          throw new GraphQLError('Memory not accessible.', {
+            extensions: { code: 'FORBIDDEN' },
+          });
+        }
+        scopeIds = [id];
+      } else if (accessible === null) {
+        // Admin/all scope: explicitly restrict to vector-indexed memories
+        // (mirrors the h-find-nodes MCP path).
+        const all = await ctx.db.memory.findMany({
+          where: { vectorIndexEnabled: true, deletedAt: null },
+          select: { id: true },
+        });
+        scopeIds = all.map((m) => m.id);
+      } else {
+        scopeIds = accessible;
+      }
+
+      // Filter to vector-indexed memories. No-index is a flagged result,
+      // never an error (FR-021 + contract "Access control" section).
+      const indexed = await ctx.db.memory.findMany({
+        where: { id: { in: scopeIds }, vectorIndexEnabled: true, deletedAt: null },
+        select: { id: true },
+      });
+      const indexedIds = indexed.map((m) => m.id);
+      if (indexedIds.length === 0) {
+        return { nodes: [], reason: 'no_vector_index', degraded: null };
+      }
+      if (!isEmbeddingConfigured()) {
+        return { nodes: [], reason: 'embedding_unavailable', degraded: null };
+      }
+
+      const [qvec] = await getEmbeddingClient().embed([query], 'query');
+      const hits = await vectorSearchNodes(ctx.db, {
+        memoryIds: indexedIds,
+        queryEmbedding: qvec,
+        limit: limit ?? 50,
+      });
+      if (hits.length === 0) {
+        return { nodes: [], reason: null, degraded: null };
+      }
+      const hitNodes = await ctx.db.node.findMany({
+        where: { id: { in: hits.map((h) => h.nodeId) }, deletedAt: null },
+        include: {
+          outgoingEdges: { include: { target: true } },
+          incomingEdges: { include: { source: true } },
+        },
+      });
+      // Decrypt batched — same posture as the legacy nodes query.
+      await decryptNodesBatch(ctx.db, hitNodes);
+      // Preserve hit ranking order returned by vectorSearchNodes.
+      const byId = new Map(hitNodes.map((n) => [n.id, n]));
+      const ordered = hits
+        .map((h) => byId.get(h.nodeId))
+        .filter((n): n is NonNullable<typeof n> => n !== undefined);
+      return { nodes: ordered, reason: null, degraded: null };
     },
 
     subtree: async (_: unknown, { prefix: rawPrefix }: { prefix: string }, ctx: Context) => {

@@ -9,6 +9,7 @@ import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
+import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
 import type { Memory, Organization } from '../../generated/prisma/index.js';
 
 const execFile = promisify(execFileCb);
@@ -79,6 +80,16 @@ export const syncGraphFromGithub = async (
 
     // 4. Upsert all nodes and edges into the database (transactional)
     let pendingEdgeCount = 0;
+    // Spec 033 T029 — defer embedding enqueue until after the transaction
+    // commits. The plaintext was loaded from the filesystem by
+    // loadNodeFromFs (FR-013 reconcile already ran), so it's safe to use
+    // as in-closure plaintext for the prompt-drain embed — matching the
+    // GraphQL / MCP write paths so encrypted memories embed correctly at
+    // write time without a session key (FR-027).
+    const pendingEmbeds: Array<{
+      nodeId: string;
+      plaintext: { content: string | null; abstract: string | null };
+    }> = [];
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       const upsertedIds: string[] = [];
 
@@ -112,6 +123,10 @@ export const syncGraphFromGithub = async (
           update,
         });
         upsertedIds.push(nodeId);
+        pendingEmbeds.push({
+          nodeId,
+          plaintext: { content: node.content ?? null, abstract: node.abstract ?? null },
+        });
 
         // Resolve any cross-repo PendingEdges that were waiting for this node
         const pending = await tx.pendingEdge.findMany({ where: { targetId: nodeId } });
@@ -161,6 +176,18 @@ export const syncGraphFromGithub = async (
       where: { id: graph.id },
       data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null, pendingEdgeCount },
     }).catch(() => {});
+
+    // 6. Spec 033 T029 — enqueue embedding for each upserted node now that
+    // the transaction has committed. Fire-and-forget; enqueueNodeEmbedding
+    // is a no-op when the memory isn't vector-indexed and is internally
+    // catch-all so it can never break the sync.
+    for (const e of pendingEmbeds) {
+      void enqueueNodeEmbedding(db, {
+        nodeId: e.nodeId,
+        memoryId: graph.id,
+        plaintext: e.plaintext,
+      });
+    }
 
     console.log(`Synced memory "${graphName}": ${fsGraph.nodes.length} nodes, ${edges.length} edges`);
     return { nodeCount: fsGraph.nodes.length };

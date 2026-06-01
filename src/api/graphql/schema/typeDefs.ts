@@ -52,6 +52,52 @@ export const typeDefs = `#graphql
     CHATBOT
   }
 
+  """
+  Search dispatch for nodeSearch. Spec 033.
+
+  - keyword: substring match across name/loc/description/tags (the legacy
+    nodes-query semantic; ships as a nodeSearch mode in US3).
+  - vector: semantic search via the memory's vector index. Requires
+    vectorIndexEnabled on the memory.
+  - hybrid: reciprocal-rank fusion of keyword + vector (ships in US3).
+  """
+  enum SearchMode {
+    keyword
+    vector
+    hybrid
+  }
+
+  """
+  Result granularity for nodeSearch. Spec 033.
+
+  - node: one entry per matching node (US1 default).
+  - chunk: passage-level entries with offsets into the parent node's
+    content (US2; chunk hits collapse to node-level when granularity is
+    node).
+  """
+  enum SearchGranularity {
+    node
+    chunk
+  }
+
+  """
+  Envelope for nodeSearch — carries the ranked nodes plus structured
+  flags surfacing degraded / no-index outcomes that the MCP path emits
+  inline. Spec 033.
+
+  reason: set when the query could not run as requested (e.g.
+    'no_vector_index' on a non-indexed memory with mode:vector); nodes
+    is empty in that case.
+  degraded: set when the query ran but at reduced fidelity (e.g.
+    'no_vector_index' on a hybrid query that fell back to keyword-only);
+    nodes still carries usable hits.
+  """
+  type NodeSearchResult {
+    nodes: [Node!]!
+    reason: String
+    degraded: String
+  }
+
   type Node {
     id: ID!
     memoryId: String!
@@ -1053,6 +1099,28 @@ export const typeDefs = `#graphql
       limit: Int
       offset: Int
     ): [Node!]!
+
+    """
+    Vector/hybrid-aware search over a memory. Keyword-only callers should
+    keep using the legacy 'nodes' query — nodeSearch is the new
+    vector-aware entrypoint per spec 033 contract.
+
+    mode defaults to vector (the v1 case US1 ships). expand and chunk
+    granularity ship in US2/US3; passing them in this version returns
+    an empty-but-flagged result so the schema stays stable across slices.
+
+    Access control: same memory-read gate as the keyword nodes query —
+    the raw-SQL similarity query is scoped to memories the caller can
+    read, never cross-memory.
+    """
+    nodeSearch(
+      query: String!
+      memoryUrn: String
+      mode: SearchMode
+      expand: Int
+      granularity: SearchGranularity
+      limit: Int
+    ): NodeSearchResult!
 
     # All nodes whose loc starts with the given prefix
     subtree(prefix: String!): [Node!]!
