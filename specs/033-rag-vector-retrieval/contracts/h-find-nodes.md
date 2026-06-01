@@ -1,4 +1,4 @@
-# Contract — `h-find-nodes` (extended) + GraphQL `nodes`
+# Contract — `h-find-nodes` (extended) + GraphQL `nodeSearch`
 
 Extends the existing search surface (D5/FR-018). One surface, three modes; no new `h-search` tool.
 
@@ -23,6 +23,8 @@ granularity: z.enum(['node', 'chunk']).optional()                // default 'nod
 | `keyword` | unchanged `matchesQuery` in-memory filter |
 | `vector` | embed query (`search_query:` prefix) → raw-SQL cosine top-K in memory → join `nodes` (`deletedAt IS NULL` + access control) → rank |
 | `hybrid` | run keyword + vector; fuse by RRF `score = Σ 1/(60 + rank)`; one ranked list |
+
+**Keyword rank for RRF** (important): today's keyword path returns hits sorted **alphabetically by `loc`**, not by relevance — feeding that raw list position into RRF as the keyword "rank" would let alphabetical order bias the fused result. So before fusion the keyword hits MUST be re-ranked by a relevance signal: **(1) number of distinct query terms matched (desc), then (2) total term-frequency across the haystack (desc)**, ties broken by `loc` for determinism. That relevance ordering supplies the `rank` used in the RRF term. (Vector rank is the cosine-distance ordering.) RRF `k = 60`, fixed platform-wide (FR-019).
 
 ## Result envelope (FR-021) — text tool surfaces flags as annotation lines
 
@@ -50,9 +52,9 @@ granularity: z.enum(['node', 'chunk']).optional()                // default 'nod
     > …passage text…
   ```
 
-## GraphQL `nodes` query (parity; `resolvers.ts:1706`)
+## GraphQL `nodeSearch` query (vector-aware entrypoint; the legacy `nodes` query stays keyword-only)
 
-Add the same `mode`/`expand`/`granularity` args. Because GraphQL returns structured data, the flags are **envelope fields**, not text lines. Introduce a wrapper result type so existing callers selecting `[Node!]` are unaffected only if they migrate; to preserve the current `[Node!]!` shape, expose flags via a sibling query or an optional extension type:
+**v1 decision**: the vector-aware GraphQL surface is a **new `nodeSearch` query**, not a change to the existing `nodes` query (`resolvers.ts:1706`). The legacy `nodes` query keeps its `[Node!]!` return type untouched (keyword-only), so no existing caller breaks; `nodeSearch` carries the same `mode`/`expand`/`granularity` args as the MCP tool and, because GraphQL returns structured data, surfaces the flags as **envelope fields** rather than text lines:
 
 ```graphql
 type NodeSearchResult {
@@ -66,7 +68,7 @@ enum SearchMode { keyword vector hybrid }
 enum SearchGranularity { node chunk }
 ```
 
-(Keeping the legacy `nodes` query untouched avoids breaking its `[Node!]!` contract; `nodeSearch` is the vector-aware entry. `/plan` may instead evolve `nodes` if no external caller depends on its exact return type — decided at `/tasks`.) typeDefs doc-comments updated in the same PR (constitution II); no raw backticks (S3).
+The legacy `nodes` query is untouched (keyword-only, `[Node!]!`); `nodeSearch` is the single vector-aware entrypoint. typeDefs doc-comments updated in the same PR (constitution II); no raw backticks (S3).
 
 ## Access control (constitution V)
 

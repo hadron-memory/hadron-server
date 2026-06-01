@@ -34,14 +34,18 @@ async function drainEmbeddingQueue(db, opts?): Promise<{ embedded: number; faile
 function startEmbeddingWorkerLoop(db, opts?): NodeJS.Timeout;   // setTimeout initial → setInterval
 ```
 
-`drainEmbeddingQueue` selects up to `batchSize` nodes where `embedding_pending_at IS NOT NULL OR embedding_failed_at IS NOT NULL` (respecting an attempts cap / backoff), and for each calls `embedNode`.
+`drainEmbeddingQueue` selects up to `batchSize` nodes where `embedding_pending_at IS NOT NULL` — **`embedding_pending_at` is the single work signal**. Failure handling:
+- **Transient** (embedding-API timeout/5xx, dimension mismatch from a flaky deploy): leave `embedding_pending_at` set, set `embedding_failed_at`, `embeddingAttempts++` — re-tried next sweep until an attempts cap, after which `embedding_pending_at` is cleared (give up; `embedding_failed_at` remains as the diagnostic record).
+- **Permanent** (`encrypted-no-plaintext (#206)`): clear `embedding_pending_at` immediately, set `embedding_failed_at` — never re-selected.
+
+`embedding_failed_at` is thus a record, not a work signal; only `embedding_pending_at` drives selection. For each selected node `embedNode` is called.
 
 ### `embedNode(db, node, plaintext?, config)` — the unit of work
 
 1. Resolve effective config (memory `embeddingSource`, chunk dials with platform defaults).
 2. Determine source text:
    - plaintext provided (prompt-drain) → use it;
-   - else read the row (sweep). If `memory.isEncrypted` AND the row is ciphertext (GraphQL-written) AND no decrypt path → set `embedding_failed_at`, `embeddingError = 'encrypted-no-plaintext (#206)'`, and stop (documented v1 boundary, D-R3).
+   - else read the row (sweep). If `memory.isEncrypted` AND the row is ciphertext (GraphQL-written) AND no decrypt path → this is a **permanent** failure: **clear `embedding_pending_at`**, set `embedding_failed_at` + `embeddingError = 'encrypted-no-plaintext (#206)'`, and stop. Permanent failures are NOT re-selected by the sweep (so they don't spam retries/logs); recovery lands with #206 (documented v1 boundary, D-R3).
 3. `DELETE FROM node_embeddings WHERE node_id = $node AND kind IN (<sources>)` (clean re-index).
 4. For `abstract` source: if abstract non-empty, `embed([abstract],'document')` → insert one `kind='abstract'` row.
 5. For `content-chunks` source: `chunkNode(content, config)` → `embed(chunks,'document')` → insert `kind='chunk'` rows with `chunkIndex/charStart/charEnd/chunkText`.
@@ -53,26 +57,37 @@ All embedding inserts use raw SQL (`$executeRaw … $1::vector`).
 ## Vector search query (read path; D-R5)
 
 ```sql
--- node-level (default): best chunk/abstract per node
-SELECT ne.node_id, MIN(ne.embedding <=> $queryVec::vector) AS distance
-FROM node_embeddings ne
-JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL
-WHERE ne.memory_id = $memoryId
-GROUP BY ne.node_id
+-- node-level (default): ANN scan FIRST (HNSW-served), THEN dedupe to nodes.
+-- A GROUP BY / MIN() over the whole table would defeat the HNSW index and
+-- force a full scan — so the index-using ANN scan must be the inner query.
+-- Over-fetch candidates so multiple chunks per node still yield k distinct
+-- nodes after dedupe (and absorb the rare soft-deleted candidate).
+WITH ann AS (
+  SELECT ne.node_id, ne.embedding <=> $queryVec::vector AS distance
+  FROM node_embeddings ne
+  WHERE ne.memory_id = $memoryId
+  ORDER BY ne.embedding <=> $queryVec::vector   -- HNSW index serves this
+  LIMIT $candidateK                             -- e.g. k * 10
+)
+SELECT a.node_id, MIN(a.distance) AS distance
+FROM ann a
+JOIN nodes n ON n.id = a.node_id AND n.deleted_at IS NULL
+GROUP BY a.node_id
 ORDER BY distance ASC
 LIMIT $k;
 
--- chunk-level (granularity:'chunk'): passages
+-- chunk-level (granularity:'chunk'): passages — ORDER BY ... LIMIT is already
+-- HNSW-friendly; the memory_id (+ kind) filter narrows before the index walk.
 SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
-       (ne.embedding <=> $queryVec::vector) AS distance
+       ne.embedding <=> $queryVec::vector AS distance
 FROM node_embeddings ne
 JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL
 WHERE ne.memory_id = $memoryId AND ne.kind = 'chunk'
-ORDER BY distance ASC
-LIMIT $k;
+ORDER BY ne.embedding <=> $queryVec::vector
+LIMIT $candidateK;   -- then drop any whose node failed the deleted-at join, keep top k
 ```
 
-`score = 1 - distance` (cosine). HNSW index serves the `<=>` ordering. Memory scope + `deleted_at IS NULL` enforced in the query; caller access-control upstream (constitution V).
+`score = 1 - distance` (cosine). The **ANN scan must be the index-using inner step**; dedupe/group happens on the small candidate set, never over the full table. Memory scope + `deleted_at IS NULL` enforced in the query; caller access-control upstream (constitution V).
 
 ## Tests (constitution I)
 

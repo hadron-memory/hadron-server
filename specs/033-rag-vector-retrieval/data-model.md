@@ -119,7 +119,11 @@ model NodeEmbedding {
   node   Node   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
-  @@unique([nodeId, kind, chunkIndex])  // dedupe chunks; abstract rows have NULL chunkIndex
+  @@unique([nodeId, kind, chunkIndex])  // dedupes CHUNK rows. NOTE: abstract rows have
+                                        // chunkIndex = NULL, and Postgres treats NULLs as
+                                        // distinct — so this does NOT dedupe abstract rows.
+                                        // Abstract uniqueness is enforced by a partial unique
+                                        // index (below) instead.
   @@index([nodeId])
   @@index([memoryId])
   @@map("node_embeddings")
@@ -136,6 +140,11 @@ model NodeEmbedding {
 ```sql
 CREATE INDEX IF NOT EXISTS node_embeddings_embedding_hnsw
   ON node_embeddings USING hnsw (embedding vector_cosine_ops);
+
+-- One abstract vector per node. The @@unique above can't enforce this
+-- (NULL chunkIndex ⇒ NULLs distinct in Postgres), so a partial unique index does.
+CREATE UNIQUE INDEX IF NOT EXISTS node_embeddings_abstract_uniq
+  ON node_embeddings (node_id) WHERE kind = 'abstract';
 ```
 
 ---

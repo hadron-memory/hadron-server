@@ -30,14 +30,14 @@ Resolves every NEEDS CLARIFICATION from Technical Context and records the techno
 - **Low ops**: served in dev by **Ollama** (`ollama pull nomic-embed-text`) and in prod by **HuggingFace Text-Embeddings-Inference (TEI)** or vLLM — a single small container/process. CPU-viable for this corpus size.
 
 **Operational notes that affect correctness**:
-- **Task prefixes are mandatory for nomic.** Documents must be embedded with a `search_document: ` prefix and queries with `search_query: `. The `EmbeddingClient` MUST apply the correct prefix per call-site (index vs query) or retrieval quality degrades sharply. Captured as a contract requirement (see `contracts/embedding-client.md`).
+- **Task prefixes are mandatory for nomic.** Documents must be embedded with a `search_document: ` prefix and queries with `search_query: `. The `EmbeddingClient` MUST apply the correct prefix per call-site (index vs query) or retrieval quality degrades sharply. Captured as a contract requirement (see `contracts/embedding-worker.md`).
 - **The Postgres server must have pgvector installed** (the `.so`), not just `CREATE EXTENSION` run. `postgres:17-alpine` lacks it → dev/test switch to the `pgvector/pgvector:pg17` image; prod (bare-metal Postgres on `alpha`) installs the `pgvector` package. **Infra prerequisite, flagged in quickstart + tasks.**
 
 **Alternatives considered**:
 - *OpenAI text-embedding-3-small (1536d)* / *Voyage 3.5 (1024d)* — cheaper to operate (no model server) and slightly higher quality, but both transmit plaintext to a third party at index time. Rejected for the privacy posture; either remains a clean future swap via the stored model id + re-embed path (FR-014).
 - *bge-small-en-v1.5 (384d)* — lighter (smaller vectors, faster), viable alternative if the model server proves heavy; lower ceiling and a 512-token context (vs nomic's 8192). Kept as the documented fallback.
 
-**Knobs** (env, per the CLAUDE.md env-var convention): `EMBEDDING_API_URL` (required when `vectorIndex` memories exist), `EMBEDDING_MODEL` (default `nomic-embed-text-v1.5`), `EMBEDDING_DIM` (default `768`, MUST equal the pgvector column dimension), `EMBEDDING_API_KEY` (optional, for an authenticated self-hosted endpoint).
+**Knobs** (env, per the CLAUDE.md env-var convention): `EMBEDDING_API_URL` (required when `vectorIndexEnabled` memories exist), `EMBEDDING_MODEL` (default `nomic-embed-text-v1.5`), `EMBEDDING_DIM` (default `768`, MUST equal the pgvector column dimension), `EMBEDDING_API_KEY` (optional, for an authenticated self-hosted endpoint).
 
 ---
 
@@ -86,13 +86,13 @@ Resolves every NEEDS CLARIFICATION from Technical Context and records the techno
 ## D-R5 — Query surface: extend `h-find-nodes`; raw-SQL vector search; RRF hybrid; in-process expand
 
 **Decision**:
-- Add `mode: 'keyword' | 'vector' | 'hybrid'` (absent ⇒ keyword, backward-compatible), `expand: number` (default 0), and `granularity: 'node' | 'chunk'` (default node) to the `h-find-nodes` zod schema (`mcp/server.ts:957`). Mirror on the GraphQL `nodes` query.
+- Add `mode: 'keyword' | 'vector' | 'hybrid'` (absent ⇒ keyword, backward-compatible), `expand: number` (default 0), and `granularity: 'node' | 'chunk'` (default node) to the `h-find-nodes` zod schema (`mcp/server.ts:957`). Add a vector-aware GraphQL `nodeSearch` query carrying the same args (the legacy `nodes` query stays keyword-only, preserving its `[Node!]!` contract).
 - **keyword**: unchanged path (`matchesQuery`).
 - **vector**: embed the query (with `search_query:` prefix), run a raw-SQL similarity query scoped to the memory, join `nodes` for `deletedAt IS NULL` + access control, return ranked node ids (or chunk rows for `granularity:'chunk'`).
 - **hybrid**: run keyword + vector, fuse by **Reciprocal-Rank Fusion**, `score = Σ 1/(k + rank)`, **k = 60** fixed platform-wide (FR-019).
 - **expand**: in-process BFS over `outgoingEdges`/`incomingEdges` (undirected, all edge types) to depth `n`, neighbors **appended unscored** after ranked hits (FR-020).
 
-**Result-envelope flags within a text tool** (FR-021): `h-find-nodes` returns plain text, so the typed `no_vector_index` reason is surfaced as a **dedicated annotation line** in the text result (e.g. a leading `Note: this memory has no vector index — enable memory.vectorIndex to use mode:vector. [no_vector_index]`), and for `mode:hybrid` a `Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]` line above the keyword hits. The **GraphQL `nodes`** query exposes these as structured envelope fields (`reason`, `degraded`). Same contract, surfaced per transport.
+**Result-envelope flags within a text tool** (FR-021): `h-find-nodes` returns plain text, so the typed `no_vector_index` reason is surfaced as a **dedicated annotation line** in the text result (e.g. a leading `Note: this memory has no vector index — enable memory.vectorIndexEnabled to use mode:vector. [no_vector_index]`), and for `mode:hybrid` a `Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]` line above the keyword hits. The **GraphQL `nodeSearch`** query exposes these as structured envelope fields (`reason`, `degraded`). Same contract, surfaced per transport.
 
 **Rationale**: one search surface (D5, closes #206 gap 4). Vector needs DB-side ORDER BY (raw SQL) — distinct from the in-memory keyword path; that's fine, the tool dispatches by mode. RRF is the boring, dependency-free default.
 
@@ -123,6 +123,6 @@ Typed errors (constitution S2/III) at the GraphQL boundary for the app-layer rej
 | Async transport | durable Node markers + setImmediate prompt-drain + setInterval sweep (D-R3) |
 | Embed-on-encrypted | prompt-drain (in-closure plaintext) for all; sweep covers plaintext-on-row; GraphQL-encrypted sweep recovery deferred to #206 (D-R3) |
 | Chunking | in-house markdown-aware + fixed-size, char-offset locators (D-R4) |
-| Query API | `mode`/`expand`/`granularity` on `h-find-nodes` + GraphQL `nodes`; raw-SQL vector; RRF k=60 (D-R5) |
+| Query API | `mode`/`expand`/`granularity` on `h-find-nodes` + GraphQL `nodeSearch`; raw-SQL vector; RRF k=60 (D-R5) |
 | Config home | direct `Memory` columns + CHECK constraints; not blocked on spec 024 (D-R6) |
 | pgvector availability | Postgres image/package must include pgvector before `CREATE EXTENSION` (D-R1/D-R2) — infra prerequisite |

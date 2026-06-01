@@ -111,7 +111,7 @@ Each slice is independently testable per the spec's Independent Test definitions
 - **nomic task prefixes** (`search_document:`/`search_query:`) are correctness-critical — unit-tested.
 - **Encrypted-via-GraphQL sweep recovery** is bounded by #206 — documented boundary, not a blocker (prompt-drain covers the common path).
 - **Cost-control deferral** vs constitution V's "rate-limits are server concerns" — explicit v1 deferral, flagged above.
-- **`nodeSearch` vs evolving `nodes`** — choose at `/tasks` based on whether any external caller depends on `nodes`' exact `[Node!]!` return type.
+- **GraphQL surface**: the vector-aware entrypoint is a **new `nodeSearch` query** (decided); the legacy `nodes` query stays keyword-only so its `[Node!]!` contract never breaks.
 
 ## Complexity Tracking
 
