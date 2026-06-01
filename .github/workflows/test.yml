@@ -35,7 +35,9 @@ jobs:
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_test
     services:
       postgres:
-        image: postgres:16
+        # 033-rag-vector-retrieval: pgvector-bearing image (postgres:16 + pgvector)
+        # so `CREATE EXTENSION vector` works in CI. Same PG16, data-compatible.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: hadron_test

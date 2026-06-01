@@ -40,5 +40,27 @@ export async function setup() {
       );
   `);
 
+  // 033-rag-vector-retrieval: vector-index config invariants.
+  // FR-026 (encrypted memory needs disclosure ack) + FR-003 chunk-dial sanity.
+  // The pgvector extension + indexes come from `db push` (extensions = [vector])
+  // + post-push.sql (db:test-setup); these CHECK constraints are the per-run
+  // safety net, matching the pattern above.
+  await client.query(`
+    ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_vector_encrypted_ack";
+    ALTER TABLE "memories"
+      ADD CONSTRAINT "chk_memory_vector_encrypted_ack"
+      CHECK (NOT (is_encrypted AND vector_index_enabled) OR vector_index_encrypted_ack_at IS NOT NULL);
+
+    ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_chunk_tokens_positive";
+    ALTER TABLE "memories"
+      ADD CONSTRAINT "chk_memory_chunk_tokens_positive"
+      CHECK (chunk_tokens IS NULL OR chunk_tokens > 0);
+
+    ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_chunk_overlap_valid";
+    ALTER TABLE "memories"
+      ADD CONSTRAINT "chk_memory_chunk_overlap_valid"
+      CHECK (chunk_overlap IS NULL OR (chunk_overlap >= 0 AND (chunk_tokens IS NULL OR chunk_overlap < chunk_tokens)));
+  `);
+
   await client.end();
 }

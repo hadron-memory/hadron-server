@@ -28,7 +28,9 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_smoke
     services:
       postgres:
-        image: postgres:16
+        # 033-rag-vector-retrieval: pgvector-bearing image (postgres:16 + pgvector)
+        # so `CREATE EXTENSION vector` works in CI. Same PG16, data-compatible.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: hadron_smoke
@@ -116,15 +118,24 @@ jobs:
           #     express in `schema.prisma`. The diff therefore wants
           #     to "fix" them into non-partial form on every run.
           #   - The "-- CreateIndex" comment that accompanies them.
+          #   - 033: `node_embeddings_embedding_hnsw` is a pgvector HNSW
+          #     index, which Prisma can't express, so the diff wants to
+          #     DROP it. It must live in the migration (prod needs it and
+          #     prod doesn't run post-push.sql), so it's whitelisted here.
           # Any OTHER line in the diff is real drift and must fail CI.
           DIFF=$(pnpm prisma migrate diff \
             --from-url "$DATABASE_URL" \
             --to-schema-datamodel prisma/schema.prisma \
             --script 2>&1 \
             | grep -vE "^Loaded|^Prisma config|^$" \
-            | grep -vE '^-- CreateIndex$' \
+            | grep -vE '^-- (CreateIndex|DropIndex)$' \
             | grep -vE '^CREATE INDEX "memories_user_id_idx" ON "memories"\("user_id"\);$' \
-            | grep -vE '^CREATE UNIQUE INDEX "users_external_app_id_external_id_key" ON "users"\("external_app_id", "external_id"\);$')
+            | grep -vE '^CREATE UNIQUE INDEX "users_external_app_id_external_id_key" ON "users"\("external_app_id", "external_id"\);$' \
+            | grep -vE '^DROP INDEX "node_embeddings_embedding_hnsw";$' \
+            || true)
+          # `|| true`: when every diff line is whitelisted the final grep matches
+          # nothing and exits 1, which under `bash -e` would fail the job. An empty
+          # DIFF means "no drift" — the `-n` test below handles it as success.
           if [ -n "$DIFF" ] && [ "$DIFF" != "-- This is an empty migration." ]; then
             echo "::error::Schema drift between migrations and schema.prisma:"
             echo "$DIFF"

@@ -1,6 +1,9 @@
 services:
   db:
-    image: postgres:17-alpine
+    # 033-rag-vector-retrieval: pgvector-bearing image (drop-in for postgres:17;
+    # data-compatible). Required for `CREATE EXTENSION vector`. NB: a system
+    # Postgres (non-docker) instead needs the `postgresql-17-pgvector` package.
+    image: pgvector/pgvector:pg17
     container_name: postgres
     restart: unless-stopped
     environment:
