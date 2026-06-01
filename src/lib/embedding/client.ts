@@ -97,7 +97,7 @@ export class HttpEmbeddingClient implements EmbeddingClient {
         body: JSON.stringify({ model: this.model, input }),
       });
     } catch (err) {
-      throw new EmbeddingRequestError((err as Error).message);
+      throw new EmbeddingRequestError(err instanceof Error ? err.message : String(err));
     }
 
     if (!res.ok) {
@@ -129,18 +129,38 @@ export class HttpEmbeddingClient implements EmbeddingClient {
   }
 }
 
-/** Parse Ollama (`embeddings`) or OpenAI (`data[].embedding`) response bodies. */
+/**
+ * Parse Ollama (`embeddings`) or OpenAI (`data[].embedding`) response bodies.
+ * Returns null on any shape we don't recognize OR can't fully validate — every
+ * element must be an array of finite numbers, so a malformed body (null entries,
+ * non-numeric values) is rejected as a request error rather than silently
+ * producing junk vectors that pass the later dimension check.
+ */
 function extractVectors(body: unknown): number[][] | null {
   if (typeof body !== 'object' || body === null) return null;
   const b = body as Record<string, unknown>;
-  // Ollama /api/embed
+
+  let raw: unknown[];
   if (Array.isArray(b.embeddings)) {
-    return b.embeddings as number[][];
+    // Ollama /api/embed
+    raw = b.embeddings;
+  } else if (Array.isArray(b.data)) {
+    // OpenAI /v1/embeddings — each element is { embedding: number[] }
+    raw = (b.data as unknown[]).map((d) =>
+      typeof d === 'object' && d !== null
+        ? (d as Record<string, unknown>).embedding
+        : undefined,
+    );
+  } else {
+    return null;
   }
-  // OpenAI /v1/embeddings
-  if (Array.isArray(b.data)) {
-    const out = (b.data as Array<{ embedding?: unknown }>).map((d) => d.embedding);
-    if (out.every((e) => Array.isArray(e))) return out as number[][];
+
+  const out: number[][] = [];
+  for (const v of raw) {
+    if (!Array.isArray(v) || !v.every((n) => typeof n === 'number' && Number.isFinite(n))) {
+      return null;
+    }
+    out.push(v as number[]);
   }
-  return null;
+  return out;
 }

@@ -96,4 +96,25 @@ describe('HttpEmbeddingClient guards', () => {
     expect(out).toEqual([]);
     expect(calls).toHaveLength(0);
   });
+
+  it('rejects a malformed embeddings element (not an array)', async () => {
+    const { impl } = fakeFetch({ embeddings: [null] });
+    await expect(client(impl).embed(['x'], 'document')).rejects.toBeInstanceOf(
+      EmbeddingRequestError,
+    );
+  });
+
+  it('rejects a vector containing a non-finite number', async () => {
+    const { impl } = fakeFetch({ embeddings: [[1, Number.NaN, ...vec(766)]] });
+    await expect(client(impl).embed(['x'], 'document')).rejects.toBeInstanceOf(
+      EmbeddingRequestError,
+    );
+  });
+
+  it('rejects a null element in the OpenAI data array', async () => {
+    const { impl } = fakeFetch({ data: [null] });
+    await expect(client(impl).embed(['x'], 'document')).rejects.toBeInstanceOf(
+      EmbeddingRequestError,
+    );
+  });
 });

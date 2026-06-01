@@ -15,7 +15,10 @@ import {
 
 export * from './client.js';
 
-export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text-v1.5';
+// The Ollama tag is `nomic-embed-text` (which serves nomic-embed-text-v1.5,
+// 768-dim). The model string is sent verbatim to the endpoint, so this must
+// match the served tag — using `nomic-embed-text-v1.5` would 404 against Ollama.
+export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
 export const DEFAULT_EMBEDDING_DIM = 768;
 export const DEFAULT_EMBEDDING_PROVIDER = 'local';
 
@@ -41,9 +44,14 @@ export function getEmbeddingClient(): EmbeddingClient {
         'Set it to a self-hosted embedding endpoint (dev: Ollama /api/embed).',
     );
   }
-  const dim = process.env.EMBEDDING_DIM
-    ? Number(process.env.EMBEDDING_DIM)
-    : DEFAULT_EMBEDDING_DIM;
+  const dimEnv = process.env.EMBEDDING_DIM;
+  const dim = dimEnv ? Number(dimEnv) : DEFAULT_EMBEDDING_DIM;
+  if (!Number.isInteger(dim) || dim <= 0) {
+    throw new Error(
+      `Invalid EMBEDDING_DIM: ${JSON.stringify(dimEnv)} — must be a positive integer ` +
+        `equal to the pgvector column dimension (${DEFAULT_EMBEDDING_DIM}).`,
+    );
+  }
   cached = new HttpEmbeddingClient({
     url,
     model: process.env.EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL,
