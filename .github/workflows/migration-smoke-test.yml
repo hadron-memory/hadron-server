@@ -131,7 +131,11 @@ jobs:
             | grep -vE '^-- (CreateIndex|DropIndex)$' \
             | grep -vE '^CREATE INDEX "memories_user_id_idx" ON "memories"\("user_id"\);$' \
             | grep -vE '^CREATE UNIQUE INDEX "users_external_app_id_external_id_key" ON "users"\("external_app_id", "external_id"\);$' \
-            | grep -vE '^DROP INDEX "node_embeddings_embedding_hnsw";$')
+            | grep -vE '^DROP INDEX "node_embeddings_embedding_hnsw";$' \
+            || true)
+          # `|| true`: when every diff line is whitelisted the final grep matches
+          # nothing and exits 1, which under `bash -e` would fail the job. An empty
+          # DIFF means "no drift" — the `-n` test below handles it as success.
           if [ -n "$DIFF" ] && [ "$DIFF" != "-- This is an empty migration." ]; then
             echo "::error::Schema drift between migrations and schema.prisma:"
             echo "$DIFF"
