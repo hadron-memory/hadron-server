@@ -48,6 +48,7 @@ import {
 } from './access-control.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { computeContentHash } from '../lib/contentHash.js';
+import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
 import { vectorSearchNodes } from '../services/embedding/vectors.js';
 import { getEmbeddingClient, isEmbeddingConfigured } from '../lib/embedding/index.js';
@@ -1115,7 +1116,29 @@ export function createMcpServerInstance(
           const n = nodeById.get(hit.nodeId);
           if (!n) continue;
           const urn = await nodeUrn(n.loc, n.memoryId);
+          // Spec 033 FR-023 — `Source: abstract-stale` marker on stale
+          // abstract-vector hits. Every v1 hit is an abstract-kind hit
+          // (chunks ship in US2; once they do, this needs to gate on
+          // `hit.kind === 'abstract'` once vectorSearchNodes surfaces it).
+          //
+          // The predicate mirrors spec 032's read-time check (four clauses
+          // + the load-bearing `!= null` legacy short-circuit). NOTE: we
+          // do NOT apply spec 032's `!memory.isEncrypted` gate here —
+          // spec 033 FR-025 calls this out explicitly: because the vector
+          // and the abstractOriginHash are both stamped at write time on
+          // in-closure plaintext, the predicate IS computable on encrypted
+          // memories whose MCP write path stores plaintext at rest (#206).
+          // A defensive `!isCiphertext(content)` skip would still let a
+          // GraphQL-encrypted row (ciphertext at rest) fall through quietly
+          // rather than false-positive.
+          const isStale =
+            n.abstract != null && n.abstract.length > 0 &&
+            n.content != null && n.content.length > 0 &&
+            !isCiphertext(n.content) &&
+            n.abstractOriginHash != null &&
+            n.abstractOriginHash !== computeContentHash(n.content);
           const parts = [`- **${urn}** — ${n.name}  (score ${hit.score.toFixed(3)})`];
+          if (isStale) parts.push('  Source: abstract-stale');
           if (n.description) parts.push(`  ${n.description}`);
           if (!brief && n.abstract) {
             for (const absLine of (n.abstract as string).split(/\r?\n/)) parts.push(`  ${absLine}`);

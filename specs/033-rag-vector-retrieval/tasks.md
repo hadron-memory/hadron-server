@@ -149,11 +149,8 @@ Single web-service (hadron-server). Source at `src/`, schema at `prisma/`, tests
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T051 [P] [US4] Integration test: stale abstract hit served + `Source: abstract-stale`; chunk hits unmarked; self-heal after re-embed; encrypted-memory hit still markable (SC-009) in `src/test/integration/033-us4-staleness.test.ts`
-
-### Implementation for User Story 4
-
-- [ ] T052 [US4] In `vectorSearch`/`h-find-nodes` result rendering, apply the spec-032 predicate (`abstractOriginHash != computeContentHash(node.content)` via `src/lib/contentHash.ts`) to **abstract**-vector hits and emit the `Source: abstract-stale` marker; ensure **chunk** hits never carry it (`src/services/embedding/vectorSearch.ts`, `src/mcp/server.ts`)
+- [X] T051 [P] [US4] Integration test at `src/test/integration/033-us4-staleness.test.ts` covering: stale node → hit returned + `Source: abstract-stale`; fresh + legacy null-hash nodes → no marker; self-heal after re-embed; encrypted-memory hit still marked (FR-025: write-time plaintext stamping means the predicate is computable even without read-time decryption — spec 032's `!memory.isEncrypted` gate is intentionally NOT applied here). Chunk-hits-don't-carry-it is vacuous in US1 (no chunks yet); US2 will revise once `vectorSearchNodes` surfaces hit kind.
+- [X] T052 [US4] Implemented in `src/mcp/server.ts` h-find-nodes vector render. Four-clause predicate mirrors spec 032 (abstract + content non-empty, `abstractOriginHash != null`, `abstractOriginHash !== computeContentHash(node.content)`), plus a defensive `!isCiphertext(content)` so GraphQL-encrypted rows (ciphertext at rest, #206) fall through quietly rather than false-positive. Marker emits as a `Source: abstract-stale` line right after the hit's score line. GraphQL `nodeSearch` envelope unchanged — clients can compute per-Node staleness from the existing `abstractOriginHash` + `content` fields (the text-marker contract in `contracts/h-find-nodes.md` is MCP-only).
 
 **Checkpoint**: staleness signal on vector hits; self-healing verified.
 
