@@ -33,6 +33,10 @@ Added to the `Memory` model (`schema.prisma:483`). All nullable/defaulted; exist
 
 ```prisma
   /// 033 — opt-in: when true, this memory's nodes are vector-indexed.
+  /// DB default is `false` (safe); the **class-derived default** is applied at
+  /// createMemory — a `knowledge`-class, non-encrypted memory is created with
+  /// `true`; all other classes and any encrypted memory stay `false` (FR-001).
+  /// Always individually flippable thereafter.
   vectorIndexEnabled        Boolean          @default(false) @map("vector_index_enabled")
   /// 033 — what the vector index is built from. Memory property, NOT a
   /// query parameter (D1/FR-002). Only meaningful when vectorIndexEnabled.
@@ -102,6 +106,10 @@ model NodeEmbedding {
   /// query filters by memory before ORDER BY distance).
   memoryId  String        @map("memory_id")
   kind      EmbeddingKind
+  /// Stored embedding provider — e.g. "local" | "openai" | "voyage". Sibling
+  /// to `model`; disambiguates provenance and makes a provider/model swap
+  /// (re-embed) auditable and filterable. v1 is always "local".
+  provider  String
   /// Stored model id (FR-014) — e.g. "nomic-embed-text-v1.5". Forward-compat
   /// for a deliberate re-embed when the platform model changes.
   model     String

@@ -6,8 +6,9 @@
 interface EmbeddingClient {
   /** Returns one vector per input, each of length EMBEDDING_DIM (768). */
   embed(texts: string[], purpose: 'document' | 'query'): Promise<number[][]>;
-  readonly model: string;   // e.g. "nomic-embed-text-v1.5"  (stored per vector, FR-014)
-  readonly dim: number;     // 768; MUST equal the pgvector column dimension
+  readonly provider: string; // e.g. "local" | "openai" | "voyage"  (stored per vector)
+  readonly model: string;    // e.g. "nomic-embed-text-v1.5"  (stored per vector, FR-014)
+  readonly dim: number;      // 768; MUST equal the pgvector column dimension
 }
 ```
 
