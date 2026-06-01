@@ -25,16 +25,25 @@ export interface AbstractVectorRow {
   embedding: number[];
 }
 
-/** Replace a node's abstract vector (delete existing kind='abstract', insert one). */
+/**
+ * Replace a node's abstract vector (delete existing kind='abstract', insert one).
+ *
+ * Wrapped in a transaction so a failed INSERT (transient network, constraint,
+ * etc.) rolls back the DELETE — otherwise the node would briefly carry no
+ * abstract vector and reads would miss until the next successful sweep
+ * (PR-219 review).
+ */
 export async function upsertAbstractVector(
   db: PrismaClient,
   row: AbstractVectorRow,
 ): Promise<void> {
-  await db.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${row.nodeId} AND kind = 'abstract'`;
-  await db.$executeRaw`
-    INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, embedding, created_at)
-    VALUES (${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, now())
-  `;
+  await db.$transaction(async (tx) => {
+    await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${row.nodeId} AND kind = 'abstract'`;
+    await tx.$executeRaw`
+      INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, embedding, created_at)
+      VALUES (${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, now())
+    `;
+  });
 }
 
 /** Delete all of a node's vectors (re-index / disable / cleared abstract). */

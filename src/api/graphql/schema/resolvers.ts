@@ -1845,6 +1845,12 @@ export const resolvers = {
       }
 
       const [qvec] = await getEmbeddingClient().embed([query], 'query');
+      if (!qvec) {
+        // Defensive: empty/malformed embed response would TypeError in
+        // toVectorLiteral. Treat as the same "unavailable" flag the
+        // unconfigured-endpoint branch returns above (PR-219 review).
+        return { nodes: [], reason: 'embedding_unavailable', degraded: null };
+      }
       const hits = await vectorSearchNodes(ctx.db, {
         memoryIds: indexedIds,
         queryEmbedding: qvec,
@@ -3935,6 +3941,15 @@ export const resolvers = {
       const sourceChanged =
         embeddingSource !== undefined && embeddingSource !== memory.embeddingSource;
       if (nowEnabled && (!wasEnabled || sourceChanged)) {
+        // When the source itself changes (abstract ↔ contentChunks ↔ both),
+        // the previously-stored vectors are now the wrong KIND. vectorSearch
+        // doesn't filter by kind today, so leaving them would mix stale
+        // vectors of the old kind with whatever the backfill produces.
+        // Drop everything first; the backfill re-stamps every node and the
+        // sweep re-embeds against the new source (PR-219 review).
+        if (sourceChanged) {
+          await deleteMemoryVectors(ctx.db, id);
+        }
         // Enabled or re-sourced → backfill: stamp every live node pending.
         await backfillMemoryEmbeddings(ctx.db, id);
       } else if (!nowEnabled && wasEnabled) {

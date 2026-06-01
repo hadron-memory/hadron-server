@@ -88,6 +88,26 @@ export async function embedNode(
       } else {
         const c = client ?? getEmbeddingClient();
         const [vec] = await c.embed([abstractText], 'document');
+        // Defensive: an empty/malformed embed response yields `undefined`,
+        // which would TypeError in `toVectorLiteral`. Treat as a transient
+        // failure so the sweep retries (PR-219 review).
+        if (!vec) {
+          throw new Error('Embedding client returned no vector.');
+        }
+        // Latest-wins guard on the UPSERT (not just the clear): re-check
+        // `embeddingPendingAt` in the DB right before writing. If a newer
+        // write has re-stamped it while we were embedding, our vector is
+        // stale by definition — skip the write so the newer prompt-drain's
+        // result wins (PR-219 review, Gemini high). Without this, two
+        // concurrent prompt-drains race to INSERT and the slower one's
+        // older vector silently overwrites the newer one.
+        const fresh = await db.node.findUnique({
+          where: { id: nodeId },
+          select: { embeddingPendingAt: true },
+        });
+        if (fresh?.embeddingPendingAt?.getTime() !== capturedPendingAt?.getTime()) {
+          return 'skipped';
+        }
         await upsertAbstractVector(db, {
           nodeId,
           memoryId: memory.id,
@@ -104,7 +124,17 @@ export async function embedNode(
     const cleared = await clearMarkers(db, nodeId, capturedPendingAt);
     return cleared ? 'embedded' : 'skipped';
   } catch (err) {
-    await markTransientFailure(db, node.id, node.embeddingAttempts, maxAttempts, String(err));
+    // Same latest-wins guard on the failure path (PR-219 review, Gemini high):
+    // if a newer write has re-stamped embeddingPendingAt, this failure record
+    // would mask a fresh attempt that's already in flight or queued.
+    await markTransientFailure(
+      db,
+      node.id,
+      capturedPendingAt,
+      node.embeddingAttempts,
+      maxAttempts,
+      String(err),
+    );
     return 'failed-transient';
   }
 }
@@ -142,14 +172,27 @@ async function markPermanentFailure(
 async function markTransientFailure(
   db: PrismaClient,
   nodeId: string,
+  capturedPendingAt: Date | null,
   priorAttempts: number,
   maxAttempts: number,
   error: string,
 ): Promise<void> {
   const attempts = priorAttempts + 1;
   const giveUp = attempts >= maxAttempts;
-  await db.node.update({
-    where: { id: nodeId },
+  // Optimistic guard: only stamp the failure if embeddingPendingAt is still
+  // the value we captured at the start of this attempt. A newer write that
+  // re-stamped it has either already retried successfully or has its own
+  // attempt in flight; either way our stale failure shouldn't clobber it.
+  // updateMany returns count=0 silently when the WHERE doesn't match.
+  //
+  // On giveUp we clear embeddingPendingAt but leave embeddingAttempts at
+  // the cap value. A future operator-driven retry (manual SQL re-stamp,
+  // not via enqueueNodeEmbedding which resets attempts to 0) would be
+  // silently excluded by drainEmbeddingQueue's `attempts < maxAttempts`
+  // filter. Manual interventions MUST reset attempts to 0 too — the
+  // documented contract.
+  await db.node.updateMany({
+    where: { id: nodeId, embeddingPendingAt: capturedPendingAt },
     data: {
       embeddingFailedAt: new Date(),
       embeddingAttempts: attempts,

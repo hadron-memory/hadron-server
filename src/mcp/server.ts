@@ -1081,7 +1081,25 @@ export function createMcpServerInstance(
             'Note: vector search is unavailable — no embedding endpoint is configured. [embedding_unavailable]\n\nFound 0 node(s).',
           );
         }
+        // The `query` arg's describe documents `"*"`/`""` as keyword survey
+        // mode — those values are meaningless to a vector embedder (and
+        // some backends reject empty input outright). Reject explicitly so
+        // callers get a clear message instead of a 400/garbage-vector
+        // (PR-219 review, Copilot).
+        const trimmed = query.trim();
+        if (trimmed === '' || trimmed === '*') {
+          return textResult(
+            'Note: empty or "*" queries are keyword-only (survey mode); supply a natural-language query for mode:vector. [empty_vector_query]\n\nFound 0 node(s).',
+          );
+        }
         const [qvec] = await getEmbeddingClient().embed([query], 'query');
+        if (!qvec) {
+          // Same defensive guard as the GraphQL nodeSearch path: a
+          // malformed/empty embed response would TypeError downstream.
+          return textResult(
+            'Note: vector search is unavailable — embedding generation returned no vector. [embedding_unavailable]\n\nFound 0 node(s).',
+          );
+        }
         const hits = await vectorSearchNodes(db, {
           memoryIds: indexedIds,
           queryEmbedding: qvec,
