@@ -38,7 +38,9 @@ export async function enqueueNodeEmbedding(
     if (!memory?.vectorIndexEnabled) return;
 
     // Durable marker (recovery net): fresh attempt resets failure state.
-    await db.node.update({
+    // updateMany (not update) so a node deleted between the write and this
+    // async enqueue is a no-op, not a thrown "record not found".
+    await db.node.updateMany({
       where: { id: args.nodeId },
       data: {
         embeddingPendingAt: new Date(),
