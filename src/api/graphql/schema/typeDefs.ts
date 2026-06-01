@@ -616,6 +616,13 @@ export const typeDefs = `#graphql
   }
 
   # A Hadron memory (git repo + branch settings).
+  # 033-rag-vector-retrieval: what a memory's vector index is built from.
+  enum EmbeddingSource {
+    abstract
+    contentChunks
+    both
+  }
+
   type Memory {
     id: ID!
     organizationId: String!
@@ -649,6 +656,9 @@ export const typeDefs = `#graphql
     # not the memory owner / not ADMIN/OWNER of the memory's org.
     userId: ID
     isEncrypted: Boolean!
+    # 033-rag-vector-retrieval: per-memory vector-index config.
+    vectorIndexEnabled: Boolean!
+    embeddingSource: EmbeddingSource!
     userMemoryOfAgentId: String
     anonymousExpiresAt: String
     # 008-agent-installation: app pivot for app/personal-class memories.
@@ -1382,7 +1392,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility): Memory!
+    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource): Memory!
 
     """
     Soft-delete a Memory.

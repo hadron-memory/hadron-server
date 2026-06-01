@@ -2,6 +2,11 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypt
 import { generateId } from '../../../lib/id.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
+  enqueueNodeEmbedding,
+  backfillMemoryEmbeddings,
+} from '../../../services/embedding/enqueue.js';
+import { deleteMemoryVectors } from '../../../services/embedding/vectors.js';
+import {
   APP_KEY_PREFIX,
   USER_API_KEY_LABEL_MAX_LEN,
   hashAppKey,
@@ -2876,6 +2881,14 @@ export const resolvers = {
         console.error('[upsertNode] git write error:', err);
       });
 
+      // 033 — (re-)embed on write. finalNode is decrypted (plaintext) here, so
+      // the prompt-drain embeds correctly even on encrypted memories (FR-027).
+      void enqueueNodeEmbedding(ctx.db, {
+        nodeId: finalNode.id,
+        memoryId: input.memoryId,
+        plaintext: { content: finalNode.content, abstract: finalNode.abstract },
+      });
+
       return finalNode;
     },
 
@@ -3679,6 +3692,11 @@ export const resolvers = {
             // 023-app-shape US4: a `memoryClass: 'group'` argument lets
             // callers create group-class memories explicitly.
             class: requestedClass,
+            // 033 — class-derived default for the vector index (FR-001):
+            // a `knowledge`-class memory (non-encrypted, as created here) is
+            // searchable by default; `group` and others default off. Flippable
+            // later via updateMemory.
+            vectorIndexEnabled: requestedClass === 'knowledge',
             // Group memories must have userId NULL — enforced by the
             // chk_memory_group_no_owner CHECK; we set it explicitly here.
             userId: requestedClass === 'group' ? null : undefined,
@@ -3731,12 +3749,16 @@ export const resolvers = {
         readBranch,
         writeBranch,
         visibility,
+        vectorIndexEnabled,
+        embeddingSource,
       }: {
         id: string; name?: string; urn?: string; organizationId?: string;
         shortDescription?: string; description?: string; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string; readBranch?: string; writeBranch?: string; visibility?: string;
+        vectorIndexEnabled?: boolean;
+        embeddingSource?: 'abstract' | 'contentChunks' | 'both';
       },
       ctx: Context,
     ) => {
@@ -3754,7 +3776,7 @@ export const resolvers = {
         const slug = urn ?? memory.urn.split(':').slice(1).join(':');
         newUrn = `${org.urn}:${slug}`;
       }
-      return ctx.db.memory.update({
+      const updated = await ctx.db.memory.update({
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
@@ -3774,9 +3796,38 @@ export const resolvers = {
           ...(readBranch !== undefined ? { readBranch } : {}),
           ...(writeBranch !== undefined ? { writeBranch } : {}),
           ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
+          // 033 — vector-index config. The chk_memory_vector_encrypted_ack CHECK
+          // constraint blocks enabling on an encrypted memory without the
+          // disclosure ack (the friendly EncryptedVectorIndexNotAcknowledgedError
+          // wrapper + chunk dials land in US5/US2).
+          ...(vectorIndexEnabled !== undefined ? { vectorIndexEnabled } : {}),
+          ...(embeddingSource !== undefined ? { embeddingSource } : {}),
         },
         include: MEMORY_INCLUDE,
       });
+
+      // 033 — react to vector-index config changes (FR-004/FR-008/FR-026):
+      const nowEnabled = updated.vectorIndexEnabled;
+      const wasEnabled = memory.vectorIndexEnabled;
+      const sourceChanged =
+        embeddingSource !== undefined && embeddingSource !== memory.embeddingSource;
+      if (nowEnabled && (!wasEnabled || sourceChanged)) {
+        // Enabled or re-sourced → backfill: stamp every live node pending.
+        await backfillMemoryEmbeddings(ctx.db, id);
+      } else if (!nowEnabled && wasEnabled) {
+        // Disabled → drop stored vectors and clear markers.
+        await deleteMemoryVectors(ctx.db, id);
+        await ctx.db.node.updateMany({
+          where: { memoryId: id },
+          data: {
+            embeddingPendingAt: null,
+            embeddingFailedAt: null,
+            embeddingError: null,
+            embeddingAttempts: 0,
+          },
+        });
+      }
+      return updated;
     },
 
     deleteMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
@@ -4195,7 +4246,7 @@ export const resolvers = {
       // applied verbatim per plan D4 (no recomputation on restore;
       // legacy null hashes short-circuit the staleness check via the
       // NOT NULL guard in h-read-node).
-      return ctx.db.node.update({
+      const restored = await ctx.db.node.update({
         where: { id: node.id },
         data: {
           name: version.name,
@@ -4208,6 +4259,15 @@ export const resolvers = {
         },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
+      // 033 — re-embed the restored content (version snapshots are plaintext on
+      // non-encrypted memories; ciphertext snapshots are handled by embedNode's
+      // #206 permanent-fail path).
+      void enqueueNodeEmbedding(ctx.db, {
+        nodeId: restored.id,
+        memoryId: restored.memoryId,
+        plaintext: { content: version.content, abstract: version.abstract },
+      });
+      return restored;
     },
 
     addToMyMemories: async (_: unknown, { memoryId }: { memoryId: string }, ctx: Context) => {

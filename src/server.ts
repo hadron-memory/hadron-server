@@ -32,6 +32,8 @@ import {
   hasPersonalWorkspace,
 } from './provisioning/personal-workspace.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
+import { startEmbeddingWorkerLoop } from './jobs/embedNodes.js';
+import { isEmbeddingConfigured } from './lib/embedding/index.js';
 
 export async function createServer(): Promise<Express> {
   const app = express();
@@ -872,6 +874,24 @@ export async function createServer(): Promise<Express> {
   // Skipped in test environments to avoid leaking timers.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_ANON_CLEANUP !== 'true') {
     startAnonymousMemoryCleanupLoop(db);
+  }
+
+  // 033 — embedding worker sweep (retries / restarts / backfill). Skipped in
+  // tests (which drive embedNode/drainEmbeddingQueue directly). Warns if any
+  // memory is vector-indexed but no embedding endpoint is configured.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_EMBED_WORKER !== 'true') {
+    startEmbeddingWorkerLoop(db);
+    void db.memory
+      .count({ where: { vectorIndexEnabled: true, deletedAt: null } })
+      .then((n) => {
+        if (n > 0 && !isEmbeddingConfigured()) {
+          console.warn(
+            `[embed-worker] ${n} memory(ies) have vectorIndexEnabled but EMBEDDING_API_URL is unset — ` +
+              `nodes will queue (embeddingPendingAt) but not embed until an endpoint is configured.`,
+          );
+        }
+      })
+      .catch(() => {});
   }
 
   return app;

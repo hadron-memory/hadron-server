@@ -66,3 +66,8 @@ export function getEmbeddingClient(): EmbeddingClient {
 export function resetEmbeddingClientForTests(): void {
   cached = null;
 }
+
+/** Test hook: inject a stub client (CI has no embedding endpoint). */
+export function setEmbeddingClientForTests(client: EmbeddingClient): void {
+  cached = client;
+}
