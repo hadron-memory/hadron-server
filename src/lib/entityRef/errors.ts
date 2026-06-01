@@ -111,6 +111,44 @@ export class InvalidContentScopeError extends Error {
   }
 }
 
+/**
+ * 033-rag-vector-retrieval — surfaced by `updateMemory`/`createMemory` when a
+ * caller tries to enable the vector index on an ENCRYPTED memory without
+ * acknowledging the embedding-inversion disclosure (FR-026). Stored vectors
+ * are plaintext and partially invertible, so an encrypted memory must not be
+ * silently indexed; the caller affirms via `acknowledgeVectorInversionRisk`.
+ * The CHECK constraint `chk_memory_vector_encrypted_ack` is the DB backstop.
+ *
+ * GraphQL `extensions.code: 'EncryptedVectorIndexNotAcknowledgedError'`.
+ */
+export class EncryptedVectorIndexNotAcknowledgedError extends Error {
+  constructor(public readonly memoryRef: string) {
+    super(
+      `ENCRYPTED_VECTOR_INDEX_NOT_ACKNOWLEDGED: enabling the vector index on the ` +
+        `encrypted memory ${memoryRef} requires acknowledging the embedding-inversion ` +
+        `disclosure (stored vectors are plaintext and partially invertible). Pass ` +
+        `acknowledgeVectorInversionRisk: true to proceed.`,
+    );
+    this.name = 'EncryptedVectorIndexNotAcknowledgedError';
+  }
+}
+
+/**
+ * 033-rag-vector-retrieval — surfaced by `updateMemory`/`createMemory` when the
+ * per-memory chunking dials are invalid (FR-003): `chunkTokens` must be > 0 and
+ * `chunkOverlap` must be in `[0, chunkTokens)`. The CHECK constraints
+ * `chk_memory_chunk_tokens_positive` / `chk_memory_chunk_overlap_valid` are the
+ * DB backstop; this class is the friendly GraphQL-boundary error.
+ *
+ * GraphQL `extensions.code: 'InvalidChunkConfigError'`.
+ */
+export class InvalidChunkConfigError extends Error {
+  constructor(public readonly reason: string) {
+    super(`INVALID_CHUNK_CONFIG: ${reason}`);
+    this.name = 'InvalidChunkConfigError';
+  }
+}
+
 // Re-export from sibling modules so callers can import error classes
 // from a single place.
 export { InvalidLocError } from '../validateLoc.js';

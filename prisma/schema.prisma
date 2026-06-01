@@ -1,11 +1,18 @@
 generator client {
-  provider = "prisma-client-js"
-  output   = "../src/generated/prisma"
+  provider        = "prisma-client-js"
+  output          = "../src/generated/prisma"
+  // 033-rag-vector-retrieval: postgresqlExtensions is still a preview feature
+  // in Prisma 6.x; enables the `extensions` block below so `prisma db push` /
+  // `migrate` manage `CREATE EXTENSION vector` (pgvector).
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  // 033-rag-vector-retrieval: pgvector. db push/migrate runs CREATE EXTENSION
+  // vector before creating the vector(768) column on node_embeddings.
+  extensions = [vector]
 }
 
 // ─── Hadron entity model ──────────────────────────────────────────────
@@ -571,6 +578,25 @@ model Memory {
   /// Whether this memory accepts asset uploads. system-class memories
   /// typically opt out.
   acceptsUploads       Boolean          @default(true) @map("accepts_uploads")
+  // ─── 033-rag-vector-retrieval: per-memory vector-index config ───
+  /// Opt-in: when true, this memory's nodes are vector-indexed. DB default is
+  /// `false`; the **class-derived default** is applied at createMemory — a
+  /// `knowledge`-class, non-encrypted memory is created with `true`, all other
+  /// classes and any encrypted memory stay `false` (FR-001). Flippable per memory.
+  vectorIndexEnabled        Boolean          @default(false) @map("vector_index_enabled")
+  /// What the vector index is built from. Memory property, NOT a query
+  /// parameter (FR-002). Only meaningful when vectorIndexEnabled.
+  embeddingSource           EmbeddingSource  @default(abstract) @map("embedding_source")
+  /// Per-memory chunking dials (FR-003). NULL ⇒ platform default (512 / 64).
+  /// Consulted only when embeddingSource includes chunks.
+  chunkTokens               Int?             @map("chunk_tokens")
+  chunkOverlap              Int?             @map("chunk_overlap")
+  /// Force fixed-size chunking, bypassing structure-aware (FR-015).
+  forceFixedSize            Boolean          @default(false) @map("force_fixed_size")
+  /// Timestamp the owner acknowledged the embedding-inversion disclosure for an
+  /// ENCRYPTED memory (FR-026). NULL ⇒ not acknowledged. Gates encrypted-memory
+  /// indexing via chk_memory_vector_encrypted_ack.
+  vectorIndexEncryptedAckAt DateTime?        @map("vector_index_encrypted_ack_at")
   createdAt            DateTime         @default(now()) @map("created_at")
   createdBy            String?          @map("created_by")
   updatedAt            DateTime         @updatedAt @map("updated_at")
@@ -580,6 +606,7 @@ model Memory {
 
   organization             Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   nodes                    Node[]
+  embeddings               NodeEmbedding[]      // 033: per-memory vectors (denormalized memoryId)
   assets                   Asset[]
   subscriptions            MemorySubscription[]
   agentItems               AgentMemoryItem[]
@@ -761,6 +788,18 @@ model Node {
   /// warning, and the upcoming RAG layer. System-managed: never
   /// settable via GraphQL `NodeInput`.
   abstractOriginHash String? @map("abstract_origin_hash")
+  // ─── 033-rag-vector-retrieval: durable embedding-queue markers ───
+  /// Set when this node needs (re-)embedding; cleared on success. The single
+  /// work signal the embedding worker drains (FR-006/FR-007). Operational
+  /// state only — intentionally NOT versioned on NodeVersion.
+  embeddingPendingAt DateTime? @map("embedding_pending_at")
+  /// Set when an embed attempt failed (record, not a work signal). Transient
+  /// failures keep pending set for retry; permanent failures clear pending (FR-009).
+  embeddingFailedAt  DateTime? @map("embedding_failed_at")
+  /// Attempt counter for backoff / give-up. Non-null; reset to 0 on success/revoke.
+  embeddingAttempts  Int       @default(0) @map("embedding_attempts")
+  /// Last embed error (diagnosability; surfaced by h-validate).
+  embeddingError     String?   @map("embedding_error")
   /// Number of input tokens.
   tokens      Int?
   /// Classification tags.
@@ -797,11 +836,70 @@ model Node {
   pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
   versions      NodeVersion[]
+  embeddings    NodeEmbedding[] // 033: 1 abstract row + N chunk rows; Cascade delete
 
   @@unique([loc, memoryId])
   @@index([loc])
   @@index([memoryId])
   @@map("nodes")
+}
+
+/// 033-rag-vector-retrieval: what a memory's vector index is built from
+/// (per-memory property, not a query parameter — FR-002).
+enum EmbeddingSource {
+  abstract // default — embed Node.abstract
+  contentChunks @map("content_chunks") // embed content chunks
+  both // embed both
+}
+
+/// 033-rag-vector-retrieval: kind of a stored vector.
+enum EmbeddingKind {
+  abstract // one row per node — vector of Node.abstract
+  chunk // N rows per node — vector of one content chunk
+}
+
+/// 033-rag-vector-retrieval: a stored embedding vector for a node's abstract
+/// or one of its content chunks. Vectors are computed on plaintext at write
+/// time (FR-027) and stored plaintext (pgvector). The `embedding` column is
+/// `Unsupported("vector(768)")` — Prisma has no native vector type, so it is
+/// NEVER read/written through the generated client; all access is raw SQL
+/// (`$queryRaw`/`$executeRaw`). The HNSW index + abstract partial-unique index
+/// live in the migration + post-push.sql (not expressible in Prisma schema).
+model NodeEmbedding {
+  id       String        @id @default(cuid())
+  nodeId   String        @map("node_id")
+  /// Denormalized for fast per-memory similarity filtering (search filters by
+  /// memory before ORDER BY distance).
+  memoryId String        @map("memory_id")
+  kind     EmbeddingKind
+  /// Embedding provider — "local" | "openai" | "voyage" … v1 is always "local".
+  provider String
+  /// Stored model id (FR-014) — e.g. "nomic-embed-text-v1.5". Forward-compat
+  /// for a deliberate re-embed when the platform model changes.
+  model    String
+  /// Vector dimension (sanity / forward-compat guard).
+  dim      Int
+  // ── chunk-only locators (NULL for kind = abstract); FR-016 ──
+  chunkIndex Int?    @map("chunk_index")
+  charStart  Int?    @map("char_start")
+  charEnd    Int?    @map("char_end")
+  chunkText  String? @map("chunk_text")
+  // ── the vector — pgvector; Prisma has no native type ──
+  // Declared OPTIONAL in Prisma (a REQUIRED Unsupported field would drop the
+  // model from client create/upsert and break the $allModels extension in
+  // src/integrations/db/client.ts). NOT NULL is enforced at the DB level
+  // (migration + post-push.sql `SET NOT NULL`); rows are only ever inserted via
+  // raw SQL, which always supplies the vector — so the optionality is cosmetic.
+  embedding Unsupported("vector(768)")?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  node   Node   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeId, kind, chunkIndex]) // dedupes CHUNK rows; abstract uniqueness via partial index (post-push.sql)
+  @@index([nodeId])
+  @@index([memoryId])
+  @@map("node_embeddings")
 }
 
 /// Directed edge between two Nodes. The `label` describes the

@@ -61,3 +61,48 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_personal_agent_id
   CHECK (class NOT IN ('personal', 'private') OR user_memory_of_agent_id IS NOT NULL);
+
+-- ─── 033-rag-vector-retrieval ───────────────────────────────────────────
+-- pgvector extension (db push with `extensions = [vector]` also handles this;
+-- kept here so a bare psql -f post-push.sql is self-sufficient).
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- The vector column is declared OPTIONAL in schema.prisma (Prisma typing
+-- constraint), so `db push` creates it nullable. Enforce NOT NULL here — rows
+-- are only ever inserted via raw SQL, which always supplies the vector.
+ALTER TABLE node_embeddings ALTER COLUMN embedding SET NOT NULL;
+
+-- HNSW index for cosine similarity (pgvector defaults pinned).
+CREATE INDEX IF NOT EXISTS node_embeddings_embedding_hnsw
+  ON node_embeddings USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+
+-- One abstract vector per node (the @@unique can't dedupe NULL chunk_index rows).
+CREATE UNIQUE INDEX IF NOT EXISTS node_embeddings_abstract_uniq
+  ON node_embeddings (node_id) WHERE kind = 'abstract';
+
+-- Cheap sweep "find work" indexes (scan only marked rows).
+CREATE INDEX IF NOT EXISTS nodes_embedding_pending_idx
+  ON nodes (embedding_pending_at) WHERE embedding_pending_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS nodes_embedding_failed_idx
+  ON nodes (embedding_failed_at) WHERE embedding_failed_at IS NOT NULL;
+
+-- FR-026: an encrypted memory cannot have the index enabled without a recorded
+-- disclosure acknowledgment.
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_vector_encrypted_ack;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_vector_encrypted_ack
+  CHECK (NOT (is_encrypted AND vector_index_enabled) OR vector_index_encrypted_ack_at IS NOT NULL);
+
+-- FR-003: chunk dials sanity.
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_chunk_tokens_positive;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_chunk_tokens_positive
+  CHECK (chunk_tokens IS NULL OR chunk_tokens > 0);
+
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_chunk_overlap_valid;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_chunk_overlap_valid
+  CHECK (chunk_overlap IS NULL OR (chunk_overlap >= 0 AND (chunk_tokens IS NULL OR chunk_overlap < chunk_tokens)));
