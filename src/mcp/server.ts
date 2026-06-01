@@ -48,6 +48,9 @@ import {
 } from './access-control.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { computeContentHash } from '../lib/contentHash.js';
+import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
+import { vectorSearchNodes } from '../services/embedding/vectors.js';
+import { getEmbeddingClient, isEmbeddingConfigured } from '../lib/embedding/index.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import {
   NodeNotFoundError,
@@ -958,13 +961,14 @@ export function createMcpServerInstance(
     'h-find-nodes',
     'Substring/keyword search across node name, loc, description, and tags. ALL whitespace-separated terms must appear (case-insensitive) somewhere in those fields — no semantic / vector search, no fuzzy matching, no stemming, and node BODY content is NOT indexed. Multi-word natural-language queries that don\'t share literal substrings with the corpus will return zero hits; pick discriminating keywords. Pass `query: "*"` (or `""`) to match every node — useful as a first survey before adding to a memory. To browse the tree structure, use `h-list-nodes` instead. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory. Soft-deleted nodes are excluded.',
     {
-      query: z.string().describe('Whitespace-separated keywords; each must literally appear (case-insensitive) in name/loc/description/tags. Not a natural-language or semantic query, and body content is NOT searched. Use "*" or "" to match all nodes (survey mode).'),
-      parentRel: z.string().optional().describe('Scope search to this subtree'),
+      query: z.string().describe('For mode:keyword (default) — whitespace-separated keywords; each must literally appear (case-insensitive) in name/loc/description/tags. For mode:vector — a natural-language query embedded and matched semantically against the memory\'s vector index (spec 033). Use "*" or "" to match all nodes (keyword survey mode).'),
+      mode: z.enum(['keyword', 'vector']).optional().describe('keyword (default): substring match. vector: semantic search over the memory\'s vector index (requires the memory to have vectorIndexEnabled). Spec 033.'),
+      parentRel: z.string().optional().describe('Scope search to this subtree (keyword mode)'),
       memoryUrn: z.string().optional().describe('Scope search to this memory'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
       limit: z.number().optional().describe('Max results (default 50)'),
     },
-    async ({ query, parentRel, memoryUrn, brief, limit }) => {
+    async ({ query, mode, parentRel, memoryUrn, brief, limit }) => {
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -1038,6 +1042,88 @@ export function createMcpServerInstance(
           }
           where.memoryId = resolvedParent.memoryId;
         }
+      }
+
+      // 033 — vector (semantic) search. Per-memory: resolves the target memory
+      // set from the same scoping as keyword, then searches only the vector-
+      // indexed ones. Diagnostic states are surfaced as text lines (FR-021).
+      if (mode === 'vector') {
+        let targetIds: string[];
+        const scoped = where.memoryId as unknown;
+        if (typeof scoped === 'string') {
+          targetIds = [scoped];
+        } else if (
+          scoped &&
+          typeof scoped === 'object' &&
+          Array.isArray((scoped as { in?: unknown }).in)
+        ) {
+          targetIds = (scoped as { in: string[] }).in;
+        } else {
+          // Admin/all scope: restrict to vector-indexed memories explicitly.
+          const all = await db.memory.findMany({
+            where: { vectorIndexEnabled: true, deletedAt: null },
+            select: { id: true },
+          });
+          targetIds = all.map((m) => m.id);
+        }
+        const indexed = await db.memory.findMany({
+          where: { id: { in: targetIds }, vectorIndexEnabled: true, deletedAt: null },
+          select: { id: true },
+        });
+        const indexedIds = indexed.map((m) => m.id);
+        if (indexedIds.length === 0) {
+          return textResult(
+            'Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).',
+          );
+        }
+        if (!isEmbeddingConfigured()) {
+          return textResult(
+            'Note: vector search is unavailable — no embedding endpoint is configured. [embedding_unavailable]\n\nFound 0 node(s).',
+          );
+        }
+        // The `query` arg's describe documents `"*"`/`""` as keyword survey
+        // mode — those values are meaningless to a vector embedder (and
+        // some backends reject empty input outright). Reject explicitly so
+        // callers get a clear message instead of a 400/garbage-vector
+        // (PR-219 review, Copilot).
+        const trimmed = query.trim();
+        if (trimmed === '' || trimmed === '*') {
+          return textResult(
+            'Note: empty or "*" queries are keyword-only (survey mode); supply a natural-language query for mode:vector. [empty_vector_query]\n\nFound 0 node(s).',
+          );
+        }
+        const [qvec] = await getEmbeddingClient().embed([query], 'query');
+        if (!qvec) {
+          // Same defensive guard as the GraphQL nodeSearch path: a
+          // malformed/empty embed response would TypeError downstream.
+          return textResult(
+            'Note: vector search is unavailable — embedding generation returned no vector. [embedding_unavailable]\n\nFound 0 node(s).',
+          );
+        }
+        const hits = await vectorSearchNodes(db, {
+          memoryIds: indexedIds,
+          queryEmbedding: qvec,
+          limit: limit ?? 50,
+        });
+        if (hits.length === 0) return textResult('Found 0 node(s).');
+        const hitNodes = await db.node.findMany({
+          where: { id: { in: hits.map((h) => h.nodeId) }, deletedAt: null },
+        });
+        const nodeById = new Map(hitNodes.map((n) => [n.id, n]));
+        const vlines: string[] = [];
+        for (const hit of hits) {
+          const n = nodeById.get(hit.nodeId);
+          if (!n) continue;
+          const urn = await nodeUrn(n.loc, n.memoryId);
+          const parts = [`- **${urn}** — ${n.name}  (score ${hit.score.toFixed(3)})`];
+          if (n.description) parts.push(`  ${n.description}`);
+          if (!brief && n.abstract) {
+            for (const absLine of (n.abstract as string).split(/\r?\n/)) parts.push(`  ${absLine}`);
+          }
+          if (n.tags?.length) parts.push(`  Tags: ${(n.tags as string[]).join(', ')}`);
+          vlines.push(parts.join('\n'));
+        }
+        return textResult(`Found ${vlines.length} node(s):\n\n${vlines.join('\n')}`);
       }
 
       const allNodes = await db.node.findMany({
@@ -1844,6 +1930,14 @@ export function createMcpServerInstance(
         });
       }
 
+      // 033 — (re-)embed on write. MCP stores plaintext on the row (#206), and
+      // `content`/`normalizedAbstract` are plaintext here.
+      void enqueueNodeEmbedding(db, {
+        nodeId: upserted.id,
+        memoryId,
+        plaintext: { content: content ?? null, abstract: normalizedAbstract },
+      });
+
       const savedUrn = await nodeUrn(loc, memoryId);
       return textResult(`Node saved: ${savedUrn}`);
     },
@@ -2034,6 +2128,19 @@ export function createMcpServerInstance(
           outgoingEdges: updatedNode.outgoingEdges ?? [],
         }, '', auth.clientId, existing.memoryId).catch((err) => {
           console.error('[h-update-node] git write error:', err);
+        });
+      }
+
+      // 033 — re-embed when content or abstract changed (existing.* is plaintext
+      // on the MCP path, #206). Other-field-only updates don't touch the index.
+      if (content !== undefined || normalizedAbstract !== undefined) {
+        void enqueueNodeEmbedding(db, {
+          nodeId: existing.id,
+          memoryId: existing.memoryId,
+          plaintext: {
+            content: content !== undefined ? content : existing.content,
+            abstract: normalizedAbstract !== undefined ? normalizedAbstract : existing.abstract,
+          },
         });
       }
 

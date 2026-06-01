@@ -2,6 +2,12 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypt
 import { generateId } from '../../../lib/id.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
+  enqueueNodeEmbedding,
+  backfillMemoryEmbeddings,
+} from '../../../services/embedding/enqueue.js';
+import { deleteMemoryVectors, vectorSearchNodes } from '../../../services/embedding/vectors.js';
+import { getEmbeddingClient, isEmbeddingConfigured } from '../../../lib/embedding/index.js';
+import {
   APP_KEY_PREFIX,
   USER_API_KEY_LABEL_MAX_LEN,
   hashAppKey,
@@ -1742,6 +1748,134 @@ export const resolvers = {
       return sorted.slice(offset ?? 0, (offset ?? 0) + (limit ?? 100));
     },
 
+    /**
+     * Spec 033 — vector/hybrid-aware search. The legacy `nodes` query stays
+     * keyword-only (`[Node!]!`); `nodeSearch` is the structured envelope
+     * surface that returns `{ nodes, reason, degraded }` so flag conditions
+     * stay machine-readable (the MCP path renders them as text lines).
+     *
+     * v1 / US1 scope (this resolver):
+     *   - mode: vector (and the default when mode is omitted) is fully wired.
+     *   - mode: keyword / hybrid throw GraphQLError until US3 (T050) lands
+     *     them. Throwing keeps the schema stable AND tells the caller exactly
+     *     when each capability arrives — silently returning empty would
+     *     conflate "not implemented yet" with "no hits."
+     *   - granularity: chunk and expand>0 throw the same way until US2 (T042)
+     *     and US3 (T049) respectively.
+     *
+     * Access control mirrors the keyword `nodes` query — `getAccessibleMemoryIds`
+     * gates the memory scope, and the raw-SQL similarity query is scoped to
+     * those IDs (never cross-memory).
+     */
+    nodeSearch: async (
+      _: unknown,
+      {
+        query,
+        memoryUrn,
+        mode,
+        expand,
+        granularity,
+        limit,
+      }: {
+        query: string;
+        memoryUrn?: string;
+        mode?: 'keyword' | 'vector' | 'hybrid';
+        expand?: number;
+        granularity?: 'node' | 'chunk';
+        limit?: number;
+      },
+      ctx: Context,
+    ) => {
+      const effectiveMode = mode ?? 'vector';
+      if (effectiveMode === 'keyword' || effectiveMode === 'hybrid') {
+        throw new GraphQLError(
+          `nodeSearch mode:${effectiveMode} ships in spec 033 US3 (T050). For keyword search today, use the legacy nodes(search:) query.`,
+          { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
+        );
+      }
+      if (granularity === 'chunk') {
+        throw new GraphQLError(
+          'nodeSearch granularity:chunk ships in spec 033 US2 (T042).',
+          { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
+        );
+      }
+      if (expand != null && expand > 0) {
+        throw new GraphQLError(
+          'nodeSearch expand>0 ships in spec 033 US3 (T049).',
+          { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
+        );
+      }
+
+      // Resolve scope: a single memory by URN (with access check), or the
+      // full accessible set when memoryUrn is omitted.
+      let scopeIds: string[];
+      const accessible = await getAccessibleMemoryIds(ctx);
+      if (memoryUrn) {
+        const { id } = await resolveMemoryRef(ctx.db, memoryUrn);
+        if (accessible !== null && !accessible.includes(id)) {
+          throw new GraphQLError('Memory not accessible.', {
+            extensions: { code: 'FORBIDDEN' },
+          });
+        }
+        scopeIds = [id];
+      } else if (accessible === null) {
+        // Admin/all scope: explicitly restrict to vector-indexed memories
+        // (mirrors the h-find-nodes MCP path).
+        const all = await ctx.db.memory.findMany({
+          where: { vectorIndexEnabled: true, deletedAt: null },
+          select: { id: true },
+        });
+        scopeIds = all.map((m) => m.id);
+      } else {
+        scopeIds = accessible;
+      }
+
+      // Filter to vector-indexed memories. No-index is a flagged result,
+      // never an error (FR-021 + contract "Access control" section).
+      const indexed = await ctx.db.memory.findMany({
+        where: { id: { in: scopeIds }, vectorIndexEnabled: true, deletedAt: null },
+        select: { id: true },
+      });
+      const indexedIds = indexed.map((m) => m.id);
+      if (indexedIds.length === 0) {
+        return { nodes: [], reason: 'no_vector_index', degraded: null };
+      }
+      if (!isEmbeddingConfigured()) {
+        return { nodes: [], reason: 'embedding_unavailable', degraded: null };
+      }
+
+      const [qvec] = await getEmbeddingClient().embed([query], 'query');
+      if (!qvec) {
+        // Defensive: empty/malformed embed response would TypeError in
+        // toVectorLiteral. Treat as the same "unavailable" flag the
+        // unconfigured-endpoint branch returns above (PR-219 review).
+        return { nodes: [], reason: 'embedding_unavailable', degraded: null };
+      }
+      const hits = await vectorSearchNodes(ctx.db, {
+        memoryIds: indexedIds,
+        queryEmbedding: qvec,
+        limit: limit ?? 50,
+      });
+      if (hits.length === 0) {
+        return { nodes: [], reason: null, degraded: null };
+      }
+      const hitNodes = await ctx.db.node.findMany({
+        where: { id: { in: hits.map((h) => h.nodeId) }, deletedAt: null },
+        include: {
+          outgoingEdges: { include: { target: true } },
+          incomingEdges: { include: { source: true } },
+        },
+      });
+      // Decrypt batched — same posture as the legacy nodes query.
+      await decryptNodesBatch(ctx.db, hitNodes);
+      // Preserve hit ranking order returned by vectorSearchNodes.
+      const byId = new Map(hitNodes.map((n) => [n.id, n]));
+      const ordered = hits
+        .map((h) => byId.get(h.nodeId))
+        .filter((n): n is NonNullable<typeof n> => n !== undefined);
+      return { nodes: ordered, reason: null, degraded: null };
+    },
+
     subtree: async (_: unknown, { prefix: rawPrefix }: { prefix: string }, ctx: Context) => {
       const prefix = parseUrnInput(rawPrefix).value;
       const access = await memoryAccessFilter(ctx);
@@ -2876,6 +3010,14 @@ export const resolvers = {
         console.error('[upsertNode] git write error:', err);
       });
 
+      // 033 — (re-)embed on write. finalNode is decrypted (plaintext) here, so
+      // the prompt-drain embeds correctly even on encrypted memories (FR-027).
+      void enqueueNodeEmbedding(ctx.db, {
+        nodeId: finalNode.id,
+        memoryId: input.memoryId,
+        plaintext: { content: finalNode.content, abstract: finalNode.abstract },
+      });
+
       return finalNode;
     },
 
@@ -3679,6 +3821,11 @@ export const resolvers = {
             // 023-app-shape US4: a `memoryClass: 'group'` argument lets
             // callers create group-class memories explicitly.
             class: requestedClass,
+            // 033 — class-derived default for the vector index (FR-001):
+            // a `knowledge`-class memory (non-encrypted, as created here) is
+            // searchable by default; `group` and others default off. Flippable
+            // later via updateMemory.
+            vectorIndexEnabled: requestedClass === 'knowledge',
             // Group memories must have userId NULL — enforced by the
             // chk_memory_group_no_owner CHECK; we set it explicitly here.
             userId: requestedClass === 'group' ? null : undefined,
@@ -3731,12 +3878,16 @@ export const resolvers = {
         readBranch,
         writeBranch,
         visibility,
+        vectorIndexEnabled,
+        embeddingSource,
       }: {
         id: string; name?: string; urn?: string; organizationId?: string;
         shortDescription?: string; description?: string; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string; readBranch?: string; writeBranch?: string; visibility?: string;
+        vectorIndexEnabled?: boolean;
+        embeddingSource?: 'abstract' | 'contentChunks' | 'both';
       },
       ctx: Context,
     ) => {
@@ -3754,7 +3905,7 @@ export const resolvers = {
         const slug = urn ?? memory.urn.split(':').slice(1).join(':');
         newUrn = `${org.urn}:${slug}`;
       }
-      return ctx.db.memory.update({
+      const updated = await ctx.db.memory.update({
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
@@ -3774,9 +3925,47 @@ export const resolvers = {
           ...(readBranch !== undefined ? { readBranch } : {}),
           ...(writeBranch !== undefined ? { writeBranch } : {}),
           ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
+          // 033 — vector-index config. The chk_memory_vector_encrypted_ack CHECK
+          // constraint blocks enabling on an encrypted memory without the
+          // disclosure ack (the friendly EncryptedVectorIndexNotAcknowledgedError
+          // wrapper + chunk dials land in US5/US2).
+          ...(vectorIndexEnabled !== undefined ? { vectorIndexEnabled } : {}),
+          ...(embeddingSource !== undefined ? { embeddingSource } : {}),
         },
         include: MEMORY_INCLUDE,
       });
+
+      // 033 — react to vector-index config changes (FR-004/FR-008/FR-026):
+      const nowEnabled = updated.vectorIndexEnabled;
+      const wasEnabled = memory.vectorIndexEnabled;
+      const sourceChanged =
+        embeddingSource !== undefined && embeddingSource !== memory.embeddingSource;
+      if (nowEnabled && (!wasEnabled || sourceChanged)) {
+        // When the source itself changes (abstract ↔ contentChunks ↔ both),
+        // the previously-stored vectors are now the wrong KIND. vectorSearch
+        // doesn't filter by kind today, so leaving them would mix stale
+        // vectors of the old kind with whatever the backfill produces.
+        // Drop everything first; the backfill re-stamps every node and the
+        // sweep re-embeds against the new source (PR-219 review).
+        if (sourceChanged) {
+          await deleteMemoryVectors(ctx.db, id);
+        }
+        // Enabled or re-sourced → backfill: stamp every live node pending.
+        await backfillMemoryEmbeddings(ctx.db, id);
+      } else if (!nowEnabled && wasEnabled) {
+        // Disabled → drop stored vectors and clear markers.
+        await deleteMemoryVectors(ctx.db, id);
+        await ctx.db.node.updateMany({
+          where: { memoryId: id },
+          data: {
+            embeddingPendingAt: null,
+            embeddingFailedAt: null,
+            embeddingError: null,
+            embeddingAttempts: 0,
+          },
+        });
+      }
+      return updated;
     },
 
     deleteMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
@@ -4195,7 +4384,7 @@ export const resolvers = {
       // applied verbatim per plan D4 (no recomputation on restore;
       // legacy null hashes short-circuit the staleness check via the
       // NOT NULL guard in h-read-node).
-      return ctx.db.node.update({
+      const restored = await ctx.db.node.update({
         where: { id: node.id },
         data: {
           name: version.name,
@@ -4208,6 +4397,15 @@ export const resolvers = {
         },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
+      // 033 — re-embed the restored content (version snapshots are plaintext on
+      // non-encrypted memories; ciphertext snapshots are handled by embedNode's
+      // #206 permanent-fail path).
+      void enqueueNodeEmbedding(ctx.db, {
+        nodeId: restored.id,
+        memoryId: restored.memoryId,
+        plaintext: { content: version.content, abstract: version.abstract },
+      });
+      return restored;
     },
 
     addToMyMemories: async (_: unknown, { memoryId }: { memoryId: string }, ctx: Context) => {

@@ -373,7 +373,11 @@ describe('h-read-node — `Source: abstract-stale` marker (US2)', () => {
     await updateNode({ loc: 'r7', content: "Y'" });
     await db.memory.update({
       where: { id: fx.memory.id },
-      data: { isEncrypted: true },
+      // 033: the memory was created via createMemory (knowledge → vectorIndexEnabled
+      // true by the class-derived default). Encrypting it without acknowledging the
+      // inversion risk would violate chk_memory_vector_encrypted_ack, so disable the
+      // index here — this test is about abstract staleness, not vectors.
+      data: { isEncrypted: true, vectorIndexEnabled: false },
     });
     const out = await readNode('r7', 'all');
     expect(out).not.toContain('Source: abstract-stale');
@@ -459,7 +463,11 @@ describe('h-validate — `[stale-abstract]` warning (US3)', () => {
     await updateNode({ loc: 'v-enc', content: "Y'" });
     await db.memory.update({
       where: { id: fx.memory.id },
-      data: { isEncrypted: true },
+      // 033: the memory was created via createMemory (knowledge → vectorIndexEnabled
+      // true by the class-derived default). Encrypting it without acknowledging the
+      // inversion risk would violate chk_memory_vector_encrypted_ack, so disable the
+      // index here — this test is about abstract staleness, not vectors.
+      data: { isEncrypted: true, vectorIndexEnabled: false },
     });
     const out = await validate();
     expect(out).not.toContain('[stale-abstract]');
