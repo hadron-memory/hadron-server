@@ -1,0 +1,12 @@
+# pnpm 11 stopped reading the `"pnpm"` field in package.json — config moved
+# to this file (even for single-package repos). Without explicit approval
+# here pnpm exits non-zero on `pnpm install` because @prisma/client,
+# bcrypt, esbuild, etc. need their build/postinstall scripts to run
+# (prisma generates the client, bcrypt + esbuild build native artifacts).
+allowBuilds:
+  '@apollo/protobufjs': true
+  '@prisma/client': true
+  '@prisma/engines': true
+  bcrypt: true
+  esbuild: true
+  prisma: true
