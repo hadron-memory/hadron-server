@@ -370,20 +370,17 @@ async function renderNodeSearchResult(
   return { nodes: ordered, passages: [], reason, degraded };
 }
 
-/**
- * Deduplicate nodes by loc: when multiple nodes share the same loc across
- * different memories, prefer canonical (isLink=false) over link nodes.
- */
-function deduplicateNodes<T extends { loc: string; isLink: boolean }>(nodes: T[]): T[] {
-  const byLoc = new Map<string, T>();
-  for (const node of nodes) {
-    const existing = byLoc.get(node.loc);
-    if (!existing || (existing.isLink && !node.isLink)) {
-      byLoc.set(node.loc, node);
-    }
-  }
-  return Array.from(byLoc.values());
-}
+// Note (PR-227 review, Gemini): a `deduplicateNodes` helper lived here
+// pre-2026-06-02 to collapse rows by `(memoryId, loc)` and prefer the
+// canonical (isLink=false) over the link variant. The schema's
+// `@@unique([loc, memoryId])` on Node makes this a structural no-op
+// for any direct `findMany` result — Prisma cannot return two rows for
+// the same (memoryId, loc) pair, so the canonical-vs-link tiebreak
+// never fires. The function was removed and call sites use the
+// findMany result directly. Cross-memory same-loc preservation is
+// pinned by src/test/integration/dedup-cross-memory-loc.test.ts so a
+// future query shape that re-introduces row duplication (e.g. a UNION
+// across memories) would surface there.
 
 /**
  * Verify the caller has write access to a specific memory.
@@ -1805,7 +1802,7 @@ export const resolvers = {
       await decryptNodesBatch(ctx.db, results);
       // Sort by nodeType priority: abstract first, then info/reference, then record
       const typePriority: Record<string, number> = { abstract: 0, info: 1, reference: 1, record: 2, system: 3 };
-      const sorted = deduplicateNodes(results).sort((a, b) =>
+      const sorted = results.sort((a, b) =>
         (typePriority[a.nodeType] ?? 1) - (typePriority[b.nodeType] ?? 1)
       );
       return sorted.slice(offset ?? 0, (offset ?? 0) + (limit ?? 100));
@@ -1909,19 +1906,17 @@ export const resolvers = {
       }
 
       // Helper: run the keyword half (used by keyword + hybrid). Mirrors
-      // the MCP fall-through: findMany over scope → dedup by loc → filter
-      // by matchesQuery.
+      // the MCP fall-through: findMany over scope → filter by matchesQuery.
+      // No (memoryId, loc) dedup needed — the Node model's
+      // @@unique([loc, memoryId]) makes that a structural no-op
+      // (PR-227 review). Cross-memory same-loc preservation is pinned by
+      // src/test/integration/dedup-cross-memory-loc.test.ts.
       const runKeyword = async (): Promise<typeof keywordMatchesType> => {
         const candidates = await ctx.db.node.findMany({
           where: { memoryId: { in: scopeIds }, deletedAt: null },
           take: 1000,
         });
-        const byLoc = new Map<string, typeof candidates[0]>();
-        for (const n of candidates) {
-          const existing = byLoc.get(n.loc);
-          if (!existing || (existing.isLink && !n.isLink)) byLoc.set(n.loc, n);
-        }
-        return Array.from(byLoc.values()).filter((n) => matchesQuery(n, query));
+        return candidates.filter((n) => matchesQuery(n, query));
       };
       // Type alias for the helper's return — TS infers via the call site.
       let keywordMatchesType!: Awaited<ReturnType<typeof ctx.db.node.findMany>>;
@@ -2053,7 +2048,7 @@ export const resolvers = {
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
       await decryptNodesBatch(ctx.db, results);
-      return deduplicateNodes(results);
+      return results;
     },
 
     nodeUsage: async (_: unknown, { loc, limit }: { loc: string; limit?: number }, ctx: Context) => {

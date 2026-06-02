@@ -1274,14 +1274,12 @@ export function createMcpServerInstance(
             limit: candidateLimit,
           }),
         ]);
-        // Dedup keyword nodes by loc (canonical preferred), filter by
-        // matchesQuery, then re-rank by relevance for RRF.
-        const byLocK = new Map<string, typeof kwNodes[0]>();
-        for (const n of kwNodes) {
-          const existing = byLocK.get(n.loc);
-          if (!existing || (existing.isLink && !n.isLink)) byLocK.set(n.loc, n);
-        }
-        const kwMatches = Array.from(byLocK.values()).filter((n) => matchesQuery(n, query));
+        // Filter by matchesQuery, then re-rank by relevance for RRF.
+        // No (memoryId, loc) dedup needed — the Node model's
+        // @@unique([loc, memoryId]) makes that a structural no-op
+        // (PR-227 review). Cross-memory same-loc preservation is pinned
+        // by src/test/integration/dedup-cross-memory-loc.test.ts.
+        const kwMatches = kwNodes.filter((n) => matchesQuery(n, query));
         const kwRanked = keywordRelevanceRank(kwMatches, query);
         // RRF the two lists by node ID. The fused list is the union of
         // both inputs ordered by reciprocal-rank score.
@@ -1367,14 +1365,11 @@ export function createMcpServerInstance(
             }
           : undefined,
       });
-      // Deduplicate by loc: prefer canonical (isLink=false) over link nodes
-      const byLoc = new Map<string, typeof allNodes[0]>();
-      for (const n of allNodes) {
-        const existing = byLoc.get(n.loc);
-        if (!existing || (existing.isLink && !n.isLink)) byLoc.set(n.loc, n);
-      }
-      const nodes = Array.from(byLoc.values());
-      const matches = nodes.filter((n) => matchesQuery(n, query));
+      // No (memoryId, loc) dedup needed — the Node model's
+      // @@unique([loc, memoryId]) makes that a structural no-op
+      // (PR-227 review). Cross-memory same-loc preservation is pinned
+      // by src/test/integration/dedup-cross-memory-loc.test.ts.
+      const matches = allNodes.filter((n) => matchesQuery(n, query));
       const limited = matches.slice(0, limit ?? 50);
 
       // Spec 033 US3 (T049) — append undirected neighbors after the
