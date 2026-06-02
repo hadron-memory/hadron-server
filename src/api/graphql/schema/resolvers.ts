@@ -1850,12 +1850,15 @@ export const resolvers = {
       ctx: Context,
     ) => {
       const effectiveMode = mode ?? 'vector';
-      // Spec 033 US2 — chunk-granularity rejection only when the mode
-      // doesn't support it. Chunk retrieval requires vector matches;
-      // keyword-mode has nothing chunk-shaped to return.
-      if (granularity === 'chunk' && effectiveMode === 'keyword') {
+      // Spec 033 US2 — chunk-granularity is supported only in mode:vector
+      // today. Keyword has no chunks; hybrid's RRF fusion produces
+      // node-level scores, not passage-level (PR-225 review, Gemini high).
+      // If hybrid+chunk grows real demand later, the design call is whether
+      // to RRF over passages (different semantics) or fuse keyword node
+      // hits with vector passages (asymmetric output). Out of v1.
+      if (granularity === 'chunk' && effectiveMode !== 'vector') {
         throw new GraphQLError(
-          'nodeSearch granularity:chunk requires mode:vector or mode:hybrid (keyword search has no chunks).',
+          `nodeSearch granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}). Hybrid + chunk passages is out of v1 — please use mode:vector for passage retrieval.`,
           { extensions: { code: 'BAD_USER_INPUT' } },
         );
       }
@@ -4117,19 +4120,25 @@ export const resolvers = {
       // typed error at the API boundary. Compute effective post-update
       // values so partial updates (just chunkTokens, just chunkOverlap)
       // still validate against the row's settled state.
+      //
+      // PR-225 review (Gemini med + Copilot): when either dial is null in
+      // the post-update state, the runtime treats null as "platform
+      // default" (512 tokens / 64 overlap; see src/lib/chunking.ts).
+      // Validation MUST resolve to those defaults too, otherwise an
+      // input like `chunkOverlap: 600` with `chunkTokens: null` would
+      // slip past the API and crash at the DB CHECK with a 500.
+      const DEFAULT_TOKENS_FOR_VALIDATION = 512;
+      const DEFAULT_OVERLAP_FOR_VALIDATION = 64;
       const effectiveTokens = chunkTokens !== undefined ? chunkTokens : memory.chunkTokens;
       const effectiveOverlap = chunkOverlap !== undefined ? chunkOverlap : memory.chunkOverlap;
       if (effectiveTokens !== null && effectiveTokens !== undefined && effectiveTokens <= 0) {
         throw new InvalidChunkConfigError(`chunkTokens must be > 0 (got ${effectiveTokens}).`);
       }
-      if (
-        effectiveOverlap !== null &&
-        effectiveOverlap !== undefined &&
-        (effectiveOverlap < 0 ||
-          (effectiveTokens !== null && effectiveTokens !== undefined && effectiveOverlap >= effectiveTokens))
-      ) {
+      const resolvedTokens = effectiveTokens ?? DEFAULT_TOKENS_FOR_VALIDATION;
+      const resolvedOverlap = effectiveOverlap ?? DEFAULT_OVERLAP_FOR_VALIDATION;
+      if (resolvedOverlap < 0 || resolvedOverlap >= resolvedTokens) {
         throw new InvalidChunkConfigError(
-          `chunkOverlap must satisfy 0 <= chunkOverlap < chunkTokens (got overlap=${effectiveOverlap}, tokens=${effectiveTokens}).`,
+          `chunkOverlap must satisfy 0 <= chunkOverlap < chunkTokens (effective: overlap=${resolvedOverlap}, tokens=${resolvedTokens}).`,
         );
       }
 
@@ -4176,10 +4185,17 @@ export const resolvers = {
         embeddingSource !== undefined && embeddingSource !== memory.embeddingSource;
       // 033 US2 FR-004 — chunk dial changes also count as a re-index trigger
       // (the existing chunks would otherwise drift from the new boundaries).
-      const chunkConfigChanged =
+      // PR-225 review (Copilot): gate this trigger on the post-update
+      // effective embeddingSource actually using chunks — tweaking chunk
+      // dials on an abstract-only memory shouldn't force a full re-embed.
+      const effectiveSource = updated.embeddingSource;
+      const sourceUsesChunks =
+        effectiveSource === 'contentChunks' || effectiveSource === 'both';
+      const chunkDialsChanged =
         (chunkTokens !== undefined && chunkTokens !== memory.chunkTokens) ||
         (chunkOverlap !== undefined && chunkOverlap !== memory.chunkOverlap) ||
         (forceFixedSize !== undefined && forceFixedSize !== memory.forceFixedSize);
+      const chunkConfigChanged = chunkDialsChanged && sourceUsesChunks;
       if (nowEnabled && (!wasEnabled || sourceChanged || chunkConfigChanged)) {
         // When the source itself changes (abstract ↔ contentChunks ↔ both),
         // the previously-stored vectors are now the wrong KIND. vectorSearch

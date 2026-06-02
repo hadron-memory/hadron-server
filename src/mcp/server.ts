@@ -965,7 +965,7 @@ export function createMcpServerInstance(
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
       limit: z.number().optional().describe('Max results (default 50)'),
       expand: z.number().int().min(0).max(3).optional().describe('Append undirected graph neighbors (all edge types) within depth N AFTER the ranked hits, unscored. Default 0 (no expansion). Max 3. Useful for context-stuffing — the ranked nodes plus their immediate graph context in one tool call. Spec 033 FR-020.'),
-      granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. Only meaningful for mode:vector / mode:hybrid on a content-chunk-bearing memory. Spec 033 US2 FR-022.'),
+      granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),
     },
     async ({ query, mode, parentRel, memoryUrn, brief, limit, expand, granularity }) => {
       try {
@@ -973,6 +973,17 @@ export function createMcpServerInstance(
       } catch (e) {
         if (e instanceof InvalidParentRelError) return textResult(e.message);
         throw e;
+      }
+      // Spec 033 US2 — chunk granularity requires explicit mode:vector
+      // (PR-225 review, Gemini high). MCP's default mode is keyword,
+      // which has no chunks. Hybrid's RRF produces node-level scores not
+      // passage-level. Explicit rejection matches the GraphQL nodeSearch
+      // surface and avoids silently dropping the chunk arg.
+      if (granularity === 'chunk' && mode !== 'vector') {
+        const effective = mode ?? 'keyword';
+        return textResult(
+          `granularity:chunk requires mode:vector (got mode:${effective}). Hybrid + chunk passages is out of v1.`,
+        );
       }
 
       // Normalize parentRel once so validation, resolution, and scoping all

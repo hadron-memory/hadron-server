@@ -183,13 +183,21 @@ function structureAwareChunks(
  * the final chunk is shorter when the content doesn't divide evenly.
  */
 function fixedSizeChunks(content: string, config: ChunkingConfig): Chunk[] {
-  const tokens = config.chunkTokens ?? DEFAULT_CHUNK_TOKENS;
-  const overlap = config.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP;
+  // PR-225 review (Gemini med + Copilot): defensive clamping. If
+  // `chunkOverlap >= chunkTokens` slips past API validation (e.g., a
+  // test inserts directly into the row), the unclamped step would be
+  // ≤ 0 and the `Math.max(1, …)` below would force a 1-char slide —
+  // potentially emitting millions of chunks for a moderately-sized
+  // document. Clamp the inputs at the chunking layer too.
+  const tokens = Math.max(1, config.chunkTokens ?? DEFAULT_CHUNK_TOKENS);
+  const overlap = Math.max(
+    0,
+    Math.min(config.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP, tokens - 1),
+  );
   const windowChars = tokens * CHARS_PER_TOKEN;
   const stepChars = (tokens - overlap) * CHARS_PER_TOKEN;
-  // Defensive: stepChars must be > 0 (otherwise infinite loop). The
-  // validated config invariant (`chunkOverlap < chunkTokens`) guarantees
-  // this in practice; clamp here as a safety net.
+  // Belt-and-suspenders: even with the clamping above, keep the
+  // floor-at-1 guard so the loop can never spin infinitely.
   const step = Math.max(1, stepChars);
 
   const chunks: Chunk[] = [];
