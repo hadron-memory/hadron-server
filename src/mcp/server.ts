@@ -51,7 +51,7 @@ import { computeContentHash } from '../lib/contentHash.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { reciprocalRankFusion } from '../lib/rrf.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
-import { vectorSearchNodes } from '../services/embedding/vectors.js';
+import { vectorSearchNodes, vectorSearchChunks } from '../services/embedding/vectors.js';
 import { getEmbeddingClient, isEmbeddingConfigured } from '../lib/embedding/index.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import {
@@ -965,8 +965,9 @@ export function createMcpServerInstance(
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
       limit: z.number().optional().describe('Max results (default 50)'),
       expand: z.number().int().min(0).max(3).optional().describe('Append undirected graph neighbors (all edge types) within depth N AFTER the ranked hits, unscored. Default 0 (no expansion). Max 3. Useful for context-stuffing — the ranked nodes plus their immediate graph context in one tool call. Spec 033 FR-020.'),
+      granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. Only meaningful for mode:vector / mode:hybrid on a content-chunk-bearing memory. Spec 033 US2 FR-022.'),
     },
-    async ({ query, mode, parentRel, memoryUrn, brief, limit, expand }) => {
+    async ({ query, mode, parentRel, memoryUrn, brief, limit, expand, granularity }) => {
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -1112,6 +1113,40 @@ export function createMcpServerInstance(
           return textResult(
             'Note: vector search is unavailable — embedding generation returned no vector. [embedding_unavailable]\n\nFound 0 node(s).',
           );
+        }
+        // Spec 033 US2 (T042) — chunk-level granularity returns passages
+        // (span text + char offsets + chunk index + parent URN) rather
+        // than node URNs. Renders as a flat list of `- **<urn>** [chunk N
+        // @ chars a-b] (score …)\n  <span text>` entries, one per
+        // passage. Skips expand entirely (chunk-level retrieval is for
+        // RAG context-stuffing; graph expansion is a node-level concept).
+        if (granularity === 'chunk') {
+          const chunkHits = await vectorSearchChunks(db, {
+            memoryIds: indexedIds!,
+            queryEmbedding: qvec,
+            limit: limit ?? 50,
+          });
+          if (chunkHits.length === 0) return textResult('Found 0 passage(s).');
+          // Pre-resolve URNs for hit nodes (dedupe — one node may have
+          // multiple chunk hits).
+          const uniqueNodeIds = Array.from(new Set(chunkHits.map((h) => h.nodeId)));
+          const hitNodes = await db.node.findMany({
+            where: { id: { in: uniqueNodeIds }, deletedAt: null },
+            select: { id: true, loc: true, memoryId: true, name: true },
+          });
+          const nodeById = new Map(hitNodes.map((n) => [n.id, n]));
+          const lines: string[] = [];
+          for (const hit of chunkHits) {
+            const n = nodeById.get(hit.nodeId);
+            if (!n) continue;
+            const urn = await nodeUrn(n.loc, n.memoryId);
+            const header = `- **${urn}** [chunk ${hit.chunkIndex} @ chars ${hit.charStart}-${hit.charEnd}] — ${n.name}  (score ${hit.score.toFixed(3)})`;
+            // Chunk text body — prefix each line two spaces for parity
+            // with the abstract-render format used in node-level mode.
+            const bodyLines = hit.chunkText.split(/\r?\n/).map((l) => `  ${l}`);
+            lines.push([header, ...bodyLines].join('\n'));
+          }
+          return textResult(`Found ${lines.length} passage(s):\n\n${lines.join('\n')}`);
         }
         const hits = await vectorSearchNodes(db, {
           memoryIds: indexedIds!,

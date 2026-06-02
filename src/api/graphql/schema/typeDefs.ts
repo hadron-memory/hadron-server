@@ -94,8 +94,32 @@ export const typeDefs = `#graphql
   """
   type NodeSearchResult {
     nodes: [Node!]!
+    """
+    Spec 033 US2 — populated when the query specified granularity:chunk on a
+    content-chunk-bearing memory. Each entry is a passage (chunk text +
+    character offsets + chunk index + parent node URN), ranked by best
+    similarity. Empty list when granularity:node (default) — the ranked
+    nodes are in \`nodes\`.
+    """
+    passages: [Passage!]!
     reason: String
     degraded: String
+  }
+
+  """
+  Spec 033 US2 — one matching chunk from a content-chunk vector index.
+  Carries the locator metadata a RAG consumer needs for context-stuffing:
+  span text, character offset within the parent node, chunk index, and
+  the parent node's URN.
+  """
+  type Passage {
+    parentNodeId: ID!
+    parentNodeUrn: String!
+    chunkIndex: Int!
+    charStart: Int!
+    charEnd: Int!
+    text: String!
+    score: Float!
   }
 
   type Node {
@@ -705,6 +729,22 @@ export const typeDefs = `#graphql
     # 033-rag-vector-retrieval: per-memory vector-index config.
     vectorIndexEnabled: Boolean!
     embeddingSource: EmbeddingSource!
+    """
+    Spec 033 US2 — chunk-window size in tokens (~4 chars/token). Null = platform default (512).
+    Applies when embeddingSource includes content chunks.
+    """
+    chunkTokens: Int
+    """
+    Spec 033 US2 — overlap between consecutive chunks in tokens. Null = platform default (64).
+    Must be < chunkTokens.
+    """
+    chunkOverlap: Int
+    """
+    Spec 033 US2 — force the fixed-size chunking strategy, bypassing the
+    structure-aware default. Useful when the content's heading structure
+    is unreliable (e.g. transcripts, machine-generated reports).
+    """
+    forceFixedSize: Boolean!
     userMemoryOfAgentId: String
     anonymousExpiresAt: String
     # 008-agent-installation: app pivot for app/personal-class memories.
@@ -1467,7 +1507,7 @@ export const typeDefs = `#graphql
     truth in \`FR_026_DISCLOSURE\` — see \`src/lib/entityRef/errors.ts\`). On a
     non-encrypted memory the flag is a no-op.
     """
-    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean): Memory!
+    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean): Memory!
 
     """
     Soft-delete a Memory.

@@ -14,7 +14,13 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import type { EmbeddingClient } from '../lib/embedding/index.js';
 import { getEmbeddingClient, isEmbeddingConfigured } from '../lib/embedding/index.js';
 import { isCiphertext } from '../lib/crypto.js';
-import { upsertAbstractVector, deleteNodeVectors } from '../services/embedding/vectors.js';
+import {
+  upsertAbstractVector,
+  upsertChunkVectors,
+  deleteNodeVectors,
+  deleteNodeChunkVectors,
+} from '../services/embedding/vectors.js';
+import { chunkNode } from '../lib/chunking.js';
 
 export interface EmbedPlaintext {
   content?: string | null;
@@ -52,7 +58,16 @@ export async function embedNode(
       embeddingPendingAt: true,
       embeddingAttempts: true,
       memory: {
-        select: { id: true, vectorIndexEnabled: true, embeddingSource: true, isEncrypted: true },
+        select: {
+          id: true,
+          vectorIndexEnabled: true,
+          embeddingSource: true,
+          isEncrypted: true,
+          // 033 US2 — chunk config dials.
+          chunkTokens: true,
+          chunkOverlap: true,
+          forceFixedSize: true,
+        },
       },
     },
   });
@@ -69,7 +84,9 @@ export async function embedNode(
 
   const wantAbstract =
     memory.embeddingSource === 'abstract' || memory.embeddingSource === 'both';
-  // content-chunks is US2; US1 indexes abstracts only.
+  // 033 US2 — content-chunks ships now (alongside `both`).
+  const wantChunks =
+    memory.embeddingSource === 'contentChunks' || memory.embeddingSource === 'both';
 
   try {
     if (wantAbstract) {
@@ -84,23 +101,30 @@ export async function embedNode(
 
       if (abstractText == null || abstractText.trim() === '') {
         // Nothing to embed — ensure no stale abstract vector lingers.
-        await deleteNodeVectors(db, nodeId);
+        // Use deleteNodeVectors when ONLY abstract is wanted; otherwise
+        // a targeted delete-abstract via the chunk-path's transactional
+        // delete-then-insert would clobber the chunks. Since the chunk
+        // path runs its own delete-and-insert for kind='chunk' below,
+        // it's safe to just delete all-vectors here when wantAbstract
+        // alone is true — but when wantChunks is also true, we need to
+        // preserve chunks. Special-case both:
+        if (!wantChunks) {
+          await deleteNodeVectors(db, nodeId);
+        } else {
+          // Targeted: drop the abstract row only; chunks survive.
+          await db.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId} AND kind = 'abstract'`;
+        }
       } else {
         const c = client ?? getEmbeddingClient();
         const [vec] = await c.embed([abstractText], 'document');
-        // Defensive: an empty/malformed embed response yields `undefined`,
-        // which would TypeError in `toVectorLiteral`. Treat as a transient
-        // failure so the sweep retries (PR-219 review).
         if (!vec) {
           throw new Error('Embedding client returned no vector.');
         }
         // Latest-wins guard on the UPSERT (not just the clear): re-check
-        // `embeddingPendingAt` in the DB right before writing. If a newer
-        // write has re-stamped it while we were embedding, our vector is
-        // stale by definition — skip the write so the newer prompt-drain's
-        // result wins (PR-219 review, Gemini high). Without this, two
-        // concurrent prompt-drains race to INSERT and the slower one's
-        // older vector silently overwrites the newer one.
+        // `embeddingPendingAt` in the DB right before writing. PR-219
+        // review (Gemini high) — without this, two concurrent
+        // prompt-drains race to INSERT and the slower one's older vector
+        // silently overwrites the newer one.
         const fresh = await db.node.findUnique({
           where: { id: nodeId },
           select: { embeddingPendingAt: true },
@@ -116,6 +140,67 @@ export async function embedNode(
           dim: c.dim,
           embedding: vec,
         });
+      }
+    }
+
+    if (wantChunks) {
+      // Spec 033 US2 T040 — chunk path. Mirror the abstract-path checks:
+      // encrypted-no-plaintext is a permanent failure; empty content
+      // clears the chunk vectors; otherwise chunk, embed, upsert.
+      const contentText =
+        plaintext?.content !== undefined ? plaintext.content : node.content;
+
+      if (memory.isEncrypted && contentText != null && isCiphertext(contentText)) {
+        await markPermanentFailure(db, nodeId, 'encrypted-no-plaintext (#206)');
+        return 'failed-permanent';
+      }
+
+      if (contentText == null || contentText.trim() === '') {
+        await deleteNodeChunkVectors(db, nodeId);
+      } else {
+        const chunks = chunkNode(contentText, {
+          chunkTokens: memory.chunkTokens ?? undefined,
+          chunkOverlap: memory.chunkOverlap ?? undefined,
+          forceFixedSize: memory.forceFixedSize,
+        });
+        if (chunks.length === 0) {
+          await deleteNodeChunkVectors(db, nodeId);
+        } else {
+          const c = client ?? getEmbeddingClient();
+          const vectors = await c.embed(
+            chunks.map((ch) => ch.text),
+            'document',
+          );
+          if (vectors.length !== chunks.length) {
+            throw new Error(
+              `Embedding client returned ${vectors.length} vectors for ${chunks.length} chunks.`,
+            );
+          }
+          // Same latest-wins guard before the upsert.
+          const fresh = await db.node.findUnique({
+            where: { id: nodeId },
+            select: { embeddingPendingAt: true },
+          });
+          if (fresh?.embeddingPendingAt?.getTime() !== capturedPendingAt?.getTime()) {
+            return 'skipped';
+          }
+          await upsertChunkVectors(
+            db,
+            nodeId,
+            chunks.map((ch, i) => ({
+              nodeId,
+              memoryId: memory.id,
+              provider: c.provider,
+              model: c.model,
+              dim: c.dim,
+              chunkIndex: ch.chunkIndex,
+              charStart: ch.charStart,
+              charEnd: ch.charEnd,
+              chunkText: ch.text,
+              embedding: vectors[i],
+            })),
+          );
+        }
       }
     }
 

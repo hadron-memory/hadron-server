@@ -1,0 +1,251 @@
+/**
+ * 033-rag-vector-retrieval US2 — content-chunk retrieval (SC-005).
+ *
+ * What US2 pins:
+ *   - Memory opted into `embeddingSource: contentChunks` writes one
+ *     `kind='chunk'` row per chunk, each carrying chunkIndex / charStart
+ *     / charEnd / chunkText locator metadata.
+ *   - `granularity: chunk` returns passages (the chunk hits themselves);
+ *     `granularity: node` (default) collapses chunk hits to ranked node
+ *     URNs via MIN(distance) per node.
+ *   - Same hit set produces consistent results under both granularities
+ *     — chunk hits and the collapsed node hits agree on which nodes are
+ *     relevant.
+ */
+
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { db } from '../../integrations/db/client.js';
+import { cleanDb } from '../helpers.js';
+import { generateId } from '../../lib/id.js';
+import type { EmbeddingClient } from '../../lib/embedding/index.js';
+import {
+  setEmbeddingClientForTests,
+  resetEmbeddingClientForTests,
+} from '../../lib/embedding/index.js';
+import { embedNode } from '../../jobs/embedNodes.js';
+import { createTestableMcpServer } from '../../mcp/server.js';
+import type { AuthContext } from '../../middleware/auth.js';
+
+const DIM = 768;
+
+/** Deterministic stub: maps known chunk texts to fixed vectors. */
+function stubClient(map: Record<string, number[]>): EmbeddingClient {
+  return {
+    provider: 'test',
+    model: 'stub-model',
+    dim: DIM,
+    async embed(texts: string[]) {
+      return texts.map((t) => {
+        // Match by substring so multi-chunk content with section headers
+        // doesn't have to be byte-exact in the test map.
+        for (const [key, vec] of Object.entries(map)) {
+          if (t.includes(key)) return vec;
+        }
+        // Fallback: orthogonal-ish vector keyed by string length so each
+        // unmapped chunk lands far from the mapped ones.
+        const v = new Array(DIM).fill(0);
+        v[(t.length * 7) % DIM] = 1;
+        return v;
+      });
+    },
+  };
+}
+
+function oneHot(slot: number): number[] {
+  const v = new Array(DIM).fill(0);
+  v[slot % DIM] = 1;
+  return v;
+}
+
+let orgUrn: string;
+let memUrn: string;
+let memId: string;
+let adminId: string;
+
+function adminAuth(): AuthContext {
+  return { userId: adminId, roles: ['ADMIN'], clientId: `user:${adminId}` };
+}
+
+beforeEach(async () => {
+  await cleanDb(db);
+  process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
+
+  orgUrn = `us2-org-${generateId().slice(0, 8)}`;
+  const org = await db.organization.create({
+    data: { id: generateId(), name: orgUrn, urn: orgUrn },
+  });
+  const admin = await db.user.create({
+    data: { githubId: 9912, githubUsername: 'us2-admin', roles: ['ADMIN'] },
+  });
+  await db.orgMember.create({
+    data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
+  });
+  adminId = admin.id;
+
+  memUrn = `${orgUrn}:us2mem`;
+  const mem = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: org.id,
+      urn: memUrn,
+      name: 'us2mem',
+      class: 'knowledge',
+      vectorIndexEnabled: true,
+      embeddingSource: 'contentChunks',
+    },
+  });
+  memId = mem.id;
+});
+
+afterAll(() => {
+  resetEmbeddingClientForTests();
+  delete process.env.EMBEDDING_API_URL;
+});
+
+async function seedNodeWithChunks(loc: string, content: string): Promise<string> {
+  const nodeId = generateId();
+  await db.node.create({
+    data: {
+      id: nodeId,
+      memoryId: memId,
+      loc,
+      name: loc,
+      content,
+      embeddingPendingAt: new Date(),
+    },
+  });
+  const outcome = await embedNode(db, nodeId);
+  expect(outcome).toBe('embedded');
+  return nodeId;
+}
+
+describe('US2 — chunk-level retrieval (SC-005)', () => {
+  it('contentChunks memory writes kind=chunk rows with full locator metadata', async () => {
+    // Stub returns slot-1 for every chunk so the embed call succeeds; we
+    // care about the row shape here, not the search ranking.
+    setEmbeddingClientForTests(stubClient({}));
+
+    const md = '# Intro\nFirst section body.\n\n## Section B\nSecond section body.\n\n## Section C\nThird section body.';
+    await seedNodeWithChunks('multi-section', md);
+
+    const rows = await db.$queryRaw<
+      { kind: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string }[]
+    >`
+      SELECT kind, chunk_index, char_start, char_end, chunk_text
+      FROM node_embeddings
+      WHERE memory_id = ${memId}
+      ORDER BY chunk_index ASC
+    `;
+    expect(rows.length).toBe(3);
+    expect(rows.every((r) => r.kind === 'chunk')).toBe(true);
+    expect(rows.map((r) => r.chunk_index)).toEqual([0, 1, 2]);
+    // Locator metadata round-trips: each row's stored text equals the
+    // span the offsets point at in the original content.
+    for (const r of rows) {
+      expect(md.slice(r.char_start, r.char_end)).toBe(r.chunk_text);
+    }
+  });
+
+  it('granularity:chunk returns passages, granularity:node collapses to one entry per node', async () => {
+    // Stub: the "alpha" string anchors a known vector; all other chunks
+    // get the orthogonal fallback so the search has exactly one strong
+    // chunk hit (and one node hit by collapse).
+    setEmbeddingClientForTests(
+      stubClient({
+        alpha: oneHot(1),
+      }),
+    );
+
+    const md = '# Intro\nThe alpha keyword goes here.\n\n## Section B\nOther body.\n\n## Section C\nMore content.';
+    await seedNodeWithChunks('with-alpha', md);
+
+    const srv = createTestableMcpServer(adminAuth());
+    // chunk-level — should surface the passage with chunkIndex 0 (the
+    // section containing "alpha").
+    const chunkOut = await srv.callToolText('h-find-nodes', {
+      query: 'alpha',
+      mode: 'vector',
+      memoryUrn: memUrn,
+      granularity: 'chunk',
+      limit: 5,
+    });
+    expect(chunkOut).toContain('passage(s)');
+    expect(chunkOut).toContain('[chunk 0 @ chars');
+    expect(chunkOut).toContain('alpha keyword');
+    // node-level — should surface the parent node URN once (despite the
+    // node having 3 chunks).
+    const nodeOut = await srv.callToolText('h-find-nodes', {
+      query: 'alpha',
+      mode: 'vector',
+      memoryUrn: memUrn,
+      limit: 5,
+    });
+    expect(nodeOut).toContain('with-alpha');
+    expect(nodeOut).toContain('node(s)');
+    // Exactly one occurrence of the URN bullet — collapse worked.
+    const bulletMatches = nodeOut.match(/^- \*\*[^*]+with-alpha/gm) ?? [];
+    expect(bulletMatches.length).toBe(1);
+  });
+
+  it('content edit on a chunk-indexed node re-derives the chunks (FR-017)', async () => {
+    setEmbeddingClientForTests(stubClient({}));
+
+    // Initial content: 2 sections → 2 chunks.
+    const initial = '# A\nfirst version body.\n\n## B\nsecond section.';
+    const nodeId = await seedNodeWithChunks('editable', initial);
+    const initialRows = await db.$queryRaw<{ chunk_index: number; chunk_text: string }[]>`
+      SELECT chunk_index, chunk_text FROM node_embeddings WHERE node_id = ${nodeId} ORDER BY chunk_index
+    `;
+    expect(initialRows.length).toBe(2);
+    expect(initialRows[0].chunk_text).toContain('first version body');
+
+    // Edit: same node, completely different content. The sweep re-derives
+    // chunks against the new content and replaces the prior rows.
+    await db.node.update({
+      where: { id: nodeId },
+      data: {
+        content: '# X\nedited first.\n\n## Y\nedited second.\n\n## Z\nedited third.',
+        embeddingPendingAt: new Date(),
+      },
+    });
+    const outcome = await embedNode(db, nodeId);
+    expect(outcome).toBe('embedded');
+
+    const editedRows = await db.$queryRaw<{ chunk_index: number; chunk_text: string }[]>`
+      SELECT chunk_index, chunk_text FROM node_embeddings WHERE node_id = ${nodeId} ORDER BY chunk_index
+    `;
+    // Old chunks are gone; new chunks reflect the edited content.
+    expect(editedRows.length).toBe(3);
+    expect(editedRows[0].chunk_text).toContain('edited first');
+    expect(editedRows[0].chunk_text).not.toContain('first version body');
+  });
+
+  it('embeddingSource:both writes one abstract row AND N chunk rows', async () => {
+    setEmbeddingClientForTests(stubClient({}));
+
+    await db.memory.update({ where: { id: memId }, data: { embeddingSource: 'both' } });
+
+    const nodeId = generateId();
+    await db.node.create({
+      data: {
+        id: nodeId,
+        memoryId: memId,
+        loc: 'dual-indexed',
+        name: 'dual-indexed',
+        abstract: 'A short summary.',
+        content: '# Section 1\nbody one\n\n## Section 2\nbody two',
+        embeddingPendingAt: new Date(),
+      },
+    });
+    await embedNode(db, nodeId);
+
+    const rows = await db.$queryRaw<{ kind: string }[]>`
+      SELECT kind FROM node_embeddings WHERE node_id = ${nodeId} ORDER BY kind, chunk_index NULLS FIRST
+    `;
+    // Exactly one abstract row + 2 chunk rows.
+    const abstractRows = rows.filter((r) => r.kind === 'abstract');
+    const chunkRows = rows.filter((r) => r.kind === 'chunk');
+    expect(abstractRows.length).toBe(1);
+    expect(chunkRows.length).toBe(2);
+  });
+});
