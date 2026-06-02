@@ -44,8 +44,25 @@ export interface SageMakerEmbeddingClientOptions {
   /** Optional inference-component name (multi-model endpoints). */
   inferenceComponentName?: string;
   /**
+   * Optional dedicated AWS credentials. When supplied, the underlying
+   * SageMakerRuntimeClient uses these instead of the SDK's default
+   * credential chain — recommended hardening so a leaked SageMaker key
+   * only buys `sagemaker:InvokeEndpoint` on the configured endpoint and
+   * NOT whatever the host's default AWS identity can reach (S3 buckets,
+   * other AWS services, account-level enumeration). When unsupplied the
+   * SDK falls through to its standard chain (IAM role on host,
+   * AWS_PROFILE, AWS_ACCESS_KEY_ID/SECRET) — usable for dev / single-
+   * tenant deploys where a separate IAM principal isn't worth the
+   * Doppler overhead.
+   */
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  /** Optional STS session token; only needed for temporary credentials. */
+  sessionToken?: string;
+  /**
    * Test hook: inject a pre-constructed SDK client. Production code does
-   * NOT pass this; the constructor builds its own from `region`.
+   * NOT pass this; the constructor builds its own from `region` and the
+   * optional dedicated credentials.
    */
   sdkClient?: SageMakerRuntimeClient;
 }
@@ -67,8 +84,28 @@ export class SageMakerEmbeddingClient implements EmbeddingClient {
     // "local" default.
     this.provider = opts.provider ?? 'aws-sagemaker';
     this.inferenceComponentName = opts.inferenceComponentName;
-    this.sdk =
-      opts.sdkClient ?? new SageMakerRuntimeClient({ region: opts.region });
+
+    if (opts.sdkClient) {
+      this.sdk = opts.sdkClient;
+    } else {
+      // Build credentials object only when BOTH access key id and secret
+      // are present. The dedicated-credentials path is opt-in; absence
+      // means "use the SDK default chain." A half-configured pair would
+      // be ambiguous, so the factory in `./index.ts` rejects that case
+      // before this constructor is ever called.
+      const credentials =
+        opts.accessKeyId && opts.secretAccessKey
+          ? {
+              accessKeyId: opts.accessKeyId,
+              secretAccessKey: opts.secretAccessKey,
+              ...(opts.sessionToken ? { sessionToken: opts.sessionToken } : {}),
+            }
+          : undefined;
+      this.sdk = new SageMakerRuntimeClient({
+        region: opts.region,
+        ...(credentials ? { credentials } : {}),
+      });
+    }
   }
 
   async embed(texts: string[], purpose: EmbedPurpose): Promise<number[][]> {

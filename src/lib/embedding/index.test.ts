@@ -107,6 +107,57 @@ describe('getEmbeddingClient — sagemaker backend', () => {
   });
 });
 
+describe('getEmbeddingClient — sagemaker dedicated credentials', () => {
+  // Dedicated keys shrink the blast radius of a leak — a leaked
+  // SageMaker key only buys `sagemaker:InvokeEndpoint` on the
+  // configured endpoint, not whatever S3 / account-level surface
+  // the host's default AWS identity can reach.
+
+  function setSageMakerBase() {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+  }
+
+  it('builds a SageMaker client when both ACCESS_KEY_ID and SECRET_ACCESS_KEY are set', () => {
+    setSageMakerBase();
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ACCESS_KEY_ID', 'AKIAIOSFODNN7EXAMPLE');
+    vi.stubEnv(
+      'EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY',
+      'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    );
+    expect(getEmbeddingClient()).toBeInstanceOf(SageMakerEmbeddingClient);
+  });
+
+  it('builds a SageMaker client when neither is set (falls through to default chain)', () => {
+    setSageMakerBase();
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ACCESS_KEY_ID', undefined);
+    vi.stubEnv('EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY', undefined);
+    expect(getEmbeddingClient()).toBeInstanceOf(SageMakerEmbeddingClient);
+  });
+
+  it('throws when only ACCESS_KEY_ID is set (half-configured pair is ambiguous)', () => {
+    setSageMakerBase();
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ACCESS_KEY_ID', 'AKIAIOSFODNN7EXAMPLE');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY', undefined);
+    expect(() => getEmbeddingClient()).toThrow(
+      /EMBEDDING_SAGEMAKER_ACCESS_KEY_ID.*SECRET_ACCESS_KEY.*together/s,
+    );
+  });
+
+  it('throws when only SECRET_ACCESS_KEY is set', () => {
+    setSageMakerBase();
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ACCESS_KEY_ID', undefined);
+    vi.stubEnv(
+      'EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY',
+      'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    );
+    expect(() => getEmbeddingClient()).toThrow(
+      /EMBEDDING_SAGEMAKER_ACCESS_KEY_ID.*SECRET_ACCESS_KEY.*together/s,
+    );
+  });
+});
+
 describe('getEmbeddingClient — invalid EMBEDDING_BACKEND', () => {
   it('throws on an unknown backend name', () => {
     vi.stubEnv('EMBEDDING_BACKEND', 'bedrock');

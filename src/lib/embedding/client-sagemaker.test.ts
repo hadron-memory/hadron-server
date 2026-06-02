@@ -179,6 +179,56 @@ describe('SageMakerEmbeddingClient — guards', () => {
   });
 });
 
+describe('SageMakerEmbeddingClient — dedicated credentials', () => {
+  // These tests verify what the constructor DOES with the credential
+  // options — the test hook (sdkClient) bypasses the SDK constructor
+  // entirely, so we exercise the production code path here by NOT
+  // passing sdkClient. Constructor success without throwing is the
+  // pinning behavior; what the SDK does with the credentials is
+  // covered by aws-sdk's own tests.
+
+  it('constructs with explicit credentials when accessKeyId + secretAccessKey are set', () => {
+    expect(() => {
+      // eslint-disable-next-line @typescript-eslint/no-new
+      new SageMakerEmbeddingClient({
+        endpointName: 'hadron-embed-nomic-v1',
+        region: 'us-east-1',
+        model: 'nomic-embed-text-v1.5',
+        dim: 768,
+        accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+        secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      });
+    }).not.toThrow();
+  });
+
+  it('constructs with explicit credentials + session token (STS path)', () => {
+    expect(() => {
+      // eslint-disable-next-line @typescript-eslint/no-new
+      new SageMakerEmbeddingClient({
+        endpointName: 'hadron-embed-nomic-v1',
+        region: 'us-east-1',
+        model: 'nomic-embed-text-v1.5',
+        dim: 768,
+        accessKeyId: 'ASIAIOSFODNN7EXAMPLE',
+        secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+        sessionToken: 'FwoGZXIvYXdzEJr//////////wEaDExample',
+      });
+    }).not.toThrow();
+  });
+
+  it('constructs without credentials (falls through to SDK default chain) when neither is set', () => {
+    expect(() => {
+      // eslint-disable-next-line @typescript-eslint/no-new
+      new SageMakerEmbeddingClient({
+        endpointName: 'hadron-embed-nomic-v1',
+        region: 'us-east-1',
+        model: 'nomic-embed-text-v1.5',
+        dim: 768,
+      });
+    }).not.toThrow();
+  });
+});
+
 describe('SageMakerEmbeddingClient — error wrapping', () => {
   it('wraps AWS SDK errors as EmbeddingRequestError carrying the SDK error name', async () => {
     // The SDK uses class-shaped errors with a `name` property like

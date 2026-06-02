@@ -100,6 +100,26 @@ export function getEmbeddingClient(): EmbeddingClient {
           'endpoint lives in (e.g. "us-east-1").',
       );
     }
+    // Optional dedicated SageMaker credentials. Recommended hardening:
+    // a leaked SageMaker key then only buys `sagemaker:InvokeEndpoint`
+    // on this endpoint, not whatever the host's default AWS identity
+    // can reach. Both ID and SECRET must be set together — a
+    // half-configured pair is rejected here rather than at first call.
+    const accessKeyId = process.env.EMBEDDING_SAGEMAKER_ACCESS_KEY_ID;
+    const secretAccessKey =
+      process.env.EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY;
+    if (
+      (accessKeyId && !secretAccessKey) ||
+      (!accessKeyId && secretAccessKey)
+    ) {
+      throw new Error(
+        'EMBEDDING_SAGEMAKER_ACCESS_KEY_ID and EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY ' +
+          'must be set together. Set both for the dedicated-credentials path ' +
+          '(recommended), or neither to fall through to the AWS SDK default ' +
+          'credential chain.',
+      );
+    }
+
     cached = new SageMakerEmbeddingClient({
       endpointName,
       region,
@@ -108,6 +128,9 @@ export function getEmbeddingClient(): EmbeddingClient {
       provider,
       inferenceComponentName:
         process.env.EMBEDDING_SAGEMAKER_INFERENCE_COMPONENT,
+      accessKeyId,
+      secretAccessKey,
+      sessionToken: process.env.EMBEDDING_SAGEMAKER_SESSION_TOKEN,
     });
     return cached;
   }
