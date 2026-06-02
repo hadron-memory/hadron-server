@@ -1117,22 +1117,27 @@ export function createMcpServerInstance(
             'Note: empty or "*" queries are keyword-only (survey mode); supply a natural-language query for mode:vector. [empty_vector_query]\n\nFound 0 node(s).',
           );
         }
-        // #234 — wrap the embed() call so an endpoint that's configured
-        // but unreachable at query time degrades to the same
-        // [embedding_unavailable] envelope instead of letting the raw
-        // EmbeddingRequestError out of the tool handler. Vector mode has
-        // no keyword fallback (caller explicitly asked for vector); the
-        // empty envelope IS the documented degrade.
+        // #234 — wrap the embed() call so any failure at query time
+        // (endpoint unreachable, HTTP 5xx, malformed response, dimension
+        // mismatch) degrades to the same [embedding_unavailable]
+        // envelope instead of letting the raw error out of the tool
+        // handler. Vector mode has no keyword fallback (caller
+        // explicitly asked for vector); the empty envelope IS the
+        // documented degrade.
         let qvec: number[] | undefined;
         try {
           [qvec] = await getEmbeddingClient().embed([query], 'query');
         } catch (err) {
+          // Log the full error object so the typed cause survives —
+          // EmbeddingRequestError / EmbeddingDimensionMismatchError
+          // each tell the operator something different about what to
+          // fix.
           console.warn(
-            '[h-find-nodes vector] embedding endpoint unreachable; returning empty envelope:',
-            err instanceof Error ? err.message : err,
+            '[h-find-nodes vector] embed() failed; returning empty envelope.',
+            err,
           );
           return textResult(
-            'Note: vector search is unavailable — embedding endpoint unreachable. [embedding_unavailable]\n\nFound 0 node(s).',
+            'Note: vector search is unavailable — embed() failed. [embedding_unavailable]\n\nFound 0 node(s).',
           );
         }
         if (!qvec) {
@@ -1267,19 +1272,22 @@ export function createMcpServerInstance(
             'Note: empty or "*" queries are keyword-only (survey mode); supply a natural-language query for mode:hybrid. [empty_vector_query]\n\nFound 0 node(s).',
           );
         }
-        // #234 — wrap embed() so an endpoint configured but unreachable
-        // at query time falls back to keyword-only with a degraded note,
+        // #234 — wrap embed() so any failure at query time (endpoint
+        // unreachable, HTTP 5xx, malformed response, dimension
+        // mismatch) falls back to keyword-only with a degraded note,
         // mirroring the existing no-indexed-memory degrade above.
         let qvec: number[] | undefined;
         try {
           [qvec] = await getEmbeddingClient().embed([query], 'query');
         } catch (err) {
+          // Log the full error object so the typed cause survives in
+          // operator-readable form.
           console.warn(
-            '[h-find-nodes hybrid] embedding endpoint unreachable; falling back to keyword-only:',
-            err instanceof Error ? err.message : err,
+            '[h-find-nodes hybrid] embed() failed; falling back to keyword-only.',
+            err,
           );
           hybridDegradedNote =
-            'Note: vector half unavailable (embedding endpoint unreachable); showing keyword results only. [degraded:embedding_unavailable]';
+            'Note: vector half unavailable (embed() failed); showing keyword results only. [degraded:embedding_unavailable]';
           // Fall through to the keyword path below; the note will be
           // prepended to the response.
         }
@@ -1294,95 +1302,96 @@ export function createMcpServerInstance(
         // #234 — when the embed threw, qvec is undefined and the
         // catch above set hybridDegradedNote. Skip the fusion path and
         // fall through to the keyword block below; the note will be
-        // prepended to that response.
+        // prepended to that response. The fusion path is indented
+        // inside this guard so the brace structure stays readable.
         if (qvec) {
-        // Run keyword half (over the SAME scoping as the keyword branch
-        // below — same `where`) and vector half in parallel.
-        const finalLimit = limit ?? 50;
-        // PR-223 review (Gemini): hybrid pulls a DEEPER candidate pool from
-        // the vector half than the final output limit. RRF benefits from
-        // candidates ranked slightly outside the top finalLimit on the
-        // vector side that ALSO appear high on the keyword side — capping
-        // at finalLimit would discard those before fusion. Keyword half
-        // already over-fetches (`take: 1000`) for the same reason.
-        const candidateLimit = Math.max(100, finalLimit);
-        const [kwNodes, vecHits] = await Promise.all([
-          db.node.findMany({ where, take: 1000 }),
-          vectorSearchNodes(db, {
-            memoryIds: indexedIds!,
-            queryEmbedding: qvec,
-            limit: candidateLimit,
-          }),
-        ]);
-        // Filter by matchesQuery, then re-rank by relevance for RRF.
-        // No (memoryId, loc) dedup needed — the Node model's
-        // @@unique([loc, memoryId]) makes that a structural no-op
-        // (PR-227 review). Cross-memory same-loc preservation is pinned
-        // by src/test/integration/dedup-cross-memory-loc.test.ts.
-        const kwMatches = kwNodes.filter((n) => matchesQuery(n, query));
-        const kwRanked = keywordRelevanceRank(kwMatches, query);
-        // RRF the two lists by node ID. The fused list is the union of
-        // both inputs ordered by reciprocal-rank score.
-        const fusedIds = reciprocalRankFusion(
-          [kwRanked.map((n) => n.id), vecHits.map((h) => h.nodeId)],
-          (id) => id,
-        ).slice(0, finalLimit);
-        // Spec 033 US3 (T049) — append undirected neighbors.
-        const neighborIds = expand && expand > 0
-          ? await expandWithNeighbors(db, fusedIds, expand, { memoryIds: indexedIds })
-          : [];
-        const allRenderIds = [...fusedIds, ...neighborIds];
-        if (allRenderIds.length === 0) return textResult('Found 0 node(s).');
-        // PR-223 review (Gemini): include outgoing edges in brief mode,
-        // matching keyword path coverage.
-        const renderNodes = await db.node.findMany({
-          where: { id: { in: allRenderIds }, deletedAt: null },
-          include: brief
-            ? {
-                outgoingEdges: {
-                  include: { target: true },
-                  where: { target: { deletedAt: null } },
-                },
-              }
-            : undefined,
-        });
-        const renderById = new Map(renderNodes.map((n) => [n.id, n]));
-        const scoreById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
-        const hlines: string[] = [];
-        for (const id of allRenderIds) {
-          const n = renderById.get(id);
-          if (!n) continue;
-          const urn = await nodeUrn(n.loc, n.memoryId);
-          const score = scoreById.get(id);
-          const isStale =
-            score !== undefined &&
-            n.abstract != null && n.abstract.length > 0 &&
-            n.content != null && n.content.length > 0 &&
-            !isCiphertext(n.content) &&
-            n.abstractOriginHash != null &&
-            n.abstractOriginHash !== computeContentHash(n.content);
-          const parts = [
-            score !== undefined
-              ? `- **${urn}** — ${n.name}  (score ${score.toFixed(3)})`
-              : `- **${urn}** — ${n.name}`,
-          ];
-          if (isStale) parts.push('  Source: abstract-stale');
-          if (n.description) parts.push(`  ${n.description}`);
-          if (!brief && n.abstract) {
-            for (const absLine of (n.abstract as string).split(/\r?\n/)) parts.push(`  ${absLine}`);
+          // Run keyword half (over the SAME scoping as the keyword branch
+          // below — same `where`) and vector half in parallel.
+          const finalLimit = limit ?? 50;
+          // PR-223 review (Gemini): hybrid pulls a DEEPER candidate pool from
+          // the vector half than the final output limit. RRF benefits from
+          // candidates ranked slightly outside the top finalLimit on the
+          // vector side that ALSO appear high on the keyword side — capping
+          // at finalLimit would discard those before fusion. Keyword half
+          // already over-fetches (`take: 1000`) for the same reason.
+          const candidateLimit = Math.max(100, finalLimit);
+          const [kwNodes, vecHits] = await Promise.all([
+            db.node.findMany({ where, take: 1000 }),
+            vectorSearchNodes(db, {
+              memoryIds: indexedIds!,
+              queryEmbedding: qvec,
+              limit: candidateLimit,
+            }),
+          ]);
+          // Filter by matchesQuery, then re-rank by relevance for RRF.
+          // No (memoryId, loc) dedup needed — the Node model's
+          // @@unique([loc, memoryId]) makes that a structural no-op
+          // (PR-227 review). Cross-memory same-loc preservation is pinned
+          // by src/test/integration/dedup-cross-memory-loc.test.ts.
+          const kwMatches = kwNodes.filter((n) => matchesQuery(n, query));
+          const kwRanked = keywordRelevanceRank(kwMatches, query);
+          // RRF the two lists by node ID. The fused list is the union of
+          // both inputs ordered by reciprocal-rank score.
+          const fusedIds = reciprocalRankFusion(
+            [kwRanked.map((n) => n.id), vecHits.map((h) => h.nodeId)],
+            (id) => id,
+          ).slice(0, finalLimit);
+          // Spec 033 US3 (T049) — append undirected neighbors.
+          const neighborIds = expand && expand > 0
+            ? await expandWithNeighbors(db, fusedIds, expand, { memoryIds: indexedIds })
+            : [];
+          const allRenderIds = [...fusedIds, ...neighborIds];
+          if (allRenderIds.length === 0) return textResult('Found 0 node(s).');
+          // PR-223 review (Gemini): include outgoing edges in brief mode,
+          // matching keyword path coverage.
+          const renderNodes = await db.node.findMany({
+            where: { id: { in: allRenderIds }, deletedAt: null },
+            include: brief
+              ? {
+                  outgoingEdges: {
+                    include: { target: true },
+                    where: { target: { deletedAt: null } },
+                  },
+                }
+              : undefined,
+          });
+          const renderById = new Map(renderNodes.map((n) => [n.id, n]));
+          const scoreById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
+          const hlines: string[] = [];
+          for (const id of allRenderIds) {
+            const n = renderById.get(id);
+            if (!n) continue;
+            const urn = await nodeUrn(n.loc, n.memoryId);
+            const score = scoreById.get(id);
+            const isStale =
+              score !== undefined &&
+              n.abstract != null && n.abstract.length > 0 &&
+              n.content != null && n.content.length > 0 &&
+              !isCiphertext(n.content) &&
+              n.abstractOriginHash != null &&
+              n.abstractOriginHash !== computeContentHash(n.content);
+            const parts = [
+              score !== undefined
+                ? `- **${urn}** — ${n.name}  (score ${score.toFixed(3)})`
+                : `- **${urn}** — ${n.name}`,
+            ];
+            if (isStale) parts.push('  Source: abstract-stale');
+            if (n.description) parts.push(`  ${n.description}`);
+            if (!brief && n.abstract) {
+              for (const absLine of (n.abstract as string).split(/\r?\n/)) parts.push(`  ${absLine}`);
+            }
+            if (n.tags?.length) parts.push(`  Tags: ${(n.tags as string[]).join(', ')}`);
+            const briefEdges = (n as { outgoingEdges?: Array<{ target: { loc: string; memoryId: string }; label: string }> }).outgoingEdges;
+            if (brief && briefEdges?.length) {
+              const edgeStrs = await Promise.all(briefEdges.map(async (e) => {
+                const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
+                return `→ ${targetUrn} (${e.label})`;
+              }));
+              parts.push(`  Edges: ${edgeStrs.join(', ')}`);
+            }
+            hlines.push(parts.join('\n'));
           }
-          if (n.tags?.length) parts.push(`  Tags: ${(n.tags as string[]).join(', ')}`);
-          const briefEdges = (n as { outgoingEdges?: Array<{ target: { loc: string; memoryId: string }; label: string }> }).outgoingEdges;
-          if (brief && briefEdges?.length) {
-            const edgeStrs = await Promise.all(briefEdges.map(async (e) => {
-              const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
-              return `→ ${targetUrn} (${e.label})`;
-            }));
-            parts.push(`  Edges: ${edgeStrs.join(', ')}`);
-          }
-          hlines.push(parts.join('\n'));
-        }
-        return textResult(`Found ${hlines.length} node(s):\n\n${hlines.join('\n')}`);
+          return textResult(`Found ${hlines.length} node(s):\n\n${hlines.join('\n')}`);
         }
       }
 

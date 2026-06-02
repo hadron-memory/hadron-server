@@ -21,7 +21,7 @@
  * and assert the degrade fires on both surfaces.
  */
 
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
@@ -85,8 +85,10 @@ beforeEach(async () => {
   // Endpoint is "configured" so the resolvers don't take the
   // !isEmbeddingConfigured() degrade path — but the stub client's
   // embed() throws, simulating "configured but unreachable at
-  // query time" (the #234 repro).
-  process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
+  // query time" (the #234 repro). vi.stubEnv is the project
+  // convention (PR-191 review) so the override doesn't leak to
+  // later test files sharing the worker.
+  vi.stubEnv('EMBEDDING_API_URL', 'http://stub.local/api/embed');
   setEmbeddingClientForTests(unreachableClient());
 
   orgUrn = `i234-org-${generateId().slice(0, 8)}`;
@@ -121,7 +123,7 @@ beforeEach(async () => {
 
 afterAll(() => {
   resetEmbeddingClientForTests();
-  delete process.env.EMBEDDING_API_URL;
+  vi.unstubAllEnvs();
 });
 
 // ---------------------------------------------------------------------------
@@ -201,7 +203,7 @@ describe('#234 — MCP h-find-nodes degrades when embed() throws', () => {
     });
 
     expect(out).toContain('[embedding_unavailable]');
-    expect(out).toContain('embedding endpoint unreachable');
+    expect(out).toContain('embed() failed');
     expect(out).toContain('Found 0 node(s)');
   });
 
@@ -220,6 +222,7 @@ describe('#234 — MCP h-find-nodes degrades when embed() throws', () => {
     // The degraded note is prepended to the keyword-only output.
     expect(out).toContain('[degraded:embedding_unavailable]');
     expect(out).toContain('vector half unavailable');
+    expect(out).toContain('embed() failed');
     // Keyword hits are surfaced.
     expect(out).toContain('a-kw-only');
     expect(out).toContain('b-kw-only');

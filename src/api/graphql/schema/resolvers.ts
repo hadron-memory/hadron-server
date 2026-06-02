@@ -1965,11 +1965,12 @@ export const resolvers = {
       if (!isEmbeddingConfigured()) {
         return { nodes: [], passages: [], reason: 'embedding_unavailable', degraded: null };
       }
-      // #234 — wrap the embed() call so an endpoint that's configured but
-      // unreachable at query time (service down, DNS failure, egress
-      // blocked) degrades gracefully instead of throwing the raw
-      // EmbeddingRequestError out of the resolver. Mirrors the
-      // already-correct `no_vector_index` degrade path a few lines up:
+      // #234 — wrap the embed() call so any failure at query time
+      // (endpoint unreachable, HTTP 5xx, malformed response, dimension
+      // mismatch — anything getEmbeddingClient().embed() can throw)
+      // degrades gracefully instead of propagating the error out of
+      // the resolver. Mirrors the already-correct `no_vector_index`
+      // degrade path a few lines up:
       //   - hybrid → fall back to keyword + `degraded: 'embedding_unavailable'`
       //   - vector → empty envelope with `reason: 'embedding_unavailable'`
       // The `!qvec` defensive branch below is preserved (handles an
@@ -1978,14 +1979,15 @@ export const resolvers = {
       try {
         [qvec] = await getEmbeddingClient().embed([query], 'query');
       } catch (err) {
-        // Surface the cause in logs — silent degrade would make
-        // operators chase a "search returns fewer results than expected"
-        // ticket without knowing the endpoint is down.
+        // Log the full error object — preserves stack + any typed
+        // shape (EmbeddingRequestError, EmbeddingDimensionMismatchError)
+        // so operators can tell endpoint-down from dim-mismatch from
+        // HTTP 500 without chasing a "search returns fewer results
+        // than expected" ticket.
         console.warn(
-          '[nodeSearch] embedding endpoint unreachable; degrading to ' +
-            (effectiveMode === 'hybrid' ? 'keyword-only' : 'empty result') +
-            ':',
-          err instanceof Error ? err.message : err,
+          `[nodeSearch] embed() failed in mode:${effectiveMode}; degrading to ` +
+            (effectiveMode === 'hybrid' ? 'keyword-only.' : 'empty result.'),
+          err,
         );
         if (effectiveMode === 'hybrid') {
           const matches = await runKeyword();
