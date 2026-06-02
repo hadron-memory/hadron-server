@@ -56,10 +56,10 @@ export const typeDefs = `#graphql
   Search dispatch for nodeSearch. Spec 033.
 
   - keyword: substring match across name/loc/description/tags (the legacy
-    nodes-query semantic; ships as a nodeSearch mode in US3).
+    nodes-query semantic, exposed as a nodeSearch mode for parity).
   - vector: semantic search via the memory's vector index. Requires
     vectorIndexEnabled on the memory.
-  - hybrid: reciprocal-rank fusion of keyword + vector (ships in US3).
+  - hybrid: reciprocal-rank fusion of keyword + vector (k=60).
   """
   enum SearchMode {
     keyword
@@ -1142,12 +1142,14 @@ export const typeDefs = `#graphql
 
     """
     Vector/hybrid-aware search over a memory. Keyword-only callers should
-    keep using the legacy 'nodes' query — nodeSearch is the new
+    keep using the legacy 'nodes' query — nodeSearch is the
     vector-aware entrypoint per spec 033 contract.
 
-    mode defaults to vector (the v1 case US1 ships). expand and chunk
-    granularity ship in US2/US3; passing them in this version returns
-    an empty-but-flagged result so the schema stays stable across slices.
+    mode defaults to vector (the vector-aware entrypoint design — the
+    MCP h-find-nodes tool defaults to keyword for backward-compat,
+    a deliberate divergence between the two surfaces). expand (graph
+    neighbor depth 0..3, default 0) and granularity:chunk (passage
+    retrieval, vector-mode only) are both fully live.
 
     Access control: same memory-read gate as the keyword nodes query —
     the raw-SQL similarity query is scoped to memories the caller can
