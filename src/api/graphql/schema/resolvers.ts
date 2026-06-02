@@ -1965,7 +1965,42 @@ export const resolvers = {
       if (!isEmbeddingConfigured()) {
         return { nodes: [], passages: [], reason: 'embedding_unavailable', degraded: null };
       }
-      const [qvec] = await getEmbeddingClient().embed([query], 'query');
+      // #234 — wrap the embed() call so an endpoint that's configured but
+      // unreachable at query time (service down, DNS failure, egress
+      // blocked) degrades gracefully instead of throwing the raw
+      // EmbeddingRequestError out of the resolver. Mirrors the
+      // already-correct `no_vector_index` degrade path a few lines up:
+      //   - hybrid → fall back to keyword + `degraded: 'embedding_unavailable'`
+      //   - vector → empty envelope with `reason: 'embedding_unavailable'`
+      // The `!qvec` defensive branch below is preserved (handles an
+      // embedder that resolves to an empty array rather than throwing).
+      let qvec: number[] | undefined;
+      try {
+        [qvec] = await getEmbeddingClient().embed([query], 'query');
+      } catch (err) {
+        // Surface the cause in logs — silent degrade would make
+        // operators chase a "search returns fewer results than expected"
+        // ticket without knowing the endpoint is down.
+        console.warn(
+          '[nodeSearch] embedding endpoint unreachable; degrading to ' +
+            (effectiveMode === 'hybrid' ? 'keyword-only' : 'empty result') +
+            ':',
+          err instanceof Error ? err.message : err,
+        );
+        if (effectiveMode === 'hybrid') {
+          const matches = await runKeyword();
+          const rankedIds = matches.slice(0, finalLimit).map((n) => n.id);
+          return await renderNodeSearchResult(
+            ctx,
+            rankedIds,
+            expand,
+            scopeIds,
+            null,
+            'embedding_unavailable',
+          );
+        }
+        return { nodes: [], passages: [], reason: 'embedding_unavailable', degraded: null };
+      }
       if (!qvec) {
         return { nodes: [], passages: [], reason: 'embedding_unavailable', degraded: null };
       }

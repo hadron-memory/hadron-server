@@ -1117,7 +1117,24 @@ export function createMcpServerInstance(
             'Note: empty or "*" queries are keyword-only (survey mode); supply a natural-language query for mode:vector. [empty_vector_query]\n\nFound 0 node(s).',
           );
         }
-        const [qvec] = await getEmbeddingClient().embed([query], 'query');
+        // #234 — wrap the embed() call so an endpoint that's configured
+        // but unreachable at query time degrades to the same
+        // [embedding_unavailable] envelope instead of letting the raw
+        // EmbeddingRequestError out of the tool handler. Vector mode has
+        // no keyword fallback (caller explicitly asked for vector); the
+        // empty envelope IS the documented degrade.
+        let qvec: number[] | undefined;
+        try {
+          [qvec] = await getEmbeddingClient().embed([query], 'query');
+        } catch (err) {
+          console.warn(
+            '[h-find-nodes vector] embedding endpoint unreachable; returning empty envelope:',
+            err instanceof Error ? err.message : err,
+          );
+          return textResult(
+            'Note: vector search is unavailable — embedding endpoint unreachable. [embedding_unavailable]\n\nFound 0 node(s).',
+          );
+        }
         if (!qvec) {
           // Same defensive guard as the GraphQL nodeSearch path: a
           // malformed/empty embed response would TypeError downstream.
@@ -1250,12 +1267,35 @@ export function createMcpServerInstance(
             'Note: empty or "*" queries are keyword-only (survey mode); supply a natural-language query for mode:hybrid. [empty_vector_query]\n\nFound 0 node(s).',
           );
         }
-        const [qvec] = await getEmbeddingClient().embed([query], 'query');
-        if (!qvec) {
+        // #234 — wrap embed() so an endpoint configured but unreachable
+        // at query time falls back to keyword-only with a degraded note,
+        // mirroring the existing no-indexed-memory degrade above.
+        let qvec: number[] | undefined;
+        try {
+          [qvec] = await getEmbeddingClient().embed([query], 'query');
+        } catch (err) {
+          console.warn(
+            '[h-find-nodes hybrid] embedding endpoint unreachable; falling back to keyword-only:',
+            err instanceof Error ? err.message : err,
+          );
+          hybridDegradedNote =
+            'Note: vector half unavailable (embedding endpoint unreachable); showing keyword results only. [degraded:embedding_unavailable]';
+          // Fall through to the keyword path below; the note will be
+          // prepended to the response.
+        }
+        if (!qvec && !hybridDegradedNote) {
+          // Embed resolved to an empty array — distinct from "threw,"
+          // covered by the existing defensive guard. Surface the same
+          // envelope as the vector branch.
           return textResult(
             'Note: vector search is unavailable — embedding generation returned no vector. [embedding_unavailable]\n\nFound 0 node(s).',
           );
         }
+        // #234 — when the embed threw, qvec is undefined and the
+        // catch above set hybridDegradedNote. Skip the fusion path and
+        // fall through to the keyword block below; the note will be
+        // prepended to that response.
+        if (qvec) {
         // Run keyword half (over the SAME scoping as the keyword branch
         // below — same `where`) and vector half in parallel.
         const finalLimit = limit ?? 50;
@@ -1343,6 +1383,7 @@ export function createMcpServerInstance(
           hlines.push(parts.join('\n'));
         }
         return textResult(`Found ${hlines.length} node(s):\n\n${hlines.join('\n')}`);
+        }
       }
 
       const allNodes = await db.node.findMany({
