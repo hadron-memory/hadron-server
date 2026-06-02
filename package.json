@@ -4,6 +4,7 @@
   "description": "Hadron Controller — GraphQL API, usage DB, and node collection",
   "type": "module",
   "main": "dist/index.js",
+  "packageManager": "pnpm@10.15.0",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",

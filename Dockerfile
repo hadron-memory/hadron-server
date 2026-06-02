@@ -2,7 +2,14 @@ FROM node:22-alpine
 RUN apk add --no-cache git curl gnupg && \
     curl -sLf --retry 3 --tlsv1.2 --proto "=https" 'https://cli.doppler.com/install.sh' | sh && \
     apk del curl gnupg
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pin pnpm to a version that still reads `package.json`'s `"pnpm"` field
+# (onlyBuiltDependencies for Prisma/bcrypt/esbuild native artifacts). pnpm 11
+# moved that config to `pnpm-workspace.yaml` with an incompatible schema; CI
+# is on `pnpm/action-setup@v4 with: version: 9` which doesn't read the
+# workspace file. Keeping both surfaces on pnpm 10 lets the package.json
+# config work everywhere. Match the `packageManager` field in package.json
+# when bumping.
+RUN corepack enable && corepack prepare pnpm@10.15.0 --activate
 WORKDIR /app
 
 # Install dependencies
