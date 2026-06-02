@@ -7,18 +7,26 @@
  * test pins:
  *
  *   - typeDefs declares the four new Node fields and the one new Memory
- *     field. A grep-based audit so any future contributor accidentally
- *     dropping them gets a loud failure at PR time.
+ *     field with the right nullability. A grep-based audit so any
+ *     future contributor accidentally dropping or downgrading the
+ *     fields gets a loud failure at PR time. Shapes:
+ *       Node.embeddingPendingAt: String   (nullable — null when not pending)
+ *       Node.embeddingFailedAt:  String   (nullable — null on success/never-failed)
+ *       Node.embeddingError:     String   (nullable — null when no error recorded)
+ *       Node.embeddingAttempts:  Int!     (non-null; Prisma default 0)
+ *       Memory.vectorIndexEncryptedAckAt: String (nullable)
  *
- *   - The Node and Memory DateTime resolvers serialize Prisma's `Date`
- *     into ISO strings (the GraphQL String! contract) and propagate
- *     null through unchanged.
+ *   - The three DateTime?-backed fields (Node.embeddingPendingAt,
+ *     Node.embeddingFailedAt, Memory.vectorIndexEncryptedAckAt) route
+ *     through the `toISO` helper so Prisma's `Date` becomes a GraphQL
+ *     ISO string and `null` propagates through unchanged.
  *
- *   - The static-string fields (embeddingError, embeddingAttempts) need
- *     no resolver coercion — Prisma returns the right shapes already —
- *     so the default-resolver path is sufficient. Pinned by absence
- *     here: this file does NOT declare a resolver for those fields,
- *     and the typeDefs audit confirms they're still declared.
+ *   - embeddingError (String) and embeddingAttempts (Int!) are served by
+ *     the default GraphQL field resolver — Prisma returns the right
+ *     shapes natively. We pin that explicitly below so a future
+ *     contributor who adds a resolver for either field (e.g. to mask
+ *     credentials in the error message) is forced to remove the
+ *     assertion and acknowledge the behavior change.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -51,6 +59,24 @@ describe('Portal #257 — Node embedding-state fields exposed in GraphQL schema'
 describe('Portal #257 — Memory.vectorIndexEncryptedAckAt exposed in GraphQL schema', () => {
   it('declares vectorIndexEncryptedAckAt: String on the Memory type', () => {
     expect(typeDefs).toMatch(/vectorIndexEncryptedAckAt:\s*String\b/);
+  });
+});
+
+describe('Node embedding-state — default-resolver fields stay on the default path', () => {
+  // PR-232 review (Copilot): "pinned by absence" isn't a real assertion.
+  // Make it real. If a contributor adds a resolver for either field —
+  // e.g. to mask credentials in embeddingError, or to clamp
+  // embeddingAttempts on read — they must update this test to
+  // acknowledge the behavior change. Prisma returns the right shapes
+  // natively today (string + int), so the default resolver is correct.
+  it('resolvers.Node.embeddingError is undefined (default field resolver applies)', () => {
+    const node = resolvers.Node as Record<string, unknown>;
+    expect(node.embeddingError).toBeUndefined();
+  });
+
+  it('resolvers.Node.embeddingAttempts is undefined (default field resolver applies)', () => {
+    const node = resolvers.Node as Record<string, unknown>;
+    expect(node.embeddingAttempts).toBeUndefined();
   });
 });
 
