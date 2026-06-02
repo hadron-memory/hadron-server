@@ -1459,8 +1459,15 @@ export const typeDefs = `#graphql
     Update a Memory.
 
     Accepts the entity's ID or URN.
+
+    Spec 033 FR-026: enabling \`vectorIndexEnabled\` on an \`isEncrypted\` memory
+    requires \`acknowledgeVectorInversionRisk: true\` in the same call. Without
+    the flag, an \`EncryptedVectorIndexNotAcknowledgedError\` is thrown carrying
+    the full four-point disclosure on \`error.disclosure\` (single source of
+    truth in \`FR_026_DISCLOSURE\` — see \`src/lib/entityRef/errors.ts\`). On a
+    non-encrypted memory the flag is a no-op.
     """
-    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource): Memory!
+    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean): Memory!
 
     """
     Soft-delete a Memory.

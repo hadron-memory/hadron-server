@@ -80,7 +80,12 @@ import {
   composeInstalledAgentUrn,
 } from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
-import { NodeLocConflictError, NodeNotFoundError, NodeAbstractTooLongError } from '../../../lib/entityRef/errors.js';
+import {
+  NodeLocConflictError,
+  NodeNotFoundError,
+  NodeAbstractTooLongError,
+  EncryptedVectorIndexNotAcknowledgedError,
+} from '../../../lib/entityRef/errors.js';
 import { compileTemplate } from '../../../lib/template.js';
 import {
   validateEdgeCondition,
@@ -3880,6 +3885,7 @@ export const resolvers = {
         visibility,
         vectorIndexEnabled,
         embeddingSource,
+        acknowledgeVectorInversionRisk,
       }: {
         id: string; name?: string; urn?: string; organizationId?: string;
         shortDescription?: string; description?: string; tags?: string[];
@@ -3888,6 +3894,7 @@ export const resolvers = {
         source?: string; readBranch?: string; writeBranch?: string; visibility?: string;
         vectorIndexEnabled?: boolean;
         embeddingSource?: 'abstract' | 'contentChunks' | 'both';
+        acknowledgeVectorInversionRisk?: boolean;
       },
       ctx: Context,
     ) => {
@@ -3905,6 +3912,39 @@ export const resolvers = {
         const slug = urn ?? memory.urn.split(':').slice(1).join(':');
         newUrn = `${org.urn}:${slug}`;
       }
+
+      // 033 US5 FR-026 — enabling the vector index on an encrypted memory
+      // requires explicit acknowledgment of the embedding-inversion
+      // disclosure (stored vectors are plaintext + partially invertible —
+      // see FR_026_DISCLOSURE in src/lib/entityRef/errors.ts for the full
+      // four-point text). The friendly typed error fires at the API
+      // boundary; the chk_memory_vector_encrypted_ack CHECK is the DB-level
+      // backstop.
+      //
+      // Gate fires only when this call would enable the index AND the row
+      // is encrypted AND no prior ack timestamp is recorded.
+      //
+      // ── First-ack-is-permanent (intentional; PR-222 review item 3) ──
+      // `vectorIndexEncryptedAckAt` survives a revoke + re-enable cycle.
+      // Once a user has acked, future toggles never re-prompt. The audit-
+      // relevant moment is the FIRST opt-in. If the disclosure copy ever
+      // changes materially, audit semantics would need an explicit
+      // re-consent flow (e.g., bump a disclosure-version column and clear
+      // ackAt when the version bumps) — but that's deliberately deferred
+      // until/unless the copy actually changes. DO NOT "fix" this by
+      // clearing ackAt on revoke without product sign-off; the current
+      // semantic is the explicit choice.
+      let nextAckAt: Date | undefined;
+      const willBeEnabled = vectorIndexEnabled === true ||
+        (vectorIndexEnabled === undefined && memory.vectorIndexEnabled);
+      const enablingNow = willBeEnabled && !memory.vectorIndexEnabled;
+      if (memory.isEncrypted && enablingNow && memory.vectorIndexEncryptedAckAt == null) {
+        if (acknowledgeVectorInversionRisk !== true) {
+          throw new EncryptedVectorIndexNotAcknowledgedError(memory.urn);
+        }
+        nextAckAt = new Date();
+      }
+
       const updated = await ctx.db.memory.update({
         where: { id },
         data: {
@@ -3927,10 +3967,11 @@ export const resolvers = {
           ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
           // 033 — vector-index config. The chk_memory_vector_encrypted_ack CHECK
           // constraint blocks enabling on an encrypted memory without the
-          // disclosure ack (the friendly EncryptedVectorIndexNotAcknowledgedError
-          // wrapper + chunk dials land in US5/US2).
+          // disclosure ack; the resolver-level gate above is the friendly
+          // typed-error wrapper. Chunk dials land in US2.
           ...(vectorIndexEnabled !== undefined ? { vectorIndexEnabled } : {}),
           ...(embeddingSource !== undefined ? { embeddingSource } : {}),
+          ...(nextAckAt !== undefined ? { vectorIndexEncryptedAckAt: nextAckAt } : {}),
         },
         include: MEMORY_INCLUDE,
       });

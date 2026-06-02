@@ -149,11 +149,8 @@ Single web-service (hadron-server). Source at `src/`, schema at `prisma/`, tests
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T051 [P] [US4] Integration test: stale abstract hit served + `Source: abstract-stale`; chunk hits unmarked; self-heal after re-embed; encrypted-memory hit still markable (SC-009) in `src/test/integration/033-us4-staleness.test.ts`
-
-### Implementation for User Story 4
-
-- [ ] T052 [US4] In `vectorSearch`/`h-find-nodes` result rendering, apply the spec-032 predicate (`abstractOriginHash != computeContentHash(node.content)` via `src/lib/contentHash.ts`) to **abstract**-vector hits and emit the `Source: abstract-stale` marker; ensure **chunk** hits never carry it (`src/services/embedding/vectorSearch.ts`, `src/mcp/server.ts`)
+- [X] T051 [P] [US4] Integration test at `src/test/integration/033-us4-staleness.test.ts` covering: stale node → hit returned + `Source: abstract-stale`; fresh + legacy null-hash nodes → no marker; self-heal after re-embed; encrypted-memory hit still marked (FR-025: write-time plaintext stamping means the predicate is computable even without read-time decryption — spec 032's `!memory.isEncrypted` gate is intentionally NOT applied here). Chunk-hits-don't-carry-it is vacuous in US1 (no chunks yet); US2 will revise once `vectorSearchNodes` surfaces hit kind.
+- [X] T052 [US4] Implemented in `src/mcp/server.ts` h-find-nodes vector render. Four-clause predicate mirrors spec 032 (abstract + content non-empty, `abstractOriginHash != null`, `abstractOriginHash !== computeContentHash(node.content)`), plus a defensive `!isCiphertext(content)` so GraphQL-encrypted rows (ciphertext at rest, #206) fall through quietly rather than false-positive. Marker emits as a `Source: abstract-stale` line right after the hit's score line. GraphQL `nodeSearch` envelope unchanged — clients can compute per-Node staleness from the existing `abstractOriginHash` + `content` fields (the text-marker contract in `contracts/h-find-nodes.md` is MCP-only).
 
 **Checkpoint**: staleness signal on vector hits; self-healing verified.
 
@@ -167,13 +164,13 @@ Single web-service (hadron-server). Source at `src/`, schema at `prisma/`, tests
 
 ### Tests for User Story 5 ⚠️
 
-- [ ] T053 [P] [US5] Integration test: enable-on-encrypted without ack errors; with `acknowledgeVectorInversionRisk` succeeds + sets `vectorIndexEncryptedAckAt`; un-acked stores no vectors; revoke removes vectors + clears markers (SC-010) in `src/test/integration/033-us5-encrypted.test.ts`
+- [X] T053 [P] [US5] Integration test at `src/test/integration/033-us5-encrypted.test.ts` — 6 scenarios: ack-missing throws; ack-present succeeds + stamps `vectorIndexEncryptedAckAt`; re-ack on already-acked memory leaves the original timestamp; non-encrypted memory makes the ack flag a no-op; revoke deletes vectors + clears all marker columns (incl. `embeddingAttempts: 0`); T056 perma-fail coverage (ciphertext at rest + no key → `markPermanentFailure` with `encrypted-no-plaintext (#206)`).
 
 ### Implementation for User Story 5
 
-- [ ] T054 [US5] Extend `createMemory`/`updateMemory` (`resolvers.ts`): when enabling on an `isEncrypted` memory, require `acknowledgeVectorInversionRisk: true` (set `vectorIndexEncryptedAckAt = now()`) else throw `EncryptedVectorIndexNotAcknowledgedError`; include the four-point disclosure text (contracts/memory-config.md); add the input to `typeDefs.ts`
-- [ ] T055 [US5] Implement revoke/disable in `resolvers.ts`: on `vectorIndexEnabled → false`, delete the memory's `node_embeddings` rows AND null `embeddingPendingAt`/`embeddingFailedAt`/`embeddingError` and **reset `embeddingAttempts` to `0`** (it's a non-null Int — clearing to null would violate the schema) on its nodes, so the worker stops selecting them
-- [ ] T056 [US5] Verify (no new code): assert the `embedNode` encrypted-via-GraphQL **permanent-failure** path (`encrypted-no-plaintext (#206)`) from T024 clears pending + sets failed without retry, and confirm it's exercised by the T053 test — re-tagged as a verification step so it isn't silently checked off
+- [X] T054 [US5] Extended `updateMemory` in `resolvers.ts` + `typeDefs.ts` with `acknowledgeVectorInversionRisk: Boolean`. Resolver-level gate fires when this call would *enable* the index (was-off → will-be-on) AND `isEncrypted` AND `vectorIndexEncryptedAckAt IS NULL` AND the flag is not true → throws `EncryptedVectorIndexNotAcknowledgedError` (typed); with the flag set, stamps `vectorIndexEncryptedAckAt = now()`. The `chk_memory_vector_encrypted_ack` CHECK is the structural backstop. `createMemory` left untouched — it doesn't accept `isEncrypted`, so the condition can never fire there. The four-point disclosure copy lives in the error message + the typeDefs doc-comment per the contract. Known gap surfaced by T056: `encryptMemory` doesn't enforce the same FR-026 gate and bombs at the DB level if called on an already-indexed memory; filed as a follow-up issue.
+- [X] T055 [US5] Verified — the revoke/disable branch in `updateMemory` (resolvers.ts:3955-3966) already (a) calls `deleteMemoryVectors`, (b) updateMany's all of the memory's nodes clearing `embeddingPendingAt`/`embeddingFailedAt`/`embeddingError` to null and **resetting `embeddingAttempts: 0`** (the load-bearing detail per the task description — the column is non-null Int). Shipped with US1 MVP; T053's revoke scenario pins it.
+- [X] T056 [US5] Verified by the last test in `033-us5-encrypted.test.ts`. Faithful flow: encrypted+indexed+ack'd memory, node with `encryptNodeFieldsWithKey`-encrypted abstract+content (the state upsertNode-then-session-ended would have left), sweep runs without a key. Asserts `markPermanentFailure` outcome: `embeddingPendingAt: null` (sweep never re-selects), `embeddingFailedAt: set`, `embeddingError` contains `encrypted-no-plaintext` + `#206`, `embeddingAttempts: 0` (terminal failure does NOT bump the counter — distinct from `markTransientFailure`).
 
 **Checkpoint**: encrypted opt-in gated + disclosed; revocation complete.
 
