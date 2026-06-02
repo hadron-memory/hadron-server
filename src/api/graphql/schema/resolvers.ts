@@ -371,18 +371,32 @@ async function renderNodeSearchResult(
 }
 
 /**
- * Deduplicate nodes by loc: when multiple nodes share the same loc across
- * different memories, prefer canonical (isLink=false) over link nodes.
+ * Deduplicate nodes by (memoryId, loc): when the SAME memory has two rows for
+ * the same loc (one canonical isLink=false + one link isLink=true), prefer
+ * the canonical. Cross-memory collisions on the same loc — e.g. each of three
+ * memories has its own `start-here` node — MUST NOT collapse: those are
+ * three distinct nodes that happen to share a local path.
+ *
+ * Pre-spec-033 versions of this function keyed by `loc` alone and silently
+ * dropped cross-memory same-loc nodes. A user with `start-here` in
+ * `hadronmemory.com::dev`, `micromentor.org::mm-app`, AND `micromentor.org::mmdata`
+ * would see only one of the three in the portal's `Query.nodes` view. The
+ * `(memoryId, loc)` key preserves both invariants — the within-memory
+ * canonical-over-link tiebreak the comment originally meant AND the
+ * across-memory keep-everything semantic the data shape demands.
  */
-function deduplicateNodes<T extends { loc: string; isLink: boolean }>(nodes: T[]): T[] {
-  const byLoc = new Map<string, T>();
+function deduplicateNodes<T extends { loc: string; isLink: boolean; memoryId: string }>(
+  nodes: T[],
+): T[] {
+  const byKey = new Map<string, T>();
   for (const node of nodes) {
-    const existing = byLoc.get(node.loc);
+    const key = `${node.memoryId}:${node.loc}`;
+    const existing = byKey.get(key);
     if (!existing || (existing.isLink && !node.isLink)) {
-      byLoc.set(node.loc, node);
+      byKey.set(key, node);
     }
   }
-  return Array.from(byLoc.values());
+  return Array.from(byKey.values());
 }
 
 /**
@@ -1916,12 +1930,17 @@ export const resolvers = {
           where: { memoryId: { in: scopeIds }, deletedAt: null },
           take: 1000,
         });
-        const byLoc = new Map<string, typeof candidates[0]>();
+        // Key by (memoryId, loc): cross-memory same-loc nodes (e.g.
+        // each of three memories has its own `start-here`) MUST survive
+        // — they're distinct nodes that happen to share a local path.
+        // Within-memory canonical-vs-link collision still dedupes.
+        const byKey = new Map<string, typeof candidates[0]>();
         for (const n of candidates) {
-          const existing = byLoc.get(n.loc);
-          if (!existing || (existing.isLink && !n.isLink)) byLoc.set(n.loc, n);
+          const key = `${n.memoryId}:${n.loc}`;
+          const existing = byKey.get(key);
+          if (!existing || (existing.isLink && !n.isLink)) byKey.set(key, n);
         }
-        return Array.from(byLoc.values()).filter((n) => matchesQuery(n, query));
+        return Array.from(byKey.values()).filter((n) => matchesQuery(n, query));
       };
       // Type alias for the helper's return — TS infers via the call site.
       let keywordMatchesType!: Awaited<ReturnType<typeof ctx.db.node.findMany>>;

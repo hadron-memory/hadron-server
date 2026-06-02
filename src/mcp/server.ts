@@ -1274,14 +1274,18 @@ export function createMcpServerInstance(
             limit: candidateLimit,
           }),
         ]);
-        // Dedup keyword nodes by loc (canonical preferred), filter by
-        // matchesQuery, then re-rank by relevance for RRF.
-        const byLocK = new Map<string, typeof kwNodes[0]>();
+        // Dedup keyword nodes by (memoryId, loc) — canonical preferred
+        // within a memory; cross-memory same-loc nodes are distinct and
+        // both survive (e.g. each of three memories has its own
+        // `start-here`). Filter by matchesQuery, then re-rank by
+        // relevance for RRF.
+        const byKeyK = new Map<string, typeof kwNodes[0]>();
         for (const n of kwNodes) {
-          const existing = byLocK.get(n.loc);
-          if (!existing || (existing.isLink && !n.isLink)) byLocK.set(n.loc, n);
+          const key = `${n.memoryId}:${n.loc}`;
+          const existing = byKeyK.get(key);
+          if (!existing || (existing.isLink && !n.isLink)) byKeyK.set(key, n);
         }
-        const kwMatches = Array.from(byLocK.values()).filter((n) => matchesQuery(n, query));
+        const kwMatches = Array.from(byKeyK.values()).filter((n) => matchesQuery(n, query));
         const kwRanked = keywordRelevanceRank(kwMatches, query);
         // RRF the two lists by node ID. The fused list is the union of
         // both inputs ordered by reciprocal-rank score.
@@ -1367,13 +1371,18 @@ export function createMcpServerInstance(
             }
           : undefined,
       });
-      // Deduplicate by loc: prefer canonical (isLink=false) over link nodes
-      const byLoc = new Map<string, typeof allNodes[0]>();
+      // Deduplicate by (memoryId, loc): prefer canonical (isLink=false)
+      // over link nodes WITHIN a memory; cross-memory same-loc nodes
+      // (e.g. each of three memories has its own `start-here`) MUST
+      // survive — they're distinct nodes that happen to share a local
+      // path.
+      const byKey = new Map<string, typeof allNodes[0]>();
       for (const n of allNodes) {
-        const existing = byLoc.get(n.loc);
-        if (!existing || (existing.isLink && !n.isLink)) byLoc.set(n.loc, n);
+        const key = `${n.memoryId}:${n.loc}`;
+        const existing = byKey.get(key);
+        if (!existing || (existing.isLink && !n.isLink)) byKey.set(key, n);
       }
-      const nodes = Array.from(byLoc.values());
+      const nodes = Array.from(byKey.values());
       const matches = nodes.filter((n) => matchesQuery(n, query));
       const limited = matches.slice(0, limit ?? 50);
 
