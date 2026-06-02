@@ -84,3 +84,52 @@ Unit tests: `chunkNode` (structure-aware vs fixed-size, overlap, dials, char off
 ## 5. Rollback / disable
 
 Set `vectorIndexEnabled: false` on a memory → its `node_embeddings` rows are deleted and writes stop stamping markers. The feature is dormant for memories that never opt in (no embedding work, no `EMBEDDING_API_URL` needed).
+
+## 6. Performance sanity — HNSW serves the vector query (T059)
+
+Recorded on `hadron_dev` 2026-06-02 (PR #226). 5,200 abstract-vector rows in a single memory; query embedding generated inline via `(ARRAY(SELECT random() FROM generate_series(1, 768)))::vector` to avoid model dependency.
+
+The inner ANN query (the one `vectorSearchNodes` issues) is served by the HNSW index, NOT a sequential scan:
+
+```
+->  Index Scan using node_embeddings_embedding_hnsw on node_embeddings ne
+      (cost=77.84..9610.00 rows=5200 width=15) (actual time=0.379..1.005 rows=100 loops=1)
+      Order By: (embedding <=> ((InitPlan 1).col1)::vector)
+      Filter: (memory_id = 'perf-mem'::text)
+      Buffers: shared hit=457
+```
+
+Full query (ANN + node join + dedupe to top 10) executes in **1.86 ms** on this row count.
+
+**Caveat**: the planner picks Seq Scan instead of HNSW when the table is small (verified at ~200 rows). This is correct cost-based behaviour — a sequential scan of 200 vectors is cheaper than the HNSW lookup overhead. HNSW kicks in once the row count crosses the planner's cost threshold (a few thousand rows in our tests). No tuning needed for typical prod-scale memories.
+
+**Method (reproducible)**:
+
+```bash
+psql "$DATABASE_URL" <<'SQL'
+-- Build the query vector ONCE in a CTE so the SELECT distance and the
+-- ORDER BY use the same vector. Inlining `(ARRAY(SELECT random()…))`
+-- in both places would generate two different vectors per query
+-- because `random()` is volatile — confuses the plan and makes the
+-- distances inconsistent.
+EXPLAIN (ANALYZE, BUFFERS)
+WITH q AS (
+  SELECT (ARRAY(SELECT random() FROM generate_series(1, 768)))::vector AS vec
+),
+ann AS (
+  SELECT ne.node_id, ne.embedding <=> (SELECT vec FROM q) AS distance
+  FROM node_embeddings ne
+  WHERE ne.memory_id = '<some-memory-id>'
+  ORDER BY ne.embedding <=> (SELECT vec FROM q)
+  LIMIT 100
+)
+SELECT a.node_id, MIN(a.distance) AS distance
+FROM ann a
+JOIN nodes n ON n.id = a.node_id AND n.deleted_at IS NULL
+GROUP BY a.node_id
+ORDER BY distance ASC
+LIMIT 10;
+SQL
+```
+
+Look for `Index Scan using node_embeddings_embedding_hnsw` in the inner CTE. If the plan shows `Seq Scan on node_embeddings`, the table is too small for the index to win cost — populate more vectors or run `ANALYZE node_embeddings` to refresh planner stats.
