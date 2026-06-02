@@ -5,7 +5,11 @@ import {
   enqueueNodeEmbedding,
   backfillMemoryEmbeddings,
 } from '../../../services/embedding/enqueue.js';
-import { deleteMemoryVectors, vectorSearchNodes } from '../../../services/embedding/vectors.js';
+import {
+  deleteMemoryVectors,
+  vectorSearchNodes,
+  vectorSearchChunks,
+} from '../../../services/embedding/vectors.js';
 import { getEmbeddingClient, isEmbeddingConfigured } from '../../../lib/embedding/index.js';
 import { reciprocalRankFusion } from '../../../lib/rrf.js';
 import {
@@ -91,6 +95,7 @@ import {
   NodeNotFoundError,
   NodeAbstractTooLongError,
   EncryptedVectorIndexNotAcknowledgedError,
+  InvalidChunkConfigError,
 } from '../../../lib/entityRef/errors.js';
 import { compileTemplate } from '../../../lib/template.js';
 import {
@@ -336,14 +341,19 @@ async function renderNodeSearchResult(
   expandScope: string[],
   reason: string | null,
   degraded: string | null,
-): Promise<{ nodes: unknown[]; reason: string | null; degraded: string | null }> {
+): Promise<{
+  nodes: unknown[];
+  passages: unknown[];
+  reason: string | null;
+  degraded: string | null;
+}> {
   const neighborIds =
     expand && expand > 0
       ? await expandWithNeighbors(ctx.db, rankedIds, expand, { memoryIds: expandScope })
       : [];
   const allIds = [...rankedIds, ...neighborIds];
   if (allIds.length === 0) {
-    return { nodes: [], reason, degraded };
+    return { nodes: [], passages: [], reason, degraded };
   }
   const fetched = await ctx.db.node.findMany({
     where: { id: { in: allIds }, deletedAt: null },
@@ -357,7 +367,7 @@ async function renderNodeSearchResult(
   const ordered = allIds
     .map((id) => byId.get(id))
     .filter((n): n is NonNullable<typeof n> => n !== undefined);
-  return { nodes: ordered, reason, degraded };
+  return { nodes: ordered, passages: [], reason, degraded };
 }
 
 /**
@@ -1840,11 +1850,16 @@ export const resolvers = {
       ctx: Context,
     ) => {
       const effectiveMode = mode ?? 'vector';
-      // US2 still ships chunks; reject for now.
-      if (granularity === 'chunk') {
+      // Spec 033 US2 — chunk-granularity is supported only in mode:vector
+      // today. Keyword has no chunks; hybrid's RRF fusion produces
+      // node-level scores, not passage-level (PR-225 review, Gemini high).
+      // If hybrid+chunk grows real demand later, the design call is whether
+      // to RRF over passages (different semantics) or fuse keyword node
+      // hits with vector passages (asymmetric output). Out of v1.
+      if (granularity === 'chunk' && effectiveMode !== 'vector') {
         throw new GraphQLError(
-          'nodeSearch granularity:chunk ships in spec 033 US2 (T042).',
-          { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
+          `nodeSearch granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}). Hybrid + chunk passages is out of v1 — please use mode:vector for passage retrieval.`,
+          { extensions: { code: 'BAD_USER_INPUT' } },
         );
       }
       // Validate expand bounds (PR-223 review, Copilot): the MCP surface
@@ -1939,18 +1954,62 @@ export const resolvers = {
         );
       }
       if (effectiveMode === 'vector' && indexedIds.length === 0) {
-        return { nodes: [], reason: 'no_vector_index', degraded: null };
+        return { nodes: [], passages: [], reason: 'no_vector_index', degraded: null };
       }
       if (!isEmbeddingConfigured()) {
-        return { nodes: [], reason: 'embedding_unavailable', degraded: null };
+        return { nodes: [], passages: [], reason: 'embedding_unavailable', degraded: null };
       }
       const [qvec] = await getEmbeddingClient().embed([query], 'query');
       if (!qvec) {
-        return { nodes: [], reason: 'embedding_unavailable', degraded: null };
+        return { nodes: [], passages: [], reason: 'embedding_unavailable', degraded: null };
       }
 
       // ── VECTOR MODE ───────────────────────────────────────────────
       if (effectiveMode === 'vector') {
+        // Spec 033 US2 (T042) — chunk-level granularity returns
+        // passages with span text + offsets + parent URN. Default
+        // (node) granularity returns the existing node-collapsed
+        // ranking.
+        if (granularity === 'chunk') {
+          const chunkHits = await vectorSearchChunks(ctx.db, {
+            memoryIds: indexedIds,
+            queryEmbedding: qvec,
+            limit: finalLimit,
+          });
+          if (chunkHits.length === 0) {
+            return { nodes: [], passages: [], reason: null, degraded: null };
+          }
+          // Batch-fetch parent nodes + memory URNs for URN composition.
+          // Build canonical `<memory-urn>::<loc>` URNs inline rather than
+          // importing nodeUrn() from mcp/server.ts (which would recreate
+          // the circular dep that PR-223 review eliminated).
+          const uniqueNodeIds = Array.from(new Set(chunkHits.map((h) => h.nodeId)));
+          const parents = await ctx.db.node.findMany({
+            where: { id: { in: uniqueNodeIds }, deletedAt: null },
+            select: { id: true, loc: true, memory: { select: { urn: true } } },
+          });
+          const parentById = new Map(parents.map((p) => [p.id, p]));
+          const passages = [];
+          for (const hit of chunkHits) {
+            const parent = parentById.get(hit.nodeId);
+            if (!parent) continue;
+            // Canonical form: `<memory.urn>::<loc>`. New paths emit
+            // canonical memory URNs; legacy `:`-separated memory URNs
+            // are tolerated by downstream consumers via the spec-021/022
+            // canonicalization layer.
+            const parentNodeUrn = `${parent.memory.urn}::${parent.loc}`;
+            passages.push({
+              parentNodeId: parent.id,
+              parentNodeUrn,
+              chunkIndex: hit.chunkIndex,
+              charStart: hit.charStart,
+              charEnd: hit.charEnd,
+              text: hit.chunkText,
+              score: hit.score,
+            });
+          }
+          return { nodes: [], passages, reason: null, degraded: null };
+        }
         const hits = await vectorSearchNodes(ctx.db, {
           memoryIds: indexedIds,
           queryEmbedding: qvec,
@@ -3990,6 +4049,9 @@ export const resolvers = {
         vectorIndexEnabled,
         embeddingSource,
         acknowledgeVectorInversionRisk,
+        chunkTokens,
+        chunkOverlap,
+        forceFixedSize,
       }: {
         id: string; name?: string; urn?: string; organizationId?: string;
         shortDescription?: string; description?: string; tags?: string[];
@@ -3999,6 +4061,9 @@ export const resolvers = {
         vectorIndexEnabled?: boolean;
         embeddingSource?: 'abstract' | 'contentChunks' | 'both';
         acknowledgeVectorInversionRisk?: boolean;
+        chunkTokens?: number | null;
+        chunkOverlap?: number | null;
+        forceFixedSize?: boolean;
       },
       ctx: Context,
     ) => {
@@ -4049,6 +4114,34 @@ export const resolvers = {
         nextAckAt = new Date();
       }
 
+      // 033 US2 T043 — chunk dial validation (FR-003). Same invariants
+      // the chk_memory_chunk_tokens_positive / chk_memory_chunk_overlap_valid
+      // CHECK constraints enforce at the DB level; this is the friendly
+      // typed error at the API boundary. Compute effective post-update
+      // values so partial updates (just chunkTokens, just chunkOverlap)
+      // still validate against the row's settled state.
+      //
+      // PR-225 review (Gemini med + Copilot): when either dial is null in
+      // the post-update state, the runtime treats null as "platform
+      // default" (512 tokens / 64 overlap; see src/lib/chunking.ts).
+      // Validation MUST resolve to those defaults too, otherwise an
+      // input like `chunkOverlap: 600` with `chunkTokens: null` would
+      // slip past the API and crash at the DB CHECK with a 500.
+      const DEFAULT_TOKENS_FOR_VALIDATION = 512;
+      const DEFAULT_OVERLAP_FOR_VALIDATION = 64;
+      const effectiveTokens = chunkTokens !== undefined ? chunkTokens : memory.chunkTokens;
+      const effectiveOverlap = chunkOverlap !== undefined ? chunkOverlap : memory.chunkOverlap;
+      if (effectiveTokens !== null && effectiveTokens !== undefined && effectiveTokens <= 0) {
+        throw new InvalidChunkConfigError(`chunkTokens must be > 0 (got ${effectiveTokens}).`);
+      }
+      const resolvedTokens = effectiveTokens ?? DEFAULT_TOKENS_FOR_VALIDATION;
+      const resolvedOverlap = effectiveOverlap ?? DEFAULT_OVERLAP_FOR_VALIDATION;
+      if (resolvedOverlap < 0 || resolvedOverlap >= resolvedTokens) {
+        throw new InvalidChunkConfigError(
+          `chunkOverlap must satisfy 0 <= chunkOverlap < chunkTokens (effective: overlap=${resolvedOverlap}, tokens=${resolvedTokens}).`,
+        );
+      }
+
       const updated = await ctx.db.memory.update({
         where: { id },
         data: {
@@ -4072,10 +4165,15 @@ export const resolvers = {
           // 033 — vector-index config. The chk_memory_vector_encrypted_ack CHECK
           // constraint blocks enabling on an encrypted memory without the
           // disclosure ack; the resolver-level gate above is the friendly
-          // typed-error wrapper. Chunk dials land in US2.
+          // typed-error wrapper.
           ...(vectorIndexEnabled !== undefined ? { vectorIndexEnabled } : {}),
           ...(embeddingSource !== undefined ? { embeddingSource } : {}),
           ...(nextAckAt !== undefined ? { vectorIndexEncryptedAckAt: nextAckAt } : {}),
+          // 033 US2 — chunk dials. Validated above against the effective
+          // post-update state.
+          ...(chunkTokens !== undefined ? { chunkTokens } : {}),
+          ...(chunkOverlap !== undefined ? { chunkOverlap } : {}),
+          ...(forceFixedSize !== undefined ? { forceFixedSize } : {}),
         },
         include: MEMORY_INCLUDE,
       });
@@ -4085,14 +4183,36 @@ export const resolvers = {
       const wasEnabled = memory.vectorIndexEnabled;
       const sourceChanged =
         embeddingSource !== undefined && embeddingSource !== memory.embeddingSource;
-      if (nowEnabled && (!wasEnabled || sourceChanged)) {
+      // 033 US2 FR-004 — chunk dial changes also count as a re-index trigger
+      // (the existing chunks would otherwise drift from the new boundaries).
+      // PR-225 review (Copilot): gate this trigger on the post-update
+      // effective embeddingSource actually using chunks — tweaking chunk
+      // dials on an abstract-only memory shouldn't force a full re-embed.
+      const effectiveSource = updated.embeddingSource;
+      const sourceUsesChunks =
+        effectiveSource === 'contentChunks' || effectiveSource === 'both';
+      const chunkDialsChanged =
+        (chunkTokens !== undefined && chunkTokens !== memory.chunkTokens) ||
+        (chunkOverlap !== undefined && chunkOverlap !== memory.chunkOverlap) ||
+        (forceFixedSize !== undefined && forceFixedSize !== memory.forceFixedSize);
+      const chunkConfigChanged = chunkDialsChanged && sourceUsesChunks;
+      if (nowEnabled && (!wasEnabled || sourceChanged || chunkConfigChanged)) {
         // When the source itself changes (abstract ↔ contentChunks ↔ both),
         // the previously-stored vectors are now the wrong KIND. vectorSearch
         // doesn't filter by kind today, so leaving them would mix stale
         // vectors of the old kind with whatever the backfill produces.
         // Drop everything first; the backfill re-stamps every node and the
         // sweep re-embeds against the new source (PR-219 review).
-        if (sourceChanged) {
+        //
+        // Chunk-config changes (033 US2 FR-004): the existing chunk vectors
+        // were sliced under the OLD chunkTokens / chunkOverlap / forceFixedSize
+        // values. New dials produce different boundaries — the sweep will
+        // re-derive chunks per the new config, so we drop the old chunk
+        // vectors before backfill (preserving abstract vectors when source
+        // is `abstract` or `both` would be a bigger change; the simpler
+        // shape is "any reconfig triggers a full re-index" matching the
+        // sourceChanged path).
+        if (sourceChanged || chunkConfigChanged) {
           await deleteMemoryVectors(ctx.db, id);
         }
         // Enabled or re-sourced → backfill: stamp every live node pending.
