@@ -3026,7 +3026,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'h-validate',
-    'Check a memory for broken edge references, sparse nodes, stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), and embedding-failure flags (spec 033 — nodes whose async embedding hit the attempts cap or hit the #206 encrypted-no-plaintext perma-fail). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (h-validate does not decrypt; tracked by #206).',
+    'Check a memory for broken edge references, sparse nodes, stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), and embedding-failure flags (spec 033 — nodes with `embedding_failed_at` set; covers BOTH in-flight transient failures awaiting retry AND terminal failures, including the #206 encrypted-no-plaintext perma-fail class). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (h-validate does not decrypt; tracked by #206).',
     {
       memoryUrn: z.string().describe('Fully-qualified memory URN, e.g. "acme.com:mmdata"'),
     },
@@ -3098,19 +3098,34 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         ) {
           issues.push(`[stale-abstract] ${nUrn} — abstract may not reflect current content`);
         }
-        // Spec 033 T058 — surface embedding-failure diagnosability. When
-        // a node's async embedding hit the attempts cap (transient
-        // failure) OR landed on the permanent `encrypted-no-plaintext
-        // (#206)` branch, embedding_failed_at gets stamped. An empty
-        // vector index from outside h-validate looks identical to "no
-        // hits matched" — surfacing the failure flag here gives
-        // operators (and the agents who proactively run h-validate
-        // before debugging an empty index) a single-tool diagnostic
-        // surface. Default Prisma findMany without a select includes
-        // every scalar column, so embeddingFailedAt + embeddingError
-        // are already on `node` without a select change.
+        // Spec 033 T058 — surface embedding-failure diagnosability.
+        // `embedding_failed_at` is stamped on EVERY failed attempt:
+        //   - transient failures awaiting retry → both pendingAt AND
+        //     failedAt are set (markTransientFailure)
+        //   - transient failures that hit the attempts cap → pendingAt
+        //     cleared, failedAt stays (giveUp branch)
+        //   - permanent encrypted-no-plaintext (#206) → same shape as
+        //     the cap (markPermanentFailure)
+        // h-validate surfaces ALL of these because each is operator-
+        // useful: in-flight retries say "this node has failed at least
+        // once but the sweep will retry"; terminal failures say "this
+        // node will never embed without intervention." PR-226 review
+        // (Copilot) corrected an earlier comment that described only
+        // the terminal cases.
+        //
+        // Why this matters: an empty vector index from outside
+        // h-validate looks identical to "no hits matched". Surfacing
+        // the failure flag here gives operators (and the agents who
+        // proactively run h-validate before debugging an empty index)
+        // a single-tool diagnostic surface. Default Prisma findMany
+        // without a select includes every scalar column, so
+        // embeddingFailedAt + embeddingError are already on `node`
+        // without a select change.
         if (node.embeddingFailedAt) {
-          const reason = node.embeddingError ?? 'unknown';
+          // PR-226 review (Gemini): `??` only catches null/undefined, so an
+          // empty or whitespace-only error message would render as a blank
+          // reason. `?.trim() || 'unknown'` handles all three cases.
+          const reason = node.embeddingError?.trim() || 'unknown';
           issues.push(`[embed-failed] ${nUrn} — ${reason}`);
         }
       }

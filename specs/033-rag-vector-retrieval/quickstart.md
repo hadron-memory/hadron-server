@@ -107,12 +107,20 @@ Full query (ANN + node join + dedupe to top 10) executes in **1.86 ms** on this 
 
 ```bash
 psql "$DATABASE_URL" <<'SQL'
+-- Build the query vector ONCE in a CTE so the SELECT distance and the
+-- ORDER BY use the same vector. Inlining `(ARRAY(SELECT random()…))`
+-- in both places would generate two different vectors per query
+-- because `random()` is volatile — confuses the plan and makes the
+-- distances inconsistent.
 EXPLAIN (ANALYZE, BUFFERS)
-WITH ann AS (
-  SELECT ne.node_id, ne.embedding <=> (ARRAY(SELECT random() FROM generate_series(1, 768)))::vector AS distance
+WITH q AS (
+  SELECT (ARRAY(SELECT random() FROM generate_series(1, 768)))::vector AS vec
+),
+ann AS (
+  SELECT ne.node_id, ne.embedding <=> (SELECT vec FROM q) AS distance
   FROM node_embeddings ne
   WHERE ne.memory_id = '<some-memory-id>'
-  ORDER BY ne.embedding <=> (ARRAY(SELECT random() FROM generate_series(1, 768)))::vector
+  ORDER BY ne.embedding <=> (SELECT vec FROM q)
   LIMIT 100
 )
 SELECT a.node_id, MIN(a.distance) AS distance

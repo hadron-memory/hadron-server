@@ -2,12 +2,20 @@
  * 033-rag-vector-retrieval Phase 8 polish T058 — h-validate surfaces
  * embedding-failure diagnosability.
  *
- * Pins: when a node's async embedding hits the attempts cap (transient
- * failure) OR lands on the permanent #206 encrypted-no-plaintext branch,
- * `embedding_failed_at` is stamped. h-validate now emits an
- * `[embed-failed] <urn> — <reason>` line so an empty vector index is
- * diagnosable from the validator's output (the operator-facing surface
- * for spec-033 sweep failures).
+ * `embedding_failed_at` is stamped on EVERY failed embed attempt:
+ *   - transient failures awaiting retry → pendingAt AND failedAt set
+ *   - transient failures that hit the attempts cap → pendingAt cleared,
+ *     failedAt stays
+ *   - permanent #206 encrypted-no-plaintext → same shape as the cap
+ *
+ * h-validate surfaces ALL of these because each is operator-useful: an
+ * in-flight retry tells the operator "this has failed at least once
+ * but the sweep will retry"; a terminal failure tells them "this will
+ * never embed without intervention." Without this surface an empty
+ * vector index from outside looks identical to "no hits matched" and
+ * the operator has no single-tool diagnostic.
+ *
+ * The output shape is `[embed-failed] <urn> — <reason>`.
  */
 
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
@@ -129,6 +137,58 @@ describe('Phase 8 T058 — h-validate surfaces embedding-failure diagnosability'
 
     const out = await validate();
     expect(out).not.toContain('[embed-failed]');
+  });
+
+  it('node with embeddingFailedAt + still-pending retry (failedAt AND pendingAt both set) → flagged', async () => {
+    // The in-flight retry shape: markTransientFailure stamps both
+    // embeddingFailedAt AND keeps embeddingPendingAt set when the
+    // attempts cap hasn't been reached. h-validate flags these too
+    // (PR-226 review, Copilot) so the operator sees "this has failed
+    // at least once but the sweep will retry."
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: memId,
+        loc: 'retry-pending',
+        name: 'retry-pending',
+        content: 'body',
+        embeddingPendingAt: new Date(),
+        embeddingFailedAt: new Date(),
+        embeddingError: 'transient: rate-limited',
+        embeddingAttempts: 2,
+      },
+    });
+
+    const out = await validate();
+    expect(out).toContain('[embed-failed]');
+    expect(out).toContain('retry-pending');
+    expect(out).toContain('rate-limited');
+  });
+
+  it('node with whitespace-only embeddingError → falls back to "unknown" (PR-226 review)', async () => {
+    // PR-226 review (Gemini): `??` only catches null/undefined, so an
+    // empty/whitespace error message would render a blank reason. The
+    // `?.trim() || 'unknown'` fallback handles all three cases.
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: memId,
+        loc: 'failed-whitespace',
+        name: 'failed-whitespace',
+        content: 'body',
+        embeddingFailedAt: new Date(),
+        embeddingError: '   \t\n  ',
+        embeddingAttempts: 0,
+      },
+    });
+
+    const out = await validate();
+    expect(out).toContain('[embed-failed]');
+    expect(out).toContain('failed-whitespace');
+    expect(out).toContain('unknown');
+    // No blank line / blank reason — the literal "   " whitespace
+    // didn't slip through as the rendered reason.
+    expect(out).not.toMatch(/\[embed-failed\][^\n]*failed-whitespace —\s*$/m);
   });
 
   it('mixed memory: failed node + healthy node → only the failed one is flagged', async () => {
