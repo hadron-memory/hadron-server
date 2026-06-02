@@ -1,49 +1,148 @@
 /**
- * 033-rag-vector-retrieval — embedding factory env validation.
+ * 033-rag-vector-retrieval — embedding factory env validation + backend dispatch.
+ *
+ * All env mutations go through vi.stubEnv / vi.unstubAllEnvs so they don't
+ * leak to later test files sharing the worker (PR-191 review convention).
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
-import { getEmbeddingClient, resetEmbeddingClientForTests } from './index.js';
-
-const ENV_KEYS = ['EMBEDDING_API_URL', 'EMBEDDING_DIM', 'EMBEDDING_MODEL'] as const;
-const saved: Record<string, string | undefined> = {};
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import {
+  getEmbeddingClient,
+  resetEmbeddingClientForTests,
+  isEmbeddingConfigured,
+  HttpEmbeddingClient,
+  SageMakerEmbeddingClient,
+} from './index.js';
 
 afterEach(() => {
   resetEmbeddingClientForTests();
-  for (const k of ENV_KEYS) {
-    if (saved[k] === undefined) delete process.env[k];
-    else process.env[k] = saved[k];
-  }
+  vi.unstubAllEnvs();
 });
 
-function setEnv(env: Partial<Record<(typeof ENV_KEYS)[number], string>>) {
-  for (const k of ENV_KEYS) saved[k] = process.env[k];
-  resetEmbeddingClientForTests();
-  delete process.env.EMBEDDING_DIM;
-  process.env.EMBEDDING_API_URL = 'http://embed.test/api/embed';
-  Object.assign(process.env, env);
-}
-
-describe('getEmbeddingClient EMBEDDING_DIM validation', () => {
+describe('getEmbeddingClient — EMBEDDING_DIM validation', () => {
   it('throws on a non-numeric EMBEDDING_DIM', () => {
-    setEnv({ EMBEDDING_DIM: 'not-a-number' });
+    vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
+    vi.stubEnv('EMBEDDING_DIM', 'not-a-number');
     expect(() => getEmbeddingClient()).toThrow(/EMBEDDING_DIM/);
   });
 
   it('throws on a non-positive EMBEDDING_DIM', () => {
-    setEnv({ EMBEDDING_DIM: '0' });
+    vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
+    vi.stubEnv('EMBEDDING_DIM', '0');
     expect(() => getEmbeddingClient()).toThrow(/EMBEDDING_DIM/);
   });
 
   it('defaults to 768 when EMBEDDING_DIM is unset', () => {
-    setEnv({});
+    vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
+    vi.stubEnv('EMBEDDING_DIM', undefined);
     expect(getEmbeddingClient().dim).toBe(768);
   });
+});
 
+describe('getEmbeddingClient — http backend (default)', () => {
   it('throws when EMBEDDING_API_URL is unset', () => {
-    for (const k of ENV_KEYS) saved[k] = process.env[k];
-    resetEmbeddingClientForTests();
-    delete process.env.EMBEDDING_API_URL;
+    vi.stubEnv('EMBEDDING_BACKEND', undefined);
+    vi.stubEnv('EMBEDDING_API_URL', undefined);
     expect(() => getEmbeddingClient()).toThrow(/EMBEDDING_API_URL/);
+  });
+
+  it('returns an HttpEmbeddingClient when EMBEDDING_BACKEND is unset', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', undefined);
+    vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
+    expect(getEmbeddingClient()).toBeInstanceOf(HttpEmbeddingClient);
+  });
+
+  it('returns an HttpEmbeddingClient when EMBEDDING_BACKEND=http', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'http');
+    vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
+    expect(getEmbeddingClient()).toBeInstanceOf(HttpEmbeddingClient);
+  });
+});
+
+describe('getEmbeddingClient — sagemaker backend', () => {
+  it('returns a SageMakerEmbeddingClient when EMBEDDING_BACKEND=sagemaker', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    expect(getEmbeddingClient()).toBeInstanceOf(SageMakerEmbeddingClient);
+  });
+
+  it('accepts case-insensitive backend names', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', '  SageMaker  ');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    expect(getEmbeddingClient()).toBeInstanceOf(SageMakerEmbeddingClient);
+  });
+
+  it('throws when EMBEDDING_SAGEMAKER_ENDPOINT_NAME is unset', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', undefined);
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    expect(() => getEmbeddingClient()).toThrow(
+      /EMBEDDING_SAGEMAKER_ENDPOINT_NAME/,
+    );
+  });
+
+  it('throws when EMBEDDING_SAGEMAKER_REGION is unset', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', undefined);
+    expect(() => getEmbeddingClient()).toThrow(/EMBEDDING_SAGEMAKER_REGION/);
+  });
+
+  it('defaults provider to "aws-sagemaker" when EMBEDDING_PROVIDER is unset', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    vi.stubEnv('EMBEDDING_PROVIDER', undefined);
+    expect(getEmbeddingClient().provider).toBe('aws-sagemaker');
+  });
+
+  it('honors EMBEDDING_PROVIDER override', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    vi.stubEnv('EMBEDDING_PROVIDER', 'mm-prod');
+    expect(getEmbeddingClient().provider).toBe('mm-prod');
+  });
+});
+
+describe('getEmbeddingClient — invalid EMBEDDING_BACKEND', () => {
+  it('throws on an unknown backend name', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'bedrock');
+    expect(() => getEmbeddingClient()).toThrow(/EMBEDDING_BACKEND/);
+  });
+});
+
+describe('isEmbeddingConfigured', () => {
+  it('is true for http backend when EMBEDDING_API_URL is set', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'http');
+    vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
+    expect(isEmbeddingConfigured()).toBe(true);
+  });
+
+  it('is false for http backend when EMBEDDING_API_URL is unset', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'http');
+    vi.stubEnv('EMBEDDING_API_URL', undefined);
+    expect(isEmbeddingConfigured()).toBe(false);
+  });
+
+  it('is true for sagemaker backend when endpoint + region are set', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    expect(isEmbeddingConfigured()).toBe(true);
+  });
+
+  it('is false for sagemaker backend when endpoint is unset', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', undefined);
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    expect(isEmbeddingConfigured()).toBe(false);
+  });
+
+  it('is false on a misconfigured EMBEDDING_BACKEND (no throw to the caller)', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'bedrock');
+    expect(isEmbeddingConfigured()).toBe(false);
   });
 });

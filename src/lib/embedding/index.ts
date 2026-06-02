@@ -1,10 +1,19 @@
 /**
  * 033-rag-vector-retrieval — embedding client wiring.
  *
- * Reads the `EMBEDDING_*` env vars (see CLAUDE.md env table) and constructs a
- * singleton {@link HttpEmbeddingClient}. `EMBEDDING_API_URL` is required only
- * when vector indexing is actually in use; callers that may run without it
- * should use {@link getEmbeddingClient} and handle the thrown error, or check
+ * Reads the `EMBEDDING_*` env vars (see CLAUDE.md env table) and constructs
+ * the process-wide singleton {@link EmbeddingClient}. Two backends:
+ *
+ *   - `EMBEDDING_BACKEND=http` (default) — {@link HttpEmbeddingClient};
+ *     requires `EMBEDDING_API_URL`. Dev path (Ollama) and any HF TEI / vLLM
+ *     endpoint accessible over HTTP.
+ *   - `EMBEDDING_BACKEND=sagemaker` — {@link SageMakerEmbeddingClient};
+ *     requires `EMBEDDING_SAGEMAKER_ENDPOINT_NAME` and
+ *     `EMBEDDING_SAGEMAKER_REGION`. Production path; AWS-tenant compute
+ *     hosting nomic via the HuggingFace TEI container.
+ *
+ * Callers that may run without an embedding endpoint configured should use
+ * {@link getEmbeddingClient} and handle the thrown error, or check
  * {@link isEmbeddingConfigured} first.
  */
 
@@ -12,8 +21,10 @@ import {
   HttpEmbeddingClient,
   type EmbeddingClient,
 } from './client.js';
+import { SageMakerEmbeddingClient } from './client-sagemaker.js';
 
 export * from './client.js';
+export { SageMakerEmbeddingClient } from './client-sagemaker.js';
 
 // The Ollama tag is `nomic-embed-text` (which serves nomic-embed-text-v1.5,
 // 768-dim). The model string is sent verbatim to the endpoint, so this must
@@ -22,28 +33,105 @@ export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
 export const DEFAULT_EMBEDDING_DIM = 768;
 export const DEFAULT_EMBEDDING_PROVIDER = 'local';
 
+export type EmbeddingBackend = 'http' | 'sagemaker';
+
 let cached: EmbeddingClient | null = null;
 
-/** True when `EMBEDDING_API_URL` is set (vector indexing can run). */
-export function isEmbeddingConfigured(): boolean {
-  return !!process.env.EMBEDDING_API_URL;
+function resolveBackend(): EmbeddingBackend {
+  const raw = process.env.EMBEDDING_BACKEND?.trim().toLowerCase();
+  if (!raw || raw === 'http') return 'http';
+  if (raw === 'sagemaker') return 'sagemaker';
+  throw new Error(
+    `Invalid EMBEDDING_BACKEND: ${JSON.stringify(process.env.EMBEDDING_BACKEND)} ` +
+      `(expected "http" or "sagemaker").`,
+  );
 }
 
 /**
- * The process-wide embedding client. Throws if `EMBEDDING_API_URL` is unset —
- * the embedding worker and search paths only call this for memories that have
- * opted into vector indexing, and the server logs a startup warning when
- * indexed memories exist without a configured endpoint.
+ * True when the current `EMBEDDING_BACKEND` has the env vars it needs to
+ * actually serve embeddings. The embedding worker and search paths only call
+ * the client for memories that have opted into vector indexing; the server
+ * logs a startup warning when indexed memories exist without a configured
+ * endpoint.
+ */
+export function isEmbeddingConfigured(): boolean {
+  try {
+    const backend = resolveBackend();
+    if (backend === 'sagemaker') {
+      return !!process.env.EMBEDDING_SAGEMAKER_ENDPOINT_NAME &&
+        !!process.env.EMBEDDING_SAGEMAKER_REGION;
+    }
+    return !!process.env.EMBEDDING_API_URL;
+  } catch {
+    // Misconfigured EMBEDDING_BACKEND — treat as not configured; the
+    // startup warning + the throw from getEmbeddingClient surface the
+    // specific cause.
+    return false;
+  }
+}
+
+/**
+ * The process-wide embedding client. Throws on missing or invalid
+ * configuration so a misconfigured deploy fails loudly rather than
+ * silently dropping vector writes.
  */
 export function getEmbeddingClient(): EmbeddingClient {
   if (cached) return cached;
+  const backend = resolveBackend();
+  const dim = readDim();
+  const model = process.env.EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL;
+  const provider = process.env.EMBEDDING_PROVIDER;
+
+  if (backend === 'sagemaker') {
+    const endpointName = process.env.EMBEDDING_SAGEMAKER_ENDPOINT_NAME;
+    const region = process.env.EMBEDDING_SAGEMAKER_REGION;
+    if (!endpointName) {
+      throw new Error(
+        'EMBEDDING_SAGEMAKER_ENDPOINT_NAME is not set — required when ' +
+          'EMBEDDING_BACKEND=sagemaker. Set it to the SageMaker endpoint ' +
+          'name (e.g. "hadron-embed-nomic-v1") that hosts nomic via the ' +
+          'HuggingFace TEI container.',
+      );
+    }
+    if (!region) {
+      throw new Error(
+        'EMBEDDING_SAGEMAKER_REGION is not set — required when ' +
+          'EMBEDDING_BACKEND=sagemaker. Set it to the AWS region the ' +
+          'endpoint lives in (e.g. "us-east-1").',
+      );
+    }
+    cached = new SageMakerEmbeddingClient({
+      endpointName,
+      region,
+      model,
+      dim,
+      provider,
+      inferenceComponentName:
+        process.env.EMBEDDING_SAGEMAKER_INFERENCE_COMPONENT,
+    });
+    return cached;
+  }
+
+  // http backend
   const url = process.env.EMBEDDING_API_URL;
   if (!url) {
     throw new Error(
       'EMBEDDING_API_URL is not set — required for vector indexing (spec 033). ' +
-        'Set it to a self-hosted embedding endpoint (dev: Ollama /api/embed).',
+        'Set it to a self-hosted embedding endpoint (dev: Ollama /api/embed), ' +
+        'or set EMBEDDING_BACKEND=sagemaker for the SageMaker path.',
     );
   }
+  cached = new HttpEmbeddingClient({
+    url,
+    model,
+    dim,
+    provider: provider ?? DEFAULT_EMBEDDING_PROVIDER,
+    apiKey: process.env.EMBEDDING_API_KEY,
+  });
+  return cached;
+}
+
+function readDim(): number {
   const dimEnv = process.env.EMBEDDING_DIM;
   const dim = dimEnv ? Number(dimEnv) : DEFAULT_EMBEDDING_DIM;
   if (!Number.isInteger(dim) || dim <= 0) {
@@ -52,14 +140,7 @@ export function getEmbeddingClient(): EmbeddingClient {
         `equal to the pgvector column dimension (${DEFAULT_EMBEDDING_DIM}).`,
     );
   }
-  cached = new HttpEmbeddingClient({
-    url,
-    model: process.env.EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL,
-    dim,
-    provider: process.env.EMBEDDING_PROVIDER ?? DEFAULT_EMBEDDING_PROVIDER,
-    apiKey: process.env.EMBEDDING_API_KEY,
-  });
-  return cached;
+  return dim;
 }
 
 /** Test hook: reset the cached singleton. */
