@@ -3915,14 +3915,25 @@ export const resolvers = {
 
       // 033 US5 FR-026 — enabling the vector index on an encrypted memory
       // requires explicit acknowledgment of the embedding-inversion
-      // disclosure (stored vectors are plaintext + partially invertible).
-      // The friendly typed error fires at the API boundary; the
-      // chk_memory_vector_encrypted_ack CHECK is the DB-level backstop.
+      // disclosure (stored vectors are plaintext + partially invertible —
+      // see FR_026_DISCLOSURE in src/lib/entityRef/errors.ts for the full
+      // four-point text). The friendly typed error fires at the API
+      // boundary; the chk_memory_vector_encrypted_ack CHECK is the DB-level
+      // backstop.
       //
       // Gate fires only when this call would enable the index AND the row
-      // is encrypted AND no prior ack timestamp is recorded. A re-ack
-      // on a memory that's already acknowledged is a no-op (the timestamp
-      // stays put — the original opt-in moment is the audit-relevant one).
+      // is encrypted AND no prior ack timestamp is recorded.
+      //
+      // ── First-ack-is-permanent (intentional; PR-222 review item 3) ──
+      // `vectorIndexEncryptedAckAt` survives a revoke + re-enable cycle.
+      // Once a user has acked, future toggles never re-prompt. The audit-
+      // relevant moment is the FIRST opt-in. If the disclosure copy ever
+      // changes materially, audit semantics would need an explicit
+      // re-consent flow (e.g., bump a disclosure-version column and clear
+      // ackAt when the version bumps) — but that's deliberately deferred
+      // until/unless the copy actually changes. DO NOT "fix" this by
+      // clearing ackAt on revoke without product sign-off; the current
+      // semantic is the explicit choice.
       let nextAckAt: Date | undefined;
       const willBeEnabled = vectorIndexEnabled === true ||
         (vectorIndexEnabled === undefined && memory.vectorIndexEnabled);
