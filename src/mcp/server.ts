@@ -1274,18 +1274,12 @@ export function createMcpServerInstance(
             limit: candidateLimit,
           }),
         ]);
-        // Dedup keyword nodes by (memoryId, loc) — canonical preferred
-        // within a memory; cross-memory same-loc nodes are distinct and
-        // both survive (e.g. each of three memories has its own
-        // `start-here`). Filter by matchesQuery, then re-rank by
-        // relevance for RRF.
-        const byKeyK = new Map<string, typeof kwNodes[0]>();
-        for (const n of kwNodes) {
-          const key = `${n.memoryId}:${n.loc}`;
-          const existing = byKeyK.get(key);
-          if (!existing || (existing.isLink && !n.isLink)) byKeyK.set(key, n);
-        }
-        const kwMatches = Array.from(byKeyK.values()).filter((n) => matchesQuery(n, query));
+        // Filter by matchesQuery, then re-rank by relevance for RRF.
+        // No (memoryId, loc) dedup needed — the Node model's
+        // @@unique([loc, memoryId]) makes that a structural no-op
+        // (PR-227 review). Cross-memory same-loc preservation is pinned
+        // by src/test/integration/dedup-cross-memory-loc.test.ts.
+        const kwMatches = kwNodes.filter((n) => matchesQuery(n, query));
         const kwRanked = keywordRelevanceRank(kwMatches, query);
         // RRF the two lists by node ID. The fused list is the union of
         // both inputs ordered by reciprocal-rank score.
@@ -1371,19 +1365,11 @@ export function createMcpServerInstance(
             }
           : undefined,
       });
-      // Deduplicate by (memoryId, loc): prefer canonical (isLink=false)
-      // over link nodes WITHIN a memory; cross-memory same-loc nodes
-      // (e.g. each of three memories has its own `start-here`) MUST
-      // survive — they're distinct nodes that happen to share a local
-      // path.
-      const byKey = new Map<string, typeof allNodes[0]>();
-      for (const n of allNodes) {
-        const key = `${n.memoryId}:${n.loc}`;
-        const existing = byKey.get(key);
-        if (!existing || (existing.isLink && !n.isLink)) byKey.set(key, n);
-      }
-      const nodes = Array.from(byKey.values());
-      const matches = nodes.filter((n) => matchesQuery(n, query));
+      // No (memoryId, loc) dedup needed — the Node model's
+      // @@unique([loc, memoryId]) makes that a structural no-op
+      // (PR-227 review). Cross-memory same-loc preservation is pinned
+      // by src/test/integration/dedup-cross-memory-loc.test.ts.
+      const matches = allNodes.filter((n) => matchesQuery(n, query));
       const limited = matches.slice(0, limit ?? 50);
 
       // Spec 033 US3 (T049) — append undirected neighbors after the

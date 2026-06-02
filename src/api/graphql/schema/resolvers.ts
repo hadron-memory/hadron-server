@@ -370,34 +370,17 @@ async function renderNodeSearchResult(
   return { nodes: ordered, passages: [], reason, degraded };
 }
 
-/**
- * Deduplicate nodes by (memoryId, loc): when the SAME memory has two rows for
- * the same loc (one canonical isLink=false + one link isLink=true), prefer
- * the canonical. Cross-memory collisions on the same loc — e.g. each of three
- * memories has its own `start-here` node — MUST NOT collapse: those are
- * three distinct nodes that happen to share a local path.
- *
- * Pre-spec-033 versions of this function keyed by `loc` alone and silently
- * dropped cross-memory same-loc nodes. A user with `start-here` in
- * `hadronmemory.com::dev`, `micromentor.org::mm-app`, AND `micromentor.org::mmdata`
- * would see only one of the three in the portal's `Query.nodes` view. The
- * `(memoryId, loc)` key preserves both invariants — the within-memory
- * canonical-over-link tiebreak the comment originally meant AND the
- * across-memory keep-everything semantic the data shape demands.
- */
-function deduplicateNodes<T extends { loc: string; isLink: boolean; memoryId: string }>(
-  nodes: T[],
-): T[] {
-  const byKey = new Map<string, T>();
-  for (const node of nodes) {
-    const key = `${node.memoryId}:${node.loc}`;
-    const existing = byKey.get(key);
-    if (!existing || (existing.isLink && !node.isLink)) {
-      byKey.set(key, node);
-    }
-  }
-  return Array.from(byKey.values());
-}
+// Note (PR-227 review, Gemini): a `deduplicateNodes` helper lived here
+// pre-2026-06-02 to collapse rows by `(memoryId, loc)` and prefer the
+// canonical (isLink=false) over the link variant. The schema's
+// `@@unique([loc, memoryId])` on Node makes this a structural no-op
+// for any direct `findMany` result — Prisma cannot return two rows for
+// the same (memoryId, loc) pair, so the canonical-vs-link tiebreak
+// never fires. The function was removed and call sites use the
+// findMany result directly. Cross-memory same-loc preservation is
+// pinned by src/test/integration/dedup-cross-memory-loc.test.ts so a
+// future query shape that re-introduces row duplication (e.g. a UNION
+// across memories) would surface there.
 
 /**
  * Verify the caller has write access to a specific memory.
@@ -1819,7 +1802,7 @@ export const resolvers = {
       await decryptNodesBatch(ctx.db, results);
       // Sort by nodeType priority: abstract first, then info/reference, then record
       const typePriority: Record<string, number> = { abstract: 0, info: 1, reference: 1, record: 2, system: 3 };
-      const sorted = deduplicateNodes(results).sort((a, b) =>
+      const sorted = results.sort((a, b) =>
         (typePriority[a.nodeType] ?? 1) - (typePriority[b.nodeType] ?? 1)
       );
       return sorted.slice(offset ?? 0, (offset ?? 0) + (limit ?? 100));
@@ -1923,24 +1906,17 @@ export const resolvers = {
       }
 
       // Helper: run the keyword half (used by keyword + hybrid). Mirrors
-      // the MCP fall-through: findMany over scope → dedup by loc → filter
-      // by matchesQuery.
+      // the MCP fall-through: findMany over scope → filter by matchesQuery.
+      // No (memoryId, loc) dedup needed — the Node model's
+      // @@unique([loc, memoryId]) makes that a structural no-op
+      // (PR-227 review). Cross-memory same-loc preservation is pinned by
+      // src/test/integration/dedup-cross-memory-loc.test.ts.
       const runKeyword = async (): Promise<typeof keywordMatchesType> => {
         const candidates = await ctx.db.node.findMany({
           where: { memoryId: { in: scopeIds }, deletedAt: null },
           take: 1000,
         });
-        // Key by (memoryId, loc): cross-memory same-loc nodes (e.g.
-        // each of three memories has its own `start-here`) MUST survive
-        // — they're distinct nodes that happen to share a local path.
-        // Within-memory canonical-vs-link collision still dedupes.
-        const byKey = new Map<string, typeof candidates[0]>();
-        for (const n of candidates) {
-          const key = `${n.memoryId}:${n.loc}`;
-          const existing = byKey.get(key);
-          if (!existing || (existing.isLink && !n.isLink)) byKey.set(key, n);
-        }
-        return Array.from(byKey.values()).filter((n) => matchesQuery(n, query));
+        return candidates.filter((n) => matchesQuery(n, query));
       };
       // Type alias for the helper's return — TS infers via the call site.
       let keywordMatchesType!: Awaited<ReturnType<typeof ctx.db.node.findMany>>;
@@ -2072,7 +2048,7 @@ export const resolvers = {
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
       await decryptNodesBatch(ctx.db, results);
-      return deduplicateNodes(results);
+      return results;
     },
 
     nodeUsage: async (_: unknown, { loc, limit }: { loc: string; limit?: number }, ctx: Context) => {
