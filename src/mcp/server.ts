@@ -412,133 +412,18 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
   return `urn:node:${bareMemCanonical}::${loc}`;
 }
 
-export function matchesQuery(
-  node: { name: string; loc: string; description: string | null; tags: string[] },
-  query: string,
-): boolean {
-  // Issue #170: `*` and empty string are "match all". Without this an
-  // agent surveying a memory will reasonably try `query: "*"` first,
-  // get "No nodes found", and proceed to write — overlooking the
-  // existing tree. Now `*` (and trimmed-empty) surface every node so
-  // the agent can see what's already there.
-  const trimmed = query.trim();
-  if (trimmed === '' || trimmed === '*') return true;
-  const terms = trimmed.toLowerCase().split(/\s+/);
-  const haystack = [node.name, node.loc, node.description || '', ...node.tags]
-    .join(' ')
-    .toLowerCase();
-  return terms.every((t) => haystack.includes(t));
-}
-
-/**
- * Spec 033 US3 (T048) — re-rank keyword hits by relevance signal so RRF
- * fusion isn't biased by the default alphabetical-by-loc order from
- * `db.node.findMany`. Today's `mode:keyword` (default) path renders
- * results in DB order for stability; this helper feeds the RRF input
- * only on the hybrid path.
- *
- * Signal ordering per contracts/h-find-nodes.md:
- *   1. Distinct query terms matched (desc) — does the node hit MORE of
- *      the query? Strong indicator.
- *   2. Total term frequency across the haystack (desc) — secondary
- *      relevance signal for ties on (1).
- *   3. `loc` ascending — deterministic tiebreak so the same input
- *      always produces the same output.
- *
- * The haystack mirrors `matchesQuery` (name + loc + description + tags).
- * Query is lowercased + split on whitespace; empty/`*` query maps to no
- * terms and the function returns the input unchanged (caller already
- * passed through `matchesQuery`'s "match all" branch).
- */
-export function keywordRelevanceRank<
-  T extends { name: string; loc: string; description: string | null; tags: string[] },
->(nodes: T[], query: string): T[] {
-  const trimmed = query.trim();
-  if (trimmed === '' || trimmed === '*') return [...nodes];
-  const terms = trimmed.toLowerCase().split(/\s+/).filter(Boolean);
-  return [...nodes]
-    .map((node) => {
-      const haystack = [node.name, node.loc, node.description || '', ...node.tags]
-        .join(' ')
-        .toLowerCase();
-      let distinctMatches = 0;
-      let totalFreq = 0;
-      for (const term of terms) {
-        const occurrences = haystack.split(term).length - 1;
-        if (occurrences > 0) distinctMatches += 1;
-        totalFreq += occurrences;
-      }
-      return { node, distinctMatches, totalFreq };
-    })
-    .sort((a, b) => {
-      if (a.distinctMatches !== b.distinctMatches) return b.distinctMatches - a.distinctMatches;
-      if (a.totalFreq !== b.totalFreq) return b.totalFreq - a.totalFreq;
-      return a.node.loc.localeCompare(b.node.loc);
-    })
-    .map((entry) => entry.node);
-}
-
-/**
- * Spec 033 US3 (T049) — append undirected graph neighbors after the
- * ranked hits, unscored. BFS from the ranked-hit set up to `depth` hops,
- * traversing all edge types in both directions. Deduplicated against
- * the seed set and prior hops, scoped to memories the caller can read
- * AND to live nodes.
- *
- * Returns the appended node IDs in BFS-traversal order. The caller
- * concatenates this onto the ranked-hits list; "unscored" in the
- * contract means literally "appended after, with no fused score" —
- * not "scored zero."
- */
-export async function expandWithNeighbors(
-  db: PrismaClient,
-  seedIds: string[],
-  depth: number,
-  memoryScope: { memoryIds?: string[] | null } = {},
-): Promise<string[]> {
-  if (depth <= 0 || seedIds.length === 0) return [];
-  const seen = new Set<string>(seedIds);
-  let frontier = new Set<string>(seedIds);
-  const appended: string[] = [];
-  for (let d = 0; d < depth; d++) {
-    if (frontier.size === 0) break;
-    const frontierIds = Array.from(frontier);
-    const edges = await db.edge.findMany({
-      where: { OR: [{ sourceId: { in: frontierIds } }, { targetId: { in: frontierIds } }] },
-      select: { sourceId: true, targetId: true },
-    });
-    const candidateIds = new Set<string>();
-    for (const e of edges) {
-      if (!seen.has(e.sourceId)) candidateIds.add(e.sourceId);
-      if (!seen.has(e.targetId)) candidateIds.add(e.targetId);
-    }
-    if (candidateIds.size === 0) {
-      frontier = new Set<string>();
-      continue;
-    }
-    // Filter to alive nodes within scope. memoryIds === null means
-    // admin/all — no extra filter; explicit array gates by memory.
-    const memWhere =
-      memoryScope.memoryIds == null ? {} : { memoryId: { in: memoryScope.memoryIds } };
-    const aliveNeighbors = await db.node.findMany({
-      where: { id: { in: Array.from(candidateIds) }, deletedAt: null, ...memWhere },
-      select: { id: true },
-    });
-    const aliveSet = new Set(aliveNeighbors.map((n) => n.id));
-    const nextFrontier = new Set<string>();
-    // Preserve BFS traversal order: iterate candidateIds in insertion order
-    // (the order edges were emitted by findMany), keep only alive ones.
-    for (const id of candidateIds) {
-      if (aliveSet.has(id)) {
-        seen.add(id);
-        appended.push(id);
-        nextFrontier.add(id);
-      }
-    }
-    frontier = nextFrontier;
-  }
-  return appended;
-}
+// Spec 033 US3 — search helpers moved to src/lib/search.ts to break the
+// circular dependency that was forming once GraphQL nodeSearch started
+// importing them (mcp/server.ts already imports from resolvers.ts via the
+// chat tools). Imported here for the h-find-nodes dispatch + re-exported
+// for backwards compatibility with callers that still import these from
+// `mcp/server.ts` (h-find-nodes tests).
+import {
+  matchesQuery,
+  keywordRelevanceRank,
+  expandWithNeighbors,
+} from '../lib/search.js';
+export { matchesQuery, keywordRelevanceRank, expandWithNeighbors };
 
 // Loc validation moved to src/lib/validateLoc.ts so the GraphQL
 // upsertNode resolver and the MCP tool surface share the same rule
@@ -1241,8 +1126,19 @@ export function createMcpServerInstance(
           : [];
         const allRenderIds = [...rankedIds, ...neighborIds];
         if (allRenderIds.length === 0) return textResult('Found 0 node(s).');
+        // PR-223 review (Gemini): the `brief` parameter is documented to
+        // include outgoing-edge index info. The vector path was previously
+        // omitting it — bring it in line with the keyword path.
         const hitNodes = await db.node.findMany({
           where: { id: { in: allRenderIds }, deletedAt: null },
+          include: brief
+            ? {
+                outgoingEdges: {
+                  include: { target: true },
+                  where: { target: { deletedAt: null } },
+                },
+              }
+            : undefined,
         });
         const nodeById = new Map(hitNodes.map((n) => [n.id, n]));
         const scoreById = new Map(hits.map((h) => [h.nodeId, h.score]));
@@ -1276,6 +1172,15 @@ export function createMcpServerInstance(
             for (const absLine of (n.abstract as string).split(/\r?\n/)) parts.push(`  ${absLine}`);
           }
           if (n.tags?.length) parts.push(`  Tags: ${(n.tags as string[]).join(', ')}`);
+          // Brief edge rendering — matches the keyword path's format.
+          const briefEdges = (n as { outgoingEdges?: Array<{ target: { loc: string; memoryId: string }; label: string }> }).outgoingEdges;
+          if (brief && briefEdges?.length) {
+            const edgeStrs = await Promise.all(briefEdges.map(async (e) => {
+              const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
+              return `→ ${targetUrn} (${e.label})`;
+            }));
+            parts.push(`  Edges: ${edgeStrs.join(', ')}`);
+          }
           vlines.push(parts.join('\n'));
         }
         return textResult(`Found ${vlines.length} node(s):\n\n${vlines.join('\n')}`);
@@ -1308,12 +1213,19 @@ export function createMcpServerInstance(
         // Run keyword half (over the SAME scoping as the keyword branch
         // below — same `where`) and vector half in parallel.
         const finalLimit = limit ?? 50;
+        // PR-223 review (Gemini): hybrid pulls a DEEPER candidate pool from
+        // the vector half than the final output limit. RRF benefits from
+        // candidates ranked slightly outside the top finalLimit on the
+        // vector side that ALSO appear high on the keyword side — capping
+        // at finalLimit would discard those before fusion. Keyword half
+        // already over-fetches (`take: 1000`) for the same reason.
+        const candidateLimit = Math.max(100, finalLimit);
         const [kwNodes, vecHits] = await Promise.all([
           db.node.findMany({ where, take: 1000 }),
           vectorSearchNodes(db, {
             memoryIds: indexedIds!,
             queryEmbedding: qvec,
-            limit: finalLimit,
+            limit: candidateLimit,
           }),
         ]);
         // Dedup keyword nodes by loc (canonical preferred), filter by
@@ -1337,8 +1249,18 @@ export function createMcpServerInstance(
           : [];
         const allRenderIds = [...fusedIds, ...neighborIds];
         if (allRenderIds.length === 0) return textResult('Found 0 node(s).');
+        // PR-223 review (Gemini): include outgoing edges in brief mode,
+        // matching keyword path coverage.
         const renderNodes = await db.node.findMany({
           where: { id: { in: allRenderIds }, deletedAt: null },
+          include: brief
+            ? {
+                outgoingEdges: {
+                  include: { target: true },
+                  where: { target: { deletedAt: null } },
+                },
+              }
+            : undefined,
         });
         const renderById = new Map(renderNodes.map((n) => [n.id, n]));
         const scoreById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
@@ -1366,6 +1288,14 @@ export function createMcpServerInstance(
             for (const absLine of (n.abstract as string).split(/\r?\n/)) parts.push(`  ${absLine}`);
           }
           if (n.tags?.length) parts.push(`  Tags: ${(n.tags as string[]).join(', ')}`);
+          const briefEdges = (n as { outgoingEdges?: Array<{ target: { loc: string; memoryId: string }; label: string }> }).outgoingEdges;
+          if (brief && briefEdges?.length) {
+            const edgeStrs = await Promise.all(briefEdges.map(async (e) => {
+              const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
+              return `→ ${targetUrn} (${e.label})`;
+            }));
+            parts.push(`  Edges: ${edgeStrs.join(', ')}`);
+          }
           hlines.push(parts.join('\n'));
         }
         return textResult(`Found ${hlines.length} node(s):\n\n${hlines.join('\n')}`);
@@ -1403,23 +1333,39 @@ export function createMcpServerInstance(
 
       // Spec 033 US3 (T049) — append undirected neighbors after the
       // ranked keyword hits when `expand` is set. Scope the BFS to the
-      // same memory set the keyword query saw.
+      // SAME memory set the keyword query saw — when memoryUrn narrowed
+      // `where.memoryId` to a single ID, use that single-memory scope
+      // (PR-223 review: without this, cross-memory edges from the seed
+      // node could pull in neighbors from memories outside the caller's
+      // explicit scope).
       let expandedNodes: typeof allNodes = [];
       if (expand && expand > 0 && limited.length > 0) {
-        // Pass memoryIds=null when admin/all (matches `where` behavior).
-        const scope = memoryIds == null ? { memoryIds: null } : { memoryIds };
+        const scopedMemoryId = where.memoryId as unknown;
+        let expandScope: { memoryIds: string[] | null };
+        if (typeof scopedMemoryId === 'string') {
+          expandScope = { memoryIds: [scopedMemoryId] };
+        } else if (
+          scopedMemoryId &&
+          typeof scopedMemoryId === 'object' &&
+          Array.isArray((scopedMemoryId as { in?: unknown }).in)
+        ) {
+          expandScope = { memoryIds: (scopedMemoryId as { in: string[] }).in };
+        } else {
+          // memoryIds === null means admin/all (no further filter).
+          expandScope = { memoryIds: memoryIds };
+        }
         const extraIds = await expandWithNeighbors(
           db,
           limited.map((n) => n.id),
           expand,
-          scope,
+          expandScope,
         );
         if (extraIds.length > 0) {
           expandedNodes = await db.node.findMany({
             where: {
               id: { in: extraIds },
               deletedAt: null,
-              ...(memoryIds ? { memoryId: { in: memoryIds } } : {}),
+              ...(expandScope.memoryIds ? { memoryId: { in: expandScope.memoryIds } } : {}),
             },
             include: brief
               ? {

@@ -12,7 +12,7 @@ import {
   matchesQuery,
   keywordRelevanceRank,
   expandWithNeighbors,
-} from '../../../mcp/server.js';
+} from '../../../lib/search.js';
 import {
   APP_KEY_PREFIX,
   USER_API_KEY_LABEL_MAX_LEN,
@@ -1847,6 +1847,16 @@ export const resolvers = {
           { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
         );
       }
+      // Validate expand bounds (PR-223 review, Copilot): the MCP surface
+      // clamps via zod min(0).max(3); GraphQL has no equivalent unless
+      // we check here. Without this guard a caller could pass expand: 1000
+      // and force unbounded BFS work.
+      if (expand != null && (expand < 0 || expand > 3 || !Number.isInteger(expand))) {
+        throw new GraphQLError(
+          'nodeSearch `expand` must be an integer in [0, 3].',
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
       const finalLimit = limit ?? 50;
 
       // Resolve scope: a single memory by URN (with access check), or the
@@ -1953,12 +1963,18 @@ export const resolvers = {
       // ── HYBRID MODE ───────────────────────────────────────────────
       // Run keyword + vector in parallel; re-rank keyword by relevance
       // for RRF; fuse with reciprocalRankFusion. Mirrors the MCP path.
+      // PR-223 review (Gemini): vector half pulls a DEEPER candidate
+      // pool than finalLimit so RRF can promote items ranked slightly
+      // outside the top-N on the vector side that ALSO show up on the
+      // keyword side. Without this, small `limit` values silently
+      // degrade fusion quality.
+      const candidateLimit = Math.max(100, finalLimit);
       const [kwMatches, vecHits] = await Promise.all([
         runKeyword(),
         vectorSearchNodes(ctx.db, {
           memoryIds: indexedIds,
           queryEmbedding: qvec,
-          limit: finalLimit,
+          limit: candidateLimit,
         }),
       ]);
       const kwRanked = keywordRelevanceRank(kwMatches, query);

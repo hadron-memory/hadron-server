@@ -85,9 +85,10 @@ describe('reciprocalRankFusion', () => {
       ],
       (n) => n.id,
     );
-    expect(out.map((n) => n.id)).toEqual(['n1', 'b'.length ? 'n2' : 'n2']); // n1 dominates (in both)
-    expect(out[0].id).toBe('n1');
-    // The first-seen entry is the one retained.
+    // n1 appears in both lists → its fused score is 1/61 + 1/61, beating n2's
+    // single-list 1/62. n1 must be first, and the entry kept is the FIRST-SEEN
+    // object (sameA1), not the second-seen one.
+    expect(out.map((n) => n.id)).toEqual(['n1', 'n2']);
     expect(out[0]).toBe(sameA1);
   });
 
