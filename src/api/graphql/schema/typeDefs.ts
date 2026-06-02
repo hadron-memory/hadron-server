@@ -135,6 +135,38 @@ export const typeDefs = `#graphql
     abstract: String
     "Spec 032 — fingerprint of the content value at the time abstract was authored. SHA-256 of plaintext content, truncated to 8 hex chars. Compared at read time against computeContentHash(node.content) to detect staleness; when the two values differ AND abstractOriginHash is non-null, the abstract may not reflect current content. System-managed; never settable via NodeInput."
     abstractOriginHash: String
+    """
+    Spec 033 FR-006/FR-007 — set when this node needs (re-)embedding;
+    cleared on success. The single work signal the embedding worker
+    drains. Operational state (never versioned on NodeVersion). The
+    portal renders this as a subtle "embedding…" badge so a user who
+    just edited isn't confused that their change "didn't take" in
+    search yet. System-managed.
+    """
+    embeddingPendingAt: String
+    """
+    Spec 033 FR-009 — set when an embed attempt failed (record, not a
+    work signal). Transient failures keep embeddingPendingAt set for
+    retry; permanent failures clear it. The portal renders this as a
+    red badge with the embeddingError message inline so users with an
+    empty index can distinguish "nothing matched" from "every embed
+    failed". System-managed.
+    """
+    embeddingFailedAt: String
+    """
+    Spec 033 — last embed error message (diagnosability; also surfaced
+    by h-validate). Common values: encrypted-no-plaintext (#206),
+    embedding-endpoint-unreachable, dimension-mismatch. Null when no
+    failure has been recorded since the most recent success or revoke.
+    System-managed.
+    """
+    embeddingError: String
+    """
+    Spec 033 — attempt counter for backoff / give-up. Resets to 0 on
+    success or revoke. Surfaced for ops diagnostics (a node stuck at a
+    high attempt count likely needs operator attention). System-managed.
+    """
+    embeddingAttempts: Int!
     content: String
     tokens: Int
     tags: [String!]!
@@ -745,6 +777,19 @@ export const typeDefs = `#graphql
     is unreliable (e.g. transcripts, machine-generated reports).
     """
     forceFixedSize: Boolean!
+    """
+    Spec 033 FR-026 — timestamp at which the memory owner accepted the
+    encrypted-memory vector-inversion disclosure. Set when the caller
+    passes acknowledgeVectorInversionRisk: true on updateMemory for an
+    isEncrypted: true memory enabling vectorIndexEnabled for the first
+    time. The portal surfaces this readback so the user can confirm
+    when they accepted the tradeoff (the disclosure text is the
+    FR_026_DISCLOSURE constant in src/lib/entityRef/errors.ts).
+    Survives a revoke + re-enable cycle (never cleared). Null for
+    unencrypted memories and for encrypted memories where the index
+    was never enabled.
+    """
+    vectorIndexEncryptedAckAt: String
     userMemoryOfAgentId: String
     anonymousExpiresAt: String
     # 008-agent-installation: app pivot for app/personal-class memories.

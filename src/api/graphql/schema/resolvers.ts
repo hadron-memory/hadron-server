@@ -1131,6 +1131,12 @@ export const resolvers = {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
     createdAt: (n: { createdAt: Date | string }) => toISO(n.createdAt)!,
     updatedAt: (n: { updatedAt: Date | string }) => toISO(n.updatedAt)!,
+    // Spec 033 embedding-state DateTime fields — Prisma returns Date,
+    // portal (and any other GraphQL consumer) needs ISO strings.
+    embeddingPendingAt: (n: { embeddingPendingAt?: Date | string | null }) =>
+      toISO(n.embeddingPendingAt),
+    embeddingFailedAt: (n: { embeddingFailedAt?: Date | string | null }) =>
+      toISO(n.embeddingFailedAt),
   },
   NodeVersion: {
     createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
@@ -1150,6 +1156,11 @@ export const resolvers = {
     lastSyncedAt: (g: { lastSyncedAt?: Date | string | null }) => toISO(g.lastSyncedAt),
     createdAt: (g: { createdAt: Date | string }) => toISO(g.createdAt)!,
     updatedAt: (g: { updatedAt: Date | string }) => toISO(g.updatedAt)!,
+    // Spec 033 FR-026 — readback for the encrypted-memory vector-
+    // inversion disclosure ack.
+    vectorIndexEncryptedAckAt: (g: {
+      vectorIndexEncryptedAckAt?: Date | string | null;
+    }) => toISO(g.vectorIndexEncryptedAckAt),
     organization: (g: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
       (g as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: g.organizationId } }),
