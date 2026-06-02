@@ -3026,7 +3026,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'h-validate',
-    'Check a memory for broken edge references, sparse nodes, and stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (h-validate does not decrypt; tracked by #206).',
+    'Check a memory for broken edge references, sparse nodes, stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), and embedding-failure flags (spec 033 — nodes whose async embedding hit the attempts cap or hit the #206 encrypted-no-plaintext perma-fail). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (h-validate does not decrypt; tracked by #206).',
     {
       memoryUrn: z.string().describe('Fully-qualified memory URN, e.g. "acme.com:mmdata"'),
     },
@@ -3097,6 +3097,21 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           node.abstractOriginHash !== computeContentHash(node.content)
         ) {
           issues.push(`[stale-abstract] ${nUrn} — abstract may not reflect current content`);
+        }
+        // Spec 033 T058 — surface embedding-failure diagnosability. When
+        // a node's async embedding hit the attempts cap (transient
+        // failure) OR landed on the permanent `encrypted-no-plaintext
+        // (#206)` branch, embedding_failed_at gets stamped. An empty
+        // vector index from outside h-validate looks identical to "no
+        // hits matched" — surfacing the failure flag here gives
+        // operators (and the agents who proactively run h-validate
+        // before debugging an empty index) a single-tool diagnostic
+        // surface. Default Prisma findMany without a select includes
+        // every scalar column, so embeddingFailedAt + embeddingError
+        // are already on `node` without a select change.
+        if (node.embeddingFailedAt) {
+          const reason = node.embeddingError ?? 'unknown';
+          issues.push(`[embed-failed] ${nUrn} — ${reason}`);
         }
       }
 
