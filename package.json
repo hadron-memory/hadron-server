@@ -4,6 +4,7 @@
   "description": "Hadron Controller — GraphQL API, usage DB, and node collection",
   "type": "module",
   "main": "dist/index.js",
+  "packageManager": "pnpm@10.15.0",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
@@ -46,6 +47,16 @@
     "resend": "^6.9.3",
     "yaml": "^2.8.2",
     "zod": "^4.3.6"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@apollo/protobufjs",
+      "@prisma/client",
+      "@prisma/engines",
+      "bcrypt",
+      "esbuild",
+      "prisma"
+    ]
   },
   "devDependencies": {
     "@types/bcrypt": "^5.0.2",
