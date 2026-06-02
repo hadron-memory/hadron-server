@@ -126,16 +126,16 @@ Single web-service (hadron-server). Source at `src/`, schema at `prisma/`, tests
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T044 [P] [US3] Integration test: no-`mode` == keyword (snapshot) and `mode:hybrid` RRF ordering on divergent keyword/semantic relevance (SC-007) in `src/test/integration/033-us3-hybrid.test.ts`
-- [ ] T045 [P] [US3] Integration test: `expand:1` appends undirected all-edge-type neighbors unscored after ranked hits; `mode:hybrid` on unindexed → keyword hits + `[degraded:no_vector_index]` in `src/test/integration/033-us3-expand-degraded.test.ts`
-- [ ] T046 [P] [US3] Unit test for RRF determinism + keyword relevance ranking, colocated at `src/lib/rrf.test.ts` (repo convention)
+- [X] T044 [P] [US3] Integration test at `src/test/integration/033-us3-hybrid.test.ts` — 4 scenarios: no-`mode` is byte-identical to `mode:keyword`; both-signal node beats single-signal under RRF (SC-007); vector-only hits surface that keyword would miss; hybrid on unindexed memory degrades + emits the `[degraded:no_vector_index]` flag.
+- [X] T045 [P] [US3] Integration test at `src/test/integration/033-us3-expand-degraded.test.ts` — 6 scenarios: `expand:1` appends both outgoing AND incoming neighbors (undirected); seeds deduplicated against neighbor expansion; `expand:0` (default) appends nothing; GraphQL `nodeSearch` envelope carries `degraded:'no_vector_index'` on hybrid-on-unindexed; vector-on-unindexed carries `reason:'no_vector_index'` with empty nodes; keyword mode via nodeSearch returns hits with neither flag.
+- [X] T046 [P] [US3] Unit test colocated at `src/lib/rrf.test.ts` — 9 scenarios: `RRF_K === 60` (FR-019); single-list passthrough; disjoint lists alternate by insertion order; both-signal beats single-signal (SC-007); hybrid example with known divergent rankings produces deterministic expected order; cross-run determinism via insertion-order tiebreak; `keyFn` collapses duplicates by composite key; empty inputs; k-parameter changes rank decay.
 
 ### Implementation for User Story 3
 
-- [ ] T047 [P] [US3] Implement `rrf.ts` in `src/lib/rrf.ts`: reciprocal-rank fusion, `k=60` fixed, taking pre-ranked keyword + vector lists
-- [ ] T048 [US3] Add keyword relevance ranking for RRF (distinct query terms matched, then term frequency, `loc` tiebreak) in `src/mcp/server.ts` so fusion isn't biased by the alphabetical-by-`loc` default order
-- [ ] T049 [US3] Implement the `expand: <depth>` BFS helper (undirected, all edge types, neighbors appended unscored) and wire into `h-find-nodes` (`src/mcp/server.ts`) and `nodeSearch` (`resolvers.ts`)
-- [ ] T050 [US3] Wire `mode:keyword` (explicit) + `mode:hybrid` dispatch + `[degraded:no_vector_index]` flag into `h-find-nodes` (`src/mcp/server.ts`) and `nodeSearch` (`resolvers.ts`)
+- [X] T047 [P] [US3] Implemented `src/lib/rrf.ts` exporting `reciprocalRankFusion<T>(lists, keyFn, k = RRF_K)` + `RRF_K = 60` constant. Stable insertion-order tiebreak so identical inputs always produce identical orderings (load-bearing for snapshot tests). Doc-comment names the load-bearing detail that keyword rank MUST be relevance-ranked, not alphabetical-by-loc, BEFORE being handed to RRF.
+- [X] T048 [US3] Added `keywordRelevanceRank` helper in `src/mcp/server.ts` (also imported by GraphQL nodeSearch). Re-orders keyword candidates by (distinct query terms matched desc, total term frequency desc, loc asc tiebreak). Only called on the hybrid path — `mode:keyword` (default) output stays alphabetical-by-loc, byte-identical to today (FR-018 / SC-007 keyword-default gate).
+- [X] T049 [US3] Added `expandWithNeighbors` helper in `src/mcp/server.ts` (BFS, undirected, all edge types, deduplicated against seeds + earlier hops, scoped to live nodes within `memoryIds`). Wired into all three modes in `h-find-nodes` AND into `nodeSearch` via a `renderNodeSearchResult` helper at the resolvers module scope. Returns appended IDs in BFS traversal order; appended after the ranked hits, unscored.
+- [X] T050 [US3] Wired `mode:hybrid` dispatch into both surfaces. **MCP** (`src/mcp/server.ts`): runs keyword + vector in parallel via `Promise.all`, re-ranks keyword via T048, RRF-fuses via T047, renders with mixed `(score …)` annotation only on vector-side hits. When no in-scope memory is indexed, falls through to the keyword path with a prepended `[degraded:no_vector_index]` note. **GraphQL** (`resolvers.ts`): same dispatch shape; the envelope's `degraded` field carries `'no_vector_index'` instead of a text line. The `nodeSearch` resolver also dropped its US1 `NOT_YET_IMPLEMENTED` throws for `mode:keyword` and `expand>0` — both ship in this slice. `granularity:chunk` still throws (US2's T042 territory).
 
 **Checkpoint**: all three modes + expand work on both MCP and GraphQL.
 

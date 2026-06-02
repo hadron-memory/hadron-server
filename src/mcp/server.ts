@@ -49,6 +49,7 @@ import {
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { computeContentHash } from '../lib/contentHash.js';
 import { isCiphertext } from '../lib/crypto.js';
+import { reciprocalRankFusion } from '../lib/rrf.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
 import { vectorSearchNodes } from '../services/embedding/vectors.js';
 import { getEmbeddingClient, isEmbeddingConfigured } from '../lib/embedding/index.js';
@@ -60,7 +61,7 @@ import {
 } from '../lib/entityRef/errors.js';
 import { isId } from '../lib/entityRef/shape.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import type { SessionType } from '../generated/prisma/index.js';
+import type { PrismaClient, SessionType } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 
 // ---------------------------------------------------------------------------
@@ -427,6 +428,116 @@ export function matchesQuery(
     .join(' ')
     .toLowerCase();
   return terms.every((t) => haystack.includes(t));
+}
+
+/**
+ * Spec 033 US3 (T048) — re-rank keyword hits by relevance signal so RRF
+ * fusion isn't biased by the default alphabetical-by-loc order from
+ * `db.node.findMany`. Today's `mode:keyword` (default) path renders
+ * results in DB order for stability; this helper feeds the RRF input
+ * only on the hybrid path.
+ *
+ * Signal ordering per contracts/h-find-nodes.md:
+ *   1. Distinct query terms matched (desc) — does the node hit MORE of
+ *      the query? Strong indicator.
+ *   2. Total term frequency across the haystack (desc) — secondary
+ *      relevance signal for ties on (1).
+ *   3. `loc` ascending — deterministic tiebreak so the same input
+ *      always produces the same output.
+ *
+ * The haystack mirrors `matchesQuery` (name + loc + description + tags).
+ * Query is lowercased + split on whitespace; empty/`*` query maps to no
+ * terms and the function returns the input unchanged (caller already
+ * passed through `matchesQuery`'s "match all" branch).
+ */
+export function keywordRelevanceRank<
+  T extends { name: string; loc: string; description: string | null; tags: string[] },
+>(nodes: T[], query: string): T[] {
+  const trimmed = query.trim();
+  if (trimmed === '' || trimmed === '*') return [...nodes];
+  const terms = trimmed.toLowerCase().split(/\s+/).filter(Boolean);
+  return [...nodes]
+    .map((node) => {
+      const haystack = [node.name, node.loc, node.description || '', ...node.tags]
+        .join(' ')
+        .toLowerCase();
+      let distinctMatches = 0;
+      let totalFreq = 0;
+      for (const term of terms) {
+        const occurrences = haystack.split(term).length - 1;
+        if (occurrences > 0) distinctMatches += 1;
+        totalFreq += occurrences;
+      }
+      return { node, distinctMatches, totalFreq };
+    })
+    .sort((a, b) => {
+      if (a.distinctMatches !== b.distinctMatches) return b.distinctMatches - a.distinctMatches;
+      if (a.totalFreq !== b.totalFreq) return b.totalFreq - a.totalFreq;
+      return a.node.loc.localeCompare(b.node.loc);
+    })
+    .map((entry) => entry.node);
+}
+
+/**
+ * Spec 033 US3 (T049) — append undirected graph neighbors after the
+ * ranked hits, unscored. BFS from the ranked-hit set up to `depth` hops,
+ * traversing all edge types in both directions. Deduplicated against
+ * the seed set and prior hops, scoped to memories the caller can read
+ * AND to live nodes.
+ *
+ * Returns the appended node IDs in BFS-traversal order. The caller
+ * concatenates this onto the ranked-hits list; "unscored" in the
+ * contract means literally "appended after, with no fused score" —
+ * not "scored zero."
+ */
+export async function expandWithNeighbors(
+  db: PrismaClient,
+  seedIds: string[],
+  depth: number,
+  memoryScope: { memoryIds?: string[] | null } = {},
+): Promise<string[]> {
+  if (depth <= 0 || seedIds.length === 0) return [];
+  const seen = new Set<string>(seedIds);
+  let frontier = new Set<string>(seedIds);
+  const appended: string[] = [];
+  for (let d = 0; d < depth; d++) {
+    if (frontier.size === 0) break;
+    const frontierIds = Array.from(frontier);
+    const edges = await db.edge.findMany({
+      where: { OR: [{ sourceId: { in: frontierIds } }, { targetId: { in: frontierIds } }] },
+      select: { sourceId: true, targetId: true },
+    });
+    const candidateIds = new Set<string>();
+    for (const e of edges) {
+      if (!seen.has(e.sourceId)) candidateIds.add(e.sourceId);
+      if (!seen.has(e.targetId)) candidateIds.add(e.targetId);
+    }
+    if (candidateIds.size === 0) {
+      frontier = new Set<string>();
+      continue;
+    }
+    // Filter to alive nodes within scope. memoryIds === null means
+    // admin/all — no extra filter; explicit array gates by memory.
+    const memWhere =
+      memoryScope.memoryIds == null ? {} : { memoryId: { in: memoryScope.memoryIds } };
+    const aliveNeighbors = await db.node.findMany({
+      where: { id: { in: Array.from(candidateIds) }, deletedAt: null, ...memWhere },
+      select: { id: true },
+    });
+    const aliveSet = new Set(aliveNeighbors.map((n) => n.id));
+    const nextFrontier = new Set<string>();
+    // Preserve BFS traversal order: iterate candidateIds in insertion order
+    // (the order edges were emitted by findMany), keep only alive ones.
+    for (const id of candidateIds) {
+      if (aliveSet.has(id)) {
+        seen.add(id);
+        appended.push(id);
+        nextFrontier.add(id);
+      }
+    }
+    frontier = nextFrontier;
+  }
+  return appended;
 }
 
 // Loc validation moved to src/lib/validateLoc.ts so the GraphQL
@@ -962,14 +1073,15 @@ export function createMcpServerInstance(
     'h-find-nodes',
     'Substring/keyword search across node name, loc, description, and tags. ALL whitespace-separated terms must appear (case-insensitive) somewhere in those fields — no semantic / vector search, no fuzzy matching, no stemming, and node BODY content is NOT indexed. Multi-word natural-language queries that don\'t share literal substrings with the corpus will return zero hits; pick discriminating keywords. Pass `query: "*"` (or `""`) to match every node — useful as a first survey before adding to a memory. To browse the tree structure, use `h-list-nodes` instead. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory. Soft-deleted nodes are excluded.',
     {
-      query: z.string().describe('For mode:keyword (default) — whitespace-separated keywords; each must literally appear (case-insensitive) in name/loc/description/tags. For mode:vector — a natural-language query embedded and matched semantically against the memory\'s vector index (spec 033). Use "*" or "" to match all nodes (keyword survey mode).'),
-      mode: z.enum(['keyword', 'vector']).optional().describe('keyword (default): substring match. vector: semantic search over the memory\'s vector index (requires the memory to have vectorIndexEnabled). Spec 033.'),
+      query: z.string().describe('For mode:keyword (default) — whitespace-separated keywords; each must literally appear (case-insensitive) in name/loc/description/tags. For mode:vector / mode:hybrid — a natural-language query embedded and matched semantically against the memory\'s vector index (spec 033). Use "*" or "" to match all nodes (keyword survey mode; rejected for mode:vector).'),
+      mode: z.enum(['keyword', 'vector', 'hybrid']).optional().describe('keyword (default): substring match — output is byte-identical to today\'s no-mode behavior. vector: semantic search over the memory\'s vector index (requires vectorIndexEnabled). hybrid: keyword + vector fused by reciprocal-rank fusion (RRF, k=60). On a non-indexed memory, mode:hybrid degrades to keyword-only and emits a [degraded:no_vector_index] note. Spec 033.'),
       parentRel: z.string().optional().describe('Scope search to this subtree (keyword mode)'),
       memoryUrn: z.string().optional().describe('Scope search to this memory'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
       limit: z.number().optional().describe('Max results (default 50)'),
+      expand: z.number().int().min(0).max(3).optional().describe('Append undirected graph neighbors (all edge types) within depth N AFTER the ranked hits, unscored. Default 0 (no expansion). Max 3. Useful for context-stuffing — the ranked nodes plus their immediate graph context in one tool call. Spec 033 FR-020.'),
     },
-    async ({ query, mode, parentRel, memoryUrn, brief, limit }) => {
+    async ({ query, mode, parentRel, memoryUrn, brief, limit, expand }) => {
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -1045,10 +1157,17 @@ export function createMcpServerInstance(
         }
       }
 
-      // 033 — vector (semantic) search. Per-memory: resolves the target memory
-      // set from the same scoping as keyword, then searches only the vector-
-      // indexed ones. Diagnostic states are surfaced as text lines (FR-021).
-      if (mode === 'vector') {
+      // 033 — vector (semantic) search and 033 US3 hybrid mode. Shared
+      // setup: resolve the in-scope memory set to those with the index
+      // enabled. Diagnostic states are surfaced as text lines (FR-021).
+      //
+      // Hybrid degradation: when the caller asks for mode:hybrid but no
+      // in-scope memory has the index, we fall through to the keyword
+      // branch below and prepend a [degraded:no_vector_index] note. This
+      // variable carries the note through the fall-through.
+      let hybridDegradedNote: string | null = null;
+      let indexedIds: string[] | null = null;
+      if (mode === 'vector' || mode === 'hybrid') {
         let targetIds: string[];
         const scoped = where.memoryId as unknown;
         if (typeof scoped === 'string') {
@@ -1071,12 +1190,20 @@ export function createMcpServerInstance(
           where: { id: { in: targetIds }, vectorIndexEnabled: true, deletedAt: null },
           select: { id: true },
         });
-        const indexedIds = indexed.map((m) => m.id);
+        indexedIds = indexed.map((m) => m.id);
         if (indexedIds.length === 0) {
-          return textResult(
-            'Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).',
-          );
+          if (mode === 'vector') {
+            return textResult(
+              'Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).',
+            );
+          }
+          // Hybrid + no indexed memory → degrade to keyword-only per
+          // contracts/h-find-nodes.md "Result envelope" section.
+          hybridDegradedNote =
+            'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]';
         }
+      }
+      if (mode === 'vector') {
         if (!isEmbeddingConfigured()) {
           return textResult(
             'Note: vector search is unavailable — no embedding endpoint is configured. [embedding_unavailable]\n\nFound 0 node(s).',
@@ -1102,42 +1229,47 @@ export function createMcpServerInstance(
           );
         }
         const hits = await vectorSearchNodes(db, {
-          memoryIds: indexedIds,
+          memoryIds: indexedIds!,
           queryEmbedding: qvec,
           limit: limit ?? 50,
         });
-        if (hits.length === 0) return textResult('Found 0 node(s).');
+        const rankedIds = hits.map((h) => h.nodeId);
+        // Spec 033 US3 (T049) — append undirected graph neighbors after
+        // the ranked hits, unscored.
+        const neighborIds = expand && expand > 0
+          ? await expandWithNeighbors(db, rankedIds, expand, { memoryIds: indexedIds })
+          : [];
+        const allRenderIds = [...rankedIds, ...neighborIds];
+        if (allRenderIds.length === 0) return textResult('Found 0 node(s).');
         const hitNodes = await db.node.findMany({
-          where: { id: { in: hits.map((h) => h.nodeId) }, deletedAt: null },
+          where: { id: { in: allRenderIds }, deletedAt: null },
         });
         const nodeById = new Map(hitNodes.map((n) => [n.id, n]));
+        const scoreById = new Map(hits.map((h) => [h.nodeId, h.score]));
         const vlines: string[] = [];
-        for (const hit of hits) {
-          const n = nodeById.get(hit.nodeId);
+        for (const id of allRenderIds) {
+          const n = nodeById.get(id);
           if (!n) continue;
           const urn = await nodeUrn(n.loc, n.memoryId);
+          const score = scoreById.get(id);
           // Spec 033 FR-023 — `Source: abstract-stale` marker on stale
           // abstract-vector hits. Every v1 hit is an abstract-kind hit
           // (chunks ship in US2; once they do, this needs to gate on
           // `hit.kind === 'abstract'` once vectorSearchNodes surfaces it).
-          //
-          // The predicate mirrors spec 032's read-time check (four clauses
-          // + the load-bearing `!= null` legacy short-circuit). NOTE: we
-          // do NOT apply spec 032's `!memory.isEncrypted` gate here —
-          // spec 033 FR-025 calls this out explicitly: because the vector
-          // and the abstractOriginHash are both stamped at write time on
-          // in-closure plaintext, the predicate IS computable on encrypted
-          // memories whose MCP write path stores plaintext at rest (#206).
-          // A defensive `!isCiphertext(content)` skip would still let a
-          // GraphQL-encrypted row (ciphertext at rest) fall through quietly
-          // rather than false-positive.
+          // Expanded (unscored) neighbors don't get the marker — they
+          // weren't matched via an abstract vector at all.
           const isStale =
+            score !== undefined &&
             n.abstract != null && n.abstract.length > 0 &&
             n.content != null && n.content.length > 0 &&
             !isCiphertext(n.content) &&
             n.abstractOriginHash != null &&
             n.abstractOriginHash !== computeContentHash(n.content);
-          const parts = [`- **${urn}** — ${n.name}  (score ${hit.score.toFixed(3)})`];
+          const parts = [
+            score !== undefined
+              ? `- **${urn}** — ${n.name}  (score ${score.toFixed(3)})`
+              : `- **${urn}** — ${n.name}`,
+          ];
           if (isStale) parts.push('  Source: abstract-stale');
           if (n.description) parts.push(`  ${n.description}`);
           if (!brief && n.abstract) {
@@ -1147,6 +1279,96 @@ export function createMcpServerInstance(
           vlines.push(parts.join('\n'));
         }
         return textResult(`Found ${vlines.length} node(s):\n\n${vlines.join('\n')}`);
+      }
+
+      // Spec 033 US3 (T050) — hybrid mode (when vector half is available).
+      // Runs keyword + vector, re-ranks keyword by relevance for RRF input,
+      // fuses with reciprocal-rank fusion (k=60), then renders. The
+      // !hybridDegradedNote guard skips this block when no indexed memory
+      // exists in scope — that flow falls through to the keyword branch
+      // below with the degraded note prepended.
+      if (mode === 'hybrid' && !hybridDegradedNote) {
+        if (!isEmbeddingConfigured()) {
+          return textResult(
+            'Note: vector search is unavailable — no embedding endpoint is configured. [embedding_unavailable]\n\nFound 0 node(s).',
+          );
+        }
+        const trimmed = query.trim();
+        if (trimmed === '' || trimmed === '*') {
+          return textResult(
+            'Note: empty or "*" queries are keyword-only (survey mode); supply a natural-language query for mode:hybrid. [empty_vector_query]\n\nFound 0 node(s).',
+          );
+        }
+        const [qvec] = await getEmbeddingClient().embed([query], 'query');
+        if (!qvec) {
+          return textResult(
+            'Note: vector search is unavailable — embedding generation returned no vector. [embedding_unavailable]\n\nFound 0 node(s).',
+          );
+        }
+        // Run keyword half (over the SAME scoping as the keyword branch
+        // below — same `where`) and vector half in parallel.
+        const finalLimit = limit ?? 50;
+        const [kwNodes, vecHits] = await Promise.all([
+          db.node.findMany({ where, take: 1000 }),
+          vectorSearchNodes(db, {
+            memoryIds: indexedIds!,
+            queryEmbedding: qvec,
+            limit: finalLimit,
+          }),
+        ]);
+        // Dedup keyword nodes by loc (canonical preferred), filter by
+        // matchesQuery, then re-rank by relevance for RRF.
+        const byLocK = new Map<string, typeof kwNodes[0]>();
+        for (const n of kwNodes) {
+          const existing = byLocK.get(n.loc);
+          if (!existing || (existing.isLink && !n.isLink)) byLocK.set(n.loc, n);
+        }
+        const kwMatches = Array.from(byLocK.values()).filter((n) => matchesQuery(n, query));
+        const kwRanked = keywordRelevanceRank(kwMatches, query);
+        // RRF the two lists by node ID. The fused list is the union of
+        // both inputs ordered by reciprocal-rank score.
+        const fusedIds = reciprocalRankFusion(
+          [kwRanked.map((n) => n.id), vecHits.map((h) => h.nodeId)],
+          (id) => id,
+        ).slice(0, finalLimit);
+        // Spec 033 US3 (T049) — append undirected neighbors.
+        const neighborIds = expand && expand > 0
+          ? await expandWithNeighbors(db, fusedIds, expand, { memoryIds: indexedIds })
+          : [];
+        const allRenderIds = [...fusedIds, ...neighborIds];
+        if (allRenderIds.length === 0) return textResult('Found 0 node(s).');
+        const renderNodes = await db.node.findMany({
+          where: { id: { in: allRenderIds }, deletedAt: null },
+        });
+        const renderById = new Map(renderNodes.map((n) => [n.id, n]));
+        const scoreById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
+        const hlines: string[] = [];
+        for (const id of allRenderIds) {
+          const n = renderById.get(id);
+          if (!n) continue;
+          const urn = await nodeUrn(n.loc, n.memoryId);
+          const score = scoreById.get(id);
+          const isStale =
+            score !== undefined &&
+            n.abstract != null && n.abstract.length > 0 &&
+            n.content != null && n.content.length > 0 &&
+            !isCiphertext(n.content) &&
+            n.abstractOriginHash != null &&
+            n.abstractOriginHash !== computeContentHash(n.content);
+          const parts = [
+            score !== undefined
+              ? `- **${urn}** — ${n.name}  (score ${score.toFixed(3)})`
+              : `- **${urn}** — ${n.name}`,
+          ];
+          if (isStale) parts.push('  Source: abstract-stale');
+          if (n.description) parts.push(`  ${n.description}`);
+          if (!brief && n.abstract) {
+            for (const absLine of (n.abstract as string).split(/\r?\n/)) parts.push(`  ${absLine}`);
+          }
+          if (n.tags?.length) parts.push(`  Tags: ${(n.tags as string[]).join(', ')}`);
+          hlines.push(parts.join('\n'));
+        }
+        return textResult(`Found ${hlines.length} node(s):\n\n${hlines.join('\n')}`);
       }
 
       const allNodes = await db.node.findMany({
@@ -1179,11 +1401,58 @@ export function createMcpServerInstance(
       const matches = nodes.filter((n) => matchesQuery(n, query));
       const limited = matches.slice(0, limit ?? 50);
 
-      if (limited.length === 0) {
-        return textResult(`No nodes found matching "${query}".`);
+      // Spec 033 US3 (T049) — append undirected neighbors after the
+      // ranked keyword hits when `expand` is set. Scope the BFS to the
+      // same memory set the keyword query saw.
+      let expandedNodes: typeof allNodes = [];
+      if (expand && expand > 0 && limited.length > 0) {
+        // Pass memoryIds=null when admin/all (matches `where` behavior).
+        const scope = memoryIds == null ? { memoryIds: null } : { memoryIds };
+        const extraIds = await expandWithNeighbors(
+          db,
+          limited.map((n) => n.id),
+          expand,
+          scope,
+        );
+        if (extraIds.length > 0) {
+          expandedNodes = await db.node.findMany({
+            where: {
+              id: { in: extraIds },
+              deletedAt: null,
+              ...(memoryIds ? { memoryId: { in: memoryIds } } : {}),
+            },
+            include: brief
+              ? {
+                  outgoingEdges: {
+                    include: { target: true },
+                    where: { target: { deletedAt: null } },
+                  },
+                  incomingEdges: {
+                    include: { source: true },
+                    where: { source: { deletedAt: null } },
+                  },
+                }
+              : undefined,
+          });
+          // Preserve BFS traversal order returned by expandWithNeighbors.
+          const expandedById = new Map(expandedNodes.map((n) => [n.id, n]));
+          expandedNodes = extraIds
+            .map((id) => expandedById.get(id))
+            .filter((n): n is NonNullable<typeof n> => n !== undefined);
+        }
       }
 
-      const lines = await Promise.all(limited.map(async (n: any) => {
+      if (limited.length === 0 && expandedNodes.length === 0) {
+        // Preserve the byte-identical "no match" output for the default
+        // keyword path — but when hybrid degraded to keyword AND found
+        // nothing, prepend the degraded note so the caller isn't left
+        // wondering why no fusion happened.
+        const baseMsg = `No nodes found matching "${query}".`;
+        return textResult(hybridDegradedNote ? `${hybridDegradedNote}\n\n${baseMsg}` : baseMsg);
+      }
+
+      const renderInOrder = [...limited, ...expandedNodes];
+      const lines = await Promise.all(renderInOrder.map(async (n: any) => {
         const urn = await nodeUrn(n.loc, n.memoryId);
         const parts = [`- **${urn}** — ${n.name}`];
         if (n.description) parts.push(`  ${n.description}`);
@@ -1214,7 +1483,9 @@ export function createMcpServerInstance(
         return parts.join('\n');
       }));
 
-      return textResult(`Found ${limited.length} node(s):\n\n${lines.join('\n')}`);
+      const renderCount = renderInOrder.length;
+      const body = `Found ${renderCount} node(s):\n\n${lines.join('\n')}`;
+      return textResult(hybridDegradedNote ? `${hybridDegradedNote}\n\n${body}` : body);
     },
   );
 

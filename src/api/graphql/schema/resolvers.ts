@@ -7,6 +7,12 @@ import {
 } from '../../../services/embedding/enqueue.js';
 import { deleteMemoryVectors, vectorSearchNodes } from '../../../services/embedding/vectors.js';
 import { getEmbeddingClient, isEmbeddingConfigured } from '../../../lib/embedding/index.js';
+import { reciprocalRankFusion } from '../../../lib/rrf.js';
+import {
+  matchesQuery,
+  keywordRelevanceRank,
+  expandWithNeighbors,
+} from '../../../mcp/server.js';
 import {
   APP_KEY_PREFIX,
   USER_API_KEY_LABEL_MAX_LEN,
@@ -310,6 +316,48 @@ async function sessionScopeFilter(ctx: Context): Promise<Record<string, unknown>
 async function memoryAccessFilter(ctx: Context): Promise<Record<string, unknown>> {
   const ids = await getAccessibleMemoryIds(ctx);
   return ids === null ? {} : { memoryId: { in: ids } };
+}
+
+/**
+ * Spec 033 US3 — shared rendering pass for `nodeSearch`. Takes the
+ * ranked node IDs from any of the three modes (keyword/vector/hybrid),
+ * optionally appends BFS-expanded neighbors, fetches the full node rows
+ * (with edges + decryption applied), and re-orders them to match the
+ * input ranking. Returns the GraphQL NodeSearchResult envelope.
+ *
+ * The expand-scope here is the memory set the ranked path searched —
+ * for vector/hybrid that's the indexed memories; for keyword that's
+ * the broader accessible set.
+ */
+async function renderNodeSearchResult(
+  ctx: Context,
+  rankedIds: string[],
+  expand: number | undefined,
+  expandScope: string[],
+  reason: string | null,
+  degraded: string | null,
+): Promise<{ nodes: unknown[]; reason: string | null; degraded: string | null }> {
+  const neighborIds =
+    expand && expand > 0
+      ? await expandWithNeighbors(ctx.db, rankedIds, expand, { memoryIds: expandScope })
+      : [];
+  const allIds = [...rankedIds, ...neighborIds];
+  if (allIds.length === 0) {
+    return { nodes: [], reason, degraded };
+  }
+  const fetched = await ctx.db.node.findMany({
+    where: { id: { in: allIds }, deletedAt: null },
+    include: {
+      outgoingEdges: { include: { target: true } },
+      incomingEdges: { include: { source: true } },
+    },
+  });
+  await decryptNodesBatch(ctx.db, fetched);
+  const byId = new Map(fetched.map((n) => [n.id, n]));
+  const ordered = allIds
+    .map((id) => byId.get(id))
+    .filter((n): n is NonNullable<typeof n> => n !== undefined);
+  return { nodes: ordered, reason, degraded };
 }
 
 /**
@@ -1792,24 +1840,14 @@ export const resolvers = {
       ctx: Context,
     ) => {
       const effectiveMode = mode ?? 'vector';
-      if (effectiveMode === 'keyword' || effectiveMode === 'hybrid') {
-        throw new GraphQLError(
-          `nodeSearch mode:${effectiveMode} ships in spec 033 US3 (T050). For keyword search today, use the legacy nodes(search:) query.`,
-          { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
-        );
-      }
+      // US2 still ships chunks; reject for now.
       if (granularity === 'chunk') {
         throw new GraphQLError(
           'nodeSearch granularity:chunk ships in spec 033 US2 (T042).',
           { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
         );
       }
-      if (expand != null && expand > 0) {
-        throw new GraphQLError(
-          'nodeSearch expand>0 ships in spec 033 US3 (T049).',
-          { extensions: { code: 'NOT_YET_IMPLEMENTED' } },
-        );
-      }
+      const finalLimit = limit ?? 50;
 
       // Resolve scope: a single memory by URN (with access check), or the
       // full accessible set when memoryUrn is omitted.
@@ -1824,61 +1862,111 @@ export const resolvers = {
         }
         scopeIds = [id];
       } else if (accessible === null) {
-        // Admin/all scope: explicitly restrict to vector-indexed memories
-        // (mirrors the h-find-nodes MCP path).
-        const all = await ctx.db.memory.findMany({
-          where: { vectorIndexEnabled: true, deletedAt: null },
-          select: { id: true },
-        });
-        scopeIds = all.map((m) => m.id);
+        // Admin/all scope: for vector/hybrid, restrict to vector-indexed
+        // memories explicitly. For keyword, restrict to ALL accessible
+        // memories — substring search shouldn't artificially exclude
+        // non-indexed ones.
+        if (effectiveMode === 'vector' || effectiveMode === 'hybrid') {
+          const all = await ctx.db.memory.findMany({
+            where: { vectorIndexEnabled: true, deletedAt: null },
+            select: { id: true },
+          });
+          scopeIds = all.map((m) => m.id);
+        } else {
+          const all = await ctx.db.memory.findMany({
+            where: { deletedAt: null },
+            select: { id: true },
+          });
+          scopeIds = all.map((m) => m.id);
+        }
       } else {
         scopeIds = accessible;
       }
 
-      // Filter to vector-indexed memories. No-index is a flagged result,
-      // never an error (FR-021 + contract "Access control" section).
+      // Helper: run the keyword half (used by keyword + hybrid). Mirrors
+      // the MCP fall-through: findMany over scope → dedup by loc → filter
+      // by matchesQuery.
+      const runKeyword = async (): Promise<typeof keywordMatchesType> => {
+        const candidates = await ctx.db.node.findMany({
+          where: { memoryId: { in: scopeIds }, deletedAt: null },
+          take: 1000,
+        });
+        const byLoc = new Map<string, typeof candidates[0]>();
+        for (const n of candidates) {
+          const existing = byLoc.get(n.loc);
+          if (!existing || (existing.isLink && !n.isLink)) byLoc.set(n.loc, n);
+        }
+        return Array.from(byLoc.values()).filter((n) => matchesQuery(n, query));
+      };
+      // Type alias for the helper's return — TS infers via the call site.
+      let keywordMatchesType!: Awaited<ReturnType<typeof ctx.db.node.findMany>>;
+
+      // ── KEYWORD MODE ──────────────────────────────────────────────
+      if (effectiveMode === 'keyword') {
+        const matches = await runKeyword();
+        const rankedIds = matches.slice(0, finalLimit).map((n) => n.id);
+        return await renderNodeSearchResult(ctx, rankedIds, expand, scopeIds, null, null);
+      }
+
+      // ── VECTOR + HYBRID common: resolve indexed-memory subset ─────
       const indexed = await ctx.db.memory.findMany({
         where: { id: { in: scopeIds }, vectorIndexEnabled: true, deletedAt: null },
         select: { id: true },
       });
       const indexedIds = indexed.map((m) => m.id);
-      if (indexedIds.length === 0) {
+
+      // Hybrid + no indexed memory → degrade to keyword-only.
+      if (effectiveMode === 'hybrid' && indexedIds.length === 0) {
+        const matches = await runKeyword();
+        const rankedIds = matches.slice(0, finalLimit).map((n) => n.id);
+        return await renderNodeSearchResult(
+          ctx,
+          rankedIds,
+          expand,
+          scopeIds,
+          null,
+          'no_vector_index',
+        );
+      }
+      if (effectiveMode === 'vector' && indexedIds.length === 0) {
         return { nodes: [], reason: 'no_vector_index', degraded: null };
       }
       if (!isEmbeddingConfigured()) {
         return { nodes: [], reason: 'embedding_unavailable', degraded: null };
       }
-
       const [qvec] = await getEmbeddingClient().embed([query], 'query');
       if (!qvec) {
-        // Defensive: empty/malformed embed response would TypeError in
-        // toVectorLiteral. Treat as the same "unavailable" flag the
-        // unconfigured-endpoint branch returns above (PR-219 review).
         return { nodes: [], reason: 'embedding_unavailable', degraded: null };
       }
-      const hits = await vectorSearchNodes(ctx.db, {
-        memoryIds: indexedIds,
-        queryEmbedding: qvec,
-        limit: limit ?? 50,
-      });
-      if (hits.length === 0) {
-        return { nodes: [], reason: null, degraded: null };
+
+      // ── VECTOR MODE ───────────────────────────────────────────────
+      if (effectiveMode === 'vector') {
+        const hits = await vectorSearchNodes(ctx.db, {
+          memoryIds: indexedIds,
+          queryEmbedding: qvec,
+          limit: finalLimit,
+        });
+        const rankedIds = hits.map((h) => h.nodeId);
+        return await renderNodeSearchResult(ctx, rankedIds, expand, indexedIds, null, null);
       }
-      const hitNodes = await ctx.db.node.findMany({
-        where: { id: { in: hits.map((h) => h.nodeId) }, deletedAt: null },
-        include: {
-          outgoingEdges: { include: { target: true } },
-          incomingEdges: { include: { source: true } },
-        },
-      });
-      // Decrypt batched — same posture as the legacy nodes query.
-      await decryptNodesBatch(ctx.db, hitNodes);
-      // Preserve hit ranking order returned by vectorSearchNodes.
-      const byId = new Map(hitNodes.map((n) => [n.id, n]));
-      const ordered = hits
-        .map((h) => byId.get(h.nodeId))
-        .filter((n): n is NonNullable<typeof n> => n !== undefined);
-      return { nodes: ordered, reason: null, degraded: null };
+
+      // ── HYBRID MODE ───────────────────────────────────────────────
+      // Run keyword + vector in parallel; re-rank keyword by relevance
+      // for RRF; fuse with reciprocalRankFusion. Mirrors the MCP path.
+      const [kwMatches, vecHits] = await Promise.all([
+        runKeyword(),
+        vectorSearchNodes(ctx.db, {
+          memoryIds: indexedIds,
+          queryEmbedding: qvec,
+          limit: finalLimit,
+        }),
+      ]);
+      const kwRanked = keywordRelevanceRank(kwMatches, query);
+      const fusedIds = reciprocalRankFusion(
+        [kwRanked.map((n) => n.id), vecHits.map((h) => h.nodeId)],
+        (id) => id,
+      ).slice(0, finalLimit);
+      return await renderNodeSearchResult(ctx, fusedIds, expand, indexedIds, null, null);
     },
 
     subtree: async (_: unknown, { prefix: rawPrefix }: { prefix: string }, ctx: Context) => {
