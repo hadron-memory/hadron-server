@@ -24,6 +24,7 @@ import {
 } from '../../lib/embedding/index.js';
 import { embedNode } from '../../jobs/embedNodes.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
+import { resolvers, type Context as GqlContext } from '../../api/graphql/schema/resolvers.js';
 import type { AuthContext } from '../../middleware/auth.js';
 
 const DIM = 768;
@@ -64,6 +65,9 @@ let adminId: string;
 
 function adminAuth(): AuthContext {
   return { userId: adminId, roles: ['ADMIN'], clientId: `user:${adminId}` };
+}
+function adminCtx(): GqlContext {
+  return { db, roles: ['ADMIN'], userId: adminId };
 }
 
 beforeEach(async () => {
@@ -247,5 +251,72 @@ describe('US2 — chunk-level retrieval (SC-005)', () => {
     const chunkRows = rows.filter((r) => r.kind === 'chunk');
     expect(abstractRows.length).toBe(1);
     expect(chunkRows.length).toBe(2);
+  });
+});
+
+describe('US2 — granularity:chunk rejection (PR-225 review)', () => {
+  it('MCP h-find-nodes: granularity:chunk with mode:hybrid → text reject', async () => {
+    setEmbeddingClientForTests(stubClient({}));
+    const srv = createTestableMcpServer(adminAuth());
+    const out = await srv.callToolText('h-find-nodes', {
+      query: 'anything',
+      mode: 'hybrid',
+      memoryUrn: memUrn,
+      granularity: 'chunk',
+    });
+    expect(out).toContain('granularity:chunk requires mode:vector');
+    expect(out).toContain('mode:hybrid');
+  });
+
+  it('MCP h-find-nodes: granularity:chunk with mode:keyword (or default) → text reject', async () => {
+    setEmbeddingClientForTests(stubClient({}));
+    const srv = createTestableMcpServer(adminAuth());
+    // No mode → defaults to keyword. Spec is the same: chunk needs
+    // mode:vector explicitly.
+    const out = await srv.callToolText('h-find-nodes', {
+      query: 'anything',
+      memoryUrn: memUrn,
+      granularity: 'chunk',
+    });
+    expect(out).toContain('granularity:chunk requires mode:vector');
+    expect(out).toContain('mode:keyword');
+  });
+
+  it('GraphQL nodeSearch: granularity:chunk with mode:hybrid → GraphQLError(BAD_USER_INPUT)', async () => {
+    setEmbeddingClientForTests(stubClient({}));
+    await expect(
+      resolvers.Query.nodeSearch(
+        {},
+        {
+          query: 'anything',
+          memoryUrn: memUrn,
+          mode: 'hybrid',
+          granularity: 'chunk',
+        },
+        adminCtx(),
+      ),
+    ).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+      message: expect.stringContaining('granularity:chunk is only supported in mode:vector'),
+    });
+  });
+
+  it('GraphQL nodeSearch: granularity:chunk + mode:vector still works (positive control)', async () => {
+    setEmbeddingClientForTests(stubClient({}));
+    // Seed at least one chunked node so the path returns something.
+    await seedNodeWithChunks('positive-control', '# A\nbody.\n\n## B\nmore.');
+    const result = await resolvers.Query.nodeSearch(
+      {},
+      {
+        query: 'anything',
+        memoryUrn: memUrn,
+        mode: 'vector',
+        granularity: 'chunk',
+      },
+      adminCtx(),
+    );
+    expect(result.nodes).toEqual([]);
+    expect(Array.isArray(result.passages)).toBe(true);
+    expect((result.passages as unknown[]).length).toBeGreaterThan(0);
   });
 });

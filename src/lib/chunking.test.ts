@@ -126,6 +126,52 @@ describe('chunkNode — fixed-size dials (FR-003 + FR-015)', () => {
   });
 });
 
+describe('chunkNode — defensive clamping (PR-225 review)', () => {
+  it('chunkOverlap >= chunkTokens (e.g., from a direct DB write) does NOT explode into a 1-char slide', async () => {
+    // Without clamping, the unclamped step would be (50-50)*4 = 0 →
+    // forced to 1 by the floor guard, which on a 100k-char document
+    // would emit ~100k chunks. With clamping, overlap clamps to 49 →
+    // step = 4 chars → ~25k chunks for the same content. The number we
+    // really care about is "not catastrophically large" — assert an
+    // upper bound that's well below the unclamped worst case.
+    const content = 'A'.repeat(100_000);
+    const chunks = chunkNode(content, {
+      forceFixedSize: true,
+      chunkTokens: 50,
+      chunkOverlap: 50, // bad: equal to tokens; clamp pulls to 49
+    });
+    // Clamp makes step = (50 - 49) * 4 = 4. ~25k chunks at most.
+    expect(chunks.length).toBeLessThan(40_000);
+    // Sanity: still produces non-empty chunks at expected window size.
+    expect(chunks[0].text.length).toBe(200); // 50 tokens * 4 chars
+  });
+
+  it('chunkOverlap > chunkTokens (even worse) is clamped, not infinite', () => {
+    const content = 'A'.repeat(1000);
+    const chunks = chunkNode(content, {
+      forceFixedSize: true,
+      chunkTokens: 10,
+      chunkOverlap: 100, // way too high
+    });
+    // overlap clamps to 9. step = (10-9)*4 = 4. window = 40. roughly
+    // (1000-40)/4 + 1 ≈ 241 chunks. Bounded.
+    expect(chunks.length).toBeLessThan(500);
+    expect(chunks.length).toBeGreaterThan(0);
+  });
+
+  it('chunkTokens <= 0 is clamped to 1 (does not spin forever)', () => {
+    const content = 'short';
+    const chunks = chunkNode(content, {
+      forceFixedSize: true,
+      chunkTokens: 0, // clamps to 1; window = 4 chars
+      chunkOverlap: 0,
+    });
+    // window = 4 chars, content = 5 chars → 2 chunks (0-4, 4-5).
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks.length).toBeLessThan(content.length + 1);
+  });
+});
+
 describe('chunkNode — structure-aware edge cases', () => {
   it('skips heading-like lines inside fenced code blocks', () => {
     // Without the fenced-block guard, the `# comment` inside the code

@@ -205,6 +205,105 @@ describe('US2 — InvalidChunkConfigError + CHECK backstop', () => {
   });
 });
 
+describe('US2 — validation against effective post-update state (PR-225 review)', () => {
+  it('rejects chunkOverlap >= platform-default tokens when chunkTokens is null', async () => {
+    // Memory created with no explicit dials: both DB columns are null,
+    // meaning the runtime uses the platform defaults (512/64). Without
+    // resolving the validation against those defaults, this update
+    // would slip past with effectiveTokens=null and crash at the
+    // CHECK with a 500.
+    const memId = await makeChunkMemory();
+    await expect(
+      resolvers.Mutation.updateMemory(
+        {},
+        { id: memId, chunkOverlap: 600 },
+        adminCtx(),
+      ),
+    ).rejects.toBeInstanceOf(InvalidChunkConfigError);
+  });
+
+  it('rejects chunkOverlap = chunkTokens (equality must fail; spec is strict <)', async () => {
+    const memId = await makeChunkMemory();
+    await expect(
+      resolvers.Mutation.updateMemory(
+        {},
+        { id: memId, chunkTokens: 100, chunkOverlap: 100 },
+        adminCtx(),
+      ),
+    ).rejects.toBeInstanceOf(InvalidChunkConfigError);
+  });
+});
+
+describe('US2 — re-index trigger gated on effective source (PR-225 review)', () => {
+  it('chunk-dial change on an abstract-only memory does NOT trigger a re-index', async () => {
+    // Memory created with embeddingSource: contentChunks above; flip
+    // it to abstract for this test.
+    const memId = await makeChunkMemory();
+    await db.memory.update({
+      where: { id: memId },
+      data: { embeddingSource: 'abstract' },
+    });
+    // Seed a node + clear any pending marker so we can detect a re-index.
+    const nodeId = generateId();
+    await db.node.create({
+      data: {
+        id: nodeId,
+        memoryId: memId,
+        loc: 'abs-only',
+        name: 'abs-only',
+        abstract: 'a short note',
+        content: 'body',
+        embeddingPendingAt: null,
+        embeddingAttempts: 0,
+      },
+    });
+
+    // Change ONLY chunk dials. Source stays abstract — dials are inert.
+    await resolvers.Mutation.updateMemory(
+      {},
+      { id: memId, chunkTokens: 256, chunkOverlap: 32 },
+      adminCtx(),
+    );
+
+    // No re-index was triggered: pending marker stays cleared, no
+    // wasted embedding work.
+    const node = await db.node.findUnique({
+      where: { id: nodeId },
+      select: { embeddingPendingAt: true },
+    });
+    expect(node?.embeddingPendingAt).toBeNull();
+  });
+
+  it('chunk-dial change on a contentChunks memory DOES trigger a re-index (positive control)', async () => {
+    const memId = await makeChunkMemory({ chunkTokens: 500, chunkOverlap: 50 });
+    const nodeId = generateId();
+    await db.node.create({
+      data: {
+        id: nodeId,
+        memoryId: memId,
+        loc: 'chunked',
+        name: 'chunked',
+        content: 'body',
+        embeddingPendingAt: null,
+        embeddingAttempts: 0,
+      },
+    });
+
+    await resolvers.Mutation.updateMemory(
+      {},
+      { id: memId, chunkTokens: 256, chunkOverlap: 32 },
+      adminCtx(),
+    );
+
+    const node = await db.node.findUnique({
+      where: { id: nodeId },
+      select: { embeddingPendingAt: true },
+    });
+    // Re-stamped pending — the sweep will re-embed under the new dials.
+    expect(node?.embeddingPendingAt).not.toBeNull();
+  });
+});
+
 describe('US2 — chunk-dial change triggers re-index (FR-004)', () => {
   it('changing chunkTokens drops the old chunk vectors + re-stamps pending', async () => {
     const memId = await makeChunkMemory({ chunkTokens: 500, chunkOverlap: 50, forceFixedSize: true });
