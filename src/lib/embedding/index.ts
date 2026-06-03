@@ -58,8 +58,22 @@ export function isEmbeddingConfigured(): boolean {
   try {
     const backend = resolveBackend();
     if (backend === 'sagemaker') {
-      return !!process.env.EMBEDDING_SAGEMAKER_ENDPOINT_NAME &&
-        !!process.env.EMBEDDING_SAGEMAKER_REGION;
+      if (!process.env.EMBEDDING_SAGEMAKER_ENDPOINT_NAME) return false;
+      if (!process.env.EMBEDDING_SAGEMAKER_REGION) return false;
+      // Mirror the both-or-neither rule getEmbeddingClient() enforces
+      // for the dedicated credentials pair. A half-configured pair
+      // would make getEmbeddingClient() throw on every drain — without
+      // this check, `isEmbeddingConfigured()` would return true and
+      // the worker would enter a tight retry loop until the operator
+      // notices. Same logic for the session token (only valid with
+      // dedicated credentials present).
+      const ak = process.env.EMBEDDING_SAGEMAKER_ACCESS_KEY_ID;
+      const sk = process.env.EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY;
+      if ((ak && !sk) || (!ak && sk)) return false;
+      if (process.env.EMBEDDING_SAGEMAKER_SESSION_TOKEN && !(ak && sk)) {
+        return false;
+      }
+      return true;
     }
     return !!process.env.EMBEDDING_API_URL;
   } catch {
@@ -119,6 +133,16 @@ export function getEmbeddingClient(): EmbeddingClient {
           'credential chain.',
       );
     }
+    const sessionToken = process.env.EMBEDDING_SAGEMAKER_SESSION_TOKEN;
+    if (sessionToken && !(accessKeyId && secretAccessKey)) {
+      throw new Error(
+        'EMBEDDING_SAGEMAKER_SESSION_TOKEN is set, but ' +
+          'EMBEDDING_SAGEMAKER_ACCESS_KEY_ID / ' +
+          'EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY are not. Session token is ' +
+          'meaningful only as part of an STS-derived credential triple — ' +
+          'set the access key pair too, or unset the session token.',
+      );
+    }
 
     cached = new SageMakerEmbeddingClient({
       endpointName,
@@ -130,7 +154,7 @@ export function getEmbeddingClient(): EmbeddingClient {
         process.env.EMBEDDING_SAGEMAKER_INFERENCE_COMPONENT,
       accessKeyId,
       secretAccessKey,
-      sessionToken: process.env.EMBEDDING_SAGEMAKER_SESSION_TOKEN,
+      sessionToken,
     });
     return cached;
   }

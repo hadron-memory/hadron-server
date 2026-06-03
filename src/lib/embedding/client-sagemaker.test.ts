@@ -12,8 +12,10 @@
  *     client should not over-narrow.
  *   - Dimension and count guards fire on bad responses.
  *   - AWS SDK errors are wrapped into EmbeddingRequestError carrying the
- *     SDK error name (the worker classifies transient vs. permanent off
- *     that name).
+ *     SDK error name. The worker today persists the wrapped message
+ *     verbatim on `embeddingError`; preserving the SDK name there makes
+ *     failures diagnosable and keeps the door open for a future
+ *     classifier to act on it.
  *   - InferenceComponentName is forwarded when set.
  *   - Empty input short-circuits without invoking the endpoint.
  *
@@ -232,8 +234,9 @@ describe('SageMakerEmbeddingClient — dedicated credentials', () => {
 describe('SageMakerEmbeddingClient — error wrapping', () => {
   it('wraps AWS SDK errors as EmbeddingRequestError carrying the SDK error name', async () => {
     // The SDK uses class-shaped errors with a `name` property like
-    // "ValidationException" or "ModelError" — the worker's classifier
-    // reads this off `embeddingError` to decide transient-vs-permanent.
+    // "ValidationException" or "ModelError". The wrapped message
+    // preserves the name so it lands on `embeddingError` for diagnosis
+    // (and stays available for a future worker-side classifier).
     const sdkErr = new Error('Endpoint not found');
     sdkErr.name = 'ValidationException';
     const { sdk } = fakeSdk(undefined, { throwError: sdkErr });

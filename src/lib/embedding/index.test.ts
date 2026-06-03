@@ -196,4 +196,74 @@ describe('isEmbeddingConfigured', () => {
     vi.stubEnv('EMBEDDING_BACKEND', 'bedrock');
     expect(isEmbeddingConfigured()).toBe(false);
   });
+
+  // PR-233 review (Copilot): isEmbeddingConfigured() must reject the
+  // same configurations getEmbeddingClient() throws on, otherwise the
+  // embedding worker enters a tight retry loop — isEmbeddingConfigured
+  // says "yes, drain me," getEmbeddingClient throws on every drain.
+  // These tests pin the parity for the dedicated-credentials half-
+  // configured cases.
+
+  it('is false when only EMBEDDING_SAGEMAKER_ACCESS_KEY_ID is set (half-configured pair)', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ACCESS_KEY_ID', 'AKIAIOSFODNN7EXAMPLE');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY', undefined);
+    expect(isEmbeddingConfigured()).toBe(false);
+  });
+
+  it('is false when only EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY is set (half-configured pair)', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ACCESS_KEY_ID', undefined);
+    vi.stubEnv(
+      'EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY',
+      'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    );
+    expect(isEmbeddingConfigured()).toBe(false);
+  });
+
+  it('is false when EMBEDDING_SAGEMAKER_SESSION_TOKEN is set without the access key pair', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ACCESS_KEY_ID', undefined);
+    vi.stubEnv('EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY', undefined);
+    vi.stubEnv('EMBEDDING_SAGEMAKER_SESSION_TOKEN', 'FwoGZX...');
+    expect(isEmbeddingConfigured()).toBe(false);
+  });
+
+  it('is true with the complete STS triple (access key + secret + session token)', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ACCESS_KEY_ID', 'ASIAIOSFODNN7EXAMPLE');
+    vi.stubEnv(
+      'EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY',
+      'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    );
+    vi.stubEnv('EMBEDDING_SAGEMAKER_SESSION_TOKEN', 'FwoGZX...');
+    expect(isEmbeddingConfigured()).toBe(true);
+  });
+});
+
+describe('getEmbeddingClient — sagemaker session token guard', () => {
+  // Mirror of the isEmbeddingConfigured cases: getEmbeddingClient must
+  // throw on the same invariants. The both-or-neither rule for the
+  // access key pair was already covered above; this adds the lone
+  // session-token case.
+
+  it('throws when EMBEDDING_SAGEMAKER_SESSION_TOKEN is set without the access key pair', () => {
+    vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
+    vi.stubEnv('EMBEDDING_SAGEMAKER_ACCESS_KEY_ID', undefined);
+    vi.stubEnv('EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY', undefined);
+    vi.stubEnv('EMBEDDING_SAGEMAKER_SESSION_TOKEN', 'FwoGZX...');
+    expect(() => getEmbeddingClient()).toThrow(
+      /EMBEDDING_SAGEMAKER_SESSION_TOKEN.*ACCESS_KEY_ID.*SECRET_ACCESS_KEY/s,
+    );
+  });
 });

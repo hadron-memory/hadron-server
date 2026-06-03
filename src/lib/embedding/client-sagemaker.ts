@@ -127,12 +127,13 @@ export class SageMakerEmbeddingClient implements EmbeddingClient {
       response = await this.sdk.send(command);
     } catch (err) {
       // AWS SDK errors carry a `name` (e.g. "ValidationException",
-      // "ModelError", "ServiceUnavailable") that the worker's
-      // attempt-classifier can read off `embeddingError` to decide
-      // transient-vs-permanent. Surface it untouched.
-      throw new EmbeddingRequestError(
-        err instanceof Error ? `${err.name}: ${err.message}` : String(err),
-      );
+      // "ModelError", "ServiceUnavailable"). Including it in the
+      // wrapped message keeps diagnostic info available on
+      // `embeddingError` and leaves room for a future worker-side
+      // classifier to act on it. Handle three shapes: real Error,
+      // plain object with a message (common when errors cross VM
+      // contexts or are deserialized), and unknown.
+      throw new EmbeddingRequestError(formatAwsError(err));
     }
 
     if (!response.Body) {
@@ -173,7 +174,21 @@ async function streamToString(body: unknown): Promise<string> {
   if (body instanceof Uint8Array) {
     return new TextDecoder().decode(body);
   }
-  // Fallback — consume an async iterable / ReadableStream of bytes.
+  // Node.js `Readable` streams implement Symbol.asyncIterator natively;
+  // the WHATWG `ReadableStream` (used by undici / fetch) implements both
+  // asyncIterator (in recent Node) and getReader. Prefer the
+  // asyncIterator path so a plain Node Readable (common in tests and
+  // mocks) drains cleanly without a TypeError.
+  if (body && typeof (body as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function') {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for await (const chunk of body as AsyncIterable<Uint8Array>) {
+      chunks.push(chunk);
+      total += chunk.length;
+    }
+    return concatToString(chunks, total);
+  }
+  // Fallback — WHATWG ReadableStream without asyncIterator support.
   const reader = (body as { getReader?: () => ReadableStreamDefaultReader<Uint8Array> })
     .getReader?.();
   if (!reader) {
@@ -189,6 +204,10 @@ async function streamToString(body: unknown): Promise<string> {
       total += value.length;
     }
   }
+  return concatToString(chunks, total);
+}
+
+function concatToString(chunks: Uint8Array[], total: number): string {
   const merged = new Uint8Array(total);
   let offset = 0;
   for (const c of chunks) {
@@ -196,4 +215,25 @@ async function streamToString(body: unknown): Promise<string> {
     offset += c.length;
   }
   return new TextDecoder().decode(merged);
+}
+
+/**
+ * Format an AWS SDK error so the SDK error `name` (e.g. "ValidationException",
+ * "ModelError") stays visible in `embeddingError`. Handles three shapes:
+ *   - real `Error` instance (the common path),
+ *   - plain object with a `message` (errors that have crossed VM contexts
+ *     or been deserialized — common in tests),
+ *   - anything else (falls back to `String(err)`).
+ */
+function formatAwsError(err: unknown): string {
+  if (err instanceof Error) {
+    return `${err.name}: ${err.message}`;
+  }
+  if (err && typeof err === 'object' && 'message' in err) {
+    const obj = err as { name?: unknown; message?: unknown };
+    const name = typeof obj.name === 'string' ? obj.name : 'Error';
+    const message = typeof obj.message === 'string' ? obj.message : String(obj.message);
+    return `${name}: ${message}`;
+  }
+  return String(err);
 }
