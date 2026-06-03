@@ -2,13 +2,22 @@
  * 033-rag-vector-retrieval — embedding client.
  *
  * v1 uses a single platform-fixed, self-hosted embedding model
- * (`nomic-embed-text-v1.5`, 768-dim) reached over HTTP at a configurable
- * endpoint (Ollama `/api/embed` in dev; HF TEI / vLLM in prod). No node
- * plaintext leaves Hadron infra (privacy posture, FR-026).
+ * (`nomic-embed-text-v1.5`, 768-dim) reached at a configurable endpoint.
+ * Two backends are supported:
+ *
+ *   - **HTTP** ({@link HttpEmbeddingClient}) — used in development against
+ *     Ollama `/api/embed`. Also serves any HF TEI / vLLM endpoint that
+ *     exposes either the Ollama or OpenAI response shape.
+ *   - **AWS SageMaker Real-Time Inference** ({@link SageMakerEmbeddingClient}
+ *     in `./client-sagemaker.ts`) — the production path; hosts nomic on a
+ *     SageMaker endpoint via the HuggingFace TEI container. AWS-tenant
+ *     compute, so no plaintext leaves Hadron infrastructure (privacy
+ *     posture, FR-026).
  *
  * nomic requires task-instruction prefixes — `search_document:` for indexed
  * documents, `search_query:` for queries (D-R1). Getting this wrong silently
- * degrades recall, so the client applies it (never the call site).
+ * degrades recall, so every client implementation applies it via
+ * {@link applyNomicPrefix} (never the call site).
  */
 
 export type EmbedPurpose = 'document' | 'query';
@@ -16,7 +25,7 @@ export type EmbedPurpose = 'document' | 'query';
 export interface EmbeddingClient {
   /** One vector per input, each of length `dim`. Applies the nomic prefix. */
   embed(texts: string[], purpose: EmbedPurpose): Promise<number[][]>;
-  readonly provider: string; // e.g. "local" (stored per vector)
+  readonly provider: string; // e.g. "local" / "aws-sagemaker" (stored per vector)
   readonly model: string; // e.g. "nomic-embed-text-v1.5" (stored per vector, FR-014)
   readonly dim: number; // 768; MUST equal the pgvector column dimension
 }
@@ -35,6 +44,16 @@ const PREFIX: Record<EmbedPurpose, string> = {
   document: 'search_document: ',
   query: 'search_query: ',
 };
+
+/**
+ * Apply the nomic task-instruction prefix to every input. Exported so
+ * non-HTTP backends ({@link SageMakerEmbeddingClient}) prepend the same
+ * prefix without duplicating the table — getting this wrong silently
+ * degrades recall.
+ */
+export function applyNomicPrefix(texts: string[], purpose: EmbedPurpose): string[] {
+  return texts.map((t) => PREFIX[purpose] + t);
+}
 
 /**
  * Thrown when the embedding endpoint returns vectors of an unexpected
@@ -84,7 +103,7 @@ export class HttpEmbeddingClient implements EmbeddingClient {
 
   async embed(texts: string[], purpose: EmbedPurpose): Promise<number[][]> {
     if (texts.length === 0) return [];
-    const input = texts.map((t) => PREFIX[purpose] + t);
+    const input = applyNomicPrefix(texts, purpose);
 
     let res: Response;
     try {
@@ -115,28 +134,54 @@ export class HttpEmbeddingClient implements EmbeddingClient {
     if (vectors === null) {
       throw new EmbeddingRequestError('response had no recognizable embeddings');
     }
-    if (vectors.length !== texts.length) {
-      throw new EmbeddingRequestError(
-        `expected ${texts.length} vectors, got ${vectors.length}`,
-      );
-    }
-    for (const v of vectors) {
-      if (v.length !== this.dim) {
-        throw new EmbeddingDimensionMismatchError(this.dim, v.length);
-      }
-    }
+    validateVectorShape(vectors, texts.length, this.dim);
     return vectors;
   }
 }
 
 /**
- * Parse Ollama (`embeddings`) or OpenAI (`data[].embedding`) response bodies.
- * Returns null on any shape we don't recognize OR can't fully validate — every
- * element must be an array of finite numbers, so a malformed body (null entries,
- * non-numeric values) is rejected as a request error rather than silently
- * producing junk vectors that pass the later dimension check.
+ * Common post-parse validation: count matches input, every vector matches the
+ * configured dimension. Throws the same typed errors regardless of backend so
+ * the worker's failure-classification path stays uniform.
  */
-function extractVectors(body: unknown): number[][] | null {
+export function validateVectorShape(
+  vectors: number[][],
+  expectedCount: number,
+  expectedDim: number,
+): void {
+  if (vectors.length !== expectedCount) {
+    throw new EmbeddingRequestError(
+      `expected ${expectedCount} vectors, got ${vectors.length}`,
+    );
+  }
+  for (const v of vectors) {
+    if (v.length !== expectedDim) {
+      throw new EmbeddingDimensionMismatchError(expectedDim, v.length);
+    }
+  }
+}
+
+/**
+ * Parse one of three known response shapes:
+ *   - Ollama:                   `{ embeddings: number[][] }`
+ *   - OpenAI / OpenAI-compat:   `{ data: [{ embedding: number[] }] }`
+ *   - HuggingFace TEI native:   `number[][]` (top-level 2D array)
+ *
+ * The TEI native shape is what the HuggingFace TEI container on SageMaker
+ * returns when invoked through the SageMaker Runtime SDK — the container
+ * passes its raw response through, and TEI's `/embed` returns a bare 2D
+ * array (no envelope).
+ *
+ * Returns null on any shape we don't recognize OR can't fully validate —
+ * every element must be an array of finite numbers, so a malformed body
+ * (null entries, non-numeric values) is rejected as a request error rather
+ * than silently producing junk vectors that pass the later dimension check.
+ */
+export function extractVectors(body: unknown): number[][] | null {
+  // TEI native: top-level 2D array.
+  if (Array.isArray(body)) {
+    return validateRaw(body);
+  }
   if (typeof body !== 'object' || body === null) return null;
   const b = body as Record<string, unknown>;
 
@@ -155,6 +200,10 @@ function extractVectors(body: unknown): number[][] | null {
     return null;
   }
 
+  return validateRaw(raw);
+}
+
+function validateRaw(raw: unknown[]): number[][] | null {
   const out: number[][] = [];
   for (const v of raw) {
     if (!Array.isArray(v) || !v.every((n) => typeof n === 'number' && Number.isFinite(n))) {

@@ -66,6 +66,18 @@ describe('HttpEmbeddingClient response shapes', () => {
     const out = await client(impl).embed(['a'], 'document');
     expect(out[0][0]).toBe(0.5);
   });
+
+  it('parses the HuggingFace TEI raw 2D-array shape', async () => {
+    // TEI's native /embed returns a bare 2D array — no envelope.
+    // Useful when the HTTP path is fronting a TEI endpoint directly,
+    // and also exercised end-to-end by the SageMaker client (which
+    // routes through the same extractVectors helper).
+    const { impl } = fakeFetch([vec(768, 0.7), vec(768, 0.8)]);
+    const out = await client(impl).embed(['a', 'b'], 'document');
+    expect(out).toHaveLength(2);
+    expect(out[0][0]).toBe(0.7);
+    expect(out[1][0]).toBe(0.8);
+  });
 });
 
 describe('HttpEmbeddingClient guards', () => {
