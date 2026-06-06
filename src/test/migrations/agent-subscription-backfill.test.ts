@@ -46,21 +46,22 @@ afterEach(async () => {
     WHERE class IN ('app', 'personal') AND app_id IS NULL
   `);
   await pgClient.query(`ALTER TABLE memories ALTER COLUMN class SET NOT NULL`);
+  // Restore each constraint to its CURRENT definition (must stay in sync with
+  // prisma/post-push.sql + src/test/globalSetup.ts) — re-adding a stale
+  // definition clobbers the constraint for every test file that runs after
+  // this one. 034-memory-class-access re-keyed ownership onto class and
+  // relaxed the app_id / agent requirements.
   await pgClient.query(`
     ALTER TABLE memories ADD CONSTRAINT chk_personal_visibility_user
-      CHECK ((visibility = 'PERSONAL') = (user_id IS NOT NULL))
+      CHECK ((class IN ('personal', 'private')) = (user_id IS NOT NULL))
   `);
-  // Restore the constraint to its CURRENT definition (must stay in
-  // sync with prisma/post-push.sql + src/test/globalSetup.ts). The
-  // 'private' value was added 2026-05-24; missing it here clobbers
-  // the constraint and breaks subsequent test files that use private
-  // memories.
   await pgClient.query(`
     ALTER TABLE memories
       ADD CONSTRAINT chk_memory_class_app_id
       CHECK (
-        (class IN ('app', 'personal', 'private') AND app_id IS NOT NULL)
+        (class = 'app' AND app_id IS NOT NULL)
         OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
+        OR (class IN ('personal', 'private'))
       )
   `);
   await pgClient.end();

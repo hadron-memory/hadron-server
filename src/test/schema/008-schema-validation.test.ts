@@ -237,24 +237,26 @@ describe('008 schema — chk_memory_class_app_id', () => {
     ).rejects.toThrow();
   });
 
-  it('rejects class=personal with app_id=NULL', async () => {
+  // 034-memory-class-access: app_id is now OPTIONAL for personal/private — a
+  // free-standing (user-owned, app-less) personal memory is valid.
+  it('accepts class=personal with app_id=NULL (free-standing, owner set)', async () => {
     const org = await db.organization.create({
       data: { id: generateId(), name: 'chk-org-2', urn: 'chk-org-2' },
     });
     const user = await db.user.create({ data: { id: generateId(), githubId: 80042 } });
-    await expect(
-      db.memory.create({
-        data: {
-          id: generateId(),
-          organizationId: org.id,
-          urn: `${org.urn}:bad-personal`,
-          name: 'bad-personal',
-          class: 'personal',
-          visibility: 'PERSONAL',
-          userId: user.id,
-        },
-      }),
-    ).rejects.toThrow();
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:free-standing-personal`,
+        name: 'free-standing-personal',
+        class: 'personal',
+        visibility: 'PERSONAL',
+        userId: user.id,
+      },
+    });
+    expect(mem.appId).toBeNull();
+    expect(mem.userId).toBe(user.id);
   });
 
   it('rejects class=knowledge with a non-NULL app_id', async () => {

@@ -7,26 +7,31 @@
 -- Apply this file after every `db push` (the db:dev-setup / db:test-setup
 -- scripts in package.json wire it up).
 
--- 005-agent-subscription: bidirectional invariant for personal memory.
+-- 005-agent-subscription, re-keyed by 034-memory-class-access: ownership is a
+-- property of CLASS, not visibility. `personal`/`private` are single-owner
+-- (user_id NOT NULL); all other classes have user_id NULL. This replaces the
+-- old visibility=PERSONAL coupling so a `private` memory (visibility=PRIVATE)
+-- can carry an owner, and so a free-standing personal/private memory is valid.
+-- NAMING DEBT: the constraint name still says "visibility"; rename to
+-- chk_memory_owner_userid when next touching it.
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_personal_visibility_user;
 ALTER TABLE memories
   ADD CONSTRAINT chk_personal_visibility_user
-  CHECK ((visibility = 'PERSONAL') = (user_id IS NOT NULL));
+  CHECK ((class IN ('personal', 'private')) = (user_id IS NOT NULL));
 
--- 008-agent-installation (extended by 023-app-shape): app_id is required
--- for class IN ('app', 'personal', 'private'), forbidden for class IN
--- ('system', 'knowledge', 'group'). 023 added 'group' as an org-scoped
--- class with no app_id (FR-024). 'private' (added 2026-05-24) shares the
--- (App, Agent, User) scope shape with 'personal' but is single-owner and
--- not shareable; an upcoming spec will pin down the encryption model.
+-- 008-agent-installation, relaxed by 034-memory-class-access: app_id is
+-- REQUIRED only for class='app'; FORBIDDEN for system/knowledge/group;
+-- OPTIONAL for personal/private (set when provisioned inside an app — the
+-- (app, user) scope; NULL when free-standing / user-owned).
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_class_app_id;
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_class_app_id
   CHECK (
-    (class IN ('app', 'personal', 'private') AND app_id IS NOT NULL)
+    (class = 'app' AND app_id IS NOT NULL)
     OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
+    OR (class IN ('personal', 'private'))
   );
 
 -- 023-app-shape FR-024: bidirectional invariant — class='group' ⇔
@@ -56,11 +61,14 @@ ALTER TABLE memories
 -- NAMING DEBT: the constraint name still says "personal" but now also covers
 -- 'private'. Rename to e.g. chk_memory_user_scoped_agent_id when next touching
 -- this constraint.
+-- 034-memory-class-access: the agent scope is required only for an APP-SCOPED
+-- personal/private memory (app_id set). A free-standing / user-owned
+-- personal/private memory (app_id NULL) has no agent, so it is exempt.
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_personal_agent_id;
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_personal_agent_id
-  CHECK (class NOT IN ('personal', 'private') OR user_memory_of_agent_id IS NOT NULL);
+  CHECK (class NOT IN ('personal', 'private') OR app_id IS NULL OR user_memory_of_agent_id IS NOT NULL);
 
 -- ─── 033-rag-vector-retrieval ───────────────────────────────────────────
 -- pgvector extension (db push with `extensions = [vector]` also handles this;

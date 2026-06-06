@@ -168,9 +168,27 @@ describe('resolveMemoryAuthorization', () => {
     return s;
   }
 
-  // 1. License denial.
-  it('denies any personal-class op when no AgentSubscription exists', async () => {
+  // 1. License: 034-memory-class-access moved the AgentSubscription check off
+  // the direct-owner path and onto the agent-on-behalf path.
+  it('allows a direct owner personal-class call WITHOUT a subscription', async () => {
     const result = await run(emptyState(), personalMemory(), ctx({ callerUserId: 'alice' }));
+    expect(result).toEqual({ allowed: true });
+  });
+
+  it('denies agent-on-behalf personal access when no AgentSubscription exists', async () => {
+    const s = emptyState();
+    s.appMembers.set('app-juno-mm:alice', { role: 'member' });
+    s.appAgents.add('app-juno-mm:juno');
+    const result = await run(
+      s,
+      personalMemory(),
+      ctx({
+        callerUserId: 'alice',
+        actingForUserId: 'alice',
+        callingAppId: 'app-juno-mm',
+        callingAgentId: 'juno',
+      }),
+    );
     expect(result).toEqual({ allowed: false, reason: 'no-subscription' });
   });
 
@@ -359,28 +377,26 @@ describe('resolveMemoryAuthorization', () => {
     expect(result).toEqual({ allowed: false, reason: 'no-membership' });
   });
 
-  // Defensive: personal-class with null agent fails closed (fails the
-  // license check rather than silently bypassing it).
-  it('returns invalid-context when personal-class memory has null userMemoryOfAgentId', async () => {
+  // 034: a free-standing personal memory (no app/agent) is valid — the direct
+  // owner is allowed; only `userId` (the owner) is required.
+  it('allows the direct owner on a free-standing personal memory (null app/agent)', async () => {
     const result = await run(
       stateWithAliceSub(),
-      personalMemory({ userMemoryOfAgentId: null }),
+      personalMemory({ userMemoryOfAgentId: null, appId: null }),
       ctx({ callerUserId: 'alice' }),
     );
-    expect(result).toEqual({ allowed: false, reason: 'invalid-context' });
+    expect(result).toEqual({ allowed: true });
   });
 
-  // Defensive: personal-class scope-invariant break in resolvePersonalAccess
-  // covers all three required scoping columns.
-  it('returns invalid-context when personal-class memory has null appId', async () => {
-    // Note: the license check passes (userMemoryOfAgentId is non-null), so
-    // the invariant guard in resolvePersonalAccess is what fires.
+  // 034: a non-owner direct call on a personal memory falls through to the
+  // MemoryShare path; with no share row it's denied `no-share`.
+  it('denies a non-owner direct call on a personal memory with no share', async () => {
     const result = await run(
       stateWithAliceSub(),
-      personalMemory({ appId: null, userId: 'mallory' }), // userId differs to skip owner-bypass
+      personalMemory({ appId: null, userId: 'mallory' }), // not the caller → no owner-bypass
       ctx({ callerUserId: 'alice' }),
     );
-    expect(result).toEqual({ allowed: false, reason: 'invalid-context' });
+    expect(result).toEqual({ allowed: false, reason: 'no-share' });
   });
 
   // ─── Private-class tests (added 2026-05-24) ──────────────────────────
@@ -392,9 +408,9 @@ describe('resolveMemoryAuthorization', () => {
   // tell "no share row found" (personal) apart from "share is impossible
   // by class invariant" (private).
 
-  it('private: license denial fires before any per-class branch', async () => {
+  it('private: direct owner is allowed WITHOUT a subscription (license moved to agent-on-behalf)', async () => {
     const result = await run(emptyState(), privateMemory(), ctx({ callerUserId: 'alice' }));
-    expect(result).toEqual({ allowed: false, reason: 'no-subscription' });
+    expect(result).toEqual({ allowed: true });
   });
 
   it('private: owner direct-call is allowed (owner-bypass mirror of personal)', async () => {
@@ -487,18 +503,22 @@ describe('resolveMemoryAuthorization', () => {
     expect(result).toEqual({ allowed: false, reason: 'class-not-shareable' });
   });
 
-  it('private: null appId or null userMemoryOfAgentId yields invalid-context', async () => {
+  it('private: free-standing (null app/agent) — owner allowed, non-owner class-not-shareable', async () => {
     const s = stateWithAliceSub();
-    // userId differs from caller so we don't short-circuit via owner-bypass.
-    const r1 = await run(s, privateMemory({ appId: null, userId: 'mallory' }), ctx({ callerUserId: 'alice' }));
-    expect(r1).toEqual({ allowed: false, reason: 'invalid-context' });
-    // userMemoryOfAgentId NULL trips the license guard before per-class dispatch.
-    const r2 = await run(
+    // non-owner direct call on a free-standing private memory → no share path.
+    const r1 = await run(
       s,
-      privateMemory({ userMemoryOfAgentId: null }),
+      privateMemory({ appId: null, userMemoryOfAgentId: null, userId: 'mallory' }),
       ctx({ callerUserId: 'alice' }),
     );
-    expect(r2).toEqual({ allowed: false, reason: 'invalid-context' });
+    expect(r1).toEqual({ allowed: false, reason: 'class-not-shareable' });
+    // owner direct call on a free-standing private memory (no agent) → allowed.
+    const r2 = await run(
+      s,
+      privateMemory({ appId: null, userMemoryOfAgentId: null }),
+      ctx({ callerUserId: 'alice' }),
+    );
+    expect(r2).toEqual({ allowed: true });
   });
 
   // 16. Group — role enforcement (reader/writer/owner).

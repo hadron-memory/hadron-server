@@ -18,26 +18,37 @@ export async function setup() {
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
 
-  // 005-agent-subscription FR-014: bidirectional invariant on memories.
-  // PERSONAL ⇔ userId IS NOT NULL.
+  // 005-agent-subscription, re-keyed by 034-memory-class-access: ownership is
+  // class-based — personal/private ⇔ user_id IS NOT NULL (allows private+owner
+  // and free-standing personal/private; decoupled from visibility).
   await client.query(`
     ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_personal_visibility_user";
     ALTER TABLE "memories"
       ADD CONSTRAINT "chk_personal_visibility_user"
-      CHECK (("visibility" = 'PERSONAL') = ("user_id" IS NOT NULL));
+      CHECK (("class" IN ('personal', 'private')) = ("user_id" IS NOT NULL));
   `);
 
-  // 008-agent-installation (extended 023 + 2026-05-24 'private'):
-  // app_id is required for class IN ('app', 'personal', 'private'),
-  // forbidden for class IN ('system', 'knowledge', 'group').
+  // 008-agent-installation, relaxed by 034-memory-class-access: app_id required
+  // only for class='app'; forbidden for system/knowledge/group; OPTIONAL for
+  // personal/private (set when app-scoped, NULL when free-standing).
   await client.query(`
     ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_class_app_id";
     ALTER TABLE "memories"
       ADD CONSTRAINT "chk_memory_class_app_id"
       CHECK (
-        (class IN ('app', 'personal', 'private') AND app_id IS NOT NULL)
+        (class = 'app' AND app_id IS NOT NULL)
         OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
+        OR (class IN ('personal', 'private'))
       );
+  `);
+
+  // 034-memory-class-access: agent scope required only for an app-scoped
+  // personal/private memory (app_id set); free-standing (app_id NULL) is exempt.
+  await client.query(`
+    ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_personal_agent_id";
+    ALTER TABLE "memories"
+      ADD CONSTRAINT "chk_memory_personal_agent_id"
+      CHECK (class NOT IN ('personal', 'private') OR app_id IS NULL OR user_memory_of_agent_id IS NOT NULL);
   `);
 
   // 033-rag-vector-retrieval: vector-index config invariants.
