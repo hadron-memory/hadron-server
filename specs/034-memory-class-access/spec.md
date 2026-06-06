@@ -6,10 +6,9 @@
 **Status**: Draft
 **Input**: Design discussion [`memory/2026-06-04-memory-access-rules`](../../../hadron-concept/design-discussions/memory/2026-06-04-memory-access-rules/) — final [summary.md](../../../hadron-concept/design-discussions/memory/2026-06-04-memory-access-rules/summary.md) (decisions D-2026-06-04-001/002 + D-2026-06-05-001/002/003).
 
-> **Note:** This spec was rewritten 2026-06-05 after the design discussion's
-> reopened round. The interim `plan.md` / `research.md` / `contracts/` /
-> `quickstart.md` were written against an earlier (group-ACL) model and are
-> **stale** — regenerate them with `/speckit-plan` from this spec.
+> Spec + all planning artifacts (`plan.md`, `research.md`, `data-model.md`,
+> `contracts/`, `quickstart.md`) were rewritten 2026-06-05 to the final design and
+> are the current, authoritative set for this feature.
 
 ## Context
 
@@ -113,9 +112,14 @@ visibility; `Memory.type` no longer exists; the full suite is green.
 - **FR-001**: Authorization MUST be determined by `Memory.class` (+ owner +
   app/org membership + `MemoryShare`). `createdBy` MUST NOT be used as an
   authorization input anywhere.
-- **FR-002**: `Memory` ownership MUST support a **typed one-of** owner among
-  `{ownerUserId, organizationId, ownerAgentId, ownerAppId}`; `organizationId` MUST
-  NOT be required. (No polymorphic `(type,id)` owner.)
+- **FR-002**: `Memory` ownership MUST support a **user** owner, not only an
+  organization. This is expressed via the **existing** typed columns — `userId`
+  (the user owner, for `personal`/`private`) and `organizationId` (the org), which
+  MUST be made **nullable** — plus the existing agent/app linkage
+  (`Agent.systemMemoryId` for `system`, `app_id` for `app`). **No new generic or
+  polymorphic owner column is introduced** (a dedicated `ownerAgentId`/`ownerAppId`
+  column set is explicitly out of v1 scope). A row's owner is determined by its
+  `class` together with these existing columns.
 - **FR-003**: `personal` and `private` memories MUST be readable and writable
   **only by their owner** (`userId`) — no org-membership path, no ADMIN/OWNER
   bypass.
@@ -189,9 +193,13 @@ visibility; `Memory.type` no longer exists; the full suite is green.
   column swap), mapping existing `PERSONAL`/`PRIVATE` → NULL by class.
 - `personal` default scope is `(app, user)` when created inside an app;
   free-standing personal/private are user-owned with `app_id NULL`.
-- The canonical predicate `src/lib/auth/resolveMemoryAuthorization.ts` already
-  enforces owner-only for `personal`/`private`; this feature removes its
-  agent/`AgentSubscription` requirement so free-standing owner-only works.
+- The canonical predicate `src/lib/auth/resolveMemoryAuthorization.ts` today gates
+  `personal`/`private` to the owner **but also** requires agent-scoping
+  (`userMemoryOfAgentId`, and `app_id` for `personal`) and an `AgentSubscription`
+  license check, and it honors `MemoryShare` for `personal`. This feature **removes
+  the agent-scoping + `AgentSubscription` requirement** for `personal`/`private` so
+  a **free-standing** (app-less, user-owned) memory resolves as owner-only;
+  `MemoryShare(personal)` is retained, `private` stays non-shareable.
 
 ## Out of Scope
 

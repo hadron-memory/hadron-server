@@ -29,27 +29,31 @@ groups/`Memory.role` are a deferred future layer.
 
 ## Constitution Check
 
-*GATE: re-checked after Phase 1 — PASS.*
+*GATE: this PR is **spec/plan-only — no implementation**. The items below are the
+gates the implementation MUST satisfy; each is marked **PLANNED** (the plan provides
+for it), not done. They are re-verified when the code lands.*
 
-- **Principle I (test-first, server scope)** — every access-control mutation gets
-  an integration test in `src/test/integration/`: `createMemory(personal|private,
-  free-standing & in-app)`, the owner-only read/write predicate, `MemoryShare`
-  grant/revoke on `personal`, `private` share-rejection, `PUBLIC` knowledge
-  unauth-read, and `Memory.type`-removal parity. **PASS.**
-- **Principle II (docs-concurrent)** — `MemoryVisibility`/`Memory.type`/`createMemory`
-  doc-comments in `typeDefs.ts` updated in-PR; the class→access rule documented in
-  platform-specs. **PASS.**
-- **Principle III + S2 (typed errors)** — `createMemory` rejections (share a
-  `private`, change class/owner, app-key creating a user-owned memory) return typed
-  errors with stable `extensions.code`. **PASS.**
-- **Principle V (zero-trust enforcement)** — the owner-only rule lives in
-  `resolveMemoryAuthorization` + the MCP gate; owner check is `Memory.userId`,
-  never `createdBy`; no resolver bypass. **PASS.**
-- **S5 (CHECKs + regression test)** — the re-keyed/added CHECKs (`chk_memory_personal_owner`,
-  `chk_memory_private_owner`, `chk_memory_visibility_class`, relaxed
-  `chk_memory_class_app_id`) land in `post-push.sql` with regression tests. **PASS.**
-- **S3 (`typeDefs.ts` one template literal, no raw backticks)** — doc-comment edits
-  avoid backticks. **PASS.**
+- **Principle I (test-first, server scope)** — **PLANNED:** every access-control
+  mutation gets an integration test in `src/test/integration/`:
+  `createMemory(personal|private, free-standing & in-app)`, the owner-only
+  read/write predicate, `MemoryShare` grant/revoke on `personal`, `private`
+  share-rejection, `PUBLIC` knowledge unauth-read, and `Memory.type`-removal parity.
+- **Principle II (docs-concurrent)** — **PLANNED:** the implementation PR updates the
+  `MemoryVisibility`/`Memory.type`/`createMemory` doc-comments in `typeDefs.ts` and
+  documents the class→access rule in platform-specs.
+- **Principle III + S2 (typed errors)** — **PLANNED:** `createMemory` rejections
+  (share a `private`, change class/owner, app-key creating a user-owned memory,
+  `visibility` on personal/private) return typed errors with stable
+  `extensions.code`.
+- **Principle V (zero-trust enforcement)** — **PLANNED:** the owner-only rule stays
+  in `resolveMemoryAuthorization` + the MCP gate; owner check is `Memory.userId`,
+  never `createdBy`; no resolver bypass.
+- **S5 (CHECKs + regression test)** — **PLANNED:** the re-keyed/added CHECKs
+  (`chk_memory_personal_owner`, `chk_memory_private_owner`,
+  `chk_memory_visibility_class`, relaxed `chk_memory_class_app_id`) land in
+  `post-push.sql` with regression tests.
+- **S3 (`typeDefs.ts` one template literal, no raw backticks)** — **PLANNED:**
+  doc-comment edits avoid backticks.
 - **Spec-location note** — constitution's *Spec Workflow* says specs live in
   `spec-kits/specs/`; current practice (031–034 + the 2026-05-28 convention) puts
   them in `hadron-server/specs/`. This spec follows current practice; constitution
@@ -86,7 +90,8 @@ src/
 ├── api/graphql/schema/
 │   ├── resolvers.ts                      # createMemory opens personal/private (free-standing);
 │   │                                     #   read/write surfaces honor class owner-only; knowledge per visibility (PUBLIC unauth)
-│   └── typeDefs.ts                        # remove MemoryType; update MemoryVisibility; doc-comments
+│   └── typeDefs.ts                        # remove MemoryType; update MemoryVisibility;
+│                                          #   EXTEND createMemory args (class options + appId + encrypted); doc-comments
 ├── lib/auth/
 │   └── resolveMemoryAuthorization.ts     # personal/private → owner-only; drop agent/AgentSubscription requirement
 ├── mcp/access-control.ts                 # parity for free-standing owner-only

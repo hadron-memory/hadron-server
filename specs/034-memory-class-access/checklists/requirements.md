@@ -31,11 +31,10 @@
 
 ## Notes
 
-- One design fork (whether the `PRIVATE`/`PERSONAL` enum *values* are dropped or
-  retained as class-bound markers) was resolved with a documented assumption
-  (retain; FR-015) rather than a [NEEDS CLARIFICATION] marker, because a
-  reasonable default exists (dropping a Postgres enum value is destructive) and
-  the choice does not change user-facing scope.
+- The `PRIVATE`/`PERSONAL` enum-value fork is resolved by **removing** both values
+  via a Postgres enum **type-swap** migration (spec **FR-009**, research R2,
+  data-model migration). The earlier "retain as class-bound markers" reading is
+  superseded — the markers were the human/AI ambiguity the feature removes.
 - The spec deliberately names specific entity/field/file names (`Memory.userId`,
   `Memory.type`, `resolveMemoryAuthorization.ts`) because they are the precise
   subject of the change and were fixed by the source design discussion — these

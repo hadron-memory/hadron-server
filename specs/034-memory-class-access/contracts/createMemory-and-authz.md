@@ -8,7 +8,10 @@ constitution S2/Principle III (stable `extensions.code`, no raw Prisma/`new Erro
 **Now accepts** `class ∈ {knowledge, group, personal, private}` (was
 `knowledge`/`group` only).
 
-Input (relevant): `{ name, class, appId?, visibility?, encrypted? }`.
+Input (relevant): `{ name, class, appId?, visibility?, encrypted? }`. The
+`createMemory` mutation signature in `typeDefs.ts` MUST be extended to add `appId`
+and `encrypted` (and the broadened `class`) — this is a tracked implementation task
+in [plan.md](../plan.md).
 
 Server behavior:
 
@@ -24,7 +27,7 @@ Rejections (typed):
 | Caller / input | Result |
 |---|---|
 | App-key (no `userId`) creating `personal`/`private` | typed error — owner-only memory needs a user owner |
-| `visibility` passed for `personal`/`private` | ignored/rejected — those classes carry NULL visibility |
+| `visibility` passed for `personal`/`private` | **typed rejection** (`BAD_USER_INPUT`) — those classes carry NULL visibility |
 | `encrypted=true` on non-`private` | rejected — only `private` may encrypt |
 | create `MemoryShare` targeting a `private` memory | rejected at share-create |
 
