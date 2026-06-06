@@ -23,14 +23,14 @@ Enums:
 
 ## Access by class (the rule — no new field, no groups)
 
-| class | read | write | `visibility` | owner | shareable | encrypt |
-|---|---|---|---|---|---|---|
-| `system` | app members | builder (agent owner) | — (NULL) | agent | no | no |
-| `app` | app members | app members | — (NULL) | app | no | no |
-| `knowledge` | `ORGANIZATION`→org members; `PUBLIC`→anyone (incl. unauth) | members | **PUBLIC\|ORGANIZATION** | org/agent | no | no |
-| `personal` | owner (`userId`) | owner | — (NULL) | user | via `MemoryShare` | no |
-| `private` | owner (`userId`) | owner | — (NULL) | user | **no** | **yes** |
-| `group` | *(deferred)* | | GROUP | | | |
+| class       | read                                                       | write                 | `visibility`             | owner     | shareable         | can encrypt |
+|-------------|------------------------------------------------------------|-----------------------|--------------------------|-----------|-------------------|-------------|
+| `system`    | app members                                                | builder (agent owner) | — (NULL)                 | agent     | no                | no          |
+| `app`       | app members                                                | app members           | — (NULL)                 | app       | no                | no          |
+| `knowledge` | `ORGANIZATION`→org members; `PUBLIC`→anyone (incl. unauth) | members               | **PUBLIC\|ORGANIZATION** | org/agent | no                | no          |
+| `personal`  | owner (`userId`)                                           | owner (share)         | — (NULL)                 | user      | via `MemoryShare` | no          |
+| `private`   | owner (`userId`)                                           | owner                 | — (NULL)                 | user      | **no**            | **yes**     |
+| `group`     | *(deferred)*                                               |                       | GROUP                    |           |                   |             |
 
 No ADMIN/OWNER bypass for `personal`/`private`. Active app **masks the result set
 down** (restriction only; never widens).
