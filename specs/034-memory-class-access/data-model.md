@@ -28,7 +28,7 @@ Enums:
 | `system`    | app members                                                | builder (agent owner) | — (NULL)                 | agent     | no                | no          |
 | `app`       | app members                                                | app members           | — (NULL)                 | app       | no                | no          |
 | `knowledge` | `ORGANIZATION`→org members; `PUBLIC`→anyone (incl. unauth) | members               | **PUBLIC\|ORGANIZATION** | org/agent | no                | no          |
-| `personal`  | owner (`userId`)                                           | owner (share)         | — (NULL)                 | user      | via `MemoryShare` | no          |
+| `personal`  | owner + `MemoryShare(reader\|writer)`                      | owner + `MemoryShare(writer)` | — (NULL)         | user      | via `MemoryShare` | no          |
 | `private`   | owner (`userId`)                                           | owner                 | — (NULL)                 | user      | **no**            | **yes**     |
 | `group`     | *(deferred)*                                               |                       | GROUP                    |           |                   |             |
 
@@ -73,7 +73,9 @@ Each new/changed CHECK ships with a regression test (S5).
 
 No new entities. Field-level changes on `Memory`, the re-keyed CHECKs, and the
 predicate reshape (`resolveMemoryAuthorization` `personal`/`private` branch →
-owner-only, drop the agent/`AgentSubscription` requirement). Sharing stays on the
+direct-owner allow with the **up-front** agent/`AgentSubscription` requirement
+removed; the subscription check **moves to** the agent-on-behalf branch, where it
+still gates agent-mediated access). Sharing stays on the
 existing **`MemoryShare`** (`personal` only; `private` rejected at create).
 **Not built:** `Group`, `AssignedGroup`, `MemoryAccess`, `memberDefault`,
 `Memory.role` — the documented future group-ACL layer.
