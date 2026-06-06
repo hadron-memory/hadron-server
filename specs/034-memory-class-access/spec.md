@@ -196,10 +196,12 @@ visibility; `Memory.type` no longer exists; the full suite is green.
 - The canonical predicate `src/lib/auth/resolveMemoryAuthorization.ts` today gates
   `personal`/`private` to the owner **but also** requires agent-scoping
   (`userMemoryOfAgentId`, and `app_id` for `personal`) and an `AgentSubscription`
-  license check, and it honors `MemoryShare` for `personal`. This feature **removes
-  the agent-scoping + `AgentSubscription` requirement** for `personal`/`private` so
-  a **free-standing** (app-less, user-owned) memory resolves as owner-only;
-  `MemoryShare(personal)` is retained, `private` stays non-shareable.
+  license check, and it honors `MemoryShare` for `personal`. This feature removes
+  those requirements **from the direct-owner path** so a **free-standing** (app-less,
+  user-owned) memory resolves as owner-only — but the `AgentSubscription` check is
+  **retained on the agent-on-behalf path** (an installed agent acting for the user
+  still needs the user's active subscription); `MemoryShare(personal)` is retained,
+  `private` stays non-shareable.
 
 ## Out of Scope
 

@@ -100,14 +100,19 @@ effectively one-way action; never a default; mind PII.
 
 ## R9 — Predicate reshape for free-standing owner-only
 
-**Decision**: `resolveMemoryAuthorization`'s `personal`/`private` branch reduces to
-*allow iff caller is the owner* (`callerUserId === Memory.userId`); **drop** the
-`userMemoryOfAgentId`-non-null requirement and the up-front `AgentSubscription`
-license check. The optional agent-on-behalf branch may remain when an agent context
-is present and matches, but is never required.
+**Decision**: `resolveMemoryAuthorization`'s `personal`/`private` branch: the
+**direct owner** path is *allow iff caller is the owner* (`callerUserId ===
+Memory.userId`) with the `userMemoryOfAgentId`-non-null requirement and the
+**up-front** `AgentSubscription` check **removed**. The `AgentSubscription` check is
+**not dropped — it moves into the agent-on-behalf branch** (Step 3b), which still
+requires it. The optional agent-on-behalf branch may apply when an agent context is
+present and matches, but is never required for a direct owner call.
 
-**Rationale**: a free-standing owner-only memory has no agent; the license check
-gates *agent* interaction. (D-2026-06-04-002 / Q5.)
+**Rationale**: a free-standing owner-only memory has no agent, so the *direct*
+owner path needs no license check; but the license check still gates *agent*
+interaction, so it must remain on the agent-on-behalf path or an installed agent
+could reach a user's memory without an active subscription (security/licensing
+bypass — Gemini PR-241 review). (D-2026-06-04-002 / Q5.)
 
 ## R10 — Roll out the predicate change as a strangler (shadow parity)
 
