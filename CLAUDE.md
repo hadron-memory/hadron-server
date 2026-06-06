@@ -120,5 +120,5 @@ two-layer model without further setup:
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/033-rag-vector-retrieval/plan.md](specs/033-rag-vector-retrieval/plan.md)
+[specs/034-memory-class-access/plan.md](specs/034-memory-class-access/plan.md)
 <!-- SPECKIT END -->
