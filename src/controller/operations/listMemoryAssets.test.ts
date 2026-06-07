@@ -66,7 +66,7 @@ beforeEach(async () => {
       urn: `${org.urn}:list-mem`,
       name: 'list-mem',
       class: 'personal',
-      visibility: 'PERSONAL',
+      visibility: null,
       userId: user.id,
       appId: app.id,
       // 023 FR-004/FR-032: chk_memory_personal_agent_id requires the

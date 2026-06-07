@@ -42,7 +42,7 @@ afterEach(async () => {
   // pivot end-to-end, downgrade leftovers to knowledge so the constraint can
   // be re-added cleanly.
   await pgClient.query(`
-    UPDATE memories SET class = 'knowledge', visibility = 'PRIVATE', user_id = NULL
+    UPDATE memories SET class = 'knowledge', visibility = 'ORGANIZATION', user_id = NULL
     WHERE class IN ('app', 'personal') AND app_id IS NULL
   `);
   await pgClient.query(`ALTER TABLE memories ALTER COLUMN class SET NOT NULL`);
@@ -92,12 +92,12 @@ async function runBackfillSql() {
           WHERE s.memory_id = m.id AND s.user_id IS NOT NULL
           ORDER BY s.started_at ASC LIMIT 1
        ),
-       visibility = 'PERSONAL'
+       visibility = NULL
      WHERE m.class = 'personal'
   `);
   await pgClient.query(`
     UPDATE memories
-       SET class = 'knowledge', visibility = 'PRIVATE'
+       SET class = 'knowledge', visibility = 'ORGANIZATION'
      WHERE class = 'personal' AND user_id IS NULL
   `);
 }
@@ -139,7 +139,7 @@ describe('Memory.class backfill (FR-010)', () => {
     expect(knAfter.class).toBe('knowledge');
     // No session attribution → fallback demotes personal to knowledge
     expect(persAfter.class).toBe('knowledge');
-    expect(persAfter.visibility).toBe('PRIVATE');
+    expect(persAfter.visibility).toBe('ORGANIZATION');
     expect(persAfter.userId).toBeNull();
   });
 
@@ -187,7 +187,7 @@ describe('Memory.class backfill (FR-010)', () => {
 
     const after = await db.memory.findUniqueOrThrow({ where: { id: personalMemory.id } });
     expect(after.class).toBe('personal');
-    expect(after.visibility).toBe('PERSONAL');
+    expect(after.visibility).toBeNull();
     expect(after.userId).toBe(user.id);
   });
 });

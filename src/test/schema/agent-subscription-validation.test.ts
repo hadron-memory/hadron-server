@@ -90,7 +90,7 @@ describe('AgentSubscription model + MemoryClass enum + PERSONAL visibility', () 
     expect(memApp.class).toBe('app');
     expect(memKnowledge.class).toBe('knowledge');
     expect(memPersonal.class).toBe('personal');
-    expect(memPersonal.visibility).toBe('PERSONAL');
+    expect(memPersonal.visibility).toBeNull();
     expect(memPersonal.userId).toBe(user.id);
   });
 });
@@ -108,7 +108,7 @@ describe('CHECK constraint: PERSONAL ⇔ userId IS NOT NULL', () => {
           urn: `${org.urn}:bad-personal`,
           name: 'bad',
           class: 'personal',
-          visibility: 'PERSONAL',
+          visibility: null,
           // userId intentionally omitted
         },
       }),
@@ -128,7 +128,7 @@ describe('CHECK constraint: PERSONAL ⇔ userId IS NOT NULL', () => {
           urn: `${org.urn}:bad-private`,
           name: 'bad-private',
           class: 'knowledge',
-          visibility: 'PRIVATE',
+          visibility: 'ORGANIZATION',
           userId: user.id,
         },
       }),
@@ -159,7 +159,7 @@ describe('CHECK constraint: PERSONAL ⇔ userId IS NOT NULL', () => {
       organizationId: org.id,
       agentId: agent.id,
     });
-    expect(mem.visibility).toBe('PERSONAL');
+    expect(mem.visibility).toBeNull();
     expect(mem.userId).toBe(user.id);
   });
 
@@ -176,7 +176,7 @@ describe('CHECK constraint: PERSONAL ⇔ userId IS NOT NULL', () => {
         class: 'knowledge',
       },
     });
-    expect(mem.visibility).toBe('PRIVATE');
+    expect(mem.visibility).toBeNull();
     expect(mem.userId).toBeNull();
   });
 });

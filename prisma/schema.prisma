@@ -193,29 +193,30 @@ enum MemoryLogEventType {
   OTHER
 }
 
-/// Memory visibility. **Bidirectional invariant** enforced by a
-/// Postgres CHECK constraint: `visibility = PERSONAL` ⇔ `userId IS
-/// NOT NULL`. PERSONAL is strict ownership — no ADMIN/OWNER bypass;
-/// only the owning user can read.
+/// Memory visibility — **035-visibility-enum-cleanup**. Meaningful only
+/// for `knowledge` (PUBLIC/ORGANIZATION) and `group` (GROUP); NULL for
+/// every other class. The `PERSONAL`/`PRIVATE` values were dropped (spec
+/// 034 moved privacy onto the `personal`/`private` CLASS). The
+/// `chk_memory_visibility_class` CHECK forbids a non-null visibility on
+/// any class other than knowledge/group.
 enum MemoryVisibility {
   PUBLIC
-  PRIVATE
   ORGANIZATION
-  PERSONAL
   /// 023-app-shape: bidirectional with `MemoryClass.group`. Enforced by
   /// the `chk_memory_group_visibility` CHECK constraint:
   /// `class = 'group' ⇔ visibility = 'GROUP'`.
   GROUP
 }
 
-/// **Legacy two-way type** kept alongside the post-005 four-way
-/// `class` field. AGENT_SYSTEM corresponds to `class = system`;
-/// KNOWLEDGE was the catch-all before 005 split the world into
-/// app/knowledge/personal. New code should branch on `class`, not
-/// `type`. A future cleanup spec will collapse this.
-enum MemoryType {
-  KNOWLEDGE
-  AGENT_SYSTEM
+/// Agent visibility — **035-visibility-enum-cleanup** split this off the
+/// shared `MemoryVisibility` enum. `PERSONAL` is the creator-only draft
+/// state (named PERSONAL, not PRIVATE, so it never collides with the
+/// memory `private` class). `Organization.agents` filters on it;
+/// `createAgent` defaults to it.
+enum AgentVisibility {
+  PUBLIC
+  ORGANIZATION
+  PERSONAL
 }
 
 /// Per-Memory typology — formalized in 005-agent-subscription
@@ -547,10 +548,10 @@ model Memory {
   readBranch           String?          @map("read_branch")
   /// Branch for mutations (default: "hadron-updates").
   writeBranch          String?          @map("write_branch")
-  visibility           MemoryVisibility @default(PRIVATE)
-  /// **Legacy two-way type** — see MemoryType enum doc. Branch on
-  /// `class` instead for new code.
-  type                 MemoryType       @default(KNOWLEDGE)
+  /// 035-visibility-enum-cleanup: nullable, no default. Set only for
+  /// `knowledge` (PUBLIC/ORGANIZATION) and `group` (GROUP); NULL for
+  /// system/app/personal/private (enforced by chk_memory_visibility_class).
+  visibility           MemoryVisibility?
   /// Whether the memory's contents (including asset bytes) are
   /// encrypted at rest using AES-256-GCM under HADRON_ENCRYPTION_KEY.
   isEncrypted          Boolean          @default(false) @map("is_encrypted")
@@ -1137,10 +1138,9 @@ model Agent {
   /// (DEVELOP-from-App is dropped per R-10); edits happen in the
   /// Agent ownership surface.
   systemMemoryId       String?          @map("system_memory_id")
-  /// PUBLIC | ORGANIZATION | PRIVATE — PERSONAL is reserved for
-  /// memories and not a valid value here despite the shared enum
-  /// type. Default PRIVATE.
-  visibility           MemoryVisibility @default(PRIVATE)
+  /// PUBLIC | ORGANIZATION | PERSONAL (035-visibility-enum-cleanup gave
+  /// agents their own enum). PERSONAL is the creator-only draft state.
+  visibility           AgentVisibility  @default(PERSONAL)
   /// Coarse behavior hint — see AgentType enum doc. Largely legacy
   /// post-008.
   type                 AgentType        @default(ASSISTANT)

@@ -41,32 +41,14 @@ beforeEach(async () => {
 // createMemory with type
 // ---------------------------------------------------------------------------
 
-describe('createMemory with type', () => {
-  it('defaults to KNOWLEDGE', async () => {
-    const m = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'my-knowledge' },
-      adminCtx(),
-    );
-    expect(m.type).toBe('KNOWLEDGE');
-  });
-
-  it('accepts AGENT_SYSTEM', async () => {
-    const m = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'juno-system', type: 'AGENT_SYSTEM' },
-      adminCtx(),
-    );
-    expect(m.type).toBe('AGENT_SYSTEM');
-  });
-});
-
 // ---------------------------------------------------------------------------
-// First-attach flow: updateAgent sets systemMemoryId → memory becomes AGENT_SYSTEM
+// First-attach flow: updateAgent sets systemMemoryId → memory becomes
+// class='system'. 035-visibility-enum-cleanup removed the `type` column;
+// `class` is authoritative, and the attach clears the memory's visibility.
 // ---------------------------------------------------------------------------
 
 describe('updateAgent first-attach of systemMemoryId', () => {
-  it('marks the target memory as AGENT_SYSTEM and renames it', async () => {
+  it('marks the target memory as class=system, renames it, clears visibility', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
       { orgId: orgA.id, name: 'juno', visibility: 'ORGANIZATION' },
@@ -85,9 +67,11 @@ describe('updateAgent first-attach of systemMemoryId', () => {
     );
 
     const updated = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
-    expect(updated.type).toBe('AGENT_SYSTEM');
+    expect(updated.class).toBe('system');
     expect(updated.name).toBe('juno System');
-    expect(updated.visibility).toBe('ORGANIZATION');
+    // 035: agent visibility no longer syncs onto the system memory — it is
+    // always NULL (chk_memory_visibility_class).
+    expect(updated.visibility).toBeNull();
   });
 
   it('refuses a memory from a different org', async () => {
@@ -232,10 +216,13 @@ describe('agent → system memory sync', () => {
     expect(synced.name).toBe('juno2 System');
   });
 
-  it('syncs visibility when the agent is updated', async () => {
+  // 035-visibility-enum-cleanup: agent visibility NO LONGER syncs onto the
+  // system memory — a system memory's visibility is always NULL. This is the
+  // inverse of the old "syncs visibility" behavior.
+  it('does not propagate agent visibility onto the system memory', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'juno', visibility: 'PRIVATE' },
+      { orgId: orgA.id, name: 'juno', visibility: 'PERSONAL' },
       adminCtx(),
     );
     const mem = await resolvers.Mutation.createMemory(
@@ -256,7 +243,10 @@ describe('agent → system memory sync', () => {
     );
 
     const synced = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
-    expect(synced.visibility).toBe('ORGANIZATION');
+    expect(synced.visibility).toBeNull();
+    // The agent itself still tracks the update.
+    const reloaded = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
+    expect(reloaded.visibility).toBe('ORGANIZATION');
   });
 });
 
@@ -510,7 +500,7 @@ describe('Memory.agent derived field', () => {
     const updated = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
 
     const resolved = await resolvers.Memory.agent(
-      { id: updated.id, type: updated.type },
+      { id: updated.id, class: updated.class },
       {},
       { db } as Context,
     );
@@ -524,7 +514,7 @@ describe('Memory.agent derived field', () => {
       adminCtx(),
     );
     const resolved = await resolvers.Memory.agent(
-      { id: m.id, type: m.type },
+      { id: m.id, class: m.class },
       {},
       { db } as Context,
     );
@@ -626,7 +616,6 @@ describe('deleteMemory (spec 013)', () => {
           urn: `${app.urn}:owner-personal`,
           name: 'Owner personal memory',
           class: 'personal',
-          visibility: 'PERSONAL',
           userId: owner.id,
           appId: app.id,
           userMemoryOfAgentId: agent.id,

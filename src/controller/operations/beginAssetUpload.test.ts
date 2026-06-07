@@ -67,7 +67,7 @@ beforeEach(async () => {
       organizationId: org.id,
       urn: `${org.urn}:buno:user:${generateId()}`,
       name: 'user-memory',
-      visibility: 'PRIVATE',
+      visibility: 'ORGANIZATION',
     },
   });
   resolveTargetMemoryId.mockClear();
@@ -290,7 +290,7 @@ describe('beginAssetUploadV2', () => {
         urn: `${org.urn}:v2mem:${generateId()}`,
         name: 'v2-personal-memory',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: user.id,
         // 008: chk_memory_class_app_id requires app_id for personal-class.
         appId: app.id,

@@ -18,11 +18,14 @@ export const typeDefs = `#graphql
     ERROR
   }
 
+  """
+  035-visibility-enum-cleanup: meaningful only for knowledge
+  (PUBLIC/ORGANIZATION) and group (GROUP); null otherwise. PERSONAL/PRIVATE
+  were dropped — privacy is the personal/private memory CLASS now.
+  """
   enum MemoryVisibility {
     PUBLIC
-    PRIVATE
     ORGANIZATION
-    PERSONAL
     """
     023-app-shape US4: team-shared visibility. Bound bidirectionally
     to MemoryClass.group by the chk_memory_group_visibility CHECK
@@ -31,9 +34,14 @@ export const typeDefs = `#graphql
     GROUP
   }
 
-  enum MemoryType {
-    KNOWLEDGE
-    AGENT_SYSTEM
+  """
+  035-visibility-enum-cleanup: agents have their own visibility enum,
+  decoupled from MemoryVisibility. PERSONAL is the creator-only draft state.
+  """
+  enum AgentVisibility {
+    PUBLIC
+    ORGANIZATION
+    PERSONAL
   }
 
   enum CreateUserPermission {
@@ -601,7 +609,7 @@ export const typeDefs = `#graphql
     shareable), no ADMIN/OWNER bypass. Spec 034 (hadron-server #242)
     made it user-creatable via createMemory: free-standing (no
     app/agent) or app-scoped. May opt into encrypt-at-rest
-    (visibility=PRIVATE marks the class), but the encryption
+    (the private CLASS marks it; visibility is NULL), but the encryption
     implementation itself is a deferred follow-up — do NOT rely on
     at-rest encryption for secret material yet.
     """
@@ -743,8 +751,8 @@ export const typeDefs = `#graphql
     source: String
     readBranch: String
     writeBranch: String
-    visibility: MemoryVisibility!
-    type: MemoryType!
+    # 035-visibility-enum-cleanup: nullable — set only for knowledge/group.
+    visibility: MemoryVisibility
     # 005-agent-subscription: four-way memory typology
     class: MemoryClass!
     # 006-asset-upload-redesign: per-memory upload-acceptance gate.
@@ -795,7 +803,7 @@ export const typeDefs = `#graphql
     # Required when class IN ('app', 'personal'); NULL otherwise.
     appId: ID
     app: App
-    # Populated only for type = AGENT_SYSTEM — the agent this memory is
+    # Populated only for class = system — the agent this memory is
     # the system memory of. Null for regular knowledge memories.
     agent: Agent
     syncStatus: SyncStatus!
@@ -831,7 +839,7 @@ export const typeDefs = `#graphql
     description: String
     systemPrompt: String
     systemMemoryId: String
-    visibility: MemoryVisibility!
+    visibility: AgentVisibility!
     type: AgentType!
     surfaces: [String!]!
     aiProvider: String
@@ -1534,7 +1542,6 @@ export const typeDefs = `#graphql
       readBranch: String
       writeBranch: String
       visibility: MemoryVisibility
-      type: MemoryType
       """
       'knowledge' (default), 'group', or the owner-only 'personal' /
       'private' (spec 034). 'system' and 'app' are rejected — they
@@ -1576,14 +1583,14 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    createAgent(orgId: ID!, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: MemoryVisibility, type: AgentType, surfaces: [String!]): Agent!
+    createAgent(orgId: ID!, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!]): Agent!
 
     """
     Update an Agent.
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: MemoryVisibility, type: AgentType, surfaces: [String!]): Agent!
+    updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!]): Agent!
 
     """
     Soft-delete an Agent.

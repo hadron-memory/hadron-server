@@ -56,7 +56,7 @@ function makeGraph(overrides?: Partial<MemoryWithOrg>): MemoryWithOrg {
     source: 'git@github.com:test/repo.git',
     readBranch: null,
     writeBranch: null,
-    visibility: 'PRIVATE',
+    visibility: 'ORGANIZATION',
     syncStatus: 'PENDING',
     syncError: null,
     pendingEdgeCount: 0,

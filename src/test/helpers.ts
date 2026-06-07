@@ -341,7 +341,7 @@ export async function createDbPersonalMemory(
       userMemoryOfAgentId: opts.agentId,
       appId,
       class: 'personal',
-      visibility: 'PERSONAL',
+      visibility: null,
     },
   });
 }

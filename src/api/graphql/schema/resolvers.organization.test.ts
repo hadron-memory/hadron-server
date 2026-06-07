@@ -74,8 +74,7 @@ describe('Query.orgSystemMemories (007-entity-id-or-urn)', () => {
         organizationId: org.id,
         urn: `${org.urn}:juno-system`,
         name: 'juno-system',
-        class: 'knowledge',
-        type: 'AGENT_SYSTEM',
+        class: 'system',
       },
     });
   });

@@ -251,7 +251,7 @@ describe('008 schema — chk_memory_class_app_id', () => {
         urn: `${org.urn}:free-standing-personal`,
         name: 'free-standing-personal',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: user.id,
       },
     });

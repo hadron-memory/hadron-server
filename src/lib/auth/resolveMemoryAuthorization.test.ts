@@ -76,7 +76,7 @@ function personalMemory(overrides: Partial<MemoryForAuth> = {}): MemoryForAuth {
   return {
     id: 'mem-personal-1',
     class: 'personal',
-    visibility: 'PERSONAL',
+    visibility: null,
     userId: 'alice',
     appId: 'app-juno-mm',
     userMemoryOfAgentId: 'juno',
@@ -88,7 +88,7 @@ function appMemory(overrides: Partial<MemoryForAuth> = {}): MemoryForAuth {
   return {
     id: 'mem-app-1',
     class: 'app',
-    visibility: 'ORGANIZATION',
+    visibility: null,
     userId: null,
     appId: 'app-1',
     userMemoryOfAgentId: 'juno',
@@ -100,7 +100,7 @@ function systemMemory(overrides: Partial<MemoryForAuth> = {}): MemoryForAuth {
   return {
     id: 'mem-system-1',
     class: 'system',
-    visibility: 'PRIVATE',
+    visibility: null,
     userId: null,
     appId: null,
     userMemoryOfAgentId: null,
@@ -136,7 +136,7 @@ function privateMemory(overrides: Partial<MemoryForAuth> = {}): MemoryForAuth {
   return {
     id: 'mem-private-1',
     class: 'private',
-    visibility: 'PERSONAL',
+    visibility: null,
     userId: 'alice',
     appId: 'app-juno-mm',
     userMemoryOfAgentId: 'juno',
