@@ -279,7 +279,8 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
             ? [
                 { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any }, visibility: { not: 'PRIVATE' as any } },
                 { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any }, visibility: 'PRIVATE' as any, createdBy: ctx.userId },
-                { subscriptions: { some: { organizationId: { in: orgIds } } } },
+                // Cross-org subscriptions never reach owner-only personal/private.
+                { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
               ]
             : []),
           // 034: owner-owned personal/private memories — only the owner.
@@ -2724,7 +2725,7 @@ export const resolvers = {
               // Org-shared classes via membership; 034: owner-owned
               // personal/private never come in via the org.
               { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
-              { subscriptions: { some: { organizationId: { in: orgIds } } } },
+              { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
               // 034: the user's own owner-owned personal/private memories.
               { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
             ],
@@ -4001,7 +4002,18 @@ export const resolvers = {
             { extensions: { code: 'UNAUTHENTICATED' } },
           );
         }
-        await requireOrgRole(ctx, resolvedOrgId, 'READER');
+        // Require ACTUAL membership of the org container — NOT requireOrgRole,
+        // whose global ADMIN/OWNER bypass would let a platform admin create a
+        // personal/private memory in an org they don't belong to.
+        const orgMembership = await ctx.db.orgMember.findUnique({
+          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: ctx.userId } },
+        });
+        if (!orgMembership || orgMembership.deletedAt) {
+          throw new GraphQLError(
+            'You must be a member of the organization to create a personal/private memory in it.',
+            { extensions: { code: 'FORBIDDEN' } },
+          );
+        }
       } else {
         await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       }
@@ -4089,9 +4101,11 @@ export const resolvers = {
             // later via updateMemory.
             vectorIndexEnabled: requestedClass === 'knowledge',
             // Owner-owned personal/private set the creator as the owner
-            // (free-standing: app_id / userMemoryOfAgentId stay NULL). Group
-            // memories must have userId NULL (chk_memory_group_no_owner).
-            userId: isUserOwned ? ctx.userId : requestedClass === 'group' ? null : undefined,
+            // (free-standing: app_id / userMemoryOfAgentId stay NULL). All other
+            // classes MUST have userId NULL (chk_personal_visibility_user /
+            // chk_memory_group_no_owner) — set it explicitly rather than relying
+            // on Prisma omitting the field.
+            userId: isUserOwned ? ctx.userId : null,
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           },
           include: MEMORY_INCLUDE,
