@@ -597,14 +597,13 @@ export const typeDefs = `#graphql
     """
     group
     """
-    RESERVED for an upcoming spec'd "encrypted-by-default" class.
-    Today: same (app_id, agent_id, user_id) scope as personal,
-    stored in plaintext, minus the MemoryShare path (single-owner,
-    not shareable). DO NOT store secret material here until the
-    encryption spec ships. Auto-provisioning is not implemented —
-    createMemory rejects this class; production cannot create rows
-    yet. The class is exposed on the enum so read paths don't
-    break the day the spec'd work lands.
+    Single-owner, owner-only memory — no MemoryShare path (not
+    shareable), no ADMIN/OWNER bypass. Spec 034 (hadron-server #242)
+    made it user-creatable via createMemory: free-standing (no
+    app/agent) or app-scoped. May opt into encrypt-at-rest
+    (visibility=PRIVATE marks the class), but the encryption
+    implementation itself is a deferred follow-up — do NOT rely on
+    at-rest encryption for secret material yet.
     """
     private
   }
@@ -1510,11 +1509,13 @@ export const typeDefs = `#graphql
     for orgId.
 
     Defaults to knowledge-class with PRIVATE visibility. Pass
-    memoryClass: group + visibility: GROUP to create a group-class
-    memory (023-app-shape US4); the calling user is auto-added as
-    the first owner. Personal-class and system-class memories are
-    NOT created via this mutation — they auto-provision via
-    AgentSubscription / Agent.systemMemoryId.
+    memoryClass: group + visibility: GROUP for a group-class memory
+    (023-app-shape US4; the caller is auto-added as the first owner),
+    or memoryClass: personal | private for an owner-only memory the
+    caller owns (spec 034 — free-standing, no app/agent; the caller
+    must be a member of the org container). system- and app-class
+    memories are NOT created here — they auto-provision via
+    Agent.systemMemoryId / the App install path.
     """
     createMemory(
       orgId: ID!
@@ -1535,8 +1536,8 @@ export const typeDefs = `#graphql
       visibility: MemoryVisibility
       type: MemoryType
       """
-      023-app-shape US4: 'knowledge' (default) or 'group'. Other
-      values (system, app, personal) are rejected — those classes
+      'knowledge' (default), 'group', or the owner-only 'personal' /
+      'private' (spec 034). 'system' and 'app' are rejected — they
       auto-provision via different code paths.
       """
       memoryClass: MemoryClass

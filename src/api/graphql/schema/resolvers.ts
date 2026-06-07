@@ -3983,11 +3983,10 @@ export const resolvers = {
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
         type?: 'KNOWLEDGE' | 'AGENT_SYSTEM';
         // GraphQL passes the full MemoryClass enum; the resolver
-        // allowlists the user-creatable values below. `private` (added
-        // 2026-05-24) is exposed on the enum for read paths but is
-        // NOT user-creatable here and has no auto-provisioning path
-        // yet — the encryption / provisioning model is deferred to a
-        // follow-up spec.
+        // allowlists the user-creatable values below. Spec 034 added
+        // `personal`/`private` as owner-only, user-creatable classes
+        // (free-standing or app-scoped); `system`/`app` still
+        // auto-provision via other paths and are rejected here.
         memoryClass?: 'knowledge' | 'group' | 'system' | 'app' | 'personal' | 'private';
       },
       ctx: Context,
