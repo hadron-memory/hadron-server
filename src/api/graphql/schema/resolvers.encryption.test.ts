@@ -320,13 +320,15 @@ describe('read path decryption', () => {
     );
     await resolvers.Mutation.endAgentSession({}, { sessionId: session.id }, appCtx(secretApp.id));
 
-    // Read from a new admin context (no active session) — batch read leaves
-    // ciphertext in place rather than hard-failing, so the value comes back
-    // as enc:v1:... which the caller can tell is ciphertext.
+    // Read as the memory's OWNER, outside any active session (no session key) —
+    // batch read leaves ciphertext in place rather than hard-failing, so the
+    // value comes back as enc:v1:... which the caller can tell is ciphertext.
+    // (Owner-only access per spec 034 — a platform admin can't read it.)
+    const owned = await db.memory.findUniqueOrThrow({ where: { id: session.memoryId! }, select: { userId: true } });
     const read = await resolvers.Query.nodeById(
       {},
       { id: written.id },
-      { db, roles: ['ADMIN'] },
+      { db, userId: owned.userId! },
     );
     expect(read?.content?.startsWith('enc:v1:')).toBe(true);
     expect(read?.content).not.toBe('secret');

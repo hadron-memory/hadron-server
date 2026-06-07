@@ -234,12 +234,11 @@ async function requireOrgRole(
  * - Unauthenticated: public memories only
  */
 async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
-  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return null;
-
   // App Key with an active session — hard-isolate to the session's memory
   // plus the agent's system memory. Even if an LLM asks to read a different
   // memory by ID, this filter denies it. This is THE security boundary for
-  // multi-user agents.
+  // multi-user agents — checked FIRST, so it can't be widened by an ADMIN role
+  // riding on a session context.
   if (ctx.appId && ctx.sessionId) {
     const session = await ctx.db.session.findUnique({
       where: { id: ctx.sessionId },
@@ -252,6 +251,25 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
     if (session?.memoryId) ids.push(session.memoryId);
     if (session?.agent?.systemMemoryId) ids.push(session.agent.systemMemoryId);
     return ids;
+  }
+
+  // Platform ADMIN/OWNER: broad access EXCEPT another user's owner-owned
+  // personal/private memory. 034-memory-class-access: we return an explicit id
+  // list (not `null` = "no filter") so the owner-only carve-out flows through
+  // every node read surface (memoryAccessFilter / nodeSearch) — otherwise an
+  // operator could read another user's private memory's nodes.
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
+    const all = await ctx.db.memory.findMany({
+      where: {
+        deletedAt: null,
+        NOT: {
+          class: { in: ['personal', 'private'] as any },
+          userId: { not: ctx.userId ?? '__none__' },
+        },
+      },
+      select: { id: true },
+    });
+    return all.map((m: { id: string }) => m.id);
   }
 
   // App Key without an active session — management-only context, no memory
@@ -285,7 +303,9 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
             : []),
           // 034: owner-owned personal/private memories — only the owner.
           { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
-          { visibility: 'PUBLIC' as any },
+          // PUBLIC memories — defensively excluding personal/private so a
+          // mis-set visibility can never expose an owner-owned memory.
+          { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any } },
         ],
       },
       select: { id: true },

@@ -62,8 +62,10 @@ ALTER TABLE memories
 -- 'private'. Rename to e.g. chk_memory_user_scoped_agent_id when next touching
 -- this constraint.
 -- 034-memory-class-access: the agent scope is required only for an APP-SCOPED
--- personal/private memory (app_id set). A free-standing / user-owned
--- personal/private memory (app_id NULL) has no agent, so it is exempt.
+-- personal/private memory (app_id set). A free-standing personal/private memory
+-- (app_id NULL) is exempt. (We deliberately do NOT couple app_id ⇔ agent: a
+-- legacy pre-008 row may have app_id NULL with an agent set, and the MCP gate
+-- has explicit handling + a regression test for that shape.)
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_personal_agent_id;
 ALTER TABLE memories
