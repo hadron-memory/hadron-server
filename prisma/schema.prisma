@@ -246,16 +246,17 @@ enum MemoryType {
 ///   knowledge  — reference content the Agent reads from. Per-Agent
 ///                (not per-App); two installs of the same Agent share
 ///                the same knowledge memory.
-///   personal   — per-user records keyed on (app_id, agent_id, user_id).
-///                The per-App pivot is what gives multi-install
-///                Mike-on-two-orgs clean isolation. Strict ownership.
-///   private    — RESERVED for an upcoming spec'd "encrypted-by-default"
-///                class. Today: same (app_id, agent_id, user_id) scope as
-///                personal, stored in plaintext, minus the MemoryShare
-///                path (single-owner, not shareable). **Do not store
-///                secret material here until the encryption spec ships.**
-///                Auto-provisioning is not implemented — createMemory
-///                rejects this class; production cannot create rows yet.
+///   personal   — per-user records owned by Memory.userId. App-scoped by
+///                (app_id, agent_id, user_id) when provisioned inside an
+///                app (the per-App pivot gives Mike-on-two-orgs clean
+///                isolation), OR free-standing (app_id/agent NULL) when a
+///                user creates it directly (spec 034). Strict ownership.
+///   private    — single-owner, owner-only (no MemoryShare path, no
+///                ADMIN/OWNER bypass). Spec 034 (#242) made it
+///                user-creatable via createMemory — free-standing or
+///                app-scoped. May opt into encrypt-at-rest, but the
+///                encryption implementation is a deferred follow-up, so
+///                **do not rely on at-rest encryption for secrets yet.**
 enum MemoryClass {
   system
   app
