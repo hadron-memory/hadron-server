@@ -140,41 +140,16 @@ export async function resolveMemoryAuthorization(
   ctx: AuthContext,
   op: Op,
 ): Promise<AuthResult> {
-  // ─── Step 1: License check (only for Agent-attributable memory) ───────
+  // ─── Step 1: (removed — license check is now per-path) ────────────────
   //
-  // The license check fires only when the Memory has a definite
-  // associated Agent — which today means `personal`-class memory
-  // (where `userMemoryOfAgentId` is the scoping Agent per FR-004).
-  // The other classes skip this check by design:
-  //   - `app`     — AppMember of the Memory's App is the license
-  //                 (multi-Agent App per US1; no per-Agent gate).
-  //   - `group`   — MemoryMember on the Memory is the license
-  //                 (team membership, not per-Agent — US4).
-  //   - `system`  — read-only to every caller; access is class-gated.
-  //   - `knowledge` — visibility rules (PUBLIC/PRIVATE/ORGANIZATION)
-  //                 govern; the existing helper handles them.
-  // `private` (added 2026-05-24) also has a definite Agent — same
-  // (App, Agent, User) scope as personal — so the same license check
-  // applies. Add new classes to this comment AND to the dispatch in
-  // Step 2.
-  if (memory.class === 'personal' || memory.class === 'private') {
-    // FR-004 / chk_memory_personal_agent_id should guarantee this column
-    // is non-null for every personal-class row. If we encounter a row
-    // where it's null (legacy data predating the CHECK, or future
-    // constraint regression), fail closed — silently skipping the
-    // license check would be a bypass.
-    if (memory.userMemoryOfAgentId === null) {
-      return { allowed: false, reason: 'invalid-context' };
-    }
-    const principalForLicense = ctx.actingForUserId ?? ctx.callerUserId;
-    const sub = await deps.getAgentSubscription(
-      principalForLicense,
-      memory.userMemoryOfAgentId,
-    );
-    if (sub === null || !isLifecycleActive(sub)) {
-      return { allowed: false, reason: 'no-subscription' };
-    }
-  }
+  // 034-memory-class-access: the `AgentSubscription` license check used to
+  // run up-front for every `personal`/`private` access. It no longer does —
+  // a **free-standing** (user-owned, app-less, agent-less) personal/private
+  // memory has no agent to license, and a **direct owner** call needs no
+  // license at all. The check now lives ONLY in the agent-on-behalf branch
+  // (Step 3b) of `resolvePersonalAccess` / `resolvePrivateAccess`, where an
+  // installed Agent acts for the user — there it still gates access so an
+  // Agent can't reach a user's memory without the user's active subscription.
 
   // ─── Step 2: Class-based dispatch ───────────────────────────────────────
   switch (memory.class) {
@@ -237,18 +212,12 @@ async function resolvePersonalAccess(
   ctx: AuthContext,
   op: Op,
 ): Promise<AuthResult> {
-  if (
-    memory.userId === null ||
-    memory.appId === null ||
-    memory.userMemoryOfAgentId === null
-  ) {
-    // Invariant break: personal-class memory MUST carry the full
-    // (App, Agent, User) scope per FR-004 / FR-032. Enforced by three
-    // CHECK constraints — `chk_personal_visibility_user` (user_id NOT NULL,
-    // from spec 005), `chk_memory_class_app_id` (app_id NOT NULL,
-    // from spec 008), and `chk_memory_personal_agent_id`
-    // (user_memory_of_agent_id NOT NULL, from spec 023). If any are
-    // null here, the row is misconfigured; fail closed.
+  if (memory.userId === null) {
+    // Every personal-class memory MUST carry an owner (chk_personal_visibility_user).
+    // 034-memory-class-access: `appId` / `userMemoryOfAgentId` may now be NULL
+    // for a free-standing (user-owned, app-less) personal memory — only the
+    // owner is required. The agent-on-behalf branch below re-checks that the
+    // app/agent scope is present before granting agent-mediated access.
     return { allowed: false, reason: 'invalid-context' };
   }
 
@@ -290,10 +259,17 @@ async function resolvePersonalAccess(
     ctx.callingAgentId != null &&
     ctx.callingAgentId === memory.userMemoryOfAgentId
   ) {
-    const [appAgent, appMember] = await Promise.all([
+    // 034-memory-class-access: the AgentSubscription license check (moved out
+    // of the old Step 1) lives here — an Agent acting on the user's behalf
+    // MUST hold the user's active subscription to the scoping Agent.
+    const [appAgent, appMember, sub] = await Promise.all([
       deps.getAppAgent(ctx.callingAppId, ctx.callingAgentId),
       deps.getAppMember(memory.appId, memory.userId),
+      deps.getAgentSubscription(memory.userId, memory.userMemoryOfAgentId),
     ]);
+    if (sub === null || !isLifecycleActive(sub)) {
+      return { allowed: false, reason: 'no-subscription' };
+    }
     if (appAgent !== null && appMember !== null) {
       return { allowed: true };
     }
@@ -301,6 +277,18 @@ async function resolvePersonalAccess(
   }
 
   // 3c. Cross-user (FR-035 path): consult MemoryShare.
+  //
+  // License-first for an AGENT-SCOPED personal memory (spec 023 FR-013): a
+  // cross-user grantee still needs an active subscription to the scoping Agent
+  // before the share is honored. 034-memory-class-access only lifted the
+  // license requirement from the DIRECT-OWNER path and from FREE-STANDING
+  // (no-agent) memories — so this check is gated on `userMemoryOfAgentId`.
+  if (memory.userMemoryOfAgentId !== null) {
+    const sub = await deps.getAgentSubscription(effectiveCaller, memory.userMemoryOfAgentId);
+    if (sub === null || !isLifecycleActive(sub)) {
+      return { allowed: false, reason: 'no-subscription' };
+    }
+  }
   const share = await deps.getMemoryShare(memory.id, effectiveCaller);
   if (share === null) {
     return { allowed: false, reason: 'no-share' };
@@ -349,11 +337,9 @@ async function resolvePrivateAccess(
   ctx: AuthContext,
   _op: Op,
 ): Promise<AuthResult> {
-  if (
-    memory.userId === null ||
-    memory.appId === null ||
-    memory.userMemoryOfAgentId === null
-  ) {
+  if (memory.userId === null) {
+    // 034-memory-class-access: only the owner is required; `appId` /
+    // `userMemoryOfAgentId` may be NULL for a free-standing private memory.
     return { allowed: false, reason: 'invalid-context' };
   }
   // Direct user call: owner-bypass.
@@ -362,9 +348,10 @@ async function resolvePrivateAccess(
   }
   // Agent-mediated: principal must be acting for themselves, the
   // calling (App, Agent) must match the Memory's scoping (App, Agent),
-  // and both revocation checks (Agent still installed, principal still
-  // an AppMember) must pass — same physician's-office boundary as
-  // personal class.
+  // both revocation checks (Agent still installed, principal still an
+  // AppMember) must pass, AND the user must hold an active subscription to
+  // the scoping Agent (license check, moved here from the old Step 1) —
+  // same physician's-office boundary as personal class.
   if (
     ctx.actingForUserId != null &&
     ctx.actingForUserId === memory.userId &&
@@ -373,10 +360,14 @@ async function resolvePrivateAccess(
     ctx.callingAgentId != null &&
     ctx.callingAgentId === memory.userMemoryOfAgentId
   ) {
-    const [appAgent, appMember] = await Promise.all([
+    const [appAgent, appMember, sub] = await Promise.all([
       deps.getAppAgent(ctx.callingAppId, ctx.callingAgentId),
       deps.getAppMember(memory.appId, memory.userId),
+      deps.getAgentSubscription(memory.userId, memory.userMemoryOfAgentId),
     ]);
+    if (sub === null || !isLifecycleActive(sub)) {
+      return { allowed: false, reason: 'no-subscription' };
+    }
     if (appAgent !== null && appMember !== null) {
       return { allowed: true };
     }

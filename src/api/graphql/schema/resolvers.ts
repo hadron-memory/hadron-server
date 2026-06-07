@@ -234,12 +234,11 @@ async function requireOrgRole(
  * - Unauthenticated: public memories only
  */
 async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
-  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return null;
-
   // App Key with an active session — hard-isolate to the session's memory
   // plus the agent's system memory. Even if an LLM asks to read a different
   // memory by ID, this filter denies it. This is THE security boundary for
-  // multi-user agents.
+  // multi-user agents — checked FIRST, so it can't be widened by an ADMIN role
+  // riding on a session context.
   if (ctx.appId && ctx.sessionId) {
     const session = await ctx.db.session.findUnique({
       where: { id: ctx.sessionId },
@@ -252,6 +251,25 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
     if (session?.memoryId) ids.push(session.memoryId);
     if (session?.agent?.systemMemoryId) ids.push(session.agent.systemMemoryId);
     return ids;
+  }
+
+  // Platform ADMIN/OWNER: broad access EXCEPT another user's owner-owned
+  // personal/private memory. 034-memory-class-access: we return an explicit id
+  // list (not `null` = "no filter") so the owner-only carve-out flows through
+  // every node read surface (memoryAccessFilter / nodeSearch) — otherwise an
+  // operator could read another user's private memory's nodes.
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
+    const all = await ctx.db.memory.findMany({
+      where: {
+        deletedAt: null,
+        NOT: {
+          class: { in: ['personal', 'private'] as any },
+          userId: { not: ctx.userId ?? '__none__' },
+        },
+      },
+      select: { id: true },
+    });
+    return all.map((m: { id: string }) => m.id);
   }
 
   // App Key without an active session — management-only context, no memory
@@ -271,15 +289,23 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
       where: {
         deletedAt: null,
         OR: [
-          // Org memories: ORGANIZATION or PUBLIC visible to all members, PRIVATE only to creator
+          // Org memories (knowledge/group/app/system): visible via org
+          // membership. 034-memory-class-access: owner-owned personal/private
+          // are NEVER reachable via org membership — they are owner-only and
+          // handled by the owner clause below.
           ...(orgIds.length > 0
             ? [
-                { organizationId: { in: orgIds }, visibility: { not: 'PRIVATE' as any } },
-                { organizationId: { in: orgIds }, visibility: 'PRIVATE' as any, createdBy: ctx.userId },
-                { subscriptions: { some: { organizationId: { in: orgIds } } } },
+                { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any }, visibility: { not: 'PRIVATE' as any } },
+                { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any }, visibility: 'PRIVATE' as any, createdBy: ctx.userId },
+                // Cross-org subscriptions never reach owner-only personal/private.
+                { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
               ]
             : []),
-          { visibility: 'PUBLIC' as any },
+          // 034: owner-owned personal/private memories — only the owner.
+          { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
+          // PUBLIC memories — defensively excluding personal/private so a
+          // mis-set visibility can never expose an owner-owned memory.
+          { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any } },
         ],
       },
       select: { id: true },
@@ -393,9 +419,10 @@ async function renderNodeSearchResult(
  * 3. Users: org member with CONTRIBUTOR+, or cross-org subscription with CONTRIBUTOR role
  */
 async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
-  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
-
+  // App-keyed callers: delegate to the class-aware MCP gate (handles app-scoped
+  // personal/private + the app+admin short-circuit). Unchanged.
   if (ctx.appId) {
+    if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
     if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
     throw new Error('Forbidden: no write access to this memory');
   }
@@ -405,8 +432,18 @@ async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise
 
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
-    select: { organizationId: true },
+    select: { organizationId: true, userId: true, class: true },
   });
+
+  // 034-memory-class-access: owner-owned personal/private memories are
+  // owner-only to write — no ADMIN/OWNER bypass, no org-role path.
+  if (memory.class === 'personal' || memory.class === 'private') {
+    if (memory.userId === ctx.userId) return;
+    throw new Error('Forbidden: no write access to this memory');
+  }
+
+  // Non-personal/private: global ADMIN/OWNER bypass.
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
 
   // Direct org member with CONTRIBUTOR+?
   const member = await ctx.db.orgMember.findUnique({
@@ -453,6 +490,9 @@ const ORG_INCLUDE = {
       deletedAt: null,
       userMemoryOfAgentId: null,
       type: { not: 'AGENT_SYSTEM' as const },
+      // 034-memory-class-access: owner-owned personal/private are never "org
+      // memories" — they're owner-only and surfaced via the owner's own views.
+      class: { notIn: ['personal', 'private'] as any },
     },
     include: MEMORY_INCLUDE,
     orderBy: { name: 'asc' as const },
@@ -2596,6 +2636,12 @@ export const resolvers = {
         include: MEMORY_INCLUDE,
       });
       if (!memory || memory.deletedAt) return null;
+      // 034-memory-class-access: owner-owned personal/private are owner-only —
+      // no ADMIN/OWNER bypass, no org-member path. Check before the org logic.
+      if (memory.class === 'personal' || memory.class === 'private') {
+        if (!ctx.userId || memory.userId !== ctx.userId) throw new Error('Forbidden');
+        return memory;
+      }
       // Authorization: platform ADMIN or member of the memory's org
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
         if (!ctx.userId) throw new Error('Forbidden');
@@ -2692,12 +2738,16 @@ export const resolvers = {
           where: {
             deletedAt: null,
             ...typeFilter,
-            // Also exclude per-user memories — they belong to the chatbot
+            // Also exclude per-user agent memories — they belong to the chatbot
             // flow, not the user's regular memory list.
             userMemoryOfAgentId: null,
             OR: [
-              { organizationId: { in: orgIds } },
-              { subscriptions: { some: { organizationId: { in: orgIds } } } },
+              // Org-shared classes via membership; 034: owner-owned
+              // personal/private never come in via the org.
+              { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
+              { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
+              // 034: the user's own owner-owned personal/private memories.
+              { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
             ],
           },
           include: MEMORY_INCLUDE,
@@ -3944,22 +3994,48 @@ export const resolvers = {
     ) => {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
-      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
 
-      // 023-app-shape US4: createMemory only creates user-driven
-      // classes — `knowledge` (default) and `group`. The GraphQL enum
-      // exposes the full MemoryClass set for read paths, but the
-      // mutation's allowlist here rejects system / app / personal
-      // explicitly. Those classes auto-provision via different code
-      // paths (Agent.systemMemoryId; AgentSubscription/AppMember).
+      // 023-app-shape US4 + 034-memory-class-access: user-creatable classes are
+      // `knowledge` (default), `group`, and the owner-owned `personal`/`private`
+      // (free-standing — no app/agent). `system`/`app` still auto-provision via
+      // other paths and are rejected here.
       const requestedClass = memoryClass ?? 'knowledge';
-      if (requestedClass !== 'knowledge' && requestedClass !== 'group') {
+      const isUserOwned = requestedClass === 'personal' || requestedClass === 'private';
+      if (requestedClass !== 'knowledge' && requestedClass !== 'group' && !isUserOwned) {
         throw new GraphQLError(
           `createMemory does not accept class='${requestedClass}'. Only ` +
-            `'knowledge' and 'group' are user-creatable; '${requestedClass}' ` +
-            `auto-provisions via a different code path.`,
+            `'knowledge', 'group', 'personal', and 'private' are user-creatable; ` +
+            `'${requestedClass}' auto-provisions via a different code path.`,
           { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' } },
         );
+      }
+
+      // Authorization (034-memory-class-access): org-shared classes
+      // (knowledge/group) require org ADMIN; owner-owned classes
+      // (personal/private) require only that the creator is an authenticated
+      // member of the org *container* — the memory is theirs, not the org's,
+      // and access is owner-only by class.
+      if (isUserOwned) {
+        if (!ctx.userId) {
+          throw new GraphQLError(
+            'Creating a personal/private memory requires an authenticated user (the creator is the owner).',
+            { extensions: { code: 'UNAUTHENTICATED' } },
+          );
+        }
+        // Require ACTUAL membership of the org container — NOT requireOrgRole,
+        // whose global ADMIN/OWNER bypass would let a platform admin create a
+        // personal/private memory in an org they don't belong to.
+        const orgMembership = await ctx.db.orgMember.findUnique({
+          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: ctx.userId } },
+        });
+        if (!orgMembership || orgMembership.deletedAt) {
+          throw new GraphQLError(
+            'You must be a member of the organization to create a personal/private memory in it.',
+            { extensions: { code: 'FORBIDDEN' } },
+          );
+        }
+      } else {
+        await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       }
       // 023-app-shape US4: group-class memories must carry GROUP
       // visibility (enforced by the chk_memory_group_visibility CHECK
@@ -4023,7 +4099,14 @@ export const resolvers = {
             source,
             readBranch,
             writeBranch,
-            visibility: requestedClass === 'group' ? 'GROUP' : ((visibility as MemoryVisibility) ?? 'PRIVATE'),
+            visibility:
+              requestedClass === 'group'
+                ? 'GROUP'
+                : requestedClass === 'personal'
+                  ? 'PERSONAL'
+                  : requestedClass === 'private'
+                    ? 'PRIVATE'
+                    : ((visibility as MemoryVisibility) ?? 'PRIVATE'),
             type: type ?? 'KNOWLEDGE',
             // 005-agent-subscription: explicit user-driven createMemory
             // creates a knowledge-class memory by default. Personal-class
@@ -4037,9 +4120,12 @@ export const resolvers = {
             // searchable by default; `group` and others default off. Flippable
             // later via updateMemory.
             vectorIndexEnabled: requestedClass === 'knowledge',
-            // Group memories must have userId NULL — enforced by the
-            // chk_memory_group_no_owner CHECK; we set it explicitly here.
-            userId: requestedClass === 'group' ? null : undefined,
+            // Owner-owned personal/private set the creator as the owner
+            // (free-standing: app_id / userMemoryOfAgentId stay NULL). All other
+            // classes MUST have userId NULL (chk_personal_visibility_user /
+            // chk_memory_group_no_owner) — set it explicitly rather than relying
+            // on Prisma omitting the field.
+            userId: isUserOwned ? ctx.userId : null,
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           },
           include: MEMORY_INCLUDE,
