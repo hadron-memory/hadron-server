@@ -1,6 +1,7 @@
 # Spec 035 — Visibility enum cleanup
 
-Status: in progress · Owner: Holger · Branch: `feat/spec-035-visibility-enum-cleanup`
+Status: **Implemented** (2026-06-08) · Owner: Holger · PRs: hadron-server #244 + #245,
+hadron-portal #274, hadron-docs #53
 Follows: spec 034 (memory-class access) · Handoff:
 `urn:node:hadronmemory.com::dev::handoffs:2026-06-07-visibility-enum-cleanup`
 (decision D-2026-06-05-002).
