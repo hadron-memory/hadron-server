@@ -4,7 +4,7 @@
   "description": "Hadron Controller — GraphQL API, usage DB, and node collection",
   "type": "module",
   "main": "dist/index.js",
-  "packageManager": "pnpm@10.15.0",
+  "packageManager": "pnpm@11.5.2+sha512.71c631e382066efc25625d5cf029075de07b61b37f6e27350fbd84b1bda5864c8c1967adc280776b45c30a715c0359a3be08fef42d5bb09e2b99029979692916",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
@@ -46,7 +46,7 @@
     "mustache": "^4.2.0",
     "pg": "^8.20.0",
     "resend": "^6.9.3",
-    "yaml": "^2.8.2",
+    "yaml": "2.8.3",
     "zod": "^4.3.6"
   },
   "pnpm": {

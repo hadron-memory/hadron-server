@@ -1,0 +1,11 @@
+# Build-script allowlist for pnpm 11 (which no longer reads the legacy
+# `pnpm.onlyBuiltDependencies` field from package.json). Maintained by
+# `pnpm approve-builds`; these deps are permitted to run install/build scripts
+# (bcrypt node-gyp native build, prisma engine fetch + client generate, esbuild).
+allowBuilds:
+  '@apollo/protobufjs': true
+  '@prisma/client': true
+  '@prisma/engines': true
+  bcrypt: true
+  esbuild: true
+  prisma: true
