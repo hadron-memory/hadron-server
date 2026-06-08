@@ -51,6 +51,15 @@ export async function setup() {
       CHECK (class NOT IN ('personal', 'private') OR app_id IS NULL OR user_memory_of_agent_id IS NOT NULL);
   `);
 
+  // 035-visibility-enum-cleanup: visibility is meaningful only for knowledge
+  // (PUBLIC/ORGANIZATION) and group (GROUP); NULL for every other class.
+  await client.query(`
+    ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_visibility_class";
+    ALTER TABLE "memories"
+      ADD CONSTRAINT "chk_memory_visibility_class"
+      CHECK (visibility IS NULL OR class IN ('knowledge', 'group'));
+  `);
+
   // 033-rag-vector-retrieval: vector-index config invariants.
   // FR-026 (encrypted memory needs disclosure ack) + FR-003 chunk-dial sanity.
   // The pgvector extension + indexes come from `db push` (extensions = [vector])

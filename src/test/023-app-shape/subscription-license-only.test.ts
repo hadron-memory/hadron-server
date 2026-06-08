@@ -70,7 +70,7 @@ async function setupFixture(): Promise<Fixture> {
       organizationId: org.id,
       urn: `${org.urn}:coaching`,
       name: 'coaching',
-      visibility: 'PRIVATE',
+      visibility: 'PERSONAL',
       installationPolicy: {
         maxMembers: 'unlimited',
         memberRoles: ['mentee', 'mentor'],
@@ -112,7 +112,7 @@ async function setupFixture(): Promise<Fixture> {
       urn: `${app.id}:alice:solo`,
       name: 'alice solo',
       class: 'personal',
-      visibility: 'PERSONAL',
+      visibility: null,
       userId: alice.id,
       appId: app.id,
       userMemoryOfAgentId: agent.id,
@@ -142,7 +142,7 @@ async function setupFixture(): Promise<Fixture> {
       urn: `${app.id}:app-brain`,
       name: 'app brain',
       class: 'app',
-      visibility: 'PRIVATE',
+      visibility: null,
       appId: app.id,
     },
   });

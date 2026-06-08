@@ -69,7 +69,7 @@ async function setupFixture(): Promise<Fixture> {
         organizationId: org.id,
         urn: `${org.urn}:${slug}`,
         name: slug,
-        visibility: 'PRIVATE',
+        visibility: 'PERSONAL',
       },
     });
     return a.id;
@@ -212,7 +212,7 @@ describe('US1: install Agents into an App via AppAgent', () => {
         urn: `${fx.appId}:personal-a`,
         name: 'A personal',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: fx.adminUserId,
         appId: fx.appId,
         userMemoryOfAgentId: fx.agentAId,
@@ -225,7 +225,8 @@ describe('US1: install Agents into an App via AppAgent', () => {
         urn: `${fx.appId}:app-a`,
         name: 'A app',
         class: 'app',
-        visibility: 'ORGANIZATION',
+        // 035-visibility-enum-cleanup: app-class visibility is NULL.
+        visibility: null,
         appId: fx.appId,
         userMemoryOfAgentId: fx.agentAId,
       },
@@ -270,7 +271,7 @@ describe('US1: install Agents into an App via AppAgent', () => {
         urn: `${fx.appId}:reinstall-personal`,
         name: 'reinstall personal',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: fx.adminUserId,
         appId: fx.appId,
         userMemoryOfAgentId: fx.agentAId,

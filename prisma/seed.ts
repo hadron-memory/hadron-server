@@ -363,7 +363,8 @@ async function main() {
       urn: `${junoMentorApp.urn}:mike-personal`,
       name: 'Mike\'s personal memory @ Mentor Co',
       class: 'personal',
-      visibility: 'PERSONAL',
+      // 035-visibility-enum-cleanup: personal privacy is class-driven; NULL.
+      visibility: null,
       userId: mike.id,
       userMemoryOfAgentId: junoAgent.id,
       appId: junoMentorApp.id,
@@ -376,7 +377,8 @@ async function main() {
       urn: `${junoClientApp.urn}:mike-personal`,
       name: 'Mike\'s personal memory @ Client Co',
       class: 'personal',
-      visibility: 'PERSONAL',
+      // 035-visibility-enum-cleanup: personal privacy is class-driven; NULL.
+      visibility: null,
       userId: mike.id,
       userMemoryOfAgentId: junoAgent.id,
       appId: junoClientApp.id,

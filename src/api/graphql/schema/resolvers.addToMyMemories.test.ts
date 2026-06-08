@@ -90,7 +90,7 @@ beforeEach(async () => {
       urn: `${publisherOrg.urn}:private-mem`,
       name: 'private-mem',
       class: 'knowledge',
-      visibility: 'PRIVATE',
+      visibility: 'ORGANIZATION',
     },
   });
 });

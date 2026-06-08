@@ -135,6 +135,7 @@ import type {
   AppMembershipRole,
   SubscriptionType,
   MemoryVisibility,
+  AgentVisibility,
 } from '../../../generated/prisma/index.js';
 import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
@@ -289,23 +290,32 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
       where: {
         deletedAt: null,
         OR: [
-          // Org memories (knowledge/group/app/system): visible via org
-          // membership. 034-memory-class-access: owner-owned personal/private
-          // are NEVER reachable via org membership — they are owner-only and
-          // handled by the owner clause below.
+          // Org-visible memories: knowledge (PUBLIC/ORGANIZATION) + group
+          // (GROUP). 035-visibility-enum-cleanup: this used to admit
+          // `class notIn personal/private AND visibility != PRIVATE`, which —
+          // given the old PRIVATE default — excluded app/system. `class IN
+          // (knowledge, group)` preserves exactly that set (app/system are
+          // reached via AppMember / the agent surface, not this node query).
+          // Per-user "holding" memories (userMemoryOfAgentId set — e.g. the
+          // startChat no-App knowledge downgrade) are owner-only: excluded
+          // here, re-admitted by the owner clause below. (Owner-gating moved
+          // off visibility=PRIVATE onto userMemoryOfAgentId — mirrors the
+          // chathistory-knowledge-class-auth-gap finding.)
           ...(orgIds.length > 0
             ? [
-                { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any }, visibility: { not: 'PRIVATE' as any } },
-                { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any }, visibility: 'PRIVATE' as any, createdBy: ctx.userId },
+                { organizationId: { in: orgIds }, class: { in: ['knowledge', 'group'] as any }, userMemoryOfAgentId: null },
                 // Cross-org subscriptions never reach owner-only personal/private.
-                { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
+                { class: { notIn: ['personal', 'private'] as any }, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds } } } },
               ]
             : []),
           // 034: owner-owned personal/private memories — only the owner.
           { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
-          // PUBLIC memories — defensively excluding personal/private so a
-          // mis-set visibility can never expose an owner-owned memory.
-          { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any } },
+          // The caller's own per-user holding memories (knowledge/app bound to
+          // an agent for this user) — owner-only, gated on creator identity.
+          { userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
+          // PUBLIC memories — defensively excluding personal/private and
+          // per-user holdings so a mis-set visibility can't expose them.
+          { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any }, userMemoryOfAgentId: null },
         ],
       },
       select: { id: true },
@@ -412,7 +422,7 @@ async function renderNodeSearchResult(
  * Verify the caller has write access to a specific memory.
  *
  * Checks (most restrictive wins):
- * 1. Global ADMIN/OWNER — always allowed (except for PERSONAL memories,
+ * 1. Global ADMIN/OWNER — always allowed (except for personal/private memories,
  *    where strict ownership applies per FR-016)
  * 2. App-keyed callers: write resolved by canWriteToMemory which folds
  *    AppAgent.role + AgentMemoryItem.role + AgentSubscription gates
@@ -489,10 +499,11 @@ const ORG_INCLUDE = {
     where: {
       deletedAt: null,
       userMemoryOfAgentId: null,
-      type: { not: 'AGENT_SYSTEM' as const },
       // 034-memory-class-access: owner-owned personal/private are never "org
       // memories" — they're owner-only and surfaced via the owner's own views.
-      class: { notIn: ['personal', 'private'] as any },
+      // 035-visibility-enum-cleanup: system memories (was `type !=
+      // AGENT_SYSTEM`) are excluded by class — surfaced via the agent surface.
+      class: { notIn: ['personal', 'private', 'system'] as any },
     },
     include: MEMORY_INCLUDE,
     orderBy: { name: 'asc' as const },
@@ -1235,12 +1246,12 @@ export const resolvers = {
       }
       return null;
     },
-    // For AGENT_SYSTEM memories, find the agent that owns this memory.
+    // For system-class memories, find the agent that owns this memory.
     // Returns null for regular knowledge memories. We use a findFirst because
     // there's no FK from Memory → Agent — the relationship is expressed on
     // the Agent side via Agent.systemMemoryId.
-    agent: async (g: { id: string; type?: string }, _: unknown, ctx: Context) => {
-      if (g.type !== 'AGENT_SYSTEM') return null;
+    agent: async (g: { id: string; class?: string }, _: unknown, ctx: Context) => {
+      if (g.class !== 'system') return null;
       return ctx.db.agent.findFirst({
         where: { systemMemoryId: g.id, deletedAt: null },
         include: AGENT_INCLUDE,
@@ -1632,10 +1643,12 @@ export const resolvers = {
     agents: async (org: { id: string }, _: unknown, ctx: Context) => {
       const where: Record<string, unknown> = { organizationId: org.id, deletedAt: null };
       if (ctx.userId) {
-        // PRIVATE: only creator; ORGANIZATION + PUBLIC: all org members
+        // PERSONAL: only creator; ORGANIZATION + PUBLIC: all org members.
+        // 035-visibility-enum-cleanup: agents use AgentVisibility now; the
+        // creator-only draft value is PERSONAL (was PRIVATE).
         where.OR = [
-          { visibility: { not: 'PRIVATE' as MemoryVisibility } },
-          { visibility: 'PRIVATE' as MemoryVisibility, createdBy: ctx.userId },
+          { visibility: { not: 'PERSONAL' as AgentVisibility } },
+          { visibility: 'PERSONAL' as AgentVisibility, createdBy: ctx.userId },
         ];
       }
       return ctx.db.agent.findMany({
@@ -2677,7 +2690,7 @@ export const resolvers = {
         where: {
           organizationId: resolvedOrgId,
           deletedAt: null,
-          type: 'AGENT_SYSTEM',
+          class: 'system',
           userMemoryOfAgentId: null,
         },
         include: MEMORY_INCLUDE,
@@ -2695,7 +2708,7 @@ export const resolvers = {
       // "Show system memories" at the top of /app/memories.
       const typeFilter = includeAgentSystem
         ? {}
-        : { type: { not: 'AGENT_SYSTEM' as const } };
+        : { class: { not: 'system' as const } };
 
       // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Surface
       // memoryItems for every installed Agent (the "primary" notion is
@@ -2720,7 +2733,7 @@ export const resolvers = {
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
           for (const item of aa.agent.memoryItems) {
-            if (!includeAgentSystem && item.memory.type === 'AGENT_SYSTEM') continue;
+            if (!includeAgentSystem && item.memory.class === 'system') continue;
             memoryMap.set(item.memory.id, item.memory);
           }
         }
@@ -3973,7 +3986,6 @@ export const resolvers = {
         readBranch,
         writeBranch,
         visibility,
-        type,
         memoryClass,
       }: {
         orgId: string; name: string;
@@ -3981,7 +3993,6 @@ export const resolvers = {
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
-        type?: 'KNOWLEDGE' | 'AGENT_SYSTEM';
         // GraphQL passes the full MemoryClass enum; the resolver
         // allowlists the user-creatable values below. Spec 034 added
         // `personal`/`private` as owner-only, user-creatable classes
@@ -4098,15 +4109,16 @@ export const resolvers = {
             source,
             readBranch,
             writeBranch,
+            // 035-visibility-enum-cleanup: group → GROUP; personal/private →
+            // NULL (privacy is class-driven, not visibility); knowledge default
+            // → ORGANIZATION (was PRIVATE). chk_memory_visibility_class forbids
+            // a non-null visibility on personal/private.
             visibility:
               requestedClass === 'group'
                 ? 'GROUP'
-                : requestedClass === 'personal'
-                  ? 'PERSONAL'
-                  : requestedClass === 'private'
-                    ? 'PRIVATE'
-                    : ((visibility as MemoryVisibility) ?? 'PRIVATE'),
-            type: type ?? 'KNOWLEDGE',
+                : requestedClass === 'personal' || requestedClass === 'private'
+                  ? null
+                  : ((visibility as MemoryVisibility) ?? 'ORGANIZATION'),
             // 005-agent-subscription: explicit user-driven createMemory
             // creates a knowledge-class memory by default. Personal-class
             // memories are auto-provisioned via the AgentSubscription
@@ -4369,13 +4381,13 @@ export const resolvers = {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedId } });
       // Spec 013: class-aware authz. Personal-class memories have a single
       // owner in Memory.userId. The chk_personal_visibility_user CHECK
-      // constraint enforces visibility=PERSONAL ⇔ userId IS NOT NULL;
-      // class=personal → visibility=PERSONAL is application-enforced.
+      // constraint enforces class IN (personal,private) ⇔ userId IS NOT NULL
+      // (re-keyed onto class by spec 034; visibility is NULL for these).
       // Only the owner deletes — matches parent constitution Invariant 13.
       // Private-class memories (added 2026-05-24) follow the same
       // single-owner delete rule. All other classes (system/app/knowledge/
       // group) gate on org-admin role on the parent org. Authz runs first
-      // so unauthorized callers can't probe row state via the AGENT_SYSTEM
+      // so unauthorized callers can't probe row state via the system-memory
       // guard or idempotency short-circuit.
       if (memory.class === 'personal' || memory.class === 'private') {
         if (!ctx.userId || memory.userId !== ctx.userId) {
@@ -4384,10 +4396,10 @@ export const resolvers = {
       } else {
         await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
       }
-      // AGENT_SYSTEM memories are owned by their agent and can only be
+      // System-class memories are owned by their agent and can only be
       // removed by deleting the agent. This prevents the agent from ending
       // up with no brain via a stray deleteMemory call.
-      if (memory.type === 'AGENT_SYSTEM') {
+      if (memory.class === 'system') {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
       // Spec 013 FR-014: idempotency. A re-delete on an already-soft-deleted
@@ -4444,11 +4456,16 @@ export const resolvers = {
       // Defaults: CHATBOT when systemMemoryId is set (wizard flow), otherwise ASSISTANT.
       const inferredType = type ?? (systemMemoryId ? 'CHATBOT' : 'ASSISTANT');
       const defaultSurfaces = inferredType === 'CHATBOT' ? ['api'] : ['mcp'];
-      const agentVisibility = (visibility as MemoryVisibility) ?? 'PRIVATE';
+      const agentVisibility = (visibility as AgentVisibility) ?? 'PERSONAL';
 
       // If a systemMemoryId is provided at create time, validate the target
-      // and mark it as AGENT_SYSTEM with the synced name and visibility.
-      // This is the wizard's primary entry point.
+      // and promote it to class='system' with the synced name. This is the
+      // wizard's primary entry point.
+      // 035-visibility-enum-cleanup: the memory's `class` (not the dropped
+      // `type` column) marks it as a system memory, and its `visibility` is
+      // cleared to NULL — agent visibility no longer syncs onto the system
+      // memory (chk_memory_visibility_class forbids a non-null visibility on
+      // class='system').
       if (systemMemoryId) {
         const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
         if (target.organizationId !== resolvedOrgId) {
@@ -4464,9 +4481,9 @@ export const resolvers = {
         await ctx.db.memory.update({
           where: { id: systemMemoryId },
           data: {
-            type: 'AGENT_SYSTEM',
+            class: 'system',
             name: `${name} System`,
-            visibility: agentVisibility,
+            visibility: null,
           },
         });
       }
@@ -4507,8 +4524,8 @@ export const resolvers = {
         }
         if (!agent.systemMemoryId && incoming) {
           // First-attach: verify the target memory exists, belongs to this
-          // org, isn't already another agent's system memory, and mark it
-          // as AGENT_SYSTEM.
+          // org, isn't already another agent's system memory, and promote it
+          // to class='system'.
           const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: incoming } });
           if (target.organizationId !== agent.organizationId) {
             throw new Error('System memory must belong to the same organization as the agent');
@@ -4523,25 +4540,27 @@ export const resolvers = {
           await ctx.db.memory.update({
             where: { id: incoming },
             data: {
-              type: 'AGENT_SYSTEM',
-              // Sync name + visibility immediately to the target memory.
+              // 035-visibility-enum-cleanup: mark via class; clear visibility
+              // (forbidden non-null on class='system'). Agent visibility no
+              // longer propagates onto the system memory.
+              class: 'system',
               name: `${name ?? agent.name} System`,
-              visibility: (visibility as MemoryVisibility) ?? agent.visibility,
+              visibility: null,
             },
           });
         }
       }
 
-      // ── Name / visibility sync for existing system memory.
+      // ── Name sync for existing system memory.
       // If the agent already has a system memory and the caller is updating
-      // name or visibility on the agent, propagate to the memory so they
-      // stay in lockstep.
-      if (agent.systemMemoryId && (name !== undefined || visibility !== undefined)) {
+      // the agent's name, propagate so they stay in lockstep.
+      // 035-visibility-enum-cleanup: visibility no longer propagates — a
+      // system memory's visibility is always NULL.
+      if (agent.systemMemoryId && name !== undefined) {
         await ctx.db.memory.update({
           where: { id: agent.systemMemoryId },
           data: {
-            ...(name !== undefined ? { name: `${name} System` } : {}),
-            ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
+            name: `${name} System`,
             updatedBy: ctx.userId ?? ctx.clientId ?? null,
           },
         }).catch((err) => {
@@ -4560,7 +4579,7 @@ export const resolvers = {
           ...(description !== undefined ? { description } : {}),
           ...(systemPrompt !== undefined ? { systemPrompt } : {}),
           ...(systemMemoryId !== undefined ? { systemMemoryId } : {}),
-          ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
+          ...(visibility !== undefined ? { visibility: visibility as AgentVisibility } : {}),
           ...(type !== undefined ? { type } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),
         },
@@ -4595,14 +4614,14 @@ export const resolvers = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
-      // AGENT_SYSTEM memories can only be linked via Agent.systemMemoryId.
+      // System-class memories can only be linked via Agent.systemMemoryId.
       // Attaching them as regular memory items would allow access patterns
       // we don't want (e.g. another agent reading the linked agent's prompts).
       const memory = await ctx.db.memory.findUniqueOrThrow({
         where: { id: resolvedMemoryId },
-        select: { type: true },
+        select: { class: true },
       });
-      if (memory.type === 'AGENT_SYSTEM') {
+      if (memory.class === 'system') {
         throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
       }
       await ctx.db.agentMemoryItem.create({ data: { agentId: resolvedAgentId, memoryId: resolvedMemoryId, role: role ?? 'read', createdBy: ctx.userId ?? ctx.clientId ?? null } });
@@ -4653,15 +4672,14 @@ export const resolvers = {
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
 
-      if (memory.visibility === 'ORGANIZATION' || memory.visibility === 'PRIVATE') {
+      // 035-visibility-enum-cleanup: only PUBLIC memories are cross-org
+      // subscribable. ORGANIZATION/GROUP/NULL (personal/private/app/system)
+      // are all rejected (PRIVATE is gone from the enum).
+      if (memory.visibility !== 'PUBLIC') {
         throw new Error('Only public memories can be subscribed to by other organizations');
       }
 
-      if (memory.visibility === 'PUBLIC') {
-        await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      } else {
-        await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
-      }
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
 
       if (memory.organizationId === resolvedOrgId) {
         throw new Error('Owner organization has implicit access and cannot subscribe');
@@ -5189,9 +5207,13 @@ export const resolvers = {
           const memoryClass: 'personal' | 'knowledge' = matchingApp
             ? 'personal'
             : 'knowledge';
-          const visibility: 'PERSONAL' | 'PRIVATE' = matchingApp
-            ? 'PERSONAL'
-            : 'PRIVATE';
+          // 035-visibility-enum-cleanup: personal memory → NULL visibility
+          // (class-driven privacy); the no-App knowledge holding memory →
+          // ORGANIZATION (owner-gating now rides on userMemoryOfAgentId in
+          // getAccessibleMemoryIds, not visibility=PRIVATE).
+          const visibility: MemoryVisibility | null = matchingApp
+            ? null
+            : 'ORGANIZATION';
 
           const created = await ctx.db.memory.create({
             data: {
@@ -5200,7 +5222,7 @@ export const resolvers = {
               name: `${agent.name} — ${ctx.userId}`,
               // 005-agent-subscription: personal-class memory; userId
               // owner-pivot is required by the bidirectional CHECK
-              // constraint (PERSONAL ⇔ userId IS NOT NULL). Note:
+              // constraint (class IN (personal,private) ⇔ userId NOT NULL). Note:
               // organizationId stays at agent.organizationId here for
               // the legacy JWT-user path; the spec's FR-015 (use
               // user's personal org) applies to the new App-keyed
@@ -7455,11 +7477,13 @@ export const resolvers = {
               urn: memoryUrn,
               name: `User memory (${agent.name})`,
               // 005-agent-subscription: per-user memory keyed on userId.
-              // Bidirectional CHECK constraint requires PERSONAL ⇔ userId
-              // IS NOT NULL.
+              // Bidirectional CHECK constraint requires class IN
+              // (personal,private) ⇔ userId IS NOT NULL.
               userId,
               class: 'personal',
-              visibility: 'PERSONAL',
+              // 035-visibility-enum-cleanup: personal privacy is class-driven;
+              // visibility is NULL (was PERSONAL).
+              visibility: null,
               userMemoryOfAgentId: agentId,
               // 008-agent-installation: personal memories pivot on
               // (app_id, user_id). The chk_memory_class_app_id constraint
@@ -7492,7 +7516,8 @@ export const resolvers = {
             // it); class is 'app' since the data belongs to the App's
             // bucket of records-through-this-agent until promoted.
             class: 'app',
-            visibility: 'PRIVATE',
+            // 035-visibility-enum-cleanup: app-class visibility is NULL.
+            visibility: null,
             userMemoryOfAgentId: agentId,
             // 008-agent-installation: app-class memories require app_id
             // (chk_memory_class_app_id).

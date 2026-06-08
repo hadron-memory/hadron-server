@@ -56,7 +56,7 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
         organizationId: org.id,
         urn: `${org.urn}:notes`,
         name: 'notes',
-        visibility: 'PRIVATE',
+        visibility: 'ORGANIZATION',
         class: 'knowledge',
       },
     });
@@ -129,7 +129,7 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
         organizationId: org.id,
         urn: `${org.urn}:notes2`,
         name: 'notes2',
-        visibility: 'PRIVATE',
+        visibility: 'ORGANIZATION',
         class: 'knowledge',
       },
     });

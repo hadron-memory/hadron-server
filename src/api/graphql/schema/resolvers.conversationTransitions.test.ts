@@ -42,7 +42,7 @@ beforeEach(async () => {
 
   agent = await resolvers.Mutation.createAgent(
     {},
-    { orgId: orgA.id, name: 'sage', visibility: 'PRIVATE' },
+    { orgId: orgA.id, name: 'sage', visibility: 'PERSONAL' },
     adminCtx(),
   );
   systemMemory = await resolvers.Mutation.createMemory(

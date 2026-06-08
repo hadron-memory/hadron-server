@@ -167,7 +167,7 @@ describe('US4: group memory governance via MemoryMember', () => {
           orgId: fx.orgId,
           name: 'bad-group',
           memoryClass: 'group',
-          visibility: 'PRIVATE',
+          visibility: 'ORGANIZATION',
         },
         adminCtx(fx.ownerUserId),
       );

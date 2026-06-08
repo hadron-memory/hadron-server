@@ -45,6 +45,12 @@ export enum LogLevel {
 
 export enum MemoryVisibility {
   PUBLIC = 'PUBLIC',
-  PRIVATE = 'PRIVATE',
   ORGANIZATION = 'ORGANIZATION',
+  GROUP = 'GROUP',
+}
+
+export enum AgentVisibility {
+  PUBLIC = 'PUBLIC',
+  ORGANIZATION = 'ORGANIZATION',
+  PERSONAL = 'PERSONAL',
 }

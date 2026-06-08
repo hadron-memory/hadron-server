@@ -52,7 +52,7 @@ describe('createMemory — owner-owned classes', () => {
   it('a READER member can create a private memory they own (free-standing: no app/agent)', async () => {
     const mem = await createPrivate();
     expect(mem.class).toBe('private');
-    expect(mem.visibility).toBe('PRIVATE');
+    expect(mem.visibility).toBeNull();
     expect(mem.userId).toBe(owner.id);
     expect(mem.appId).toBeNull();
     expect(mem.userMemoryOfAgentId).toBeNull();
@@ -62,7 +62,7 @@ describe('createMemory — owner-owned classes', () => {
   it('a READER member can create a personal memory they own', async () => {
     const mem = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'my-personal', memoryClass: 'personal' } as any, asOwner());
     expect(mem.class).toBe('personal');
-    expect(mem.visibility).toBe('PERSONAL');
+    expect(mem.visibility).toBeNull();
     expect(mem.userId).toBe(owner.id);
   });
 

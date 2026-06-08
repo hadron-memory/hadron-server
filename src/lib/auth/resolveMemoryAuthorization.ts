@@ -76,7 +76,9 @@ export type AuthResult = AuthAllow | AuthDeny;
 export type MemoryForAuth = {
   id: string;
   class: 'system' | 'app' | 'knowledge' | 'personal' | 'group' | 'private';
-  visibility: 'PUBLIC' | 'PRIVATE' | 'ORGANIZATION' | 'PERSONAL' | 'GROUP';
+  // 035-visibility-enum-cleanup: visibility is meaningful only for knowledge
+  // (PUBLIC/ORGANIZATION) and group (GROUP); NULL for every other class.
+  visibility: 'PUBLIC' | 'ORGANIZATION' | 'GROUP' | null;
   userId: string | null;
   appId: string | null;
   /** Legacy column name from spec 005; semantically the Memory's Agent id. */
@@ -117,7 +119,7 @@ export interface AuthDeps {
 
   /**
    * Hook for the existing `knowledge`-class access logic (visibility
-   * rules: PUBLIC / PRIVATE / ORGANIZATION). The Phase 2b retrofit
+   * rules: PUBLIC / ORGANIZATION). The Phase 2b retrofit
    * will fold this into the predicate; until then, callers wire it
    * to the existing helper.
    */

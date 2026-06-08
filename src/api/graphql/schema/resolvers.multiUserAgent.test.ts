@@ -278,7 +278,7 @@ describe('startAgentSession', () => {
 
     const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
     expect(mem?.userMemoryOfAgentId).toBe(agent.id);
-    expect(mem?.visibility).toBe('PERSONAL');
+    expect(mem?.visibility).toBeNull();
     expect(mem?.urn).toContain(':user:');
   });
 

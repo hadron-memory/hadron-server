@@ -113,7 +113,7 @@ describe('T048: personal-memory provisioning idempotency (sequential)', () => {
         urn: `${appAtX.id}:mike-personal`,
         name: 'Mike\'s memory @ Org X',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: mike.id,
         userMemoryOfAgentId: mealplan.id,
         appId: appAtX.id,
@@ -145,7 +145,7 @@ describe('T049: access-control gate 3 enforces Memory.app_id === auth.appId', ()
         urn: `${appAtX.id}:mike-x`,
         name: 'Mike @ X',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: mike.id,
         userMemoryOfAgentId: mealplan.id,
         appId: appAtX.id,
@@ -171,7 +171,7 @@ describe('T049: access-control gate 3 enforces Memory.app_id === auth.appId', ()
         urn: `${appAtX.id}:mike-x-bob-test`,
         name: 'Mike @ X',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: mike.id,
         userMemoryOfAgentId: mealplan.id,
         appId: appAtX.id,
@@ -226,7 +226,7 @@ describe('T049: access-control gate 3 enforces Memory.app_id === auth.appId', ()
           urn: `${orgX.urn}:legacy-mike`,
           name: 'Legacy Mike memory (Mealplan)',
           class: 'personal',
-          visibility: 'PERSONAL',
+          visibility: null,
           userId: mike.id,
           userMemoryOfAgentId: mealplan.id,
           appId: null, // legacy
@@ -259,7 +259,7 @@ describe('T049: access-control gate 3 enforces Memory.app_id === auth.appId', ()
       // migration's step 4b applies.
       await db.$executeRawUnsafe(`
         UPDATE memories
-           SET class = 'knowledge', user_id = NULL, visibility = 'PRIVATE'
+           SET class = 'knowledge', user_id = NULL, visibility = 'ORGANIZATION'
          WHERE class = 'personal' AND app_id IS NULL
       `);
       // Re-add the constraint in its CURRENT (034-memory-class-access) form so
@@ -293,7 +293,7 @@ describe('T050: personal memory re-attaches automatically when the user rejoins 
         urn: `${appAtX.id}:mike-personal`,
         name: 'Mike\'s personal',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: mike.id,
         userMemoryOfAgentId: mealplan.id,
         appId: appAtX.id,
@@ -334,7 +334,7 @@ describe('T051: an orphan from App A does NOT auto-attach when user joins App B 
         urn: `${appAtX.id}:mike-personal-orphan`,
         name: 'Mike @ X (orphan)',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: mike.id,
         userMemoryOfAgentId: mealplan.id,
         appId: appAtX.id,
@@ -362,7 +362,7 @@ describe('T051: an orphan from App A does NOT auto-attach when user joins App B 
         urn: `${appAtY.id}:mike-personal`,
         name: 'Mike @ Y (fresh)',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: mike.id,
         userMemoryOfAgentId: mealplan.id,
         appId: appAtY.id,
@@ -400,7 +400,7 @@ describe('T052: app-class memories addressed on (app_id, agent_id) are distinct 
         urn: `${appAtX.id}:appmem`,
         name: 'App memory @ X',
         class: 'app',
-        visibility: 'PRIVATE',
+        visibility: null,
         userMemoryOfAgentId: mealplan.id,
         appId: appAtX.id,
       },
@@ -412,7 +412,7 @@ describe('T052: app-class memories addressed on (app_id, agent_id) are distinct 
         urn: `${appAtY.id}:appmem`,
         name: 'App memory @ Y',
         class: 'app',
-        visibility: 'PRIVATE',
+        visibility: null,
         userMemoryOfAgentId: mealplan.id,
         appId: appAtY.id,
       },
@@ -465,7 +465,7 @@ describe('T053: per-user app-class memory addresses on (app_id, agent_id, user_i
         urn: `${junoApp.id}:user-${mike.id}`,
         name: 'Juno per-user memory (Mike)',
         class: 'app',
-        visibility: 'PRIVATE',
+        visibility: null,
         userMemoryOfAgentId: juno.id,
         appId: junoApp.id,
         // userId on app-class memory denotes the per-user keying. The
@@ -480,7 +480,7 @@ describe('T053: per-user app-class memory addresses on (app_id, agent_id, user_i
         urn: `${junoApp.id}:user-${bob.id}`,
         name: 'Juno per-user memory (Bob)',
         class: 'app',
-        visibility: 'PRIVATE',
+        visibility: null,
         userMemoryOfAgentId: juno.id,
         appId: junoApp.id,
       },

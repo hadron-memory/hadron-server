@@ -50,7 +50,7 @@ beforeEach(async () => {
       organizationId: org.id,
       urn: `${org.urn}:buno:user:${generateId()}`,
       name: 'user-memory',
-      visibility: 'PRIVATE',
+      visibility: 'ORGANIZATION',
     },
   });
 });

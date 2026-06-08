@@ -53,6 +53,16 @@ ALTER TABLE memories
   ADD CONSTRAINT chk_memory_group_no_owner
   CHECK (class <> 'group' OR user_id IS NULL);
 
+-- 035-visibility-enum-cleanup: visibility is meaningful only for knowledge
+-- (PUBLIC/ORGANIZATION) and group (GROUP). Every other class has visibility
+-- NULL. Loose form — forbids non-null elsewhere but does not require non-null
+-- on knowledge/group (application code defaults knowledge to ORGANIZATION).
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_visibility_class;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_visibility_class
+  CHECK (visibility IS NULL OR class IN ('knowledge', 'group'));
+
 -- 023-app-shape FR-004 / FR-032: personal memory carries the (App, Agent,
 -- User) scope. user_memory_of_agent_id (legacy column name; semantically
 -- agent_id) is required-non-null for personal class. 'private' (added

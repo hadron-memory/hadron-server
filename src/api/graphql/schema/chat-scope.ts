@@ -172,7 +172,8 @@ export async function findOrCreateAppClassMemory(args: {
         urn,
         name: `${appName} — ${agentName} — shared chats`,
         class: 'app',
-        visibility: 'PRIVATE',
+        // 035-visibility-enum-cleanup: app-class visibility is NULL.
+        visibility: null,
         appId,
         userId: null,
         createdBy: actingUserId,

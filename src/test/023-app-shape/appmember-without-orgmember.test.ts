@@ -82,7 +82,7 @@ async function setupFixture(): Promise<Fixture> {
       organizationId: therapistOrg.id,
       urn: `${therapistOrg.urn}:know-yourself`,
       name: 'Know Yourself',
-      visibility: 'PRIVATE',
+      visibility: 'PERSONAL',
       installationPolicy: {
         maxMembers: 'unlimited',
         memberRoles: ['client', 'therapist'],
@@ -359,7 +359,7 @@ describe('US2: AppMember without OrgMember', () => {
         urn: `${fx.therapyAppId}:daisy-personal`,
         name: 'daisy personal',
         class: 'personal',
-        visibility: 'PERSONAL',
+        visibility: null,
         userId: fx.daisyUserId,
         appId: fx.therapyAppId,
         userMemoryOfAgentId: fx.knowYourselfAgentId,

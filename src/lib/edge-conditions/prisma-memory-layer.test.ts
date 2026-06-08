@@ -26,7 +26,7 @@ async function makeMemory(name: string, isEncrypted: boolean) {
       organizationId: org.id,
       urn: `${org.urn}:${name}`,
       name,
-      visibility: 'PRIVATE',
+      visibility: 'ORGANIZATION',
       isEncrypted,
     },
   });
