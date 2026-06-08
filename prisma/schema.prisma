@@ -221,10 +221,12 @@ enum AgentVisibility {
 
 /// Per-Memory typology — formalized in 005-agent-subscription
 /// (2026-04-30); per-class governance refined in 008-agent-installation
-/// (2026-05-02). PERSONAL-class memories MUST have Memory.userId set
-/// (enforced by a Postgres CHECK constraint added in the 005 migration).
-/// APP- and PERSONAL-class memories MUST have Memory.appId set
-/// (enforced by chk_memory_class_app_id from the 008 migration).
+/// (2026-05-02), re-keyed onto `class` by 034-memory-class-access.
+/// `personal`/`private`-class memories MUST have Memory.userId set
+/// (chk_personal_visibility_user). `app`-class MUST have Memory.appId set;
+/// `personal`/`private` MAY have it (set when app-scoped, NULL when
+/// free-standing); `system`/`knowledge`/`group` MUST NOT
+/// (chk_memory_class_app_id, relaxed by spec 034).
 ///
 ///   system     — the Agent's own definition (one per Agent, linked via
 ///                Agent.systemMemoryId). Universally read-only from any
@@ -492,17 +494,21 @@ model OrgMember {
 model Memory {
   id                  String  @id @default(cuid())
   organizationId      String  @map("organization_id")
-  // 008-agent-installation (2026-05-02): App pivot for class IN ('app', 'personal').
-  // Required when class IN ('app', 'personal'); NULL for class IN ('system', 'knowledge').
-  // Enforced by the chk_memory_class_app_id CHECK constraint added in the migration.
-  /// The App this memory belongs to. Required when `class` is `app`
-  /// or `personal`; NULL otherwise. Enforced by chk_memory_class_app_id.
+  // 008-agent-installation (2026-05-02), relaxed by 034-memory-class-access:
+  // App pivot. Required for class='app'; OPTIONAL for personal/private (set
+  // when app-scoped, NULL when free-standing); forbidden for system/knowledge/
+  // group. Enforced by the chk_memory_class_app_id CHECK constraint.
+  /// The App this memory belongs to. Required when `class` is `app`;
+  /// optional for `personal`/`private` (set when app-scoped, NULL when
+  /// free-standing); NULL for `system`/`knowledge`/`group`. Enforced by
+  /// chk_memory_class_app_id.
   appId               String? @map("app_id")
-  // 005-agent-subscription (2026-04-30): explicit User owner for personal-class
-  // memories. NULL for non-personal memories. Postgres CHECK constraint
-  // enforces the bidirectional invariant: visibility=PERSONAL ⇔ userId IS NOT NULL.
-  /// Owning user for personal-class memories. Bidirectional invariant
-  /// (CHECK): `visibility = PERSONAL` ⇔ `userId IS NOT NULL`.
+  // 005-agent-subscription (2026-04-30), re-keyed onto class by 034: explicit
+  // User owner for personal/private-class memories. NULL otherwise. Postgres
+  // CHECK enforces: class IN ('personal','private') ⇔ userId IS NOT NULL.
+  /// Owning user for personal/private-class memories. Bidirectional invariant
+  /// (CHECK chk_personal_visibility_user): `class IN ('personal','private')`
+  /// ⇔ `userId IS NOT NULL`.
   userId              String? @map("user_id")
   /// Legacy 005 Agent-pivot for personal memories. **Retained for
   /// backward-compat queries** (008 R-3); not consulted by post-008
@@ -1278,13 +1284,13 @@ model MemoryLicense {
 ///
 /// **Access evaluation order** (cross-org chain — extended in
 /// 005-agent-subscription with the App↔Agent and User↔Agent gates;
-/// rewritten in 008-agent-installation with App.agent_id direct +
-/// AgentOrgGrant):
-///   1. **App ↔ Agent** — `App.agentId IS NOT NULL` AND
-///      `Agent.visibility` allows the App's org. Cross-org installs
-///      (`App.organizationId != Agent.organizationId`) additionally
-///      require an active `AgentOrgGrant(App.organizationId,
-///      App.agentId)`. Same-org installs auto-pass.
+/// 008-agent-installation added AgentOrgGrant; 023-app-shape replaced the
+/// direct `App.agentId` with the `AppAgent` join (an App can install N Agents)):
+///   1. **App ↔ Agent** — the App has the Agent installed (an `AppAgent`
+///      row links them) AND `Agent.visibility` allows the App's org.
+///      Cross-org installs (`App.organizationId != Agent.organizationId`)
+///      additionally require an active `AgentOrgGrant(App.organizationId,
+///      agentId)`. Same-org installs auto-pass.
 ///   2. **Agent ↔ Memory (knowledge / app / system)** — current
 ///      implementation (`src/mcp/access-control.ts#foldAgentIntoAccessMap`):
 ///      `AgentMemoryItem(agent, memory)` exists OR memory is the
@@ -1300,7 +1306,7 @@ model MemoryLicense {
 ///      gates. The spec called for auto-grant; the implementation
 ///      currently does not.
 ///   3. **User ↔ Agent (personal-class memory only)** —
-///      `AgentSubscription(user, App.agentId)` exists AND active per
+///      `AgentSubscription(user, agentId)` exists AND active per
 ///      the predicate, AND `Memory.appId = App.id` (the per-App
 ///      isolation that User Story 2 hangs on — a session through App
 ///      A cannot read the personal memory at `(B.id, user.id)` for
@@ -1308,10 +1314,10 @@ model MemoryLicense {
 ///   4. **Effective role** — most restrictive of
 ///      `AgentMemoryItem.role` and `MemorySubscription.role`. (The
 ///      legacy `AppAgent.role` is dropped post-008 — system memory is
-///      universally read-only from any App.) PERSONAL-class memories
-///      enforce strict ownership *additionally*: even an ADMIN/OWNER
-///      who would otherwise satisfy gate 2 cannot read a PERSONAL
-///      memory they do not own (FR-016).
+///      universally read-only from any App.) `personal`/`private`-class
+///      memories enforce strict ownership *additionally*: even an
+///      ADMIN/OWNER who would otherwise satisfy gate 2 cannot read a
+///      `personal`/`private` memory they do not own (FR-016).
 ///
 /// **Worked example** (the four-org Juno scenario, 008 vocabulary):
 /// an App in `OrgA` deploys Juno (Agent in `OrgB` with
@@ -1321,8 +1327,8 @@ model MemoryLicense {
 /// active `AgentOrgGrant(OrgA, juno)`. End-user Alice (personal org
 /// `personal-alice`) chats through that App; her records land in a
 /// personal Memory at `(App.id, alice.id)` (`Memory.userId = alice`,
-/// `Memory.appId = App.id`, `class = personal`,
-/// `visibility = PERSONAL`). The cross-org write into Alice's
+/// `Memory.appId = App.id`, `class = personal`, `visibility = null`).
+/// The cross-org write into Alice's
 /// personal memory is granted by `AgentSubscription(alice, juno)` —
 /// without it, Juno has zero access. If Alice installs Juno into a
 /// *second* App (different Org), her records there go to a separate
