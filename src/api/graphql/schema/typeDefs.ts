@@ -1516,7 +1516,7 @@ export const typeDefs = `#graphql
     Create a memory in an organization. Accepts the entity's ID or URN
     for orgId.
 
-    Defaults to knowledge-class with PRIVATE visibility. Pass
+    Defaults to knowledge-class with ORGANIZATION visibility. Pass
     memoryClass: group + visibility: GROUP for a group-class memory
     (023-app-shape US4; the caller is auto-added as the first owner),
     or memoryClass: personal | private for an owner-only memory the
