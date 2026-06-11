@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * GraphQL SDL export.
  *
@@ -10,8 +9,9 @@
  *
  * Consumers: hadron-cli commits the output as `schema/schema.graphql`
  * and runs genqlient codegen against it (`make schema` there invokes
- * this script). Run via `pnpm schema:export` — the `.ts` import
- * through a `.js` specifier requires tsx, same as check-graphql-sdl.
+ * this script). Run via `pnpm schema:export` only (no shebang on
+ * purpose): the `.ts` import through a `.js` specifier requires tsx,
+ * so direct execution under plain node would fail.
  */
 import { buildSchema, printSchema, lexicographicSortSchema } from 'graphql';
 import { typeDefs } from '../src/api/graphql/schema/typeDefs.js';
@@ -21,6 +21,6 @@ try {
   process.stdout.write(printSchema(schema) + '\n');
 } catch (e) {
   console.error('✗ GraphQL SDL failed to build:');
-  console.error(e.message);
+  console.error(e);
   process.exit(1);
 }
