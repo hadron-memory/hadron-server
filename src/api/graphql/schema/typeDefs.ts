@@ -1196,13 +1196,18 @@ export const typeDefs = `#graphql
     """
     Resolve a fully-qualified, \`urn:<type>:\`-prefixed Hadron URN to the ids
     needed to reach its canonical page. Returns null when the URN is
-    unresolvable OR the caller lacks access (the same not-found-vs-forbidden
-    collapse the per-kind queries use, so existence is never disclosed).
+    unresolvable (not found) OR the caller lacks access. Unlike the dedicated
+    per-kind queries — which throw \`Forbidden\` on no-access — this query
+    deliberately collapses both not-found and no-access to null, so a
+    redirect resolver can 404 uniformly without disclosing which case it was.
+
+    Per-kind access uses the SAME authorization rules as the dedicated
+    queries (memory/org/agent: org membership; app: org ADMIN; node:
+    memoryAccessFilter), only with the throw replaced by a null return.
 
     The \`urn:<type>:\` prefix is the dispatch key — bare URNs without a type
     prefix are ambiguous across kinds (\`org::slug\` could be a memory or an
-    agent) and resolve to null. Access is enforced per kind identically to
-    the dedicated memory/node/organization/app queries.
+    agent) and resolve to null.
     """
     resolveUrn(urn: String!): UrnResolution
 

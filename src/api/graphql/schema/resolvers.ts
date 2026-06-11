@@ -1838,8 +1838,13 @@ export const resolvers = {
             select: { memoryId: true },
           });
           if (!node) return null;
-          // Same access gate as nodeById: the node's memory must be in the
-          // caller's accessible set ({} = unrestricted for global admins).
+          // Same access gate as nodeById. memoryAccessFilter returns either an
+          // explicit allow-list filter (`{ memoryId: { in: [...] } }`) — which
+          // for platform ADMIN/OWNER still carves out other users' personal/
+          // private memories (034) — or `{}` (no `memoryId` key) when the
+          // caller's access is genuinely unrestricted. We only apply the
+          // allow-list when the `memoryId` key is present; an empty filter
+          // falls through and admits the node, exactly as nodeById does.
           const access = await memoryAccessFilter(ctx);
           if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
             if (!(access.memoryId.in as string[]).includes(node.memoryId)) return null;
