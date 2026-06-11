@@ -2280,19 +2280,30 @@ export const resolvers = {
     },
 
     memoryUsageSummary: async (_: unknown, { memoryId }: { memoryId: string }, ctx: Context) => {
+      requireRole(ctx, 'READER');
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-      // Get all node locs belonging to this memory
-      const nodes = await ctx.db.node.findMany({
-        where: { memoryId: resolvedMemoryId },
-        select: { loc: true },
-      });
-      const locs = nodes.map((n: { loc: string }) => n.loc);
-      if (!locs.length) return [];
 
+      // Access control (#250, extended from usageEvents): deny a memory the
+      // caller can't read with [] (no existence leak), mirroring usageEvents
+      // and nodeById. getAccessibleMemoryIds encodes principals + the memory-
+      // class rules (spec 034). Previously this resolver had no gate at all —
+      // any authenticated caller could read any tenant's per-node usage counts.
+      const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
+      if (accessibleMemoryIds !== null && !accessibleMemoryIds.includes(resolvedMemoryId)) {
+        return [];
+      }
+
+      // #253: scope via the UsageEvent→Node relation, not `nodeLoc: { in: locs }`.
+      // FK-precise (no cross-memory loc collision — a node named `alpha` in
+      // another memory no longer inflates this memory's counts), a single query,
+      // and no IN-parameter limit on large memories. Like usageEvents post-#251
+      // this excludes events with a null nodeId (orphaned after node deletion,
+      // or the older recordUsage path's ambiguous loc lookup) — arguably more
+      // correct, since an unattributable event shouldn't count toward a memory.
       const rows = await ctx.db.usageEvent.groupBy({
         by: ['nodeLoc', 'type'],
-        where: { nodeLoc: { in: locs } },
+        where: { node: { memoryId: resolvedMemoryId } },
         _count: { id: true },
       });
       return rows.map((r: { nodeLoc: string | null; type: string; _count: { id: number } }) => ({
@@ -2444,10 +2455,8 @@ export const resolvers = {
       // and a single SQL query — unlike fetching every node loc and using
       // `nodeLoc: { in }`, which collides on shared locs and can blow the
       // IN-parameter limit on large memories. Like the nodeId path, it excludes
-      // events with a null nodeId (orphaned / legacy).
-      //
-      // NOTE: memoryUsageSummary still uses the loc-based approach and carries
-      // the same latent collision; aligning it is tracked in #253.
+      // events with a null nodeId (orphaned / legacy). memoryUsageSummary uses
+      // the same relation-scoping approach (aligned in #253).
       let memoryNodeFilter: { memoryId: string } | undefined;
       if (memoryId) {
         // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
