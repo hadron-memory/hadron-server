@@ -1786,6 +1786,123 @@ export const resolvers = {
   },
 
   Query: {
+    // hadron-portal#262: resolve a `urn:<type>:`-prefixed URN to the ids the
+    // portal needs to redirect to the resource's canonical page. Dispatches
+    // on the URN type segment; reuses the same entity-ref resolvers and
+    // per-kind authorization as the dedicated memory/node/org/agent/app
+    // queries. No-access and not-found both collapse to null (→ the portal
+    // route turns it into a 404), so this never discloses existence of a
+    // resource the caller can't reach. Bare URNs without a type prefix are
+    // ambiguous across kinds and return null.
+    resolveUrn: async (_: unknown, { urn }: { urn: string }, ctx: Context) => {
+      const isGlobalAdmin =
+        !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
+      // Membership check mirroring the per-kind queries' "member of the org"
+      // gate, but returning a boolean instead of throwing so we can collapse
+      // no-access to null.
+      const isOrgMember = async (orgId: string): Promise<boolean> => {
+        if (isGlobalAdmin) return true;
+        if (!ctx.userId) return false;
+        const member = await ctx.db.orgMember.findUnique({
+          where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+        });
+        return !!member;
+      };
+
+      const { type } = parseUrnInput(urn);
+      switch (type) {
+        case 'memory': {
+          let id: string;
+          try {
+            ({ id } = await resolveMemoryRef(ctx.db, urn));
+          } catch {
+            return null;
+          }
+          const memory = await ctx.db.memory.findUnique({
+            where: { id },
+            select: { organizationId: true },
+          });
+          if (!memory) return null;
+          if (!(await isOrgMember(memory.organizationId))) return null;
+          return { kind: 'memory', id };
+        }
+        case 'node': {
+          let id: string;
+          try {
+            ({ id } = await resolveNodeRef(ctx.db, urn));
+          } catch {
+            return null;
+          }
+          const node = await ctx.db.node.findUnique({
+            where: { id },
+            select: { memoryId: true },
+          });
+          if (!node) return null;
+          // Same access gate as nodeById. memoryAccessFilter returns either an
+          // explicit allow-list filter (`{ memoryId: { in: [...] } }`) — which
+          // for platform ADMIN/OWNER still carves out other users' personal/
+          // private memories (034) — or `{}` (no `memoryId` key) when the
+          // caller's access is genuinely unrestricted. We only apply the
+          // allow-list when the `memoryId` key is present; an empty filter
+          // falls through and admits the node, exactly as nodeById does.
+          const access = await memoryAccessFilter(ctx);
+          if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
+            if (!(access.memoryId.in as string[]).includes(node.memoryId)) return null;
+          }
+          return { kind: 'node', id, memoryId: node.memoryId };
+        }
+        case 'org': {
+          let id: string;
+          try {
+            ({ id } = await resolveOrgRef(ctx.db, urn));
+          } catch {
+            return null;
+          }
+          if (!(await isOrgMember(id))) return null;
+          return { kind: 'org', id };
+        }
+        case 'agent': {
+          let id: string;
+          try {
+            ({ id } = await resolveAgentRef(ctx.db, urn));
+          } catch {
+            return null;
+          }
+          const agent = await ctx.db.agent.findUnique({
+            where: { id },
+            select: { organizationId: true },
+          });
+          if (!agent) return null;
+          if (!(await isOrgMember(agent.organizationId))) return null;
+          return { kind: 'agent', id };
+        }
+        case 'app': {
+          let id: string;
+          try {
+            ({ id } = await resolveAppRef(ctx.db, urn));
+          } catch {
+            return null;
+          }
+          const app = await ctx.db.app.findUnique({
+            where: { id },
+            select: { organizationId: true },
+          });
+          if (!app) return null;
+          // The dedicated app(id) query requires org ADMIN; mirror that.
+          if (!isGlobalAdmin) {
+            if (!ctx.userId) return null;
+            const member = await ctx.db.orgMember.findUnique({
+              where: { organizationId_userId: { organizationId: app.organizationId, userId: ctx.userId } },
+            });
+            if (!member || (ROLE_ORDER[member.role] ?? -1) < ROLE_ORDER['ADMIN']) return null;
+          }
+          return { kind: 'app', id, organizationId: app.organizationId };
+        }
+        default:
+          return null;
+      }
+    },
+
     node: async (_: unknown, { loc: rawLoc, raw }: { loc: string; raw?: boolean }, ctx: Context) => {
       const parsed = parseUrnInput(rawLoc);
       const typeErr = validateUrnType(parsed, 'node');

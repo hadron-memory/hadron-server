@@ -1175,7 +1175,42 @@ export const typeDefs = `#graphql
     sizeBytes: Int!
   }
 
+  """
+  Result of resolving a Hadron URN to the ids a client needs to navigate to
+  the resource's canonical page. Powers the portal's /app/u/<urn> redirect
+  route (hadron-portal#262).
+
+  \`kind\` is the URN's type segment: memory | node | agent | org | app.
+  \`id\` is the resolved entity's primary id. \`memoryId\` is set only for
+  nodes (their owning memory), \`organizationId\` only for apps (their owning
+  org) — both are the extra ids those resources' canonical routes require.
+  """
+  type UrnResolution {
+    kind:           String!
+    id:             ID!
+    memoryId:       ID
+    organizationId: ID
+  }
+
   type Query {
+    """
+    Resolve a fully-qualified, \`urn:<type>:\`-prefixed Hadron URN to the ids
+    needed to reach its canonical page. Returns null when the URN is
+    unresolvable (not found) OR the caller lacks access. Unlike the dedicated
+    per-kind queries — which throw \`Forbidden\` on no-access — this query
+    deliberately collapses both not-found and no-access to null, so a
+    redirect resolver can 404 uniformly without disclosing which case it was.
+
+    Per-kind access uses the SAME authorization rules as the dedicated
+    queries (memory/org/agent: org membership; app: org ADMIN; node:
+    memoryAccessFilter), only with the throw replaced by a null return.
+
+    The \`urn:<type>:\` prefix is the dispatch key — bare URNs without a type
+    prefix are ambiguous across kinds (\`org::slug\` could be a memory or an
+    agent) and resolve to null.
+    """
+    resolveUrn(urn: String!): UrnResolution
+
     # Get a single node by its loc path (raw: true to skip template compilation)
     node(loc: String!, raw: Boolean): Node
 
