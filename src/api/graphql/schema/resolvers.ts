@@ -2240,14 +2240,68 @@ export const resolvers = {
 
     usageEvents: async (
       _: unknown,
-      { type, nodeLoc, limit, offset }: { type?: string; nodeLoc?: string; limit?: number; offset?: number },
+      {
+        type,
+        nodeLoc,
+        memoryId,
+        nodeId,
+        limit,
+        offset,
+      }: {
+        type?: string;
+        nodeLoc?: string;
+        memoryId?: string;
+        nodeId?: string;
+        limit?: number;
+        offset?: number;
+      },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
+
+      // Per-node scoping (issue #249 follow-up): a single node's events,
+      // addressed by node PK or URN — no memoryId required. UsageEvent carries
+      // a nodeId FK (set at ingest from the resolved node), so we filter on it
+      // exactly. That's memory-precise — unlike the nodeLoc-based memory scope
+      // below, it can't collide with a same-loc node in another memory. Events
+      // whose nodeId is null (orphaned post node-deletion, or the older
+      // recordUsage path's ambiguous loc lookup) are intentionally excluded; a
+      // resolvable node ref implies a live node.
+      let nodeIdFilter: string | undefined;
+      if (nodeId) {
+        // 007/022-entity-id-or-urn: nodeId may be a node PK or a fully-
+        // qualified node URN. No contextMemoryId at the API boundary (spec 022).
+        const { id: resolvedNodeId } = await resolveNodeRef(ctx.db, nodeId);
+        nodeIdFilter = resolvedNodeId;
+      }
+
+      // Per-memory scoping (issue #249): UsageEvent rows are keyed by nodeLoc
+      // (no memoryId column), so scoping to a memory means "events whose
+      // nodeLoc is one of the memory's node locs" — mirrors memoryUsageSummary.
+      // Authz follows memoryUsageSummary: the global READER role above is the
+      // gate; resolveMemoryRef is the only memory-level check (no per-memory
+      // read enforcement beyond that).
+      const nodeLocFilter: { in?: string[]; contains?: string } = {};
+      if (memoryId) {
+        // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
+        const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+        const nodes = await ctx.db.node.findMany({
+          where: { memoryId: resolvedMemoryId },
+          select: { loc: true },
+        });
+        const locs = nodes.map((n: { loc: string }) => n.loc);
+        if (!locs.length) return [];
+        nodeLocFilter.in = locs;
+      }
+      // When both memoryId and nodeLoc are given, nodeLoc (a substring match)
+      // further narrows within the memory's locs.
+      if (nodeLoc) nodeLocFilter.contains = nodeLoc;
+
       return ctx.db.usageEvent.findMany({
         where: {
           ...(type ? { type } : {}),
-          ...(nodeLoc ? { nodeLoc: { contains: nodeLoc } } : {}),
+          ...(nodeIdFilter ? { nodeId: nodeIdFilter } : {}),
+          ...(Object.keys(nodeLocFilter).length ? { nodeLoc: nodeLocFilter } : {}),
         },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 50,

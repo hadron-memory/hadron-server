@@ -1222,8 +1222,12 @@ export const typeDefs = `#graphql
     # Usage stats for a node (most recent events first)
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
 
-    # Usage events (most recent first), optionally filtered by type or nodeLoc
-    usageEvents(type: String, nodeLoc: String, limit: Int, offset: Int): [UsageEvent!]!
+    # Usage events (most recent first), optionally filtered by type, nodeLoc,
+    # memoryId, or nodeId. When memoryId is given (ID or URN), results are
+    # scoped to that memory's node locs; a nodeLoc substring further narrows
+    # within it. When nodeId is given (node PK or URN — no memoryId needed),
+    # results are scoped to that single node via its exact FK.
+    usageEvents(type: String, nodeLoc: String, memoryId: ID, nodeId: ID, limit: Int, offset: Int): [UsageEvent!]!
 
     # Version history for a node
     nodeVersions(nodeId: ID!, limit: Int): [NodeVersion!]!
