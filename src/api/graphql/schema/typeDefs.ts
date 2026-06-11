@@ -1222,11 +1222,21 @@ export const typeDefs = `#graphql
     # Usage stats for a node (most recent events first)
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
 
-    # Usage events (most recent first), optionally filtered by type, nodeLoc,
-    # memoryId, or nodeId. When memoryId is given (ID or URN), results are
-    # scoped to that memory's node locs; a nodeLoc substring further narrows
-    # within it. When nodeId is given (node PK or URN — no memoryId needed),
-    # results are scoped to that single node via its exact FK.
+    # Usage events (most recent first), optionally filtered by type, memoryId,
+    # or nodeId.
+    #
+    # memoryId is a token (node PK is not — it's the memory): accepts the
+    # memory's ID or URN; results are scoped to that memory's node locs.
+    #
+    # nodeId is a node token accepting a PK, a fully-qualified URN, or a bare
+    # loc (no memoryId needed):
+    #   - PK / URN  → resolved to a single node; scoped via its exact nodeId FK
+    #                 (memory-precise).
+    #   - bare loc  → exact nodeLoc match across all memories (like nodeUsage);
+    #                 not existence-checked.
+    #
+    # nodeLoc (DEPRECATED): substring filter, superseded by the bare-loc form of
+    # nodeId. Retained until the portal query migrates off it; removal in #252.
     usageEvents(type: String, nodeLoc: String, memoryId: ID, nodeId: ID, limit: Int, offset: Int): [UsageEvent!]!
 
     # Version history for a node

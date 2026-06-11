@@ -119,6 +119,8 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { isId } from '../../../lib/entityRef/shape.js';
+import { assertFullyQualifiedUrn } from '../../../lib/urn.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
@@ -2259,20 +2261,45 @@ export const resolvers = {
     ) => {
       requireRole(ctx, 'READER');
 
-      // Per-node scoping (issue #249 follow-up): a single node's events,
-      // addressed by node PK or URN — no memoryId required. UsageEvent carries
-      // a nodeId FK (set at ingest from the resolved node), so we filter on it
-      // exactly. That's memory-precise — unlike the nodeLoc-based memory scope
-      // below, it can't collide with a same-loc node in another memory. Events
-      // whose nodeId is null (orphaned post node-deletion, or the older
-      // recordUsage path's ambiguous loc lookup) are intentionally excluded; a
-      // resolvable node ref implies a live node.
+      // Per-node scoping (issue #249 follow-up): a single node addressed by a
+      // node *token* — PK, URN, or bare loc — no memoryId required. Mirrors the
+      // memoryId pattern (resolveMemoryRef accepts ID or URN), generalized to a
+      // node ref. Two branches by token shape:
+      //
+      //   - PK or fully-qualified node URN → resolveNodeRef → exact nodeId FK
+      //     filter. UsageEvent carries a nodeId FK (set at ingest from the
+      //     resolved node), so this is memory-precise: it can't collide with a
+      //     same-loc node in another memory. Events whose nodeId is null
+      //     (orphaned post node-deletion, or the older recordUsage path's
+      //     ambiguous loc lookup) are excluded; a resolvable ref implies a live
+      //     node.
+      //   - bare loc (fails node-URN qualification — a node URN needs ≥3
+      //     segments) → exact nodeLoc match, like nodeUsage(loc). Cross-memory:
+      //     UsageEvent has no memoryId, so this matches that loc in every
+      //     memory; it does NOT validate node existence (it's a filter, not a
+      //     lookup, so an unknown loc yields [] rather than NODE_NOT_FOUND).
       let nodeIdFilter: string | undefined;
+      let nodeLocExact: string | undefined;
       if (nodeId) {
-        // 007/022-entity-id-or-urn: nodeId may be a node PK or a fully-
-        // qualified node URN. No contextMemoryId at the API boundary (spec 022).
-        const { id: resolvedNodeId } = await resolveNodeRef(ctx.db, nodeId);
-        nodeIdFilter = resolvedNodeId;
+        let isNodeRef = isId(nodeId);
+        if (!isNodeRef) {
+          // assertFullyQualifiedUrn checks shape only (≥3 segments for 'node').
+          // Pass → treat as URN; throw (UrnNotQualifiedError) → treat as loc.
+          try {
+            assertFullyQualifiedUrn(nodeId, 'node');
+            isNodeRef = true;
+          } catch {
+            isNodeRef = false;
+          }
+        }
+        if (isNodeRef) {
+          // 007/022-entity-id-or-urn: PK or fully-qualified node URN. No
+          // contextMemoryId at the API boundary (spec 022).
+          const { id: resolvedNodeId } = await resolveNodeRef(ctx.db, nodeId);
+          nodeIdFilter = resolvedNodeId;
+        } else {
+          nodeLocExact = nodeId;
+        }
       }
 
       // Per-memory scoping (issue #249): UsageEvent rows are keyed by nodeLoc
@@ -2281,7 +2308,7 @@ export const resolvers = {
       // Authz follows memoryUsageSummary: the global READER role above is the
       // gate; resolveMemoryRef is the only memory-level check (no per-memory
       // read enforcement beyond that).
-      const nodeLocFilter: { in?: string[]; contains?: string } = {};
+      const nodeLocFilter: { in?: string[]; contains?: string; equals?: string } = {};
       if (memoryId) {
         // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
         const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
@@ -2293,9 +2320,13 @@ export const resolvers = {
         if (!locs.length) return [];
         nodeLocFilter.in = locs;
       }
-      // When both memoryId and nodeLoc are given, nodeLoc (a substring match)
-      // further narrows within the memory's locs.
+      // nodeLoc (DEPRECATED — substring `contains`): superseded by the bare-loc
+      // form of `nodeId` (exact). Kept until the portal's USAGE_EVENTS_QUERY
+      // drops $nodeLoc; removal tracked in #252. When given with memoryId, it
+      // narrows within the memory's locs.
       if (nodeLoc) nodeLocFilter.contains = nodeLoc;
+      // nodeId-as-bare-loc → exact loc match; AND-combines with the above.
+      if (nodeLocExact) nodeLocFilter.equals = nodeLocExact;
 
       return ctx.db.usageEvent.findMany({
         where: {

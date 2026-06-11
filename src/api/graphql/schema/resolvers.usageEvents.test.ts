@@ -204,7 +204,7 @@ describe('usageEvents nodeId filter', () => {
     expect(result[0].nodeLoc).toBe('gamma');
   });
 
-  it('rejects an unknown nodeId with NODE_NOT_FOUND', async () => {
+  it('rejects an unknown PK/URN nodeId with NODE_NOT_FOUND', async () => {
     await expect(
       resolvers.Query.usageEvents(
         null,
@@ -212,5 +212,27 @@ describe('usageEvents nodeId filter', () => {
         ctx(),
       ),
     ).rejects.toThrow(/NODE_NOT_FOUND/);
+  });
+
+  // Bare-loc form: nodeId that isn't a PK or a fully-qualified node URN is
+  // treated as a loc and exact-matched against nodeLoc (like nodeUsage).
+  it('accepts a bare loc as nodeId — exact nodeLoc match', async () => {
+    const result = await resolvers.Query.usageEvents(null, { nodeId: 'beta' }, ctx());
+    expect(result).toHaveLength(1);
+    expect(result[0].nodeLoc).toBe('beta');
+  });
+
+  it('bare-loc nodeId combines with type', async () => {
+    const result = await resolvers.Query.usageEvents(
+      null,
+      { nodeId: 'alpha', type: 'read' },
+      ctx(),
+    );
+    expect(result).toHaveLength(2); // alpha has 2 reads + 1 write
+  });
+
+  it('bare-loc nodeId is a filter, not a lookup — unknown loc yields [] (no throw)', async () => {
+    const result = await resolvers.Query.usageEvents(null, { nodeId: 'no-such-loc' }, ctx());
+    expect(result).toEqual([]);
   });
 });
