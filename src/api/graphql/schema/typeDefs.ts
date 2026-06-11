@@ -1260,6 +1260,12 @@ export const typeDefs = `#graphql
     # Usage events (most recent first), optionally filtered by type, memoryId,
     # or nodeId.
     #
+    # Access control (#250): results are always scoped to memories the caller
+    # may read (org membership / subscriptions / public / owned personal+private
+    # per spec 034; ADMIN/OWNER see all but other users' personal+private). A
+    # memoryId the caller can't read returns [] (no existence leak); the global
+    # form (no memoryId) is bounded to the readable set, never cross-tenant.
+    #
     # memoryId is a memory identifier — accepts the memory's ID or URN. Results
     # are scoped to events whose node belongs to that memory (FK-precise).
     #
@@ -1267,8 +1273,8 @@ export const typeDefs = `#graphql
     # loc (no memoryId needed):
     #   - PK / URN  → resolved to a single node; scoped via its exact nodeId FK
     #                 (memory-precise).
-    #   - bare loc  → exact nodeLoc match across all memories (like nodeUsage);
-    #                 not existence-checked.
+    #   - bare loc  → exact nodeLoc match, bounded to readable memories (like
+    #                 nodeUsage but access-scoped); not existence-checked.
     #
     # nodeLoc (DEPRECATED): substring filter, superseded by the bare-loc form of
     # nodeId. Retained until the portal query migrates off it; removal in #252.

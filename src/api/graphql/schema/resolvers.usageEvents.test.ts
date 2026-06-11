@@ -29,9 +29,12 @@ let betaNode: { id: string };
 let gammaNode: { id: string };
 let otherAlphaNode: { id: string };
 
-// usageEvents calls requireRole(ctx, 'READER'); supply a role so the gate passes.
+// These tests exercise filter *mechanics* (memoryId / nodeId / type / paging),
+// not access control — so they run as a global ADMIN, which sees every
+// (knowledge-class) fixture memory. Access scoping (#250) is covered separately
+// in resolvers.usageEvents.access.test.ts.
 function ctx(): Context {
-  return { db, roles: ['READER'] } as Context;
+  return { db, roles: ['ADMIN'], userId: 'admin-user' } as Context;
 }
 
 beforeEach(async () => {

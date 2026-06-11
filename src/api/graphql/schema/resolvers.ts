@@ -2423,21 +2423,35 @@ export const resolvers = {
         }
       }
 
+      // Access scoping (issue #250): restrict results to memories the caller
+      // may read. getAccessibleMemoryIds is the canonical helper — it
+      // encapsulates every principal type and the memory-class rules (spec
+      // 034): a JWT / user-API-key caller gets their org + subscription +
+      // public + owned personal/private set; ADMIN/OWNER get all memories
+      // except other users' personal/private. App keys carry roles:[] and are
+      // already rejected by requireRole above (App usage reads aren't a GraphQL
+      // surface — they go through MCP). `null` means unrestricted (no filter).
+      const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
+
       // Per-memory scoping (issue #249): filter on the UsageEvent→Node relation
       // by the resolved memory. FK-precise (no cross-memory nodeLoc collision)
       // and a single SQL query — unlike fetching every node loc and using
       // `nodeLoc: { in }`, which collides on shared locs and can blow the
       // IN-parameter limit on large memories. Like the nodeId path, it excludes
-      // events with a null nodeId (orphaned / legacy). Authz: the global READER
-      // role above is the gate; resolveMemoryRef is the only memory-level check
-      // (no per-memory read enforcement — tracked in #250).
+      // events with a null nodeId (orphaned / legacy).
       //
       // NOTE: memoryUsageSummary still uses the loc-based approach and carries
-      // the same latent collision; aligning it is a possible follow-up.
+      // the same latent collision; aligning it is tracked in #253.
       let memoryNodeFilter: { memoryId: string } | undefined;
       if (memoryId) {
         // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
         const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+        // #250: deny a memory the caller can't read. Return [] (not a thrown
+        // Forbidden) to avoid leaking existence — mirrors nodeById returning
+        // null for an out-of-scope target.
+        if (accessibleMemoryIds !== null && !accessibleMemoryIds.includes(resolvedMemoryId)) {
+          return [];
+        }
         memoryNodeFilter = { memoryId: resolvedMemoryId };
       }
 
@@ -2449,11 +2463,20 @@ export const resolvers = {
       // nodeId-as-bare-loc → exact loc match; AND-combines with the above.
       if (nodeLocExact) nodeLocFilter.equals = nodeLocExact;
 
+      // Resolve the UsageEvent→Node relation filter:
+      //  - memoryId scoped path → the single, already access-checked memory.
+      //  - otherwise → the caller's full accessible-memory set (#250). This
+      //    bounds both the global feed and any bare-loc nodeId filter to
+      //    readable memories. A `null` accessible set = unrestricted.
+      const nodeRelationFilter: { memoryId: string } | { memoryId: { in: string[] } } | undefined =
+        memoryNodeFilter ??
+        (accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : undefined);
+
       return ctx.db.usageEvent.findMany({
         where: {
           ...(type ? { type } : {}),
           ...(nodeIdFilter ? { nodeId: nodeIdFilter } : {}),
-          ...(memoryNodeFilter ? { node: memoryNodeFilter } : {}),
+          ...(nodeRelationFilter ? { node: nodeRelationFilter } : {}),
           ...(Object.keys(nodeLocFilter).length ? { nodeLoc: nodeLocFilter } : {}),
         },
         orderBy: { createdAt: 'desc' },
