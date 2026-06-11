@@ -1954,11 +1954,28 @@ export const resolvers = {
 
     nodes: async (
       _: unknown,
-      { nodeType, tags, search, prefix: rawPrefix, limit, offset }: { nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number; offset?: number },
+      { memory, nodeType, tags, search, prefix: rawPrefix, limit, offset }: { memory?: string; nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       const prefix = rawPrefix ? parseUrnInput(rawPrefix).value : undefined;
       const access = await memoryAccessFilter(ctx);
+      // Memory scoping (ID or URN per 007-entity-id-or-urn) is
+      // intersected with the access filter's own memoryId clause
+      // in-place. Composing via a separate AND key is unsafe here:
+      // tagsFilter also emits { AND: [...] } on SQLite, and a spread
+      // collision would silently drop the memory scope (the same
+      // overwrite class as #253/#255).
+      if (memory) {
+        const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memory);
+        if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
+          const allowedIds = (access.memoryId as { in: string[] }).in;
+          access.memoryId = allowedIds.includes(resolvedMemoryId)
+            ? resolvedMemoryId
+            : { in: [] };
+        } else {
+          access.memoryId = resolvedMemoryId;
+        }
+      }
       const results = await ctx.db.node.findMany({
         where: {
           ...access,
