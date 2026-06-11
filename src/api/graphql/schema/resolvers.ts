@@ -2301,13 +2301,21 @@ export const resolvers = {
       // this excludes events with a null nodeId (orphaned after node deletion,
       // or the older recordUsage path's ambiguous loc lookup) — arguably more
       // correct, since an unattributable event shouldn't count toward a memory.
+      //
+      // `nodeLoc: { not: null }` restores a guarantee the old loc-IN scoping had
+      // implicitly: the result feeds UsageSummaryEntry.nodeLoc (String!), so a
+      // null-nodeLoc group (an event with nodeId set but nodeLoc null) would
+      // violate the schema at the GraphQL layer. The IN-filter could never
+      // produce one; the relation filter can, so exclude it explicitly.
       const rows = await ctx.db.usageEvent.groupBy({
         by: ['nodeLoc', 'type'],
-        where: { node: { memoryId: resolvedMemoryId } },
+        where: { node: { memoryId: resolvedMemoryId }, nodeLoc: { not: null } },
         _count: { id: true },
       });
       return rows.map((r: { nodeLoc: string | null; type: string; _count: { id: number } }) => ({
-        nodeLoc: r.nodeLoc,
+        // nodeLoc is non-null here (guarded in the where above); Prisma's
+        // groupBy result type still widens it to string | null.
+        nodeLoc: r.nodeLoc as string,
         type: r.type,
         count: r._count.id,
       }));

@@ -119,6 +119,22 @@ describe('memoryUsageSummary', () => {
       resolvers.Query.memoryUsageSummary(null, { memoryId: 'cnonexistentnonexistent12' }, ctx()),
     ).rejects.toThrow(/MEMORY_NOT_FOUND/);
   });
+
+  // UsageSummaryEntry.nodeLoc is String! — an event with nodeId set but a null
+  // nodeLoc must not surface as a { nodeLoc: null } group (which the relation
+  // scoping would otherwise admit, violating the schema contract).
+  it('excludes events whose nodeLoc is null (no null group)', async () => {
+    const ghost = await db.node.create({
+      data: { id: generateId(), memoryId: memory.id, loc: 'ghost', name: 'ghost' },
+    });
+    await db.usageEvent.create({
+      data: { id: generateId(), type: 'read', nodeLoc: null, nodeId: ghost.id },
+    });
+    const result = await resolvers.Query.memoryUsageSummary(null, { memoryId: memory.id }, ctx());
+    expect(result.every((r) => r.nodeLoc !== null)).toBe(true);
+    // Unchanged from the baseline: alpha(read/write), beta(read) — ghost excluded.
+    expect(result).toHaveLength(3);
+  });
 });
 
 describe('memoryUsageSummary access control (#250)', () => {
