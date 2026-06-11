@@ -1227,7 +1227,7 @@ export const typeDefs = `#graphql
       the hadron-cli \`node ls --memory\` surface; mirrors the
       usageEvents(memoryId:) filter (#249).
       """
-      memory: String
+      memory: ID
       nodeType: String
       tags: [String!]
       search: String

@@ -1959,19 +1959,26 @@ export const resolvers = {
     ) => {
       const prefix = rawPrefix ? parseUrnInput(rawPrefix).value : undefined;
       const access = await memoryAccessFilter(ctx);
-      // Memory scoping (ID or URN per 007-entity-id-or-urn) is ANDed
-      // with the access filter — never spread into the same object,
-      // which would overwrite the access filter's own memoryId clause
-      // (the #253/#255 bug class).
-      let memoryScope: Record<string, unknown> = {};
+      // Memory scoping (ID or URN per 007-entity-id-or-urn) is
+      // intersected with the access filter's own memoryId clause
+      // in-place. Composing via a separate AND key is unsafe here:
+      // tagsFilter also emits { AND: [...] } on SQLite, and a spread
+      // collision would silently drop the memory scope (the same
+      // overwrite class as #253/#255).
       if (memory) {
         const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memory);
-        memoryScope = { AND: [{ memoryId: resolvedMemoryId }] };
+        if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
+          const allowedIds = (access.memoryId as { in: string[] }).in;
+          access.memoryId = allowedIds.includes(resolvedMemoryId)
+            ? resolvedMemoryId
+            : { in: [] };
+        } else {
+          access.memoryId = resolvedMemoryId;
+        }
       }
       const results = await ctx.db.node.findMany({
         where: {
           ...access,
-          ...memoryScope,
           // Exclude system nodes from search by default (unless explicitly requested)
           ...(nodeType ? { nodeType } : search ? { nodeType: { not: 'system' } } : {}),
           ...(tags?.length ? tagsFilter(tags) : {}),

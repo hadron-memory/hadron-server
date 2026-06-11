@@ -83,6 +83,20 @@ describe('Query.nodes memory filter', () => {
     expect(nodes).toHaveLength(0);
   });
 
+  it('memory + tags compose without dropping the memory scope', async () => {
+    // Regression guard for AND-clause composition: tagsFilter emits
+    // { AND: [...] } on SQLite, which would collide with a memory
+    // scope expressed as a separate AND key and silently widen the
+    // result set back to every accessible memory.
+    await createDbNode(db, { loc: 'tagged-one', memoryId: memA1.id, tags: ['t1'] });
+    await createDbNode(db, { loc: 'tagged-two', memoryId: memA2.id, tags: ['t1'] });
+    const nodes = await resolvers.Query.nodes(
+      null, { memory: memA1.id, tags: ['t1'] }, userActx(),
+    );
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].loc).toBe('tagged-one');
+  });
+
   it('unknown memory ref throws', async () => {
     await expect(
       resolvers.Query.nodes(null, { memory: 'org-a:does-not-exist' }, userActx()),
