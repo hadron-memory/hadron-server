@@ -1275,10 +1275,7 @@ export const typeDefs = `#graphql
     #                 (memory-precise).
     #   - bare loc  → exact nodeLoc match, bounded to readable memories (like
     #                 nodeUsage but access-scoped); not existence-checked.
-    #
-    # nodeLoc (DEPRECATED): substring filter, superseded by the bare-loc form of
-    # nodeId. Retained until the portal query migrates off it; removal in #252.
-    usageEvents(type: String, nodeLoc: String, memoryId: ID, nodeId: ID, limit: Int, offset: Int): [UsageEvent!]!
+    usageEvents(type: String, memoryId: ID, nodeId: ID, limit: Int, offset: Int): [UsageEvent!]!
 
     # Version history for a node
     nodeVersions(nodeId: ID!, limit: Int): [NodeVersion!]!

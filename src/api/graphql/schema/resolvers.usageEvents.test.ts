@@ -153,14 +153,14 @@ describe('usageEvents memoryId filter', () => {
     expect(result[0].nodeLoc).toBe('alpha');
   });
 
-  it('narrows within the memory scope when nodeLoc is also given', async () => {
+  it('narrows within the memory scope when a bare-loc nodeId is also given', async () => {
+    // The removed `nodeLoc` substring arg's job is now done by bare-loc nodeId:
+    // memoryId scopes to the memory, nodeId='beta' exact-matches the loc within.
     const result = await resolvers.Query.usageEvents(
       null,
-      { memoryId: memory.id, nodeLoc: 'beta' },
+      { memoryId: memory.id, nodeId: 'beta' },
       ctx(),
     );
-    // beta is within the memory; gamma is excluded even though both are
-    // outside an explicit list — memoryId scope wins, nodeLoc narrows.
     expect(result).toHaveLength(1);
     expect(result[0].nodeLoc).toBe('beta');
   });
