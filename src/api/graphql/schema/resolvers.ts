@@ -1954,14 +1954,24 @@ export const resolvers = {
 
     nodes: async (
       _: unknown,
-      { nodeType, tags, search, prefix: rawPrefix, limit, offset }: { nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number; offset?: number },
+      { memory, nodeType, tags, search, prefix: rawPrefix, limit, offset }: { memory?: string; nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       const prefix = rawPrefix ? parseUrnInput(rawPrefix).value : undefined;
       const access = await memoryAccessFilter(ctx);
+      // Memory scoping (ID or URN per 007-entity-id-or-urn) is ANDed
+      // with the access filter — never spread into the same object,
+      // which would overwrite the access filter's own memoryId clause
+      // (the #253/#255 bug class).
+      let memoryScope: Record<string, unknown> = {};
+      if (memory) {
+        const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memory);
+        memoryScope = { AND: [{ memoryId: resolvedMemoryId }] };
+      }
       const results = await ctx.db.node.findMany({
         where: {
           ...access,
+          ...memoryScope,
           // Exclude system nodes from search by default (unless explicitly requested)
           ...(nodeType ? { nodeType } : search ? { nodeType: { not: 'system' } } : {}),
           ...(tags?.length ? tagsFilter(tags) : {}),

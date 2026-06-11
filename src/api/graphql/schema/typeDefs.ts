@@ -1217,8 +1217,17 @@ export const typeDefs = `#graphql
     # Get a single node by its ID (raw: true to skip template compilation)
     nodeById(id: ID!, raw: Boolean): Node
 
-    # List or search nodes; optionally filter by tags and nodeType
+    # List or search nodes; optionally filter by tags and nodeType.
     nodes(
+      """
+      Scope to a single memory, addressed by ID or fully-qualified URN
+      (007-entity-id-or-urn dispatch via resolveMemoryRef). Intersected
+      with the caller's access filter — scoping to an inaccessible
+      memory yields [], and an unknown ref throws NOT_FOUND. Added for
+      the hadron-cli \`node ls --memory\` surface; mirrors the
+      usageEvents(memoryId:) filter (#249).
+      """
+      memory: String
       nodeType: String
       tags: [String!]
       search: String
