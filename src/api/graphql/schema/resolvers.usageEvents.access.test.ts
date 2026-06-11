@@ -45,10 +45,10 @@ beforeEach(async () => {
   await cleanDb(db);
 
   orgA = await db.organization.create({
-    data: { id: generateId(), name: 'acc-org-a', urn: `acc-org-a-${Date.now()}` },
+    data: { id: generateId(), name: 'acc-org-a', urn: `acc-org-a-${generateId()}` },
   });
   orgB = await db.organization.create({
-    data: { id: generateId(), name: 'acc-org-b', urn: `acc-org-b-${Date.now()}` },
+    data: { id: generateId(), name: 'acc-org-b', urn: `acc-org-b-${generateId()}` },
   });
 
   userMember = await db.user.create({ data: { githubId: 5001, githubUsername: 'mem', roles: ['READER'] } });

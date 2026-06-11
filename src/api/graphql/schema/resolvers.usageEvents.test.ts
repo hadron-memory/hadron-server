@@ -44,7 +44,7 @@ beforeEach(async () => {
     data: {
       id: generateId(),
       name: 'usage-events-org',
-      urn: `usage-events-org-${Date.now()}`,
+      urn: `usage-events-org-${generateId()}`,
     },
   });
 

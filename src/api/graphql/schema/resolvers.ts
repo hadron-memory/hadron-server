@@ -2430,7 +2430,13 @@ export const resolvers = {
       // public + owned personal/private set; ADMIN/OWNER get all memories
       // except other users' personal/private. App keys carry roles:[] and are
       // already rejected by requireRole above (App usage reads aren't a GraphQL
-      // surface — they go through MCP). `null` means unrestricted (no filter).
+      // surface — they go through MCP).
+      //
+      // The return type is `string[] | null`, where null would mean
+      // "unrestricted (no filter)". In practice every branch returns an
+      // explicit list — ADMIN/OWNER included, so the personal/private carve-out
+      // still applies — so the `!== null` guards below are defensive for that
+      // type contract rather than a live code path today.
       const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
 
       // Per-memory scoping (issue #249): filter on the UsageEvent→Node relation
