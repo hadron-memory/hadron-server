@@ -1,11 +1,18 @@
 /**
- * Integration tests for the usageEvents query's memoryId filter (issue #249).
+ * Integration tests for the usageEvents query's memoryId and nodeId filters
+ * (issue #249 + follow-up).
  *
- * usageEvents was previously global (type / nodeLoc only). This issue adds an
- * optional memoryId argument that scopes results to the memory's node locs,
- * mirroring memoryUsageSummary. Tests cover the new scoping, ID-or-URN input,
- * the empty-memory short-circuit, the memoryId+nodeLoc interaction, and that
- * omitting memoryId preserves the prior global behavior.
+ * usageEvents was previously global (type / nodeLoc only). It now accepts:
+ *   - memoryId (ID or URN): scopes to events whose node belongs to that memory,
+ *     via the UsageEvent→Node relation (FK-precise — collision-proof).
+ *   - nodeId (node token): a PK / URN resolves to a single node (exact nodeId
+ *     FK); a bare loc exact-matches nodeLoc across memories (like nodeUsage).
+ *
+ * The fixture deliberately puts the loc `alpha` in two memories to prove the
+ * relation/FK scoping is collision-proof and to contrast PK (precise) vs
+ * bare-loc (cross-memory) node addressing. Tests also cover ID/URN input
+ * variants, the empty-memory case, the deprecated nodeLoc arg, and that
+ * omitting all filters preserves the prior global behavior.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -20,6 +27,7 @@ let emptyMemory: { id: string; urn: string };
 let alphaNode: { id: string };
 let betaNode: { id: string };
 let gammaNode: { id: string };
+let otherAlphaNode: { id: string };
 
 // usageEvents calls requireRole(ctx, 'READER'); supply a role so the gate passes.
 function ctx(): Context {
@@ -74,13 +82,18 @@ beforeEach(async () => {
   betaNode = await db.node.create({
     data: { id: generateId(), memoryId: memory.id, loc: 'beta', name: 'beta' },
   });
-  // `otherMemory`: gamma (1 read) — must NOT appear in memory-scoped results.
+  // `otherMemory`: gamma (1 read) + a SECOND node also at loc `alpha` (1 read).
+  // The colliding `alpha` proves memoryId/PK scoping is FK-precise (it must NOT
+  // leak into `memory`'s results) while bare-loc `alpha` spans both memories.
   gammaNode = await db.node.create({
     data: { id: generateId(), memoryId: otherMemory.id, loc: 'gamma', name: 'gamma' },
   });
+  otherAlphaNode = await db.node.create({
+    data: { id: generateId(), memoryId: otherMemory.id, loc: 'alpha', name: 'alpha' },
+  });
 
-  // Events carry both nodeLoc (memory-scope path) and nodeId (per-node path),
-  // mirroring how the MCP ingest writes them.
+  // Events carry both nodeLoc (loc/bare-loc path) and nodeId (memory + per-node
+  // FK paths), mirroring how the MCP ingest writes them.
   await db.usageEvent.createMany({
     data: [
       { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: alphaNode.id },
@@ -88,17 +101,24 @@ beforeEach(async () => {
       { id: generateId(), type: 'write', nodeLoc: 'alpha', nodeId: alphaNode.id },
       { id: generateId(), type: 'read', nodeLoc: 'beta', nodeId: betaNode.id },
       { id: generateId(), type: 'read', nodeLoc: 'gamma', nodeId: gammaNode.id },
+      // otherMemory's alpha — same loc as memory's alpha, different memory/node.
+      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: otherAlphaNode.id },
     ],
   });
 });
 
 describe('usageEvents memoryId filter', () => {
-  it('scopes events to the memory\'s nodes only — input by ID', async () => {
+  it('scopes events to the memory\'s nodes only — input by ID (collision-proof)', async () => {
     const result = await resolvers.Query.usageEvents(null, { memoryId: memory.id }, ctx());
-    // 4 events across alpha+beta; gamma (otherMemory) excluded.
+    // 4 events across memory's alpha(3)+beta(1). Crucially, otherMemory's alpha
+    // event (same loc, different memory) is excluded — the FK relation filter is
+    // collision-proof where a nodeLoc-IN filter would have leaked it (→ 5).
     expect(result).toHaveLength(4);
     const locs = new Set(result.map((e: { nodeLoc: string | null }) => e.nodeLoc));
     expect(locs).toEqual(new Set(['alpha', 'beta']));
+    // All belong to memory's nodes, not otherMemory's alpha.
+    const ids = new Set(result.map((e: { nodeId: string | null }) => e.nodeId));
+    expect(ids.has(otherAlphaNode.id)).toBe(false);
   });
 
   it('accepts a bare URN as memoryId — identical effect to ID', async () => {
@@ -144,8 +164,8 @@ describe('usageEvents memoryId filter', () => {
 
   it('without memoryId, returns global results (unchanged behavior)', async () => {
     const result = await resolvers.Query.usageEvents(null, {}, ctx());
-    // All 5 events across every memory.
-    expect(result).toHaveLength(5);
+    // All 6 events across every memory (alpha×3, beta, gamma, otherMemory alpha).
+    expect(result).toHaveLength(6);
   });
 
   it('rejects an unknown memoryId with MEMORY_NOT_FOUND', async () => {
@@ -197,11 +217,22 @@ describe('usageEvents nodeId filter', () => {
     expect(result[0].type).toBe('write');
   });
 
-  it('returns a single node\'s events even when its loc lives in another memory too', async () => {
-    // gamma is in otherMemory; addressing it by PK returns only its event.
-    const result = await resolvers.Query.usageEvents(null, { nodeId: gammaNode.id }, ctx());
-    expect(result).toHaveLength(1);
-    expect(result[0].nodeLoc).toBe('gamma');
+  it('PK is memory-precise even when the loc collides across memories', async () => {
+    // `alpha` exists in both memory and otherMemory. Addressing by PK returns
+    // ONLY memory's alpha events (3), not otherMemory's alpha event.
+    const result = await resolvers.Query.usageEvents(null, { nodeId: alphaNode.id }, ctx());
+    expect(result).toHaveLength(3);
+    const ids = new Set(result.map((e: { nodeId: string | null }) => e.nodeId));
+    expect(ids).toEqual(new Set([alphaNode.id]));
+  });
+
+  it('bare loc spans memories where PK does not — same collision, different intent', async () => {
+    // Contrast with the PK test above: the bare loc `alpha` matches the loc in
+    // BOTH memories (3 in memory + 1 in otherMemory = 4).
+    const result = await resolvers.Query.usageEvents(null, { nodeId: 'alpha' }, ctx());
+    expect(result).toHaveLength(4);
+    const ids = new Set(result.map((e: { nodeId: string | null }) => e.nodeId));
+    expect(ids).toEqual(new Set([alphaNode.id, otherAlphaNode.id]));
   });
 
   it('rejects an unknown PK/URN nodeId with NODE_NOT_FOUND', async () => {
@@ -209,6 +240,18 @@ describe('usageEvents nodeId filter', () => {
       resolvers.Query.usageEvents(
         null,
         { nodeId: 'cnonexistentnonexistent12' },
+        ctx(),
+      ),
+    ).rejects.toThrow(/NODE_NOT_FOUND/);
+  });
+
+  // A urn:-prefixed input is always a node ref: a wrong-type URN fails loudly
+  // (resolveNodeRef rejects it) rather than silently degrading to a loc filter.
+  it('rejects a wrong-type urn: nodeId loudly (does not treat it as a loc)', async () => {
+    await expect(
+      resolvers.Query.usageEvents(
+        null,
+        { nodeId: `urn:memory:${memory.urn}` },
         ctx(),
       ),
     ).rejects.toThrow(/NODE_NOT_FOUND/);
@@ -228,7 +271,8 @@ describe('usageEvents nodeId filter', () => {
       { nodeId: 'alpha', type: 'read' },
       ctx(),
     );
-    expect(result).toHaveLength(2); // alpha has 2 reads + 1 write
+    // alpha reads: 2 in memory + 1 in otherMemory = 3 (the alpha write excluded).
+    expect(result).toHaveLength(3);
   });
 
   it('bare-loc nodeId is a filter, not a lookup — unknown loc yields [] (no throw)', async () => {

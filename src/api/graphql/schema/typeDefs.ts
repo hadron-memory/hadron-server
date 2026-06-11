@@ -1225,8 +1225,8 @@ export const typeDefs = `#graphql
     # Usage events (most recent first), optionally filtered by type, memoryId,
     # or nodeId.
     #
-    # memoryId is a token (node PK is not — it's the memory): accepts the
-    # memory's ID or URN; results are scoped to that memory's node locs.
+    # memoryId is a memory identifier — accepts the memory's ID or URN. Results
+    # are scoped to events whose node belongs to that memory (FK-precise).
     #
     # nodeId is a node token accepting a PK, a fully-qualified URN, or a bare
     # loc (no memoryId needed):
