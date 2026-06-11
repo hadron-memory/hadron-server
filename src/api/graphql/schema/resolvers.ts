@@ -2380,14 +2380,12 @@ export const resolvers = {
       _: unknown,
       {
         type,
-        nodeLoc,
         memoryId,
         nodeId,
         limit,
         offset,
       }: {
         type?: string;
-        nodeLoc?: string;
         memoryId?: string;
         nodeId?: string;
         limit?: number;
@@ -2478,12 +2476,10 @@ export const resolvers = {
         memoryNodeFilter = { memoryId: resolvedMemoryId };
       }
 
-      // nodeLoc (DEPRECATED — substring `contains`): superseded by the bare-loc
-      // form of `nodeId` (exact). Kept until the portal's USAGE_EVENTS_QUERY
-      // drops $nodeLoc; removal tracked in #252.
-      const nodeLocFilter: { contains?: string; equals?: string } = {};
-      if (nodeLoc) nodeLocFilter.contains = nodeLoc;
-      // nodeId-as-bare-loc → exact loc match; AND-combines with the above.
+      // nodeId-as-bare-loc → exact nodeLoc match. (The deprecated `nodeLoc`
+      // substring arg was removed in #252 once the portal's USAGE_EVENTS_QUERY
+      // migrated to `memoryId`; bare-loc `nodeId` is the supported loc filter.)
+      const nodeLocFilter: { equals?: string } = {};
       if (nodeLocExact) nodeLocFilter.equals = nodeLocExact;
 
       // Resolve the UsageEvent→Node relation filter:
@@ -2500,7 +2496,7 @@ export const resolvers = {
           ...(type ? { type } : {}),
           ...(nodeIdFilter ? { nodeId: nodeIdFilter } : {}),
           ...(nodeRelationFilter ? { node: nodeRelationFilter } : {}),
-          ...(Object.keys(nodeLocFilter).length ? { nodeLoc: nodeLocFilter } : {}),
+          ...(nodeLocFilter.equals ? { nodeLoc: nodeLocFilter } : {}),
         },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 50,
