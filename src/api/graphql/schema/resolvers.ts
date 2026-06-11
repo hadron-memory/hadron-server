@@ -2476,12 +2476,6 @@ export const resolvers = {
         memoryNodeFilter = { memoryId: resolvedMemoryId };
       }
 
-      // nodeId-as-bare-loc → exact nodeLoc match. (The deprecated `nodeLoc`
-      // substring arg was removed in #252 once the portal's USAGE_EVENTS_QUERY
-      // migrated to `memoryId`; bare-loc `nodeId` is the supported loc filter.)
-      const nodeLocFilter: { equals?: string } = {};
-      if (nodeLocExact) nodeLocFilter.equals = nodeLocExact;
-
       // Resolve the UsageEvent→Node relation filter:
       //  - memoryId scoped path → the single, already access-checked memory.
       //  - otherwise → the caller's full accessible-memory set (#250). This
@@ -2496,7 +2490,9 @@ export const resolvers = {
           ...(type ? { type } : {}),
           ...(nodeIdFilter ? { nodeId: nodeIdFilter } : {}),
           ...(nodeRelationFilter ? { node: nodeRelationFilter } : {}),
-          ...(nodeLocFilter.equals ? { nodeLoc: nodeLocFilter } : {}),
+          // nodeId-as-bare-loc → exact nodeLoc match (the supported loc filter
+          // since the deprecated nodeLoc substring arg was removed in #252).
+          ...(nodeLocExact ? { nodeLoc: nodeLocExact } : {}),
         },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 50,
