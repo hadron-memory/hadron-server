@@ -67,8 +67,9 @@ finding, create-paths treat P2002 as the duplicate-name error, not a retry.
 
 ## D7 — Key handling: encrypt with existing helpers; masked management, privileged resolution
 
-**Decision**: `encryptToken`/`decryptToken` from `src/lib/crypto.ts` (AES-256-GCM,
-`HADRON_ENCRYPTION_KEY`), preview = `…` + last 4 (the convention at resolvers.ts:6304).
+**Decision**: `encryptToken`/`decryptToken` (AES-256-GCM, `HADRON_ENCRYPTION_KEY`) —
+formerly private helpers in resolvers.ts, extracted to `src/lib/tokenCrypto.ts` by this
+spec so the lib and resolver layer share one implementation; preview = `…` + last 4.
 Management/list surfaces expose only `hasApiKey` + `apiKeyPreview`. A privileged
 `resolveAIConfig` query returns the decrypted key — successor to `agentAIConfig` /
 `appAIConfig`, which today return decrypted keys to org ADMINs because the **portal's

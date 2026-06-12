@@ -24,7 +24,10 @@ mutation {
   createAiServiceConfig(
     ownerType: ORGANIZATION
     ownerId: "<orgId>"
-    input: { name: "fast", provider: "anthropic", model: "claude-haiku-4-5-20251001", apiKey: "sk-ant-..." }
+    name: "fast"
+    provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
+    apiKey: "sk-ant-..."
   ) { id name hasApiKey apiKeyPreview }   # preview only — never the key
 }
 

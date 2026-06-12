@@ -13,6 +13,12 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 function getEncryptionKey(): Buffer {
   const key = process.env.HADRON_ENCRYPTION_KEY;
   if (!key) throw new Error('HADRON_ENCRYPTION_KEY env var is required');
+  // Fail deterministically on misconfiguration: Buffer.from(.., 'hex')
+  // silently truncates at the first non-hex char, and a wrong-length key
+  // only surfaces later as a cryptic createCipheriv error.
+  if (!/^[0-9a-fA-F]{64}$/.test(key)) {
+    throw new Error('HADRON_ENCRYPTION_KEY must be 64 hex characters (a 32-byte AES-256 key)');
+  }
   return Buffer.from(key, 'hex');
 }
 

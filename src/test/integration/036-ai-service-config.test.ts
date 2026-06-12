@@ -499,6 +499,23 @@ describe('legacy surface shims (US3)', () => {
     ).toBeNull();
   });
 
+  it('updateApp with a partial AI config on a config-less App errors instead of silently dropping args', async () => {
+    await expect(
+      resolvers.Mutation.updateApp(
+        {},
+        { id: app.id, aiProvider: 'anthropic' },
+        { db, roles: ['ADMIN'], userId: admin.id },
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'AiConfigValidationError' } });
+    // Key-only CLEAR on a config-less App stays a tolerated no-op.
+    const updated = await resolvers.Mutation.updateApp(
+      {},
+      { id: app.id, aiApiKey: '' },
+      { db, roles: ['ADMIN'], userId: admin.id },
+    );
+    expect(updated.id).toBe(app.id);
+  });
+
   it('App-overrides-Agent precedence holds end-to-end through resolveAIConfig', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},

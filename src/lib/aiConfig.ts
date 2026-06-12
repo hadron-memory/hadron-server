@@ -177,25 +177,27 @@ export async function resolveAiConfig(
   const { appId, agentId } = ctx;
   let organizationId = ctx.organizationId ?? null;
 
+  // Each owner level is one query: the level's matching config and (for
+  // App/Agent) its organizationId come back together, so a miss costs no
+  // extra roundtrip for the org lookup (PR #262 review).
   if (appId) {
-    const config = await db.aiServiceConfig.findFirst({ where: { appId, name, enabled: true } });
+    const app = await db.app.findUnique({
+      where: { id: appId },
+      include: { aiServiceConfigs: { where: { name, enabled: true }, take: 1 } },
+    });
+    const config = app?.aiServiceConfigs[0];
     if (config) return { config, ownerType: 'APP' };
-    if (!organizationId) {
-      const app = await db.app.findUnique({ where: { id: appId }, select: { organizationId: true } });
-      organizationId = app?.organizationId ?? null;
-    }
+    if (!organizationId) organizationId = app?.organizationId ?? null;
   }
 
   if (agentId) {
-    const config = await db.aiServiceConfig.findFirst({ where: { agentId, name, enabled: true } });
+    const agent = await db.agent.findUnique({
+      where: { id: agentId },
+      include: { aiServiceConfigs: { where: { name, enabled: true }, take: 1 } },
+    });
+    const config = agent?.aiServiceConfigs[0];
     if (config) return { config, ownerType: 'AGENT' };
-    if (!organizationId) {
-      const agent = await db.agent.findUnique({
-        where: { id: agentId },
-        select: { organizationId: true },
-      });
-      organizationId = agent?.organizationId ?? null;
-    }
+    if (!organizationId) organizationId = agent?.organizationId ?? null;
   }
 
   if (organizationId) {

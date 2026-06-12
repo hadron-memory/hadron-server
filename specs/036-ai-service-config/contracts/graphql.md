@@ -27,8 +27,9 @@ type AiServiceConfig {
   apiKeyPreview: String
   params: JSON
   enabled: Boolean!
-  createdAt: DateTime!
-  updatedAt: DateTime
+  # ISO-8601 strings (house style — no DateTime scalar in this schema).
+  createdAt: String!
+  updatedAt: String
 }
 
 # Privileged resolution result (decrypted) — successor to AgentAIConfig /
@@ -69,19 +70,31 @@ resolveAIConfig(name: String, appId: ID, agentId: ID): ResolvedAiConfig!
 ## Mutations
 
 ```graphql
-input AiServiceConfigInput {
+# Flat args (house style — the schema does not use input objects here).
+# apiKey semantics: create — omitted = stored without a key; update —
+# omitted = keep stored key, empty string = clear, value = replace.
+# Auth for all three: admin rights on the owning entity (as aiServiceConfigs).
+createAiServiceConfig(
+  ownerType: AiConfigOwnerType!
+  ownerId: ID!
   name: String!
   provider: String!
   model: String!
-  # Omitted = keep stored key (update) / no key (create). Empty string = clear.
   apiKey: String
   params: JSON
   enabled: Boolean
-}
+): AiServiceConfig!
 
-# Auth for all three: admin rights on the owning entity (as aiServiceConfigs).
-createAiServiceConfig(ownerType: AiConfigOwnerType!, ownerId: ID!, input: AiServiceConfigInput!): AiServiceConfig!
-updateAiServiceConfig(id: ID!, input: AiServiceConfigUpdateInput!): AiServiceConfig!   # all input fields optional
+updateAiServiceConfig(
+  id: ID!
+  name: String
+  provider: String
+  model: String
+  apiKey: String
+  params: JSON
+  enabled: Boolean
+): AiServiceConfig!
+
 deleteAiServiceConfig(id: ID!): Boolean!
 ```
 

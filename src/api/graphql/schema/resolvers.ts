@@ -6537,7 +6537,9 @@ export const resolvers = {
         keyData.apiKeyEncrypted = encryptToken(apiKey);
         keyData.apiKeyPreview = apiKeyPreviewOf(apiKey);
       } else if (!existing?.apiKeyEncrypted) {
-        throw new Error('API key is required when no key is saved yet');
+        rethrowAiConfigTyped(
+          new AiConfigValidationError('API key is required when no key is saved yet'),
+        );
       }
       if (existing) {
         await ctx.db.aiServiceConfig.update({
@@ -6634,7 +6636,8 @@ export const resolvers = {
         return toGqlAiServiceConfig(config);
       } catch (e: unknown) {
         if ((e as { code?: string }).code === 'P2002') {
-          rethrowAiConfigTyped(new DuplicateAiServiceConfigNameError(args.name));
+          // Echo the canonical (trimmed) name the unique index actually saw.
+          rethrowAiConfigTyped(new DuplicateAiServiceConfigNameError(args.name.trim()));
         }
         rethrowAiConfigTyped(e);
       }
@@ -6678,7 +6681,9 @@ export const resolvers = {
         return toGqlAiServiceConfig(config);
       } catch (e: unknown) {
         if ((e as { code?: string }).code === 'P2002') {
-          rethrowAiConfigTyped(new DuplicateAiServiceConfigNameError(args.name ?? ''));
+          // P2002 here can only come from renaming onto a conflict, so
+          // args.name is set; trim to match the canonical stored form.
+          rethrowAiConfigTyped(new DuplicateAiServiceConfigNameError((args.name ?? '').trim()));
         }
         rethrowAiConfigTyped(e);
       }
@@ -7349,10 +7354,11 @@ export const resolvers = {
           const provider = aiProvider ?? existing?.provider;
           const model = aiModel ?? existing?.model;
           if (!provider || !model) {
-            // Clearing/keeping a key on an App with no saved config is a
-            // no-op (legacy column semantics tolerated key-only writes);
-            // setting one without provider+model is an error.
-            if (aiApiKey) {
+            // Clearing/keeping a key on an App with no saved config stays a
+            // no-op (legacy column semantics tolerated key-only clears), but
+            // any attempt to SET a partial config errors cleanly instead of
+            // silently dropping the args (PR #262 review).
+            if (aiProvider || aiModel || aiApiKey) {
               throw new GraphQLError(
                 'aiProvider and aiModel are both required when configuring AI for an App that has no saved config',
                 { extensions: { code: 'AiConfigValidationError' } },

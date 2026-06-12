@@ -23,7 +23,7 @@ model AiServiceConfig {
   provider        String
   /// Model identifier, passed verbatim to the provider.
   model           String
-  /// AES-256-GCM-encrypted API key (src/lib/crypto.ts encryptToken). For
+  /// AES-256-GCM-encrypted API key (src/lib/tokenCrypto.ts encryptToken). For
   /// bedrock this is a JSON-encoded {accessKeyId, secretAccessKey, region}
   /// triple, stored opaque.
   apiKeyEncrypted String?       @map("api_key_encrypted")
