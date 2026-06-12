@@ -3799,8 +3799,9 @@ export const resolvers = {
         targetNodeId: string;
         label: string;
         condition?: unknown;
-        priority?: number;
-        data?: Record<string, unknown>;
+        // GraphQL nullable args: non-JS clients send explicit nulls.
+        priority?: number | null;
+        data?: Record<string, unknown> | null;
       },
       ctx: Context,
     ) => {
@@ -3815,7 +3816,13 @@ export const resolvers = {
           targetId: targetNodeId,
           label,
           condition: (condition ?? null) as InputJsonValue,
-          ...(priority !== undefined ? { priority } : {}),
+          // != null: the GraphQL arg is nullable, and non-JS clients (the
+          // Go CLI) send explicit nulls for unset args. priority is a
+          // non-nullable Int @default(0) — passing null to Prisma fails
+          // validation with a misleading "Argument source is missing"
+          // (the invalid field disqualifies the scalar-FK input variant).
+          // Issue #263.
+          ...(priority != null ? { priority } : {}),
           data: (data ?? null) as InputJsonValue,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
@@ -3829,8 +3836,8 @@ export const resolvers = {
         edgeId: string;
         label?: string;
         condition?: unknown;
-        priority?: number;
-        data?: Record<string, unknown>;
+        priority?: number | null;
+        data?: Record<string, unknown> | null;
       },
       ctx: Context,
     ) => {
@@ -3843,7 +3850,9 @@ export const resolvers = {
         data: {
           ...(label !== undefined ? { label } : {}),
           ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
-          ...(priority !== undefined ? { priority } : {}),
+          // != null: explicit null from non-JS clients means "unset" — keep
+          // the stored priority (the column is a non-nullable Int). #263.
+          ...(priority != null ? { priority } : {}),
           ...(data !== undefined ? { data: data as InputJsonValue } : {}),
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
         },
