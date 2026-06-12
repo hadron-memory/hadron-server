@@ -52,13 +52,15 @@ function escapeRegExp(s: string): string {
 //
 // Left boundary INCLUDES `.` — so `foo.acme.com:dev` (a different org that
 // happens to end with the source org's domain) is not rewritten.
-// Right boundary EXCLUDES `.` — so a sentence-final period after a URN
-// ("see acme.com::dev.") doesn't block the rewrite. Trade-off: a sibling
-// memory whose slug extends the source's with a dot atom (`dev.x`) would
-// false-match; dotted memory slugs don't occur in practice, sentence
-// periods do.
+// Right boundary: a bare `.` followed by a non-slug char (or end) is
+// sentence punctuation ("see acme.com::dev.") and must NOT block the
+// rewrite — but `.` followed by another slug-atom char is still inside an
+// identifier (`acme.com::dev.x` is a DIFFERENT memory whose slug extends
+// the source's with a dot atom), so that blocks the match (PR-265 review,
+// Copilot).
 const LEFT_BOUNDARY = 'A-Za-z0-9._-';
 const RIGHT_BOUNDARY = 'A-Za-z0-9_-';
+const SLUG_ATOM = 'A-Za-z0-9._-';
 
 /**
  * Rewrite every reference to `oldUrn` (stored legacy form) into `newUrn`
@@ -83,7 +85,7 @@ export function rewriteMemoryUrnRefs(
     [oldForms.legacy, newForms.legacy],
   ] as const) {
     const re = new RegExp(
-      `(?<![${LEFT_BOUNDARY}])${escapeRegExp(from)}(?![${RIGHT_BOUNDARY}])`,
+      `(?<![${LEFT_BOUNDARY}])${escapeRegExp(from)}(?![${RIGHT_BOUNDARY}])(?!\\.[${SLUG_ATOM}])`,
       'g',
     );
     out = out.replace(re, to);
@@ -168,16 +170,6 @@ export async function cloneMemoryGraph(
       });
 
       // ── Nodes ──────────────────────────────────────────────────────────
-      // All node ids of the source (incl. soft-deleted) so edges can tell
-      // "deleted internal target" (skip) apart from "external target" (keep).
-      const allSourceNodeIds = new Set(
-        (
-          await tx.node.findMany({
-            where: { memoryId: source.id },
-            select: { id: true },
-          })
-        ).map((n) => n.id),
-      );
       const nodes = await tx.node.findMany({
         where: { memoryId: source.id, deletedAt: null },
       });
@@ -246,10 +238,27 @@ export async function cloneMemoryGraph(
       const edges = await tx.edge.findMany({
         where: { deletedAt: null, sourceId: { in: [...idMap.keys()] } },
       });
+      // Targets not in the live-ID map are either soft-deleted internal
+      // nodes (skip the edge) or external nodes (keep the original id).
+      // Query only those — not every node id of the source memory — to
+      // classify them (PR-265 review, Gemini).
+      const unmappedTargetIds = [
+        ...new Set(edges.map((e) => e.targetId).filter((id) => !idMap.has(id))),
+      ];
+      const deletedInternalTargetIds = new Set(
+        unmappedTargetIds.length > 0
+          ? (
+              await tx.node.findMany({
+                where: { id: { in: unmappedTargetIds }, memoryId: source.id },
+                select: { id: true },
+              })
+            ).map((n) => n.id)
+          : [],
+      );
       const edgeRows: Prisma.EdgeCreateManyInput[] = [];
       for (const e of edges) {
         const newTarget = idMap.get(e.targetId);
-        if (!newTarget && allSourceNodeIds.has(e.targetId)) continue;
+        if (!newTarget && deletedInternalTargetIds.has(e.targetId)) continue;
         edgeRows.push({
           id: generateId(),
           sourceId: idMap.get(e.sourceId)!,

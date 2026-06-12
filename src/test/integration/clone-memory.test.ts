@@ -51,6 +51,7 @@ describe('rewriteMemoryUrnRefs', () => {
     const text = [
       'acme.com::other::x',
       'acme.com::dev-tools::y', // slug extends "dev" with a slug char
+      'acme.com::dev.x::y', // slug extends "dev" with a dot atom (PR-265 review)
       'foo.acme.com::dev::z', // different org ending in the source org
     ].join('\n');
     expect(rewriteMemoryUrnRefs(text, OLD, NEW)).toBe(text);
