@@ -9,7 +9,7 @@ for every GraphQL mutation/query touching access control, against real Postgres.
 ## Phase 1: Setup (schema + constraints)
 
 - [ ] T001 Add `AiServiceConfig` model + back-relations (`aiServiceConfigs AiServiceConfig[]` on `HadronServer`, `Organization`, `App`, `Agent`) to `prisma/schema.prisma` per data-model.md, then run `pnpm prisma generate`
-- [ ] T002 Hand-write `prisma/migrations/20260611120000_ai_service_config/migration.sql`: header comment (migration intent, Constitution II), CREATE TABLE, `chk_ai_service_config_owner` CHECK (`num_nonnulls(...) = 1`), 4 partial unique indexes, 4 FK indexes, idempotent backfill INSERTs from `agents`/`apps` legacy `ai_*` columns as `'default'` rows (apps have no preview column — leave NULL)
+- [ ] T002 Hand-write `prisma/migrations/20260611120000_ai_service_config/migration.sql`: header comment (migration intent incl. deliberate no-backfill data drop, Constitution II), CREATE TABLE, `chk_ai_service_config_owner` CHECK (`num_nonnulls(...) = 1`), 4 partial unique indexes, 4 FK indexes, DROP of `agents.ai_provider/ai_model/ai_api_key_encrypted/ai_api_key_preview` and `apps.ai_provider/ai_model/ai_api_key_encrypted`; remove the corresponding fields from `Agent`/`App` in `prisma/schema.prisma` (part of T001's schema edit)
 - [ ] T003 [P] Append the CHECK + partial unique indexes to `prisma/post-push.sql` (036 section; `DROP CONSTRAINT IF EXISTS` + `ADD CONSTRAINT` for the CHECK — never `IF NOT EXISTS` on a CHECK)
 - [ ] T004 [P] Add the same constraint DDL to `src/test/globalSetup.ts` (4th sync point — migration, post-push.sql, globalSetup.ts must stay textually in sync)
 
@@ -47,52 +47,52 @@ for every GraphQL mutation/query touching access control, against real Postgres.
 
 **Checkpoint**: Portal-ready management surface; US1 + US2 = usable registry.
 
-## Phase 5: User Story 3 — migration + legacy shims (P2)
+## Phase 5: User Story 3 — legacy cut-over + shims (P2)
 
-**Goal**: Live installations keep working byte-identically; registry becomes single source of truth.
-**Independent test**: Seed legacy columns, run backfill SQL, assert row + resolution equivalence; exercise legacy GraphQL operations.
+**Goal**: Legacy columns dropped (no backfill — data confirmed disposable); legacy API operations keep shapes/auth over the registry.
+**Independent test**: With columns gone, exercise every legacy GraphQL operation end-to-end against the registry-backed implementation, including the freshly-migrated "nothing configured" state.
 
-- [ ] T016 [US3] Backfill-equivalence integration test in `src/test/integration/036-ai-service-config.test.ts`: seed Agents/Apps with legacy `ai_*` columns, execute the backfill statements read from `prisma/migrations/20260611120000_ai_service_config/migration.sql` against `hadron_test`, assert `'default'` rows match (provider/model/encrypted blob verbatim), no rows for entities without legacy settings, re-run is a no-op (idempotency)
-- [ ] T017 [US3] Re-point legacy surface in `src/api/graphql/schema/resolvers.ts`: `agentAIConfig`/`appAIConfig` read the entity's `'default'` registry row (same shape + auth, no walk); `updateAgentAIConfig` upserts / `clearAgentAIConfig` deletes that row (stop writing legacy columns); `Agent.hasAiApiKey`/`App.hasAiApiKey` + `aiProvider`/`aiModel`/`aiApiKeyPreview` field resolvers derive from the registry; add deprecation doc-comments in `src/api/graphql/schema/typeDefs.ts` pointing at the new surface
-- [ ] T018 [US3] Update existing tests that exercise the legacy columns/paths (`src/api/graphql/schema/resolvers.agentChat.test.ts`, `src/test/integration/008-build-install-run.test.ts`, `src/integrations/db/app-schema-phase1.test.ts`) to the registry-backed behavior; keep assertions on response *shape* unchanged (that is the SC-002 regression guard)
-- [ ] T019 [US3] Shim integration tests in `src/test/integration/036-ai-service-config.test.ts`: `updateAgentAIConfig` creates/updates the registry row; `clearAgentAIConfig` deletes it; `agentAIConfig`/`appAIConfig` return decrypted `'default'` row with legacy auth gates; App-overrides-Agent precedence preserved end-to-end through `resolveAIConfig`
+- [ ] T016 [US3] Re-point legacy surface in `src/api/graphql/schema/resolvers.ts`: `agentAIConfig`/`appAIConfig` read the entity's `'default'` registry row (same shape + auth, no walk); `updateAgentAIConfig` upserts / `clearAgentAIConfig` deletes that row; `Agent.hasAiApiKey`/`App.hasAiApiKey` + `aiProvider`/`aiModel`/`aiApiKeyPreview` field resolvers derive from the registry (columns no longer exist); add deprecation doc-comments in `src/api/graphql/schema/typeDefs.ts` pointing at the new surface
+- [ ] T017 [US3] Update existing tests that exercise the legacy columns/paths (`src/api/graphql/schema/resolvers.agentChat.test.ts`, `src/test/integration/008-build-install-run.test.ts`, `src/integrations/db/app-schema-phase1.test.ts`) to the registry-backed behavior; keep assertions on response *shape* unchanged (that is the SC-002 regression guard)
+- [ ] T018 [US3] Shim integration tests in `src/test/integration/036-ai-service-config.test.ts`: `updateAgentAIConfig` creates/updates the registry row; `clearAgentAIConfig` deletes it; `agentAIConfig`/`appAIConfig` return decrypted `'default'` row with legacy auth gates and return null cleanly when nothing is configured (fresh-migration state); App-overrides-Agent precedence preserved end-to-end through `resolveAIConfig`
 
-**Checkpoint**: Deploy-safe — portal unchanged, Micromentor read path intact.
+**Checkpoint**: Deploy-safe — portal unchanged against an initially-empty registry; keys re-entered manually post-deploy.
 
 ## Phase 6: User Story 4 — name-referenced consumers (P3)
 
 **Goal**: Consumers select cost/model behavior by name only.
 **Independent test**: `resolveAiConfigWithFallback` behavior via the lib + GraphQL query (name-hit, name-miss→default, default-miss→typed error).
 
-- [ ] T020 [US4] Integration tests in `src/test/integration/036-ai-service-config.test.ts` covering the consumer contract through `resolveAIConfig`: explicit `fast` hit uses `fast`; `fast` missing falls back to `default`; neither → `NoAiConfigAvailableError` with name + context (and no key material) in the message
-- [ ] T021 [US4] Document the consumer convention (name-only reference, conventional names `default`/`fast`/`frontier`, future `AgentWebhook.aiConfigName`) in the `resolveAIConfig` doc-comment in `src/api/graphql/schema/typeDefs.ts` and a short section in `specs/036-ai-service-config/quickstart.md`
+- [ ] T019 [US4] Integration tests in `src/test/integration/036-ai-service-config.test.ts` covering the consumer contract through `resolveAIConfig`: explicit `fast` hit uses `fast`; `fast` missing falls back to `default`; neither → `NoAiConfigAvailableError` with name + context (and no key material) in the message
+- [ ] T020 [US4] Document the consumer convention (name-only reference, conventional names `default`/`fast`/`frontier`, future `AgentWebhook.aiConfigName`) in the `resolveAIConfig` doc-comment in `src/api/graphql/schema/typeDefs.ts` and a short section in `specs/036-ai-service-config/quickstart.md`
 
 **Checkpoint**: Contract ready for the headless-runner/webhook spec to consume.
 
 ## Phase 7: Polish & cross-cutting
 
-- [ ] T022 [P] Seed demo configs in `prisma/seed.ts` (org-level `default` on Acme; agent-level `fast` on Juno) so portal sessions can demo resolution without setup
-- [ ] T023 [P] Doc-comment + contract review pass: every new/changed type, field, arg in `src/api/graphql/schema/typeDefs.ts` documented (Constitution II); migration header complete
-- [ ] T024 Full gate: `pnpm test` and `pnpm tsc --noEmit` green; run quickstart.md smoke against `hadron_dev`
-- [ ] T025 Record the pattern in the Hadron dev graph (CLI: `hadron node add`): a `findings:`/`conventions:` node for the AI-config registry + resolution order, and a symptom trigger in `urn:node:hadronmemory.com::dev::start-here` (supersedes the `llm-provider-config-surfaces` routing for server-side config); note the portal follow-up (config UIs + `/api/agent-chat/ai-config` → new surface)
+- [ ] T021 [P] Seed demo configs in `prisma/seed.ts` (org-level `default` on Acme; agent-level `fast` on Juno) so portal sessions can demo resolution without setup
+- [ ] T022 [P] Doc-comment + contract review pass: every new/changed type, field, arg in `src/api/graphql/schema/typeDefs.ts` documented (Constitution II); migration header complete
+- [ ] T023 Full gate: `pnpm test` and `pnpm tsc --noEmit` green; run quickstart.md smoke against `hadron_dev`
+- [ ] T024 Record the pattern in the Hadron dev graph (CLI: `hadron node add`): a `findings:`/`conventions:` node for the AI-config registry + resolution order, and a symptom trigger in `urn:node:hadronmemory.com::dev::start-here` (supersedes the `llm-provider-config-surfaces` routing for server-side config); note the portal follow-up (config UIs + `/api/agent-chat/ai-config` → new surface)
 
 ## Dependencies
 
 - Phase 1 → Phase 2 → Phase 3 (US1) → Phase 4 (US2) → Phase 5 (US3) → Phase 6 (US4) → Phase 7
 - US2 depends on US1 only for shared typeDefs scaffolding (T010); could run parallel after T010 if needed
-- US3 depends on US1 (resolution) but not US2; T016 only needs Phase 1
+- US3 depends on US1 (resolution) but not US2
 - US4 is test/documentation work over Phase 2's `resolveAiConfigWithFallback`
 
 ## Parallel opportunities
 
 - T003 + T004 (different files) after T002
 - T008 + T009 after T007
-- T022 + T023 during polish
+- T021 + T022 during polish
 - Within stories, typeDefs and resolver tasks are sequential (same two files dominate — `typeDefs.ts`, `resolvers.ts` — so most GraphQL tasks are deliberately not [P])
 
 ## Implementation strategy
 
 MVP = Phases 1–3 (US1): registry table + resolution query, demonstrable with seeded
-data. Ship-gate = through Phase 5 (US3): the deploy is only safe for Micromentor once
-the shims + backfill land, so Phases 1–5 belong in one PR (bundle-PRs working
-agreement). Phases 6–7 can ride along or follow immediately.
+data. Ship-gate = through Phase 5 (US3): the column drop and the shims must land
+together (the schema change breaks the old resolvers), so Phases 1–5 belong in one PR
+(bundle-PRs working agreement). Phases 6–7 can ride along or follow immediately.
+Post-deploy manual step: re-enter AI keys (stored configs deliberately dropped).

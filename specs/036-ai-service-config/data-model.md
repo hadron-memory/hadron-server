@@ -6,9 +6,9 @@
 /// Named AI service configuration (spec 036). Owned by exactly one of
 /// HadronServer / Organization / App / Agent (chk_ai_service_config_owner).
 /// Resolved by name walking App -> Agent -> Org(of the App) -> HadronServer;
-/// well-known fallback name: 'default'. Supersedes the legacy Agent.ai_* /
-/// App.ai_* columns (backfilled as 'default' rows; columns frozen, removal
-/// is a follow-up spec).
+/// well-known fallback name: 'default'. Replaces the legacy Agent.ai_* /
+/// App.ai_* columns, which the 036 migration drops outright (stored values
+/// confirmed disposable 2026-06-11; re-entered manually).
 model AiServiceConfig {
   id              String        @id @default(cuid())
   /// Lookup name, unique per owner (partial unique indexes). Conventional
@@ -82,25 +82,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_agent_name_uniq
   ON ai_service_configs (agent_id, name) WHERE agent_id IS NOT NULL;
 ```
 
-## Backfill (in the same migration, after table + constraints)
+## Legacy column drop (in the same migration, after table + constraints)
 
 ```sql
--- Backfill legacy per-Agent / per-App AI settings as 'default' configs.
--- Encrypted blobs copy verbatim (same HADRON_ENCRYPTION_KEY; no re-encryption).
--- Idempotent: ON CONFLICT against the partial uniques.
-INSERT INTO ai_service_configs
-  (id, name, agent_id, provider, model, api_key_encrypted, api_key_preview, enabled, created_at)
-SELECT 'aisc_' || md5(random()::text || id), 'default', id, ai_provider, ai_model,
-       ai_api_key_encrypted, ai_api_key_preview, true, now()
-FROM agents
-WHERE ai_provider IS NOT NULL AND ai_model IS NOT NULL AND deleted_at IS NULL
-ON CONFLICT (agent_id, name) WHERE agent_id IS NOT NULL DO NOTHING;
--- (App equivalent mirrors this with app_id / apps.)
+-- 036: legacy per-Agent / per-App AI settings do not survive (confirmed
+-- disposable 2026-06-11). No backfill; operators re-enter configs manually.
+ALTER TABLE agents
+  DROP COLUMN IF EXISTS ai_provider,
+  DROP COLUMN IF EXISTS ai_model,
+  DROP COLUMN IF EXISTS ai_api_key_encrypted,
+  DROP COLUMN IF EXISTS ai_api_key_preview;
+ALTER TABLE apps
+  DROP COLUMN IF EXISTS ai_provider,
+  DROP COLUMN IF EXISTS ai_model,
+  DROP COLUMN IF EXISTS ai_api_key_encrypted;
 ```
 
-*(Exact id-generation in the final SQL follows whatever the latest hand-written
-migration uses for app-layer-style ids in SQL; if none exists, `gen_random_uuid()`-based
-text is acceptable — ids are opaque cuid-like strings, not validated by shape.)*
+The Prisma model fields are removed from `Agent`/`App` in `schema.prisma` in the same
+change, so `db push` databases (`hadron_dev`/`hadron_test`) converge on the same shape.
 
 ## Resolution semantics
 
@@ -133,9 +132,9 @@ Context: `{ name?, appId?, agentId?, organizationId? }`.
 resolution without deleting credentials. Delete is hard and immediate; owner-entity
 delete cascades.
 
-## Legacy columns (transition state)
+## Legacy surface (transition state)
 
-| Column set | After this feature |
+| Surface | After this feature |
 |---|---|
-| `agents.ai_provider/ai_model/ai_api_key_encrypted/ai_api_key_preview` | Backfilled, frozen (no writes), still readable by old code paths; dropped in follow-up spec |
-| `apps.ai_provider/ai_model/ai_api_key_encrypted` | Same (note: `apps` has no preview column today — backfill leaves `api_key_preview` NULL for App rows) |
+| `agents.ai_*` / `apps.ai_*` columns | **Dropped** by the 036 migration (no backfill) |
+| `agentAIConfig` / `appAIConfig` / `updateAgentAIConfig` / `clearAgentAIConfig` / `hasAiApiKey` + AI field reads | Keep shapes/auth, registry-backed (the entity's `default` row); removal is a follow-up gated on portal migration |

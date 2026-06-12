@@ -100,9 +100,9 @@ Existing auth errors (`Unauthenticated`, org-role denials) follow current patter
 
 | Operation | New behavior |
 |---|---|
-| `agentAIConfig(agentId)` | Returns the Agent-owned `default` registry row (decrypted), same shape/auth as today; null when none |
+| `agentAIConfig(agentId)` | Returns the Agent-owned `default` registry row (decrypted), same shape/auth as today; null when none (a freshly-migrated deployment returns null everywhere — stored configs were dropped, not migrated) |
 | `appAIConfig(appId)` | Returns the App-owned `default` registry row (decrypted); null when none — keeps its single-entity contract (no walk) |
-| `updateAgentAIConfig(agentId, provider, model, apiKey)` | Upserts the Agent's `default` registry row; legacy columns no longer written |
+| `updateAgentAIConfig(agentId, provider, model, apiKey)` | Upserts the Agent's `default` registry row (legacy columns no longer exist) |
 | `clearAgentAIConfig(agentId)` | Deletes the Agent's `default` registry row |
 | `Agent.hasAiApiKey` / `App.hasAiApiKey` (and `aiProvider`/`aiModel`/`aiApiKeyPreview` field reads) | Field resolvers derive from the entity's `default` registry row |
 

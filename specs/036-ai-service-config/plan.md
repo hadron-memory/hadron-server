@@ -11,9 +11,9 @@ App / Agent — plus a resolution helper that walks **App → Agent → Org-of-t
 HadronServer** and returns the first enabled config matching a name (well-known fallback
 name: `default`). The existing `agentAIConfig`/`appAIConfig` queries and
 `updateAgentAIConfig`/`clearAgentAIConfig` mutations become shims over the registry so
-hadron-portal keeps working unchanged across the deploy; legacy `ai_*` columns are
-backfilled into `default`-named rows in the migration and frozen (removal is a follow-up
-spec gated on portal migration).
+hadron-portal keeps working unchanged across the deploy; legacy `ai_*` columns are **dropped** in the same migration — existing stored
+configurations are disposable (confirmed 2026-06-11; re-entered manually). Removal of the
+legacy GraphQL operations themselves is a follow-up gated on portal migration.
 
 ## Technical Context
 
@@ -24,8 +24,8 @@ spec gated on portal migration).
 **Target Platform**: hadron-server (the portal/UI follow-up is a separate hadron-portal change)
 **Project Type**: web service (GraphQL API + Prisma)
 **Performance Goals**: resolution is ≤ 4 indexed point lookups per session start; no measurable session-start regression
-**Constraints**: zero behavioral regression for live installations (Micromentor); legacy GraphQL fields keep working; keys never plaintext on management surfaces
-**Scale/Scope**: one new model, ~6 new GraphQL operations + 4 legacy shims, one migration with backfill, one resolution lib module
+**Constraints**: legacy GraphQL operations keep their shapes/auth (registry-backed shims; portal works against an initially-empty registry); stored AI configs are disposable — no backfill; keys never plaintext on management surfaces
+**Scale/Scope**: one new model, ~6 new GraphQL operations + 4 legacy shims, one migration (table create + legacy-column drop, no backfill), one resolution lib module
 
 ## Constitution Check
 
@@ -34,7 +34,7 @@ spec gated on portal migration).
 | Gate | Status | How the plan satisfies it |
 |---|---|---|
 | I — Pragmatic test-first: every mutation touching access control has an integration test against real Postgres | PASS | All new CRUD mutations + the privileged `resolveAIConfig` query get integration tests in `src/test/integration/036-ai-service-config.test.ts` (auth matrix, masked exposure, resolution precedence) |
-| II — Docs-concurrent: typeDefs doc-comments in same PR; migration intent in migration header | PASS | New types/fields/args documented in `typeDefs.ts`; migration SQL carries a header comment explaining table + backfill |
+| II — Docs-concurrent: typeDefs doc-comments in same PR; migration intent in migration header | PASS | New types/fields/args documented in `typeDefs.ts`; migration SQL carries a header comment explaining table + legacy-column drop (no backfill — data confirmed disposable) |
 | III / S2 — Typed errors only across the wire | PASS | New typed errors (`AiServiceConfigNotFoundError`, `DuplicateAiServiceConfigNameError`, `UnknownAiProviderError`, `NoAiConfigAvailableError`) join the `src/lib/entityRef/errors.ts` pattern; P2002 on create mapped to the duplicate-name error |
 | V — Zero-trust: all reads/writes through access-control layer | PASS | CRUD + resolution gate via `requireOrgRole` / platform-admin checks per owner level; no App-supplied claims trusted |
 | S3 — `typeDefs.ts` single template literal, no raw backticks in doc-comments | PASS | Doc-comments use single quotes |
@@ -67,7 +67,7 @@ prisma/
 │                                          #   HadronServer, Organization, App, Agent)
 ├── post-push.sql                          # + chk_ai_service_config_owner + 4 partial uniques
 └── migrations/20260611120000_ai_service_config/
-    └── migration.sql                      # CREATE TABLE + constraints + backfill INSERTs
+    └── migration.sql                      # CREATE TABLE + constraints + DROP legacy ai_* columns
 
 src/
 ├── lib/

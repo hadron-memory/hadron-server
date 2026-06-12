@@ -38,23 +38,18 @@ query {
 Expected: with no App/Agent `fast` config, resolution lands on the org level
 (`ownerType: ORGANIZATION`). Add an App-owned `fast` config and re-run — the App wins.
 
-## Verify migration backfill equivalence (SC-002)
+## After deploying (manual step)
 
-```bash
-# Pre-deploy sanity on a prod-like dump: every populated legacy column-set
-# must have a matching 'default' registry row after `prisma migrate deploy`.
-psql "$DATABASE_URL" -c "
-  SELECT count(*) FROM agents a
-  WHERE a.ai_provider IS NOT NULL AND a.ai_model IS NOT NULL AND a.deleted_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM ai_service_configs c
-                    WHERE c.agent_id = a.id AND c.name = 'default');"
-# expected: 0   (and the app-side twin of this query: 0)
-```
+Stored AI configurations were deliberately dropped by the migration (confirmed
+disposable, 2026-06-11) — re-enter keys via the portal's existing AI-config UIs
+(which hit the legacy operations, now registry-backed) or via
+`createAiServiceConfig`. Until then every surface reports "not configured"
+without errors.
 
 ## What did NOT change
 
 - hadron-portal works unmodified: `agentAIConfig`, `appAIConfig`,
   `updateAgentAIConfig`, `clearAgentAIConfig`, and `hasAiApiKey` keep their
   shapes/auth — they now read/write the registry under the hood.
-- Legacy `ai_*` columns still exist (frozen). Dropping them is the follow-up spec,
-  gated on the portal moving to the new surface.
+- Removal of those legacy GraphQL operations is the follow-up, gated on the
+  portal moving to the new surface.

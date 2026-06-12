@@ -78,23 +78,24 @@ those queries (org ADMIN of the context org, or platform ADMIN/OWNER).
 **Codebase facts**: `agentAIConfig` (resolvers.ts:2520) requires org ADMIN;
 `appAIConfig` (resolvers.ts:3201) requires org ADMIN or platform admin.
 
-## D8 — Legacy surface becomes shims; columns frozen after backfill
+## D8 — Legacy surface becomes shims; columns dropped, no backfill
 
-**Decision**: Single source of truth after migration. The migration backfills populated
-`Agent.ai_*` / `App.ai_*` column-sets into owner-scoped rows named `default` (copying the
-encrypted blob verbatim — same encryption key, no re-encryption). Then:
+**Decision**: Single source of truth from day one. Existing stored AI configurations are
+disposable (Holger, 2026-06-11: "None of the existing AI configuration need to survive.
+We can manually fill them back in. Nothing in production depends on it."), so the
+migration **drops** the `agents.ai_*` and `apps.ai_*` columns outright — no backfill, no
+data-equivalence guarantee. Operators re-enter keys manually. Then:
 - `agentAIConfig` / `appAIConfig` queries → read the registry (the entity's own `default`
   row; `appAIConfig` keeps returning only the App-level row, preserving its current
   single-entity contract).
 - `updateAgentAIConfig` / `clearAgentAIConfig` (and the App equivalent mutation path) →
   upsert/delete the entity's `default` registry row.
 - `Agent.hasAiApiKey` / `App.hasAiApiKey` field resolvers → derive from the registry.
-- Legacy columns are no longer written; they go stale and are dropped in a follow-up spec
-  once hadron-portal migrates (per spec FR-015).
-**Rationale**: Dual-write invites skew; shims keep the portal working byte-identically
-(SC-002) without it ever knowing the storage moved.
-**Alternatives**: dual-write during transition (rejected — skew risk, more code);
-read-through with column fallback (rejected — two sources of truth).
+**Rationale**: Shims keep the portal working without code changes (it sees "not
+configured" until keys are re-entered); dropping the columns now removes the follow-up
+column-cleanup spec entirely.
+**Alternatives**: backfill + frozen columns (rejected — pure overhead once the data was
+confirmed disposable); dual-write (rejected — skew risk).
 
 ## D9 — Provider registry + params validation
 
@@ -107,15 +108,14 @@ the encrypted key field, preserved as-is. `params Json?` holds provider-specific
 Params schemas are permissive (passthrough with typed well-known keys) so new provider
 knobs don't require server releases.
 
-## D10 — Backfill verification strategy
+## D10 — Cut-over verification strategy
 
-**Decision**: Backfill SQL lives in the migration (prod path: `prisma migrate deploy` on
-container start, per the prisma-deploy-flow ops node). Because `hadron_test`/`hadron_dev`
-are `db push`-managed (no migration replay), an integration test seeds legacy columns,
-executes the same backfill SQL (read from the migration file) against `hadron_test`, and
-asserts row equivalence + resolution equivalence (SC-002). The migration is written
-idempotently (`ON CONFLICT DO NOTHING` against the partial uniques) so a re-run cannot
-duplicate rows.
+**Decision**: No backfill to verify. The migration (prod path: `prisma migrate deploy`
+on container start, per the prisma-deploy-flow ops node) creates the table and drops the
+legacy columns. Verification is behavioral: integration tests exercise every legacy
+GraphQL operation against the registry-backed implementation and assert unchanged shapes
++ auth (revised SC-002), including the "nothing configured yet" state a freshly-migrated
+deployment is in.
 
 ## D11 — Resolution helper shape
 

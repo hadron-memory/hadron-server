@@ -44,20 +44,20 @@ An authorized user manages (creates, lists, updates, deletes, enables/disables) 
 
 ---
 
-### User Story 3 - Existing per-Agent/per-App AI settings keep working (migration) (Priority: P2)
+### User Story 3 - Clean cut-over from the legacy per-Agent/per-App AI columns (Priority: P2)
 
-Agents and Apps that already carry AI settings in the legacy columns continue to work without operator action: their settings are backfilled into the new registry as configs named `default`, and the existing session paths (agent chat, app sessions) read from the registry afterwards. Legacy columns and their API fields remain readable during the transition and are removed only in a follow-up once the portal has migrated.
+The legacy AI columns on Agent and App are removed outright in this feature's migration — existing stored configurations do **not** survive and are re-entered manually afterwards (confirmed 2026-06-11: nothing in production depends on them). The existing API operations the portal calls (read/update/clear AI config, has-key indicators) keep their shapes but are re-pointed at the registry, so the portal keeps functioning against an initially-empty registry until operators re-enter keys.
 
 **Why this priority**: Micromentor is live; the read path must keep working across the deploy. Migration safety is as important as the new capability, but it depends on P1 existing.
 
-**Independent Test**: Seed an Agent and an App with legacy AI columns populated, run the backfill, and verify (a) registry rows named `default` exist with matching provider/model/key, and (b) an agent-chat session resolves the same provider/model/key it would have before.
+**Independent Test**: With the migration applied (legacy columns gone), exercise the legacy API operations end-to-end: save a config through the legacy update operation, read it back through the legacy read operation, and verify it landed in the registry as the entity's `default` config.
 
 **Acceptance Scenarios**:
 
-1. **Given** an Agent with legacy provider/model/key columns populated, **When** the backfill runs, **Then** an Agent-owned config named `default` exists carrying the same provider, model, encrypted key, and preview.
-2. **Given** an App with legacy override columns populated, **When** the backfill runs, **Then** an App-owned config named `default` exists, and sessions through that App resolve it ahead of the Agent's config (preserving today's App-overrides-Agent behavior).
-3. **Given** an Agent with no legacy AI settings, **When** the backfill runs, **Then** no registry row is created for it.
-4. **Given** the backfill has run, **When** existing portal/API clients read the legacy AI fields, **Then** the reads still succeed during the transition window.
+1. **Given** the migration has applied, **When** the legacy update operation saves provider/model/key for an Agent, **Then** an Agent-owned registry config named `default` is created and the legacy read operation returns it.
+2. **Given** an App-owned `default` config and an Agent-owned `default` config, **When** a session through that App resolves, **Then** the App-level config wins (preserving today's App-overrides-Agent behavior).
+3. **Given** the migration has applied and no configs have been re-entered, **When** portal/API clients read the legacy AI fields, **Then** the reads succeed and report "not configured" (no errors, no crashes).
+4. **Given** the legacy clear operation runs, **When** the entity has a `default` registry config, **Then** that config is deleted.
 
 ---
 
@@ -104,9 +104,9 @@ Platform consumers that trigger LLM work — future webhooks, scheduled/backgrou
 - **FR-010**: Authorized users MUST be able to create, list, update, enable/disable, and delete configurations on entities they administer; updating a configuration without supplying a key MUST preserve the stored key.
 - **FR-011**: Access control MUST follow the owning entity: only users with administrative rights over the owner (platform admin for Host, org owner/admin for Organization, App administrators for App, Agent owner for Agent) may manage or view its configurations.
 - **FR-012**: Provider-specific parameters MUST be validated per provider at write time; configurations for unrecognized providers MUST be rejected.
-- **FR-013**: Existing Agent-level and App-level AI settings (provider, model, encrypted key, preview) MUST be backfilled into the registry as configurations named `default` owned by the respective Agent/App; entities with no legacy settings produce no rows.
-- **FR-014**: After backfill, all session execution paths that previously read the legacy columns MUST read from the registry, preserving the existing App-overrides-Agent precedence.
-- **FR-015**: Legacy columns and their API read fields MUST remain functional during the transition; their removal is a separate follow-up feature gated on portal migration (out of scope here).
+- **FR-013**: The legacy Agent-level and App-level AI columns MUST be dropped in this feature's migration. Stored values are NOT migrated (confirmed disposable); operators re-enter configurations manually.
+- **FR-014**: All session execution paths that previously read the legacy columns MUST read from the registry, preserving the existing App-overrides-Agent precedence.
+- **FR-015**: The legacy API operations (read/update/clear AI config, has-key fields) MUST keep their existing shapes and authorization, re-implemented over the registry (the entity's `default` config), so existing clients keep working without code changes; their removal is a follow-up gated on portal migration.
 - **FR-016**: Deleting an owner entity MUST delete its configurations.
 - **FR-017**: Resolution MUST work in contexts where some levels are absent (e.g. a platform job with no App or Agent resolves against Host only).
 
@@ -114,14 +114,14 @@ Platform consumers that trigger LLM work — future webhooks, scheduled/backgrou
 
 - **AiServiceConfig**: A named AI service configuration. Attributes: lookup name; exactly one owner (HadronServer, Organization, App, or Agent); provider; model; encrypted API key + masked preview; provider-specific parameters; enabled flag; audit timestamps. Uniqueness: (owner, name).
 - **HadronServer** *(existing)*: The platform host entity; gains the role of outermost config owner. No new host entity is introduced.
-- **Organization / App / Agent** *(existing)*: Gain config ownership; Agent and App additionally carry legacy AI columns that this feature supersedes (removal deferred).
+- **Organization / App / Agent** *(existing)*: Gain config ownership; the legacy AI columns on Agent and App are dropped by this feature's migration.
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
 - **SC-001**: For any execution context and config name, resolution returns a deterministic result that matches the documented precedence order in 100% of cases (verified by an exhaustive precedence test matrix across all four levels × enabled/disabled × present/absent).
-- **SC-002**: After backfill, every Agent and App that had working AI settings before the migration produces byte-identical provider/model/key resolution results through the new registry (zero behavioral regressions on live installations).
+- **SC-002**: All legacy API operations keep their exact shapes and authorization after the cut-over (verified by exercising each against the registry-backed implementation); a freshly-migrated deployment reports "not configured" everywhere without errors until configs are re-entered.
 - **SC-003**: No management/listing API response, log line, or error message ever contains a plaintext API key (verified by tests asserting masked-only exposure); decrypted keys flow only through the privileged resolution surface to callers who pass its authorization check.
 - **SC-004**: An operator can create a named config and see a session use it without touching any other entity's settings (config changes at one level never require edits at another).
 - **SC-005**: A future consumer (webhook, scheduled task, portal chatbot) can select per-invocation model/cost behavior by supplying only a config name — no credentials or provider details at the call site.
@@ -134,7 +134,8 @@ Platform consumers that trigger LLM work — future webhooks, scheduled/backgrou
 - One config row = one (provider, model, key, params) tuple; the two-entity split (shared credentials + per-model detail) from the 2026-05-03 discussion is deliberately collapsed for v1 and can be normalized later if key rotation across many configs becomes painful.
 - `default` is a reserved-by-convention well-known name, not an enforced enum; additional conventional names (e.g. `fast`, `frontier`) are documented, not enforced.
 - User-level personal configs need no new mechanism: a user attaches org-level configs to their personal organization.
-- Out of scope (deferred): cross-org config sharing/visibility, `payedBy`/payment semantics, rate limits and token allowances (headless-runner concern; soft limits can live in provider params), URN-based cross-org references, and removal of the legacy columns (follow-up feature).
+- Existing stored AI configurations are disposable (confirmed 2026-06-11): no backfill, no data-equivalence guarantee; the legacy columns are dropped in this migration and operators re-enter keys manually.
+- Out of scope (deferred): cross-org config sharing/visibility, `payedBy`/payment semantics, rate limits and token allowances (headless-runner concern; soft limits can live in provider params), URN-based cross-org references, and removal of the legacy GraphQL operations (follow-up gated on portal migration).
 - Encryption reuses the platform's existing AES-256-GCM token-encryption helpers and key management; no new key-management mechanism is introduced.
 - LLM calls are currently executed by the portal's server-side runtime (and later the headless runner), which fetches decrypted credentials from the platform via the existing `agentAIConfig`/`appAIConfig` queries. The privileged resolution surface (FR-009a) replaces those queries; the portal's `/api/agent-chat/ai-config` save/test/clear endpoint and both portal config UIs (agent detail, App settings) migrate to the new CRUD + resolution surfaces in the portal follow-up.
 - Known provider identifiers today: `anthropic`, `openai`, `glm`, `bedrock`. Bedrock stores a JSON-encoded credential triple (access key ID, secret, region) in the key field — provider validation must preserve that behavior.
