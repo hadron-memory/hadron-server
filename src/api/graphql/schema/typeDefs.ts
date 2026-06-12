@@ -1740,6 +1740,27 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     deleteMemory(id: ID!): Boolean!
+
+    """
+    Clone a Memory into a new Memory (same org) named \`name\`.
+
+    Accepts the source's ID or URN. Copies the Memory row plus all live
+    Nodes, Edges, and PendingEdges; references to the source memory's URN
+    inside node content/abstract (canonical and legacy spellings) are
+    rewritten to the clone's URN. Vector-index config carries over and the
+    clone's nodes are stamped for re-embedding.
+
+    NOT copied: version history, subscriptions, shares, group members
+    (the caller is bootstrapped as a group clone's first owner), sessions,
+    licenses, log entries, assets, and git-sync config (the clone starts
+    DB-only).
+
+    Authorization mirrors deleteMemory: personal/private → owner only;
+    knowledge/group → org ADMIN. system/app-class sources and encrypted
+    memories are rejected.
+    """
+    cloneMemory(id: ID!, name: String!): Memory!
+
     """
     Set encrypted source token for non-GitHub-App repos.
 
