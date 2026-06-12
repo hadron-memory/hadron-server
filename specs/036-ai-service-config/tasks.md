@@ -73,7 +73,7 @@ for every GraphQL mutation/query touching access control, against real Postgres.
 - [x] T021 [P] Seed demo configs in `prisma/seed.ts` (org-level `default` on Acme; agent-level `fast` on Juno) so portal sessions can demo resolution without setup
 - [x] T022 [P] Doc-comment + contract review pass: every new/changed type, field, arg in `src/api/graphql/schema/typeDefs.ts` documented (Constitution II); migration header complete
 - [x] T023 Full gate: `pnpm test` and `pnpm tsc --noEmit` green; run quickstart.md smoke against `hadron_dev`
-- [ ] T024 Record the pattern in the Hadron dev graph (CLI: `hadron node add`): a `findings:`/`conventions:` node for the AI-config registry + resolution order, and a symptom trigger in `urn:node:hadronmemory.com::dev::start-here` (supersedes the `llm-provider-config-surfaces` routing for server-side config); note the portal follow-up (config UIs + `/api/agent-chat/ai-config` → new surface)
+- [x] T024 Record the pattern in the Hadron dev graph (CLI: `hadron node add`): a `findings:`/`conventions:` node for the AI-config registry + resolution order, and a symptom trigger in `urn:node:hadronmemory.com::dev::start-here` (supersedes the `llm-provider-config-surfaces` routing for server-side config); note the portal follow-up (config UIs + `/api/agent-chat/ai-config` → new surface)
 
 ## Dependencies
 
