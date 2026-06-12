@@ -66,6 +66,7 @@ import {
   MemoryNotFoundForShareError,
   MemoryShareGranteeMissingError,
 } from '../../../controller/operations/createMemoryShare.js';
+import { cloneMemoryGraph } from '../../../controller/operations/cloneMemory.js';
 import { revokeMemoryShare } from '../../../controller/operations/revokeMemoryShare.js';
 import {
   updateMemoryShareRole,
@@ -4916,6 +4917,97 @@ export const resolvers = {
         data: { deletedAt: new Date() },
       });
       return true;
+    },
+
+    cloneMemory: async (
+      _: unknown,
+      { id, name }: { id: string; name: string },
+      ctx: Context,
+    ) => {
+      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
+      const { id: sourceId } = await resolveMemoryRef(ctx.db, id);
+      const source = await ctx.db.memory.findUniqueOrThrow({ where: { id: sourceId } });
+
+      // Class-aware authz mirrors deleteMemory: personal/private are
+      // owner-only; org-shared classes gate on org ADMIN. Authz runs first
+      // so unauthorized callers can't probe class/encryption state.
+      if (source.class === 'personal' || source.class === 'private') {
+        if (!ctx.userId || source.userId !== ctx.userId) {
+          throw new GraphQLError(
+            `Forbidden: only the owner can clone a ${source.class} memory`,
+            { extensions: { code: 'FORBIDDEN' } },
+          );
+        }
+      } else {
+        await requireOrgRole(ctx, source.organizationId, 'ADMIN');
+      }
+      // system/app-class memories auto-provision via the agent/install
+      // paths (same rationale as createMemory rejecting these classes) —
+      // a free-standing clone would violate their pivot invariants
+      // (chk_memory_class_app_id) or duplicate an agent's brain.
+      if (source.class === 'system' || source.class === 'app') {
+        throw new GraphQLError(
+          `cloneMemory does not accept a class='${source.class}' source. ` +
+            `Only 'knowledge', 'group', 'personal', and 'private' memories can be cloned.`,
+          { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' } },
+        );
+      }
+      // v1: encrypted sources are rejected — the URN rewrite needs
+      // plaintext, and a clone would need its own encryption envelope +
+      // session-key flow. Follow-up if/when needed.
+      if (source.isEncrypted) {
+        throw new GraphQLError(
+          'cloneMemory does not support encrypted memories yet.',
+          { extensions: { code: 'ENCRYPTED_MEMORY_CLONE_UNSUPPORTED' } },
+        );
+      }
+      // Group-class clones bootstrap the caller as first owner, which
+      // needs an authenticated user (matches createMemory).
+      if (source.class === 'group' && !ctx.userId) {
+        throw new GraphQLError(
+          'Cloning a group-class memory requires an authenticated user (the caller becomes the first owner).',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+
+      const org = await ctx.db.organization.findUniqueOrThrow({
+        where: { id: source.organizationId },
+        select: { urn: true },
+      });
+      const newUrn = `${org.urn}:${name}`;
+      // URN collision handling matches createMemory: a soft-deleted holder
+      // is hard-deleted, a live one is an error.
+      const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
+      if (existing) {
+        if (existing.deletedAt) {
+          await ctx.db.memory.delete({ where: { id: existing.id } });
+        } else {
+          throw new Error(`A memory with URN "${newUrn}" already exists`);
+        }
+      }
+
+      const isUserOwned = source.class === 'personal' || source.class === 'private';
+      const { memoryId } = await cloneMemoryGraph(ctx.db, {
+        sourceMemoryId: source.id,
+        name,
+        newUrn,
+        // chk_personal_visibility_user: owner set iff personal/private.
+        ownerUserId: isUserOwned ? ctx.userId! : null,
+        groupOwnerUserId: source.class === 'group' ? (ctx.userId ?? null) : null,
+        actorId: ctx.userId ?? ctx.clientId ?? null,
+      });
+
+      // 033 — the clone carries the source's vector-index config but no
+      // vectors; stamp every node pending so the sweep (or prompt-drain on
+      // future writes) re-embeds the rewritten content.
+      if (source.vectorIndexEnabled) {
+        await backfillMemoryEmbeddings(ctx.db, memoryId);
+      }
+
+      return ctx.db.memory.findUniqueOrThrow({
+        where: { id: memoryId },
+        include: MEMORY_INCLUDE,
+      });
     },
 
     setMemorySourceToken: async (
