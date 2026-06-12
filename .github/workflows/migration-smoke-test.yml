@@ -122,11 +122,15 @@ jobs:
           #     DROP it. It must live in the migration (prod needs it and
           #     prod doesn't run post-push.sql), so it's whitelisted here.
           # Any OTHER line in the diff is real drift and must fail CI.
-          DIFF=$(pnpm prisma migrate diff \
+          # Invoke the prisma bin directly (not `pnpm prisma`): pnpm 11's
+          # verify-deps-before-run preamble ("Already up to date" / "Done
+          # in ...") would land in the captured output and read as drift.
+          DIFF=$(node_modules/.bin/prisma migrate diff \
             --from-url "$DATABASE_URL" \
             --to-schema-datamodel prisma/schema.prisma \
             --script 2>&1 \
             | grep -vE "^Loaded|^Prisma config|^$" \
+            | grep -vE '^(Already up to date|Done in .*)$' \
             | grep -vE '^-- (CreateIndex|DropIndex)$' \
             | grep -vE '^CREATE INDEX "memories_user_id_idx" ON "memories"\("user_id"\);$' \
             | grep -vE '^CREATE UNIQUE INDEX "users_external_app_id_external_id_key" ON "users"\("external_app_id", "external_id"\);$' \
