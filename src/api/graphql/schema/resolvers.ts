@@ -1,5 +1,20 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { generateId } from '../../../lib/id.js';
+import { encryptToken, decryptToken } from '../../../lib/tokenCrypto.js';
+import {
+  AiServiceConfigNotFoundError,
+  AiConfigValidationError,
+  DuplicateAiServiceConfigNameError,
+  NoAiConfigAvailableError,
+  UnknownAiProviderError,
+  DEFAULT_AI_CONFIG_NAME,
+  apiKeyWriteFields,
+  apiKeyPreviewOf,
+  resolveAiConfigWithFallback,
+  validateAiConfigName,
+  validateProviderAndParams,
+  type AiConfigOwnerType,
+} from '../../../lib/aiConfig.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   enqueueNodeEmbedding,
@@ -224,6 +239,130 @@ async function requireOrgRole(
   if (!member || (ROLE_ORDER[member.role] ?? -1) < ROLE_ORDER[required]) {
     throw new Error('Forbidden');
   }
+}
+
+// ── 036-ai-service-config helpers ──────────────────────────────────────
+
+function isPlatformAdmin(ctx: Context): boolean {
+  return !!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'));
+}
+
+/** Row shape shared by the masked mappers below (no key material leaves). */
+interface AiServiceConfigRow {
+  id: string;
+  name: string;
+  hadronServerId: string | null;
+  organizationId: string | null;
+  appId: string | null;
+  agentId: string | null;
+  provider: string;
+  model: string;
+  apiKeyEncrypted: string | null;
+  apiKeyPreview: string | null;
+  params: unknown;
+  enabled: boolean;
+  createdAt: Date | string;
+  updatedAt?: Date | string | null;
+}
+
+function aiConfigOwnerOf(c: AiServiceConfigRow): { ownerType: AiConfigOwnerType; ownerId: string } {
+  if (c.appId) return { ownerType: 'APP', ownerId: c.appId };
+  if (c.agentId) return { ownerType: 'AGENT', ownerId: c.agentId };
+  if (c.organizationId) return { ownerType: 'ORGANIZATION', ownerId: c.organizationId };
+  return { ownerType: 'HADRON_SERVER', ownerId: c.hadronServerId! };
+}
+
+/** Masked management view — never carries key material beyond the preview. */
+function toGqlAiServiceConfig(c: AiServiceConfigRow) {
+  return {
+    id: c.id,
+    name: c.name,
+    ...aiConfigOwnerOf(c),
+    provider: c.provider,
+    model: c.model,
+    hasApiKey: !!c.apiKeyEncrypted,
+    apiKeyPreview: c.apiKeyPreview,
+    params: c.params ?? null,
+    enabled: c.enabled,
+    createdAt: toISO(c.createdAt)!,
+    updatedAt: toISO(c.updatedAt ?? null),
+  };
+}
+
+/**
+ * Resolve + authorize an AI-config owner reference. Platform ADMIN/OWNER
+ * for HADRON_SERVER; org ADMIN of the owning org for the other levels
+ * (requireOrgRole short-circuits for platform admins). ownerId accepts
+ * ID or URN for org/app/agent owners (007 pattern); HADRON_SERVER is
+ * ID-only.
+ */
+async function requireAiConfigOwnerAdmin(
+  ctx: Context,
+  ownerType: AiConfigOwnerType,
+  ownerId: string,
+): Promise<{ ownerWhere: Record<string, string>; resolvedOwnerId: string }> {
+  switch (ownerType) {
+    case 'HADRON_SERVER': {
+      if (!isPlatformAdmin(ctx)) throw new Error('Forbidden');
+      const server = await ctx.db.hadronServer.findUnique({ where: { id: ownerId } });
+      if (!server) throw new AiServiceConfigNotFoundError(`hadron server ${ownerId}`);
+      return { ownerWhere: { hadronServerId: server.id }, resolvedOwnerId: server.id };
+    }
+    case 'ORGANIZATION': {
+      const { id } = await resolveOrgRef(ctx.db, ownerId);
+      await requireOrgRole(ctx, id, 'ADMIN');
+      return { ownerWhere: { organizationId: id }, resolvedOwnerId: id };
+    }
+    case 'APP': {
+      const { id } = await resolveAppRef(ctx.db, ownerId);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      return { ownerWhere: { appId: id }, resolvedOwnerId: id };
+    }
+    case 'AGENT': {
+      const { id } = await resolveAgentRef(ctx.db, ownerId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      return { ownerWhere: { agentId: id }, resolvedOwnerId: id };
+    }
+  }
+}
+
+/** Map lib-level typed AI-config errors to GraphQL errors (S2). */
+function rethrowAiConfigTyped(e: unknown): never {
+  if (
+    e instanceof AiServiceConfigNotFoundError ||
+    e instanceof DuplicateAiServiceConfigNameError ||
+    e instanceof UnknownAiProviderError ||
+    e instanceof NoAiConfigAvailableError ||
+    e instanceof AiConfigValidationError
+  ) {
+    throw new GraphQLError(e.message, { extensions: { code: e.name } });
+  }
+  throw e;
+}
+
+/**
+ * Per-source memoized fetch of an entity's 'default' config so the
+ * registry-backed Agent/App field resolvers (aiProvider, aiModel,
+ * hasAiApiKey, aiApiKeyPreview) cost one query per parent object, not
+ * one per field. Management view: the row is returned even when
+ * disabled (resolution, not display, is what skips disabled configs).
+ */
+const defaultAiConfigMemo = new WeakMap<object, Promise<AiServiceConfigRow | null>>();
+function defaultAiConfigOf(
+  src: { id: string },
+  ownerFk: 'agentId' | 'appId',
+  ctx: Context,
+): Promise<AiServiceConfigRow | null> {
+  let p = defaultAiConfigMemo.get(src);
+  if (!p) {
+    p = ctx.db.aiServiceConfig.findFirst({
+      where: { [ownerFk]: src.id, name: DEFAULT_AI_CONFIG_NAME },
+    }) as Promise<AiServiceConfigRow | null>;
+    defaultAiConfigMemo.set(src, p);
+  }
+  return p;
 }
 
 // ── Memory access control ──────────────────────────────────────────────
@@ -851,31 +990,8 @@ function deriveChatTitle(
   return 'Untitled chat';
 }
 
-function getEncryptionKey(): Buffer {
-  const key = process.env.HADRON_ENCRYPTION_KEY;
-  if (!key) throw new Error('HADRON_ENCRYPTION_KEY env var is required');
-  return Buffer.from(key, 'hex');
-}
-
-function encryptToken(plaintext: string): string {
-  const key = getEncryptionKey();
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return Buffer.concat([iv, tag, encrypted]).toString('base64');
-}
-
-function decryptToken(ciphertext: string): string {
-  const key = getEncryptionKey();
-  const buf = Buffer.from(ciphertext, 'base64');
-  const iv = buf.subarray(0, 12);
-  const tag = buf.subarray(12, 28);
-  const data = buf.subarray(28);
-  const decipher = createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
-}
+// encryptToken/decryptToken moved to src/lib/tokenCrypto.ts (spec 036) so
+// the AI-config lib and this resolver layer share one implementation.
 
 async function getExchangeRefreshToken(
   ctx: Context,
@@ -1368,7 +1484,14 @@ export const resolvers = {
     createdAt: (a: { createdAt: Date | string }) => toISO(a.createdAt)!,
     updatedAt: (a: { updatedAt?: Date | string | null }) => toISO(a.updatedAt ?? null),
     expiresAt: (a: { expiresAt?: Date | string | null }) => toISO(a.expiresAt ?? null),
-    hasAiApiKey: (a: { aiApiKeyEncrypted?: string | null }) => !!a.aiApiKeyEncrypted,
+    // 036-ai-service-config: registry-backed reads of the App's
+    // 'default' config (legacy ai_* columns dropped).
+    aiProvider: async (a: { id: string }, _: unknown, ctx: Context) =>
+      (await defaultAiConfigOf(a, 'appId', ctx))?.provider ?? null,
+    aiModel: async (a: { id: string }, _: unknown, ctx: Context) =>
+      (await defaultAiConfigOf(a, 'appId', ctx))?.model ?? null,
+    hasAiApiKey: async (a: { id: string }, _: unknown, ctx: Context) =>
+      !!(await defaultAiConfigOf(a, 'appId', ctx))?.apiKeyEncrypted,
     organization: (a: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
       (a as Record<string, unknown>).organization ??
       ctx.db.organization.findUnique({ where: { id: a.organizationId } }),
@@ -1689,8 +1812,17 @@ export const resolvers = {
   },
   Agent: {
     createdAt: (b: { createdAt: Date | string }) => toISO(b.createdAt)!,
-    // Never return the encrypted API key itself — only whether one exists.
-    hasAiApiKey: (a: { aiApiKeyEncrypted?: string | null }) => !!a.aiApiKeyEncrypted,
+    // 036-ai-service-config: registry-backed reads of the Agent's
+    // 'default' config (legacy ai_* columns dropped). Never return the
+    // encrypted key itself — only whether one exists + the preview.
+    aiProvider: async (a: { id: string }, _: unknown, ctx: Context) =>
+      (await defaultAiConfigOf(a, 'agentId', ctx))?.provider ?? null,
+    aiModel: async (a: { id: string }, _: unknown, ctx: Context) =>
+      (await defaultAiConfigOf(a, 'agentId', ctx))?.model ?? null,
+    hasAiApiKey: async (a: { id: string }, _: unknown, ctx: Context) =>
+      !!(await defaultAiConfigOf(a, 'agentId', ctx))?.apiKeyEncrypted,
+    aiApiKeyPreview: async (a: { id: string }, _: unknown, ctx: Context) =>
+      (await defaultAiConfigOf(a, 'agentId', ctx))?.apiKeyPreview ?? null,
     // 008-agent-installation: declarative knobs come back from Prisma as
     // JSON columns. Pass through with sensible defaults (the column has a
     // schema-level DEFAULT, so this is belt-and-braces against partial
@@ -2524,12 +2656,99 @@ export const resolvers = {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       // Org ADMIN on the agent's org can read the decrypted key.
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
-      if (!agent.aiProvider || !agent.aiModel || !agent.aiApiKeyEncrypted) return null;
+      // 036-ai-service-config: registry-backed — the Agent's 'default'
+      // config (single-entity contract preserved; no resolution walk).
+      const config = await ctx.db.aiServiceConfig.findFirst({
+        where: { agentId: resolvedAgentId, name: DEFAULT_AI_CONFIG_NAME },
+      });
+      if (!config?.apiKeyEncrypted) return null;
       return {
-        provider: agent.aiProvider,
-        apiKey: decryptToken(agent.aiApiKeyEncrypted),
-        model: agent.aiModel,
+        provider: config.provider,
+        apiKey: decryptToken(config.apiKeyEncrypted),
+        model: config.model,
       };
+    },
+
+    // ── 036-ai-service-config ─────────────────────────────────────────
+
+    aiServiceConfigs: async (
+      _: unknown,
+      { ownerType, ownerId }: { ownerType: AiConfigOwnerType; ownerId: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId && !isPlatformAdmin(ctx)) throw new Error('Unauthenticated');
+      try {
+        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, ownerType, ownerId);
+        const configs = await ctx.db.aiServiceConfig.findMany({
+          where: ownerWhere,
+          orderBy: { name: 'asc' },
+        });
+        return configs.map(toGqlAiServiceConfig);
+      } catch (e) {
+        rethrowAiConfigTyped(e);
+      }
+    },
+
+    resolveAIConfig: async (
+      _: unknown,
+      { name, appId, agentId }: { name?: string | null; appId?: string | null; agentId?: string | null },
+      ctx: Context,
+    ) => {
+      try {
+        // Resolve refs (007 ID-or-URN) and compute the effective org for
+        // the auth gate — the same org the walk itself will consult.
+        let resolvedAppId: string | null = null;
+        let resolvedAgentId: string | null = null;
+        let effectiveOrgId: string | null = null;
+        if (appId) {
+          const { id } = await resolveAppRef(ctx.db, appId);
+          resolvedAppId = id;
+          const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+          effectiveOrgId = app.organizationId;
+        }
+        if (agentId) {
+          const { id } = await resolveAgentRef(ctx.db, agentId);
+          resolvedAgentId = id;
+          if (!effectiveOrgId) {
+            const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+            effectiveOrgId = agent.organizationId;
+          }
+        }
+        // Privileged surface (decrypted key): org ADMIN of the effective
+        // org — same gate as the legacy agentAIConfig/appAIConfig queries
+        // this supersedes. Without app/agent context, platform admin only.
+        if (effectiveOrgId) {
+          await requireOrgRole(ctx, effectiveOrgId, 'ADMIN');
+        } else if (!isPlatformAdmin(ctx)) {
+          throw new Error('Forbidden');
+        }
+        const resolved = await resolveAiConfigWithFallback(ctx.db, name ?? null, {
+          appId: resolvedAppId,
+          agentId: resolvedAgentId,
+          organizationId: effectiveOrgId,
+        });
+        const { config, ownerType } = resolved;
+        if (!config.apiKeyEncrypted) {
+          // Resolvable but unusable: a config without a key cannot back an
+          // LLM call (spec 036 edge case — name the config + level, never
+          // key material).
+          throw new NoAiConfigAvailableError(
+            config.name,
+            `this context — config '${config.name}' at the ${ownerType} level has no API key stored`,
+          );
+        }
+        return {
+          configId: config.id,
+          name: config.name,
+          ownerType,
+          provider: config.provider,
+          model: config.model,
+          apiKey: decryptToken(config.apiKeyEncrypted),
+          params: config.params ?? null,
+        };
+      } catch (e) {
+        rethrowAiConfigTyped(e);
+      }
     },
 
     myChats: async (
@@ -3208,11 +3427,16 @@ export const resolvers = {
       if (!isPlatformAdmin) {
         await requireOrgRole(ctx, app.organizationId, 'ADMIN');
       }
-      if (!app.aiProvider || !app.aiModel || !app.aiApiKeyEncrypted) return null;
+      // 036-ai-service-config: registry-backed — the App's 'default'
+      // config (single-entity contract preserved; no resolution walk).
+      const config = await ctx.db.aiServiceConfig.findFirst({
+        where: { appId: resolvedAppId, name: DEFAULT_AI_CONFIG_NAME },
+      });
+      if (!config?.apiKeyEncrypted) return null;
       return {
-        provider: app.aiProvider,
-        apiKey: decryptToken(app.aiApiKeyEncrypted),
-        model: app.aiModel,
+        provider: config.provider,
+        apiKey: decryptToken(config.apiKeyEncrypted),
+        model: config.model,
       };
     },
 
@@ -6296,23 +6520,54 @@ export const resolvers = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
-      // If apiKey is provided, encrypt it and store a preview (last 4 chars).
-      // If omitted/blank, keep the existing encrypted key.
-      const keyData: Record<string, unknown> = {};
+      // 036-ai-service-config: upsert the Agent's 'default' registry
+      // config. Legacy key semantics preserved: a provided apiKey is
+      // encrypted with a preview; omitted/blank keeps the stored key,
+      // which must then already exist.
+      try {
+        validateProviderAndParams(provider, null);
+      } catch (e) {
+        rethrowAiConfigTyped(e);
+      }
+      const existing = await ctx.db.aiServiceConfig.findFirst({
+        where: { agentId: resolvedAgentId, name: DEFAULT_AI_CONFIG_NAME },
+      });
+      const keyData: Record<string, string> = {};
       if (apiKey) {
-        keyData.aiApiKeyEncrypted = encryptToken(apiKey);
-        keyData.aiApiKeyPreview = apiKey.length >= 4 ? '…' + apiKey.slice(-4) : '…';
-      } else if (!agent.aiApiKeyEncrypted) {
+        keyData.apiKeyEncrypted = encryptToken(apiKey);
+        keyData.apiKeyPreview = apiKeyPreviewOf(apiKey);
+      } else if (!existing?.apiKeyEncrypted) {
         throw new Error('API key is required when no key is saved yet');
       }
-      return ctx.db.agent.update({
+      if (existing) {
+        await ctx.db.aiServiceConfig.update({
+          where: { id: existing.id },
+          data: { provider, model, ...keyData, updatedBy: ctx.userId ?? null },
+        });
+      } else {
+        // apiKey is guaranteed non-blank here (guard above); P2002 from a
+        // concurrent create surfaces as the duplicate-name typed error
+        // rather than a retry (upsert is not race-safe on the cold path).
+        try {
+          await ctx.db.aiServiceConfig.create({
+            data: {
+              agentId: resolvedAgentId,
+              name: DEFAULT_AI_CONFIG_NAME,
+              provider,
+              model,
+              ...keyData,
+              createdBy: ctx.userId ?? null,
+            },
+          });
+        } catch (e: unknown) {
+          if ((e as { code?: string }).code === 'P2002') {
+            rethrowAiConfigTyped(new DuplicateAiServiceConfigNameError(DEFAULT_AI_CONFIG_NAME));
+          }
+          throw e;
+        }
+      }
+      return ctx.db.agent.findUniqueOrThrow({
         where: { id: resolvedAgentId },
-        data: {
-          aiProvider: provider,
-          aiModel: model,
-          ...keyData,
-          updatedBy: ctx.userId ?? null,
-        },
         include: AGENT_INCLUDE,
       });
     },
@@ -6322,17 +6577,124 @@ export const resolvers = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
-      return ctx.db.agent.update({
+      // 036-ai-service-config: clearing deletes the 'default' registry
+      // config (idempotent).
+      await ctx.db.aiServiceConfig.deleteMany({
+        where: { agentId: resolvedAgentId, name: DEFAULT_AI_CONFIG_NAME },
+      });
+      return ctx.db.agent.findUniqueOrThrow({
         where: { id: resolvedAgentId },
-        data: {
-          aiProvider: null,
-          aiModel: null,
-          aiApiKeyEncrypted: null,
-          aiApiKeyPreview: null,
-          updatedBy: ctx.userId ?? null,
-        },
         include: AGENT_INCLUDE,
       });
+    },
+
+    // ── 036-ai-service-config CRUD ────────────────────────────────────
+
+    createAiServiceConfig: async (
+      _: unknown,
+      args: {
+        ownerType: AiConfigOwnerType;
+        ownerId: string;
+        name: string;
+        provider: string;
+        model: string;
+        apiKey?: string | null;
+        params?: unknown;
+        enabled?: boolean | null;
+      },
+      ctx: Context,
+    ) => {
+      try {
+        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerId);
+        const name = validateAiConfigName(args.name);
+        validateProviderAndParams(args.provider, args.params ?? null);
+        // No upsert: a P2002 from the partial unique (owner, name) index is
+        // the duplicate-name typed error, not a retry (upsert is not
+        // race-safe on the cold path).
+        const config = await ctx.db.aiServiceConfig.create({
+          data: {
+            ...ownerWhere,
+            name,
+            provider: args.provider,
+            model: args.model,
+            ...(args.apiKey
+              ? {
+                  apiKeyEncrypted: encryptToken(args.apiKey),
+                  apiKeyPreview: apiKeyPreviewOf(args.apiKey),
+                }
+              : {}),
+            params:
+              args.params === undefined || args.params === null
+                ? undefined
+                : (args.params as InputJsonValue),
+            enabled: args.enabled ?? true,
+            createdBy: ctx.userId ?? null,
+          },
+        });
+        return toGqlAiServiceConfig(config);
+      } catch (e: unknown) {
+        if ((e as { code?: string }).code === 'P2002') {
+          rethrowAiConfigTyped(new DuplicateAiServiceConfigNameError(args.name));
+        }
+        rethrowAiConfigTyped(e);
+      }
+    },
+
+    updateAiServiceConfig: async (
+      _: unknown,
+      args: {
+        id: string;
+        name?: string | null;
+        provider?: string | null;
+        model?: string | null;
+        apiKey?: string | null;
+        params?: unknown;
+        enabled?: boolean | null;
+      },
+      ctx: Context,
+    ) => {
+      try {
+        const existing = await ctx.db.aiServiceConfig.findUnique({ where: { id: args.id } });
+        if (!existing) throw new AiServiceConfigNotFoundError(args.id);
+        const owner = aiConfigOwnerOf(existing);
+        await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        const provider = args.provider ?? existing.provider;
+        const params = args.params === undefined ? existing.params : args.params;
+        validateProviderAndParams(provider, params ?? null);
+        const config = await ctx.db.aiServiceConfig.update({
+          where: { id: existing.id },
+          data: {
+            ...(args.name != null ? { name: validateAiConfigName(args.name) } : {}),
+            provider,
+            ...(args.model != null ? { model: args.model } : {}),
+            ...apiKeyWriteFields(args.apiKey),
+            ...(args.params === undefined
+              ? {}
+              : { params: args.params === null ? Prisma.DbNull : (args.params as InputJsonValue) }),
+            ...(args.enabled == null ? {} : { enabled: args.enabled }),
+            updatedBy: ctx.userId ?? null,
+          },
+        });
+        return toGqlAiServiceConfig(config);
+      } catch (e: unknown) {
+        if ((e as { code?: string }).code === 'P2002') {
+          rethrowAiConfigTyped(new DuplicateAiServiceConfigNameError(args.name ?? ''));
+        }
+        rethrowAiConfigTyped(e);
+      }
+    },
+
+    deleteAiServiceConfig: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      try {
+        const existing = await ctx.db.aiServiceConfig.findUnique({ where: { id } });
+        if (!existing) throw new AiServiceConfigNotFoundError(id);
+        const owner = aiConfigOwnerOf(existing);
+        await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        await ctx.db.aiServiceConfig.delete({ where: { id: existing.id } });
+        return true;
+      } catch (e) {
+        rethrowAiConfigTyped(e);
+      }
     },
 
     // ── Chatbot revisions ─────────────────────────────────────────────
@@ -6763,9 +7125,6 @@ export const resolvers = {
           description: description ?? null,
           systemPrompt: systemPrompt ?? null,
           agentTools: agentTools ?? [],
-          aiProvider: aiProvider ?? null,
-          aiModel: aiModel ?? null,
-          aiApiKeyEncrypted: aiApiKey ? encryptToken(aiApiKey) : null,
           expiresAt: expiresAt ? new Date(expiresAt) : undefined,
           createUserPermission: createUserPermission ?? 'EXPLICIT',
           identifyUserMethod: identifyUserMethod ?? 'USER_ID',
@@ -6776,6 +7135,29 @@ export const resolvers = {
         },
         include: APP_INCLUDE,
       });
+
+      // 036-ai-service-config: the legacy aiProvider/aiModel/aiApiKey args
+      // become the App's 'default' registry config (deploy-time override
+      // that wins over the Agent's default in the resolution walk).
+      if (aiProvider && aiModel) {
+        try {
+          validateProviderAndParams(aiProvider, null);
+        } catch (e) {
+          rethrowAiConfigTyped(e);
+        }
+        await ctx.db.aiServiceConfig.create({
+          data: {
+            appId: createdApp.id,
+            name: DEFAULT_AI_CONFIG_NAME,
+            provider: aiProvider,
+            model: aiModel,
+            ...(aiApiKey
+              ? { apiKeyEncrypted: encryptToken(aiApiKey), apiKeyPreview: apiKeyPreviewOf(aiApiKey) }
+              : {}),
+            createdBy: ctx.userId ?? null,
+          },
+        });
+      }
 
       // 008-agent-installation T059: cascade-install required deps.
       // Walk AgentImport rows for the parent and install each one as its own
@@ -6919,9 +7301,11 @@ export const resolvers = {
         description?: string;
         systemPrompt?: string;
         agentTools?: string[];
-        aiProvider?: string;
-        aiModel?: string;
-        aiApiKey?: string;
+        // GraphQL nullable args: explicit null is meaningful here
+        // (aiProvider: null clears the App's 'default' AI config).
+        aiProvider?: string | null;
+        aiModel?: string | null;
+        aiApiKey?: string | null;
         expiresAt?: string;
         surfaces?: string[];
         trainingMode?: boolean;
@@ -6951,6 +7335,56 @@ export const resolvers = {
         if (!slug) throw new Error('App URN slug cannot be empty');
         newUrn = `${org.urn}:${slug}`;
       }
+      // 036-ai-service-config: the legacy aiProvider/aiModel/aiApiKey args
+      // maintain the App's 'default' registry config. Explicit null
+      // aiProvider clears the whole config (legacy column-null semantics);
+      // aiApiKey '' clears just the key.
+      if (aiProvider !== undefined || aiModel !== undefined || aiApiKey !== undefined) {
+        const existing = await ctx.db.aiServiceConfig.findFirst({
+          where: { appId: resolvedId, name: DEFAULT_AI_CONFIG_NAME },
+        });
+        if (aiProvider === null) {
+          if (existing) await ctx.db.aiServiceConfig.delete({ where: { id: existing.id } });
+        } else {
+          const provider = aiProvider ?? existing?.provider;
+          const model = aiModel ?? existing?.model;
+          if (!provider || !model) {
+            // Clearing/keeping a key on an App with no saved config is a
+            // no-op (legacy column semantics tolerated key-only writes);
+            // setting one without provider+model is an error.
+            if (aiApiKey) {
+              throw new GraphQLError(
+                'aiProvider and aiModel are both required when configuring AI for an App that has no saved config',
+                { extensions: { code: 'AiConfigValidationError' } },
+              );
+            }
+          } else {
+            try {
+              validateProviderAndParams(provider, null);
+            } catch (e) {
+              rethrowAiConfigTyped(e);
+            }
+            const keyFields = apiKeyWriteFields(aiApiKey);
+            if (existing) {
+              await ctx.db.aiServiceConfig.update({
+                where: { id: existing.id },
+                data: { provider, model, ...keyFields, updatedBy: ctx.userId ?? null },
+              });
+            } else {
+              await ctx.db.aiServiceConfig.create({
+                data: {
+                  appId: resolvedId,
+                  name: DEFAULT_AI_CONFIG_NAME,
+                  provider,
+                  model,
+                  ...keyFields,
+                  createdBy: ctx.userId ?? null,
+                },
+              });
+            }
+          }
+        }
+      }
       return ctx.db.app.update({
         where: { id: resolvedId },
         data: {
@@ -6961,9 +7395,6 @@ export const resolvers = {
           ...(description !== undefined ? { description } : {}),
           ...(systemPrompt !== undefined ? { systemPrompt } : {}),
           ...(agentTools !== undefined ? { agentTools } : {}),
-          ...(aiProvider !== undefined ? { aiProvider } : {}),
-          ...(aiModel !== undefined ? { aiModel } : {}),
-          ...(aiApiKey !== undefined ? { aiApiKeyEncrypted: aiApiKey ? encryptToken(aiApiKey) : null } : {}),
           ...(expiresAt !== undefined ? { expiresAt: expiresAt ? new Date(expiresAt) : null } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),
           ...(trainingMode !== undefined ? { trainingMode } : {}),

@@ -38,6 +38,16 @@ query {
 Expected: with no App/Agent `fast` config, resolution lands on the org level
 (`ownerType: ORGANIZATION`). Add an App-owned `fast` config and re-run — the App wins.
 
+## Consumer convention (US4)
+
+Consumers (future `AgentWebhook.aiConfigName`, scheduled tasks, curation jobs,
+the portal chatbot) carry an optional config **name** only — never credentials
+or provider details. At execution time, resolve via `resolveAIConfig(name,
+appId, agentId)` (GraphQL) or `resolveAiConfigWithFallback` (`src/lib/aiConfig.ts`):
+explicit name → miss falls back to `default` → miss throws
+`NoAiConfigAvailableError`. Conventional names: `default` (reserved fallback),
+`fast`, `frontier` (documented, not enforced).
+
 ## After deploying (manual step)
 
 Stored AI configurations were deliberately dropped by the migration (confirmed

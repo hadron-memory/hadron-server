@@ -226,6 +226,30 @@ async function main() {
   });
   console.log(`  Created Juno agent (maxMembers=2, appMemory=user)`);
 
+  // ── AI service configs (spec 036) ─────────────────────────────────────
+  // Demo the resolution walk without further setup: an org-level 'default'
+  // on Acme plus an agent-level 'fast' on Juno. No API keys seeded — enter
+  // real keys via the portal (the fixtures only exercise precedence).
+  await db.aiServiceConfig.createMany({
+    data: [
+      {
+        id: generateId(),
+        organizationId: acmeOrg.id,
+        name: 'default',
+        provider: 'anthropic',
+        model: 'claude-opus-4-6',
+      },
+      {
+        id: generateId(),
+        agentId: junoAgent.id,
+        name: 'fast',
+        provider: 'anthropic',
+        model: 'claude-haiku-4-5-20251001',
+      },
+    ],
+  });
+  console.log(`  Created AI service configs (acme-corp:default, juno:fast — no keys)`);
+
   // ── App: Mealplan in Acme Corp ────────────────────────────────────────
   // Same-org install: platform-co owns Mealplan but acme-corp deploys it.
   // Cross-org → AgentOrgGrant required (008 R-2 / data-model.md gate 1).

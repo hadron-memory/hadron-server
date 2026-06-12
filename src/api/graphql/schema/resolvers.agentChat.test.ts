@@ -130,15 +130,18 @@ describe('Agent AI config', () => {
       { agentId: agent.id, provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-opus-4-6' },
       adminCtx(),
     );
-    expect(updated.aiProvider).toBe('anthropic');
-    expect(updated.aiModel).toBe('claude-opus-4-6');
-    expect(updated.aiApiKeyEncrypted).toBeTruthy();
-    expect(updated.aiApiKeyEncrypted).not.toBe('sk-ant-test');
-
-    // hasAiApiKey is a field resolver — test it via the Agent resolver
-    const resolved = resolvers.Agent.hasAiApiKey({
-      aiApiKeyEncrypted: updated.aiApiKeyEncrypted,
+    // 036-ai-service-config: the mutation upserts the Agent's 'default'
+    // registry config; the legacy columns no longer exist.
+    const config = await db.aiServiceConfig.findFirstOrThrow({
+      where: { agentId: agent.id, name: 'default' },
     });
+    expect(config.provider).toBe('anthropic');
+    expect(config.model).toBe('claude-opus-4-6');
+    expect(config.apiKeyEncrypted).toBeTruthy();
+    expect(config.apiKeyEncrypted).not.toBe('sk-ant-test');
+
+    // hasAiApiKey is a registry-backed field resolver.
+    const resolved = await resolvers.Agent.hasAiApiKey(updated, {}, adminCtx());
     expect(resolved).toBe(true);
   });
 
@@ -219,7 +222,10 @@ describe('Agent AI config', () => {
       adminCtx(),
     );
     expect(updated.id).toBe(agent.id);
-    expect(updated.aiProvider).toBe('anthropic');
+    const viaUrnConfig = await db.aiServiceConfig.findFirstOrThrow({
+      where: { agentId: agent.id, name: 'default' },
+    });
+    expect(viaUrnConfig.provider).toBe('anthropic');
   });
 
   it('updateAgentAIConfig accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
@@ -250,8 +256,11 @@ describe('Agent AI config', () => {
       { agentId: stored.urn },
       adminCtx(),
     );
-    expect(cleared.aiProvider).toBeNull();
-    expect(cleared.aiApiKeyEncrypted).toBeNull();
+    expect(cleared.id).toBe(agent.id);
+    const remaining = await db.aiServiceConfig.findFirst({
+      where: { agentId: agent.id, name: 'default' },
+    });
+    expect(remaining).toBeNull();
   });
 
   it('clearAgentAIConfig wipes the config', async () => {
@@ -265,8 +274,8 @@ describe('Agent AI config', () => {
       { agentId: agent.id },
       adminCtx(),
     );
-    expect(cleared.aiProvider).toBeNull();
-    expect(cleared.aiApiKeyEncrypted).toBeNull();
+    expect(await resolvers.Agent.aiProvider(cleared, {}, adminCtx())).toBeNull();
+    expect(await resolvers.Agent.hasAiApiKey(cleared, {}, adminCtx())).toBe(false);
   });
 });
 

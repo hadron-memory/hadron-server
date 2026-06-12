@@ -238,15 +238,22 @@ describe('US1 Step (d): App.aiProvider overrides Agent default for that App\'s s
       },
       adminCtx(mike.id),
     );
-    expect(app.aiProvider).toBe('anthropic');
-    expect(app.aiModel).toBe('claude-sonnet-4-6');
-    expect(app.aiApiKeyEncrypted).not.toBeNull();
-    expect(app.aiApiKeyEncrypted).not.toBe('sk-orgx-override'); // encrypted
+    // 036-ai-service-config: the App-level override is the App's 'default'
+    // registry config; the Agent's own 'default' config is untouched.
+    const appConfig = await db.aiServiceConfig.findFirstOrThrow({
+      where: { appId: app.id, name: 'default' },
+    });
+    expect(appConfig.provider).toBe('anthropic');
+    expect(appConfig.model).toBe('claude-sonnet-4-6');
+    expect(appConfig.apiKeyEncrypted).not.toBeNull();
+    expect(appConfig.apiKeyEncrypted).not.toBe('sk-orgx-override'); // encrypted
 
     // Agent's default config is unchanged.
-    const agentAfter = await db.agent.findUniqueOrThrow({ where: { id: mealplan.id } });
-    expect(agentAfter.aiProvider).toBe('openai');
-    expect(agentAfter.aiModel).toBe('gpt-4o');
+    const agentConfig = await db.aiServiceConfig.findFirstOrThrow({
+      where: { agentId: mealplan.id, name: 'default' },
+    });
+    expect(agentConfig.provider).toBe('openai');
+    expect(agentConfig.model).toBe('gpt-4o');
   });
 });
 

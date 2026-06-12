@@ -319,6 +319,8 @@ export const typeDefs = `#graphql
     description: String
     systemPrompt: String
     agentTools: [String!]!
+    # 036-ai-service-config: the three AI fields below are registry-backed
+    # reads of the App's config named 'default' (legacy columns dropped).
     aiProvider: String
     aiModel: String
     hasAiApiKey: Boolean!
@@ -842,6 +844,8 @@ export const typeDefs = `#graphql
     visibility: AgentVisibility!
     type: AgentType!
     surfaces: [String!]!
+    # 036-ai-service-config: the four AI fields below are registry-backed
+    # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
     aiModel: String
     hasAiApiKey: Boolean!
@@ -879,10 +883,74 @@ export const typeDefs = `#graphql
 
   # Decrypted AI config for an agent. Only returned to org admins — the
   # portal backend uses it to make LLM calls on behalf of the logged-in user.
+  # 036-ai-service-config: registry-backed (the Agent's config named
+  # 'default'); prefer resolveAIConfig for new callers.
   type AgentAIConfig {
     provider: String!
     apiKey: String!
     model: String!
+  }
+
+  """
+  036-ai-service-config: which entity owns an AiServiceConfig. Exactly one
+  owner per config (DB-enforced).
+  """
+  enum AiConfigOwnerType {
+    HADRON_SERVER
+    ORGANIZATION
+    APP
+    AGENT
+  }
+
+  """
+  036-ai-service-config: a named AI service configuration (masked
+  management view — never carries key material beyond the preview).
+  Owned by exactly one of HadronServer / Organization / App / Agent.
+  Resolution walks App -> Agent -> Org (of the App) -> HadronServer and
+  returns the first ENABLED config with the requested name. Well-known
+  fallback name: 'default' (conventional extras: 'fast', 'frontier').
+  Name is unique per owner.
+  """
+  type AiServiceConfig {
+    id: ID!
+    name: String!
+    ownerType: AiConfigOwnerType!
+    "ID of the owning HadronServer / Organization / App / Agent."
+    ownerId: ID!
+    "Provider identifier; v1 known: 'anthropic' | 'openai' | 'glm' | 'bedrock'."
+    provider: String!
+    "Model identifier, passed verbatim to the provider."
+    model: String!
+    hasApiKey: Boolean!
+    "Ellipsis + last 4 characters of the stored key; null when no key."
+    apiKeyPreview: String
+    "Provider-specific knobs (maxTokens, thinking, effort, baseUrl, ...)."
+    params: JSON
+    "Disabled configs are skipped by resolution (the walk continues outward)."
+    enabled: Boolean!
+    createdAt: String!
+    updatedAt: String
+  }
+
+  """
+  036-ai-service-config: privileged resolution result. Carries the
+  DECRYPTED key — only returned by resolveAIConfig (org ADMIN of the
+  effective context org, or platform ADMIN/OWNER); successor to
+  agentAIConfig / appAIConfig.
+  """
+  type ResolvedAiConfig {
+    configId: ID!
+    name: String!
+    "Which level matched: APP | AGENT | ORGANIZATION | HADRON_SERVER."
+    ownerType: AiConfigOwnerType!
+    provider: String!
+    model: String!
+    """
+    Decrypted key. For provider 'bedrock' this is the JSON-encoded
+    accessKeyId/secretAccessKey/region triple the portal stores.
+    """
+    apiKey: String!
+    params: JSON
   }
 
   # A saved chat in one of the chat-scope tiers.
@@ -1415,9 +1483,43 @@ export const typeDefs = `#graphql
     Agent AI config (org ADMIN) — returns the decrypted API key so the
     portal backend can make LLM calls on behalf of the user.
 
+    036-ai-service-config: registry-backed (the Agent's config named
+    'default'). Prefer resolveAIConfig for new callers.
+
     Accepts the entity's ID or URN.
     """
     agentAIConfig(agentId: ID!): AgentAIConfig
+
+    """
+    036-ai-service-config: masked list of the AI configs owned by one
+    entity. Never returns key material — only hasApiKey + apiKeyPreview.
+
+    Auth: platform ADMIN/OWNER for HADRON_SERVER owners; org ADMIN of
+    the owning org for ORGANIZATION / APP / AGENT owners.
+
+    ownerId accepts the entity's ID or URN (HADRON_SERVER: ID only).
+    """
+    aiServiceConfigs(ownerType: AiConfigOwnerType!, ownerId: ID!): [AiServiceConfig!]!
+
+    """
+    036-ai-service-config: resolve a config name for an execution context
+    and return the DECRYPTED credentials (privileged; successor to
+    agentAIConfig/appAIConfig).
+
+    Walk: App -> Agent -> Org (of the App, else of the Agent) ->
+    HadronServer; disabled configs are skipped. When name is omitted,
+    'default' is resolved. When an explicit name misses, resolution falls
+    back to 'default'; if that also misses, errors with
+    NoAiConfigAvailableError. Consumers (webhooks, scheduled tasks, the
+    portal chatbot) reference configs by name only — pass the name plus
+    the execution context, never credentials.
+
+    Auth: org ADMIN of the effective context org, or platform
+    ADMIN/OWNER (required when no app/agent context is given).
+
+    appId/agentId accept the entity's ID or URN.
+    """
+    resolveAIConfig(name: String, appId: ID, agentId: ID): ResolvedAiConfig!
 
     """
     Saved chats for the current user in their personal memory for an
@@ -1771,6 +1873,10 @@ export const typeDefs = `#graphql
     """
     Update an Agent's AI provider config. Key is encrypted at rest.
 
+    036-ai-service-config: upserts the Agent's registry config named
+    'default'. Prefer createAiServiceConfig/updateAiServiceConfig for
+    new callers.
+
     Accepts the entity's ID or URN.
     """
     updateAgentAIConfig(agentId: ID!, provider: String!, model: String!, apiKey: String): Agent!
@@ -1778,9 +1884,61 @@ export const typeDefs = `#graphql
     """
     Clear an Agent's AI provider config.
 
+    036-ai-service-config: deletes the Agent's registry config named
+    'default'.
+
     Accepts the entity's ID or URN.
     """
     clearAgentAIConfig(agentId: ID!): Agent!
+
+    """
+    036-ai-service-config: create a named AI config on an owner entity.
+
+    apiKey semantics: omitted = stored without a key (unusable for
+    execution until one is set); non-empty = encrypted at rest with a
+    masked preview. Name must be 1-64 lower-case [a-z0-9_-], unique per
+    owner. provider must be a known provider; params are validated per
+    provider.
+
+    Auth: as aiServiceConfigs. ownerId accepts ID or URN
+    (HADRON_SERVER: ID only).
+    """
+    createAiServiceConfig(
+      ownerType: AiConfigOwnerType!
+      ownerId: ID!
+      name: String!
+      provider: String!
+      model: String!
+      apiKey: String
+      params: JSON
+      enabled: Boolean
+    ): AiServiceConfig!
+
+    """
+    036-ai-service-config: update a named AI config. All fields optional.
+
+    apiKey semantics: omitted = keep the stored key; empty string =
+    clear it; non-empty = replace (encrypted, preview recomputed).
+
+    Auth: admin rights on the owning entity (as aiServiceConfigs).
+    """
+    updateAiServiceConfig(
+      id: ID!
+      name: String
+      provider: String
+      model: String
+      apiKey: String
+      params: JSON
+      enabled: Boolean
+    ): AiServiceConfig!
+
+    """
+    036-ai-service-config: delete a named AI config (hard delete; the
+    resolution walk simply no longer finds it).
+
+    Auth: admin rights on the owning entity (as aiServiceConfigs).
+    """
+    deleteAiServiceConfig(id: ID!): Boolean!
 
     # Chatbot revisions (org ADMIN)
     """
