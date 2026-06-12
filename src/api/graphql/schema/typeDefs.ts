@@ -1579,7 +1579,14 @@ export const typeDefs = `#graphql
     # Replace all nodes owned by a repo within a memory (collection tool)
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
 
-    # Edge CRUD
+    # Edge CRUD. Null-arg semantics (#263):
+    # - condition/data: null on updateEdge CLEARS the stored value (the
+    #   edge-conditions contract — a null condition means 'always fires').
+    # - priority: null is treated as UNSET (createEdge falls back to the
+    #   default 0; updateEdge keeps the stored value) — the column is a
+    #   non-nullable Int, so null is never a meaningful value for it.
+    # Clients that serialize unset args as explicit nulls must omit them
+    # instead, or they will clear stored conditions/data on update.
     createEdge(sourceNodeId: ID!, targetNodeId: ID!, label: String!, condition: JSON, priority: Int, data: JSON): Edge!
     updateEdge(edgeId: ID!, label: String, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeId: ID!): Boolean!

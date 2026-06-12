@@ -3799,8 +3799,9 @@ export const resolvers = {
         targetNodeId: string;
         label: string;
         condition?: unknown;
-        priority?: number;
-        data?: Record<string, unknown>;
+        // GraphQL nullable args: non-JS clients send explicit nulls.
+        priority?: number | null;
+        data?: Record<string, unknown> | null;
       },
       ctx: Context,
     ) => {
@@ -3815,7 +3816,13 @@ export const resolvers = {
           targetId: targetNodeId,
           label,
           condition: (condition ?? null) as InputJsonValue,
-          ...(priority !== undefined ? { priority } : {}),
+          // != null: the GraphQL arg is nullable, and non-JS clients (the
+          // Go CLI) send explicit nulls for unset args. priority is a
+          // non-nullable Int @default(0) — passing null to Prisma fails
+          // validation with a misleading "Argument source is missing"
+          // (the invalid field disqualifies the scalar-FK input variant).
+          // Issue #263.
+          ...(priority != null ? { priority } : {}),
           data: (data ?? null) as InputJsonValue,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
@@ -3829,8 +3836,8 @@ export const resolvers = {
         edgeId: string;
         label?: string;
         condition?: unknown;
-        priority?: number;
-        data?: Record<string, unknown>;
+        priority?: number | null;
+        data?: Record<string, unknown> | null;
       },
       ctx: Context,
     ) => {
@@ -3838,12 +3845,23 @@ export const resolvers = {
       if (condition !== undefined && condition !== null) {
         throwOnInvalidCondition(condition);
       }
+      // Null semantics differ per arg (#263):
+      // - condition/data: null CLEARS the stored value — the spec'd
+      //   edge-conditions contract ("null = always fires") that the portal
+      //   condition editor relies on.
+      // - priority: null = UNSET (keep stored). The column is a
+      //   non-nullable Int, so null is never meaningful — and forwarding
+      //   it makes Prisma fail with a misleading "Argument source is
+      //   missing".
+      // Non-JS clients that serialize unset args as explicit nulls (the
+      // Go CLI's genqlient layer) must omit unset variables instead —
+      // tracked as a hadron-cli fix.
       return ctx.db.edge.update({
         where: { id: edgeId },
         data: {
           ...(label !== undefined ? { label } : {}),
           ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
-          ...(priority !== undefined ? { priority } : {}),
+          ...(priority != null ? { priority } : {}),
           ...(data !== undefined ? { data: data as InputJsonValue } : {}),
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
         },

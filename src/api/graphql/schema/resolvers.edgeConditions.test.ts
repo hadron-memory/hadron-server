@@ -79,6 +79,44 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     expect(calls[0][0].data.priority).toBe(5);
   });
 
+  it('omits priority from the Prisma create when the arg is an explicit null (#263)', async () => {
+    // Non-JS clients (the Go CLI) send explicit nulls for unset nullable
+    // args. priority is a non-nullable Int @default(0) — forwarding null
+    // makes Prisma reject the create with a misleading "Argument source
+    // is missing" error.
+    await mutations.createEdge(
+      null,
+      {
+        sourceNodeId: 'node-source',
+        targetNodeId: 'node-target',
+        label: 'routes-to',
+        condition: null,
+        priority: null,
+        data: null,
+      },
+      testCtx,
+    );
+    const calls = (testCtx.db.edge.create as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect('priority' in calls[0][0].data).toBe(false);
+  });
+
+  it('updateEdge nulls: priority omitted (unset), condition/data forwarded as clear (#263)', async () => {
+    await mutations.updateEdge(
+      null,
+      { edgeId: 'edge-1', label: 'renamed', condition: null, priority: null, data: null },
+      testCtx,
+    );
+    const calls = (testCtx.db.edge.update as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    // priority is a non-nullable Int — null means unset, keep stored.
+    expect('priority' in calls[0][0].data).toBe(false);
+    // condition/data keep the spec'd null-clears contract.
+    expect(calls[0][0].data.condition).toBeNull();
+    expect(calls[0][0].data.data).toBeNull();
+    expect(calls[0][0].data.label).toBe('renamed');
+  });
+
   it('rejects a disallowed operator with INVALID_EDGE_CONDITION / DISALLOWED_OPERATOR', async () => {
     await expect(
       mutations.createEdge(
