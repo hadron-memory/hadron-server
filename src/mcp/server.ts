@@ -12,6 +12,7 @@ import {
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import { validateLoc } from '../lib/validateLoc.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
@@ -3842,6 +3843,37 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     const transport = transports.get(sessionId)!;
     await transport.handleRequest(req, res, req.body);
     return;
+  }
+
+  // Stale session — the client presented a session ID we don't know
+  // (typically: the server restarted and the in-memory registry was wiped).
+  // Per the MCP streamable-HTTP spec the recoverable signal is HTTP 404
+  // ("Session not found"): on a 404 the client MUST transparently start a
+  // new session with a fresh InitializeRequest, and work resumes. Anything
+  // else — in particular the 400 "Server not initialized" the SDK emits if
+  // we feed a non-initialize request to a brand-new transport — is a
+  // generic protocol error the client gives up on, permanently severing
+  // the connection until the client itself restarts.
+  //
+  // Initialize requests fall through: the block below builds a fresh
+  // transport for them (reusing the presented session ID, so a client that
+  // re-inits with a stale ID keeps working). No auth is required to learn
+  // "session not found" — session IDs are server-generated UUIDs and the
+  // DELETE handler already answers 404 pre-auth for unknown sessions.
+  if (sessionId) {
+    const body: unknown = req.body;
+    const hasInitialize = Array.isArray(body)
+      ? body.some((m) => isInitializeRequest(m))
+      : isInitializeRequest(body);
+    if (!hasInitialize) {
+      mcpLog('info', 'stale_mcp_session_404', { mcpSessionId: sessionId, method: req.method });
+      res.status(404).json({
+        jsonrpc: '2.0',
+        error: { code: -32001, message: 'Session not found' },
+        id: null,
+      });
+      return;
+    }
   }
 
   // New session — authenticate. Accept JWT users (userId/clientId set by
