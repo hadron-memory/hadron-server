@@ -82,5 +82,23 @@ export async function setup() {
       CHECK (chunk_overlap IS NULL OR (chunk_overlap >= 0 AND (chunk_tokens IS NULL OR chunk_overlap < chunk_tokens)));
   `);
 
+  // 036-ai-service-config: a config belongs to exactly one owner; name is
+  // unique per owner (partial uniques — Prisma can't express either).
+  await client.query(`
+    ALTER TABLE "ai_service_configs" DROP CONSTRAINT IF EXISTS "chk_ai_service_config_owner";
+    ALTER TABLE "ai_service_configs"
+      ADD CONSTRAINT "chk_ai_service_config_owner"
+      CHECK (num_nonnulls(hadron_server_id, organization_id, app_id, agent_id) = 1);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_server_name_uniq
+      ON ai_service_configs (hadron_server_id, name) WHERE hadron_server_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_org_name_uniq
+      ON ai_service_configs (organization_id, name) WHERE organization_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_app_name_uniq
+      ON ai_service_configs (app_id, name) WHERE app_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_agent_name_uniq
+      ON ai_service_configs (agent_id, name) WHERE agent_id IS NOT NULL;
+  `);
+
   await client.end();
 }

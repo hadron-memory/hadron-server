@@ -432,6 +432,7 @@ model Organization {
   exchangeConnections ExchangeConnection[]
   apps                App[]
   agentOrgGrants      AgentOrgGrant[]
+  aiServiceConfigs    AiServiceConfig[]
 
   @@map("organizations")
 }
@@ -1154,14 +1155,11 @@ model Agent {
   /// known values: 'chat', 'slack', 'mcp', 'web'). Distinct from the
   /// per-App `surfaces` — this is the *design-time* declaration.
   surfaces             String[]         @default([])
-  /// AI provider for the Agent's default AI config (e.g. "anthropic",
-  /// "openai"). An App can override at deploy time via `App.aiProvider`.
-  aiProvider           String?          @map("ai_provider")
-  aiModel              String?          @map("ai_model")
-  /// AES-256-GCM-encrypted API key for the Agent's default AI config.
-  aiApiKeyEncrypted    String?          @map("ai_api_key_encrypted")
-  /// Last 4 characters of the raw API key for masked display.
-  aiApiKeyPreview      String?          @map("ai_api_key_preview")
+  // 036-ai-service-config: the legacy ai_provider/ai_model/
+  // ai_api_key_encrypted/ai_api_key_preview columns were dropped in favor
+  // of Agent-owned AiServiceConfig rows (the Agent's design-time default
+  // lives in its config named 'default'; an App-owned config overrides at
+  // deploy time per the resolution walk).
   /// Loc of the currently-published revision of the Agent's system
   /// memory. Lets the Builder ship draft revisions without affecting
   /// running Apps.
@@ -1216,6 +1214,7 @@ model Agent {
   imports           AgentImport[]       @relation("ParentAgent")
   importedBy        AgentImport[]       @relation("ImportedAgent")
   orgGrants         AgentOrgGrant[]
+  aiServiceConfigs  AiServiceConfig[]
 
   @@map("agents")
 }
@@ -1387,9 +1386,62 @@ model HadronServer {
   deletedAt       DateTime? @map("deleted_at")
   deletedBy       String?   @map("deleted_by")
 
-  logEntries ServerLogEntry[]
+  logEntries       ServerLogEntry[]
+  aiServiceConfigs AiServiceConfig[]
 
   @@map("hadron_server")
+}
+
+/// Named AI service configuration (spec 036). Owned by exactly one of
+/// HadronServer / Organization / App / Agent — enforced by the Postgres
+/// CHECK `chk_ai_service_config_owner` (see prisma/post-push.sql; Prisma
+/// cannot express it). Resolved by name walking App -> Agent -> Org (of
+/// the App, else of the Agent) -> HadronServer; the first ENABLED config
+/// with the requested name wins. Well-known fallback name: 'default'
+/// (conventional extras: 'fast', 'frontier'). Name is unique per owner
+/// via four partial unique indexes (also post-push.sql). Replaces the
+/// legacy Agent.ai_* / App.ai_* columns, which the 036 migration dropped
+/// without backfill (stored values confirmed disposable 2026-06-11).
+model AiServiceConfig {
+  id              String    @id @default(cuid())
+  /// Lookup name used by the resolution walk; lower-case canonical.
+  name            String
+  // Owner FKs — exactly one non-null (chk_ai_service_config_owner).
+  hadronServerId  String?   @map("hadron_server_id")
+  organizationId  String?   @map("organization_id")
+  appId           String?   @map("app_id")
+  agentId         String?   @map("agent_id")
+  /// Provider identifier; v1 known: 'anthropic' | 'openai' | 'glm' |
+  /// 'bedrock'. Validated against the registry in src/lib/aiConfig.ts.
+  provider        String
+  /// Model identifier, passed verbatim to the provider.
+  model           String
+  /// AES-256-GCM-encrypted API key (src/lib/tokenCrypto.ts encryptToken).
+  /// For 'bedrock' this is a JSON-encoded {accessKeyId, secretAccessKey,
+  /// region} triple, stored opaque.
+  apiKeyEncrypted String?   @map("api_key_encrypted")
+  /// Ellipsis + last 4 chars of the raw key for masked display.
+  apiKeyPreview   String?   @map("api_key_preview")
+  /// Provider-specific knobs (maxTokens, thinking, effort, baseUrl, ...).
+  /// Validated per provider by zod in src/lib/aiConfig.ts.
+  params          Json?
+  /// Disabled configs are skipped by resolution (walk continues outward).
+  enabled         Boolean   @default(true)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  createdBy       String?   @map("created_by")
+  updatedAt       DateTime? @updatedAt @map("updated_at")
+  updatedBy       String?   @map("updated_by")
+
+  hadronServer HadronServer? @relation(fields: [hadronServerId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  app          App?          @relation(fields: [appId], references: [id], onDelete: Cascade)
+  agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([hadronServerId])
+  @@index([organizationId])
+  @@index([appId])
+  @@index([agentId])
+  @@map("ai_service_configs")
 }
 
 /// Log entry for the Hadron server, surfaced in hadron-portal for
@@ -1753,11 +1805,10 @@ model App {
   systemPrompt          String?              @map("system_prompt")
   /// Tools this App's agent can access; default `[]`.
   agentTools            String[]             @default([]) @map("agent_tools")
-  /// Optional AI override on the App; if NULL, sessions resolve from
-  /// the Agent's default AI config.
-  aiProvider            String?              @map("ai_provider")
-  aiModel               String?              @map("ai_model")
-  aiApiKeyEncrypted     String?              @map("ai_api_key_encrypted")
+  // 036-ai-service-config: the legacy ai_provider/ai_model/
+  // ai_api_key_encrypted columns were dropped in favor of App-owned
+  // AiServiceConfig rows (an App-owned config is the deploy-time override
+  // that wins over the Agent's default in the resolution walk).
   expiresAt             DateTime?            @map("expires_at")
   // 008-agent-installation introduced a direct App→Agent FK; 023-app-shape
   // Phase 2b dropped it in favor of the reintroduced N:M `AppAgent` join
@@ -1813,9 +1864,10 @@ model App {
   memories      Memory[]       @relation("AppMemories")
   users         User[]
   sessions      Session[]
-  logEntries    AppLogEntry[]
-  usageEvents   UsageEvent[]
-  pendingSetups PendingSetup[]
+  logEntries       AppLogEntry[]
+  usageEvents      UsageEvent[]
+  pendingSetups    PendingSetup[]
+  aiServiceConfigs AiServiceConfig[]
 
   @@index([organizationId])
   // Spec 021 FR-027: keep `urn` lookups index-served. The DB-level

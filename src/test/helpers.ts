@@ -22,6 +22,10 @@ export function buildAppKey(suffix?: string): string {
  * Call in beforeEach for DB tests.
  */
 export async function cleanDb(db: PrismaClient): Promise<void> {
+  // 036-ai-service-config: configs FK every owner level (incl.
+  // hadron_server, which nothing below deletes) — clear them first.
+  await db.aiServiceConfig.deleteMany();
+  await db.hadronServer.deleteMany();
   await db.usageEvent.deleteMany();
   await db.edge.deleteMany();
   await db.pendingEdge.deleteMany();

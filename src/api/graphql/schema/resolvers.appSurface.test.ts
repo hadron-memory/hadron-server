@@ -118,10 +118,15 @@ describe('createApp accepts absorbed Station fields', () => {
     expect(created.description).toBe('a chatbot');
     expect(created.systemPrompt).toBe('you are helpful');
     expect(created.agentTools).toEqual(['h-find-node', 'h-read-node']);
-    expect(created.aiProvider).toBe('anthropic');
-    expect(created.aiModel).toBe('claude-sonnet-4-20250514');
-    expect(created.aiApiKeyEncrypted).not.toBeNull();
-    expect(created.aiApiKeyEncrypted).not.toBe('sk-fake-key');
+    // 036-ai-service-config: the legacy args land in the App's 'default'
+    // registry config (columns dropped).
+    const config = await db.aiServiceConfig.findFirstOrThrow({
+      where: { appId: created.id, name: 'default' },
+    });
+    expect(config.provider).toBe('anthropic');
+    expect(config.model).toBe('claude-sonnet-4-20250514');
+    expect(config.apiKeyEncrypted).not.toBeNull();
+    expect(config.apiKeyEncrypted).not.toBe('sk-fake-key');
   });
 
   it('uses the documented defaults when absorbed fields are omitted', async () => {
@@ -134,7 +139,9 @@ describe('createApp accepts absorbed Station fields', () => {
     expect(created.role).toBe('READER');
     expect(created.description).toBeNull();
     expect(created.agentTools).toEqual([]);
-    expect(created.aiApiKeyEncrypted).toBeNull();
+    expect(
+      await db.aiServiceConfig.findFirst({ where: { appId: created.id, name: 'default' } }),
+    ).toBeNull();
   });
 });
 
@@ -165,14 +172,20 @@ describe('updateApp updates absorbed Station fields', () => {
     expect(updated.description).toBe('updated');
     expect(updated.systemPrompt).toBe('updated prompt');
     expect(updated.agentTools).toEqual(['h-create-node']);
-    expect(updated.aiProvider).toBe('openai');
-    expect(updated.aiModel).toBe('gpt-4');
+    const config = await db.aiServiceConfig.findFirstOrThrow({
+      where: { appId: created.id, name: 'default' },
+    });
+    expect(config.provider).toBe('openai');
+    expect(config.model).toBe('gpt-4');
   });
 
   it('clears aiApiKey when passed an empty string', async () => {
+    // 036-ai-service-config: provider+model are required for a config row
+    // to exist; key-only createApp args create no config (legacy quirk
+    // dropped with the columns).
     const created = await resolvers.Mutation.createApp(
       {},
-      { orgId, agentId, name: 'Has Key', aiApiKey: 'sk-initial' },
+      { orgId, agentId, name: 'Has Key', aiProvider: 'anthropic', aiModel: 'claude-opus-4-6', aiApiKey: 'sk-initial' },
       adminCtx(),
     );
     const cleared = await resolvers.Mutation.updateApp(
@@ -180,7 +193,12 @@ describe('updateApp updates absorbed Station fields', () => {
       { id: created.id, aiApiKey: '' },
       adminCtx(),
     );
-    expect(cleared.aiApiKeyEncrypted).toBeNull();
+    expect(cleared.id).toBe(created.id);
+    const config = await db.aiServiceConfig.findFirstOrThrow({
+      where: { appId: created.id, name: 'default' },
+    });
+    expect(config.apiKeyEncrypted).toBeNull();
+    expect(config.apiKeyPreview).toBeNull();
   });
 });
 
@@ -285,20 +303,22 @@ describe('addAgentToApp accepts AppAgent fields', () => {
 // ---------------------------------------------------------------------------
 
 describe('App field resolvers', () => {
-  it('hasAiApiKey is false by default; true when aiApiKeyEncrypted is set', async () => {
+  it('hasAiApiKey is false by default; true when a default config has a key', async () => {
     const noKey = await resolvers.Mutation.createApp(
       {},
       { orgId, agentId, name: 'No AI' },
       adminCtx(),
     );
-    expect(resolvers.App.hasAiApiKey(noKey)).toBe(false);
+    expect(await resolvers.App.hasAiApiKey(noKey, {}, adminCtx())).toBe(false);
 
+    // 036-ai-service-config: hasAiApiKey reads the App's 'default'
+    // registry config; provider+model are required for the row to exist.
     const withKey = await resolvers.Mutation.createApp(
       {},
-      { orgId, agentId, name: 'Has AI', aiApiKey: 'sk-test' },
+      { orgId, agentId, name: 'Has AI', aiProvider: 'anthropic', aiModel: 'claude-opus-4-6', aiApiKey: 'sk-test' },
       adminCtx(),
     );
-    expect(resolvers.App.hasAiApiKey(withKey)).toBe(true);
+    expect(await resolvers.App.hasAiApiKey(withKey, {}, adminCtx())).toBe(true);
   });
 
   it('App.agent resolver returns the linked Agent (008 — replaces agentSubscriptions)', async () => {

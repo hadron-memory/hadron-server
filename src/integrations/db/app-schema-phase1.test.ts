@@ -48,11 +48,19 @@ describe('Phase 1 — App schema absorbs Station fields', () => {
         description: 'a chatbot app',
         systemPrompt: 'you are helpful',
         agentTools: ['h-find-node', 'h-read-node'],
-        aiProvider: 'anthropic',
-        aiModel: 'claude-sonnet-4-20250514',
-        aiApiKeyEncrypted: 'opaque-blob',
+        // 036-ai-service-config: AI settings live in AiServiceConfig rows
+        // now (the legacy ai_* columns were dropped).
+        aiServiceConfigs: {
+          create: {
+            name: 'default',
+            provider: 'anthropic',
+            model: 'claude-sonnet-4-20250514',
+            apiKeyEncrypted: 'opaque-blob',
+          },
+        },
         expiresAt: new Date('2027-01-01T00:00:00.000Z'),
       },
+      include: { aiServiceConfigs: true },
     });
 
     expect(app.appType).toBe('CHATBOT');
@@ -60,9 +68,9 @@ describe('Phase 1 — App schema absorbs Station fields', () => {
     expect(app.description).toBe('a chatbot app');
     expect(app.systemPrompt).toBe('you are helpful');
     expect(app.agentTools).toEqual(['h-find-node', 'h-read-node']);
-    expect(app.aiProvider).toBe('anthropic');
-    expect(app.aiModel).toBe('claude-sonnet-4-20250514');
-    expect(app.aiApiKeyEncrypted).toBe('opaque-blob');
+    expect(app.aiServiceConfigs[0]?.provider).toBe('anthropic');
+    expect(app.aiServiceConfigs[0]?.model).toBe('claude-sonnet-4-20250514');
+    expect(app.aiServiceConfigs[0]?.apiKeyEncrypted).toBe('opaque-blob');
     expect(app.expiresAt?.toISOString()).toBe('2027-01-01T00:00:00.000Z');
   });
 
@@ -81,9 +89,9 @@ describe('Phase 1 — App schema absorbs Station fields', () => {
     expect(app.description).toBeNull();
     expect(app.systemPrompt).toBeNull();
     expect(app.agentTools).toEqual([]);
-    expect(app.aiProvider).toBeNull();
-    expect(app.aiModel).toBeNull();
-    expect(app.aiApiKeyEncrypted).toBeNull();
+    expect(
+      await db.aiServiceConfig.findFirst({ where: { appId: app.id } }),
+    ).toBeNull();
     expect(app.expiresAt).toBeNull();
   });
 });
