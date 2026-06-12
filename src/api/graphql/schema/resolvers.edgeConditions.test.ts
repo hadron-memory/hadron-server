@@ -101,15 +101,19 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     expect('priority' in calls[0][0].data).toBe(false);
   });
 
-  it('keeps the stored priority when updateEdge receives an explicit null (#263)', async () => {
+  it('updateEdge nulls: priority omitted (unset), condition/data forwarded as clear (#263)', async () => {
     await mutations.updateEdge(
       null,
-      { edgeId: 'edge-1', label: 'renamed', priority: null },
+      { edgeId: 'edge-1', label: 'renamed', condition: null, priority: null, data: null },
       testCtx,
     );
     const calls = (testCtx.db.edge.update as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls).toHaveLength(1);
+    // priority is a non-nullable Int — null means unset, keep stored.
     expect('priority' in calls[0][0].data).toBe(false);
+    // condition/data keep the spec'd null-clears contract.
+    expect(calls[0][0].data.condition).toBeNull();
+    expect(calls[0][0].data.data).toBeNull();
     expect(calls[0][0].data.label).toBe('renamed');
   });
 

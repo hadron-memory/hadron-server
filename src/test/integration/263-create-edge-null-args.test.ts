@@ -70,10 +70,19 @@ describe('createEdge with explicit-null args (CLI shape, #263)', () => {
     expect(stored.priority).toBe(0);
   });
 
-  it('updateEdge with priority: null keeps the stored value', async () => {
+  it('updateEdge nulls: priority kept (unset), condition/data cleared (spec contract)', async () => {
+    const condition = { '>': [{ var: 'chat.message_count' }, 20] };
+    const data = { kind: 'transition' };
     const edge = await resolvers.Mutation.createEdge(
       {},
-      { sourceNodeId: nodeA.id, targetNodeId: nodeB.id, label: 'routes-to', priority: 7 },
+      {
+        sourceNodeId: nodeA.id,
+        targetNodeId: nodeB.id,
+        label: 'routes-to',
+        priority: 7,
+        condition,
+        data,
+      },
       adminCtx(),
     );
     await resolvers.Mutation.updateEdge(
@@ -83,6 +92,12 @@ describe('createEdge with explicit-null args (CLI shape, #263)', () => {
     );
     const stored = await db.edge.findUniqueOrThrow({ where: { id: edge.id } });
     expect(stored.label).toBe('renamed');
+    // priority: null = unset — the non-nullable Int keeps its stored value.
     expect(stored.priority).toBe(7);
+    // condition/data: null = clear, per the edge-conditions contract
+    // ("null condition = always fires"). Clients that mean "unset" must
+    // omit the variable (hadron-cli genqlient fix tracked separately).
+    expect(stored.condition).toBeNull();
+    expect(stored.data).toBeNull();
   });
 });

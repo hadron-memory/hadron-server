@@ -3845,13 +3845,22 @@ export const resolvers = {
       if (condition !== undefined && condition !== null) {
         throwOnInvalidCondition(condition);
       }
+      // Null semantics differ per arg (#263):
+      // - condition/data: null CLEARS the stored value — the spec'd
+      //   edge-conditions contract ("null = always fires") that the portal
+      //   condition editor relies on.
+      // - priority: null = UNSET (keep stored). The column is a
+      //   non-nullable Int, so null is never meaningful — and forwarding
+      //   it makes Prisma fail with a misleading "Argument source is
+      //   missing".
+      // Non-JS clients that serialize unset args as explicit nulls (the
+      // Go CLI's genqlient layer) must omit unset variables instead —
+      // tracked as a hadron-cli fix.
       return ctx.db.edge.update({
         where: { id: edgeId },
         data: {
           ...(label !== undefined ? { label } : {}),
           ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
-          // != null: explicit null from non-JS clients means "unset" — keep
-          // the stored priority (the column is a non-nullable Int). #263.
           ...(priority != null ? { priority } : {}),
           ...(data !== undefined ? { data: data as InputJsonValue } : {}),
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
