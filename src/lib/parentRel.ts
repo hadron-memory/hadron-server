@@ -12,7 +12,11 @@
 //   - empty-after-trim rejected when the param is present (callers must
 //     OMIT the param for root-level, not pass an empty string)
 
-const ACCEPTED_URN_PREFIXES = ['urn:memory:', 'urn:node:', 'loc:'];
+const ACCEPTED_URN_PREFIXES = [
+  'hrn:memory:', 'hrn:node:',
+  'urn:memory:', 'urn:node:', // legacy scheme, accepted forever (issue #239)
+  'loc:',
+];
 const KNOWN_URN_TYPES = ['org', 'memory', 'agent', 'app', 'node'] as const;
 
 export class InvalidParentRelError extends Error {
@@ -59,16 +63,18 @@ export function validateParentRel(parentRel: string | undefined): void {
     }
   }
 
-  // Reject other urn:<type>: prefixes (silent coercion is a security risk).
-  const urnMatch = trimmed.match(/^urn:([a-zA-Z]+):/);
+  // Reject other hrn:<type>: / urn:<type>: prefixes (silent coercion is a
+  // security risk).
+  const urnMatch = trimmed.match(/^(hrn|urn):([a-zA-Z]+):/);
   if (urnMatch) {
-    const type = urnMatch[1];
+    const scheme = urnMatch[1];
+    const type = urnMatch[2];
     const known = (KNOWN_URN_TYPES as readonly string[]).includes(type);
     const hint = known
-      ? `'urn:${type}:' addresses an entity, not a subtree path.`
-      : `'urn:${type}:' is not a known URN type.`;
+      ? `'${scheme}:${type}:' addresses an entity, not a subtree path.`
+      : `'${scheme}:${type}:' is not a known URN type.`;
     throw new InvalidParentRelError(
-      `parentRel cannot start with 'urn:${type}:'. ${hint} Pass a bare rel-path, or use 'urn:memory:' / 'urn:node:'.`,
+      `parentRel cannot start with '${scheme}:${type}:'. ${hint} Pass a bare rel-path, or use 'hrn:memory:' / 'hrn:node:'.`,
     );
   }
 

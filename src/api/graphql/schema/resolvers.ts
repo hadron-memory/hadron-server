@@ -136,7 +136,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { assertFullyQualifiedUrn } from '../../../lib/urn.js';
+import { assertFullyQualifiedUrn, hasSchemePrefix } from '../../../lib/urn.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
@@ -2567,10 +2567,11 @@ export const resolvers = {
       let nodeIdFilter: string | undefined;
       let nodeLocExact: string | undefined;
       if (nodeId) {
-        // `urn:`-prefixed inputs are always node refs (resolveNodeRef validates
-        // the type marker and throws on mismatch). Unprefixed inputs are refs
-        // only if they have full node-URN shape; otherwise they're a bare loc.
-        let isNodeRef = isId(nodeId) || nodeId.startsWith('urn:');
+        // Scheme-prefixed inputs (`hrn:` / legacy `urn:`) are always node refs
+        // (resolveNodeRef validates the type marker and throws on mismatch).
+        // Unprefixed inputs are refs only if they have full node-URN shape;
+        // otherwise they're a bare loc.
+        let isNodeRef = isId(nodeId) || hasSchemePrefix(nodeId);
         if (!isNodeRef) {
           // assertFullyQualifiedUrn checks shape only (≥3 segments for 'node').
           try {

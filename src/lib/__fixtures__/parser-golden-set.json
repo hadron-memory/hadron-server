@@ -13,98 +13,98 @@
   "cases": [
     {
       "_section": "D1 — type registry acceptance",
-      "input": "urn:agent:hadronmemory.com::coding-agent",
+      "input": "hrn:agent:hadronmemory.com::coding-agent",
       "expectedType": "agent",
-      "expectedParserCanonical": "urn:agent:hadronmemory.com::coding-agent",
+      "expectedParserCanonical": "hrn:agent:hadronmemory.com::coding-agent",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:memory:hadronmemory.com::coding-agent::system",
+      "input": "hrn:memory:hadronmemory.com::coding-agent::system",
       "expectedType": "memory",
-      "expectedParserCanonical": "urn:memory:hadronmemory.com::coding-agent::system",
+      "expectedParserCanonical": "hrn:memory:hadronmemory.com::coding-agent::system",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:app:micromentor.org::coding-app",
+      "input": "hrn:app:micromentor.org::coding-app",
       "expectedType": "app",
-      "expectedParserCanonical": "urn:app:micromentor.org::coding-app",
+      "expectedParserCanonical": "hrn:app:micromentor.org::coding-app",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:fake:foo",
+      "input": "hrn:fake:foo",
       "expectedReject": "unknown-type"
     },
 
     {
       "_section": "D2 — grammar (both forms accepted; bare is canonical)",
-      "input": "urn:agent:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent",
+      "input": "hrn:agent:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent",
       "expectedType": "agent",
-      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "expectedParserCanonical": "hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
       "expectedParserRewrites": ["type-marker-optionality"]
     },
     {
-      "input": "urn:memory:org::::app",
+      "input": "hrn:memory:org::::app",
       "expectedReject": "empty-segment"
     },
     {
-      "input": "urn:memory:org::app::",
+      "input": "hrn:memory:org::app::",
       "expectedReject": "trailing-double-colon"
     },
 
     {
       "_section": "D4 — memory-role markers",
-      "input": "urn:memory:micromentor.org::coding-app::coding-agent::system",
+      "input": "hrn:memory:micromentor.org::coding-app::coding-agent::system",
       "expectedType": "memory",
-      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::system",
+      "expectedParserCanonical": "hrn:memory:micromentor.org::coding-app::coding-agent::system",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:memory:micromentor.org::coding-app::coding-agent::app-mem",
+      "input": "hrn:memory:micromentor.org::coding-app::coding-agent::app-mem",
       "expectedType": "memory",
-      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::app-mem",
+      "expectedParserCanonical": "hrn:memory:micromentor.org::coding-app::coding-agent::app-mem",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:memory:micromentor.org::coding-app::coding-agent::app-user:shadowbrush",
+      "input": "hrn:memory:micromentor.org::coding-app::coding-agent::app-user:shadowbrush",
       "expectedType": "memory",
-      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::app-user:shadowbrush",
+      "expectedParserCanonical": "hrn:memory:micromentor.org::coding-app::coding-agent::app-user:shadowbrush",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:memory:micromentor.org::coding-app::coding-agent::priv:shadowbrush",
+      "input": "hrn:memory:micromentor.org::coding-app::coding-agent::priv:shadowbrush",
       "expectedType": "memory",
-      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::priv:shadowbrush",
+      "expectedParserCanonical": "hrn:memory:micromentor.org::coding-app::coding-agent::priv:shadowbrush",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:memory:micromentor.org::coding-app::coding-agent::group-mem:eng-team",
+      "input": "hrn:memory:micromentor.org::coding-app::coding-agent::group-mem:eng-team",
       "expectedType": "memory",
-      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::group-mem:eng-team",
+      "expectedParserCanonical": "hrn:memory:micromentor.org::coding-app::coding-agent::group-mem:eng-team",
       "expectedParserRewrites": []
     },
 
     {
       "_section": "D5 — slug-or-PK at parameterized role-marker positions",
-      "input": "urn:memory:micromentor.org::coding-app::coding-agent::app-user:c0123abc456def789012345678",
+      "input": "hrn:memory:micromentor.org::coding-app::coding-agent::app-user:c0123abc456def789012345678",
       "expectedType": "memory",
-      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::app-user:c0123abc456def789012345678",
+      "expectedParserCanonical": "hrn:memory:micromentor.org::coding-app::coding-agent::app-user:c0123abc456def789012345678",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:memory:micromentor.org::coding-app::coding-agent::priv:01234567890abcdef0123456789abcde",
+      "input": "hrn:memory:micromentor.org::coding-app::coding-agent::priv:01234567890abcdef0123456789abcde",
       "expectedType": "memory",
-      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::coding-agent::priv:01234567890abcdef0123456789abcde",
+      "expectedParserCanonical": "hrn:memory:micromentor.org::coding-app::coding-agent::priv:01234567890abcdef0123456789abcde",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:memory:micromentor.org::coding-app::coding-agent::app-user:foo bar",
+      "input": "hrn:memory:micromentor.org::coding-app::coding-agent::app-user:foo bar",
       "expectedReject": "invalid-charset",
       "offendingSegment": "foo bar"
     },
 
     {
       "_section": "D8 — loc: deprecated",
-      "input": "urn:loc:foo:bar",
+      "input": "hrn:loc:foo:bar",
       "expectedReject": "loc-segment-rejected"
     },
     {
@@ -112,75 +112,75 @@
       "expectedReject": "loc-segment-rejected"
     },
     {
-      "input": "urn:memory:org::loc:foo",
+      "input": "hrn:memory:org::loc:foo",
       "expectedReject": "loc-segment-rejected"
     },
 
     {
       "_section": "D9 — slug rules",
-      "input": "urn:org:baragaun.com",
+      "input": "hrn:org:baragaun.com",
       "expectedType": "org",
-      "expectedParserCanonical": "urn:org:baragaun.com",
+      "expectedParserCanonical": "hrn:org:baragaun.com",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:memory:acme.com::foo bar",
+      "input": "hrn:memory:acme.com::foo bar",
       "expectedReject": "invalid-charset",
       "offendingSegment": "foo bar"
     },
     {
       "_note": "system as the position-1 segment of a 2-segment memory URN: no agent context, so the role-marker word is at the wrong structural position. Uses acme.com (not 'org') so the test isolates the system rejection rather than tripping on 'org' as a reserved-word.",
-      "input": "urn:memory:acme.com::system",
+      "input": "hrn:memory:acme.com::system",
       "expectedReject": "reserved-word-slug",
       "offendingSegment": "system"
     },
     {
       "_note": "case-insensitive reserved-word check: Agent (mixed case) is still rejected.",
-      "input": "urn:memory:acme.com::Agent",
+      "input": "hrn:memory:acme.com::Agent",
       "expectedReject": "reserved-word-slug",
       "offendingSegment": "Agent"
     },
     {
-      "input": "urn:memory:acme.com::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toolong",
+      "input": "hrn:memory:acme.com::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toolong",
       "expectedReject": "slug-too-long"
     },
 
     {
       "_section": "D10 / R2 — installed-object URNs (already canonical)",
-      "input": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "input": "hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
       "expectedType": "agent",
-      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "expectedParserCanonical": "hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:agent:micromentor.org::coding-app::competitor.com:coding-agent",
+      "input": "hrn:agent:micromentor.org::coding-app::competitor.com:coding-agent",
       "expectedType": "agent",
-      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::competitor.com:coding-agent",
+      "expectedParserCanonical": "hrn:agent:micromentor.org::coding-app::competitor.com:coding-agent",
       "expectedParserRewrites": []
     },
 
     {
       "_section": "D11 cat 1 — source/install memory (canonical = definition URN)",
       "_note": "When the installing org equals the author, the install-by-self URN is an alias for the definition URN.",
-      "input": "urn:memory:hadronmemory.com::hadronmemory.com:coding-agent::system",
+      "input": "hrn:memory:hadronmemory.com::hadronmemory.com:coding-agent::system",
       "expectedType": "memory",
-      "expectedParserCanonical": "urn:memory:hadronmemory.com::coding-agent::system",
+      "expectedParserCanonical": "hrn:memory:hadronmemory.com::coding-agent::system",
       "expectedParserRewrites": ["source-install-memory"]
     },
 
     {
       "_section": "D11 cat 2 — node-role polymorphism (RESOLVER LAYER)",
       "_note": "The role-form rewrite needs DB access to look up the node's role; parser flags it for the resolver.",
-      "input": "urn:node:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
+      "input": "hrn:node:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
       "expectedType": "node",
-      "expectedParserCanonical": "urn:node:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
+      "expectedParserCanonical": "hrn:node:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
       "expectedParserRewrites": [],
       "expectedNeedsResolver": true
     },
     {
-      "input": "urn:prompt:micromentor.org::coding-app::coding-agent::system::notify",
+      "input": "hrn:prompt:micromentor.org::coding-app::coding-agent::system::notify",
       "expectedType": "prompt",
-      "expectedParserCanonical": "urn:prompt:micromentor.org::coding-app::coding-agent::system::notify",
+      "expectedParserCanonical": "hrn:prompt:micromentor.org::coding-app::coding-agent::system::notify",
       "expectedParserRewrites": [],
       "expectedNeedsResolver": false
     },
@@ -188,48 +188,48 @@
     {
       "_section": "D11 cat 3 — path/slug shortening (RESOLVER LAYER)",
       "_note": "Shortened form is parsed faithfully; resolver does the DB lookup to find the author-org. Parser flags needsResolver=true.",
-      "input": "urn:agent:micromentor.org::coding-app::coding-agent",
+      "input": "hrn:agent:micromentor.org::coding-app::coding-agent",
       "expectedType": "agent",
-      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::coding-agent",
+      "expectedParserCanonical": "hrn:agent:micromentor.org::coding-app::coding-agent",
       "expectedParserRewrites": [],
       "expectedNeedsResolver": true
     },
 
     {
       "_section": "D11 cat 4 — type-marker optionality (canonical = bare)",
-      "input": "urn:agent:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent",
+      "input": "hrn:agent:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent",
       "expectedType": "agent",
-      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "expectedParserCanonical": "hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
       "expectedParserRewrites": ["type-marker-optionality"]
     },
     {
-      "input": "urn:memory:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent::memory:app-mem",
+      "input": "hrn:memory:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent::memory:app-mem",
       "expectedType": "memory",
-      "expectedParserCanonical": "urn:memory:micromentor.org::coding-app::hadronmemory.com:coding-agent::app-mem",
+      "expectedParserCanonical": "hrn:memory:micromentor.org::coding-app::hadronmemory.com:coding-agent::app-mem",
       "expectedParserRewrites": ["type-marker-optionality"]
     },
 
     {
       "_section": "Compound rewrites — parser-layer cat 4 + resolver-flagged cat 3",
       "_note": "type-markered AND shortened. Parser strips markers (cat 4 fires at parser layer); shortening remains for the resolver.",
-      "input": "urn:agent:micromentor.org::app:coding-app::agent:coding-agent",
+      "input": "hrn:agent:micromentor.org::app:coding-app::agent:coding-agent",
       "expectedType": "agent",
-      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::coding-agent",
+      "expectedParserCanonical": "hrn:agent:micromentor.org::coding-app::coding-agent",
       "expectedParserRewrites": ["type-marker-optionality"],
       "expectedNeedsResolver": true
     },
 
     {
       "_section": "Idempotence — canonical-form inputs pass through unchanged",
-      "input": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "input": "hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
       "expectedType": "agent",
-      "expectedParserCanonical": "urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
+      "expectedParserCanonical": "hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent",
       "expectedParserRewrites": []
     },
     {
-      "input": "urn:prompt:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
+      "input": "hrn:prompt:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
       "expectedType": "prompt",
-      "expectedParserCanonical": "urn:prompt:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
+      "expectedParserCanonical": "hrn:prompt:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
       "expectedParserRewrites": []
     }
   ]

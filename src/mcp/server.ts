@@ -406,11 +406,11 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
   // (e.g. `review:sort-imports`), rather than letting the parser
   // re-split it as additional hierarchy levels. Calling
   // formatCanonicalUrn('node', `${memUrn}:${loc}`) directly would
-  // produce `urn:node:acme.com::dev::review::sort-imports` (4 levels)
+  // produce `hrn:node:acme.com::dev::review::sort-imports` (4 levels)
   // for a legacy memUrn — parser-correct but semantically wrong.
   const memCanonical = formatCanonicalUrn('memory', memUrn);
-  const bareMemCanonical = memCanonical.substring('urn:memory:'.length);
-  return `urn:node:${bareMemCanonical}::${loc}`;
+  const bareMemCanonical = memCanonical.substring('hrn:memory:'.length);
+  return `hrn:node:${bareMemCanonical}::${loc}`;
 }
 
 // Spec 033 US3 — search helpers moved to src/lib/search.ts to break the
@@ -655,7 +655,7 @@ export function createMcpServerInstance(
     'h-set-active-memory',
     'Set the active memory for this session. Subsequent tree tools will use this as the default scope.',
     {
-      memoryUrn: z.string().describe('Memory URN, e.g. hadronmemory.com::dev or urn:memory:hadronmemory.com::dev'),
+      memoryUrn: z.string().describe('Memory URN, e.g. hadronmemory.com::dev or hrn:memory:hadronmemory.com::dev'),
     },
     async ({ memoryUrn }) => {
       // #100 #3: Memory.urn is stored bare ('hadronmemory.com::dev'). Storing
@@ -668,9 +668,9 @@ export function createMcpServerInstance(
       // asymmetry reported in issue #100.
       const parsed = parseUrnInput(memoryUrn.trim());
       if (parsed.type !== 'memory' && parsed.type !== 'unknown') {
-        const prefix = parsed.type === 'loc' ? 'loc:' : `urn:${parsed.type}:`;
+        const prefix = parsed.type === 'loc' ? 'loc:' : `hrn:${parsed.type}:`;
         return textResult(
-          `Expected a memory URN, got '${prefix}'. Pass 'hadronmemory.com::dev' or 'urn:memory:hadronmemory.com::dev'.`,
+          `Expected a memory URN, got '${prefix}'. Pass 'hadronmemory.com::dev' or 'hrn:memory:hadronmemory.com::dev'.`,
         );
       }
 
@@ -802,7 +802,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'h-set-active-app',
-    "Set the active Hadron App for this session. Subsequent tools (h-find-nodes, h-add-node, etc.) will use this as the App scope. Pass the App URN (e.g. 'urn:app:acme-corp::notes') or an App name that matches exactly one App you have access to. Use h-list-apps to see options.",
+    "Set the active Hadron App for this session. Subsequent tools (h-find-nodes, h-add-node, etc.) will use this as the App scope. Pass the App URN (e.g. 'hrn:app:acme-corp::notes') or an App name that matches exactly one App you have access to. Use h-list-apps to see options.",
     {
       app: z
         .string()
@@ -1533,7 +1533,7 @@ export function createMcpServerInstance(
     'h-read-node',
     "Read a node by its fully-qualified URN. The URN MUST be fully qualified (org::memory::loc). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; not emitted on encrypted memories in v1 — see #206). Spec 031 + 032.",
     {
-      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::architecture" or "urn:node:acme.com::mmdata::architecture"'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::architecture" or "hrn:node:acme.com::mmdata::architecture"'),
       contentScope: z
         .enum(['content', 'abstract', 'all'])
         .optional()
@@ -2075,7 +2075,7 @@ export function createMcpServerInstance(
     'h-add-node',
     'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (org::memory::loc). Requires write access to the memory.',
     {
-      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports" or "urn:node:acme.com::mmdata::review:sort-imports". Both bare and prefixed forms accepted. Relative-form URNs (no memory) are rejected.'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports" or "hrn:node:acme.com::mmdata::review:sort-imports". Both bare and prefixed forms accepted. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
       description: z.string().optional().describe('Short description'),

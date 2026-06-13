@@ -80,11 +80,11 @@ describe('parseUrnInput', () => {
 
 describe('formatUrn', () => {
   it('formats a memory URN', () => {
-    expect(formatUrn('memory', 'hadronmemory.com:core')).toBe('urn:memory:hadronmemory.com:core');
+    expect(formatUrn('memory', 'hadronmemory.com:core')).toBe('hrn:memory:hadronmemory.com:core');
   });
 
   it('formats a node URN', () => {
-    expect(formatUrn('node', 'micromentor.org:mmdata:services:admin')).toBe('urn:node:micromentor.org:mmdata:services:admin');
+    expect(formatUrn('node', 'micromentor.org:mmdata:services:admin')).toBe('hrn:node:micromentor.org:mmdata:services:admin');
   });
 });
 
@@ -94,21 +94,21 @@ describe('formatUrn', () => {
 describe('formatCanonicalUrn', () => {
   describe('memory URNs', () => {
     it('rewrites legacy single-colon bare form to canonical', () => {
-      expect(formatCanonicalUrn('memory', 'acme.com:dev')).toBe('urn:memory:acme.com::dev');
+      expect(formatCanonicalUrn('memory', 'acme.com:dev')).toBe('hrn:memory:acme.com::dev');
     });
 
     it('passes canonical bare form through unchanged', () => {
-      expect(formatCanonicalUrn('memory', 'acme.com::dev')).toBe('urn:memory:acme.com::dev');
+      expect(formatCanonicalUrn('memory', 'acme.com::dev')).toBe('hrn:memory:acme.com::dev');
     });
   });
 
   describe('app URNs', () => {
     it('rewrites legacy single-colon bare form to canonical', () => {
-      expect(formatCanonicalUrn('app', 'acme-corp:notes')).toBe('urn:app:acme-corp::notes');
+      expect(formatCanonicalUrn('app', 'acme-corp:notes')).toBe('hrn:app:acme-corp::notes');
     });
 
     it('passes canonical bare form through unchanged', () => {
-      expect(formatCanonicalUrn('app', 'acme-corp::notes')).toBe('urn:app:acme-corp::notes');
+      expect(formatCanonicalUrn('app', 'acme-corp::notes')).toBe('hrn:app:acme-corp::notes');
     });
   });
 
@@ -132,19 +132,19 @@ describe('formatCanonicalUrn', () => {
       // inside a single path-segment as an atom, where reserved-word
       // rejection doesn't apply.)
       expect(formatCanonicalUrn('node', 'acme.com:dev:services:sort-imports')).toBe(
-        'urn:node:acme.com::dev::services::sort-imports',
+        'hrn:node:acme.com::dev::services::sort-imports',
       );
     });
 
     it('canonical bare with multi-atom leaf preserves the leaf intact', () => {
       expect(formatCanonicalUrn('node', 'acme.com::dev::review:sort-imports')).toBe(
-        'urn:node:acme.com::dev::review:sort-imports',
+        'hrn:node:acme.com::dev::review:sort-imports',
       );
     });
 
     it('canonical bare with 3 hierarchy levels passes through unchanged', () => {
       expect(formatCanonicalUrn('node', 'acme.com::dev::services')).toBe(
-        'urn:node:acme.com::dev::services',
+        'hrn:node:acme.com::dev::services',
       );
     });
   });
@@ -158,7 +158,7 @@ describe('formatCanonicalUrn', () => {
       // inner `:` alone.
       const bare = 'micromentor.org::coding-app::hadronmemory.com:coding-agent';
       expect(formatCanonicalUrn('agent', bare)).toBe(
-        'urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
+        'hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
       );
     });
   });
@@ -211,7 +211,7 @@ describe('formatCanonicalUrn', () => {
       // The load-bearing positive case: input has no `::` anywhere, so
       // every `:` is a hierarchy separator and gets promoted.
       expect(formatCanonicalUrn('memory', 'acme.com:dev')).toBe(
-        'urn:memory:acme.com::dev',
+        'hrn:memory:acme.com::dev',
       );
     });
 
@@ -225,7 +225,7 @@ describe('formatCanonicalUrn', () => {
           'micromentor.org::coding-app::hadronmemory.com:coding-agent',
         ),
       ).toBe(
-        'urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
+        'hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
       );
     });
 
@@ -252,14 +252,14 @@ describe('formatCanonicalUrn', () => {
 
     it('applies cleanly to all valid type prefixes used by MCP', () => {
       // Spec 027 affects MCP-emitted URNs of these types.
-      expect(formatCanonicalUrn('org', 'acme.com')).toBe('urn:org:acme.com');
-      expect(formatCanonicalUrn('memory', 'acme.com::dev')).toBe('urn:memory:acme.com::dev');
-      expect(formatCanonicalUrn('app', 'acme.com::coding')).toBe('urn:app:acme.com::coding');
+      expect(formatCanonicalUrn('org', 'acme.com')).toBe('hrn:org:acme.com');
+      expect(formatCanonicalUrn('memory', 'acme.com::dev')).toBe('hrn:memory:acme.com::dev');
+      expect(formatCanonicalUrn('app', 'acme.com::coding')).toBe('hrn:app:acme.com::coding');
       expect(formatCanonicalUrn('agent', 'acme.com::coding-agent')).toBe(
-        'urn:agent:acme.com::coding-agent',
+        'hrn:agent:acme.com::coding-agent',
       );
       expect(formatCanonicalUrn('node', 'acme.com::dev::services:admin')).toBe(
-        'urn:node:acme.com::dev::services:admin',
+        'hrn:node:acme.com::dev::services:admin',
       );
     });
   });
@@ -281,7 +281,7 @@ describe('validateUrnType', () => {
   it('rejects mismatched type', () => {
     const result = validateUrnType({ type: 'agent', value: 'x' }, 'memory');
     expect(result).toContain('Expected memory URN');
-    expect(result).toContain('got urn:agent');
+    expect(result).toContain('got hrn:agent');
   });
 
   it('rejects loc where memory is expected', () => {
@@ -355,6 +355,66 @@ describe('parseUrn — golden-set parity', () => {
   }
 });
 
+// =====================================================================
+// Issue #239 — `hrn:` is canonical; legacy `urn:` accepted forever.
+// =====================================================================
+describe('parseUrn — scheme prefix (issue #239)', () => {
+  it('emits canonical hrn: scheme for an hrn: input (no rewrite)', () => {
+    const r = parseUrn('hrn:agent:hadronmemory.com::coding-agent');
+    expect(r.parserCanonical).toBe('hrn:agent:hadronmemory.com::coding-agent');
+    expect(r.parserRewrites).toEqual([]);
+  });
+
+  it('rewrites a legacy urn: input to canonical hrn: and flags legacy-urn-scheme', () => {
+    const r = parseUrn('urn:agent:hadronmemory.com::coding-agent');
+    expect(r.parserCanonical).toBe('hrn:agent:hadronmemory.com::coding-agent');
+    expect(r.parserRewrites).toContain('legacy-urn-scheme');
+  });
+
+  it('legacy scheme composes with structural rewrites (both fire)', () => {
+    const r = parseUrn(
+      'urn:agent:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent',
+    );
+    expect(r.parserCanonical).toBe(
+      'hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
+    );
+    expect([...r.parserRewrites].sort()).toEqual(
+      ['legacy-urn-scheme', 'type-marker-optionality'].sort(),
+    );
+  });
+
+  it('canonical hrn: output is idempotent (re-parse fires no rewrites)', () => {
+    const once = parseUrn('urn:agent:hadronmemory.com::coding-agent').parserCanonical;
+    const twice = parseUrn(once);
+    expect(twice.parserCanonical).toBe(once);
+    expect(twice.parserRewrites).toEqual([]);
+  });
+
+  it('isParserCanonical is false for a legacy urn: input (scheme rewrite needed)', () => {
+    expect(isParserCanonical('urn:agent:hadronmemory.com::coding-agent')).toBe(false);
+    expect(isParserCanonical('hrn:agent:hadronmemory.com::coding-agent')).toBe(true);
+  });
+
+  it('parseUrnInput accepts both schemes for the type marker', () => {
+    expect(parseUrnInput('hrn:memory:acme.com:dev')).toEqual({ type: 'memory', value: 'acme.com:dev' });
+    expect(parseUrnInput('urn:memory:acme.com:dev')).toEqual({ type: 'memory', value: 'acme.com:dev' });
+  });
+
+  it('formatCanonicalUrn rejects a bareValue carrying either scheme', () => {
+    expect(() => formatCanonicalUrn('memory', 'hrn:memory:acme.com::dev')).toThrow(UrnParseError);
+    expect(() => formatCanonicalUrn('memory', 'urn:memory:acme.com::dev')).toThrow(UrnParseError);
+  });
+
+  it('composeInstalledAgentUrn accepts legacy-scheme inputs and emits hrn:', () => {
+    expect(
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org::coding-app',
+        'urn:agent:hadronmemory.com::coding-agent',
+      ),
+    ).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+  });
+});
+
 describe('parseUrn — error.input always carries the full URN', () => {
   it('threading: charset error from a buried atom carries the full URN', () => {
     // Regression for PR #124 review C2.
@@ -403,7 +463,7 @@ describe('parseUrn — case sensitivity (D9)', () => {
 
   it('preserves slug case in parserCanonical', () => {
     const result = parseUrn('urn:agent:Hadronmemory.com::Coding-Agent');
-    expect(result.parserCanonical).toBe('urn:agent:Hadronmemory.com::Coding-Agent');
+    expect(result.parserCanonical).toBe('hrn:agent:Hadronmemory.com::Coding-Agent');
   });
 });
 
@@ -413,7 +473,7 @@ describe('toParserCanonical / isParserCanonical', () => {
       'urn:agent:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent',
     );
     expect(canonical).toBe(
-      'urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
+      'hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
     );
   });
 
@@ -424,7 +484,9 @@ describe('toParserCanonical / isParserCanonical', () => {
   });
 
   it('isParserCanonical returns true for already-canonical inputs', () => {
-    expect(isParserCanonical('urn:agent:hadronmemory.com::coding-agent')).toBe(true);
+    // Canonical form carries the hrn: scheme (issue #239); a legacy urn:
+    // input is non-canonical because it needs the scheme rewrite.
+    expect(isParserCanonical('hrn:agent:hadronmemory.com::coding-agent')).toBe(true);
   });
 
   it('isParserCanonical returns false for inputs needing parser-layer rewrites', () => {
@@ -664,7 +726,7 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
         'urn:app:micromentor.org::coding-app',
         'urn:agent:hadronmemory.com::coding-agent',
       ),
-    ).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+    ).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
   });
 
   it('two different authors with same agent slug → distinct install URNs', () => {
@@ -677,8 +739,8 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
       'urn:agent:competitor.com::coding-agent',
     );
     expect(a).not.toBe(b);
-    expect(a).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
-    expect(b).toBe('urn:agent:micromentor.org::coding-app::competitor.com:coding-agent');
+    expect(a).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+    expect(b).toBe('hrn:agent:micromentor.org::coding-app::competitor.com:coding-agent');
   });
 
   it('install-by-self (installing org == author org) collapses via D11 cat 1', () => {
@@ -687,7 +749,7 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
         'urn:app:hadronmemory.com::coding-app',
         'urn:agent:hadronmemory.com::coding-agent',
       ),
-    ).toBe('urn:agent:hadronmemory.com::coding-app::coding-agent');
+    ).toBe('hrn:agent:hadronmemory.com::coding-app::coding-agent');
   });
 
   it('accepts legacy single-`:` shapes (transitional during migration)', () => {
@@ -697,7 +759,7 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
         'micromentor.org:coding-app',
         'hadronmemory.com:coding-agent',
       ),
-    ).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+    ).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
   });
 
   it('accepts mixed grammar (legacy app, spec-021 agent)', () => {
@@ -706,7 +768,7 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
         'micromentor.org:coding-app',
         'urn:agent:hadronmemory.com::coding-agent',
       ),
-    ).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+    ).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
   });
 
   it('accepts mixed grammar (spec-021 app, legacy agent)', () => {
@@ -715,7 +777,7 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
         'urn:app:micromentor.org::coding-app',
         'hadronmemory.com:coding-agent',
       ),
-    ).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+    ).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
   });
 
   it('throws on an empty appUrn', () => {
@@ -736,7 +798,7 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
         'urn:agent:micromentor.org::coding-app',
         'urn:agent:hadronmemory.com::coding-agent',
       ),
-    ).toThrow(/urn:app/);
+    ).toThrow(/hrn:app/);
   });
 
   it('throws on a wrong-type prefix on agentUrn', () => {
@@ -745,7 +807,7 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
         'urn:app:micromentor.org::coding-app',
         'urn:memory:hadronmemory.com::coding-agent',
       ),
-    ).toThrow(/urn:agent/);
+    ).toThrow(/hrn:agent/);
   });
 
   it('throws when appUrn has only an org segment (no app slug)', () => {
@@ -813,20 +875,20 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
 describe('parseUrn — node-leaf locs are NOT mangled by cat 4 strip', () => {
   it('preserves a node leaf that begins with a type-marker word', () => {
     const result = parseUrn(
-      'urn:node:micromentor.org::coding-app::coding-agent::system::app:settings',
+      'hrn:node:micromentor.org::coding-app::coding-agent::system::app:settings',
     );
     expect(result.parserCanonical).toBe(
-      'urn:node:micromentor.org::coding-app::coding-agent::system::app:settings',
+      'hrn:node:micromentor.org::coding-app::coding-agent::system::app:settings',
     );
     expect(result.parserRewrites).toEqual([]);
   });
 
   it('preserves a node leaf with a multi-atom path beginning with agent:', () => {
     const result = parseUrn(
-      'urn:node:micromentor.org::coding-app::coding-agent::system::agent:profile:bio',
+      'hrn:node:micromentor.org::coding-app::coding-agent::system::agent:profile:bio',
     );
     expect(result.parserCanonical).toBe(
-      'urn:node:micromentor.org::coding-app::coding-agent::system::agent:profile:bio',
+      'hrn:node:micromentor.org::coding-app::coding-agent::system::agent:profile:bio',
     );
     expect(result.parserRewrites).toEqual([]);
   });
@@ -837,7 +899,7 @@ describe('parseUrn — node-leaf locs are NOT mangled by cat 4 strip', () => {
       'urn:node:micromentor.org::app:coding-app::agent:hadronmemory.com:coding-agent::system::review:sort-imports',
     );
     expect(result.parserCanonical).toBe(
-      'urn:node:micromentor.org::coding-app::hadronmemory.com:coding-agent::system::review:sort-imports',
+      'hrn:node:micromentor.org::coding-app::hadronmemory.com:coding-agent::system::review:sort-imports',
     );
     expect(result.parserRewrites).toContain('type-marker-optionality');
   });

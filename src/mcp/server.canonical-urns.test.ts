@@ -75,9 +75,10 @@ describe('spec 027: MCP surface URN canonical-form audit', () => {
         const line = lines[i];
         // For each line, find any URN-literal that has 3+ colons total
         // AND no `::` substring. We use a simple two-pass approach:
-        // 1) Find all `urn:<type>:...` substrings up to a closing quote.
+        // 1) Find all `hrn:`/`urn:`-scheme `<type>:...` substrings up to a
+        //    closing quote (both schemes are matched).
         // 2) For each, count colons; if 4+ and no `::`, it's a violation.
-        const urnLiteralRegex = /urn:(?:org|app|agent|memory|node)(?::[a-zA-Z0-9._-]+){3,}/g;
+        const urnLiteralRegex = /(?:urn|hrn):(?:org|app|agent|memory|node)(?::[a-zA-Z0-9._-]+){3,}/g;
         let match: RegExpExecArray | null;
         while ((match = urnLiteralRegex.exec(line)) !== null) {
           const urn = match[0];
@@ -142,7 +143,7 @@ describe('spec 027 FR-008: R2 install URN round-trip', () => {
     // intra-segment `:` alone.
     const bare = 'micromentor.org::coding-app::hadronmemory.com:coding-agent';
     expect(formatCanonicalUrn('agent', bare)).toBe(
-      'urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
+      'hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
     );
   });
 
@@ -196,22 +197,22 @@ describe('spec 027 US2: legacy input → canonical output (composition guarantee
     // h-set-active-memory accepts memoryUrn input; response echoes the
     // resolved memory's URN via formatCanonicalUrn('memory', mem.urn).
     // If mem.urn is still legacy in DB, the wrapper canonicalizes.
-    expect(formatCanonicalUrn('memory', 'acme.com:dev')).toBe('urn:memory:acme.com::dev');
+    expect(formatCanonicalUrn('memory', 'acme.com:dev')).toBe('hrn:memory:acme.com::dev');
   });
 
   it('legacy single-colon App URN input round-trips to canonical output', () => {
     // h-set-active-app and h-list-apps emit App URNs via
     // formatCanonicalUrn('app', a.urn).
-    expect(formatCanonicalUrn('app', 'acme-corp:notes')).toBe('urn:app:acme-corp::notes');
+    expect(formatCanonicalUrn('app', 'acme-corp:notes')).toBe('hrn:app:acme-corp::notes');
   });
 
   it('h-list-apps style — multiple bare App URNs canonicalize independently', () => {
     const apps = ['acme-corp:mealplan', 'mentor-co:juno', 'startup.io::beta'];
     const canonical = apps.map((u) => formatCanonicalUrn('app', u));
     expect(canonical).toEqual([
-      'urn:app:acme-corp::mealplan',
-      'urn:app:mentor-co::juno',
-      'urn:app:startup.io::beta',
+      'hrn:app:acme-corp::mealplan',
+      'hrn:app:mentor-co::juno',
+      'hrn:app:startup.io::beta',
     ]);
   });
 
@@ -247,25 +248,25 @@ describe('spec 027: nodeUrn-style composition pattern', () => {
 
   function simulateNodeUrn(memUrn: string, loc: string): string {
     const memCanonical = formatCanonicalUrn('memory', memUrn);
-    const bareMemCanonical = memCanonical.substring('urn:memory:'.length);
-    return `urn:node:${bareMemCanonical}::${loc}`;
+    const bareMemCanonical = memCanonical.substring('hrn:memory:'.length);
+    return `hrn:node:${bareMemCanonical}::${loc}`;
   }
 
   it('produces canonical form for a legacy memUrn + simple multi-atom loc', () => {
     expect(simulateNodeUrn('acme.com:dev', 'review:sort-imports')).toBe(
-      'urn:node:acme.com::dev::review:sort-imports',
+      'hrn:node:acme.com::dev::review:sort-imports',
     );
   });
 
   it('produces canonical form for an already-canonical memUrn', () => {
     expect(simulateNodeUrn('acme.com::dev', 'review:sort-imports')).toBe(
-      'urn:node:acme.com::dev::review:sort-imports',
+      'hrn:node:acme.com::dev::review:sort-imports',
     );
   });
 
   it('produces canonical form for a single-atom loc', () => {
     expect(simulateNodeUrn('acme.com:dev', 'services')).toBe(
-      'urn:node:acme.com::dev::services',
+      'hrn:node:acme.com::dev::services',
     );
   });
 
@@ -274,7 +275,7 @@ describe('spec 027: nodeUrn-style composition pattern', () => {
     // hierarchy levels. The explicit `::` separator between memUrn
     // and loc enforces this.
     expect(simulateNodeUrn('acme.com:dev', 'services:db:helpers')).toBe(
-      'urn:node:acme.com::dev::services:db:helpers',
+      'hrn:node:acme.com::dev::services:db:helpers',
     );
   });
 });
@@ -356,7 +357,7 @@ describe('spec 027 US3: error messages quote canonical-form recovery templates',
     // error-template region.
     const serverTs = readFileSync(SERVER_TS, 'utf8');
     expect(serverTs).toContain("'hadronmemory.com::dev'");
-    expect(serverTs).toContain("'urn:memory:hadronmemory.com::dev'");
+    expect(serverTs).toContain("'hrn:memory:hadronmemory.com::dev'");
     // Negative: the legacy single-colon form should NOT appear in any
     // error template anymore.
     expect(serverTs).not.toContain("'hadronmemory.com:dev'");

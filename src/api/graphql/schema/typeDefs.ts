@@ -301,7 +301,7 @@ export const typeDefs = `#graphql
     """
     Spec 021 US1: the R2 canonical install URN combining the App's
     identity with its installed Agent's author-org and slug. Format is
-    urn:agent:<installing-org>::<app-slug>::<author-org>:<agent-slug>.
+    hrn:agent:<installing-org>::<app-slug>::<author-org>:<agent-slug>.
     Two orgs installing same-slug agents from different authors produce
     distinct URNs that differ at the author-org segment, enabling
     audit-log entries to identify each install unambiguously without a
@@ -1058,7 +1058,7 @@ export const typeDefs = `#graphql
   input NodeEdgeInput {
     """
     Reference to the target node. Accepts a node ID, a full URN
-    (urn:node:<memory-urn>:<loc>), a memory-prefixed loc
+    (hrn:node:<memory-urn>::<loc>), a memory-prefixed loc
     (<memory-urn>:<loc>), or a short loc resolved within the source
     node's memory.
     """
@@ -1262,7 +1262,7 @@ export const typeDefs = `#graphql
 
   type Query {
     """
-    Resolve a fully-qualified, \`urn:<type>:\`-prefixed Hadron URN to the ids
+    Resolve a fully-qualified, \`hrn:<type>:\`-prefixed Hadron URN (legacy \`urn:\` scheme also accepted) to the ids
     needed to reach its canonical page. Returns null when the URN is
     unresolvable (not found) OR the caller lacks access. Unlike the dedicated
     per-kind queries — which throw \`Forbidden\` on no-access — this query
@@ -1273,9 +1273,9 @@ export const typeDefs = `#graphql
     queries (memory/org/agent: org membership; app: org ADMIN; node:
     memoryAccessFilter), only with the throw replaced by a null return.
 
-    The \`urn:<type>:\` prefix is the dispatch key — bare URNs without a type
-    prefix are ambiguous across kinds (\`org::slug\` could be a memory or an
-    agent) and resolve to null.
+    The \`hrn:<type>:\` prefix (legacy \`urn:<type>:\` also accepted) is the
+    dispatch key — bare URNs without a type prefix are ambiguous across kinds
+    (\`org::slug\` could be a memory or an agent) and resolve to null.
     """
     resolveUrn(urn: String!): UrnResolution
 
