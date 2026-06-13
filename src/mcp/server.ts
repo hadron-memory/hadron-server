@@ -406,7 +406,7 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
   // (e.g. `review:sort-imports`), rather than letting the parser
   // re-split it as additional hierarchy levels. Calling
   // formatCanonicalUrn('node', `${memUrn}:${loc}`) directly would
-  // produce `urn:node:acme.com::dev::review::sort-imports` (4 levels)
+  // produce `hrn:node:acme.com::dev::review::sort-imports` (4 levels)
   // for a legacy memUrn — parser-correct but semantically wrong.
   const memCanonical = formatCanonicalUrn('memory', memUrn);
   const bareMemCanonical = memCanonical.substring('hrn:memory:'.length);

@@ -75,7 +75,8 @@ describe('spec 027: MCP surface URN canonical-form audit', () => {
         const line = lines[i];
         // For each line, find any URN-literal that has 3+ colons total
         // AND no `::` substring. We use a simple two-pass approach:
-        // 1) Find all `urn:<type>:...` substrings up to a closing quote.
+        // 1) Find all `hrn:`/`urn:`-scheme `<type>:...` substrings up to a
+        //    closing quote (both schemes are matched).
         // 2) For each, count colons; if 4+ and no `::`, it's a violation.
         const urnLiteralRegex = /(?:urn|hrn):(?:org|app|agent|memory|node)(?::[a-zA-Z0-9._-]+){3,}/g;
         let match: RegExpExecArray | null;

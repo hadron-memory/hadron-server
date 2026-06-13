@@ -395,7 +395,7 @@ function messageFor(
   const cite = offending && offending !== input ? ` (offending: "${offending}")` : '';
   switch (reason) {
     case 'unknown-type':
-      return `URN "${input}" uses an unknown type. The type segment after the "hrn:" scheme must be one of the registered types.`;
+      return `URN "${input}" uses an unknown type. The type segment after the scheme prefix ("hrn:" or legacy "urn:") must be one of the registered types.`;
     case 'malformed-grammar':
       return `URN "${input}" does not match the expected "hrn:<type>:<path>" grammar${cite} (legacy "urn:" scheme also accepted).`;
     case 'empty-segment':

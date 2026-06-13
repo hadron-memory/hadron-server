@@ -1058,7 +1058,7 @@ export const typeDefs = `#graphql
   input NodeEdgeInput {
     """
     Reference to the target node. Accepts a node ID, a full URN
-    (hrn:node:<memory-urn>:<loc>), a memory-prefixed loc
+    (hrn:node:<memory-urn>::<loc>), a memory-prefixed loc
     (<memory-urn>:<loc>), or a short loc resolved within the source
     node's memory.
     """
@@ -1273,9 +1273,9 @@ export const typeDefs = `#graphql
     queries (memory/org/agent: org membership; app: org ADMIN; node:
     memoryAccessFilter), only with the throw replaced by a null return.
 
-    The \`hrn:<type>:\` prefix is the dispatch key — bare URNs without a type
-    prefix are ambiguous across kinds (\`org::slug\` could be a memory or an
-    agent) and resolve to null.
+    The \`hrn:<type>:\` prefix (legacy \`urn:<type>:\` also accepted) is the
+    dispatch key — bare URNs without a type prefix are ambiguous across kinds
+    (\`org::slug\` could be a memory or an agent) and resolve to null.
     """
     resolveUrn(urn: String!): UrnResolution
 
