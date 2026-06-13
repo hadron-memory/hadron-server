@@ -73,7 +73,7 @@ describe('App.installedAgentUrn — spec 021 US1', () => {
       { db } as unknown as Context,
     );
 
-    expect(result).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+    expect(result).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
   });
 
   it('two same-slug agents from different authors → distinct install URNs (author-org is the disambiguator)', async () => {
@@ -127,10 +127,10 @@ describe('App.installedAgentUrn — spec 021 US1', () => {
     ).installedAgentUrn(updatedApp, {}, { db } as unknown as Context);
 
     expect(urlWithHadron).toBe(
-      'urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
+      'hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
     );
     expect(urlWithCompetitor).toBe(
-      'urn:agent:micromentor.org::coding-app::competitor.com:coding-agent',
+      'hrn:agent:micromentor.org::coding-app::competitor.com:coding-agent',
     );
     // The URNs differ ONLY at the author-org segment — the rest is
     // byte-equal between the two outputs.
@@ -152,7 +152,7 @@ describe('App.installedAgentUrn — spec 021 US1', () => {
     );
 
     // Cat 1 collapses the duplicated org segment.
-    expect(result).toBe('urn:agent:hadronmemory.com::coding-app::coding-agent');
+    expect(result).toBe('hrn:agent:hadronmemory.com::coding-app::coding-agent');
   });
 
   it('returns null when App has no agent attached (008 orphan path)', async () => {
@@ -191,6 +191,6 @@ describe('App.installedAgentUrn — spec 021 US1', () => {
       { db } as unknown as Context,
     );
 
-    expect(result).toBe('urn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+    expect(result).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
   });
 });

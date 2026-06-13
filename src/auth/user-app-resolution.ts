@@ -208,21 +208,22 @@ export type AppIdentifierResolution =
   | { kind: 'not-member' }
   | { kind: 'not-found' };
 
-const URN_APP_PREFIX = 'urn:app:';
+// Canonical `hrn:app:` plus the legacy `urn:app:` scheme, accepted forever
+// (issue #239).
+const URN_APP_PREFIXES = ['hrn:app:', 'urn:app:'];
 
 function isUrnForm(input: string): boolean {
   // Bare URN form for an App: `<org>:<slug>` (colon-separated, no spaces,
   // at least one colon). Display names can contain spaces and rarely
   // colons. Heuristic: contains ':' AND no whitespace → URN form.
-  // Prefixed URN form: `urn:app:<bare>` — matched first.
-  if (input.startsWith(URN_APP_PREFIX)) return true;
+  // Prefixed URN form: `hrn:app:<bare>` / `urn:app:<bare>` — matched first.
+  if (URN_APP_PREFIXES.some((p) => input.startsWith(p))) return true;
   return input.includes(':') && !/\s/.test(input);
 }
 
 function stripUrnPrefix(input: string): string {
-  return input.startsWith(URN_APP_PREFIX)
-    ? input.slice(URN_APP_PREFIX.length)
-    : input;
+  const prefix = URN_APP_PREFIXES.find((p) => input.startsWith(p));
+  return prefix ? input.slice(prefix.length) : input;
 }
 
 export async function resolveAppIdentifier(

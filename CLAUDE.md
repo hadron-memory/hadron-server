@@ -1,11 +1,11 @@
 # Agent dev guide — hadron-server
 
-Call the `h-read-node` MCP tool with `urn: "urn:node:hadronmemory.com::dev::instructions"` to
+Call the `h-read-node` MCP tool with `urn: "hrn:node:hadronmemory.com::dev::instructions"` to
 load the project introduction (what Hadron is, URN grammar, the platform-specs corpus, core
 architecture). Read it once per session.
 
 Then, at the start of **every change** — before drafting a plan — call
-`h-read-node` with `urn: "urn:node:hadronmemory.com::dev::start-here"`. It's a
+`h-read-node` with `urn: "hrn:node:hadronmemory.com::dev::start-here"`. It's a
 symptom-to-pattern routing index into the findings, conventions, ops, and
 review branches.
 

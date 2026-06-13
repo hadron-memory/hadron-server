@@ -101,8 +101,8 @@ describe('addEdge — happy path', () => {
     });
 
     if ('error' in result) throw new Error(result.error);
-    expect(result.sourceUrn).toMatch(/^urn:node:addedge-org::addedge-mem::review:db-type-agnostic$/);
-    expect(result.targetUrn).toMatch(/^urn:node:addedge-org::addedge-mem::models$/);
+    expect(result.sourceUrn).toMatch(/^hrn:node:addedge-org::addedge-mem::review:db-type-agnostic$/);
+    expect(result.targetUrn).toMatch(/^hrn:node:addedge-org::addedge-mem::models$/);
   });
 });
 

@@ -1,5 +1,8 @@
 // URN parser — spec 021-urn-composition.
 //
+// Scheme prefix (issue #239): `hrn:` is canonical; the legacy `urn:` scheme
+// is accepted on input forever. See the "Scheme prefix" section below.
+//
 // This module exposes TWO parser surfaces:
 //
 //   1) **Legacy parser** (`parseUrnInput`, `validateUrnType`, `formatUrn`) —
@@ -16,6 +19,36 @@
 //
 // Contracts: spec-kits/specs/021-urn-composition/contracts/parser.md,
 // spec-kits/specs/021-urn-composition/contracts/slug-validation.md.
+
+// ============================================================================
+// Scheme prefix (issue #239)
+// ============================================================================
+//
+// `hrn:` (Hadron Resource Name, AWS-`arn:`-style) is the CANONICAL scheme
+// prefix. `urn:` is the legacy scheme, accepted on input forever — there is
+// no deprecation window and no plan for one. Every parser entry point in
+// this module accepts both; every emission path composes `hrn:`.
+
+/** The canonical scheme prefix composed on every emission path. */
+export const CANONICAL_SCHEME = 'hrn';
+
+/** The legacy scheme prefix, accepted on input forever (issue #239). */
+export const LEGACY_SCHEME = 'urn';
+
+const SCHEME_PREFIX_RE = /^(?:hrn|urn):/;
+
+/** True when the input leads with a scheme prefix (`hrn:` or legacy `urn:`). */
+export function hasSchemePrefix(input: string): boolean {
+  return SCHEME_PREFIX_RE.test(input);
+}
+
+/**
+ * Rewrite a leading legacy `urn:` scheme to canonical `hrn:`. Inputs without
+ * a scheme prefix (bare URNs) and already-canonical inputs pass through.
+ */
+export function normalizeScheme(input: string): string {
+  return input.startsWith('urn:') ? `hrn:${input.slice(4)}` : input;
+}
 
 // ============================================================================
 // D1 type registry (canonical, locked)
@@ -84,7 +117,8 @@ export type AliasCategory =
   | 'source-install-memory'     // D11 cat 1 — parser layer
   | 'node-role-polymorphism'    // D11 cat 2 — resolver layer
   | 'path-slug-shortening'      // D11 cat 3 — resolver layer
-  | 'type-marker-optionality';  // D11 cat 4 — parser layer
+  | 'type-marker-optionality'   // D11 cat 4 — parser layer
+  | 'legacy-urn-scheme';        // issue #239 — `urn:` scheme rewritten to `hrn:`
 
 /** Type-marker words that may appear inside path-segments per D2 / FR-005. */
 const TYPE_MARKERS: ReadonlySet<string> = new Set(['app', 'agent', 'memory']);
@@ -240,8 +274,8 @@ export function splitNodeUrn(input: string): { memoryUrn: string; loc: string } 
   // call sites added outside the spec-022-reviewed tool handlers.
   assertFullyQualifiedUrn(input, 'node');
 
-  // Strip `urn:<type>:` prefix if present.
-  const prefixMatch = input.match(/^urn:[a-z][a-z0-9-]*:(.+)$/);
+  // Strip `hrn:<type>:` / legacy `urn:<type>:` prefix if present.
+  const prefixMatch = input.match(/^(?:hrn|urn):[a-z][a-z0-9-]*:(.+)$/);
   const path = prefixMatch ? prefixMatch[1] : input;
 
   // Canonical form: hierarchy separated by `::`. First segment is org,
@@ -293,12 +327,12 @@ export function assertFullyQualifiedUrn(
   // grammar checks; qualification is the upstream gate.
   let path = input;
   let prefixType: string | null = null;
-  const prefixMatch = input.match(/^urn:([a-z][a-z0-9-]*):(.+)$/);
+  const prefixMatch = input.match(/^(?:hrn|urn):([a-z][a-z0-9-]*):(.+)$/);
   if (prefixMatch) {
     prefixType = prefixMatch[1];
     path = prefixMatch[2];
-  } else if (input.startsWith('urn:')) {
-    // Malformed prefix shape (e.g., `urn::foo`, `urn:`). The prefix
+  } else if (hasSchemePrefix(input)) {
+    // Malformed prefix shape (e.g., `hrn::foo`, `urn:`). The prefix
     // regex captures any well-formed type marker; anything else is
     // structurally broken.
     throw new UrnNotQualifiedError(input, undefined, expectedType);
@@ -361,9 +395,9 @@ function messageFor(
   const cite = offending && offending !== input ? ` (offending: "${offending}")` : '';
   switch (reason) {
     case 'unknown-type':
-      return `URN "${input}" uses an unknown type. The type segment after "urn:" must be one of the registered types.`;
+      return `URN "${input}" uses an unknown type. The type segment after the "hrn:" scheme must be one of the registered types.`;
     case 'malformed-grammar':
-      return `URN "${input}" does not match the expected "urn:<type>:<path>" grammar${cite}.`;
+      return `URN "${input}" does not match the expected "hrn:<type>:<path>" grammar${cite} (legacy "urn:" scheme also accepted).`;
     case 'empty-segment':
       return `URN "${input}" contains an empty path-segment (caused by "::::" or similar). Each "::"-separated piece must be non-empty.`;
     case 'trailing-double-colon':
@@ -381,7 +415,7 @@ function messageFor(
     case 'empty-bare-value':
       return `formatCanonicalUrn called with empty bareValue. A bare URN value MUST contain at least one slug atom.`;
     case 'already-prefixed-bare-value':
-      return `formatCanonicalUrn bareValue${cite} starts with "urn:". Pass the bare value (no "urn:<type>:" prefix); the wrapper composes the prefix itself.`;
+      return `formatCanonicalUrn bareValue${cite} starts with a scheme prefix ("hrn:" or "urn:"). Pass the bare value (no "hrn:<type>:" prefix); the wrapper composes the prefix itself.`;
   }
 }
 
@@ -436,21 +470,22 @@ export function parseUrn(input: string): ParsedUrn {
   // restrict this check to inputs that LEAD with a `loc:` prefix —
   // arbitrary free-form strings containing the substring `loc:` are NOT
   // matched here (they'd fall through to `malformed-grammar`).
-  if (/^(urn:)?loc:/i.test(input)) {
+  if (/^((urn|hrn):)?loc:/i.test(input)) {
     throw new UrnParseError(input, 'loc-segment-rejected');
   }
 
-  const prefixMatch = input.match(/^urn:([a-z][a-z0-9-]*):(.+)$/);
+  const prefixMatch = input.match(/^(hrn|urn):([a-z][a-z0-9-]*):(.+)$/);
   if (!prefixMatch) {
     throw new UrnParseError(input, 'malformed-grammar');
   }
+  const legacySchemeUsed = prefixMatch[1] === LEGACY_SCHEME;
 
-  const type = prefixMatch[1];
+  const type = prefixMatch[2];
   if (!URN_TYPE_SET.has(type)) {
     throw new UrnParseError(input, 'unknown-type');
   }
 
-  const path = prefixMatch[2];
+  const path = prefixMatch[3];
 
   // Embedded `loc:` segments inside the path (e.g.,
   // `urn:memory:org::loc:foo::system`) are deprecated per FR-021. This
@@ -482,6 +517,13 @@ export function parseUrn(input: string): ParsedUrn {
   // === Parser-layer rewrites ===
 
   const parserRewrites: AliasCategory[] = [];
+
+  // Issue #239: legacy `urn:` scheme normalizes to canonical `hrn:`.
+  // Tracked as a rewrite category so canonical-form-logger observability
+  // covers legacy-scheme usage, even though `urn:` is accepted forever.
+  if (legacySchemeUsed) {
+    parserRewrites.push('legacy-urn-scheme');
+  }
 
   // Cat 4: type-marker optionality. Strip type markers from positionally-
   // determinable hierarchy positions. Run first so subsequent steps see a
@@ -531,7 +573,7 @@ export function parseUrn(input: string): ParsedUrn {
     needsCat2(type as CanonicalUrnType, cat1Segments) ||
     needsCat3(type as CanonicalUrnType, cat1Segments);
 
-  const parserCanonical = `urn:${type}:${cat1Segments.join('::')}`;
+  const parserCanonical = `${CANONICAL_SCHEME}:${type}:${cat1Segments.join('::')}`;
 
   return {
     type: type as CanonicalUrnType,
@@ -959,7 +1001,7 @@ export function composeInstalledAgentUrn(appUrn: string, agentUrn: string): stri
   const [installingOrg, appSlug] = appSegments;
   const [authorOrg, agentSlug] = agentSegments;
 
-  const raw = `urn:agent:${installingOrg}::${appSlug}::${authorOrg}:${agentSlug}`;
+  const raw = `hrn:agent:${installingOrg}::${appSlug}::${authorOrg}:${agentSlug}`;
 
   // Run the parser to apply D11 cats 1 + 4 canonicalization. If the
   // installing org equals the author org (install-by-self), cat 1
@@ -967,17 +1009,18 @@ export function composeInstalledAgentUrn(appUrn: string, agentUrn: string): stri
   return toParserCanonical(raw);
 }
 
-/** Strip `urn:<expected>:` prefix if present; reject wrong-type prefixes. */
+/** Strip `hrn:<expected>:` / `urn:<expected>:` prefix if present; reject wrong-type prefixes. */
 function stripPrefixOrThrow(urn: string, expectedType: 'app' | 'agent'): string {
   if (!urn) {
     throw new Error(`composeInstalledAgentUrn: ${expectedType} URN is empty`);
   }
-  if (urn.startsWith(`urn:${expectedType}:`)) {
-    return urn.slice(`urn:${expectedType}:`.length);
+  const normalized = normalizeScheme(urn);
+  if (normalized.startsWith(`hrn:${expectedType}:`)) {
+    return normalized.slice(`hrn:${expectedType}:`.length);
   }
-  if (urn.startsWith('urn:')) {
+  if (hasSchemePrefix(urn)) {
     throw new Error(
-      `composeInstalledAgentUrn: expected urn:${expectedType}: prefix; got "${urn}"`,
+      `composeInstalledAgentUrn: expected hrn:${expectedType}: prefix; got "${urn}"`,
     );
   }
   return urn;
@@ -1034,7 +1077,10 @@ export function parseFor(row: UrnRow): { canonical: string; isLegacy: boolean } 
     // still runs (we throw on parse failure); we just don't replace
     // the stored value.
     const parsed = parseUrn(row.urn);
-    if (parsed.parserCanonical !== row.urn) {
+    // Scheme-tolerant compare (issue #239): rows written before the hrn:
+    // cut-over store the legacy `urn:` scheme; that is NOT canonical-form
+    // drift. Any other mismatch still surfaces immediately.
+    if (parsed.parserCanonical !== normalizeScheme(row.urn)) {
       // Stored URN drifted from canonical — likely a write bypassed the
       // canonicalizer. Surface immediately rather than mask.
       throw new UrnParseError(row.urn, 'malformed-grammar');
@@ -1085,7 +1131,7 @@ export interface LegacyParsedUrn {
  * predate spec 021; new code SHOULD use `parseUrn` instead.
  */
 export function parseUrnInput(input: string): LegacyParsedUrn {
-  const match = input.match(/^urn:(org|memory|agent|app|node):(.+)$/);
+  const match = input.match(/^(?:hrn|urn):(org|memory|agent|app|node):(.+)$/);
   if (match) return { type: match[1] as LegacyUrnType, value: match[2] };
   const locMatch = input.match(/^loc:(.+)$/);
   if (locMatch) return { type: 'loc', value: locMatch[1] };
@@ -1094,7 +1140,7 @@ export function parseUrnInput(input: string): LegacyParsedUrn {
 
 /** Format a bare value as a typed URN string for display/output. */
 export function formatUrn(type: string, value: string): string {
-  return `urn:${type}:${value}`;
+  return `${CANONICAL_SCHEME}:${type}:${value}`;
 }
 
 /**
@@ -1130,7 +1176,7 @@ export function formatCanonicalUrn(
   if (bareValue == null || bareValue.trim().length === 0) {
     throw new UrnParseError('', 'empty-bare-value');
   }
-  if (bareValue.startsWith('urn:')) {
+  if (hasSchemePrefix(bareValue)) {
     throw new UrnParseError(bareValue, 'already-prefixed-bare-value', bareValue);
   }
   // Promote legacy single-colon hierarchy to canonical `::` separators
@@ -1143,7 +1189,7 @@ export function formatCanonicalUrn(
   const normalized = bareValue.includes('::')
     ? bareValue
     : bareValue.split(':').join('::');
-  return toParserCanonical(`urn:${type}:${normalized}`);
+  return toParserCanonical(`${CANONICAL_SCHEME}:${type}:${normalized}`);
 }
 
 /**
@@ -1159,5 +1205,5 @@ export function validateUrnType(
   if (parsed.type === expected) return null;
   // loc is accepted where node is expected (legacy behavior).
   if (parsed.type === 'loc' && expected === 'node') return null;
-  return `Expected ${expected} URN (urn:${expected}:...), got urn:${parsed.type}:...`;
+  return `Expected ${expected} URN (hrn:${expected}:...), got hrn:${parsed.type}:...`;
 }
