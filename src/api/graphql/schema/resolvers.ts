@@ -1301,6 +1301,13 @@ export const resolvers = {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
     createdAt: (n: { createdAt: Date | string }) => toISO(n.createdAt)!,
     updatedAt: (n: { updatedAt: Date | string }) => toISO(n.updatedAt)!,
+    // `node { memory { urn … } }` powers full-URN rendering in clients
+    // (the portal composes `<memory.urn>::<loc>`). The generic `nodes`
+    // query doesn't `include` the relation, so resolve it lazily by
+    // memoryId — use the preloaded relation when a resolver already
+    // included it (e.g. appNodes). Same pattern as MemoryShare.memory.
+    memory: async (n: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
+      n.memory ?? ctx.db.memory.findUnique({ where: { id: n.memoryId } }),
     // Spec 033 embedding-state DateTime fields — Prisma returns Date,
     // portal (and any other GraphQL consumer) needs ISO strings.
     embeddingPendingAt: (n: { embeddingPendingAt?: Date | string | null }) =>
@@ -2127,7 +2134,11 @@ export const resolvers = {
             : {}),
         },
         orderBy: { loc: 'asc' },
-        include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+        // Eager-load `memory` so the Node.memory field resolver serves it
+        // from the preloaded relation instead of firing one findUnique per
+        // node (N+1) — clients select `memory { urn }` to render full node
+        // URNs across a whole list.
+        include: { memory: true, outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
       // Decrypt in place before sorting/slicing — the priority sort doesn't
       // touch content, and the slice is a small window, so decrypting the
