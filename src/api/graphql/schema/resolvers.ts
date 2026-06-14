@@ -59,6 +59,7 @@ import { isLifecycleActive } from '../../../lib/lifecycle.js';
 import { getPrimaryAgent, getPrimaryAgentId, isAgentInstalled } from '../../../lib/appAgent.js';
 import { isOrgExternalAppMember } from '../../../lib/auth/isOrgExternalAppMember.js';
 import { joinApp, NoMemberRolesError, AppUninstalledError } from '../../../controller/operations/joinApp.js';
+import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import {
   createMemoryShare,
@@ -421,48 +422,37 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
     return [];
   }
 
-  // JWT user — org memories (respecting visibility) + subscribed memories + public memories
+  // JWT user — org/public/subscription memories + owner-only personal/private
+  // + the caller's own per-user holdings.
   if (ctx.userId) {
-    const memberships = await ctx.db.orgMember.findMany({
-      where: { userId: ctx.userId, deletedAt: null },
-      select: { organizationId: true },
-    });
-    const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
-    const memories = await ctx.db.memory.findMany({
+    // Org-visible (knowledge/group) + cross-org subscriptions + PUBLIC are
+    // computed by the shared getOrgReadableMemoryIds helper so this gate and
+    // the MCP gate (mcp/access-control.ts getMemoryAccess) stay in lockstep —
+    // a freshly-onboarded org member must see the same org memories over MCP
+    // as in the portal (the 2026-06-13 Micromentor onboarding incident).
+    // 035-visibility-enum-cleanup rationale for `class IN (knowledge, group)`
+    // (app/system reached via AppMember/the agent surface, not this node
+    // query) now lives in that helper's header.
+    const orgPublicIds = await getOrgReadableMemoryIds(ctx.db, ctx.userId);
+    // Identity-scoped clauses stay local — owner-only, not org-wide:
+    //   - 034: owner-owned personal/private memories (only the owner).
+    //   - the caller's own per-user "holding" memories (userMemoryOfAgentId
+    //     set — e.g. the startChat no-App knowledge downgrade), gated on
+    //     creator identity (mirrors the chathistory-knowledge-class-auth-gap
+    //     finding).
+    const ownAndHoldings = await ctx.db.memory.findMany({
       where: {
         deletedAt: null,
         OR: [
-          // Org-visible memories: knowledge (PUBLIC/ORGANIZATION) + group
-          // (GROUP). 035-visibility-enum-cleanup: this used to admit
-          // `class notIn personal/private AND visibility != PRIVATE`, which —
-          // given the old PRIVATE default — excluded app/system. `class IN
-          // (knowledge, group)` preserves exactly that set (app/system are
-          // reached via AppMember / the agent surface, not this node query).
-          // Per-user "holding" memories (userMemoryOfAgentId set — e.g. the
-          // startChat no-App knowledge downgrade) are owner-only: excluded
-          // here, re-admitted by the owner clause below. (Owner-gating moved
-          // off visibility=PRIVATE onto userMemoryOfAgentId — mirrors the
-          // chathistory-knowledge-class-auth-gap finding.)
-          ...(orgIds.length > 0
-            ? [
-                { organizationId: { in: orgIds }, class: { in: ['knowledge', 'group'] as any }, userMemoryOfAgentId: null },
-                // Cross-org subscriptions never reach owner-only personal/private.
-                { class: { notIn: ['personal', 'private'] as any }, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds } } } },
-              ]
-            : []),
-          // 034: owner-owned personal/private memories — only the owner.
           { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
-          // The caller's own per-user holding memories (knowledge/app bound to
-          // an agent for this user) — owner-only, gated on creator identity.
           { userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
-          // PUBLIC memories — defensively excluding personal/private and
-          // per-user holdings so a mis-set visibility can't expose them.
-          { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any }, userMemoryOfAgentId: null },
         ],
       },
       select: { id: true },
     });
-    return memories.map((g: { id: string }) => g.id);
+    const accessibleIds = new Set(orgPublicIds);
+    for (const g of ownAndHoldings as { id: string }[]) accessibleIds.add(g.id);
+    return [...accessibleIds];
   }
 
   // Unauthenticated — public memories only

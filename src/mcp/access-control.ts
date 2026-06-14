@@ -31,6 +31,7 @@ import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { isLifecycleActive } from '../lib/lifecycle.js';
 import { isAgentInstalled } from '../lib/appAgent.js';
 import { resolveUserApps } from '../auth/user-app-resolution.js';
+import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -150,41 +151,64 @@ export async function getMemoryAccess(
   db: PrismaClient,
   auth: AuthContext,
 ): Promise<Map<string, string>> {
-  if (auth.appId) return getAppMemoryAccess(db, auth.appId);
+  const access = new Map<string, string>();
 
-  // Spec 026 / D-2026-05-21-003 advisory branch: when no active App is
-  // selected but the caller is an authenticated user (OAuth-issued or
-  // portal-issued bearer token), return the union of memory access across
-  // every App the user is a member of. App identity is a focusing concern,
-  // not access control — the user's total access is bounded by their
-  // AppMember rows regardless of which App is currently in focus.
-  // Personal-class memories are still strictly owned by Memory.userId
-  // (per the canReadMemory / canWriteToMemory predicates above) — this
-  // map only includes memories the user can reach via App membership;
-  // personal-class authorization is enforced separately.
-  if (auth.userId) {
+  // ── Base: App-derived access ────────────────────────────────────────────
+  // App Key callers (auth.appId, no userId) and user callers with a resolved
+  // active App both start from the App's installed-Agent memory map.
+  //
+  // Spec 026 / D-2026-05-21-003 advisory branch: a user with NO active App
+  // selected gets the union across every App they're a member of — App
+  // identity is a focusing concern, not access control; the user's App-derived
+  // access is bounded by their AppMember rows regardless of which App is in
+  // focus.
+  if (auth.appId) {
+    for (const [memoryId, level] of await getAppMemoryAccess(db, auth.appId)) {
+      access.set(memoryId, level);
+    }
+  } else if (auth.userId) {
     const apps = await resolveUserApps(auth.userId, db);
-    if (apps.length === 0) return new Map();
     const perAppMaps = await Promise.all(
       apps.map((app) => getAppMemoryAccess(db, app.id)),
     );
-    const merged = new Map<string, string>();
     for (const perApp of perAppMaps) {
       for (const [memoryId, level] of perApp) {
-        const existing = merged.get(memoryId);
-        // READ_WRITE wins over READ when the same memory appears via
-        // multiple App memberships (defensive — the data model makes
-        // this unlikely but not impossible if a user has two roles
-        // across two Apps that share a memory item).
-        if (!existing || (existing === 'READ' && level === 'READ_WRITE')) {
-          merged.set(memoryId, level);
+        const existing = access.get(memoryId);
+        // READ_WRITE wins over READ_ONLY when the same memory appears via
+        // multiple App memberships (defensive — the data model makes this
+        // unlikely but not impossible if a user has two roles across two
+        // Apps that share a memory item).
+        if (!existing || (existing === 'READ_ONLY' && level === 'READ_WRITE')) {
+          access.set(memoryId, level);
         }
       }
     }
-    return merged;
   }
 
-  return new Map();
+  // ── Direct org-read — parity with the portal getAccessibleMemoryIds ─────
+  // A User principal can read org / public / subscription memories by virtue
+  // of org membership, INDEPENDENT of App membership. This closes the
+  // portal/MCP divergence that left a freshly-onboarded org member seeing
+  // memories in the portal but none over MCP until they installed an Agent
+  // (the 2026-06-13 Micromentor onboarding incident). The shared
+  // getOrgReadableMemoryIds helper guarantees the two surfaces compute the
+  // same set.
+  //
+  // Granted READ_ONLY: org membership confers read; write stays gated by the
+  // App/agent path above (so an org member with no App membership gets read,
+  // not write — the canWriteToMemory map check below sees READ_ONLY). Gated
+  // on auth.userId, so App Key callers (no userId) are unaffected — their
+  // App/session isolation is unchanged. personal/private memories are never
+  // in this set; their strict-owner path in canReadMemory / canWriteToMemory
+  // is the sole gate and runs before this map is consulted.
+  if (auth.userId) {
+    for (const memoryId of await getOrgReadableMemoryIds(db, auth.userId)) {
+      // Don't downgrade a READ_WRITE already granted via the App path.
+      if (!access.has(memoryId)) access.set(memoryId, 'READ_ONLY');
+    }
+  }
+
+  return access;
 }
 
 /**
