@@ -450,7 +450,9 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
       },
       select: { id: true },
     });
-    return [...new Set([...orgPublicIds, ...ownAndHoldings.map((g: { id: string }) => g.id)])];
+    const accessibleIds = new Set(orgPublicIds);
+    for (const g of ownAndHoldings as { id: string }[]) accessibleIds.add(g.id);
+    return [...accessibleIds];
   }
 
   // Unauthenticated — public memories only

@@ -35,6 +35,12 @@ export async function getOrgReadableMemoryIds(
   db: PrismaClient,
   userId: string,
 ): Promise<string[]> {
+  // Defensive: Prisma silently DROPS an `undefined` where-filter, so a
+  // `userId === undefined` slipping through (upstream widening, a bad call
+  // site) would turn `where: { userId }` into "all memberships" — a
+  // catastrophic cross-org read. Fail closed instead.
+  if (!userId) return [];
+
   const memberships = await db.orgMember.findMany({
     where: { userId, deletedAt: null },
     select: { organizationId: true },
@@ -53,7 +59,9 @@ export async function getOrgReadableMemoryIds(
           ? [
               { organizationId: { in: orgIds }, class: { in: ['knowledge', 'group'] as any }, userMemoryOfAgentId: null },
               // Cross-org subscriptions never reach owner-only personal/private.
-              { class: { notIn: ['personal', 'private'] as any }, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds } } } },
+              // `deletedAt: null` on the subscription so a REVOKED (soft-deleted)
+              // subscription stops granting read.
+              { class: { notIn: ['personal', 'private'] as any }, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds }, deletedAt: null } } },
             ]
           : []),
         // PUBLIC memories — defensively excluding personal/private and
