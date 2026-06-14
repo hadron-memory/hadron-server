@@ -20,6 +20,7 @@ import {
 import { generateId } from '../lib/id.js';
 import type { AuthContext } from '../middleware/auth.js';
 import {
+  canReadMemory,
   canWriteToMemory,
   getAccessibleMemoryIds,
   getAppMemoryAccess,
@@ -263,6 +264,92 @@ describe('getMemoryAccess (dispatch by principal kind)', () => {
     // null, uninstalledAt: null } }`) already excludes the history row;
     // this test pins that downstream-of-resolveUserApps behavior.
     expect(access.size).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getMemoryAccess — direct org-read (portal parity; Micromentor onboarding fix)
+// ---------------------------------------------------------------------------
+
+describe('getMemoryAccess — direct org-read (portal parity)', () => {
+  // A knowledge memory owned by the org but NOT attached to the Agent —
+  // reachable only via org membership, never via the App/agent path. The
+  // discriminator between "org-read" and "app-read".
+  async function createOrphanOrgKnowledgeMemory() {
+    return db.memory.create({
+      data: {
+        class: 'knowledge',
+        id: generateId(),
+        name: 'orphan-org-kn',
+        urn: `${orgId}:orphan-org-kn`,
+        organizationId: orgId,
+      },
+    });
+  }
+
+  async function makeOrgMember(name: string) {
+    const user = await db.user.create({ data: { id: generateId(), name } });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgId, userId: user.id, role: 'READER' },
+    });
+    return user;
+  }
+
+  it('grants an OrgMember READ_ONLY on org memories with zero AppMember rows', async () => {
+    const orphan = await createOrphanOrgKnowledgeMemory();
+    const user = await makeOrgMember('org-only-user');
+
+    const access = await getMemoryAccess(db, { userId: user.id });
+
+    // All three org knowledge memories — including the orphan never attached
+    // to the Agent — are readable purely via org membership. No App install
+    // required. This is the Micromentor onboarding fix.
+    expect(access.get(systemMemoryId)).toBe('READ_ONLY');
+    expect(access.get(knowledgeMemoryId)).toBe('READ_ONLY');
+    expect(access.get(orphan.id)).toBe('READ_ONLY');
+  });
+
+  it('org-read is READ_ONLY — an OrgMember can read but not write without an App role', async () => {
+    const user = await makeOrgMember('org-ro-user');
+
+    expect(await canReadMemory(db, { userId: user.id }, knowledgeMemoryId)).toBe(true);
+    expect(await canWriteToMemory(db, { userId: user.id }, knowledgeMemoryId)).toBe(false);
+  });
+
+  it('getAccessibleMemoryIds includes org memories for a bare OrgMember', async () => {
+    const orphan = await createOrphanOrgKnowledgeMemory();
+    const user = await makeOrgMember('org-ids-user');
+
+    const ids = await getAccessibleMemoryIds(db, { userId: user.id });
+
+    expect(new Set(ids)).toEqual(
+      new Set([systemMemoryId, knowledgeMemoryId, orphan.id]),
+    );
+  });
+
+  it('a user who is neither OrgMember nor AppMember sees nothing', async () => {
+    await createOrphanOrgKnowledgeMemory();
+    const stranger = await db.user.create({
+      data: { id: generateId(), name: 'stranger' },
+    });
+
+    const access = await getMemoryAccess(db, { userId: stranger.id });
+
+    expect(access.size).toBe(0);
+  });
+
+  it('App Key callers (no userId) get NO org-read — App isolation preserved', async () => {
+    // The org has a knowledge memory the Agent isn't attached to.
+    const orphan = await createOrphanOrgKnowledgeMemory();
+    const { app } = await createDbAppWithKey(db, 'app-iso', orgId);
+    await createDbAppAgent(db, app.id, agentId);
+
+    const access = await getMemoryAccess(db, { appId: app.id, organizationId: orgId });
+
+    // Only the Agent's two memories — the orphan org memory is NOT visible to
+    // an App Key principal even though it lives in the same org.
+    expect(access.size).toBe(2);
+    expect(access.has(orphan.id)).toBe(false);
   });
 });
 
