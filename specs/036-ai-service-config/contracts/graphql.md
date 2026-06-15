@@ -65,6 +65,19 @@ aiServiceConfigs(ownerType: AiConfigOwnerType!, ownerId: ID!): [AiServiceConfig!
 # the same gate as the legacy agentAIConfig/appAIConfig queries it succeeds.
 # appId/agentId accept ID or URN (007-entity-id-or-urn).
 resolveAIConfig(name: String, appId: ID, agentId: ID): ResolvedAiConfig!
+
+# MASKED resolvable set for a context — the plural, list-all-names analogue
+# of resolveAIConfig, for a config picker in the chatbot UI. Same walk (App ->
+# Agent -> Org (of the App, else of the Agent) -> HadronServer), but returns
+# every distinct name deduped with the innermost owner winning (each entry is
+# the row resolveAIConfig would pick for that name). Only the named Agent
+# contributes — sibling Agents in the same App are not consulted. Disabled
+# configs skipped. Never key material (hasApiKey + apiKeyPreview only).
+# Auth: scoped to one App's chat context — a non-admin MUST pass appId, be a
+# member of it, and (when agentId is given) the Agent must be installed in it.
+# Masked output, so App membership (not org admin) is the bar. Platform
+# ADMIN/OWNER always allowed (may omit appId). appId/agentId: ID or URN.
+resolveAiServiceConfigs(appId: ID, agentId: ID): [AiServiceConfig!]!
 ```
 
 ## Mutations

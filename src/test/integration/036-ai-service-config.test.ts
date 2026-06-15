@@ -266,6 +266,188 @@ describe('resolveAIConfig precedence (US1)', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────
+// resolveAiServiceConfigs — masked resolvable set (chatbot config picker)
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('resolveAiServiceConfigs (masked picker)', () => {
+  // The picker is gated on APP MEMBERSHIP, not org-admin rights: any member
+  // of the App may list the configs their chat context can resolve. `member`
+  // is an ordinary App member with no org role; the App installs the Agent
+  // (023 N:M join) so agent-only contexts resolve membership too.
+  let member: { id: string };
+  beforeEach(async () => {
+    member = await db.user.create({
+      data: { id: generateId(), handle: 'cfg-member', githubId: 36003, name: 'Member' },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    // Role is arbitrary here — the gate is membership, not the member role.
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+  });
+
+  it('returns the resolvable set deduped by name (innermost wins), masked', async () => {
+    await createConfig({ appId: app.id }, 'default', { apiKey: 'sk-app' });
+    // Shadowed by the App-level 'default' above:
+    await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-agent' });
+    await createConfig({ agentId: agent.id }, 'fast', { apiKey: 'sk-fast' });
+    await createConfig({ organizationId: org.id }, 'frontier', { apiKey: 'sk-frontier' });
+    await createConfig({ hadronServerId: server.id }, 'cheap', { apiKey: 'sk-host' });
+
+    const list = await resolvers.Query.resolveAiServiceConfigs(
+      {},
+      { appId: app.id, agentId: agent.id },
+      ctxFor(member.id),
+    );
+
+    // One entry per name, sorted; 'default' came from the App (innermost).
+    expect(list.map((c) => c.name)).toEqual(['cheap', 'default', 'fast', 'frontier']);
+    const byName = Object.fromEntries(list.map((c) => [c.name, c]));
+    expect(byName.default.ownerType).toBe('APP');
+    expect(byName.fast.ownerType).toBe('AGENT');
+    expect(byName.frontier.ownerType).toBe('ORGANIZATION');
+    expect(byName.cheap.ownerType).toBe('HADRON_SERVER');
+
+    // Masked: hasApiKey + preview only; raw key material never present (SC-003).
+    for (const c of list) {
+      expect(c.hasApiKey).toBe(true);
+      expect(c.apiKeyPreview).toBe('…test');
+      expect('apiKey' in c).toBe(false);
+      expect('apiKeyEncrypted' in c).toBe(false);
+    }
+  });
+
+  it('does NOT include configs owned by sibling Agents in the same App', async () => {
+    // A second Agent in the same org/App. Resolution always runs for one
+    // App+Agent pair, so the sibling's configs must never leak into the list.
+    const sibling = await db.agent.create({
+      data: { id: generateId(), name: 'Sib', urn: 'acme-036:sib', organizationId: org.id },
+    });
+    await createConfig({ agentId: sibling.id }, 'sibling-only', { apiKey: 'sk-sib' });
+    await createConfig({ agentId: agent.id }, 'mine', { apiKey: 'sk-mine' });
+
+    const list = await resolvers.Query.resolveAiServiceConfigs(
+      {},
+      { appId: app.id, agentId: agent.id },
+      ctxFor(member.id),
+    );
+    const names = list.map((c) => c.name);
+    expect(names).toContain('mine');
+    expect(names).not.toContain('sibling-only');
+  });
+
+  it('skips disabled configs', async () => {
+    await createConfig({ agentId: agent.id }, 'on', { apiKey: 'sk-on' });
+    await createConfig({ agentId: agent.id }, 'off', { apiKey: 'sk-off', enabled: false });
+    const list = await resolvers.Query.resolveAiServiceConfigs(
+      {},
+      { appId: app.id, agentId: agent.id },
+      ctxFor(member.id),
+    );
+    expect(list.map((c) => c.name)).toEqual(['on']);
+  });
+
+  it("includes the App's Org + Host, never another org", async () => {
+    await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-agent' });
+    await createConfig({ organizationId: org.id }, 'org-wide', { apiKey: 'sk-org' });
+    await createConfig({ organizationId: otherOrg.id }, 'rival', { apiKey: 'sk-rival' });
+    await createConfig({ hadronServerId: server.id }, 'host-wide', { apiKey: 'sk-host' });
+
+    const list = await resolvers.Query.resolveAiServiceConfigs(
+      {},
+      { appId: app.id, agentId: agent.id },
+      ctxFor(member.id),
+    );
+    const names = list.map((c) => c.name);
+    expect(names).toEqual(['default', 'host-wide', 'org-wide']);
+    expect(names).not.toContain('rival'); // org is derived from the App, never another org
+  });
+
+  it('is visible to any App member (not just org admins)', async () => {
+    await createConfig({ appId: app.id }, 'default', { apiKey: 'sk-app' });
+    // `member` holds no org role at all — App membership alone grants the read.
+    const list = await resolvers.Query.resolveAiServiceConfigs(
+      {},
+      { appId: app.id, agentId: agent.id },
+      ctxFor(member.id),
+    );
+    expect(list.map((c) => c.name)).toEqual(['default']);
+  });
+
+  it('denies non-members — including an org admin who is not an App member', async () => {
+    await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-agent' });
+    // `admin` is an ADMIN of the Agent's org but NOT an App member: the gate
+    // is App membership, not org role.
+    await expect(
+      resolvers.Query.resolveAiServiceConfigs(
+        {},
+        { appId: app.id, agentId: agent.id },
+        ctxFor(admin.id),
+      ),
+    ).rejects.toThrow();
+    // `outsider` is unrelated entirely.
+    await expect(
+      resolvers.Query.resolveAiServiceConfigs({}, { agentId: agent.id }, ctxFor(outsider.id)),
+    ).rejects.toThrow();
+  });
+
+  it('denies a member of a DIFFERENT App that installs the same Agent (no cross-App read)', async () => {
+    // Regression for the requireAiConfigPickerAccess bypass: when an appId is
+    // given, membership of THAT App is required — being a member of another
+    // App that shares the Agent must NOT grant a read of the target App's
+    // (masked) configs. `app` here owns a config the attacker must not see.
+    await createConfig({ appId: app.id }, 'default', { apiKey: 'sk-target-app' });
+    const otherApp = await db.app.create({
+      data: { id: generateId(), name: 'Other', urn: 'acme-036:other-app', organizationId: org.id },
+    });
+    await db.appAgent.create({ data: { appId: otherApp.id, agentId: agent.id } });
+    const otherMember = await db.user.create({
+      data: { id: generateId(), handle: 'cfg-other-member', githubId: 36004, name: 'Other' },
+    });
+    await db.appMember.create({ data: { appId: otherApp.id, userId: otherMember.id, role: 'member' } });
+
+    // otherMember belongs to otherApp (which installs `agent`) but NOT to `app`.
+    await expect(
+      resolvers.Query.resolveAiServiceConfigs(
+        {},
+        { appId: app.id, agentId: agent.id },
+        ctxFor(otherMember.id),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('denies an Agent that is not installed in the target App (Finding 1: no cross-Agent read)', async () => {
+    // With an appId given, the named Agent must be installed in THAT App, or a
+    // member could point the walk at an unrelated Agent's masked configs.
+    // `unrelated` shares the org but is NOT installed in `app`.
+    const unrelated = await db.agent.create({
+      data: { id: generateId(), name: 'Unrelated', urn: 'acme-036:unrelated', organizationId: org.id },
+    });
+    await createConfig({ agentId: unrelated.id }, 'secret', { apiKey: 'sk-unrelated' });
+    await expect(
+      resolvers.Query.resolveAiServiceConfigs(
+        {},
+        { appId: app.id, agentId: unrelated.id },
+        ctxFor(member.id),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('denies a non-admin agent-only call without an appId (Finding 2: no Agent-home-org read)', async () => {
+    // Without an appId the walk would derive the org from the Agent's HOME org;
+    // non-admins must supply an App so the org is always the install org.
+    await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-agent' });
+    await expect(
+      resolvers.Query.resolveAiServiceConfigs({}, { agentId: agent.id }, ctxFor(member.id)),
+    ).rejects.toThrow();
+  });
+
+  it('platform admin bypasses membership (host-only context)', async () => {
+    await createConfig({ hadronServerId: server.id }, 'host', { apiKey: 'sk-host' });
+    const list = await resolvers.Query.resolveAiServiceConfigs({}, {}, platformAdminCtx());
+    expect(list.map((c) => c.name)).toContain('host');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // T015 — US2: CRUD with masked secrets
 // ─────────────────────────────────────────────────────────────────────────
 
