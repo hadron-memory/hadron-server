@@ -389,6 +389,31 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     ).rejects.toThrow();
   });
 
+  it('denies a member of a DIFFERENT App that installs the same Agent (no cross-App read)', async () => {
+    // Regression for the requireAiConfigPickerAccess bypass: when an appId is
+    // given, membership of THAT App is required — being a member of another
+    // App that shares the Agent must NOT grant a read of the target App's
+    // (masked) configs. `app` here owns a config the attacker must not see.
+    await createConfig({ appId: app.id }, 'default', { apiKey: 'sk-target-app' });
+    const otherApp = await db.app.create({
+      data: { id: generateId(), name: 'Other', urn: 'acme-036:other-app', organizationId: org.id },
+    });
+    await db.appAgent.create({ data: { appId: otherApp.id, agentId: agent.id } });
+    const otherMember = await db.user.create({
+      data: { id: generateId(), handle: 'cfg-other-member', githubId: 36004, name: 'Other' },
+    });
+    await db.appMember.create({ data: { appId: otherApp.id, userId: otherMember.id, role: 'member' } });
+
+    // otherMember belongs to otherApp (which installs `agent`) but NOT to `app`.
+    await expect(
+      resolvers.Query.resolveAiServiceConfigs(
+        {},
+        { appId: app.id, agentId: agent.id },
+        ctxFor(otherMember.id),
+      ),
+    ).rejects.toThrow();
+  });
+
   it('platform admin bypasses membership (host-only context)', async () => {
     await createConfig({ hadronServerId: server.id }, 'host', { apiKey: 'sk-host' });
     const list = await resolvers.Query.resolveAiServiceConfigs({}, {}, platformAdminCtx());

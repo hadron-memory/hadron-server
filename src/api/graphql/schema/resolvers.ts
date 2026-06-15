@@ -336,9 +336,15 @@ async function requireAiConfigOwnerAdmin(
  * members may list the configs resolvable in their App's chat context — not
  * just org admins. The output is masked (no key material), so membership in
  * the App is the right bar: anyone who can use the chatbot can see what it
- * can pick from. Platform admins bypass. When only an Agent is in context
- * (no appId), membership in any App that installs that Agent suffices — the
- * same rule shared chats use (specs 017 / 023).
+ * can pick from. Platform admins bypass.
+ *
+ * Precedence is strict: when an `appId` is given, membership of THAT App is
+ * required (the walk returns that App's own configs, so a non-member must be
+ * denied — we MUST NOT fall through to the agentId branch, or a member of one
+ * App could read another App's configs by pairing the target appId with an
+ * Agent the two Apps share). The agentId branch is the agent-only path: with
+ * no appId, membership in any App that installs that Agent suffices (the same
+ * rule shared chats use, specs 017 / 023).
  */
 async function requireAiConfigPickerAccess(
   ctx: Context,
@@ -351,7 +357,10 @@ async function requireAiConfigPickerAccess(
     const member = await ctx.db.appMember.findUnique({
       where: { appId_userId: { appId, userId: ctx.userId } },
     });
-    if (member) return;
+    // appId in context → membership of THAT App is required; do not fall
+    // through to the agentId branch (cross-App read bypass otherwise).
+    if (!member) throw new Error('Forbidden');
+    return;
   }
   if (agentId) {
     const member = await ctx.db.appMember.findFirst({
