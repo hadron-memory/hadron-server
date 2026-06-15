@@ -224,6 +224,71 @@ export async function resolveDefaultAiConfig(
 }
 
 /**
+ * Collect every config RESOLVABLE in a context — the plural, list-all-names
+ * analogue of resolveAiConfig (which resolves ONE name). Walks the same
+ * App -> Agent -> Org (of the App, else of the Agent) -> HadronServer order,
+ * gathering all ENABLED configs and deduping by name with the INNERMOST owner
+ * winning, so each name appears once as the row resolveAiConfig would return
+ * for it. Absent levels are skipped; disabled configs are skipped.
+ *
+ * Only the Agent named in `ctx` contributes — sibling Agents installed in the
+ * same App are never consulted (resolution always runs for one App+Agent
+ * pair). Powers the chatbot UI's "which config can I pick" list; callers map
+ * the rows through the masked view (never key material).
+ */
+export async function resolveAiConfigs(
+  db: PrismaClient,
+  ctx: AiConfigContext,
+): Promise<ResolvedAiConfig[]> {
+  const { appId, agentId } = ctx;
+  let organizationId = ctx.organizationId ?? null;
+
+  // Inner -> outer walk; keep the FIRST config seen per name so the innermost
+  // owner wins, mirroring resolveAiConfig's single-name precedence.
+  const byName = new Map<string, ResolvedAiConfig>();
+  const collect = (configs: AiServiceConfig[], ownerType: AiConfigOwnerType): void => {
+    for (const config of configs) {
+      if (!byName.has(config.name)) byName.set(config.name, { config, ownerType });
+    }
+  };
+
+  if (appId) {
+    const app = await db.app.findUnique({
+      where: { id: appId },
+      include: { aiServiceConfigs: { where: { enabled: true } } },
+    });
+    if (app) collect(app.aiServiceConfigs, 'APP');
+    if (!organizationId) organizationId = app?.organizationId ?? null;
+  }
+
+  if (agentId) {
+    const agent = await db.agent.findUnique({
+      where: { id: agentId },
+      include: { aiServiceConfigs: { where: { enabled: true } } },
+    });
+    if (agent) collect(agent.aiServiceConfigs, 'AGENT');
+    if (!organizationId) organizationId = agent?.organizationId ?? null;
+  }
+
+  if (organizationId) {
+    collect(
+      await db.aiServiceConfig.findMany({ where: { organizationId, enabled: true } }),
+      'ORGANIZATION',
+    );
+  }
+
+  collect(
+    await db.aiServiceConfig.findMany({
+      where: { hadronServerId: { not: null }, enabled: true },
+      orderBy: { createdAt: 'asc' },
+    }),
+    'HADRON_SERVER',
+  );
+
+  return [...byName.values()].sort((a, b) => a.config.name.localeCompare(b.config.name));
+}
+
+/**
  * Consumer-facing semantics (spec 036 FR-007): explicit name miss falls
  * back to 'default'; a 'default' miss throws NoAiConfigAvailableError.
  */

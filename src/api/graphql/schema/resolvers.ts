@@ -11,6 +11,7 @@ import {
   apiKeyWriteFields,
   apiKeyPreviewOf,
   resolveAiConfigWithFallback,
+  resolveAiConfigs,
   validateAiConfigName,
   validateProviderAndParams,
   type AiConfigOwnerType,
@@ -328,6 +329,40 @@ async function requireAiConfigOwnerAdmin(
       return { ownerWhere: { agentId: id }, resolvedOwnerId: id };
     }
   }
+}
+
+/**
+ * Read gate for the masked config picker (resolveAiServiceConfigs): ALL App
+ * members may list the configs resolvable in their App's chat context — not
+ * just org admins. The output is masked (no key material), so membership in
+ * the App is the right bar: anyone who can use the chatbot can see what it
+ * can pick from. Platform admins bypass. When only an Agent is in context
+ * (no appId), membership in any App that installs that Agent suffices — the
+ * same rule shared chats use (specs 017 / 023).
+ */
+async function requireAiConfigPickerAccess(
+  ctx: Context,
+  appId: string | null,
+  agentId: string | null,
+): Promise<void> {
+  if (isPlatformAdmin(ctx)) return;
+  if (!ctx.userId) throw new Error('Forbidden');
+  if (appId) {
+    const member = await ctx.db.appMember.findUnique({
+      where: { appId_userId: { appId, userId: ctx.userId } },
+    });
+    if (member) return;
+  }
+  if (agentId) {
+    const member = await ctx.db.appMember.findFirst({
+      where: {
+        userId: ctx.userId,
+        app: { appAgents: { some: { agentId } }, deletedAt: null },
+      },
+    });
+    if (member) return;
+  }
+  throw new Error('Forbidden');
 }
 
 /** Map lib-level typed AI-config errors to GraphQL errors (S2). */
@@ -2749,6 +2784,29 @@ export const resolvers = {
           apiKey: decryptToken(config.apiKeyEncrypted),
           params: config.params ?? null,
         };
+      } catch (e) {
+        rethrowAiConfigTyped(e);
+      }
+    },
+
+    resolveAiServiceConfigs: async (
+      _: unknown,
+      { appId, agentId }: { appId?: string | null; agentId?: string | null },
+      ctx: Context,
+    ) => {
+      try {
+        // 007-entity-id-or-urn: appId/agentId may be ID or URN. A ref that
+        // doesn't resolve to a row simply contributes nothing to the walk.
+        const resolvedAppId = appId ? (await resolveAppRef(ctx.db, appId)).id : null;
+        const resolvedAgentId = agentId ? (await resolveAgentRef(ctx.db, agentId)).id : null;
+        // Masked picker: ALL App members may list the configs their chat
+        // context can resolve (not just org admins — no key material leaves).
+        await requireAiConfigPickerAccess(ctx, resolvedAppId, resolvedAgentId);
+        const resolved = await resolveAiConfigs(ctx.db, {
+          appId: resolvedAppId,
+          agentId: resolvedAgentId,
+        });
+        return resolved.map((r) => toGqlAiServiceConfig(r.config));
       } catch (e) {
         rethrowAiConfigTyped(e);
       }

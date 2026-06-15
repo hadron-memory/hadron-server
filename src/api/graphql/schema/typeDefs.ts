@@ -1522,6 +1522,30 @@ export const typeDefs = `#graphql
     resolveAIConfig(name: String, appId: ID, agentId: ID): ResolvedAiConfig!
 
     """
+    036-ai-service-config: the MASKED set of configs RESOLVABLE in an
+    execution context — every distinct config name a chat in this context
+    could select. Populates a config picker in the chatbot UI.
+
+    Same walk as resolveAIConfig (App -> Agent -> Org (of the App, else of
+    the Agent) -> HadronServer), but returns ALL names instead of resolving
+    one: configs are deduped by name with the innermost owner winning, so
+    each entry is the row resolveAIConfig would return for that name. Only
+    the Agent named here contributes — sibling Agents installed in the same
+    App are not consulted. Disabled configs are skipped. Never returns key
+    material (hasApiKey + apiKeyPreview only).
+
+    Auth: any member of the App may list the picker. Because the result is
+    masked (no key material), this is NOT restricted to org admins the way
+    resolveAIConfig and the aiServiceConfigs management list are — anyone who
+    can use the chatbot can see what it may pick from. With only an agentId
+    (no appId), membership in any App that installs that Agent suffices.
+    Platform ADMIN/OWNER always allowed.
+
+    appId/agentId accept the entity's ID or URN.
+    """
+    resolveAiServiceConfigs(appId: ID, agentId: ID): [AiServiceConfig!]!
+
+    """
     Saved chats for the current user in their personal memory for an
     agent. Newest first.
 
