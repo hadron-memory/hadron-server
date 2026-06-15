@@ -339,13 +339,13 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     await createConfig({ agentId: agent.id }, 'off', { apiKey: 'sk-off', enabled: false });
     const list = await resolvers.Query.resolveAiServiceConfigs(
       {},
-      { agentId: agent.id },
+      { appId: app.id, agentId: agent.id },
       ctxFor(member.id),
     );
     expect(list.map((c) => c.name)).toEqual(['on']);
   });
 
-  it('agent-only context includes Org + Host via the Agent org, never another org', async () => {
+  it("includes the App's Org + Host, never another org", async () => {
     await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-agent' });
     await createConfig({ organizationId: org.id }, 'org-wide', { apiKey: 'sk-org' });
     await createConfig({ organizationId: otherOrg.id }, 'rival', { apiKey: 'sk-rival' });
@@ -353,12 +353,12 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
 
     const list = await resolvers.Query.resolveAiServiceConfigs(
       {},
-      { agentId: agent.id },
+      { appId: app.id, agentId: agent.id },
       ctxFor(member.id),
     );
     const names = list.map((c) => c.name);
     expect(names).toEqual(['default', 'host-wide', 'org-wide']);
-    expect(names).not.toContain('rival'); // the Agent builder's other org is never consulted
+    expect(names).not.toContain('rival'); // org is derived from the App, never another org
   });
 
   it('is visible to any App member (not just org admins)', async () => {
@@ -411,6 +411,32 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
         { appId: app.id, agentId: agent.id },
         ctxFor(otherMember.id),
       ),
+    ).rejects.toThrow();
+  });
+
+  it('denies an Agent that is not installed in the target App (Finding 1: no cross-Agent read)', async () => {
+    // With an appId given, the named Agent must be installed in THAT App, or a
+    // member could point the walk at an unrelated Agent's masked configs.
+    // `unrelated` shares the org but is NOT installed in `app`.
+    const unrelated = await db.agent.create({
+      data: { id: generateId(), name: 'Unrelated', urn: 'acme-036:unrelated', organizationId: org.id },
+    });
+    await createConfig({ agentId: unrelated.id }, 'secret', { apiKey: 'sk-unrelated' });
+    await expect(
+      resolvers.Query.resolveAiServiceConfigs(
+        {},
+        { appId: app.id, agentId: unrelated.id },
+        ctxFor(member.id),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('denies a non-admin agent-only call without an appId (Finding 2: no Agent-home-org read)', async () => {
+    // Without an appId the walk would derive the org from the Agent's HOME org;
+    // non-admins must supply an App so the org is always the install org.
+    await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-agent' });
+    await expect(
+      resolvers.Query.resolveAiServiceConfigs({}, { agentId: agent.id }, ctxFor(member.id)),
     ).rejects.toThrow();
   });
 

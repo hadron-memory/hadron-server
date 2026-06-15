@@ -1534,12 +1534,12 @@ export const typeDefs = `#graphql
     App are not consulted. Disabled configs are skipped. Never returns key
     material (hasApiKey + apiKeyPreview only).
 
-    Auth: any member of the App may list the picker. Because the result is
-    masked (no key material), this is NOT restricted to org admins the way
-    resolveAIConfig and the aiServiceConfigs management list are — anyone who
-    can use the chatbot can see what it may pick from. With only an agentId
-    (no appId), membership in any App that installs that Agent suffices.
-    Platform ADMIN/OWNER always allowed.
+    Auth: scoped to one App's chat context. A non-admin caller MUST pass an
+    appId, be a member of that App, and (when an agentId is given) the Agent
+    must be installed in that App. Because the result is masked (no key
+    material), App membership — not org admin — is the bar, unlike
+    resolveAIConfig and the aiServiceConfigs management list. Platform
+    ADMIN/OWNER are always allowed and may omit appId.
 
     appId/agentId accept the entity's ID or URN.
     """

@@ -332,19 +332,21 @@ async function requireAiConfigOwnerAdmin(
 }
 
 /**
- * Read gate for the masked config picker (resolveAiServiceConfigs): ALL App
- * members may list the configs resolvable in their App's chat context — not
- * just org admins. The output is masked (no key material), so membership in
- * the App is the right bar: anyone who can use the chatbot can see what it
- * can pick from. Platform admins bypass.
+ * Read gate for the masked config picker (resolveAiServiceConfigs). The picker
+ * is scoped to ONE App's chat context, so for a non-admin caller all three of
+ * these are required:
+ *   1. an `appId` (the picker is meaningless without an installation),
+ *   2. membership of that App, and
+ *   3. the named Agent (if any) must be installed in that App.
  *
- * Precedence is strict: when an `appId` is given, membership of THAT App is
- * required (the walk returns that App's own configs, so a non-member must be
- * denied — we MUST NOT fall through to the agentId branch, or a member of one
- * App could read another App's configs by pairing the target appId with an
- * Agent the two Apps share). The agentId branch is the agent-only path: with
- * no appId, membership in any App that installs that Agent suffices (the same
- * rule shared chats use, specs 017 / 023).
+ * All three matter because the walk returns the App's configs AND the named
+ * Agent's configs AND the org's, deriving the org from the App. Tying the
+ * Agent to the App (isAgentInstalled) stops a member from pointing the walk at
+ * an unrelated Agent's configs; requiring the App (instead of resolving an
+ * Agent's home org when no appId is given) stops a member of an installing org
+ * from reading the Agent author org's configs. The output is masked (no key
+ * material), so App membership — not org admin — is the bar: anyone who can
+ * use the chatbot can see what it may pick from. Platform admins bypass.
  */
 async function requireAiConfigPickerAccess(
   ctx: Context,
@@ -353,25 +355,16 @@ async function requireAiConfigPickerAccess(
 ): Promise<void> {
   if (isPlatformAdmin(ctx)) return;
   if (!ctx.userId) throw new Error('Forbidden');
-  if (appId) {
-    const member = await ctx.db.appMember.findUnique({
-      where: { appId_userId: { appId, userId: ctx.userId } },
-    });
-    // appId in context → membership of THAT App is required; do not fall
-    // through to the agentId branch (cross-App read bypass otherwise).
-    if (!member) throw new Error('Forbidden');
-    return;
+  if (!appId) throw new Error('Forbidden');
+  const member = await ctx.db.appMember.findUnique({
+    where: { appId_userId: { appId, userId: ctx.userId } },
+  });
+  if (!member) throw new Error('Forbidden');
+  // The named Agent must be installed in this App, or the walk could be
+  // pointed at an unrelated Agent's (masked) configs.
+  if (agentId && !(await isAgentInstalled(ctx.db, appId, agentId))) {
+    throw new Error('Forbidden');
   }
-  if (agentId) {
-    const member = await ctx.db.appMember.findFirst({
-      where: {
-        userId: ctx.userId,
-        app: { appAgents: { some: { agentId } }, deletedAt: null },
-      },
-    });
-    if (member) return;
-  }
-  throw new Error('Forbidden');
 }
 
 /** Map lib-level typed AI-config errors to GraphQL errors (S2). */
