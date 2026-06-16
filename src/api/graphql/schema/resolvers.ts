@@ -17,6 +17,7 @@ import {
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
+import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
 import {
   enqueueNodeEmbedding,
   backfillMemoryEmbeddings,
@@ -2457,6 +2458,134 @@ export const resolvers = {
       });
       await decryptNodesBatch(ctx.db, results);
       return results;
+    },
+
+    /**
+     * Spec cor:api:040 — batch node read. Returns the full per-node projection
+     * for MANY nodes in one round-trip (the durable server-side primitive that
+     * lets `spec lint --all` stop doing one nodeById per node). Two mutually-
+     * exclusive forms: an explicit `ids` set (input order) or a `memory` +
+     * `locPrefix` subtree (loc order).
+     *
+     * Authorization is per-node and identical to the single-node read: the
+     * memoryAccessFilter scopes the fetch to readable memories, so a denied OR
+     * missing id simply isn't in the result and lands in `unavailable` —
+     * indistinguishable, never failing the call (cor:api:040:03, BOLA). Hard
+     * caps (cor:api:040:02): over the node-count cap throws; over the
+     * response-size cap returns a partial result flagged `truncated` — never a
+     * silent short read. No UsageEvent is recorded, matching the single-node
+     * GraphQL reads (nodeById / node), which don't either — per-surface parity.
+     */
+    nodeBatch: async (
+      _: unknown,
+      { ids, memory, locPrefix }: { ids?: string[]; memory?: string; locPrefix?: string },
+      ctx: Context,
+    ) => {
+      const hasSet = Array.isArray(ids) && ids.length > 0;
+      const hasPrefix = memory != null && locPrefix != null;
+      if (hasSet === hasPrefix) {
+        throw new GraphQLError(
+          'nodeBatch: provide EITHER `ids` (an explicit set) OR `memory` + `locPrefix` (a subtree) — not both, not neither.',
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+
+      const access = await memoryAccessFilter(ctx);
+      const include = {
+        outgoingEdges: { include: { target: true } },
+        incomingEdges: { include: { source: true } },
+      };
+
+      let ordered: Array<{
+        id: string;
+        content: string | null;
+        abstract: string | null;
+        data?: unknown;
+        properties?: unknown;
+      }> = [];
+      const unavailable: string[] = [];
+
+      if (hasSet) {
+        // Count cap (cor:api:040:02) — caller knows the count; fail loud up front.
+        if (ids!.length > BATCH_READ_MAX_NODES) {
+          throw new GraphQLError(
+            `nodeBatch: ${ids!.length} ids exceeds the ${BATCH_READ_MAX_NODES}-node cap. Split into smaller batches; the batch read does not silently truncate.`,
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
+        // The access filter scopes to readable memories, so a denied OR missing
+        // id is simply absent from the result — reported indistinguishably.
+        // Dedup so a repeated id isn't returned twice (the single nodeById
+        // can't duplicate); first-occurrence order preserved.
+        const uniqueIds = [...new Set(ids!)];
+        const rows = await ctx.db.node.findMany({
+          where: { id: { in: uniqueIds }, deletedAt: null, ...access },
+          include,
+        });
+        await decryptNodesBatch(ctx.db, rows);
+        const byId = new Map(rows.map((n) => [n.id, n]));
+        for (const id of uniqueIds) {
+          const n = byId.get(id);
+          if (n) ordered.push(n);
+          else unavailable.push(id);
+        }
+      } else {
+        const { id: memId } = await resolveMemoryRef(ctx.db, memory!);
+        const accessible = await getAccessibleMemoryIds(ctx);
+        if (accessible !== null && !accessible.includes(memId)) {
+          throw new GraphQLError('Memory not accessible.', { extensions: { code: 'FORBIDDEN' } });
+        }
+        // Count cap: take MAX+1 to detect overflow, then fail loud rather than
+        // silently returning a truncated subtree.
+        const rows = await ctx.db.node.findMany({
+          where: { memoryId: memId, loc: { startsWith: locPrefix! }, deletedAt: null },
+          orderBy: { loc: 'asc' },
+          take: BATCH_READ_MAX_NODES + 1,
+          include,
+        });
+        if (rows.length > BATCH_READ_MAX_NODES) {
+          throw new GraphQLError(
+            `nodeBatch: prefix "${locPrefix}" matches more than the ${BATCH_READ_MAX_NODES}-node cap. Narrow the prefix; the batch read does not silently truncate.`,
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
+        await decryptNodesBatch(ctx.db, rows);
+        ordered = rows;
+      }
+
+      // Response-size cap (cor:api:040:02) — pack until the byte ceiling, then
+      // stop and flag `truncated` with the omitted ids. At least one node always
+      // returns (a single oversize node still comes back). Size is measured on
+      // the decrypted content + abstract; the client selects the rest.
+      const nodes: unknown[] = [];
+      const omitted: string[] = [];
+      let bytes = 0;
+      let truncated = false;
+      for (const n of ordered) {
+        if (truncated) {
+          omitted.push(n.id);
+          continue;
+        }
+        // Approximate the serialized payload from the heavy scalar fields a
+        // client is likely to select — content + abstract + the JSON columns.
+        // Edges are relational + client-selected, so they aren't measured here.
+        const size = Buffer.byteLength(
+          (n.content ?? '') +
+            (n.abstract ?? '') +
+            (n.data != null ? JSON.stringify(n.data) : '') +
+            (n.properties != null ? JSON.stringify(n.properties) : ''),
+          'utf8',
+        );
+        if (nodes.length > 0 && bytes + size > BATCH_READ_MAX_BYTES) {
+          truncated = true;
+          omitted.push(n.id);
+          continue;
+        }
+        nodes.push(n);
+        bytes += size;
+      }
+
+      return { nodes, unavailable, truncated, omitted };
     },
 
     nodeUsage: async (_: unknown, { loc, limit }: { loc: string; limit?: number }, ctx: Context) => {

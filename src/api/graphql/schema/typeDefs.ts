@@ -115,6 +115,22 @@ export const typeDefs = `#graphql
   }
 
   """
+  Spec cor:api:040 — result envelope for the batch node read (nodeBatch).
+  'nodes' is the authorized, existing subset (input order for an id set, loc
+  order for a prefix). 'unavailable' lists the requested refs that were denied
+  OR not found — indistinguishable, so the result never discloses whether an
+  unreadable node exists. 'truncated' is true when the response-size cap was
+  reached, and 'omitted' then carries the dropped node ids. (Over the
+  node-count cap the query errors instead — never a silent short read.)
+  """
+  type NodeBatchResult {
+    nodes: [Node!]!
+    unavailable: [ID!]!
+    truncated: Boolean!
+    omitted: [ID!]!
+  }
+
+  """
   Spec 033 US2 — one matching chunk from a content-chunk vector index.
   Carries the locator metadata a RAG consumer needs for context-stuffing:
   span text, character offset within the parent node, chunk index, and
@@ -1335,6 +1351,22 @@ export const typeDefs = `#graphql
 
     # All nodes whose loc starts with the given prefix
     subtree(prefix: String!): [Node!]!
+
+    """
+    Batch read (spec cor:api:040) — the full node projection (select any Node
+    fields, including content + edges) for MANY nodes in one call, eliminating
+    the N+1 of one nodeById per node (e.g. 'spec lint --all'). Provide EITHER
+    'ids' (explicit set, returned in input order) OR 'memory' + 'locPrefix'
+    (subtree, loc order) — not both. Per-node access is applied independently:
+    denied or missing ids come back in 'unavailable' and never fail the call.
+    Bounded by hard caps — over the node-count cap throws BAD_USER_INPUT; over
+    the response-size cap returns a partial result with 'truncated: true' and
+    the dropped ids in 'omitted' (never a silent short read). Node content is
+    returned raw — Mustache templates are NOT compiled (unlike single-node
+    'node'/'nodeById'), since this is a bulk source read for lint / audit /
+    migration and compiling per node would re-introduce the N+1 it eliminates.
+    """
+    nodeBatch(ids: [ID!], memory: ID, locPrefix: String): NodeBatchResult!
 
     # Usage stats for a node (most recent events first)
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
