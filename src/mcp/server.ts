@@ -637,12 +637,21 @@ export function createMcpServerInstance(
       const memoryIds = [...access.keys()];
       const memories = await db.memory.findMany({
         where: { id: { in: memoryIds } },
-        select: { id: true, urn: true, name: true },
+        select: { id: true, urn: true, name: true, data: true },
       });
 
       const lines = memories.map((m) => {
         const level = access.get(m.id) === 'READ_WRITE' ? 'read-write' : 'read-only';
-        return `- **${formatCanonicalUrn('memory', m.urn)}** — ${m.name} (${level})`;
+        const head = `- **${formatCanonicalUrn('memory', m.urn)}** — ${m.name} (${level})`;
+        // Free-form metadata bag (no server-side semantics). Surfaced
+        // read-only on its own indented line, only when non-null so the
+        // listing stays scannable — mirrors h-read-node's `Data: <json>`
+        // idiom. Writing `data` is a GraphQL-only path: the MCP surface has
+        // no memory-mutation tool (memories are created/edited via
+        // createMemory / updateMemory). MCP also bypasses encryption (#206),
+        // but `data` is plaintext-by-design metadata, so there's no
+        // decrypt-parity gap to bridge here.
+        return m.data != null ? `${head}\n  data: ${JSON.stringify(m.data)}` : head;
       });
 
       return textResult(`${memories.length} accessible memories:\n\n${lines.join('\n')}`);

@@ -742,6 +742,11 @@ export const typeDefs = `#graphql
     name: String!
     shortDescription: String
     description: String
+    """
+    Free-form structured metadata bag (client-defined JSON, no server-side
+    semantics). Null when unset. Settable via createMemory / updateMemory.
+    """
+    data: JSON
     tags: [String!]!
     license: String
     category0: String
@@ -1724,6 +1729,8 @@ export const typeDefs = `#graphql
       name: String!
       shortDescription: String
       description: String
+      """Free-form structured metadata bag (client-defined JSON). Null = unset."""
+      data: JSON
       tags: [String!]
       license: String
       category0: String
@@ -1756,7 +1763,7 @@ export const typeDefs = `#graphql
     truth in \`FR_026_DISCLOSURE\` — see \`src/lib/entityRef/errors.ts\`). On a
     non-encrypted memory the flag is a no-op.
     """
-    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean): Memory!
+    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean): Memory!
 
     """
     Soft-delete a Memory.
