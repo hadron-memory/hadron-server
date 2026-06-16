@@ -107,12 +107,18 @@ export function preserveUnmanagedFrontmatter(
   if (!existsSync(mdPath)) return;
   try {
     const existing = readFileSync(mdPath, 'utf-8');
-    const fmMatch = existing.match(/^---\n([\s\S]*?)\n---/);
+    // Tolerate CRLF (Windows / git core.autocrlf) as well as LF.
+    const fmMatch = existing.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     if (!fmMatch) return;
-    const existingMeta = parse(fmMatch[1]) as Record<string, unknown>;
-    for (const key of ['urn', 'author']) {
-      if (existingMeta[key] && !frontmatter[key]) {
-        frontmatter[key] = existingMeta[key];
+    // parse() yields null for empty frontmatter and a scalar/array for
+    // malformed YAML; only a plain object is safe to index.
+    const existingMeta = parse(fmMatch[1]);
+    if (existingMeta && typeof existingMeta === 'object') {
+      for (const key of ['urn', 'author']) {
+        const val = (existingMeta as Record<string, unknown>)[key];
+        if (val != null && frontmatter[key] == null) {
+          frontmatter[key] = val;
+        }
       }
     }
   } catch {

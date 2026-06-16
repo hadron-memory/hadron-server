@@ -119,4 +119,22 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
     expect(node.contentHash).toBe('abcd1234');
     expect(node.content).toBe(body);
   });
+
+  it('round-trips type: link → isLink: true, and default info → isLink: false', async () => {
+    // The bulk path used to drop `type`, so re-imports flipped every link
+    // node's isLink to false. Lock the round-trip down for both cases.
+    const linkFm = buildNodeFrontmatter({ id: 'l1', name: 'A link', tags: [], nodeType: 'link' });
+    expect(linkFm.type).toBe('link');
+    const linkPath = join(graphRoot, 'lnk.md');
+    writeFileSync(linkPath, `---\n${stringify(linkFm, { lineWidth: 0 }).trim()}\n---\n\nbody\n`, 'utf-8');
+    const { node: linkNode } = await loadNodeFromFs(linkPath, graphRoot, 'org/repo');
+    expect(linkNode.isLink).toBe(true);
+
+    const infoFm = buildNodeFrontmatter({ id: 'i1', name: 'An info node', tags: [], nodeType: 'info' });
+    expect(infoFm).not.toHaveProperty('type');
+    const infoPath = join(graphRoot, 'inf.md');
+    writeFileSync(infoPath, `---\n${stringify(infoFm, { lineWidth: 0 }).trim()}\n---\n\nbody\n`, 'utf-8');
+    const { node: infoNode } = await loadNodeFromFs(infoPath, graphRoot, 'org/repo');
+    expect(infoNode.isLink).toBe(false);
+  });
 });
