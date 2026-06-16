@@ -49,6 +49,7 @@ import {
 } from './access-control.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { computeContentHash } from '../lib/contentHash.js';
+import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { reciprocalRankFusion } from '../lib/rrf.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
@@ -532,6 +533,117 @@ async function resolveMemoryByUrn(
 }
 
 // Access control lives in ./access-control.ts.
+
+/**
+ * Shared single-node read projection — the meta block + contentScope-driven
+ * body that `h-read-node` returns. Extracted so `h-read-nodes` (batch) emits
+ * the *identical* per-node projection (spec cor:api:040:01 — "the per-node
+ * projection is identical to the single-node read"); the two surfaces share
+ * one renderer and cannot drift. Pure formatting — the caller fetches the
+ * node (with outgoing/incoming edges + `memory.isEncrypted`), validates
+ * `contentScope`, and fires any usage event; this only renders. Response
+ * matrix: specs/031-node-abstract-field/contracts/h-read-node.md (spec 031 + 032).
+ */
+type ReadProjectionNode = {
+  name: string;
+  loc: string;
+  memoryId: string;
+  description: string | null;
+  nodeType: string;
+  tags: string[];
+  seq: number | null;
+  properties: unknown;
+  data: unknown;
+  content: string | null;
+  abstract: string | null;
+  abstractOriginHash: string | null;
+  memory: { isEncrypted: boolean };
+  outgoingEdges: Array<{ label: string; target: { loc: string; memoryId: string; name: string } }>;
+  incomingEdges: Array<{ label: string; source: { loc: string; memoryId: string; name: string } }>;
+};
+
+async function renderNodeReadProjection(
+  node: ReadProjectionNode,
+  scope: 'content' | 'abstract' | 'all',
+): Promise<string> {
+  const urn = await nodeUrn(node.loc, node.memoryId);
+  const outgoingLines = await Promise.all(
+    node.outgoingEdges.map(async (e) => {
+      const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
+      return `  - ${targetUrn} (${e.target.name}) — ${e.label}`;
+    }),
+  );
+  const incomingLines = await Promise.all(
+    node.incomingEdges.map(async (e) => {
+      const sourceUrn = await nodeUrn(e.source.loc, e.source.memoryId);
+      return `  - ${sourceUrn} (${e.source.name}) — ${e.label}`;
+    }),
+  );
+
+  const hasContent = !!(node.content && node.content.length > 0);
+  const hasAbstract = !!(node.abstract && node.abstract.length > 0);
+  const isFallback = scope === 'content' && !hasContent && hasAbstract;
+
+  // Spec 032 FR-010 — `Source: abstract-stale` marker. Encryption gate: the
+  // MCP read path does NOT decrypt today (asymmetry tracked by #206), so on an
+  // encrypted memory `computeContentHash(content)` hashes ciphertext and would
+  // false-positive on every node — v1 skips the predicate there. Scope gate:
+  // the marker only fires under scopes that surface the abstract (`abstract` /
+  // `all`); the default `content` scope omits it (the abstract isn't in the
+  // response). The explicit `abstractOriginHash != null` guard is load-bearing
+  // for legacy rows (without it `null !== "abc"` is true and the marker
+  // false-fires on every pre-spec-032 node).
+  const shouldCheckStale = scope === 'abstract' || scope === 'all';
+  let includeStaleMarker = false;
+  if (
+    shouldCheckStale &&
+    !node.memory.isEncrypted &&
+    hasAbstract &&
+    hasContent &&
+    node.abstractOriginHash != null
+  ) {
+    includeStaleMarker =
+      node.abstractOriginHash !== computeContentHash(node.content);
+  }
+
+  // #186: surface nodeType so callers can tell `parent` from `info`.
+  const meta = [
+    `**${node.name}**`,
+    urn,
+    node.description ? `> ${node.description}` : '',
+    `Type: ${node.nodeType}`,
+    isFallback ? 'Source: abstract-fallback' : '',
+    includeStaleMarker ? 'Source: abstract-stale' : '',
+    node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
+    node.seq !== null ? `Seq: ${node.seq}` : '',
+    node.properties ? `Properties: ${JSON.stringify(node.properties)}` : '',
+    node.data ? `Data: ${JSON.stringify(node.data)}` : '',
+    outgoingLines.length ? `Related:\n${outgoingLines.join('\n')}` : '',
+    incomingLines.length ? `Referenced by:\n${incomingLines.join('\n')}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  // Response matrix (specs/031-node-abstract-field/contracts/h-read-node.md).
+  if (scope === 'abstract') {
+    // meta + abstract (no `---`, no body). Meta alone when abstract null.
+    return hasAbstract ? `${meta}\n\n${node.abstract}` : meta;
+  }
+  if (scope === 'all') {
+    //   both present  → meta + abstract + --- + content
+    //   only abstract → meta + abstract  (no `---`)
+    //   only content  → meta + --- + content
+    //   both null     → meta alone
+    const parts: string[] = [meta];
+    if (hasAbstract) parts.push(node.abstract!);
+    if (hasContent) parts.push(`---\n\n${node.content}`);
+    return parts.join('\n\n');
+  }
+  // scope === 'content' (default) — body is content, else abstract (fallback),
+  // else empty (byte-identical pre-spec when content AND abstract are null).
+  const body = hasContent ? node.content! : isFallback ? node.abstract! : '';
+  return meta + '\n\n---\n\n' + body;
+}
 
 // ---------------------------------------------------------------------------
 // MCP Server factory — one McpServer per transport session
@@ -1608,33 +1720,13 @@ export function createMcpServerInstance(
         },
       }).catch(() => {});
 
-      const urn = await nodeUrn(node.loc, node.memoryId);
-      const outgoingLines = await Promise.all(node.outgoingEdges.map(async (e) => {
-        const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
-        return `  - ${targetUrn} (${e.target.name}) — ${e.label}`;
-      }));
-      const incomingLines = await Promise.all(node.incomingEdges.map(async (e) => {
-        const sourceUrn = await nodeUrn(e.source.loc, (e.source as any).memoryId);
-        return `  - ${sourceUrn} (${e.source.name}) — ${e.label}`;
-      }));
       // Spec 031 — contentScope-driven response shape. Default 'content'
-      // preserves pre-spec output byte-for-byte when content is non-empty
-      // (or when content AND abstract are both null). Content-fallback fires
-      // ONLY under 'content' scope when content is null/empty AND abstract
-      // is non-null — and ONLY then does the meta block carry a
-      // `Source: abstract-fallback` line.
-      //
-      // Defensive enum check: zod validates the same set at the MCP
-      // transport boundary, but defensive validation here catches direct-
-      // handler callers (e.g. createTestableMcpServer's _registeredTools
-      // shortcut, which bypasses the transport's zod parsing) and any
-      // future internal caller. Constructs the typed
-      // `InvalidContentScopeError` and returns its `message` as a tool-
-      // result string — the class is the single source of truth for
-      // both the message and any future GraphQL `extensions.code` mapping
-      // (the MCP convention is "return error text," not "throw" — the
-      // GraphQL surface, when it adds contentScope, would throw + the
-      // formatter would map name → extensions.code).
+      // preserves pre-spec output byte-for-byte. Defensive enum check: zod
+      // validates the same set at the MCP transport boundary, but direct-
+      // handler callers (createTestableMcpServer's _registeredTools shortcut)
+      // bypass that parsing, so re-validate here. InvalidContentScopeError is
+      // the single source of truth for the message (and any future GraphQL
+      // `extensions.code` mapping). MCP convention: return error text, not throw.
       if (
         contentScope !== undefined &&
         contentScope !== 'content' &&
@@ -1645,89 +1737,210 @@ export function createMcpServerInstance(
         return textResult(err.message);
       }
       const scope = contentScope ?? 'content';
-      const hasContent = !!(node.content && node.content.length > 0);
-      const hasAbstract = !!(node.abstract && node.abstract.length > 0);
-      const isFallback = scope === 'content' && !hasContent && hasAbstract;
+      // Shared with h-read-nodes (batch) so the per-node projection can never
+      // drift between the single-read and batch-read surfaces (cor:api:040:01).
+      return textResult(await renderNodeReadProjection(node, scope));
+    },
+  );
 
-      // Spec 032 FR-010 — `Source: abstract-stale` marker.
-      //
-      // Encryption gate: the MCP read path does NOT call
-      // `decryptNodesBatch` today (asymmetry tracked by #206). On an
-      // encrypted memory, `node.content` may be ciphertext, and
-      // `computeContentHash(ciphertext)` would compare unequal to every
-      // plaintext-derived `abstractOriginHash` (false-positive on every
-      // node). v1 skips the predicate on encrypted memories; the
-      // encryption-parity follow-up lifts the gate by adding a decrypt
-      // step before this point. Symmetric with the h-validate gate (US3).
-      //
-      // Scope gate: FR-010 condition e — the marker only fires under
-      // scopes that surface the abstract. Default `'content'` scope
-      // omits it (the abstract isn't in the response, so alarming
-      // would be unrelatable). Hoisting the gate above the predicate
-      // (PR-210 review) skips the hash recomputation on the default-
-      // scope read path entirely — preserves byte-identical-pre-spec
-      // behaviour at zero cost.
-      const shouldCheckStale = scope === 'abstract' || scope === 'all';
-      let includeStaleMarker = false;
+  // ── h-read-nodes (batch multi-node read) ──────────────────────────────────
+
+  server.tool(
+    'h-read-nodes',
+    "Batch read — return the full per-node projection (meta + edges + contentScope body, identical to h-read-node) for MANY nodes in one call. Two mutually-exclusive forms: (1) `urns` — an explicit list of fully-qualified node URNs, returned in input order; (2) `memoryUrn` + `locPrefix` — every readable node whose loc starts with the prefix in one memory, returned in loc order. Optional `contentScope` ('content' default | 'abstract' | 'all') applies to every node, so abstract-only triage is cheap. Per-node authorization: unreadable or non-existent refs are reported in a separate Unavailable list (denied and not-found are indistinguishable) and never fail the batch. Bounded by hard caps — exceeding the node-count cap is a loud error; exceeding the response-size cap returns a partial result flagged `truncated` (never a silent short read). Spec cor:api:040.",
+    {
+      urns: z
+        .array(z.string())
+        .optional()
+        .describe('Explicit-set form: fully-qualified node URNs (org::memory::loc). Returned in input order. Mutually exclusive with memoryUrn/locPrefix.'),
+      memoryUrn: z
+        .string()
+        .optional()
+        .describe('Prefix form: fully-qualified memory URN to read from. Use together with locPrefix.'),
+      locPrefix: z
+        .string()
+        .optional()
+        .describe('Prefix form: return every readable node whose loc starts with this prefix (loc order). Use together with memoryUrn.'),
+      contentScope: z
+        .enum(['content', 'abstract', 'all'])
+        .optional()
+        .describe("Per-node projection scope, as on h-read-node. Default 'content'."),
+    },
+    async ({ urns, memoryUrn, locPrefix, contentScope }) => {
+      // Defensive contentScope validation — parity with h-read-node (covers
+      // direct-handler callers that bypass the transport's zod parsing).
       if (
-        shouldCheckStale &&
-        !node.memory.isEncrypted &&
-        hasAbstract &&
-        hasContent &&
-        node.abstractOriginHash != null
+        contentScope !== undefined &&
+        contentScope !== 'content' &&
+        contentScope !== 'abstract' &&
+        contentScope !== 'all'
       ) {
-        // The explicit `abstractOriginHash != null` above is load-bearing
-        // for legacy nodes — without it, `null !== "abc12345"` is `true`
-        // and the marker would fire on every pre-spec-032 row.
-        includeStaleMarker =
-          node.abstractOriginHash !== computeContentHash(node.content);
+        return textResult(new InvalidContentScopeError(String(contentScope)).message);
+      }
+      const scope = contentScope ?? 'content';
+
+      const hasSet = Array.isArray(urns) && urns.length > 0;
+      // locPrefix '' is a valid "whole memory" prefix — test for presence, not
+      // truthiness, so an empty prefix isn't mistaken for the absent form.
+      const hasPrefix = memoryUrn !== undefined && locPrefix !== undefined;
+      // Exactly one form (FR-002: both capabilities exist; one tool, two modes).
+      if (hasSet === hasPrefix) {
+        return textResult(
+          'h-read-nodes: provide EITHER `urns` (an explicit set) OR `memoryUrn` + `locPrefix` (a subtree) — not both, not neither.',
+        );
       }
 
-      // #186: surface nodeType so callers can tell `parent` from `info`
-      // (portal rendering + tool dispatch both branch on this; without it
-      // there's no way to detect a node mis-typed at creation time).
-      const meta = [
-        `**${node.name}**`,
-        urn,
-        node.description ? `> ${node.description}` : '',
-        `Type: ${node.nodeType}`,
-        isFallback ? 'Source: abstract-fallback' : '',
-        includeStaleMarker ? 'Source: abstract-stale' : '',
-        node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
-        node.seq !== null ? `Seq: ${node.seq}` : '',
-        node.properties ? `Properties: ${JSON.stringify(node.properties)}` : '',
-        node.data ? `Data: ${JSON.stringify(node.data)}` : '',
-        outgoingLines.length ? `Related:\n${outgoingLines.join('\n')}` : '',
-        incomingLines.length ? `Referenced by:\n${incomingLines.join('\n')}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n');
+      // Authorized, existing nodes in caller-meaningful order, plus the refs we
+      // couldn't return — denied OR not-found, reported indistinguishably so the
+      // result never discloses whether an unreadable node exists (cor:api:040:03).
+      const ordered: Array<ReadProjectionNode & { id: string }> = [];
+      const unavailable: string[] = [];
 
-      // Render the response per the 12-cell matrix in
-      // specs/031-node-abstract-field/contracts/h-read-node.md.
-      if (scope === 'abstract') {
-        // meta + abstract (no `---`, no body). Meta alone when abstract null.
-        return hasAbstract
-          ? textResult(`${meta}\n\n${node.abstract}`)
-          : textResult(meta);
+      if (hasPrefix) {
+        // ── Prefix subtree (one memory, gated once) ──────────────────────────
+        const mem = await resolveMemoryByUrn(memoryUrn!);
+        if (!mem || !(await canReadMemory(db, auth, mem.id))) {
+          // Don't leak existence — mirror the single read's phrasing.
+          return textResult(`Memory not found: "${memoryUrn}".`);
+        }
+        // Count cap (cor:api:040:02): take MAX+1 to detect overflow, then fail
+        // loud rather than silently returning a truncated subtree.
+        const rows = await db.node.findMany({
+          where: { memoryId: mem.id, loc: { startsWith: locPrefix! }, deletedAt: null },
+          orderBy: { loc: 'asc' },
+          take: BATCH_READ_MAX_NODES + 1,
+          include: {
+            outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
+            incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
+            memory: { select: { isEncrypted: true } },
+          },
+        });
+        if (rows.length > BATCH_READ_MAX_NODES) {
+          return textResult(
+            `h-read-nodes: prefix "${locPrefix}" matches more than the ${BATCH_READ_MAX_NODES}-node cap. Narrow the prefix (or page by sub-prefix); the batch read does not silently truncate.`,
+          );
+        }
+        ordered.push(...(rows as unknown as Array<ReadProjectionNode & { id: string }>));
+      } else {
+        // ── Explicit set (mixed-memory; per-node gate) ───────────────────────
+        // Count cap up front — the caller knows the count, so fail loud before
+        // any work (cor:api:040:02).
+        if (urns!.length > BATCH_READ_MAX_NODES) {
+          return textResult(
+            `h-read-nodes: ${urns!.length} URNs exceeds the ${BATCH_READ_MAX_NODES}-node cap. Split into smaller batches; the batch read does not silently truncate.`,
+          );
+        }
+        // Dedup the input set up front so a repeated URN isn't rendered (and
+        // billed via a UsageEvent) twice — the single read can't duplicate, so
+        // neither should the batch. First-occurrence order is preserved.
+        const uniqueUrns = [...new Set(urns!)];
+        // Parse + group by memory so each distinct memory is gated + fetched
+        // once (not N findFirsts). Unparseable refs go straight to unavailable —
+        // one bad ref never fails the batch.
+        type Ref = { rawUrn: string; memoryUrn: string; loc: string };
+        const refs: Ref[] = [];
+        for (const rawUrn of uniqueUrns) {
+          try {
+            assertFullyQualifiedUrn(rawUrn, 'node');
+            const { memoryUrn: mu, loc } = splitNodeUrn(rawUrn);
+            refs.push({ rawUrn, memoryUrn: mu, loc });
+          } catch {
+            unavailable.push(rawUrn);
+          }
+        }
+        const byMemory = new Map<string, Ref[]>();
+        for (const r of refs) {
+          const arr = byMemory.get(r.memoryUrn);
+          if (arr) arr.push(r);
+          else byMemory.set(r.memoryUrn, [r]);
+        }
+        const nodeByRawUrn = new Map<string, ReadProjectionNode & { id: string }>();
+        for (const [mu, group] of byMemory) {
+          const mem = await resolveMemoryByUrn(mu);
+          if (!mem || !(await canReadMemory(db, auth, mem.id))) {
+            for (const r of group) unavailable.push(r.rawUrn);
+            continue;
+          }
+          const rows = await db.node.findMany({
+            where: { memoryId: mem.id, loc: { in: group.map((r) => r.loc) }, deletedAt: null },
+            include: {
+              outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
+              incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
+              memory: { select: { isEncrypted: true } },
+            },
+          });
+          const rowByLoc = new Map(rows.map((r) => [r.loc, r]));
+          for (const r of group) {
+            const row = rowByLoc.get(r.loc);
+            if (row) nodeByRawUrn.set(r.rawUrn, row as unknown as ReadProjectionNode & { id: string });
+            else unavailable.push(r.rawUrn);
+          }
+        }
+        // Reassemble in input order (cor:api:040:01).
+        for (const rawUrn of uniqueUrns) {
+          const n = nodeByRawUrn.get(rawUrn);
+          if (n) ordered.push(n);
+        }
       }
-      if (scope === 'all') {
-        // Sections collapse cleanly when components are missing:
-        //   both present  → meta + abstract + --- + content
-        //   only abstract → meta + abstract  (no `---`)
-        //   only content  → meta + --- + content
-        //   both null     → meta alone
-        const parts: string[] = [meta];
-        if (hasAbstract) parts.push(node.abstract!);
-        if (hasContent) parts.push(`---\n\n${node.content}`);
-        return textResult(parts.join('\n\n'));
+
+      // Render in order, packing until the response-size cap. Over the cap we
+      // stop and flag `truncated` (cor:api:040:02) — never a silent short read.
+      // At least one node always renders so a single oversize node still
+      // returns. One `read` UsageEvent per RETURNED node (cor:api:040:01 —
+      // per-node parity with h-read-node).
+      const blocks: string[] = [];
+      const omitted: string[] = [];
+      let bytes = 0;
+      let truncated = false;
+      for (const n of ordered) {
+        if (truncated) {
+          omitted.push(await nodeUrn(n.loc, n.memoryId));
+          continue;
+        }
+        const projection = await renderNodeReadProjection(n, scope);
+        const size = Buffer.byteLength(projection, 'utf8');
+        if (blocks.length > 0 && bytes + size > BATCH_READ_MAX_BYTES) {
+          truncated = true;
+          omitted.push(await nodeUrn(n.loc, n.memoryId));
+          continue;
+        }
+        blocks.push(projection);
+        bytes += size;
+        db.usageEvent
+          .create({
+            data: {
+              id: generateId(),
+              type: 'read',
+              nodeLoc: n.loc,
+              nodeId: n.id,
+              appId: auth.appId ?? null,
+              createdBy: auth.clientId ?? null,
+              sessionId: null,
+            },
+          })
+          .catch(() => {});
       }
-      // scope === 'content' (default)
-      // Body slot is filled by content when present, else by abstract
-      // (fallback rule), else empty string (byte-identical pre-spec when
-      // content is null AND abstract is null).
-      const body = hasContent ? node.content! : isFallback ? node.abstract! : '';
-      return textResult(meta + '\n\n---\n\n' + body);
+
+      const headerParts = [`returned ${blocks.length} node(s)`];
+      if (unavailable.length) headerParts.push(`${unavailable.length} unavailable`);
+      if (truncated) headerParts.push(`truncated: response-size cap reached, ${omitted.length} omitted`);
+      const parts: string[] = [`Batch read — ${headerParts.join('; ')}.`];
+      if (blocks.length) {
+        parts.push(blocks.join('\n\n────────────────────────────────────────\n\n'));
+      }
+      if (unavailable.length) {
+        parts.push(
+          `Unavailable (denied or not found):\n${unavailable.map((u) => `  - ${u}`).join('\n')}`,
+        );
+      }
+      if (truncated) {
+        parts.push(
+          `Omitted (response-size cap — re-request with contentScope: 'abstract' or a narrower set):\n${omitted
+            .map((u) => `  - ${u}`)
+            .join('\n')}`,
+        );
+      }
+      return textResult(parts.join('\n\n'));
     },
   );
 
