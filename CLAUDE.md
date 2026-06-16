@@ -9,7 +9,7 @@ Then, at the start of **every change** — before drafting a plan — call
 symptom-to-pattern routing index into the findings, conventions, ops, and
 review branches.
 
-Quick reference for AI agents working in this repo. Updated 2026-05-30.
+Quick reference for AI agents working in this repo. Updated 2026-06-15.
 
 ## Local Postgres setup
 
@@ -19,18 +19,32 @@ should not be changed.
 
 | DB | Purpose | Owner | Connection string |
 |---|---|---|---|
-| `hadron_dev` | Local development (manual portal/server runs, fixture data) | `holger` | `postgresql://holger@localhost:5432/hadron_dev` |
+| `hadron` | Local development — **the canonical dev DB.** `.env` `DATABASE_URL` points here; the app, `prisma/seed.ts`, and `prisma db push` all use it. | `holger` | `postgresql://holger@localhost:5432/hadron` |
 | `hadron_test` | Vitest test runs (cleared between tests) | `holger` | `postgresql://holger@localhost:5432/hadron_test` |
-| `hadron_smoke_test` | Pre-existing; reserved for ad-hoc smoke tests | `holger` | `postgresql://holger@localhost:5432/hadron_smoke_test` |
+| `hadron_dev` | **Deprecated / unused.** Older docs + the `db:dev-reset` script pointed here while `.env` actually used `hadron`; that split caused a long-running "phantom drift" confusion. Don't rely on it. | `holger` | `postgresql://holger@localhost:5432/hadron_dev` |
 
-Both `hadron_dev` and `hadron_test` are managed via `prisma db push` (no migration
+Both `hadron` and `hadron_test` are managed via `prisma db push` (no migration
 history on these DBs — `prisma migrate dev/deploy` does not work cleanly because
 older migrations reference the dropped `stations` table).
 
-`.env` (gitignored) holds the dev `DATABASE_URL` plus per-host secrets
-(JWT_SECRET, HADRON_ENCRYPTION_KEY). Anything Prisma-related picks it up
+**`.env` (gitignored) is the single source of truth for which DB local dev uses**
+— currently `hadron`. It holds the dev `DATABASE_URL` plus per-host secrets
+(JWT_SECRET, HADRON_ENCRYPTION_KEY); anything Prisma-related picks it up
 automatically. For tests, `vitest.config.ts` pins `DATABASE_URL` to
-`hadron_test` regardless of `.env`, so test runs never touch dev data.
+`hadron_test` regardless of `.env`, so test runs never touch dev data. Keep the
+`db:dev-*` scripts following `.env` (don't reintroduce a hardcoded DB name —
+that drift is what the deprecated `hadron_dev` row above warns about).
+
+> **Don't run a bare `prisma db push` / `pnpm db:push` against the dev DB.**
+> Prisma's schema language can't model the pgvector **HNSW index**
+> (`node_embeddings_embedding_hnsw`, created by raw SQL in `post-push.sql`), so
+> every `db push` / `migrate diff` reports it as drift and a bare push **drops
+> it** (and never rebuilds it). The push can also abort on a "possible data
+> loss" prompt for the nullable `users` composite-unique even when no row data
+> is at risk — which silently blocks unrelated additive changes behind it. Use
+> **`pnpm db:dev-setup`** (push **then** `post-push.sql`, which rebuilds the
+> HNSW index) to sync schema without wiping, or **`pnpm db:dev-reset`** for a
+> clean wipe + reseed. Both follow `.env`.
 
 ## Common commands
 
@@ -42,19 +56,24 @@ pnpm test
 pnpm tsc --noEmit
 
 # Inspect dev data
-psql -U holger -h localhost -d hadron_dev -c '\dt'
-psql postgresql://holger@localhost:5432/hadron_dev   # interactive
+psql -U holger -h localhost -d hadron -c '\dt'
+psql postgresql://holger@localhost:5432/hadron   # interactive
 
-# Reset + reseed the dev DB (the human runs this; Prisma blocks AI agents
-# from invoking --force-reset without explicit consent)
+# Sync the dev DB to the current schema WITHOUT wiping data (push +
+# post-push.sql, which rebuilds the HNSW index). Use this instead of a bare
+# `pnpm db:push`, which would drop the pgvector index. Works for AI agents.
+pnpm db:dev-setup
+
+# Reset + reseed the dev DB from scratch (the human runs this; Prisma blocks
+# AI agents from invoking --force-reset without explicit consent)
 pnpm db:dev-reset
 
 # Re-seed without resetting (works for AI agents)
-DATABASE_URL='postgresql://holger@localhost:5432/hadron_dev' pnpm tsx prisma/seed.ts
+DATABASE_URL='postgresql://holger@localhost:5432/hadron' pnpm tsx prisma/seed.ts
 
-# Re-apply CHECK constraints after a `db push` (needed because Prisma's
-# schema language doesn't model CHECK constraints)
-psql postgresql://holger@localhost:5432/hadron_dev -v ON_ERROR_STOP=1 -f prisma/post-push.sql
+# Re-apply CHECK constraints + the pgvector HNSW index after a bare `db push`
+# (Prisma's schema language models neither)
+psql postgresql://holger@localhost:5432/hadron -v ON_ERROR_STOP=1 -f prisma/post-push.sql
 ```
 
 ## Common environment variables
