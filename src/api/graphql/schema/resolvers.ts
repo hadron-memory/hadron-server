@@ -3822,12 +3822,17 @@ export const resolvers = {
         id: finalNode.id,
         loc: finalNode.loc,
         name: finalNode.name,
+        nodeType: finalNode.nodeType,
         alias: finalNode.alias,
         description: finalNode.description,
         abstract: finalNode.abstract,
         abstractOriginHash: finalNode.abstractOriginHash,
+        contentHash: finalNode.contentHash,
         content: finalNode.content,
         tags: deserializeTags(finalNode.tags) as string[],
+        seq: finalNode.seq,
+        data: finalNode.data,
+        properties: finalNode.properties,
         outgoingEdges: finalNode.outgoingEdges ?? [],
       }, input.ownerRepo ?? '', ctx.clientId, input.memoryId).catch((err) => {
         console.error('[upsertNode] git write error:', err);

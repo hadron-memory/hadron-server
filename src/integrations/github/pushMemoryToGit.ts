@@ -8,6 +8,7 @@ import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { deserializeTags } from '../db/provider.js';
+import { buildNodeFrontmatter, buildEdgeSidecar, preserveUnmanagedFrontmatter } from './nodeFrontmatter.js';
 
 const execFile = promisify(execFileCb);
 
@@ -129,16 +130,23 @@ export async function pushMemoryToGit(
       sidecarDir = join(localPath, ...parentParts, '.' + name);
     }
 
-    // Build frontmatter
-    const frontmatter: Record<string, unknown> = {
-      name: node.name,
+    // Build frontmatter (shared builder — keeps this bulk path and the
+    // incremental writeNodeToGit path emitting the exact same fields).
+    const frontmatter = buildNodeFrontmatter({
       id: node.id,
-    };
-    if (node.alias) frontmatter.alias = node.alias;
-    if (node.description) frontmatter.description = node.description;
-    const tags = deserializeTags(node.tags) as string[];
-    if (tags.length > 0) frontmatter.tags = tags;
-    if (node.seq !== null) frontmatter.seq = node.seq;
+      name: node.name,
+      nodeType: node.nodeType,
+      alias: node.alias,
+      description: node.description,
+      abstract: node.abstract,
+      abstractOriginHash: node.abstractOriginHash,
+      contentHash: node.contentHash,
+      tags: deserializeTags(node.tags) as string[],
+      seq: node.seq,
+      data: node.data,
+      properties: node.properties,
+    });
+    preserveUnmanagedFrontmatter(frontmatter, mdPath);
 
     const fmYaml = stringify(frontmatter, { lineWidth: 0 }).trim();
     const body = node.content ?? '';
@@ -148,11 +156,7 @@ export async function pushMemoryToGit(
     // Write edge sidecar if there are edges
     if (node.outgoingEdges.length > 0) {
       mkdirSync(sidecarDir, { recursive: true });
-      const edges = node.outgoingEdges.map((e) => ({
-        id: e.target.id,
-        target: e.target.loc,
-        rel: e.label ?? '',
-      }));
+      const edges = buildEdgeSidecar(node.outgoingEdges);
       writeFileSync(join(sidecarDir, 'edges.yaml'), stringify(edges), 'utf-8');
     }
   }
