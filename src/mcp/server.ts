@@ -764,11 +764,18 @@ export function createMcpServerInstance(
           },
           select: { id: true },
         });
-        for (const { id } of owned) {
-          if (levels.has(id)) continue;
-          if (!(await canReadMemory(db, auth, id))) continue;
-          levels.set(id, (await canWriteToMemory(db, auth, id)) ? 'READ_WRITE' : 'READ_ONLY');
-        }
+        // Each memory is independent and keyed by a unique id, so run the gate
+        // checks concurrently rather than as a serial 2N+1 round-trip when a
+        // user owns many personal memories. The synchronous `levels.set`
+        // between awaits is race-free: the ids are distinct, so no two
+        // callbacks ever touch the same key.
+        await Promise.all(
+          owned.map(async ({ id }) => {
+            if (levels.has(id)) return;
+            if (!(await canReadMemory(db, auth, id))) return;
+            levels.set(id, (await canWriteToMemory(db, auth, id)) ? 'READ_WRITE' : 'READ_ONLY');
+          }),
+        );
       }
 
       // Surface the active scope so a narrow list isn't silently mistaken for
