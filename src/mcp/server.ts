@@ -741,20 +741,76 @@ export function createMcpServerInstance(
       // accessible Apps. No requireAppScope() gate on purpose.
       if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
 
-      const access = await getMemoryAccess(db, auth);
-      if (access.size === 0) {
-        return textResult('No memories accessible. Subscribe to an agent with memories first.');
+      // Effective access level per memory. The App/org access map is
+      // personal-free by design (it also backs getAccessibleMemoryIds, which
+      // other tools rely on staying personal-free), so we start from it and
+      // then fold in the caller's own personal/private memories below.
+      const levels = new Map<string, string>(await getMemoryAccess(db, auth));
+
+      // #282: a user's own personal/private memories are reachable per-node via
+      // canReadMemory but absent from the access map — so without this they
+      // can't be *discovered* over MCP, the CLI-vs-MCP asymmetry #282 reported.
+      // Fold them in here, gated on auth.userId: App-Key callers (no userId)
+      // get none, preserving per-App isolation. canReadMemory / canWriteToMemory
+      // are the canonical gates, so the listing can never disagree with what
+      // h-read-node allows — including per-App isolation for app-scoped personal
+      // rows and the spec-034 free-standing owner-only case.
+      if (auth.userId) {
+        const owned = await db.memory.findMany({
+          where: {
+            userId: auth.userId,
+            class: { in: ['personal', 'private'] },
+            deletedAt: null,
+          },
+          select: { id: true },
+        });
+        // Each memory is independent and keyed by a unique id, so run the gate
+        // checks concurrently rather than as a serial 2N+1 round-trip when a
+        // user owns many personal memories. The synchronous `levels.set`
+        // between awaits is race-free: the ids are distinct, so no two
+        // callbacks ever touch the same key.
+        await Promise.all(
+          owned.map(async ({ id }) => {
+            if (levels.has(id)) return;
+            if (!(await canReadMemory(db, auth, id))) return;
+            levels.set(id, (await canWriteToMemory(db, auth, id)) ? 'READ_WRITE' : 'READ_ONLY');
+          }),
+        );
       }
 
-      const memoryIds = [...access.keys()];
+      // Surface the active scope so a narrow list isn't silently mistaken for
+      // "no access" (#282; also the #187/#190 dual-namespace confusion) — an
+      // App-Key session is intentionally narrower than a user session.
+      let scope: string;
+      if (auth.appId) {
+        const app = await db.app.findUnique({ where: { id: auth.appId }, select: { urn: true } });
+        const who = app ? formatCanonicalUrn('app', app.urn) : auth.appId;
+        scope = auth.userId
+          ? `Scope: user · active App ${who} — this App's agent memories + org-readable memories + your personal memories scoped to this App.`
+          : `Scope: App key · ${who} (App-scoped) — this App's agent memories only; personal and org-readable memories require user authentication and are not shown to an App key.`;
+      } else if (auth.userId) {
+        scope = `Scope: user · no active App — the union across your Apps + org-readable memories + all your personal memories. Select one with h-set-active-app to narrow the view.`;
+      } else {
+        scope = `Scope: ${auth.clientId ?? 'authenticated caller'}.`;
+      }
+
+      if (levels.size === 0) {
+        return textResult(`${scope}\n\nNo memories accessible. Subscribe to an agent with memories first.`);
+      }
+
+      const memoryIds = [...levels.keys()];
       const memories = await db.memory.findMany({
         where: { id: { in: memoryIds } },
-        select: { id: true, urn: true, name: true, data: true },
+        select: { id: true, urn: true, name: true, data: true, class: true },
       });
 
       const lines = memories.map((m) => {
-        const level = access.get(m.id) === 'READ_WRITE' ? 'read-write' : 'read-only';
-        const head = `- **${formatCanonicalUrn('memory', m.urn)}** — ${m.name} (${level})`;
+        const level = levels.get(m.id) === 'READ_WRITE' ? 'read-write' : 'read-only';
+        // Tag personal/private rows so it's clear *why* an otherwise-private
+        // memory shows up (it's the caller's own); knowledge/app/group rows
+        // keep the bare `(level)` form they've always had.
+        const cls = m.class === 'personal' || m.class === 'private' ? `${m.class}, ` : '';
+        const head = `- **${formatCanonicalUrn('memory', m.urn)}** — ${m.name} (${cls}${level})`;
         // Free-form metadata bag (no server-side semantics). Surfaced
         // read-only on its own indented line, only when non-null so the
         // listing stays scannable — mirrors h-read-node's `Data: <json>`
@@ -766,7 +822,7 @@ export function createMcpServerInstance(
         return m.data != null ? `${head}\n  data: ${JSON.stringify(m.data)}` : head;
       });
 
-      return textResult(`${memories.length} accessible memories:\n\n${lines.join('\n')}`);
+      return textResult(`${scope}\n\n${memories.length} accessible memories:\n\n${lines.join('\n')}`);
     },
   );
 
