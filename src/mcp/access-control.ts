@@ -238,7 +238,9 @@ export async function canWriteToMemory(
     select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true },
   });
 
-  if (memory?.class === 'personal' || memory?.class === 'private') {
+  if (!memory) return false;
+
+  if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId) return false;
 
     // 034-memory-class-access: a FREE-STANDING personal/private memory
