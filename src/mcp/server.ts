@@ -63,7 +63,7 @@ import {
 } from '../lib/entityRef/errors.js';
 import { isId } from '../lib/entityRef/shape.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import type { PrismaClient, SessionType } from '../generated/prisma/index.js';
+import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 
 // ---------------------------------------------------------------------------
@@ -1890,6 +1890,7 @@ export function createMcpServerInstance(
       // per-node parity with h-read-node).
       const blocks: string[] = [];
       const omitted: string[] = [];
+      const readEvents: Prisma.UsageEventCreateManyInput[] = [];
       let bytes = 0;
       let truncated = false;
       for (const n of ordered) {
@@ -1906,19 +1907,23 @@ export function createMcpServerInstance(
         }
         blocks.push(projection);
         bytes += size;
-        db.usageEvent
-          .create({
-            data: {
-              id: generateId(),
-              type: 'read',
-              nodeLoc: n.loc,
-              nodeId: n.id,
-              appId: auth.appId ?? null,
-              createdBy: auth.clientId ?? null,
-              sessionId: null,
-            },
-          })
-          .catch(() => {});
+        readEvents.push({
+          id: generateId(),
+          type: 'read',
+          nodeLoc: n.loc,
+          nodeId: n.id,
+          appId: auth.appId ?? null,
+          createdBy: auth.clientId ?? null,
+          sessionId: null,
+        });
+      }
+      // One batched insert for all returned nodes' read events, fire-and-forget
+      // (parity with h-read-node's non-blocking single create). A per-node
+      // create loop would fire up to BATCH_READ_MAX_NODES concurrent unawaited
+      // inserts and pressure the connection pool — createMany is one round-trip
+      // (PR #283 review).
+      if (readEvents.length > 0) {
+        db.usageEvent.createMany({ data: readEvents }).catch(() => {});
       }
 
       const headerParts = [`returned ${blocks.length} node(s)`];

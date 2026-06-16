@@ -50,6 +50,14 @@ A caller wants only abstracts for a set/subtree (to context-stuff or triage) wit
 
 ## Requirements *(mandatory)*
 
+> **Canonical spec (source of truth).** These requirements are recorded
+> implementation-agnostically in the `platform-specs` corpus — this `spec.md` is
+> the disposable working doc; the corpus nodes below are the durable contract:
+> - [hrn:node:hadronmemory.com::platform-specs::cor:api:040](https://hadronmemory.com/app/u/hrn:node:hadronmemory.com::platform-specs::cor:api:040) — Batch read (feature)
+> - [cor:api:040:01](https://hadronmemory.com/app/u/hrn:node:hadronmemory.com::platform-specs::cor:api:040:01) — core read contract (FR-001/002/003/006/007/008/009)
+> - [cor:api:040:02](https://hadronmemory.com/app/u/hrn:node:hadronmemory.com::platform-specs::cor:api:040:02) — hard caps & loud truncation (FR-004)
+> - [cor:api:040:03](https://hadronmemory.com/app/u/hrn:node:hadronmemory.com::platform-specs::cor:api:040:03) — per-node authorization & partial success (FR-005)
+
 - **FR-001** Provide a batch read keyed by an explicit list of node references (fully-qualified URNs; ID-shape accepted per the usual shape-detection), returning the full `h-read-node` projection per node (meta, abstract, content, outgoing + incoming edges).
 - **FR-002** Provide a subtree/prefix variant (memory + loc-prefix). Decide whether this is the same endpoint (URN-list **or** prefix input) or a sibling — but both must exist.
 - **FR-003** Honor `contentScope` (`content` | `abstract` | `all`, from spec 031) per call, so callers can pull abstract-only cheaply.
