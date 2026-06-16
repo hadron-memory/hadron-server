@@ -4541,6 +4541,7 @@ export const resolvers = {
         name,
         shortDescription,
         description,
+        data,
         tags,
         license,
         category0,
@@ -4556,7 +4557,7 @@ export const resolvers = {
         memoryClass,
       }: {
         orgId: string; name: string;
-        shortDescription?: string; description?: string; tags?: string[];
+        shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
@@ -4665,6 +4666,10 @@ export const resolvers = {
             name,
             shortDescription,
             description,
+            // Free-form metadata bag (no server-side semantics). Mirrors the
+            // Node.data / Edge.data null-handling: undefined omits the field
+            // (column stays NULL on create), explicit null writes NULL.
+            ...(data !== undefined ? { data: data as InputJsonValue } : {}),
             tags: tags ?? [],
             license,
             category0,
@@ -4741,6 +4746,7 @@ export const resolvers = {
         organizationId: newOrgId,
         shortDescription,
         description,
+        data,
         tags,
         license,
         category0,
@@ -4761,7 +4767,7 @@ export const resolvers = {
         forceFixedSize,
       }: {
         id: string; name?: string; urn?: string; organizationId?: string;
-        shortDescription?: string; description?: string; tags?: string[];
+        shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string; readBranch?: string; writeBranch?: string; visibility?: string;
@@ -4857,6 +4863,10 @@ export const resolvers = {
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(shortDescription !== undefined ? { shortDescription } : {}),
           ...(description !== undefined ? { description } : {}),
+          // Free-form metadata bag. undefined leaves the stored value
+          // untouched; explicit null CLEARS it (same contract as Node.data /
+          // Edge.data — #263).
+          ...(data !== undefined ? { data: data as InputJsonValue } : {}),
           ...(tags !== undefined ? { tags } : {}),
           ...(license !== undefined ? { license } : {}),
           ...(category0 !== undefined ? { category0 } : {}),

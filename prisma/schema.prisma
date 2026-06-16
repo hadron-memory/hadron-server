@@ -526,6 +526,12 @@ model Memory {
   shortDescription     String?          @map("short_description")
   /// Full description (markdown); shown when expanding a listing.
   description          String?
+  /// Free-form structured metadata for this memory — a client-defined
+  /// JSON bag with no server-side semantics. Written via the GraphQL
+  /// createMemory / updateMemory mutations; surfaced read-only over MCP
+  /// (h-list-memories renders it as a `data:` line). The MCP surface has
+  /// no memory-mutation tool, so writes stay GraphQL-only. NULL when unset.
+  data                 Json?
   /// Classification tags for search and filtering.
   tags                 String[]
   /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").
