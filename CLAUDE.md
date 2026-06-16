@@ -74,6 +74,12 @@ DATABASE_URL='postgresql://holger@localhost:5432/hadron' pnpm tsx prisma/seed.ts
 # Re-apply CHECK constraints + the pgvector HNSW index after a bare `db push`
 # (Prisma's schema language models neither)
 psql postgresql://holger@localhost:5432/hadron -v ON_ERROR_STOP=1 -f prisma/post-push.sql
+
+# Restore a PROD snapshot into a SEPARATE local DB (refuses to touch `hadron`).
+# Excludes _prisma_migrations; restores as `holger`. Encrypted columns won't
+# decrypt locally without the prod key — don't copy it. Add --sync to bring the
+# snapshot up to your working schema.prisma.
+PROD_DATABASE_URL='postgresql://…prod…' pnpm db:dev-from-prod
 ```
 
 ## Common environment variables

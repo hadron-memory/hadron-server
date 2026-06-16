@@ -19,6 +19,7 @@
     "db:dev-reset": "scripts/reset-db.sh",
     "db:dev-setup": "scripts/dev-setup.sh",
     "db:test-setup": "DATABASE_URL=postgresql://holger@localhost:5432/hadron_test prisma db push --skip-generate && psql postgresql://holger@localhost:5432/hadron_test -v ON_ERROR_STOP=1 -f prisma/post-push.sql",
+    "db:dev-from-prod": "scripts/dev-from-prod-snapshot.sh",
     "schema:export": "tsx scripts/export-graphql-sdl.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
