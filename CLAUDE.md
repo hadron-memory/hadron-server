@@ -131,12 +131,19 @@ two-layer model without further setup:
 
 ## Things to know before editing
 
-- **Bidirectional Memory invariant**: `visibility = 'PERSONAL' ⇔ user_id IS NOT NULL`.
-  Enforced by `chk_personal_visibility_user`. Set both fields together.
-- **008 Memory app_id invariant**: `class IN ('app','personal') ⇔ app_id IS NOT NULL`.
-  Enforced by `chk_memory_class_app_id`. Personal memory pivots on
-  `(app_id, user_id)` (not `(agent_id, user_id)` like 005's effective
-  pivot did).
+- **Memory owner invariant**: `class IN ('personal','private') ⇔ user_id IS NOT NULL`.
+  Enforced by `chk_personal_visibility_user` (the name predates 035 — it's now
+  keyed on `class`, not a `visibility = 'PERSONAL'` value, which no longer
+  exists). Set the owner whenever creating a personal/private memory.
+- **Memory app_id invariant** (008, relaxed by 034): `app_id` is REQUIRED for
+  `class='app'`, FORBIDDEN for `system`/`knowledge`/`group`, and OPTIONAL for
+  `personal`/`private` — set when provisioned inside an App (the
+  `(app_id, user_id)` scope), NULL when **free-standing** (user-owned, created
+  via the CLI or Cowork outside any App). Enforced by `chk_memory_class_app_id`.
+  The agent (`user_memory_of_agent_id`) is required for personal/private only
+  when `app_id` is set (`chk_memory_personal_agent_id`). **MCP gate:**
+  `canReadMemory` / `canWriteToMemory` treat a free-standing row (app_id + agent
+  both NULL) as owner-only and short-circuit the App-isolation checks.
 - **Composite-PK models** (`AgentSubscription`, `AppMember`, `AgentImport`,
   `AgentOrgGrant`) have no `id` column. The Prisma client extension at
   `src/integrations/db/client.ts` keeps these out of the auto-id-injection
