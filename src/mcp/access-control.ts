@@ -238,8 +238,19 @@ export async function canWriteToMemory(
     select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true },
   });
 
-  if (memory?.class === 'personal' || memory?.class === 'private') {
+  if (!memory) return false;
+
+  if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId) return false;
+
+    // 034-memory-class-access: a FREE-STANDING personal/private memory
+    // (app_id AND agent both NULL — user-owned, created outside any App) is
+    // owner-only with no App/agent scope, so the strict-owner check above is
+    // the whole gate. Mirror of canReadMemory — see the rationale there.
+    if (memory.appId === null && memory.userMemoryOfAgentId === null) {
+      return true;
+    }
+
     if (auth.appId) {
       // Per-App isolation: a session through App A cannot write the personal
       // memory at (B.id, user.id) for some other App B of the same Agent.
@@ -321,6 +332,18 @@ export async function canReadMemory(
 
   if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId) return false;
+
+    // 034-memory-class-access: a FREE-STANDING personal/private memory
+    // (app_id AND agent both NULL — user-owned, created outside any App) is
+    // owner-only with no App/agent scope, so the strict-owner check above is
+    // the whole gate. Without this short-circuit an owner operating through an
+    // active App (auth.appId set) is wrongly denied their OWN memory: the
+    // app_id-NULL branch below assumes a *legacy* agent-scoped row and demands
+    // an installed agent, which a free-standing row (agent NULL) can't satisfy.
+    if (memory.appId === null && memory.userMemoryOfAgentId === null) {
+      return true;
+    }
+
     if (auth.appId) {
       // Same legacy guard as canWriteToMemory: when memory.appId is NULL,
       // require the calling App to have the memory's Agent installed via

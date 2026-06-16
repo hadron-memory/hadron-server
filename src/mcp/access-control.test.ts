@@ -408,6 +408,93 @@ describe('canWriteToMemory', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Free-standing personal/private memory (spec 034) — owner-only, App-agnostic
+// ---------------------------------------------------------------------------
+
+describe('canReadMemory / canWriteToMemory — free-standing personal/private (034)', () => {
+  // A free-standing memory: user-owned, created outside any App context. Both
+  // app_id and user_memory_of_agent_id are NULL (relaxed by spec 034). The
+  // owner is the sole gate — App context must not affect access.
+  async function createFreeStanding(cls: 'personal' | 'private') {
+    const owner = await db.user.create({
+      data: { id: generateId(), name: `fs-${cls}-owner` },
+    });
+    const mem = await db.memory.create({
+      data: {
+        class: cls,
+        id: generateId(),
+        name: `free-${cls}`,
+        urn: `${orgId}:free-${cls}-${generateId()}`,
+        organizationId: orgId,
+        userId: owner.id,
+        appId: null,
+        userMemoryOfAgentId: null,
+      },
+    });
+    return { owner, mem };
+  }
+
+  // An active App the user is working through. Its identity must NOT gate a
+  // free-standing memory — the membership row just makes `auth.appId` realistic.
+  async function activeAppFor(userId: string, slug: string) {
+    const { app } = await createDbAppWithKey(db, slug, orgId);
+    await createDbAppAgent(db, app.id, agentId);
+    await db.appMember.create({ data: { appId: app.id, userId, role: 'owner' } });
+    return app;
+  }
+
+  it('owner reads+writes with NO active App', async () => {
+    const { owner, mem } = await createFreeStanding('personal');
+    const auth: AuthContext = { userId: owner.id };
+    expect(await canReadMemory(db, auth, mem.id)).toBe(true);
+    expect(await canWriteToMemory(db, auth, mem.id)).toBe(true);
+  });
+
+  // The #282 regression: pre-fix, an active App (auth.appId set) sent a
+  // free-standing memory down the legacy app_id-NULL branch, which demands an
+  // installed agent the row doesn't have — denying the owner their own memory.
+  it('owner reads+writes WITH an active App (regression: #282 free-standing gate)', async () => {
+    const { owner, mem } = await createFreeStanding('personal');
+    const app = await activeAppFor(owner.id, 'fs-app');
+    const auth: AuthContext = { userId: owner.id, appId: app.id, organizationId: orgId };
+    expect(await canReadMemory(db, auth, mem.id)).toBe(true);
+    expect(await canWriteToMemory(db, auth, mem.id)).toBe(true);
+  });
+
+  it('free-standing PRIVATE memory: owner allowed with an active App', async () => {
+    const { owner, mem } = await createFreeStanding('private');
+    const app = await activeAppFor(owner.id, 'fs-app-priv');
+    const auth: AuthContext = { userId: owner.id, appId: app.id, organizationId: orgId };
+    expect(await canReadMemory(db, auth, mem.id)).toBe(true);
+    expect(await canWriteToMemory(db, auth, mem.id)).toBe(true);
+  });
+
+  it('strict ownership: a non-owner is denied even as ADMIN, App or not (FR-016)', async () => {
+    const { mem } = await createFreeStanding('personal');
+    const other = await db.user.create({ data: { id: generateId(), name: 'fs-other' } });
+    const app = await activeAppFor(other.id, 'fs-app-other');
+
+    expect(await canReadMemory(db, { userId: other.id }, mem.id)).toBe(false);
+    expect(
+      await canReadMemory(db, { userId: other.id, appId: app.id, organizationId: orgId }, mem.id),
+    ).toBe(false);
+    // Even ADMIN cannot read another user's personal/private memory — the
+    // strict-owner check fires before the short-circuit and before any bypass.
+    expect(await canReadMemory(db, { userId: other.id, roles: ['ADMIN'] }, mem.id)).toBe(false);
+    expect(await canWriteToMemory(db, { userId: other.id }, mem.id)).toBe(false);
+  });
+
+  it('an App Key principal (no userId) cannot reach a free-standing memory', async () => {
+    const { mem } = await createFreeStanding('personal');
+    const { app } = await createDbAppWithKey(db, 'fs-appkey', orgId);
+    await createDbAppAgent(db, app.id, agentId);
+    const auth: AuthContext = { appId: app.id, organizationId: orgId };
+    expect(await canReadMemory(db, auth, mem.id)).toBe(false);
+    expect(await canWriteToMemory(db, auth, mem.id)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // getAccessibleMemoryIds — list-mode for tools that don't take a memoryId
 // ---------------------------------------------------------------------------
 
