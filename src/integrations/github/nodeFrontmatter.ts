@@ -116,16 +116,48 @@ export function buildNodeFrontmatter(
  * repo — the importer reads both back (`normalizeEdgeEntry`). They follow the
  * omit-on-default convention: `condition` only when non-null, `priority` only
  * when non-zero (the DB default).
+ *
+ * Defensive: `target` is a required FK, so a loaded edge always has one — but
+ * an edge with a missing target can't be serialized (no id to write), so it's
+ * skipped rather than allowed to throw and abort the whole sync/push.
  */
 export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<string, unknown>> {
-  return outgoingEdges.map((e) => {
-    const entry: Record<string, unknown> = { id: e.target.id };
-    if (e.target.loc) entry.loc = e.target.loc;
-    entry.rel = e.label ?? '';
-    if (e.condition != null) entry.condition = e.condition;
-    if (typeof e.priority === 'number' && e.priority !== 0) entry.priority = e.priority;
-    return entry;
-  });
+  return outgoingEdges
+    .filter((e) => e && e.target)
+    .map((e) => {
+      const entry: Record<string, unknown> = { id: e.target.id };
+      if (e.target.loc) entry.loc = e.target.loc;
+      entry.rel = e.label ?? '';
+      if (e.condition != null) entry.condition = e.condition;
+      if (typeof e.priority === 'number' && e.priority !== 0) entry.priority = e.priority;
+      return entry;
+    });
+}
+
+/**
+ * Split a loc into safe path segments. A loc maps directly onto filesystem
+ * paths that feed `writeFileSync`, `mkdirSync`, and — critically —
+ * `rmSync(recursive)`, so a malformed loc is a real hazard: an empty segment
+ * (from `a::b` or a trailing `:`) collapses `'.' + last` to `'.'` and would
+ * make the sidecar path resolve to a *parent* directory (a `:` loc resolves to
+ * the repo root), turning cleanup into a catastrophic recursive delete; a `..`
+ * segment escapes `localPath` entirely on write.
+ *
+ * Valid locs (URN grammar) never contain empty / `.` / `..` segments, so this
+ * is defense-in-depth: throw loudly rather than silently write or delete the
+ * wrong path. Shared by `nodeFilePath` and `orphanedLegacyPaths` so both reject
+ * the same inputs consistently.
+ */
+function locToSegments(loc: string): string[] {
+  const parts = loc.split(':');
+  for (const p of parts) {
+    if (p === '' || p === '.' || p === '..') {
+      throw new Error(
+        `Unsafe loc "${loc}": empty, '.', or '..' path segments are not allowed`,
+      );
+    }
+  }
+  return parts;
 }
 
 /**
@@ -139,10 +171,12 @@ export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<
  *   srv:msg:010:02     → <root>/srv/msg/010/02.md
  *   srv:msg:010:02:04  → <root>/srv/msg/010/02/04.md   (child lands in 02/)
  *   ''                 → <root>/README.md
+ *
+ * Throws on a malformed loc (empty / `.` / `..` segment) — see `locToSegments`.
  */
 export function nodeFilePath(localPath: string, loc: string): string {
   if (loc === '') return join(localPath, 'README.md');
-  return join(localPath, ...loc.split(':')) + '.md';
+  return join(localPath, ...locToSegments(loc)) + '.md';
 }
 
 /**
@@ -156,12 +190,15 @@ export function nodeFilePath(localPath: string, loc: string): string {
  * (`loadNodeFromFs`), so a leftover sidecar would mask freshly-exported
  * edges. Callers pass only non-empty locs (the empty-loc root is handled
  * separately and must never be treated as orphaned).
+ *
+ * Throws on a malformed loc — `locToSegments` guards the `rmSync(recursive)`
+ * the caller runs on `sidecar`, which would otherwise delete a parent dir.
  */
 export function orphanedLegacyPaths(
   localPath: string,
   loc: string,
 ): { readme: string; sidecar: string } {
-  const parts = loc.split(':');
+  const parts = locToSegments(loc);
   const last = parts[parts.length - 1];
   return {
     readme: join(localPath, ...parts, 'README.md'),

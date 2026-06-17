@@ -11,6 +11,7 @@ import {
   nodeFilePath,
   orphanedLegacyPaths,
   type FrontmatterNodeFields,
+  type EdgeForGit,
 } from './nodeFrontmatter.js';
 import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 
@@ -106,6 +107,16 @@ describe('buildEdgeFrontmatter', () => {
     ]);
     expect(plain).toEqual({ id: 't1', rel: 'r' });
   });
+
+  it('skips an edge with a missing target instead of throwing the whole push', () => {
+    // target is a required FK (type-impossible to be null), but the runtime
+    // guard must not crash the sync if a partial edge ever appears.
+    const edges: EdgeForGit[] = [
+      { target: null as unknown as EdgeForGit['target'], label: 'orphan' },
+      { target: { id: 't1' }, label: 'ok' },
+    ];
+    expect(buildEdgeFrontmatter(edges)).toEqual([{ id: 't1', rel: 'ok' }]);
+  });
 });
 
 describe('nodeFilePath', () => {
@@ -117,6 +128,13 @@ describe('nodeFilePath', () => {
   it('maps the empty-loc root to repo-root README.md', () => {
     expect(nodeFilePath('/g', '')).toBe('/g/README.md');
   });
+
+  it('throws on a malformed loc (empty / . / .. segment) — path-traversal guard', () => {
+    expect(() => nodeFilePath('/g', 'a::b')).toThrow();    // empty middle segment
+    expect(() => nodeFilePath('/g', 'a:b:')).toThrow();    // trailing colon
+    expect(() => nodeFilePath('/g', 'a:..:b')).toThrow();  // path traversal
+    expect(() => nodeFilePath('/g', ':')).toThrow();
+  });
 });
 
 describe('orphanedLegacyPaths', () => {
@@ -125,6 +143,14 @@ describe('orphanedLegacyPaths', () => {
       readme: '/g/srv/msg/010/02/README.md',
       sidecar: '/g/srv/msg/010/.02',
     });
+  });
+
+  it('throws on a malformed loc instead of resolving the sidecar to a parent dir', () => {
+    // ':' would collapse the sidecar to localPath itself → a recursive delete
+    // of the repo root; a trailing ':' → the node's own child folder.
+    expect(() => orphanedLegacyPaths('/g', ':')).toThrow();
+    expect(() => orphanedLegacyPaths('/g', 'srv:msg:010:02:')).toThrow();
+    expect(() => orphanedLegacyPaths('/g', 'a::b')).toThrow();
   });
 });
 
