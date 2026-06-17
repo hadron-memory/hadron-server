@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 import { parse } from 'yaml';
 
 /**
@@ -29,13 +30,21 @@ export interface FrontmatterNodeFields {
 }
 
 /**
- * An outgoing edge as needed for the sidecar — the target node (id + loc) and
- * the relationship label. Both export paths fetch `outgoingEdges` with the full
- * target node included, so `loc` is available at runtime.
+ * An outgoing edge as needed for the inline `nodes:` frontmatter — the target
+ * node (id + loc), the relationship label, and the gating state. Both export
+ * paths fetch `outgoingEdges` with the full target node included (and all the
+ * edge's scalar columns), so `loc`, `condition`, and `priority` are available
+ * at runtime.
  */
 export interface EdgeForGit {
   target: { id: string; loc?: string | null };
   label: string | null;
+  /** JSONLogic gating expression; null/undefined when the edge always fires.
+   *  Emitted only when set, so an always-fires edge stays uncluttered. */
+  condition?: unknown;
+  /** Resolution-order hook (lower fires first), DB default 0. Emitted only
+   *  when non-zero (omit-on-default), matching the importer's read-back. */
+  priority?: number | null;
 }
 
 /**
@@ -57,12 +66,22 @@ export interface EdgeForGit {
  * (they're preserved untouched on re-import of an existing node), but they're
  * real node state, so they're emitted for a faithful, reviewable mirror.
  *
+ * Outgoing edges are emitted inline as the `nodes:` array (see
+ * `buildEdgeFrontmatter`) rather than in a separate `.<seg>/edges.yaml`
+ * sidecar, so a node is one self-contained file. The importer reads `nodes:`
+ * directly (`loadNodeFromFs`), so this round-trips. `nodes:` is importer-
+ * consumed but is naturally omitted when empty (no edges → no key), which the
+ * importer reads as "no edges" — correct.
+ *
  * Omit-on-default convention (matches the rest of the codebase): nullish /
  * empty values are left out so absent-in-YAML == default-in-DB. `type` is
  * omitted for the default `info` so the common case stays uncluttered (absent
  * == info, which is also how the importer reads it).
  */
-export function buildNodeFrontmatter(node: FrontmatterNodeFields): Record<string, unknown> {
+export function buildNodeFrontmatter(
+  node: FrontmatterNodeFields,
+  outgoingEdges: EdgeForGit[] = [],
+): Record<string, unknown> {
   const frontmatter: Record<string, unknown> = { name: node.name, id: node.id };
   if (node.alias) frontmatter.alias = node.alias;
   if (node.nodeType && node.nodeType !== 'info') frontmatter.type = node.nodeType;
@@ -76,23 +95,115 @@ export function buildNodeFrontmatter(node: FrontmatterNodeFields): Record<string
   // Node-level JSON — not importer-consumed yet, but part of a faithful mirror.
   if (node.data != null) frontmatter.data = node.data;
   if (node.properties != null) frontmatter.properties = node.properties;
+  // Edges last, so the human-readable header (name/description/abstract) stays
+  // on top. Omitted entirely when there are none.
+  if (outgoingEdges.length > 0) frontmatter.nodes = buildEdgeFrontmatter(outgoingEdges);
   return frontmatter;
 }
 
 /**
- * Build the edge-sidecar array (`edges.yaml`). Emits `{ id, target, rel }` with
- * key order matching the historical on-disk shape so a re-push of an unchanged
- * graph produces a minimal diff. `target` (the human-readable loc) is included
- * when known; the importer keys off `id` (`e.id ?? e.target`), so `target` is
- * purely for readability.
+ * Build the inline `nodes:` edge array for a node's frontmatter. Emits
+ * `{ id, loc?, rel }`: the importer keys off `id` (`e.id ?? e.target`) and
+ * reads `rel` as the label; `loc` (the target's human-readable citation) is
+ * carried purely for readability and is the key the frontmatter `nodes:`
+ * shape declares (`NodeYaml.nodes`). A null label renders as an empty `rel`.
+ *
+ * Supersedes the old `.<seg>/edges.yaml` sidecar (which emitted `target`
+ * instead of `loc`) — edges now live inline in the node's own `.md`.
+ *
+ * `condition` (JSONLogic gating) and `priority` (resolution order) are emitted
+ * for a faithful mirror so a conditional/ordered edge round-trips through the
+ * repo — the importer reads both back (`normalizeEdgeEntry`). They follow the
+ * omit-on-default convention: `condition` only when non-null, `priority` only
+ * when non-zero (the DB default).
+ *
+ * Defensive: `target` is a required FK, so a loaded edge always has one — but
+ * an edge with a missing target can't be serialized (no id to write), so it's
+ * skipped rather than allowed to throw and abort the whole sync/push.
  */
-export function buildEdgeSidecar(outgoingEdges: EdgeForGit[]): Array<Record<string, unknown>> {
-  return outgoingEdges.map((e) => {
-    const entry: Record<string, unknown> = { id: e.target.id };
-    if (e.target.loc) entry.target = e.target.loc;
-    entry.rel = e.label ?? '';
-    return entry;
-  });
+export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<string, unknown>> {
+  return outgoingEdges
+    .filter((e) => e && e.target)
+    .map((e) => {
+      const entry: Record<string, unknown> = { id: e.target.id };
+      if (e.target.loc) entry.loc = e.target.loc;
+      entry.rel = e.label ?? '';
+      if (e.condition != null) entry.condition = e.condition;
+      if (typeof e.priority === 'number' && e.priority !== 0) entry.priority = e.priority;
+      return entry;
+    });
+}
+
+/**
+ * Split a loc into safe path segments. A loc maps directly onto filesystem
+ * paths that feed `writeFileSync`, `mkdirSync`, and — critically —
+ * `rmSync(recursive)`, so a malformed loc is a real hazard: an empty segment
+ * (from `a::b` or a trailing `:`) collapses `'.' + last` to `'.'` and would
+ * make the sidecar path resolve to a *parent* directory (a `:` loc resolves to
+ * the repo root), turning cleanup into a catastrophic recursive delete; a `..`
+ * segment escapes `localPath` entirely on write.
+ *
+ * Valid locs (URN grammar) never contain empty / `.` / `..` segments, so this
+ * is defense-in-depth: throw loudly rather than silently write or delete the
+ * wrong path. Shared by `nodeFilePath` and `orphanedLegacyPaths` so both reject
+ * the same inputs consistently.
+ */
+function locToSegments(loc: string): string[] {
+  const parts = loc.split(':');
+  for (const p of parts) {
+    if (p === '' || p === '.' || p === '..') {
+      throw new Error(
+        `Unsafe loc "${loc}": empty, '.', or '..' path segments are not allowed`,
+      );
+    }
+  }
+  return parts;
+}
+
+/**
+ * On-disk path for a node's markdown file. Parents and leaves use the
+ * identical rule — a node with children is written as `<seg>.md` *beside* its
+ * `<seg>/` folder (no `README.md`), so a node's path never changes when it
+ * gains or loses children (no git-rename churn). Children land in the sibling
+ * folder naturally because they write their own `<seg>/<childSeg>.md`. The
+ * empty-loc root node maps to the repo-root `README.md`.
+ *
+ *   srv:msg:010:02     → <root>/srv/msg/010/02.md
+ *   srv:msg:010:02:04  → <root>/srv/msg/010/02/04.md   (child lands in 02/)
+ *   ''                 → <root>/README.md
+ *
+ * Throws on a malformed loc (empty / `.` / `..` segment) — see `locToSegments`.
+ */
+export function nodeFilePath(localPath: string, loc: string): string {
+  if (loc === '') return join(localPath, 'README.md');
+  return join(localPath, ...locToSegments(loc)) + '.md';
+}
+
+/**
+ * The legacy on-disk locations a node may still occupy from the old export
+ * format, to be removed when re-exporting in the new layout:
+ *   - the old parent file `<...loc>/README.md`
+ *   - the old edge sidecar dir `<parent>/.<lastSeg>/`
+ *
+ * Removing the sidecar is mandatory, not cosmetic: the importer gives a
+ * sidecar `edges.yaml` *precedence* over frontmatter `nodes:`
+ * (`loadNodeFromFs`), so a leftover sidecar would mask freshly-exported
+ * edges. Callers pass only non-empty locs (the empty-loc root is handled
+ * separately and must never be treated as orphaned).
+ *
+ * Throws on a malformed loc — `locToSegments` guards the `rmSync(recursive)`
+ * the caller runs on `sidecar`, which would otherwise delete a parent dir.
+ */
+export function orphanedLegacyPaths(
+  localPath: string,
+  loc: string,
+): { readme: string; sidecar: string } {
+  const parts = locToSegments(loc);
+  const last = parts[parts.length - 1];
+  return {
+    readme: join(localPath, ...parts, 'README.md'),
+    sidecar: join(localPath, ...parts.slice(0, -1), '.' + last),
+  };
 }
 
 /**

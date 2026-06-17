@@ -1,15 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join, dirname } from 'path';
-import { mkdirSync, writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync, existsSync, rmSync } from 'fs';
 import { stringify } from 'yaml';
 import { makeTmpDir } from '../../test/helpers.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import { loadNodeFromFs } from '../localFs/loadNodeFromFs.js';
 import {
   buildNodeFrontmatter,
-  buildEdgeSidecar,
+  buildEdgeFrontmatter,
+  nodeFilePath,
+  orphanedLegacyPaths,
   type FrontmatterNodeFields,
+  type EdgeForGit,
 } from './nodeFrontmatter.js';
+import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 
 const base: FrontmatterNodeFields = { id: 'n1', name: 'A node', tags: [] };
 
@@ -65,20 +69,88 @@ describe('buildNodeFrontmatter', () => {
   it('emits seq: 0 (a real sort order, not a default to drop)', () => {
     expect(buildNodeFrontmatter({ ...base, seq: 0 }).seq).toBe(0);
   });
-});
 
-describe('buildEdgeSidecar', () => {
-  it('emits { id, target, rel } in that order when loc is known', () => {
-    const [edge] = buildEdgeSidecar([
+  it('embeds outgoing edges inline as nodes: when present, omits when empty', () => {
+    expect(buildNodeFrontmatter(base)).not.toHaveProperty('nodes');
+    expect(buildNodeFrontmatter(base, [])).not.toHaveProperty('nodes');
+    const fm = buildNodeFrontmatter(base, [
       { target: { id: 't1', loc: 'srv:msg' }, label: 'p1: feature' },
     ]);
-    expect(Object.keys(edge)).toEqual(['id', 'target', 'rel']);
-    expect(edge).toEqual({ id: 't1', target: 'srv:msg', rel: 'p1: feature' });
+    expect(fm.nodes).toEqual([{ id: 't1', loc: 'srv:msg', rel: 'p1: feature' }]);
+  });
+});
+
+describe('buildEdgeFrontmatter', () => {
+  it('emits { id, loc, rel } in that order when loc is known', () => {
+    const [edge] = buildEdgeFrontmatter([
+      { target: { id: 't1', loc: 'srv:msg' }, label: 'p1: feature' },
+    ]);
+    expect(Object.keys(edge)).toEqual(['id', 'loc', 'rel']);
+    expect(edge).toEqual({ id: 't1', loc: 'srv:msg', rel: 'p1: feature' });
   });
 
-  it('omits target when loc is unknown, and renders a null label as empty rel', () => {
-    const [edge] = buildEdgeSidecar([{ target: { id: 't1' }, label: null }]);
+  it('omits loc when unknown, and renders a null label as empty rel', () => {
+    const [edge] = buildEdgeFrontmatter([{ target: { id: 't1' }, label: null }]);
     expect(edge).toEqual({ id: 't1', rel: '' });
+  });
+
+  it('emits condition and non-zero priority when set, omits both at their defaults', () => {
+    const condition = { '==': [{ var: 'agent.role' }, 'mentor'] };
+    const [gated] = buildEdgeFrontmatter([
+      { target: { id: 't1', loc: 'a:b' }, label: 'r', condition, priority: 5 },
+    ]);
+    expect(gated).toEqual({ id: 't1', loc: 'a:b', rel: 'r', condition, priority: 5 });
+
+    // condition null + priority 0 (the DB default) → both omitted.
+    const [plain] = buildEdgeFrontmatter([
+      { target: { id: 't1' }, label: 'r', condition: null, priority: 0 },
+    ]);
+    expect(plain).toEqual({ id: 't1', rel: 'r' });
+  });
+
+  it('skips an edge with a missing target instead of throwing the whole push', () => {
+    // target is a required FK (type-impossible to be null), but the runtime
+    // guard must not crash the sync if a partial edge ever appears.
+    const edges: EdgeForGit[] = [
+      { target: null as unknown as EdgeForGit['target'], label: 'orphan' },
+      { target: { id: 't1' }, label: 'ok' },
+    ];
+    expect(buildEdgeFrontmatter(edges)).toEqual([{ id: 't1', rel: 'ok' }]);
+  });
+});
+
+describe('nodeFilePath', () => {
+  it('writes a parent like a leaf — <seg>.md beside its <seg>/ folder, no README', () => {
+    expect(nodeFilePath('/g', 'srv:msg:010:02')).toBe('/g/srv/msg/010/02.md');
+    expect(nodeFilePath('/g', 'srv:msg:010:02:04')).toBe('/g/srv/msg/010/02/04.md');
+  });
+
+  it('maps the empty-loc root to repo-root README.md', () => {
+    expect(nodeFilePath('/g', '')).toBe('/g/README.md');
+  });
+
+  it('throws on a malformed loc (empty / . / .. segment) — path-traversal guard', () => {
+    expect(() => nodeFilePath('/g', 'a::b')).toThrow();    // empty middle segment
+    expect(() => nodeFilePath('/g', 'a:b:')).toThrow();    // trailing colon
+    expect(() => nodeFilePath('/g', 'a:..:b')).toThrow();  // path traversal
+    expect(() => nodeFilePath('/g', ':')).toThrow();
+  });
+});
+
+describe('orphanedLegacyPaths', () => {
+  it('points at the old parent README and the old edge sidecar dir', () => {
+    expect(orphanedLegacyPaths('/g', 'srv:msg:010:02')).toEqual({
+      readme: '/g/srv/msg/010/02/README.md',
+      sidecar: '/g/srv/msg/010/.02',
+    });
+  });
+
+  it('throws on a malformed loc instead of resolving the sidecar to a parent dir', () => {
+    // ':' would collapse the sidecar to localPath itself → a recursive delete
+    // of the repo root; a trailing ':' → the node's own child folder.
+    expect(() => orphanedLegacyPaths('/g', ':')).toThrow();
+    expect(() => orphanedLegacyPaths('/g', 'srv:msg:010:02:')).toThrow();
+    expect(() => orphanedLegacyPaths('/g', 'a::b')).toThrow();
   });
 });
 
@@ -136,5 +208,101 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
     writeFileSync(infoPath, `---\n${stringify(infoFm, { lineWidth: 0 }).trim()}\n---\n\nbody\n`, 'utf-8');
     const { node: infoNode } = await loadNodeFromFs(infoPath, graphRoot, 'org/repo');
     expect(infoNode.isLink).toBe(false);
+  });
+
+  it('loads a parent (02.md) and its child (02/04.md) with inline edges via loadGraphFromFs', async () => {
+    // The new layout: a parent is `<seg>.md` beside its `<seg>/` folder (no
+    // README), and edges live inline in `nodes:` (no sidecar). Exercise the
+    // real export builders + path helper, then load the whole tree back.
+    const parentFm = buildNodeFrontmatter(
+      { id: 'id02', name: 'W2', tags: ['spec'] },
+      [
+        { target: { id: 'id010', loc: 'srv:msg:010' }, label: 'p1: parent' },
+        { target: { id: 'id00', loc: 'srv:msg:010:00' }, label: 'inherits' },
+      ],
+    );
+    const childFm = buildNodeFrontmatter(
+      { id: 'id04', name: 'Deep link', tags: ['spec'] },
+      [{ target: { id: 'id02', loc: 'srv:msg:010:02' }, label: 'p2: flow' }],
+    );
+
+    const parentPath = nodeFilePath(graphRoot, 'srv:msg:010:02');
+    const childPath = nodeFilePath(graphRoot, 'srv:msg:010:02:04');
+    expect(parentPath.endsWith('srv/msg/010/02.md')).toBe(true);
+    expect(childPath.endsWith('srv/msg/010/02/04.md')).toBe(true);
+    mkdirSync(dirname(parentPath), { recursive: true });
+    mkdirSync(dirname(childPath), { recursive: true });
+    writeFileSync(parentPath, `---\n${stringify(parentFm, { lineWidth: 0 }).trim()}\n---\n\nparent body\n`, 'utf-8');
+    writeFileSync(childPath, `---\n${stringify(childFm, { lineWidth: 0 }).trim()}\n---\n\nchild body\n`, 'utf-8');
+
+    const { graph, edges } = await loadGraphFromFs(graphRoot, 'specs', 'org/repo');
+    expect(graph.nodes.map((n) => n.loc).sort()).toEqual([
+      'srv:msg:010:02',
+      'srv:msg:010:02:04',
+    ]);
+    // Inline `nodes:` edges survived — no sidecar was written or read.
+    expect(edges).toContainEqual(
+      expect.objectContaining({ sourceId: 'id02', targetId: 'id010', label: 'p1: parent' }),
+    );
+    expect(edges).toContainEqual(
+      expect.objectContaining({ sourceId: 'id04', targetId: 'id02', label: 'p2: flow' }),
+    );
+  });
+
+  it('migration: cleanup removes the old parent README + stale sidecar so fresh inline edges win', async () => {
+    // Reproduce an old-format on-disk node: parent `02/README.md` plus a
+    // stale `.02/edges.yaml` sidecar. The importer gives the sidecar
+    // PRECEDENCE over inline `nodes:`, so without cleanup the stale edge
+    // would mask the fresh one — this is why `orphanedLegacyPaths` removal is
+    // mandatory.
+    const oldParentDir = join(graphRoot, 'srv', 'msg', '010', '02');
+    const oldSidecarDir = join(graphRoot, 'srv', 'msg', '010', '.02');
+    mkdirSync(oldParentDir, { recursive: true });
+    mkdirSync(oldSidecarDir, { recursive: true });
+    writeFileSync(join(oldParentDir, 'README.md'), `---\nname: W2\nid: id02\n---\n\nold body\n`, 'utf-8');
+    writeFileSync(join(oldSidecarDir, 'edges.yaml'), stringify([{ id: 'STALE', rel: 'stale edge' }]), 'utf-8');
+
+    // Simulate the new writer: write the self-contained `02.md` with a fresh
+    // inline edge, then run the exact cleanup the git writers perform.
+    const newPath = nodeFilePath(graphRoot, 'srv:msg:010:02');
+    const fm = buildNodeFrontmatter({ id: 'id02', name: 'W2', tags: [] }, [
+      { target: { id: 'id010', loc: 'srv:msg:010' }, label: 'p1: parent' },
+    ]);
+    writeFileSync(newPath, `---\n${stringify(fm, { lineWidth: 0 }).trim()}\n---\n\nnew body\n`, 'utf-8');
+    const legacy = orphanedLegacyPaths(graphRoot, 'srv:msg:010:02');
+    rmSync(legacy.readme, { force: true });
+    rmSync(legacy.sidecar, { recursive: true, force: true });
+
+    expect(existsSync(join(oldParentDir, 'README.md'))).toBe(false);
+    expect(existsSync(oldSidecarDir)).toBe(false);
+
+    const { graph, edges } = await loadGraphFromFs(graphRoot, 'specs', 'org/repo');
+    // The loc resolves to exactly one node (no duplicate README + 02.md).
+    expect(graph.nodes.filter((n) => n.loc === 'srv:msg:010:02')).toHaveLength(1);
+    // The fresh inline edge won; the stale sidecar edge is gone.
+    expect(edges).toContainEqual(
+      expect.objectContaining({ sourceId: 'id02', targetId: 'id010', label: 'p1: parent' }),
+    );
+    expect(edges.some((e) => e.targetId === 'STALE')).toBe(false);
+  });
+
+  it('round-trips edge condition + priority through the inline nodes: array', async () => {
+    const condition = { '==': [{ var: 'agent.role' }, 'mentor'] };
+    const fm = buildNodeFrontmatter({ id: 'src1', name: 'Source', tags: [] }, [
+      { target: { id: 'tgt1', loc: 'a:b' }, label: 'gated', condition, priority: 7 },
+    ]);
+    const mdPath = nodeFilePath(graphRoot, 'a');
+    writeFileSync(mdPath, `---\n${stringify(fm, { lineWidth: 0 }).trim()}\n---\n\nbody\n`, 'utf-8');
+
+    const { edges } = await loadGraphFromFs(graphRoot, 'specs', 'org/repo');
+    expect(edges).toContainEqual(
+      expect.objectContaining({
+        sourceId: 'src1',
+        targetId: 'tgt1',
+        label: 'gated',
+        condition,
+        priority: 7,
+      }),
+    );
   });
 });

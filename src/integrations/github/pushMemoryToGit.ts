@@ -1,14 +1,19 @@
 import { execFile as execFileCb } from 'child_process';
 import { createDecipheriv } from 'crypto';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, writeFileSync, readdirSync } from 'fs';
-import { join, dirname, basename } from 'path';
+import { existsSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { join, dirname } from 'path';
 import { stringify } from 'yaml';
 import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { deserializeTags } from '../db/provider.js';
-import { buildNodeFrontmatter, buildEdgeSidecar, preserveUnmanagedFrontmatter } from './nodeFrontmatter.js';
+import {
+  buildNodeFrontmatter,
+  preserveUnmanagedFrontmatter,
+  nodeFilePath,
+  orphanedLegacyPaths,
+} from './nodeFrontmatter.js';
 
 const execFile = promisify(execFileCb);
 
@@ -99,39 +104,15 @@ export async function pushMemoryToGit(
     orderBy: { loc: 'asc' },
   });
 
-  // Build a set of locs that have children (for folder detection)
-  const locSet = new Set(nodes.map((n) => n.loc));
-  const parentLocs = new Set<string>();
-  for (const n of nodes) {
-    const parts = n.loc.split(':');
-    for (let i = 1; i < parts.length; i++) {
-      parentLocs.add(parts.slice(0, i).join(':'));
-    }
-  }
-
-  // 5. Write each node as frontmatter markdown
+  // 5. Write each node as a self-contained frontmatter markdown file. A node
+  // — leaf or parent — is `<...loc>.md` (children live in the sibling
+  // `<seg>/` folder); edges are inline in `nodes:`, no sidecar.
   for (const node of nodes) {
-    const isParent = parentLocs.has(node.loc);
-    const locParts = node.loc.split(':');
-
-    let mdPath: string;
-    let sidecarDir: string;
-
-    if (isParent) {
-      // Parent node → folder/README.md
-      const folderPath = join(localPath, ...locParts);
-      mdPath = join(folderPath, 'README.md');
-      sidecarDir = join(dirname(folderPath), '.' + basename(folderPath));
-    } else {
-      // Leaf node → parent/name.md
-      const name = locParts[locParts.length - 1];
-      const parentParts = locParts.slice(0, -1);
-      mdPath = join(localPath, ...parentParts, name + '.md');
-      sidecarDir = join(localPath, ...parentParts, '.' + name);
-    }
+    const mdPath = nodeFilePath(localPath, node.loc);
 
     // Build frontmatter (shared builder — keeps this bulk path and the
-    // incremental writeNodeToGit path emitting the exact same fields).
+    // incremental writeNodeToGit path emitting the exact same fields, edges
+    // included).
     const frontmatter = buildNodeFrontmatter({
       id: node.id,
       name: node.name,
@@ -145,7 +126,7 @@ export async function pushMemoryToGit(
       seq: node.seq,
       data: node.data,
       properties: node.properties,
-    });
+    }, node.outgoingEdges);
     preserveUnmanagedFrontmatter(frontmatter, mdPath);
 
     const fmYaml = stringify(frontmatter, { lineWidth: 0 }).trim();
@@ -153,11 +134,14 @@ export async function pushMemoryToGit(
     mkdirSync(dirname(mdPath), { recursive: true });
     writeFileSync(mdPath, `---\n${fmYaml}\n---\n\n${body}\n`, 'utf-8');
 
-    // Write edge sidecar if there are edges
-    if (node.outgoingEdges.length > 0) {
-      mkdirSync(sidecarDir, { recursive: true });
-      const edges = buildEdgeSidecar(node.outgoingEdges);
-      writeFileSync(join(sidecarDir, 'edges.yaml'), stringify(edges), 'utf-8');
+    // Remove leftover old-format files (parent README + sidecar dir) so a
+    // migrating repo reshapes cleanly and no stale sidecar masks the inline
+    // edges on re-import. `git add -A` stages the deletions. Skipped for the
+    // empty-loc root (its file IS README.md, owned by the manifest below).
+    if (node.loc !== '') {
+      const legacy = orphanedLegacyPaths(localPath, node.loc);
+      rmSync(legacy.readme, { force: true });
+      rmSync(legacy.sidecar, { recursive: true, force: true });
     }
   }
 
