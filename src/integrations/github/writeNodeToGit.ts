@@ -1,13 +1,18 @@
 import { execFile as execFileCb } from 'child_process';
 import { createDecipheriv } from 'crypto';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, writeFileSync, readdirSync } from 'fs';
-import { join, dirname, basename } from 'path';
+import { existsSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { join, dirname } from 'path';
 import { stringify } from 'yaml';
 import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
-import { buildNodeFrontmatter, buildEdgeSidecar, preserveUnmanagedFrontmatter } from './nodeFrontmatter.js';
+import {
+  buildNodeFrontmatter,
+  preserveUnmanagedFrontmatter,
+  nodeFilePath,
+  orphanedLegacyPaths,
+} from './nodeFrontmatter.js';
 
 const execFile = promisify(execFileCb);
 
@@ -37,7 +42,14 @@ export interface NodeForGit {
   /** Node-level structured JSON; exported for a faithful mirror. */
   data?: unknown;
   properties?: unknown;
-  outgoingEdges: Array<{ target: { id: string; loc?: string | null }; label: string | null }>;
+  outgoingEdges: Array<{
+    target: { id: string; loc?: string | null };
+    label: string | null;
+    /** JSONLogic gating expression; null when the edge always fires. */
+    condition?: unknown;
+    /** Resolution-order hook (lower fires first), DB default 0. */
+    priority?: number | null;
+  }>;
 }
 
 /**
@@ -51,8 +63,9 @@ function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
 
 /**
  * Write a node to the appropriate git repo and branch, then push.
- * Writes the new frontmatter markdown format with optional edge sidecar.
- * Fire-and-forget safe — errors are logged, not thrown.
+ * Writes one self-contained frontmatter markdown file per node (props + edges
+ * inline; no README, no edge sidecar) via the shared `nodeFrontmatter`
+ * builders. Fire-and-forget safe — errors are logged, not thrown.
  */
 export async function writeNodeToGit(
   node: NodeForGit,
@@ -130,35 +143,16 @@ export async function writeNodeToGit(
     return;
   }
 
-  // 5. Write frontmatter markdown file
-  const locParts = node.loc.split(':');
-  let mdPath: string;
-  let sidecarDir: string;
-
-  if (locParts.length === 0 || node.loc === '') {
-    // Root node → README.md
-    mdPath = join(localPath, 'README.md');
-    sidecarDir = join(localPath, '.README');
-  } else {
-    // Check if this node has children (is it a folder?)
-    const folderPath = join(localPath, ...locParts);
-    if (existsSync(folderPath) && hasChildNodes(folderPath)) {
-      // Parent node → folder/README.md
-      mdPath = join(folderPath, 'README.md');
-      sidecarDir = join(dirname(folderPath), '.' + basename(folderPath));
-    } else {
-      // Leaf node → parent/name.md
-      const name = locParts[locParts.length - 1];
-      const parentParts = locParts.slice(0, -1);
-      mdPath = join(localPath, ...parentParts, name + '.md');
-      sidecarDir = join(localPath, ...parentParts, '.' + name);
-    }
-  }
+  // 5. Write frontmatter markdown file. A node — leaf or parent — is one
+  // self-contained `<...loc>.md` (children live in the sibling `<seg>/`
+  // folder); edges are inline in the frontmatter `nodes:` array, no sidecar.
+  const mdPath = nodeFilePath(localPath, node.loc);
 
   // Build frontmatter (shared builder — keeps this incremental path and the
-  // bulk pushMemoryToGit path emitting the exact same fields). Every
-  // importer-consumed field (abstract, abstractOriginHash, contentHash, type)
-  // is emitted when set, or a re-sync would null it; see nodeFrontmatter.ts.
+  // bulk pushMemoryToGit path emitting the exact same fields, edges included).
+  // Every importer-consumed field (abstract, abstractOriginHash, contentHash,
+  // type, nodes) is emitted when set, or a re-sync would null it; see
+  // nodeFrontmatter.ts.
   const frontmatter = buildNodeFrontmatter({
     id: node.id,
     name: node.name,
@@ -172,7 +166,7 @@ export async function writeNodeToGit(
     seq: node.seq,
     data: node.data,
     properties: node.properties,
-  });
+  }, node.outgoingEdges);
   preserveUnmanagedFrontmatter(frontmatter, mdPath);
 
   const fmYaml = stringify(frontmatter, { lineWidth: 0 }).trim();
@@ -180,11 +174,14 @@ export async function writeNodeToGit(
   mkdirSync(dirname(mdPath), { recursive: true });
   writeFileSync(mdPath, `---\n${fmYaml}\n---\n\n${body}\n`, 'utf-8');
 
-  // Write edge sidecar if there are edges
-  if (node.outgoingEdges.length > 0) {
-    mkdirSync(sidecarDir, { recursive: true });
-    const edges = buildEdgeSidecar(node.outgoingEdges);
-    writeFileSync(join(sidecarDir, 'edges.yaml'), stringify(edges), 'utf-8');
+  // Remove any leftover old-format files for this node (parent `README.md` +
+  // edge sidecar dir) so a migrating repo reshapes cleanly and a stale sidecar
+  // can't mask the inline edges on re-import. `git add -A` stages the
+  // deletions. Skipped for the empty-loc root, whose file IS README.md.
+  if (node.loc !== '') {
+    const legacy = orphanedLegacyPaths(localPath, node.loc);
+    rmSync(legacy.readme, { force: true });
+    rmSync(legacy.sidecar, { recursive: true, force: true });
   }
 
   // 6. Commit and push
@@ -221,18 +218,6 @@ export async function writeNodeToGit(
 
 function restoreRemote(localPath: string, originalUrl: string): void {
   execFile('git', ['remote', 'set-url', 'origin', originalUrl], { cwd: localPath }).catch(() => {});
-}
-
-function hasChildNodes(dir: string): boolean {
-  try {
-    const entries = readdirSync(dir, { withFileTypes: true });
-    return entries.some((e) =>
-      (e.isFile() && e.name.endsWith('.md') && e.name !== 'README.md') ||
-      (e.isDirectory() && !e.name.startsWith('.'))
-    );
-  } catch {
-    return false;
-  }
 }
 
 function decryptToken(ciphertext: string): string {
