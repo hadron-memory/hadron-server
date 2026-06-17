@@ -5,9 +5,10 @@ load the project introduction (what Hadron is, URN grammar, the platform-specs c
 architecture). Read it once per session.
 
 Then, at the start of **every change** — before drafting a plan — call
-`h-read-node` with `urn: "hrn:node:hadronmemory.com::dev::start-here"`. It's a
-symptom-to-pattern routing index into the findings, conventions, ops, and
-review branches.
+`h-read-node` with `urn: "hrn:node:hadronmemory.com::dev::preflight"`. It's a
+symptom-to-pattern routing index into the findings, conventions, and ops
+branches (portal-specific patterns live in the `hadronmemory.com::hadron-portal`
+memory).
 
 Quick reference for AI agents working in this repo. Updated 2026-06-15.
 
