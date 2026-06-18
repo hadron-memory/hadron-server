@@ -656,12 +656,13 @@ export function createMcpServerInstance(
     { capabilities: { tools: {} } },
   );
 
-  // Per-session state. The field is preserved per spec 022 D4a as advisory
-  // metadata — the agent inference layer (hadron-client) MAY read it as a
-  // future hint signal, but no server-side code reads it. Set via
-  // `h-set-active-memory`; never consumed here.
-  // TODO(spec-022-cleanup): tracked as Q-2026-05-07-001 in the design
-  // discussion registry; revisit if usage stays "set, never read" past pilot.
+  // Per-session state — this server instance is built once per MCP session
+  // (see the createMcpServerInstance call sites), so this closure variable is
+  // genuinely per-session. Set via `h-set-active-memory`. Spec 022 D4a kept it
+  // advisory; spec cor:api:060 (h-run-task) is its first server-side reader,
+  // consuming it as the default memory scope when a by-name run gives no
+  // `memory` hint. Spec-022 URN-input tools still MUST NOT fall back to it —
+  // they require a fully-qualified URN.
   let activeMemoryUrn: string | undefined;
 
   // Spec 026 — has the session called `h-list-apps` or `h-set-active-app`,
@@ -3272,52 +3273,73 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       args: z.record(z.string(), z.string()).optional().describe('Action arguments as key-value pairs'),
     },
     async ({ urn: rawUrn, args }) => {
-      // Spec 022: qualification at the API boundary.
-      try {
-        assertFullyQualifiedUrn(rawUrn, 'node');
-      } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
-        throw e;
+      // Spec 022 qualification + loading + rendering are shared with h-run-task
+      // (cor:api:060) via loadNodeForRun / renderRunNode below.
+      const loaded = await loadNodeForRun(rawUrn);
+      if ('error' in loaded) return textResult(loaded.error);
+      return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+    },
+  );
+
+  // ── Shared run core (h-run-action + h-run-task, spec cor:api:060) ──────────
+  //
+  // Loading a node for execution and rendering its run-bundle are factored out
+  // so the direct-URN runner (h-run-action, above) and the by-name runner
+  // (h-run-task, below) produce a byte-identical bundle and record the same
+  // action-run usage event. These are hoisted function declarations, so the
+  // thinned h-run-action handler above resolves them at call time.
+
+  type RunNode = Prisma.NodeGetPayload<{
+    include: { outgoingEdges: { include: { target: true } } };
+  }>;
+
+  // Qualify (spec 022) + read-gate the URN, then fetch the node with its
+  // dependency edges. Returns the node or a user-facing error string.
+  async function loadNodeForRun(
+    rawUrn: string,
+  ): Promise<{ node: RunNode; loc: string } | { error: string }> {
+    try {
+      assertFullyQualifiedUrn(rawUrn, 'node');
+    } catch (e) {
+      if (e instanceof UrnNotQualifiedError) return { error: e.message };
+      throw e;
+    }
+    const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+    const memory = await resolveMemoryByUrn(memoryUrn);
+    if (!memory || !(await canReadMemory(db, auth, memory.id))) {
+      return { error: `Memory not found: "${memoryUrn}".` };
+    }
+    const node = await db.node.findUnique({
+      where: { loc_memoryId: { loc, memoryId: memory.id } },
+      include: { outgoingEdges: { include: { target: true } } },
+    });
+    if (!node) return { error: `Node "${rawUrn}" not found.` };
+    return { node, loc };
+  }
+
+  // {{arg}} substitution + inlined edge-linked node content + one action-run
+  // usage event. Returns the rendered markdown bundle.
+  async function renderRunNode(
+    node: RunNode,
+    loc: string,
+    args?: Record<string, string>,
+  ): Promise<string> {
+    let actionContent = node.content || '';
+    if (args) {
+      for (const [key, value] of Object.entries(args)) {
+        actionContent = actionContent.replaceAll(`{{${key}}}`, value);
       }
-
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
-      const memory = await resolveMemoryByUrn(memoryUrn);
-      if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+    }
+    const topicSections: string[] = [];
+    for (const edge of node.outgoingEdges) {
+      const target = edge.target;
+      if (target.content) {
+        const targetUrn = await nodeUrn(target.loc, target.memoryId);
+        topicSections.push(`## Node: ${target.name} (${targetUrn})\n\n${target.content}`);
       }
-      if (!(await canReadMemory(db, auth, memory.id))) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
-      }
-
-      const node = await db.node.findUnique({
-        where: { loc_memoryId: { loc, memoryId: memory.id } },
-        include: { outgoingEdges: { include: { target: true } } },
-      });
-      if (!node) return textResult(`Node "${rawUrn}" not found.`);
-
-      let actionContent = node.content || '';
-
-      // Substitute args
-      if (args) {
-        for (const [key, value] of Object.entries(args)) {
-          actionContent = actionContent.replaceAll(`{{${key}}}`, value);
-        }
-      }
-
-      // Resolve referenced node content from edges
-      const topicSections: string[] = [];
-      for (const edge of node.outgoingEdges) {
-        const target = edge.target;
-        if (target.content) {
-          const targetUrn = await nodeUrn(target.loc, (target as any).memoryId);
-          topicSections.push(
-            `## Node: ${target.name} (${targetUrn})\n\n${target.content}`,
-          );
-        }
-      }
-
-      // Record usage event
-      db.usageEvent.create({
+    }
+    db.usageEvent
+      .create({
         data: {
           id: generateId(),
           type: 'action-run',
@@ -3328,15 +3350,366 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           sessionId: null,
           actionArgs: (args ?? undefined) as Record<string, string> | undefined,
         },
-      }).catch(() => {});
+      })
+      .catch(() => {});
+    const parts = [`# Node: ${node.name}\n\n${actionContent}`];
+    if (topicSections.length > 0) {
+      parts.push('---\n\n# Referenced Nodes\n\n' + topicSections.join('\n\n---\n\n'));
+    }
+    return parts.join('\n\n');
+  }
 
-      const parts = [`# Node: ${node.name}\n\n${actionContent}`];
-      if (topicSections.length > 0) {
-        parts.push(
-          '---\n\n# Referenced Nodes\n\n' + topicSections.join('\n\n---\n\n'),
+  // ── h-run-task name resolution (spec cor:api:060) ─────────────────────────
+
+  type RunTaskMem = { id: string; urn: string; name: string };
+  type RunTaskNode = {
+    id: string;
+    loc: string;
+    name: string;
+    alias: string | null;
+    description: string | null;
+  };
+  type ToolText = ReturnType<typeof textResult>;
+  // cor:api:060:03 tunable — max candidates to offer before asking to narrow.
+  const RUN_TASK_PICK_CAP = 25;
+
+  // Rank runnable candidates against a loose hint: case-insensitive, matching
+  // name/alias/loc/description, exact > prefix > substring. Pure (cor:api:060:02
+  // — substring today; a semantic name index can swap in here later).
+  function rankByHint<
+    T extends { name: string; alias?: string | null; loc: string; description?: string | null },
+  >(items: T[], hint: string): T[] {
+    const h = hint.trim().toLowerCase();
+    if (!h) return [];
+    const scored: Array<{ item: T; score: number }> = [];
+    for (const item of items) {
+      const name = item.name.toLowerCase();
+      const alias = (item.alias ?? '').toLowerCase();
+      const loc = item.loc.toLowerCase();
+      const desc = (item.description ?? '').toLowerCase();
+      let score = 0;
+      if (name === h || alias === h) score = 100;
+      else if (name.startsWith(h) || alias.startsWith(h) || loc === h || loc.endsWith(`:${h}`))
+        score = 80;
+      else if (name.includes(h) || alias.includes(h) || loc.includes(h)) score = 60;
+      else if (desc.includes(h)) score = 40;
+      if (score > 0) scored.push({ item, score });
+    }
+    scored.sort((a, b) => b.score - a.score || a.item.name.localeCompare(b.item.name));
+    return scored.map((s) => s.item);
+  }
+
+  function clientSupportsElicitation(): boolean {
+    try {
+      return !!server.server.getClientCapabilities()?.elicitation;
+    } catch {
+      return false;
+    }
+  }
+
+  // Ask the client to pick one option. Returns the chosen value, or null on
+  // decline/cancel. Throws if the transport can't service the request — callers
+  // fall back to the list relay (cor:api:060:03).
+  async function elicitSelect(
+    options: Array<{ const: string; title: string }>,
+    message: string,
+  ): Promise<string | null> {
+    const result = await server.server.elicitInput({
+      mode: 'form',
+      message,
+      requestedSchema: {
+        type: 'object',
+        properties: {
+          selection: { type: 'string', title: 'Selection', oneOf: options },
+        },
+        required: ['selection'],
+      },
+    });
+    if (result.action === 'accept' && typeof result.content?.selection === 'string') {
+      return result.content.selection;
+    }
+    return null;
+  }
+
+  // The caller's readable memory set for task discovery: the App/org access map
+  // PLUS the caller's own personal/private memories (which the access map
+  // excludes — their owner-only gate lives in canReadMemory), so free-standing
+  // personal memories stay reachable by hint (cor:api:060:02).
+  async function listRunnableMemories(): Promise<RunTaskMem[]> {
+    const byId = new Map<string, RunTaskMem>();
+    const ids = await getAccessibleMemoryIds(db, auth);
+    if (ids === null) {
+      // ADMIN/OWNER "see all" — minus other users' personal/private memories.
+      const all = await db.memory.findMany({
+        where: { deletedAt: null },
+        select: { id: true, urn: true, name: true, class: true, userId: true },
+      });
+      for (const m of all) {
+        const owned = m.userId != null && m.userId === auth.userId;
+        if ((m.class === 'personal' || m.class === 'private') && !owned) continue;
+        byId.set(m.id, { id: m.id, urn: m.urn, name: m.name });
+      }
+    } else if (ids.length > 0) {
+      const mems = await db.memory.findMany({
+        where: { id: { in: ids }, deletedAt: null },
+        select: { id: true, urn: true, name: true },
+      });
+      for (const m of mems) byId.set(m.id, m);
+    }
+    if (auth.userId) {
+      const own = await db.memory.findMany({
+        where: {
+          userId: auth.userId,
+          class: { in: ['personal', 'private'] },
+          deletedAt: null,
+        },
+        select: { id: true, urn: true, name: true },
+      });
+      for (const m of own) byId.set(m.id, m);
+    }
+    return [...byId.values()];
+  }
+
+  function loadRunnableNodes(memoryId: string): Promise<RunTaskNode[]> {
+    return db.node.findMany({
+      where: { memoryId, isRunnable: true, deletedAt: null },
+      select: { id: true, loc: true, name: true, alias: true, description: true },
+      orderBy: [{ seq: 'asc' }, { loc: 'asc' }],
+    });
+  }
+
+  // Build a canonical node URN (org::memory::loc) from a memory's stored bare
+  // URN (org:memory, single colon — see createMemory) and a node loc, so
+  // loadNodeForRun → splitNodeUrn recovers the same memory URN.
+  function nodeUrnFromMem(memUrn: string, loc: string): string {
+    const i = memUrn.indexOf(':');
+    return i < 0 ? `${memUrn}::${loc}` : `${memUrn.slice(0, i)}::${memUrn.slice(i + 1)}::${loc}`;
+  }
+
+  function runTaskCandidate(mem: RunTaskMem, node: RunTaskNode) {
+    return {
+      urn: nodeUrnFromMem(mem.urn, node.loc),
+      label: node.name,
+      description: node.description,
+    };
+  }
+
+  // Present candidates and run the chosen one: an interactive single-select
+  // where the client supports elicitation, otherwise a numbered list the agent
+  // relays for re-invocation by `urn` (cor:api:060:03).
+  async function presentAndRun(
+    candidates: Array<{ urn: string; label: string; description: string | null }>,
+    header: string,
+    args?: Record<string, string>,
+  ): Promise<ToolText> {
+    if (candidates.length > RUN_TASK_PICK_CAP) {
+      return textResult(
+        `${header}\n\n${candidates.length} matches — too many to list. Narrow it with a more specific \`task\` or \`memory\` hint.`,
+      );
+    }
+    if (clientSupportsElicitation()) {
+      try {
+        const choice = await elicitSelect(
+          candidates.map((c) => ({ const: c.urn, title: c.label })),
+          header,
+        );
+        if (choice === null) return textResult('No task selected — nothing run.');
+        const loaded = await loadNodeForRun(choice);
+        if ('error' in loaded) return textResult(loaded.error);
+        return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+      } catch {
+        // Transport can't service the picker — fall back to the list relay.
+      }
+    }
+    const lines = candidates.map(
+      (c, i) => `${i + 1}. ${c.label}${c.description ? ` — ${c.description}` : ''}\n   urn: ${c.urn}`,
+    );
+    return textResult(
+      `${header}\n\n${lines.join('\n')}\n\nRe-run h-run-task with \`urn\` set to your choice.`,
+    );
+  }
+
+  // Resolve the target memory from a loose hint, the active memory, or a pick.
+  async function resolveRunTaskMemory(
+    hint: string,
+  ): Promise<{ memory: RunTaskMem } | { done: ToolText }> {
+    const mems = await listRunnableMemories();
+    if (mems.length === 0) {
+      return {
+        done: textResult('No memories you can read. Use h-list-memories to see what is available.'),
+      };
+    }
+    const asRankable = (m: RunTaskMem) => ({ ...m, alias: null, loc: m.urn, description: null });
+
+    if (hint) {
+      const matches = rankByHint(mems.map(asRankable), hint);
+      if (matches.length === 1) return { memory: matches[0] };
+      if (matches.length === 0) {
+        return {
+          done: textResult(
+            `No memory matching "${hint}". Use h-list-memories to see what is available.`,
+          ),
+        };
+      }
+      if (clientSupportsElicitation()) {
+        try {
+          const choice = await elicitSelect(
+            matches.map((m) => ({ const: m.urn, title: m.name })),
+            `Multiple memories match "${hint}" — pick the one with your task:`,
+          );
+          if (choice === null) return { done: textResult('No memory selected — nothing run.') };
+          const chosen = matches.find((m) => m.urn === choice);
+          if (chosen) return { memory: chosen };
+        } catch {
+          // fall through to the list relay
+        }
+      }
+      const lines = matches.map((m, i) => `${i + 1}. ${m.name}\n   memory: ${m.urn}`);
+      return {
+        done: textResult(
+          `Multiple memories match "${hint}":\n\n${lines.join('\n')}\n\nRe-run h-run-task with \`memory\` set to one of these.`,
+        ),
+      };
+    }
+
+    // No memory hint — default to the session's active memory (cor:api:060:02).
+    if (activeMemoryUrn) {
+      const active = mems.find((m) => m.urn === activeMemoryUrn);
+      if (active) return { memory: active };
+    }
+    if (mems.length === 1) return { memory: mems[0] };
+    if (clientSupportsElicitation() && mems.length <= RUN_TASK_PICK_CAP) {
+      try {
+        const choice = await elicitSelect(
+          mems.map((m) => ({ const: m.urn, title: m.name })),
+          'Which memory holds the task you want to run?',
+        );
+        if (choice === null) return { done: textResult('No memory selected — nothing run.') };
+        const chosen = mems.find((m) => m.urn === choice);
+        if (chosen) return { memory: chosen };
+      } catch {
+        // fall through
+      }
+    }
+    const names = mems.slice(0, RUN_TASK_PICK_CAP).map((m) => m.name).join(', ');
+    return {
+      done: textResult(
+        `Pass a \`memory\` hint (or set an active memory with h-set-active-memory). You can reach: ${names}.`,
+      ),
+    };
+  }
+
+  // Find runnable nodes matching `hint` across the caller's OTHER readable
+  // memories — the conservative widening of cor:api:060:02 (never auto-runs;
+  // surfaces matches for an explicit pick).
+  async function searchRunnableAcross(
+    hint: string,
+    excludeMemoryId: string,
+  ): Promise<Array<{ mem: RunTaskMem; node: RunTaskNode }>> {
+    const mems = (await listRunnableMemories()).filter((m) => m.id !== excludeMemoryId);
+    const memById = new Map(mems.map((m) => [m.id, m]));
+    if (memById.size === 0) return [];
+    const nodes = await db.node.findMany({
+      where: { memoryId: { in: [...memById.keys()] }, isRunnable: true, deletedAt: null },
+      select: { id: true, loc: true, name: true, alias: true, description: true, memoryId: true },
+    });
+    return rankByHint(nodes, hint).map((n) => ({ mem: memById.get(n.memoryId)!, node: n }));
+  }
+
+  // ── h-run-task ─────────────────────────────────────────────────────────────
+
+  server.tool(
+    'h-run-task',
+    "Run a task — a runnable node (isRunnable=true) — by loose name, without a fully-qualified URN. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. Reuses the action runner: {{arg}} substitution, inlined dependencies, and an action-run usage event. Spec cor:api:060.",
+    {
+      task: z
+        .string()
+        .optional()
+        .describe(
+          'Loose name of the task to run (matched against runnable nodes by name/alias/loc/description).',
+        ),
+      memory: z
+        .string()
+        .optional()
+        .describe('Loose memory name or URN to scope the search. Omit to use the active memory.'),
+      urn: z
+        .string()
+        .optional()
+        .describe('Fully-qualified node URN to run directly, skipping name resolution.'),
+      args: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe('Task arguments as key-value pairs ({{key}} substitution).'),
+    },
+    async (rawArgs) => {
+      // createTestableMcpServer bypasses zod — normalize args defensively.
+      const a = (rawArgs ?? {}) as {
+        task?: unknown;
+        memory?: unknown;
+        urn?: unknown;
+        args?: unknown;
+      };
+      const taskHint = typeof a.task === 'string' ? a.task.trim() : '';
+      const memoryHint = typeof a.memory === 'string' ? a.memory.trim() : '';
+      const directUrn = typeof a.urn === 'string' ? a.urn.trim() : '';
+      const args =
+        a.args && typeof a.args === 'object' && !Array.isArray(a.args)
+          ? (a.args as Record<string, string>)
+          : undefined;
+
+      // URN bypass — run directly, exactly like h-run-action (cor:api:060:02).
+      if (directUrn) {
+        const loaded = await loadNodeForRun(directUrn);
+        if ('error' in loaded) return textResult(loaded.error);
+        return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+      }
+
+      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+
+      const mem = await resolveRunTaskMemory(memoryHint);
+      if ('done' in mem) return mem.done;
+      const memory = mem.memory;
+
+      const runnable = await loadRunnableNodes(memory.id);
+
+      if (taskHint) {
+        const matches = rankByHint(runnable, taskHint);
+        if (matches.length === 1) {
+          const loaded = await loadNodeForRun(nodeUrnFromMem(memory.urn, matches[0].loc));
+          if ('error' in loaded) return textResult(loaded.error);
+          return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+        }
+        if (matches.length > 1) {
+          return presentAndRun(
+            matches.map((n) => runTaskCandidate(memory, n)),
+            `Multiple tasks match "${taskHint}" in ${memory.name} — pick one:`,
+            args,
+          );
+        }
+        // Miss in the resolved memory — widen, but never auto-run elsewhere.
+        const wide = await searchRunnableAcross(taskHint, memory.id);
+        if (wide.length === 0) {
+          return textResult(`No runnable task matching "${taskHint}" in ${memory.name}.`);
+        }
+        return presentAndRun(
+          wide.map((w) => runTaskCandidate(w.mem, w.node)),
+          `No match in ${memory.name}, but "${taskHint}" matches runnable tasks in other memories — pick one:`,
+          args,
         );
       }
-      return textResult(parts.join('\n\n'));
+
+      // No task hint — offer the memory's runnable tasks.
+      if (runnable.length === 0) return textResult(`No runnable tasks in ${memory.name}.`);
+      if (runnable.length === 1) {
+        const loaded = await loadNodeForRun(nodeUrnFromMem(memory.urn, runnable[0].loc));
+        if ('error' in loaded) return textResult(loaded.error);
+        return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+      }
+      return presentAndRun(
+        runnable.map((n) => runTaskCandidate(memory, n)),
+        `Tasks in ${memory.name} — pick one to run:`,
+        args,
+      );
     },
   );
 
