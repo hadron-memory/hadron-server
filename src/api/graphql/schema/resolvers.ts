@@ -3841,14 +3841,24 @@ export const resolvers = {
         });
       }
 
+      // Tags partial-update semantics (hadron-cli#37). A create always
+      // sets the column; an update only writes it when the caller actually
+      // sent `tags`. `input.tags === undefined` (key omitted) means
+      // "preserve existing" — the same omit→leave-untouched contract the
+      // scalar fields and abstractOriginHash follow — so a partial update
+      // (e.g. content-only) no longer silently clears tags. An explicit
+      // array (including [], and a runtime `null` coerced via `?? []`)
+      // replaces.
       const tags = serializeTags(input.tags ?? []) as string[];
+      const updateTagsPayload = input.tags === undefined ? {} : { tags };
       const id = input.id ?? generateId();
-      // Strip GraphQL-only flags from the Prisma payload — `createOnly`
-      // is a control input, not a column.
-      // `edges` is consumed above (resolved into `resolvedEdges`) and
-      // applied below; strip it from the Prisma payload along with
-      // the GraphQL-only `createOnly` control flag.
-      const { edges: _edges, createOnly: _createOnly, ...nodeFields } = input;
+      // Strip GraphQL-only flags + `tags` from the Prisma payload.
+      // `createOnly` is a control input, not a column. `edges` is consumed
+      // above (resolved into `resolvedEdges`) and applied below. `tags` is
+      // re-applied per-branch below (serialized, and update-gated) — leaving
+      // the raw array in `nodeFields` would write the wrong shape on SQLite
+      // and clobber the preserve-on-omit gating above.
+      const { edges: _edges, createOnly: _createOnly, tags: _tags, ...nodeFields } = input;
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
 
       // If the target memory is encrypted, encrypt content and data before
@@ -3948,7 +3958,7 @@ export const resolvers = {
         } as Prisma.NodeUncheckedCreateInput,
         update: {
           ...nodeFieldsClean,
-          tags,
+          ...updateTagsPayload,
           ...updateExtras,
           ...hashPayload,
         } as Prisma.NodeUncheckedUpdateInput,
