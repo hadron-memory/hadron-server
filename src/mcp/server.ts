@@ -31,6 +31,7 @@ import {
   type AppSelectionErrorEnvelope,
 } from './app-selection-errors.js';
 import { mcpLog } from './mcp-log.js';
+import { tagsInputSchema } from './tagsInput.js';
 
 // Spec 025-oauth-for-mcp / research §R-6: error_description in the
 // 409 multi-App response links to a docs page that explains the
@@ -1137,7 +1138,7 @@ export function createMcpServerInstance(
       urn: z.string().describe('Fully-qualified node URN for the new section, e.g. "acme.com::mmdata::services" or "acme.com::mmdata::services:db-helpers"'),
       name: z.string().optional().describe('Display name (defaults to the last loc atom)'),
       description: z.string().optional().describe('What this section contains'),
-      tags: z.array(z.string()).optional(),
+      tags: tagsInputSchema.optional(),
     },
     async ({ urn: rawUrn, name: rawName, description, tags }) => {
       // Spec 022: qualification at the API boundary.
@@ -2430,7 +2431,7 @@ export function createMcpServerInstance(
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on h-read-node via the contentScope parameter. (h-find-nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
       seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
-      tags: z.array(z.string()).optional().describe('Tags'),
+      tags: tagsInputSchema.optional().describe('Tags'),
       properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
       data: z.record(z.string(), z.unknown()).optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config)'),
       llmModel: z.string().optional().describe('LLM model used (e.g. claude-opus-4-6)'),
@@ -2641,7 +2642,7 @@ export function createMcpServerInstance(
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on h-read-node via contentScope; h-find-nodes preview surfacing ships in spec 031 US2. Spec 031.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007).'),
       seq: z.number().optional().describe('New sort order among siblings'),
-      tags: z.array(z.string()).optional().describe('Replace tags'),
+      tags: tagsInputSchema.optional().describe('Replace tags'),
       properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
       data: z.record(z.string(), z.unknown()).optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config)'),
       llmModel: z.string().optional().describe('LLM model used'),
