@@ -29,7 +29,7 @@ export function looksLikeUrn(query: string): boolean {
   if (q.length === 0) return false;
   if (hasSchemePrefix(q)) return true; // hrn:/urn: prefix
   if (q.includes('::')) return true; // canonical separator
-  // Bare URN like "micromentor.org:juno" — a colon with no whitespace. Free
+  // Bare URN like "acme.com:my-agent" — a colon with no whitespace. Free
   // text with a colon (e.g. "note: follow up") contains whitespace and is
   // treated as a name search.
   if (q.includes(':') && !/\s/.test(q)) return true;
