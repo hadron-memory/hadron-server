@@ -22,15 +22,18 @@ export const FIELD_WEIGHT: Record<SearchField, number> = {
   content: 0.4,
 };
 
-/** 0 = no match, 1 = substring, 2 = prefix, 3 = exact (case-insensitive). */
-export function matchTier(value: string | null | undefined, query: string): 0 | 1 | 2 | 3 {
+/**
+ * 0 = no match, 1 = substring, 2 = prefix, 3 = exact (case-insensitive).
+ * `needle` MUST already be trimmed + lowercased — `matchTier` runs per
+ * candidate per row, so callers normalize the query once outside the loop.
+ */
+export function matchTier(value: string | null | undefined, needle: string): 0 | 1 | 2 | 3 {
   if (!value) return 0;
+  if (needle.length === 0) return 0;
   const v = value.toLowerCase();
-  const q = query.trim().toLowerCase();
-  if (q.length === 0) return 0;
-  if (v === q) return 3;
-  if (v.startsWith(q)) return 2;
-  if (v.includes(q)) return 1;
+  if (v === needle) return 3;
+  if (v.startsWith(needle)) return 2;
+  if (v.includes(needle)) return 1;
   return 0;
 }
 
@@ -45,7 +48,7 @@ function singleColon(s: string): string {
  */
 export function urnMatchTier(storedUrn: string | null | undefined, urnTerm: string): 0 | 1 | 2 | 3 {
   if (!storedUrn) return 0;
-  return matchTier(singleColon(storedUrn), singleColon(urnTerm));
+  return matchTier(singleColon(storedUrn), singleColon(urnTerm).toLowerCase());
 }
 
 /**
@@ -88,9 +91,11 @@ export function bestMatch(
   searched: Set<SearchField>,
 ): { field: SearchField; score: number } | null {
   let best: { field: SearchField; score: number } | null = null;
+  // Normalize the query once — matchTier expects a pre-lowercased needle.
+  const needle = query.trim().toLowerCase();
   for (const c of candidates) {
     if (!searched.has(c.field)) continue;
-    const tier = c.tier !== undefined ? c.tier : matchTier(c.value, query);
+    const tier = c.tier !== undefined ? c.tier : matchTier(c.value, needle);
     if (tier === 0) continue;
     const score = tier * FIELD_WEIGHT[c.field];
     if (!best || score > best.score) best = { field: c.field, score };

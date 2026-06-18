@@ -42,7 +42,8 @@ export async function globalSearch(
 
   const types =
     params.entityTypes && params.entityTypes.length > 0
-      ? params.entityTypes.filter((t) => ALL_ENTITY_TYPES.includes(t))
+      ? // dedupe so a repeated type can't run its adapter twice (→ duplicate hits)
+        [...new Set(params.entityTypes)].filter((t) => ALL_ENTITY_TYPES.includes(t))
       : [...ALL_ENTITY_TYPES];
 
   const limit = Math.min(MAX_LIMIT, Math.max(1, params.limit ?? DEFAULT_LIMIT));

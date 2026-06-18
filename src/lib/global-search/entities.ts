@@ -225,19 +225,23 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     }
   }
 
+  // Build select conditionally — `content: false` inside a Prisma select is
+  // non-idiomatic; only add `content` when it's actually searched.
+  const nodeSelect: Prisma.NodeSelect = {
+    id: true,
+    name: true,
+    description: true,
+    loc: true,
+    memoryId: true,
+    memory: { select: { urn: true, organizationId: true, isEncrypted: true } },
+  };
+  if (fields.has('content')) nodeSelect.content = true;
+
   const rows = await ctx.db.node.findMany({
     where: {
       AND: [nodeScopeWhere(principal), { deletedAt: null }, { OR: preds }],
     } as Prisma.NodeWhereInput,
-    select: {
-      id: true,
-      name: true,
-      description: true,
-      loc: true,
-      memoryId: true,
-      content: fields.has('content'),
-      memory: { select: { urn: true, organizationId: true, isEncrypted: true } },
-    },
+    select: nodeSelect,
     take: ctx.cap,
   });
 
