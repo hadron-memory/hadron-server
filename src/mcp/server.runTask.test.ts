@@ -263,3 +263,69 @@ describe('h-run-task — URN bypass + shared run core', () => {
     expect(text).toContain('draft body');
   });
 });
+
+describe('isRunnable write path (h-add-node / h-update-node / GraphQL upsertNode)', () => {
+  it('h-add-node creates a runnable node that h-run-task then finds and runs', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    await srv.callToolText('h-add-node', {
+      urn: nodeUrnOf(fx.alpha, 'tasks:brand-new'),
+      name: 'Brand new task',
+      nodeType: 'info',
+      isRunnable: true,
+      content: 'do the new thing',
+    });
+    const row = await db.node.findFirst({
+      where: { memoryId: fx.alpha.id, loc: 'tasks:brand-new' },
+      select: { isRunnable: true },
+    });
+    expect(row?.isRunnable).toBe(true);
+
+    const text = await srv.callToolText('h-run-task', { task: 'Brand new', memory: 'Alpha' });
+    expect(text).toContain('# Node: Brand new task');
+    expect(text).toContain('do the new thing');
+  });
+
+  it('h-update-node can clear isRunnable, removing the node from the task list', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    await srv.callToolText('h-update-node', {
+      urn: nodeUrnOf(fx.alpha, 'tasks:add-note'),
+      isRunnable: false,
+    });
+    const row = await db.node.findFirst({
+      where: { memoryId: fx.alpha.id, loc: 'tasks:add-note' },
+      select: { isRunnable: true },
+    });
+    expect(row?.isRunnable).toBe(false);
+
+    const text = await srv.callToolText('h-run-task', { task: 'Add note', memory: 'Alpha' });
+    expect(text).toContain('No runnable task matching "Add note" in Alpha');
+  });
+
+  it('h-update-node preserves isRunnable when the field is omitted (partial update)', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    await srv.callToolText('h-update-node', {
+      urn: nodeUrnOf(fx.alpha, 'tasks:add-review'),
+      description: 'touched',
+    });
+    const row = await db.node.findFirst({
+      where: { memoryId: fx.alpha.id, loc: 'tasks:add-review' },
+      select: { isRunnable: true, description: true },
+    });
+    expect(row?.isRunnable).toBe(true);
+    expect(row?.description).toBe('touched');
+  });
+
+  it('GraphQL upsertNode threads isRunnable into the node', async () => {
+    const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
+    await resolvers.Mutation.upsertNode(
+      {},
+      { input: { memoryId: fx.alpha.id, loc: 'tasks:via-gql', name: 'Via GQL', isRunnable: true } },
+      ctx,
+    );
+    const row = await db.node.findFirst({
+      where: { memoryId: fx.alpha.id, loc: 'tasks:via-gql' },
+      select: { isRunnable: true },
+    });
+    expect(row?.isRunnable).toBe(true);
+  });
+});
