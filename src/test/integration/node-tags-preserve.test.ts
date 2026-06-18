@@ -87,7 +87,10 @@ async function persistedTags(loc: string): Promise<string[]> {
     where: { loc, memoryId: fx.memory.id, deletedAt: null },
     select: { tags: true },
   });
-  return deserializeTags((node?.tags ?? []) as string[] | string);
+  // Fail loudly if the row vanished — otherwise the empty/clear cases
+  // would false-pass on a missing node (gemini review on #292).
+  if (!node) throw new Error(`Node not found: loc="${loc}"`);
+  return deserializeTags(node.tags as string[] | string);
 }
 
 // ───── create mode ─────────────────────────────────────────────────────────
@@ -158,9 +161,10 @@ describe('upsertNode — content-only update preserves siblings (hadron-cli#37)'
       where: { loc: 'sib1', memoryId: fx.memory.id, deletedAt: null },
       select: { tags: true, nodeType: true, data: true, content: true },
     });
-    expect(deserializeTags((node?.tags ?? []) as string[] | string)).toEqual(['spec', 'p1']);
-    expect(node?.nodeType).toBe('spec');
-    expect(node?.data).toEqual({ version: 3 });
-    expect(node?.content).toBe('edited');
+    expect(node).not.toBeNull();
+    expect(deserializeTags(node!.tags as string[] | string)).toEqual(['spec', 'p1']);
+    expect(node!.nodeType).toBe('spec');
+    expect(node!.data).toEqual({ version: 3 });
+    expect(node!.content).toBe('edited');
   });
 });
