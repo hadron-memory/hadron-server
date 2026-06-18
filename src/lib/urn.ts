@@ -1193,6 +1193,24 @@ export function formatCanonicalUrn(
 }
 
 /**
+ * Build a canonical `hrn:node:<mem>::<loc>` URN from a memory URN + a node loc.
+ *
+ * Spec 027: produce a canonical-form node URN regardless of how `Memory.urn`
+ * is stored (legacy `acme.com:dev` or canonical `acme.com::dev`). Canonicalize
+ * the memory URN first to a known-shape bare form, then attach `loc` as the
+ * node's single leaf path-segment with `::` — so `loc` (e.g. `review:sort`)
+ * stays one multi-atom leaf rather than being re-split into hierarchy levels.
+ *
+ * Shared by the MCP `nodeUrn` helper and the global-search node adapter so the
+ * two surfaces can't drift on node-URN shape.
+ */
+export function composeNodeUrn(memUrn: string, loc: string): string {
+  const memCanonical = formatCanonicalUrn('memory', memUrn);
+  const bareMemCanonical = memCanonical.substring(`${CANONICAL_SCHEME}:memory:`.length);
+  return `${CANONICAL_SCHEME}:node:${bareMemCanonical}::${loc}`;
+}
+
+/**
  * Legacy: validate that a parsed URN matches the expected type. Returns an
  * error message string if mismatched, or null if ok. Type `'unknown'`
  * (unprefixed input) is always accepted for backwards compatibility.

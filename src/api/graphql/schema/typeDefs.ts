@@ -115,6 +115,61 @@ export const typeDefs = `#graphql
   }
 
   """
+  Entity types the cross-entity global search (globalSearch) can return.
+  Mirrors the SearchEntityType union in src/lib/global-search.
+  """
+  enum SearchEntityType {
+    organization
+    memory
+    node
+    agent
+    app
+    aiServiceConfig
+    user
+  }
+
+  """
+  Fields globalSearch can match against. Omit \`fields\` to let the server
+  smart-sniff the query shape (PK → URN → name); explicit fields override the
+  sniff. \`pk\` is exact-match; the rest are case-insensitive substring.
+  \`content\` (node bodies) is opt-in and skips encrypted memories.
+  """
+  enum SearchField {
+    urn
+    name
+    description
+    pk
+    content
+  }
+
+  """
+  One unified, flat globalSearch result — common fields across every entity
+  type so a single ranked list renders uniformly. \`urn\` is null for entities
+  without one (aiServiceConfig, user); \`memoryId\` / \`organizationId\` are
+  convenience handles for building canonical navigation paths.
+  """
+  type GlobalSearchHit {
+    entityType: SearchEntityType!
+    id: ID!
+    urn: String
+    name: String
+    description: String
+    matchedField: SearchField!
+    score: Float!
+    memoryId: ID
+    organizationId: ID
+  }
+
+  type GlobalSearchResult {
+    hits: [GlobalSearchHit!]!
+    """
+    Notes when the search ran at reduced fidelity (e.g. content search skipped
+    on encrypted memories).
+    """
+    degraded: [String!]!
+  }
+
+  """
   Spec cor:api:040 — result envelope for the batch node read (nodeBatch).
   'nodes' is the authorized, existing subset (input order for an id set, loc
   order for a prefix). 'unavailable' lists the requested refs that were denied
@@ -1348,6 +1403,24 @@ export const typeDefs = `#graphql
       granularity: SearchGranularity
       limit: Int
     ): NodeSearchResult!
+
+    """
+    Cross-entity global search across organizations, memories, nodes, agents,
+    apps, AiServiceConfigs, and users — one ranked, flat list of hits.
+
+    By default the query shape is smart-sniffed: a PK-shaped input does an exact
+    id lookup, a URN-shaped input matches URNs, anything else matches name + URN.
+    Pass \`fields\` to force specific fields (overrides the sniff) and
+    \`entityTypes\` to restrict the kinds searched. Every hit is access-scoped to
+    the caller exactly as the per-kind queries are. Distinct from \`nodeSearch\`,
+    which is the node-only, vector-aware surface.
+    """
+    globalSearch(
+      query: String!
+      entityTypes: [SearchEntityType!]
+      fields: [SearchField!]
+      limit: Int
+    ): GlobalSearchResult!
 
     # All nodes whose loc starts with the given prefix
     subtree(prefix: String!): [Node!]!
