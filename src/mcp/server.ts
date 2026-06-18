@@ -2428,6 +2428,7 @@ export function createMcpServerInstance(
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports" or "hrn:node:acme.com::mmdata::review:sort-imports". Both bare and prefixed forms accepted. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
+      isRunnable: z.boolean().optional().describe('Whether this node can be run as a task by h-run-task (cor:api:060). Defaults to not-runnable.'),
       description: z.string().optional().describe('Short description'),
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on h-read-node via the contentScope parameter. (h-find-nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
@@ -2442,7 +2443,7 @@ export function createMcpServerInstance(
         label: z.string().describe('Relationship label'),
       })).optional().describe('Outgoing edges'),
     },
-    async ({ urn: rawUrn, name, nodeType, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
       // Spec 022: enforce qualification at the API boundary. Relative-form
       // URNs (e.g., `review:sort-imports` without org+memory) reject here
       // before any DB lookup runs.
@@ -2529,6 +2530,7 @@ export function createMcpServerInstance(
           loc,
           name,
           nodeType: nodeType ?? 'info',
+          isRunnable: isRunnable ?? null,
           description: description ?? null,
           abstract: normalizedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
@@ -2544,6 +2546,7 @@ export function createMcpServerInstance(
         update: {
           name,
           ...(nodeType ? { nodeType } : {}),
+          ...(isRunnable !== undefined ? { isRunnable } : {}),
           description: description ?? null,
           abstract: normalizedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
@@ -2639,6 +2642,7 @@ export function createMcpServerInstance(
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports"'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
+      isRunnable: z.boolean().optional().describe('Set whether this node can be run as a task by h-run-task. Pass true/false; omit to preserve.'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on h-read-node via contentScope; h-find-nodes preview surfacing ships in spec 031 US2. Spec 031.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007).'),
@@ -2654,7 +2658,7 @@ export function createMcpServerInstance(
       })).optional().describe('Replace outgoing edges'),
       reason: z.string().optional().describe('Why this change was made (stored in version history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, name, nodeType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -2760,6 +2764,7 @@ export function createMcpServerInstance(
       const data: Record<string, unknown> = {};
       if (name !== undefined) data.name = name;
       if (nodeType !== undefined) data.nodeType = nodeType;
+      if (isRunnable !== undefined) data.isRunnable = isRunnable;
       if (description !== undefined) data.description = description;
       if (normalizedAbstract !== undefined) data.abstract = normalizedAbstract;
       if (nextAbstractOriginHash !== undefined) data.abstractOriginHash = nextAbstractOriginHash;

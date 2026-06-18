@@ -8802,6 +8802,7 @@ interface NodeInput {
   id?: string;
   memoryId: string;
   nodeType?: string;
+  isRunnable?: boolean | null;
   loc: string;
   name: string;
   alias?: string;

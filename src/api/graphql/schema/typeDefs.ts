@@ -1152,6 +1152,8 @@ export const typeDefs = `#graphql
     """
     memoryId: String!
     nodeType: String
+    "Whether this node can be run as a task by h-run-task (cor:api:060). Omit to preserve on update."
+    isRunnable: Boolean
     loc: String!
     name: String!
     alias: String
