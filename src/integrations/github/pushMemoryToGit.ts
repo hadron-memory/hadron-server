@@ -71,13 +71,18 @@ export async function pushMemoryToGit(
       }
       await execFile('git', ['fetch', 'origin'], { cwd: localPath });
     } else {
+      // A previous clone may have been interrupted, leaving a non-empty dir
+      // without a `.git` — `git clone` would then fail forever with
+      // "destination path already exists and is not an empty directory".
+      // Clearing it first makes the clone self-healing. (force ignores ENOENT.)
+      rmSync(localPath, { recursive: true, force: true });
       mkdirSync(dirname(localPath), { recursive: true });
       const cloneArgs = ['clone'];
       if (memory.readBranch) cloneArgs.push('--branch', memory.readBranch);
       cloneArgs.push(cloneUrl, localPath);
       await execFile('git', cloneArgs);
     }
-    await prepareWriteBranch(localPath, branch);
+    await prepareWriteBranch(localPath, branch, memory.readBranch ?? undefined);
   } catch (err) {
     restoreRemote(localPath, memory.source);
     return { nodeCount: 0, error: `Git setup failed: ${(err as Error).message}` };

@@ -129,7 +129,7 @@ export async function writeNodeToGit(
       await execFile('git', ['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
     }
     await execFile('git', ['fetch', 'origin'], { cwd: localPath });
-    await prepareWriteBranch(localPath, branch);
+    await prepareWriteBranch(localPath, branch, graphRecord.readBranch ?? undefined);
   } catch (err) {
     console.error(`[writeNodeToGit] Branch setup failed (${branch}) for ${node.loc}:`, err);
     restoreRemote(localPath, graphRecord.source);

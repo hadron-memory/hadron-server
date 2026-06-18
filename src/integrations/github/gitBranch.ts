@@ -14,10 +14,37 @@ async function refExists(cwd: string, ref: string): Promise<boolean> {
 }
 
 /**
+ * Pick the start point for a brand-new write branch. Order of preference:
+ *   1. the memory's configured read branch (`origin/<readBranch>`) — a write
+ *      branch holds Hadron's outgoing changes to be reviewed against the read
+ *      branch, so that's the correct base;
+ *   2. the remote's default branch (`origin/HEAD`);
+ *   3. the conventional `origin/main` / `origin/master`.
+ * Returns null when none resolve (an essentially empty remote), in which case
+ * the caller forks from the current HEAD with no explicit start point.
+ *
+ * Avoids the old hardcoded `origin/main`, which failed on repos whose default
+ * branch is `master` / a custom name, or whose read branch isn't `main`.
+ */
+async function resolveBaseRef(localPath: string, baseBranch?: string): Promise<string | null> {
+  const candidates = [
+    baseBranch ? `origin/${baseBranch}` : undefined,
+    'origin/HEAD',
+    'origin/main',
+    'origin/master',
+  ].filter((r): r is string => !!r);
+  for (const ref of candidates) {
+    if (await refExists(localPath, ref)) return ref;
+  }
+  return null;
+}
+
+/**
  * Check out the memory's write branch — creating it when needed — and
  * fast-forward it to `origin/<branch>` when a matching remote branch exists.
  * Assumes the caller has already populated remote-tracking refs (a fresh
- * `git clone`, or a `git fetch origin` on an existing clone).
+ * `git clone`, or a `git fetch origin` on an existing clone). `baseBranch` is
+ * the memory's read branch, used as the fork point for a brand-new branch.
  *
  * Replaces the older "checkout; pull --ff-only; on ANY failure
  * `checkout -b <branch> origin/main`" logic, which conflated two unrelated
@@ -36,7 +63,11 @@ async function refExists(cwd: string, ref: string): Promise<boolean> {
  * Choosing the command from the branch's real local/remote existence avoids
  * both, and never depends on upstream tracking being configured.
  */
-export async function prepareWriteBranch(localPath: string, branch: string): Promise<void> {
+export async function prepareWriteBranch(
+  localPath: string,
+  branch: string,
+  baseBranch?: string,
+): Promise<void> {
   const localExists = await refExists(localPath, `refs/heads/${branch}`);
   const originExists = await refExists(localPath, `refs/remotes/origin/${branch}`);
 
@@ -55,8 +86,9 @@ export async function prepareWriteBranch(localPath: string, branch: string): Pro
     // local branch tracking it.
     await execFile('git', ['checkout', '-b', branch, `origin/${branch}`], { cwd: localPath });
   } else {
-    // Brand-new branch on both sides: fork it from the freshly fetched
-    // mainline. `git push -u` (at the call sites) then publishes it.
-    await execFile('git', ['checkout', '-b', branch, 'origin/main'], { cwd: localPath });
+    // Brand-new branch on both sides: fork it from the read branch (or the
+    // remote default). `git push -u` (at the call sites) then publishes it.
+    const base = await resolveBaseRef(localPath, baseBranch);
+    await execFile('git', ['checkout', '-b', branch, ...(base ? [base] : [])], { cwd: localPath });
   }
 }
