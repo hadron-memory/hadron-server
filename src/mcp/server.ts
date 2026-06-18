@@ -4,6 +4,7 @@ import { generateId } from '../lib/id.js';
 import {
   parseUrnInput,
   formatCanonicalUrn,
+  composeNodeUrn,
   assertFullyQualifiedUrn,
   splitNodeUrn,
   normalizeUrnForLookup,
@@ -47,6 +48,13 @@ import {
   getAccessibleMemoryIds,
   getMemoryAccess,
 } from './access-control.js';
+import { globalSearch } from '../lib/global-search/index.js';
+import {
+  normalizeEntityTypes,
+  normalizeFields,
+  type SearchPrincipal,
+} from '../lib/global-search/index.js';
+import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { computeContentHash } from '../lib/contentHash.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
@@ -396,22 +404,10 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
     memUrn = mem?.urn ?? memoryId;
     memoryUrnCache.set(memoryId, memUrn);
   }
-  // Spec 027: produce a canonical-form node URN regardless of how
-  // Memory.urn is stored (legacy `acme.com:dev` or canonical
-  // `acme.com::dev` depending on spec-021's per-row migration).
-  //
-  // Approach: canonicalize the memory URN first to obtain a known-shape
-  // canonical bare form, then attach the loc as the node's leaf
-  // path-segment with `::` as the explicit hierarchy separator. This
-  // preserves the semantic that `loc` is a single multi-atom leaf
-  // (e.g. `review:sort-imports`), rather than letting the parser
-  // re-split it as additional hierarchy levels. Calling
-  // formatCanonicalUrn('node', `${memUrn}:${loc}`) directly would
-  // produce `hrn:node:acme.com::dev::review::sort-imports` (4 levels)
-  // for a legacy memUrn — parser-correct but semantically wrong.
-  const memCanonical = formatCanonicalUrn('memory', memUrn);
-  const bareMemCanonical = memCanonical.substring('hrn:memory:'.length);
-  return `hrn:node:${bareMemCanonical}::${loc}`;
+  // Spec 027 canonical-form node URN. Shared with the global-search node
+  // adapter via composeNodeUrn (src/lib/urn.ts) so the two surfaces can't
+  // drift on node-URN shape.
+  return composeNodeUrn(memUrn, loc);
 }
 
 // Spec 033 US3 — search helpers moved to src/lib/search.ts to break the
@@ -726,6 +722,75 @@ export function createMcpServerInstance(
 
     return null; // zero-App or other path — fall through
   }
+
+  // ── h-search ─────────────────────────────────────────────────────────────
+
+  server.tool(
+    'h-search',
+    "Global cross-entity search across organizations, memories, nodes, agents, apps, AI service configs, and users — returns one ranked, flat list. By default the query shape is smart-sniffed: a PK-shaped input does an exact id lookup, a URN-shaped input matches URNs, free text matches name + URN. Pass `fields` to force which fields to match (overrides the sniff) and `entityTypes` to restrict the kinds. `pk` is exact-match; the rest are case-insensitive substring. `content` (node bodies) is opt-in and skips encrypted memories. For node-only, vector/semantic search, use h-find-nodes instead.",
+    {
+      query: z
+        .string()
+        .describe('Search text: a PK/id, a URN (hrn:/urn: or bare org::slug), or free-text name.'),
+      entityTypes: z
+        .array(
+          z.enum(['organization', 'memory', 'node', 'agent', 'app', 'aiServiceConfig', 'user']),
+        )
+        .optional()
+        .describe('Restrict to these entity types. Omit to search all.'),
+      fields: z
+        .array(z.enum(['urn', 'name', 'description', 'pk', 'content']))
+        .optional()
+        .describe('Force these fields (overrides the smart-sniff). Omit to auto-detect.'),
+      limit: z.number().optional().describe('Max results (default 50, max 200).'),
+    },
+    async ({ query, entityTypes, fields, limit }) => {
+      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+
+      // createTestableMcpServer bypasses zod — normalize args defensively.
+      const q = typeof query === 'string' ? query : '';
+      const types = normalizeEntityTypes(entityTypes);
+      const flds = normalizeFields(fields);
+      const lim = typeof limit === 'number' ? limit : undefined;
+
+      // Same access gates as the GraphQL globalSearch resolver — see the
+      // rationale there. App-Key callers (no userId) get no org-read → [].
+      const isPlatformAdmin = !!auth.roles?.includes('ADMIN') || !!auth.roles?.includes('OWNER');
+      const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
+      const orgIds = isPlatformAdmin
+        ? null
+        : auth.userId
+          ? await getMemberOrgIds(db, auth.userId)
+          : [];
+      const principal: SearchPrincipal = {
+        viewerUserId: auth.userId ?? null,
+        isPlatformAdmin,
+        accessibleMemoryIds,
+        orgIds,
+      };
+
+      const { hits, degraded } = await globalSearch(
+        db,
+        { query: q, entityTypes: types, fields: flds, limit: lim },
+        principal,
+      );
+
+      const note = degraded.length
+        ? `\n\n${degraded.map((d) => `[degraded] ${d}`).join('\n')}`
+        : '';
+      if (hits.length === 0) {
+        return textResult(`No results for "${q}".${note}`);
+      }
+      const lines = hits.map((h) => {
+        const label = h.urn ?? h.id;
+        const name = h.name ? ` — ${h.name}` : '';
+        return `- [${h.entityType}] **${label}**${name} (matched ${h.matchedField}, score ${h.score.toFixed(2)})`;
+      });
+      return textResult(
+        `${hits.length} result${hits.length === 1 ? '' : 's'} for "${q}":\n\n${lines.join('\n')}${note}`,
+      );
+    },
+  );
 
   // ── h-list-memories ──────────────────────────────────────────────────────
 

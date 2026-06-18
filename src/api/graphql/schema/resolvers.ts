@@ -139,6 +139,13 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { globalSearch as runGlobalSearch } from '../../../lib/global-search/index.js';
+import type {
+  SearchEntityType,
+  SearchField,
+  SearchPrincipal,
+} from '../../../lib/global-search/index.js';
+import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { assertFullyQualifiedUrn, hasSchemePrefix } from '../../../lib/urn.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
@@ -3258,6 +3265,42 @@ export const resolvers = {
         take: 20,
         orderBy: { name: 'asc' },
       });
+    },
+
+    globalSearch: async (
+      _: unknown,
+      {
+        query,
+        entityTypes,
+        fields,
+        limit,
+      }: {
+        query: string;
+        entityTypes?: SearchEntityType[] | null;
+        fields?: SearchField[] | null;
+        limit?: number | null;
+      },
+      ctx: Context,
+    ) => {
+      // Build the access principal from ctx using the SAME gates as the
+      // per-kind queries, so a global hit can never reach something the caller
+      // couldn't open directly. getAccessibleMemoryIds already carves out other
+      // users' personal/private (even for admin); getMemberOrgIds scopes the
+      // org-rooted slices. App-Key callers (no userId) get no org-read → [].
+      const isPlatformAdmin = !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
+      const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
+      const orgIds = isPlatformAdmin
+        ? null
+        : ctx.userId
+          ? await getMemberOrgIds(ctx.db, ctx.userId)
+          : [];
+      const principal: SearchPrincipal = {
+        viewerUserId: ctx.userId ?? null,
+        isPlatformAdmin,
+        accessibleMemoryIds,
+        orgIds,
+      };
+      return runGlobalSearch(ctx.db, { query, entityTypes, fields, limit }, principal);
     },
 
     me: async (_: unknown, __: unknown, ctx: Context) => {
