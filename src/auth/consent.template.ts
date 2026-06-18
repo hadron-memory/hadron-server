@@ -27,27 +27,52 @@ export const CONSENT_TEMPLATE = `<!doctype html>
   <meta name="robots" content="noindex">
   <title>Authorize {{clientName}}</title>
   <style>
-    :root { color-scheme: light dark; }
-    body {
-      font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      margin: 0; padding: 2rem 1rem; background: #fafafa; color: #1c1c1c;
-      display: flex; justify-content: center;
+    /* Colors are defined as matched light/dark PAIRS via custom properties so a
+       background and its foreground can never resolve to different schemes.
+       Issue #318: the card (main) used to set only its background and INHERIT
+       its text color from body. A forced/auto dark mode (browser force-dark, or
+       a Dark Reader-style extension) recolored the inherited body text to the
+       light value while leaving the explicitly-white card untouched, producing
+       near-invisible light-gray text on a white card. The card now pins its own
+       color to the same pair as its background, which closes that gap. Stock
+       browsers render the same light/dark output as before. */
+    :root {
+      color-scheme: light dark;
+      --bg: #fafafa;
+      --card-bg: #fff;
+      --card-border: #e5e5e5;
+      --text: #1c1c1c;
+      --code-bg: #f0f0f0;
+      --deny-border: #ccc;
+      --deny-hover: #f0f0f0;
     }
     @media (prefers-color-scheme: dark) {
-      body { background: #1c1c1c; color: #e6e6e6; }
-      main { background: #262626; border-color: #333; }
-      code { background: #333; }
-      button[name="decision"][value="deny"] { background: transparent; color: #e6e6e6; border: 1px solid #555; }
+      :root {
+        --bg: #1c1c1c;
+        --card-bg: #262626;
+        --card-border: #333;
+        --text: #e6e6e6;
+        --code-bg: #333;
+        --deny-border: #555;
+        --deny-hover: #333;
+      }
+    }
+    body {
+      font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0; padding: 2rem 1rem;
+      background: var(--bg); color: var(--text);
+      display: flex; justify-content: center;
     }
     main {
       max-width: 480px; width: 100%;
-      background: #fff; border: 1px solid #e5e5e5; border-radius: 8px;
+      background: var(--card-bg); color: var(--text);
+      border: 1px solid var(--card-border); border-radius: 8px;
       padding: 1.5rem 2rem;
     }
     h1 { font-size: 1.25rem; margin: 0 0 1rem; }
     ul { padding-left: 1.25rem; margin: 0.5rem 0 1.25rem; }
     li { margin: 0.25rem 0; }
-    code { background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.9em; }
+    code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.9em; }
     form { display: flex; gap: 0.5rem; margin-top: 1.5rem; }
     button[name="decision"] {
       flex: 1; padding: 0.6rem 1rem;
@@ -57,8 +82,8 @@ export const CONSENT_TEMPLATE = `<!doctype html>
     }
     button[name="decision"][value="approve"] { background: #0a66ff; color: #fff; }
     button[name="decision"][value="approve"]:hover { background: #0855d0; }
-    button[name="decision"][value="deny"]      { background: transparent; color: #1c1c1c; border: 1px solid #ccc; }
-    button[name="decision"][value="deny"]:hover { background: #f0f0f0; }
+    button[name="decision"][value="deny"]      { background: transparent; color: var(--text); border: 1px solid var(--deny-border); }
+    button[name="decision"][value="deny"]:hover { background: var(--deny-hover); }
   </style>
 </head>
 <body>
