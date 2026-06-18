@@ -7,6 +7,7 @@ import { stringify } from 'yaml';
 import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
+import { prepareWriteBranch } from './gitBranch.js';
 import {
   buildNodeFrontmatter,
   preserveUnmanagedFrontmatter,
@@ -118,25 +119,17 @@ export async function writeNodeToGit(
     }
   }
 
-  // 4. Checkout / create the branch
+  // 4. Checkout / create the branch. `prepareWriteBranch` selects checkout vs.
+  // create from the branch's real local+remote existence — the old
+  // "pull --ff-only; on failure checkout -b origin/main" path failed on a
+  // non-default branch with no upstream tracking (see gitBranch.ts).
   try {
     if (token) {
       const tokenUrl = toHttpsUrl(graphRecord.source, token);
       await execFile('git', ['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
     }
     await execFile('git', ['fetch', 'origin'], { cwd: localPath });
-
-    if (branch === 'main' || branch === 'master') {
-      await execFile('git', ['checkout', branch], { cwd: localPath });
-      await execFile('git', ['pull', '--ff-only'], { cwd: localPath });
-    } else {
-      try {
-        await execFile('git', ['checkout', branch], { cwd: localPath });
-        await execFile('git', ['pull', '--ff-only'], { cwd: localPath });
-      } catch {
-        await execFile('git', ['checkout', '-b', branch, 'origin/main'], { cwd: localPath });
-      }
-    }
+    await prepareWriteBranch(localPath, branch);
   } catch (err) {
     console.error(`[writeNodeToGit] Branch setup failed (${branch}) for ${node.loc}:`, err);
     restoreRemote(localPath, graphRecord.source);
@@ -205,7 +198,9 @@ export async function writeNodeToGit(
     ], { cwd: localPath, env: gitEnv });
 
     try {
-      await execFile('git', ['push', 'origin', branch], { cwd: localPath });
+      // `-u` sets upstream tracking so the branch isn't left tracking-less —
+      // the original root cause of the "branch already exists" failure.
+      await execFile('git', ['push', '-u', 'origin', branch], { cwd: localPath });
       console.log(`[writeNodeToGit] Pushed ${node.loc} → ${ownerRepo}@${branch}`);
     } finally {
       restoreRemote(localPath, graphRecord.source);

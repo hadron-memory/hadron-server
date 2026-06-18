@@ -7,6 +7,7 @@ import { stringify } from 'yaml';
 import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
+import { prepareWriteBranch } from './gitBranch.js';
 import { deserializeTags } from '../db/provider.js';
 import {
   buildNodeFrontmatter,
@@ -56,7 +57,11 @@ export async function pushMemoryToGit(
     }
   }
 
-  // 3. Clone or pull the repo
+  // 3. Clone or pull the repo, then check out the write branch. `prepareWriteBranch`
+  // picks checkout/create from the branch's real local+remote existence — see
+  // gitBranch.ts for why the old "pull --ff-only; on failure checkout -b" logic
+  // mis-fired on a non-default write branch.
+  const branch = memory.writeBranch ?? 'main';
   try {
     const cloneUrl = token ? toHttpsUrl(memory.source, token) : memory.source;
 
@@ -65,31 +70,14 @@ export async function pushMemoryToGit(
         await execFile('git', ['remote', 'set-url', 'origin', cloneUrl], { cwd: localPath });
       }
       await execFile('git', ['fetch', 'origin'], { cwd: localPath });
-      const branch = memory.writeBranch ?? 'main';
-      try {
-        await execFile('git', ['checkout', branch], { cwd: localPath });
-        await execFile('git', ['pull', '--ff-only'], { cwd: localPath });
-      } catch {
-        // Branch doesn't exist yet — create it
-        await execFile('git', ['checkout', '-b', branch, 'origin/main'], { cwd: localPath });
-      }
     } else {
       mkdirSync(dirname(localPath), { recursive: true });
       const cloneArgs = ['clone'];
       if (memory.readBranch) cloneArgs.push('--branch', memory.readBranch);
       cloneArgs.push(cloneUrl, localPath);
       await execFile('git', cloneArgs);
-
-      // If writeBranch differs from readBranch, checkout/create it
-      const writeBranch = memory.writeBranch ?? 'main';
-      if (writeBranch !== (memory.readBranch ?? 'main')) {
-        try {
-          await execFile('git', ['checkout', writeBranch], { cwd: localPath });
-        } catch {
-          await execFile('git', ['checkout', '-b', writeBranch], { cwd: localPath });
-        }
-      }
     }
+    await prepareWriteBranch(localPath, branch);
   } catch (err) {
     restoreRemote(localPath, memory.source);
     return { nodeCount: 0, error: `Git setup failed: ${(err as Error).message}` };
@@ -177,7 +165,6 @@ export async function pushMemoryToGit(
       GIT_COMMITTER_EMAIL: `hadron@${org.urn}`,
     };
 
-    const branch = memory.writeBranch ?? 'main';
     await execFile('git', [
       'commit', '-m', `Push ${nodes.length} nodes from Hadron\n\n[hadron-server pushMemoryToGit]`,
     ], { cwd: localPath, env: gitEnv });
@@ -188,7 +175,9 @@ export async function pushMemoryToGit(
     }
 
     try {
-      await execFile('git', ['push', 'origin', branch], { cwd: localPath });
+      // `-u` sets upstream tracking so the branch isn't left tracking-less —
+      // the original root cause of the "branch already exists" failure.
+      await execFile('git', ['push', '-u', 'origin', branch], { cwd: localPath });
       console.log(`[pushMemoryToGit] Pushed ${nodes.length} nodes → ${memory.urn}@${branch}`);
     } finally {
       restoreRemote(localPath, memory.source);
