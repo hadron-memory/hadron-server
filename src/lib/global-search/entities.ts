@@ -18,7 +18,7 @@
  * Spec: cor:api:050:02
  */
 
-import { searchContains } from '../../integrations/db/provider.js';
+import { searchContains, searchStartsWith } from '../../integrations/db/provider.js';
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import {
   bestMatch,
@@ -82,6 +82,10 @@ function textPred(column: string, q: string): AnyWhere {
   return searchContains(column, q) as AnyWhere;
 }
 
+function startsPred(column: string, q: string): AnyWhere {
+  return searchStartsWith(column, q) as AnyWhere;
+}
+
 /**
  * The loc portion of a node-URN query — everything after the leading org +
  * memory hierarchy atoms. A full node URN is `org::memory::loc`, but the Node
@@ -99,6 +103,13 @@ function textPred(column: string, q: string): AnyWhere {
  * loc. The Node row stores its loc single-colon, so rejoining with `:` matches.
  * Returns '' when there is no loc portion (≤ 2 atoms — an org/memory URN, not a
  * node URN).
+ *
+ * This is a heuristic: it can't know whether the first two atoms are really an
+ * org + memory (full node URN) or just the start of a longer loc (a partial-loc
+ * search like `brd:010:01`, where it wrongly yields `01`). The suffix is matched
+ * with `startsWith`, NOT `contains` (see searchNodes), so a wrong guess like
+ * `01` matches ~nothing and can't re-flood the cap — the precise whole-query
+ * predicate carries partial-loc searches.
  */
 function locSuffix(urnTerm: string): string {
   const atoms = urnTerm.replace(/:+/g, ':').split(':');
@@ -217,14 +228,21 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   const preds: AnyWhere[] = [];
   if (fields.has('pk')) preds.push(pkPred(q));
   if (fields.has('urn')) {
-    // Node URN is computed (memory.urn + loc), so match the stored `loc`: the
-    // whole query (a bare-loc search like `cor:brd:010:01`), plus the loc
-    // portion of a full `org::memory::loc` query. Both predicates are precise —
-    // a broad last-atom fallback floods the candidate cap and drops the real
-    // row (#301). The full-URN tier match in scoring still anchors precision.
+    // Node URN is computed (memory.urn + loc), so match the stored `loc`:
+    //   1. CONTAINS the whole query — covers bare- and partial-loc searches
+    //      (`cor:brd:010:01`, `brd:010:01`), the common case.
+    //   2. STARTS WITH the loc portion of a full `org::memory::loc` query —
+    //      covers pasting a complete node URN, whose loc the row stores without
+    //      the org/memory prefix.
+    // The suffix uses startsWith, not contains: locSuffix is a heuristic strip
+    // that mis-fires on partial locs (yielding e.g. `01`), and a broad
+    // `contains '01'` would flood the candidate cap and drop the real row
+    // (#301). An anchored startsWith for a bad guess matches ~nothing, so the
+    // precise predicate (1) still carries the search. Scoring re-anchors on the
+    // full node URN regardless.
     preds.push(textPred('loc', urnTerm));
     const suffix = locSuffix(urnTerm);
-    if (suffix && suffix !== urnTerm) preds.push(textPred('loc', suffix));
+    if (suffix && suffix !== urnTerm) preds.push(startsPred('loc', suffix));
   }
   if (fields.has('name')) preds.push(textPred('name', q));
   if (fields.has('description')) preds.push(textPred('description', q));
