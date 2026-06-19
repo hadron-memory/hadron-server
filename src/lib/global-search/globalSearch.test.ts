@@ -178,6 +178,25 @@ describe('globalSearch — smart-sniff', () => {
     expect(nodeHits[0].matchedField).toBe('urn');
   });
 
+  it('partial-loc search finds its node even amid many same-tail locs (#301)', async () => {
+    // A partial loc like `brd:010:01` (a substring of the stored loc, with the
+    // leading atom dropped) must still hit. locSuffix mis-strips it to `01`;
+    // that fallback is matched with startsWith, so it can't re-flood the cap the
+    // way a `contains '01'` substring would.
+    for (let i = 0; i < 200; i++) {
+      await db.node.create({
+        data: { id: generateId(), memoryId: fx.memoryA, loc: `cor:api:${100 + i}:01`, name: `decoy ${i}`, tags: [] },
+      });
+    }
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId: fx.memoryA, loc: 'cor:brd:010:01', name: 'BRD 10', tags: [] },
+    });
+    for (const query of ['brd:010:01', '010:01', 'cor:brd']) {
+      const { hits } = await globalSearch(db, { query }, viewerP());
+      expect(ids(byType(hits, 'node'))).toContain(target.id);
+    }
+  });
+
   it('full node-URN query finds its node across canonical, legacy, and mixed separators', async () => {
     // memoryA.urn is "org-a:alpha"; the node loc is the colon-path below. The
     // loc-suffix recovery must strip the org + memory atoms regardless of which

@@ -62,6 +62,13 @@ export function searchContains(field: string, search: string): object {
   return { [field]: { contains: search, mode: 'insensitive' } };
 }
 
+export function searchStartsWith(field: string, search: string): object {
+  if (isSqlite) {
+    return { [field]: { startsWith: search } };
+  }
+  return { [field]: { startsWith: search, mode: 'insensitive' } };
+}
+
 // ---------------------------------------------------------------------------
 // Tags filter: PostgreSQL hasEvery; SQLite uses string contains as fallback.
 // ---------------------------------------------------------------------------
