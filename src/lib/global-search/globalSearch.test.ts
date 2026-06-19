@@ -183,11 +183,13 @@ describe('globalSearch — smart-sniff', () => {
     // leading atom dropped) must still hit. locSuffix mis-strips it to `01`;
     // that fallback is matched with startsWith, so it can't re-flood the cap the
     // way a `contains '01'` substring would.
-    for (let i = 0; i < 200; i++) {
-      await db.node.create({
-        data: { id: generateId(), memoryId: fx.memoryA, loc: `cor:api:${100 + i}:01`, name: `decoy ${i}`, tags: [] },
-      });
-    }
+    await Promise.all(
+      Array.from({ length: 200 }, (_, i) =>
+        db.node.create({
+          data: { id: generateId(), memoryId: fx.memoryA, loc: `cor:api:${100 + i}:01`, name: `decoy ${i}`, tags: [] },
+        }),
+      ),
+    );
     const target = await db.node.create({
       data: { id: generateId(), memoryId: fx.memoryA, loc: 'cor:brd:010:01', name: 'BRD 10', tags: [] },
     });
