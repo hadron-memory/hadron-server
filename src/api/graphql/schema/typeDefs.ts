@@ -1856,6 +1856,15 @@ export const typeDefs = `#graphql
       auto-provision via different code paths.
       """
       memoryClass: MemoryClass
+      """
+      Override the vector-index defaults. A 'knowledge'-class memory defaults
+      to vectorIndexEnabled=true with embeddingSource=contentChunks (so any
+      node with content is retrievable immediately, no abstract authoring
+      needed — #281); every other class keeps the column defaults
+      (false / abstract). An explicit value here wins for any class.
+      """
+      vectorIndexEnabled: Boolean
+      embeddingSource: EmbeddingSource
     ): Memory!
 
     """

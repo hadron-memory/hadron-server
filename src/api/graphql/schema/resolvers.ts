@@ -4742,12 +4742,16 @@ export const resolvers = {
         writeBranch,
         visibility,
         memoryClass,
+        vectorIndexEnabled,
+        embeddingSource,
       }: {
         orgId: string; name: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
+        vectorIndexEnabled?: boolean;
+        embeddingSource?: 'abstract' | 'contentChunks' | 'both';
         // GraphQL passes the full MemoryClass enum; the resolver
         // allowlists the user-creatable values below. Spec 034 added
         // `personal`/`private` as owner-only, user-creatable classes
@@ -4885,11 +4889,21 @@ export const resolvers = {
             // 023-app-shape US4: a `memoryClass: 'group'` argument lets
             // callers create group-class memories explicitly.
             class: requestedClass,
-            // 033 — class-derived default for the vector index (FR-001):
+            // 033 — class-derived defaults for the vector index (FR-001 + #281):
             // a `knowledge`-class memory (non-encrypted, as created here) is
-            // searchable by default; `group` and others default off. Flippable
-            // later via updateMemory.
-            vectorIndexEnabled: requestedClass === 'knowledge',
+            // searchable by default. The default source is `contentChunks` —
+            // it embeds `Node.content` directly (no authored abstract / no LLM),
+            // so any node with content is retrievable immediately (the `abstract`
+            // column default would leave most knowledge nodes unindexed until
+            // abstracts are written). `group` and others keep the column defaults
+            // (off / `abstract`). Explicit caller values win for every class.
+            // All flippable later via updateMemory.
+            vectorIndexEnabled: vectorIndexEnabled ?? requestedClass === 'knowledge',
+            ...(embeddingSource !== undefined
+              ? { embeddingSource }
+              : requestedClass === 'knowledge'
+                ? { embeddingSource: 'contentChunks' as const }
+                : {}),
             // Owner-owned personal/private set the creator as the owner
             // (free-standing: app_id / userMemoryOfAgentId stay NULL). All other
             // classes MUST have userId NULL (chk_personal_visibility_user /
