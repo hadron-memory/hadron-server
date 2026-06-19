@@ -1017,6 +1017,8 @@ export const typeDefs = `#graphql
     content: String
     seq: Int
     tags: [String!]
+    "Whether this node can be run as a task by h-run-task (cor:api:060). Omit to preserve the existing value; pass true/false to set it."
+    isRunnable: Boolean
     properties: JSON
     data: JSON
     ownerRepo: String

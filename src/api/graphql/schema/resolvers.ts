@@ -8006,6 +8006,8 @@ interface NodeInput {
   data?: Record<string, unknown>;
   seq?: number;
   tags?: string[];
+  /** Whether this node can be run as a task by h-run-task. Omit to preserve; true/false to set. */
+  isRunnable?: boolean | null;
   properties?: Record<string, unknown>;
   llmModel?: string;
   aiAgent?: string;
