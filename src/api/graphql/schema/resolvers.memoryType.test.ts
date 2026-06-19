@@ -42,6 +42,86 @@ beforeEach(async () => {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// #281 — knowledge-class memories default to a usable semantic index:
+// vectorIndexEnabled=true, embeddingSource=contentChunks (so any node with
+// content is retrievable immediately, no abstract authoring needed).
+// ---------------------------------------------------------------------------
+
+describe('createMemory vector-index defaults (#281)', () => {
+  it('defaults a knowledge memory to vectorIndexEnabled + contentChunks', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'kb' },
+      adminCtx(),
+    );
+    const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(row.class).toBe('knowledge');
+    expect(row.vectorIndexEnabled).toBe(true);
+    expect(row.embeddingSource).toBe('contentChunks');
+  });
+
+  it('keeps the column defaults (off / abstract) for a non-knowledge class', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'team', memoryClass: 'group', visibility: 'GROUP' },
+      adminCtx(),
+    );
+    const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(row.class).toBe('group');
+    expect(row.vectorIndexEnabled).toBe(false);
+    expect(row.embeddingSource).toBe('abstract');
+  });
+
+  it('honors explicit caller-provided values over the knowledge default', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      {
+        orgId: orgA.id,
+        name: 'kb-explicit',
+        vectorIndexEnabled: false,
+        embeddingSource: 'abstract',
+      },
+      adminCtx(),
+    );
+    const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(row.vectorIndexEnabled).toBe(false);
+    expect(row.embeddingSource).toBe('abstract');
+  });
+
+  it('treats an explicit null as unspecified (falls back to the knowledge default)', async () => {
+    // Both fields are nullable in the GraphQL schema, so a client can send
+    // `null`. We coalesce that to the class default rather than forwarding it
+    // to Prisma (the column is non-nullable — null would be a runtime error).
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'kb-null', vectorIndexEnabled: null, embeddingSource: null },
+      adminCtx(),
+    );
+    const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(row.vectorIndexEnabled).toBe(true);
+    expect(row.embeddingSource).toBe('contentChunks');
+  });
+
+  it('honors an explicit opt-in on a non-knowledge class', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      {
+        orgId: orgA.id,
+        name: 'team-indexed',
+        memoryClass: 'group',
+        visibility: 'GROUP',
+        vectorIndexEnabled: true,
+        embeddingSource: 'both',
+      },
+      adminCtx(),
+    );
+    const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(row.vectorIndexEnabled).toBe(true);
+    expect(row.embeddingSource).toBe('both');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // First-attach flow: updateAgent sets systemMemoryId → memory becomes
 // class='system'. 035-visibility-enum-cleanup removed the `type` column;
 // `class` is authoritative, and the attach clears the memory's visibility.
