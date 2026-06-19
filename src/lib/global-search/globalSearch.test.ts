@@ -177,6 +177,23 @@ describe('globalSearch — smart-sniff', () => {
     expect(ids(nodeHits)).toContain(target.id);
     expect(nodeHits[0].matchedField).toBe('urn');
   });
+
+  it('full node-URN query finds its node across canonical, legacy, and mixed separators', async () => {
+    // memoryA.urn is "org-a:alpha"; the node loc is the colon-path below. The
+    // loc-suffix recovery must strip the org + memory atoms regardless of which
+    // separator style the caller pastes (mixed `::`/`:` included).
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId: fx.memoryA, loc: 'cor:brd:010:02', name: 'BRD 10.2', tags: [] },
+    });
+    for (const query of [
+      'org-a::alpha::cor:brd:010:02', // canonical hierarchy, colon loc leaf
+      'org-a:alpha:cor:brd:010:02', // legacy single-colon throughout
+      'org-a::alpha:cor:brd:010:02', // mixed: canonical prefix, colon loc
+    ]) {
+      const { hits } = await globalSearch(db, { query }, viewerP());
+      expect(ids(byType(hits, 'node'))).toContain(target.id);
+    }
+  });
 });
 
 describe('globalSearch — access scope', () => {

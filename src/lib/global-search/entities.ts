@@ -91,15 +91,18 @@ function textPred(column: string, q: string): AnyWhere {
  * Earlier this returned just the LAST colon-atom (e.g. `cor:brd:010:01` → `01`),
  * which was so broad it flooded the candidate cap and crowded the real row out
  * before scoring — a bare-loc search returned nothing (#301). Stripping exactly
- * the org + memory atoms keeps the fallback precise. Prefers the canonical `::`
- * separator, falling back to the legacy single `:`. Returns '' when there is no
- * loc portion (≤ 2 hierarchy atoms — i.e. an org/memory URN, not a node URN).
+ * the org + memory atoms keeps the fallback precise.
+ *
+ * Separator-agnostic: collapse `::`/`:` runs to single-colon atoms (like
+ * match.ts `singleColon`) before stripping, so canonical (`org::memory::loc`),
+ * legacy (`org:memory:loc`), and mixed (`org::memory:loc`) forms all yield the
+ * loc. The Node row stores its loc single-colon, so rejoining with `:` matches.
+ * Returns '' when there is no loc portion (≤ 2 atoms — an org/memory URN, not a
+ * node URN).
  */
 function locSuffix(urnTerm: string): string {
-  const sep = urnTerm.includes('::') ? '::' : ':';
-  const segs = urnTerm.split(sep);
-  if (segs.length <= 2) return '';
-  return segs.slice(2).join(sep);
+  const atoms = urnTerm.replace(/:+/g, ':').split(':');
+  return atoms.length > 2 ? atoms.slice(2).join(':') : '';
 }
 
 /**
