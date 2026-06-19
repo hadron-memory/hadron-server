@@ -88,6 +88,20 @@ describe('createMemory vector-index defaults (#281)', () => {
     expect(row.embeddingSource).toBe('abstract');
   });
 
+  it('treats an explicit null as unspecified (falls back to the knowledge default)', async () => {
+    // Both fields are nullable in the GraphQL schema, so a client can send
+    // `null`. We coalesce that to the class default rather than forwarding it
+    // to Prisma (the column is non-nullable — null would be a runtime error).
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'kb-null', vectorIndexEnabled: null, embeddingSource: null },
+      adminCtx(),
+    );
+    const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(row.vectorIndexEnabled).toBe(true);
+    expect(row.embeddingSource).toBe('contentChunks');
+  });
+
   it('honors an explicit opt-in on a non-knowledge class', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},

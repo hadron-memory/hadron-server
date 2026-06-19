@@ -4750,8 +4750,11 @@ export const resolvers = {
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
-        vectorIndexEnabled?: boolean;
-        embeddingSource?: 'abstract' | 'contentChunks' | 'both';
+        // Both are nullable in the GraphQL schema — a client may pass an
+        // explicit `null`, which we treat as "unspecified" (the `??` / `!= null`
+        // guards below coalesce it to the class default).
+        vectorIndexEnabled?: boolean | null;
+        embeddingSource?: 'abstract' | 'contentChunks' | 'both' | null;
         // GraphQL passes the full MemoryClass enum; the resolver
         // allowlists the user-creatable values below. Spec 034 added
         // `personal`/`private` as owner-only, user-creatable classes
@@ -4899,7 +4902,7 @@ export const resolvers = {
             // (off / `abstract`). Explicit caller values win for every class.
             // All flippable later via updateMemory.
             vectorIndexEnabled: vectorIndexEnabled ?? requestedClass === 'knowledge',
-            ...(embeddingSource !== undefined
+            ...(embeddingSource != null
               ? { embeddingSource }
               : requestedClass === 'knowledge'
                 ? { embeddingSource: 'contentChunks' as const }
