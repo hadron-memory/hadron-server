@@ -81,6 +81,13 @@ psql postgresql://holger@localhost:5432/hadron -v ON_ERROR_STOP=1 -f prisma/post
 # decrypt locally without the prod key — don't copy it. Add --sync to bring the
 # snapshot up to your working schema.prisma.
 PROD_DATABASE_URL='postgresql://…prod…' pnpm db:dev-from-prod
+
+# Mint the FIRST hdr_user_* token for a portal-less server (issue #300,
+# Option 3 — no browser, no IdP). Requires an EXISTING user; never creates
+# one. Identify by exactly one of --email / --user-id / --handle. Runs against
+# DATABASE_URL; raw key printed once. After this, `hadron auth token create`
+# (hadron-cli#68) covers the rest. Core logic: src/admin/mint-bootstrap-token.ts.
+pnpm admin:mint-token --email you@example.com
 ```
 
 ## Common environment variables
