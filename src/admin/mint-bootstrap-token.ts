@@ -57,6 +57,13 @@ export const BOOTSTRAP_ISSUED_VIA = 'admin';
 /** Thrown for any caller error (bad selector, unknown/deleted user). */
 export class BootstrapTokenError extends Error {}
 
+/** Display names for the selector flags, for error messages. */
+const SELECTOR_FLAGS = {
+  email: '--email',
+  userId: '--user-id',
+  handle: '--handle',
+} as const;
+
 /**
  * Mint a `hdr_user_*` token for an existing user. Resolves the user from
  * exactly one selector, refuses to create or to mint for a soft-deleted row,
@@ -73,8 +80,10 @@ export async function mintBootstrapToken(
   selector: UserSelector,
   opts: { label?: string | null } = {},
 ): Promise<MintedBootstrapToken> {
+  // Trim before measuring length so a whitespace-only selector
+  // (e.g. `--handle "  "`) counts as absent, not as present-but-empty.
   const provided = (['email', 'userId', 'handle'] as const).filter(
-    (k) => typeof selector[k] === 'string' && selector[k]!.length > 0,
+    (k) => typeof selector[k] === 'string' && selector[k]!.trim().length > 0,
   );
   if (provided.length === 0) {
     throw new BootstrapTokenError(
@@ -83,24 +92,29 @@ export async function mintBootstrapToken(
   }
   if (provided.length > 1) {
     throw new BootstrapTokenError(
-      `Specify only one selector; got ${provided.map((k) => `--${k}`).join(', ')}.`,
+      `Specify only one selector; got ${provided.map((k) => SELECTOR_FLAGS[k]).join(', ')}.`,
     );
   }
 
+  // Build the lookup from the single resolved key — NOT a second
+  // `!== undefined` chain. The two would disagree when a caller passes an
+  // empty string for one selector and a real value for another
+  // (`{ email: '', userId: 'x' }`): `provided` resolves to `userId`, but a
+  // `selector.email !== undefined` chain would wrongly query by `{ email: '' }`.
+  const key = provided[0];
+  const value = selector[key]!.trim();
   const where =
-    selector.email !== undefined
-      ? { email: selector.email.trim().toLowerCase() }
-      : selector.userId !== undefined
-        ? { id: selector.userId.trim() }
-        : { handle: selector.handle!.trim() };
+    key === 'email'
+      ? { email: value.toLowerCase() }
+      : key === 'userId'
+        ? { id: value }
+        : { handle: value };
 
   const user = await db.user.findUnique({ where });
   if (!user) {
-    const [key] = provided;
     throw new BootstrapTokenError(
-      `No user matches ${`--${key === 'userId' ? 'user-id' : key}`}=${
-        selector[key]
-      }. This command requires an existing user; it does not create one.`,
+      `No user matches ${SELECTOR_FLAGS[key]}=${value}. This command requires ` +
+        'an existing user; it does not create one.',
     );
   }
   if (user.deletedAt) {

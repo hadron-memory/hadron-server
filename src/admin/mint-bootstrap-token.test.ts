@@ -84,6 +84,23 @@ describe('mintBootstrapToken', () => {
     ).rejects.toBeInstanceOf(BootstrapTokenError);
   });
 
+  it('ignores an empty-string selector and resolves by the real one', async () => {
+    // Regression: `provided` (length) and the `where` builder must agree, so
+    // an empty email alongside a real user-id resolves by id, not `{email:''}`.
+    const { user: returned } = await mintBootstrapToken(db, {
+      email: '',
+      userId: user.id,
+    });
+    expect(returned.id).toBe(user.id);
+  });
+
+  it('treats a whitespace-only selector as absent', async () => {
+    await expect(mintBootstrapToken(db, { handle: '   ' })).rejects.toBeInstanceOf(
+      BootstrapTokenError,
+    );
+    expect(await db.userApiKey.count()).toBe(0);
+  });
+
   it('rejects an unknown user without creating one (require-existing-user contract)', async () => {
     await expect(
       mintBootstrapToken(db, { email: 'nobody@example.com' }),
