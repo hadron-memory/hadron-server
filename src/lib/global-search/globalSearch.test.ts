@@ -158,6 +158,25 @@ describe('globalSearch — smart-sniff', () => {
     const { hits } = await globalSearch(db, { query: 'org-a:alpha:guide:intro' }, viewerP());
     expect(ids(byType(hits, 'node'))).toEqual(new Set([fx.nodeA]));
   });
+
+  it('bare-loc search finds its node even amid many same-tail locs (#301)', async () => {
+    // Regression: the loc predicate once fell back to the query's LAST atom
+    // ("01"), which matches a huge fraction of a spec corpus. With take: 100
+    // and no ORDER BY, that flooded the candidate set and crowded the real
+    // exact match out before scoring, so the search returned nothing.
+    for (let i = 0; i < 200; i++) {
+      await db.node.create({
+        data: { id: generateId(), memoryId: fx.memoryA, loc: `cor:api:${100 + i}:01`, name: `decoy ${i}`, tags: [] },
+      });
+    }
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId: fx.memoryA, loc: 'cor:brd:010:01', name: 'BRD 10', tags: [] },
+    });
+    const { hits } = await globalSearch(db, { query: 'cor:brd:010:01' }, viewerP());
+    const nodeHits = byType(hits, 'node');
+    expect(ids(nodeHits)).toContain(target.id);
+    expect(nodeHits[0].matchedField).toBe('urn');
+  });
 });
 
 describe('globalSearch — access scope', () => {

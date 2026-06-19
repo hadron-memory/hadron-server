@@ -82,10 +82,24 @@ function textPred(column: string, q: string): AnyWhere {
   return searchContains(column, q) as AnyWhere;
 }
 
-/** Last colon-separated atom of a URN term — the node-loc tail. */
-function urnTail(urnTerm: string): string {
-  const parts = urnTerm.split(/::|:/).filter(Boolean);
-  return parts.length > 0 ? parts[parts.length - 1] : urnTerm;
+/**
+ * The loc portion of a node-URN query — everything after the leading org +
+ * memory hierarchy atoms. A full node URN is `org::memory::loc`, but the Node
+ * row stores only `loc`, so matching the whole query against `loc` never hits;
+ * we recover the loc here to build a PRECISE loc predicate.
+ *
+ * Earlier this returned just the LAST colon-atom (e.g. `cor:brd:010:01` → `01`),
+ * which was so broad it flooded the candidate cap and crowded the real row out
+ * before scoring — a bare-loc search returned nothing (#301). Stripping exactly
+ * the org + memory atoms keeps the fallback precise. Prefers the canonical `::`
+ * separator, falling back to the legacy single `:`. Returns '' when there is no
+ * loc portion (≤ 2 hierarchy atoms — i.e. an org/memory URN, not a node URN).
+ */
+function locSuffix(urnTerm: string): string {
+  const sep = urnTerm.includes('::') ? '::' : ':';
+  const segs = urnTerm.split(sep);
+  if (segs.length <= 2) return '';
+  return segs.slice(2).join(sep);
 }
 
 /**
@@ -200,11 +214,14 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   const preds: AnyWhere[] = [];
   if (fields.has('pk')) preds.push(pkPred(q));
   if (fields.has('urn')) {
-    // Node URN is computed (memory.urn + loc) — match the loc, plus the URN's
-    // trailing atom so a full node-URN query still hits.
-    const tail = urnTail(urnTerm);
+    // Node URN is computed (memory.urn + loc), so match the stored `loc`: the
+    // whole query (a bare-loc search like `cor:brd:010:01`), plus the loc
+    // portion of a full `org::memory::loc` query. Both predicates are precise —
+    // a broad last-atom fallback floods the candidate cap and drops the real
+    // row (#301). The full-URN tier match in scoring still anchors precision.
     preds.push(textPred('loc', urnTerm));
-    if (tail !== urnTerm) preds.push(textPred('loc', tail));
+    const suffix = locSuffix(urnTerm);
+    if (suffix && suffix !== urnTerm) preds.push(textPred('loc', suffix));
   }
   if (fields.has('name')) preds.push(textPred('name', q));
   if (fields.has('description')) preds.push(textPred('description', q));
