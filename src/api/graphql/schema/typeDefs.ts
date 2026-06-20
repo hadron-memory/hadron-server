@@ -1395,6 +1395,15 @@ export const typeDefs = `#graphql
       usageEvents(memoryId:) filter (#249).
       """
       memory: ID
+      """
+      Scope to a SET of memories by ID (issue #355 — node content search
+      across an agent's / app's memories in one round-trip). Each id is
+      intersected with the caller's access filter; inaccessible ids are
+      silently dropped (a multi-select UI shouldn't fail the whole search
+      because one id isn't readable). Takes precedence over \`memory\` when
+      both are supplied; omit both to search every accessible memory.
+      """
+      memoryIds: [ID!]
       nodeType: String
       tags: [String!]
       search: String
@@ -1421,6 +1430,13 @@ export const typeDefs = `#graphql
     nodeSearch(
       query: String!
       memoryUrn: String
+      """
+      Scope to a SET of memories by ID (issue #355). Intersected with the
+      caller's access filter; inaccessible ids are silently dropped — unlike
+      the singular \`memoryUrn\`, which throws FORBIDDEN. Takes precedence over
+      \`memoryUrn\`; omit both to search every accessible memory.
+      """
+      memoryIds: [ID!]
       mode: SearchMode
       expand: Int
       granularity: SearchGranularity

@@ -2130,7 +2130,7 @@ export const resolvers = {
 
     nodes: async (
       _: unknown,
-      { memory, nodeType, tags, search, prefix: rawPrefix, limit, offset }: { memory?: string; nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number; offset?: number },
+      { memory, memoryIds, nodeType, tags, search, prefix: rawPrefix, limit, offset }: { memory?: string; memoryIds?: string[]; nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       const prefix = rawPrefix ? parseUrnInput(rawPrefix).value : undefined;
@@ -2141,7 +2141,20 @@ export const resolvers = {
       // tagsFilter also emits { AND: [...] } on SQLite, and a spread
       // collision would silently drop the memory scope (the same
       // overwrite class as #253/#255).
-      if (memory) {
+      if (memoryIds && memoryIds.length > 0) {
+        // Plural memory-set scope (issue #355 — content search across an
+        // agent's / app's memories). Intersect the requested set with the
+        // access filter in-place, same composition discipline as the singular
+        // `memory` branch. Inaccessible ids are silently dropped (a
+        // multi-select search shouldn't fail wholesale over one unreadable
+        // id). Takes precedence over `memory` when both are supplied.
+        if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
+          const allowed = new Set((access.memoryId as { in: string[] }).in);
+          access.memoryId = { in: memoryIds.filter((id) => allowed.has(id)) };
+        } else {
+          access.memoryId = { in: memoryIds };
+        }
+      } else if (memory) {
         const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memory);
         if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
           const allowedIds = (access.memoryId as { in: string[] }).in;
@@ -2212,6 +2225,7 @@ export const resolvers = {
       {
         query,
         memoryUrn,
+        memoryIds,
         mode,
         expand,
         granularity,
@@ -2219,6 +2233,7 @@ export const resolvers = {
       }: {
         query: string;
         memoryUrn?: string;
+        memoryIds?: string[];
         mode?: 'keyword' | 'vector' | 'hybrid';
         expand?: number;
         granularity?: 'node' | 'chunk';
@@ -2251,11 +2266,20 @@ export const resolvers = {
       }
       const finalLimit = limit ?? 50;
 
-      // Resolve scope: a single memory by URN (with access check), or the
-      // full accessible set when memoryUrn is omitted.
+      // Resolve scope: a SET of memories by ID (issue #355), a single memory
+      // by URN (with access check), or the full accessible set when both are
+      // omitted.
       let scopeIds: string[];
       const accessible = await getAccessibleMemoryIds(ctx);
-      if (memoryUrn) {
+      if (memoryIds && memoryIds.length > 0) {
+        // Plural memory-set scope: intersect with the accessible set.
+        // Inaccessible ids are silently dropped — unlike the singular
+        // `memoryUrn` path below, which throws FORBIDDEN. Precedence over
+        // `memoryUrn` when both are supplied. The vector/hybrid branches
+        // further narrow this to vector-indexed memories downstream.
+        scopeIds =
+          accessible === null ? memoryIds : memoryIds.filter((id) => accessible.includes(id));
+      } else if (memoryUrn) {
         const { id } = await resolveMemoryRef(ctx.db, memoryUrn);
         if (accessible !== null && !accessible.includes(id)) {
           throw new GraphQLError('Memory not accessible.', {
