@@ -7,6 +7,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -378,9 +379,15 @@ describe('Edge evaluation in processChatResponse', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: systemMemory.id,
+        loc: deriveEdgeLoc(
+          'conversations:onboarding:welcome',
+          'After onboarding, move to strategy',
+          'conversations:strategy',
+        ),
         sourceId: nodeIds['conversations:onboarding:welcome'],
         targetId: nodeIds['conversations:strategy'],
-        label: 'After onboarding, move to strategy',
+        name: 'After onboarding, move to strategy',
         data: { timing: 'on_complete', behavior: 'transition' },
       },
     });
@@ -435,9 +442,15 @@ describe('Edge evaluation in processChatResponse', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: systemMemory.id,
+        loc: deriveEdgeLoc(
+          'conversations:main:check',
+          'Fill profile if missing',
+          'conversations:profile',
+        ),
         sourceId: nodeIds['conversations:main:check'],
         targetId: nodeIds['conversations:profile'],
-        label: 'Fill profile if missing',
+        name: 'Fill profile if missing',
         condition: { missing: ['memory.business_type'] },
         data: {
           timing: 'on_complete',
@@ -493,9 +506,15 @@ describe('Edge evaluation in processChatResponse', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: systemMemory.id,
+        loc: deriveEdgeLoc(
+          'conversations:main:check',
+          'Fill profile if missing',
+          'conversations:profile',
+        ),
         sourceId: nodeIds['conversations:main:check'],
         targetId: nodeIds['conversations:profile'],
-        label: 'Fill profile if missing',
+        name: 'Fill profile if missing',
         condition: { missing: ['memory.business_type'] },
         data: {
           timing: 'on_complete',
@@ -566,9 +585,15 @@ describe('Edge evaluation in processChatResponse', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: systemMemory.id,
+        loc: deriveEdgeLoc(
+          'conversations:thread:triage',
+          'Escalate to handoff',
+          'conversations:escalate',
+        ),
         sourceId: nodeIds['conversations:thread:triage'],
         targetId: nodeIds['conversations:escalate'],
-        label: 'Escalate to handoff',
+        name: 'Escalate to handoff',
         condition: {
           and: [
             { '==': [{ var: 'message.data.urgency' }, 'high'] },
@@ -623,9 +648,15 @@ describe('Edge evaluation in processChatResponse', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: systemMemory.id,
+        loc: deriveEdgeLoc(
+          'conversations:thread:triage',
+          'Escalate to handoff',
+          'conversations:escalate',
+        ),
         sourceId: nodeIds['conversations:thread:triage'],
         targetId: nodeIds['conversations:escalate'],
-        label: 'Escalate to handoff',
+        name: 'Escalate to handoff',
         condition: { '==': [{ var: 'message.data.urgency' }, 'high'] },
         data: { timing: 'on_complete', behavior: 'transition' },
       },
@@ -676,9 +707,15 @@ describe('Edge evaluation in processChatResponse', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: systemMemory.id,
+        loc: deriveEdgeLoc(
+          'conversations:gate:check',
+          'Urgent path',
+          'conversations:urgent',
+        ),
         sourceId: nodeIds['conversations:gate:check'],
         targetId: nodeIds['conversations:urgent'],
-        label: 'Urgent path',
+        name: 'Urgent path',
         condition: { '<': [{ var: 'memory.threshold' }, 5] },
         data: { timing: 'on_complete', behavior: 'transition' },
       },
@@ -747,9 +784,15 @@ describe('Edge evaluation in processChatResponse', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: systemMemory.id,
+        loc: deriveEdgeLoc(
+          'conversations:gate:check',
+          'Urgent path',
+          'conversations:urgent',
+        ),
         sourceId: nodeIds['conversations:gate:check'],
         targetId: nodeIds['conversations:urgent'],
-        label: 'Urgent path',
+        name: 'Urgent path',
         condition: { '<': [{ var: 'memory.threshold' }, 5] },
         data: { timing: 'on_complete', behavior: 'transition' },
       },
@@ -795,9 +838,15 @@ describe('Edge evaluation in processChatResponse', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: systemMemory.id,
+        loc: deriveEdgeLoc(
+          'conversations:flow:a',
+          'On complete, go to other',
+          'conversations:other',
+        ),
         sourceId: nodeIds['conversations:flow:a'],
         targetId: nodeIds['conversations:other'],
-        label: 'On complete, go to other',
+        name: 'On complete, go to other',
         data: { timing: 'on_complete', behavior: 'transition' },
       },
     });

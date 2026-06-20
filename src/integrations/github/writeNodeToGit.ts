@@ -45,7 +45,9 @@ export interface NodeForGit {
   properties?: unknown;
   outgoingEdges: Array<{
     target: { id: string; loc?: string | null };
-    label: string | null;
+    name: string | null;
+    description?: string | null;
+    isRunnable?: boolean | null;
     /** JSONLogic gating expression; null when the edge always fires. */
     condition?: unknown;
     /** Resolution-order hook (lower fires first), DB default 0. */

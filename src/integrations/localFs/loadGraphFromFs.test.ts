@@ -70,7 +70,7 @@ describe('loadGraphFromFs', () => {
     const { graph, edges } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
     const sourceId = graph.nodes.find((n) => n.loc === 'org:a')!.id;
     expect(edges).toHaveLength(1);
-    expect(edges[0]).toEqual({ sourceId, targetId, label: 'links to b' });
+    expect(edges[0]).toEqual({ sourceId, sourceLoc: 'org:a', targetId, name: 'links to b' });
   });
 
   it('logs a warning and continues when a node.yaml is malformed', async () => {

@@ -38,6 +38,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 
 // The MCP tools don't write to git in this surface, but other parts of the
 // codebase do — pin to a no-op so the test doesn't try to push.
@@ -165,27 +166,35 @@ beforeEach(async () => {
     data: [
       {
         id: generateId(),
+        memoryId: edgeSource.memoryId,
         sourceId: edgeSource.id,
         targetId: liveTarget.id,
-        label: 'cites',
+        loc: deriveEdgeLoc(edgeSource.loc, 'cites', liveTarget.loc),
+        name: 'cites',
       },
       {
         id: generateId(),
+        memoryId: edgeSource.memoryId,
         sourceId: edgeSource.id,
         targetId: tombstonedTarget.id,
-        label: 'cites',
+        loc: deriveEdgeLoc(edgeSource.loc, 'cites', tombstonedTarget.loc),
+        name: 'cites',
       },
       {
         id: generateId(),
+        memoryId: liveIncomingSource.memoryId,
         sourceId: liveIncomingSource.id,
         targetId: witness.id,
-        label: 'depends-on',
+        loc: deriveEdgeLoc(liveIncomingSource.loc, 'depends-on', witness.loc),
+        name: 'depends-on',
       },
       {
         id: generateId(),
+        memoryId: tombstonedIncomingSource.memoryId,
         sourceId: tombstonedIncomingSource.id,
         targetId: witness.id,
-        label: 'depends-on',
+        loc: deriveEdgeLoc(tombstonedIncomingSource.loc, 'depends-on', witness.loc),
+        name: 'depends-on',
       },
     ],
   });

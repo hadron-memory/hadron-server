@@ -132,8 +132,14 @@ function normalizeImportedAbstract(raw: unknown): string | null {
 interface EdgeEntry {
   /** Either `target` or `id` identifies the target node. */
   target?: string;
+  /** Relationship name. The on-disk key stays `rel` for back-compat (it was
+   * never literally "label"); read into `Edge.name`. */
   rel: string;
   id?: string;
+  /** Edge description (spec 037). */
+  description?: string;
+  /** Whether the edge is runnable (spec 037). */
+  isRunnable?: boolean;
   /**
    * JSONLogic gating expression. Null/undefined means the edge always
    * fires. The server validates the shape on import (no separate
@@ -159,7 +165,10 @@ interface EdgeEntry {
  */
 export interface LoadedEdge {
   targetId: string;
-  label: string;
+  /** Relationship name (was `label`). */
+  name: string | null;
+  description?: string | null;
+  isRunnable?: boolean | null;
   condition?: unknown;
   priority?: number;
 }
@@ -335,8 +344,14 @@ function loadSidecarEdges(mdPath: string): Array<LoadedEdge> {
 function normalizeEdgeEntry(e: EdgeEntry): LoadedEdge {
   const out: LoadedEdge = {
     targetId: (e.id ?? e.target) as string,
-    label: e.rel,
+    name: e.rel ?? null,
   };
+  if (typeof e.description === 'string') {
+    out.description = e.description;
+  }
+  if (typeof e.isRunnable === 'boolean') {
+    out.isRunnable = e.isRunnable;
+  }
   if (e.condition !== undefined && e.condition !== null) {
     out.condition = e.condition;
   }

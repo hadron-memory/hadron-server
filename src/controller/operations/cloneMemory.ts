@@ -261,9 +261,16 @@ export async function cloneMemoryGraph(
         if (!newTarget && deletedInternalTargetIds.has(e.targetId)) continue;
         edgeRows.push({
           id: generateId(),
+          // Spec 037: edge identity is (loc, memoryId). The clone preserves
+          // node locs, so the derived edge loc stays valid + unique; just
+          // copy it and retarget memoryId to the new memory.
+          memoryId,
           sourceId: idMap.get(e.sourceId)!,
           targetId: newTarget ?? e.targetId,
-          label: e.label,
+          loc: e.loc,
+          name: e.name,
+          description: e.description,
+          isRunnable: e.isRunnable,
           condition: jsonOrDbNull(e.condition),
           priority: e.priority,
           data: jsonOrDbNull(e.data),
@@ -284,7 +291,8 @@ export async function cloneMemoryGraph(
         id: generateId(),
         sourceId: idMap.get(p.sourceId)!,
         targetId: rewriteMemoryUrnRefs(p.targetId, source.urn, args.newUrn)!,
-        label: p.label,
+        loc: p.loc,
+        name: p.name,
         createdBy: args.actorId,
       }));
       if (pendingRows.length > 0) {

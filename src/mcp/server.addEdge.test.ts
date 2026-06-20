@@ -22,6 +22,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { addEdge } from './server.js';
+import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 
@@ -76,17 +77,17 @@ beforeEach(async () => {
 });
 
 describe('addEdge — happy path', () => {
-  it('persists a single edge from source to target with the given label', async () => {
+  it('persists a single edge from source to target with the given name', async () => {
     const result = await addEdge({
       sourceUrn: `urn:node:${memory.urn}:${source.loc}`,
       targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
-      label: 'use this pattern',
+      name: 'use this pattern',
       auth: adminAuth(),
     });
 
     expect(result).not.toHaveProperty('error');
     expect(await db.edge.count({
-      where: { sourceId: source.id, targetId: topLevel.id, label: 'use this pattern' },
+      where: { sourceId: source.id, targetId: topLevel.id, name: 'use this pattern' },
     })).toBe(1);
   });
 
@@ -96,7 +97,7 @@ describe('addEdge — happy path', () => {
     const result = await addEdge({
       sourceUrn: `urn:node:${memory.urn}:${source.loc}`,
       targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
-      label: 'rel',
+      name: 'rel',
       auth: adminAuth(),
     });
 
@@ -107,11 +108,11 @@ describe('addEdge — happy path', () => {
 });
 
 describe('addEdge — non-destructive + idempotent', () => {
-  it('is idempotent: re-running with the same (source, target, label) does not duplicate', async () => {
+  it('is idempotent: re-running with the same (source, target, name) does not duplicate', async () => {
     const args = {
       sourceUrn: `urn:node:${memory.urn}:${source.loc}`,
       targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
-      label: 'cites',
+      name: 'cites',
       auth: adminAuth(),
     };
 
@@ -120,7 +121,7 @@ describe('addEdge — non-destructive + idempotent', () => {
     await addEdge(args);
 
     expect(await db.edge.count({
-      where: { sourceId: source.id, targetId: topLevel.id, label: 'cites' },
+      where: { sourceId: source.id, targetId: topLevel.id, name: 'cites' },
     })).toBe(1);
   });
 
@@ -130,41 +131,43 @@ describe('addEdge — non-destructive + idempotent', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: memory.id,
         sourceId: source.id,
         targetId: nested.id,
-        label: 'preexisting',
+        loc: deriveEdgeLoc(source.loc, 'preexisting', nested.loc),
+        name: 'preexisting',
       },
     });
 
     await addEdge({
       sourceUrn: `urn:node:${memory.urn}:${source.loc}`,
       targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
-      label: 'newly-added',
+      name: 'newly-added',
       auth: adminAuth(),
     });
 
     const edges = await db.edge.findMany({
       where: { sourceId: source.id },
-      orderBy: { label: 'asc' },
+      orderBy: { name: 'asc' },
     });
     expect(edges).toHaveLength(2);
-    expect(edges.map(e => e.label)).toEqual(['newly-added', 'preexisting']);
+    expect(edges.map(e => e.name)).toEqual(['newly-added', 'preexisting']);
   });
 
-  it('supports multiple labels between the same (source, target) pair', async () => {
-    // The unique constraint is on (source, target, LABEL) — same pair
-    // with different labels is a legitimate use case (e.g. `depends-on`
-    // AND `documents`).
+  it('supports multiple names between the same (source, target) pair', async () => {
+    // Edge identity is the per-memory `loc`, which deriveEdgeLoc folds
+    // the name into — same pair with different names yields distinct
+    // locs, a legitimate use case (e.g. `depends-on` AND `documents`).
     await addEdge({
       sourceUrn: `urn:node:${memory.urn}:${source.loc}`,
       targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
-      label: 'depends-on',
+      name: 'depends-on',
       auth: adminAuth(),
     });
     await addEdge({
       sourceUrn: `urn:node:${memory.urn}:${source.loc}`,
       targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
-      label: 'documents',
+      name: 'documents',
       auth: adminAuth(),
     });
 
@@ -183,7 +186,7 @@ describe('addEdge — URN-form dispatch', () => {
     const result = await addEdge({
       sourceUrn: `urn:node:${memory.urn}:${source.loc}`,
       targetUrn: canonicalTarget,
-      label: 'cites',
+      name: 'cites',
       auth: adminAuth(),
     });
 
@@ -197,7 +200,7 @@ describe('addEdge — URN-form dispatch', () => {
     const result = await addEdge({
       sourceUrn: `urn:node:${memory.urn}:${source.loc}`,
       targetUrn: topLevel.id,
-      label: 'cites',
+      name: 'cites',
       auth: adminAuth(),
     });
 
@@ -242,7 +245,7 @@ describe('addEdge — canonical-stored Memory.urn (migration window)', () => {
     const result = await addEdge({
       sourceUrn: `urn:node:addedge-canon-org::canon-mem::src`,
       targetUrn: `urn:node:addedge-canon-org::canon-mem::tgt`,
-      label: 'rel',
+      name: 'rel',
       auth: adminAuth(),
     });
 
@@ -261,7 +264,7 @@ describe('addEdge — input validation', () => {
     const result = await addEdge({
       sourceUrn: source.id,
       targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
-      label: 'cites',
+      name: 'cites',
       auth: adminAuth(),
     });
 
@@ -276,7 +279,7 @@ describe('addEdge — input validation', () => {
     const result = await addEdge({
       sourceUrn: source.loc, // bare loc — missing org+memory
       targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
-      label: 'cites',
+      name: 'cites',
       auth: adminAuth(),
     });
 
@@ -292,7 +295,7 @@ describe('addEdge — not-found errors', () => {
     const result = await addEdge({
       sourceUrn: `urn:node:${memory.urn}:does-not-exist`,
       targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
-      label: 'cites',
+      name: 'cites',
       auth: adminAuth(),
     });
 
@@ -304,7 +307,7 @@ describe('addEdge — not-found errors', () => {
     const result = await addEdge({
       sourceUrn: `urn:node:${memory.urn}:${source.loc}`,
       targetUrn: `urn:node:${memory.urn}:does-not-exist`,
-      label: 'cites',
+      name: 'cites',
       auth: adminAuth(),
     });
 

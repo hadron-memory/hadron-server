@@ -5,13 +5,15 @@ import {
   parseUrnInput,
   formatCanonicalUrn,
   composeNodeUrn,
+  composeEdgeUrn,
   assertFullyQualifiedUrn,
   splitNodeUrn,
   normalizeUrnForLookup,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
-import { validateLoc } from '../lib/validateLoc.js';
+import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
+import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -206,8 +208,17 @@ export function createTestableMcpServer(
   };
 }
 
-/** A single resolved edge ready to be written to the database. */
-export type ResolvedEdge = { targetNodeId: string; label: string };
+/** A single resolved edge ready to be written to the database (spec 037). */
+export type ResolvedEdge = {
+  targetNodeId: string;
+  /** Target node's loc — used to derive the edge loc when none is authored. */
+  targetLoc: string;
+  name: string | null;
+  /** Author-supplied loc, or null to derive from endpoints + name at write. */
+  loc: string | null;
+  description: string | null;
+  isRunnable: boolean | null;
+};
 
 /**
  * Resolve every edge `targetId` through `resolveNodeRef` (spec 007)
@@ -227,14 +238,29 @@ export type ResolvedEdge = { targetNodeId: string; label: string };
  * FK-errored on single-segment short locs.
  */
 export async function resolveEdgeRefs(
-  edges: Array<{ targetId: string; label: string }>,
+  edges: Array<{
+    targetId: string;
+    name?: string | null;
+    loc?: string | null;
+    description?: string | null;
+    isRunnable?: boolean | null;
+  }>,
   sourceMemoryId: string,
 ): Promise<{ resolved: ResolvedEdge[] } | { error: string }> {
   const resolved: ResolvedEdge[] = [];
   for (const edge of edges) {
     try {
       const { id: targetNodeId } = await resolveNodeRef(db, edge.targetId, sourceMemoryId);
-      resolved.push({ targetNodeId, label: edge.label });
+      // Fetch the target's loc so the edge loc can be derived at write time.
+      const tgt = await db.node.findUnique({ where: { id: targetNodeId }, select: { loc: true } });
+      resolved.push({
+        targetNodeId,
+        targetLoc: tgt?.loc ?? '',
+        name: edge.name ?? null,
+        loc: edge.loc ?? null,
+        description: edge.description ?? null,
+        isRunnable: edge.isRunnable ?? null,
+      });
     } catch (err) {
       if (err instanceof NodeNotFoundError) {
         return { error: `Edge target not found: "${err.ref}"` };
@@ -248,8 +274,8 @@ export async function resolveEdgeRefs(
 /**
  * Add a single outgoing edge from `sourceUrn` to `targetUrn`, non-
  * destructively (other edges on the source are left alone) and
- * idempotently (re-running with the same triple is a no-op against
- * the `@@unique([sourceId, targetId, label])` composite). Backs the
+ * idempotently (re-running with the same loc is a no-op against
+ * the `@@unique([loc, memoryId])` identity). Backs the
  * `h-add-edge` MCP tool — extracted so the auth-gated flow (resolve
  * source → check write → resolve target → check read → upsert) is
  * directly testable without wiring a full MCP transport handshake.
@@ -271,15 +297,26 @@ export async function resolveEdgeRefs(
  */
 export type AddEdgeResult =
   | { error: string }
-  | { sourceUrn: string; targetUrn: string; label: string };
+  | { sourceUrn: string; targetUrn: string; edgeUrn: string; name: string | null; loc: string };
 
 export async function addEdge(args: {
   sourceUrn: string;
   targetUrn: string;
-  label: string;
+  name?: string | null;
+  loc?: string | null;
+  description?: string | null;
+  isRunnable?: boolean | null;
   auth: AuthContext;
 }): Promise<AddEdgeResult> {
-  const { sourceUrn: rawSource, targetUrn: rawTarget, label, auth } = args;
+  const {
+    sourceUrn: rawSource,
+    targetUrn: rawTarget,
+    name = null,
+    loc: authoredLoc = null,
+    description = null,
+    isRunnable = null,
+    auth,
+  } = args;
 
   // Spec 022: qualification at the API boundary. Source MUST be a
   // fully-qualified URN — we need to recover the memory URN from it
@@ -339,19 +376,29 @@ export async function addEdge(args: {
     return { error: `Edge target not found: "${rawTarget}"` };
   }
 
+  // Spec 037: the edge's identity is its loc within the source memory.
+  // Author-supplied loc is validated; otherwise derive it deterministically
+  // so re-running with the same endpoints + name stays idempotent.
+  const edgeLoc =
+    authoredLoc != null && authoredLoc !== '' ? authoredLoc : deriveEdgeLoc(sourceLoc, name, target.loc);
+  try {
+    validateLoc(edgeLoc);
+  } catch (e) {
+    if (e instanceof InvalidLocError) return { error: `Invalid edge loc: ${e.message}` };
+    throw e;
+  }
+
   await db.edge.upsert({
-    where: {
-      sourceId_targetId_label: {
-        sourceId: sourceNode.id,
-        targetId: targetNodeId,
-        label,
-      },
-    },
+    where: { loc_memoryId: { loc: edgeLoc, memoryId: sourceMem.id } },
     create: {
       id: generateId(),
+      memoryId: sourceMem.id,
       sourceId: sourceNode.id,
       targetId: targetNodeId,
-      label,
+      loc: edgeLoc,
+      name,
+      description,
+      isRunnable,
       createdBy: auth.clientId ?? null,
     },
     update: {},
@@ -359,7 +406,8 @@ export async function addEdge(args: {
 
   const savedSourceUrn = await nodeUrn(sourceLoc, sourceMem.id);
   const savedTargetUrn = await nodeUrn(target.loc, target.memoryId);
-  return { sourceUrn: savedSourceUrn, targetUrn: savedTargetUrn, label };
+  const savedEdgeUrn = await edgeUrn(edgeLoc, sourceMem.id);
+  return { sourceUrn: savedSourceUrn, targetUrn: savedTargetUrn, edgeUrn: savedEdgeUrn, name, loc: edgeLoc };
 }
 
 /**
@@ -375,6 +423,8 @@ export async function addEdge(args: {
  */
 export async function replaceOutgoingEdges(args: {
   sourceNodeId: string;
+  sourceLoc: string;
+  sourceMemoryId: string;
   resolved: ResolvedEdge[];
   createdBy: string | null;
 }): Promise<void> {
@@ -385,9 +435,13 @@ export async function replaceOutgoingEdges(args: {
       await tx.edge.createMany({
         data: args.resolved.map((e) => ({
           id: generateId(),
+          memoryId: args.sourceMemoryId,
           sourceId: args.sourceNodeId,
           targetId: e.targetNodeId,
-          label: e.label,
+          loc: e.loc ?? deriveEdgeLoc(args.sourceLoc, e.name, e.targetLoc),
+          name: e.name,
+          description: e.description,
+          isRunnable: e.isRunnable,
           createdBy: args.createdBy,
         })),
         skipDuplicates: true,
@@ -409,6 +463,17 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
   // adapter via composeNodeUrn (src/lib/urn.ts) so the two surfaces can't
   // drift on node-URN shape.
   return composeNodeUrn(memUrn, loc);
+}
+
+/** Build a full hrn:edge: URN from an edge loc and its memoryId (spec 037). */
+async function edgeUrn(loc: string, memoryId: string): Promise<string> {
+  let memUrn = memoryUrnCache.get(memoryId);
+  if (!memUrn) {
+    const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+    memUrn = mem?.urn ?? memoryId;
+    memoryUrnCache.set(memoryId, memUrn);
+  }
+  return composeEdgeUrn(memUrn, loc);
 }
 
 // Spec 033 US3 — search helpers moved to src/lib/search.ts to break the
@@ -555,8 +620,8 @@ type ReadProjectionNode = {
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
-  outgoingEdges: Array<{ label: string; target: { loc: string; memoryId: string; name: string } }>;
-  incomingEdges: Array<{ label: string; source: { loc: string; memoryId: string; name: string } }>;
+  outgoingEdges: Array<{ name: string | null; loc: string; target: { loc: string; memoryId: string; name: string } }>;
+  incomingEdges: Array<{ name: string | null; loc: string; source: { loc: string; memoryId: string; name: string } }>;
 };
 
 async function renderNodeReadProjection(
@@ -567,13 +632,13 @@ async function renderNodeReadProjection(
   const outgoingLines = await Promise.all(
     node.outgoingEdges.map(async (e) => {
       const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
-      return `  - ${targetUrn} (${e.target.name}) — ${e.label}`;
+      return `  - ${targetUrn} (${e.target.name}) — ${e.name ?? e.loc}`;
     }),
   );
   const incomingLines = await Promise.all(
     node.incomingEdges.map(async (e) => {
       const sourceUrn = await nodeUrn(e.source.loc, e.source.memoryId);
-      return `  - ${sourceUrn} (${e.source.name}) — ${e.label}`;
+      return `  - ${sourceUrn} (${e.source.name}) — ${e.name ?? e.loc}`;
     }),
   );
 
@@ -1486,11 +1551,11 @@ export function createMcpServerInstance(
           }
           if (n.tags?.length) parts.push(`  Tags: ${(n.tags as string[]).join(', ')}`);
           // Brief edge rendering — matches the keyword path's format.
-          const briefEdges = (n as { outgoingEdges?: Array<{ target: { loc: string; memoryId: string }; label: string }> }).outgoingEdges;
+          const briefEdges = (n as { outgoingEdges?: Array<{ target: { loc: string; memoryId: string }; name: string | null; loc: string }> }).outgoingEdges;
           if (brief && briefEdges?.length) {
             const edgeStrs = await Promise.all(briefEdges.map(async (e) => {
               const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
-              return `→ ${targetUrn} (${e.label})`;
+              return `→ ${targetUrn} (${e.name ?? e.loc})`;
             }));
             parts.push(`  Edges: ${edgeStrs.join(', ')}`);
           }
@@ -1626,11 +1691,11 @@ export function createMcpServerInstance(
               for (const absLine of (n.abstract as string).split(/\r?\n/)) parts.push(`  ${absLine}`);
             }
             if (n.tags?.length) parts.push(`  Tags: ${(n.tags as string[]).join(', ')}`);
-            const briefEdges = (n as { outgoingEdges?: Array<{ target: { loc: string; memoryId: string }; label: string }> }).outgoingEdges;
+            const briefEdges = (n as { outgoingEdges?: Array<{ target: { loc: string; memoryId: string }; name: string | null; loc: string }> }).outgoingEdges;
             if (brief && briefEdges?.length) {
               const edgeStrs = await Promise.all(briefEdges.map(async (e) => {
                 const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
-                return `→ ${targetUrn} (${e.label})`;
+                return `→ ${targetUrn} (${e.name ?? e.loc})`;
               }));
               parts.push(`  Edges: ${edgeStrs.join(', ')}`);
             }
@@ -1758,7 +1823,7 @@ export function createMcpServerInstance(
         if (brief && n.outgoingEdges?.length) {
           const edgeStrs = await Promise.all(n.outgoingEdges.map(async (e: any) => {
             const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
-            return `→ ${targetUrn} (${e.label})`;
+            return `→ ${targetUrn} (${e.name ?? e.loc})`;
           }));
           parts.push(`  Edges: ${edgeStrs.join(', ')}`);
         }
@@ -2166,7 +2231,7 @@ export function createMcpServerInstance(
       const urn = await nodeUrn(node.loc, node.memoryId);
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
         const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
-        return `  - ${targetUrn} (${e.target.name}) — ${e.label}`;
+        return `  - ${targetUrn} (${e.target.name}) — ${e.name ?? e.loc}`;
       }));
       // #186: nodeType in the meta block, mirroring h-read-node's format.
       const meta = [
@@ -2440,8 +2505,11 @@ export function createMcpServerInstance(
       aiAgent: z.string().optional().describe('AI agent tool used (e.g. claude-code, cursor)'),
       edges: z.array(z.object({
         targetUrn: z.string().describe('Target node fully-qualified URN'),
-        label: z.string().describe('Relationship label'),
-      })).optional().describe('Outgoing edges'),
+        name: z.string().optional().describe('Relationship name (was "label"), e.g. depends-on, documents'),
+        loc: z.string().optional().describe('Explicit edge loc. Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
+        description: z.string().optional().describe('Edge description'),
+        isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
+      })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
     },
     async ({ urn: rawUrn, name, nodeType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
       // Spec 022: enforce qualification at the API boundary. Relative-form
@@ -2495,7 +2563,13 @@ export function createMcpServerInstance(
           }
         }
         const r = await resolveEdgeRefs(
-          edges.map((e) => ({ targetId: e.targetUrn, label: e.label })),
+          edges.map((e) => ({
+            targetId: e.targetUrn,
+            name: e.name ?? null,
+            loc: e.loc ?? null,
+            description: e.description ?? null,
+            isRunnable: e.isRunnable ?? null,
+          })),
           memoryId,
         );
         if ('error' in r) return textResult(r.error);
@@ -2563,20 +2637,39 @@ export function createMcpServerInstance(
       if (resolvedEdges !== null) {
         await replaceOutgoingEdges({
           sourceNodeId: upserted.id,
+          sourceLoc: loc,
+          sourceMemoryId: memoryId,
           resolved: resolvedEdges,
           createdBy: auth.clientId ?? null,
         });
       }
 
-      // Resolve any PendingEdges waiting for this node (by ID or loc)
+      // Resolve any PendingEdges waiting for this node (by ID or loc).
+      // Spec 037: the promoted Edge lives in its SOURCE node's memory and
+      // gets a loc (the pending edge's authored loc, else derived from the
+      // source loc + name + this newly-arrived target's loc).
       const pendingByLoc = await db.pendingEdge.findMany({ where: { targetId: loc } });
       const pendingById = await db.pendingEdge.findMany({ where: { targetId: upserted.id } });
       for (const p of [...pendingByLoc, ...pendingById]) {
-        await db.edge.upsert({
-          where: { sourceId_targetId_label: { sourceId: p.sourceId, targetId: upserted.id, label: p.label ?? '' } },
-          create: { id: generateId(), sourceId: p.sourceId, targetId: upserted.id, label: p.label ?? '' },
-          update: {},
+        const pSource = await db.node.findUnique({
+          where: { id: p.sourceId },
+          select: { loc: true, memoryId: true },
         });
+        if (pSource) {
+          const pEdgeLoc = p.loc ?? deriveEdgeLoc(pSource.loc, p.name, upserted.loc);
+          await db.edge.upsert({
+            where: { loc_memoryId: { loc: pEdgeLoc, memoryId: pSource.memoryId } },
+            create: {
+              id: generateId(),
+              memoryId: pSource.memoryId,
+              sourceId: p.sourceId,
+              targetId: upserted.id,
+              loc: pEdgeLoc,
+              name: p.name,
+            },
+            update: {},
+          });
+        }
         await db.pendingEdge.delete({ where: { id: p.id } });
       }
 
@@ -2654,8 +2747,11 @@ export function createMcpServerInstance(
       aiAgent: z.string().optional().describe('AI agent tool used'),
       edges: z.array(z.object({
         targetUrn: z.string().describe('Target node fully-qualified URN'),
-        label: z.string().describe('Relationship label'),
-      })).optional().describe('Replace outgoing edges'),
+        name: z.string().optional().describe('Relationship name (was "label"), e.g. depends-on, documents'),
+        loc: z.string().optional().describe('Explicit edge loc. Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
+        description: z.string().optional().describe('Edge description'),
+        isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
+      })).optional().describe('Replace outgoing edges (the full set on this node)'),
       reason: z.string().optional().describe('Why this change was made (stored in version history)'),
     },
     async ({ urn: rawUrn, name, nodeType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
@@ -2704,7 +2800,13 @@ export function createMcpServerInstance(
           }
         }
         const r = await resolveEdgeRefs(
-          edges.map((e) => ({ targetId: e.targetUrn, label: e.label })),
+          edges.map((e) => ({
+            targetId: e.targetUrn,
+            name: e.name ?? null,
+            loc: e.loc ?? null,
+            description: e.description ?? null,
+            isRunnable: e.isRunnable ?? null,
+          })),
           existing.memoryId,
         );
         if ('error' in r) return textResult(r.error);
@@ -2783,6 +2885,8 @@ export function createMcpServerInstance(
       if (resolvedEdges !== null) {
         await replaceOutgoingEdges({
           sourceNodeId: existing.id,
+          sourceLoc: existing.loc,
+          sourceMemoryId: existing.memoryId,
           resolved: resolvedEdges,
           createdBy: auth.clientId ?? null,
         });
@@ -2856,17 +2960,20 @@ export function createMcpServerInstance(
 
   server.tool(
     'h-add-edge',
-    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike h-update-node, which replaces the full edge set). Idempotent: re-running with the same (source, target, label) is a no-op. The source URN MUST be a fully-qualified node URN (org::memory::loc) — ID-shape sources are rejected because the write-permission check needs the source memory, which is derived from the URN. The target URN may be fully-qualified OR an ID-shape value. Both endpoints must already exist — use h-add-node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
+    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike h-update-node, which replaces the full edge set). Idempotent: re-running with the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). The source URN MUST be a fully-qualified node URN (org::memory::loc) — ID-shape sources are rejected because the write-permission check needs the source memory, which is derived from the URN. The target URN may be fully-qualified OR an ID-shape value. Both endpoints must already exist — use h-add-node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
     {
       sourceUrn: z.string().describe('Fully-qualified source node URN, e.g. "acme.com::mmdata::services:db-helper". ID-shape sources are not accepted (the source\'s memory must be recoverable from the URN for the permission check). The source node must already exist; this tool will not create it.'),
       targetUrn: z.string().describe('Fully-qualified target node URN OR an ID-shape value. The target must already exist; use h-add-node first if it does not.'),
-      label: z.string().describe('Relationship label, e.g. "depends-on", "documents", "supersedes".'),
+      name: z.string().optional().describe('Relationship name (was "label"), e.g. "depends-on", "documents", "supersedes". Optional — loc is the identity.'),
+      loc: z.string().optional().describe('Explicit edge loc (its identity + URN suffix hrn:edge:<org>::<memory>::<loc>). Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
+      description: z.string().optional().describe('Human-readable description of the edge.'),
+      isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task automation, conversation transitions).'),
     },
-    async ({ sourceUrn, targetUrn, label }) => {
-      const result = await addEdge({ sourceUrn, targetUrn, label, auth });
+    async ({ sourceUrn, targetUrn, name, loc, description, isRunnable }) => {
+      const result = await addEdge({ sourceUrn, targetUrn, name, loc, description, isRunnable, auth });
       if ('error' in result) return textResult(result.error);
       return textResult(
-        `Edge saved: ${result.sourceUrn} → ${result.targetUrn} (${result.label})`,
+        `Edge saved: ${result.edgeUrn}${result.name ? ` (${result.name})` : ''}\n  ${result.sourceUrn} → ${result.targetUrn}`,
       );
     },
   );
@@ -3857,7 +3964,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const nUrn = await nodeUrn(node.loc, node.memoryId);
         for (const edge of node.outgoingEdges) {
           if (!nodeIds.has(edge.targetId)) {
-            issues.push(`[broken-ref] ${nUrn} → id:${edge.targetId} (${edge.label})`);
+            issues.push(`[broken-ref] ${nUrn} → id:${edge.targetId} (${edge.name ?? edge.loc})`);
           }
         }
         // Spec 031 FR-011 — abstract counts as legitimate content for the
@@ -4114,7 +4221,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           id: e.id,
           sourceLoc: e.source.loc,
           targetLoc: e.target.loc,
-          label: e.label,
+          loc: e.loc,
+          name: e.name,
           data: e.data,
         }));
 

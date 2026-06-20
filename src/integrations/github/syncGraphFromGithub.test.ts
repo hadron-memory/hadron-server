@@ -215,7 +215,7 @@ describe('syncGraphFromGithub', () => {
 
     const edges = await db.edge.findMany();
     expect(edges).toHaveLength(1);
-    expect(edges[0].label).toBe('uses');
+    expect(edges[0].name).toBe('uses');
   });
 
   it('parks a cross-repo edge as PendingEdge when target is not yet in DB', async () => {
@@ -230,7 +230,7 @@ describe('syncGraphFromGithub', () => {
     const pending = await db.pendingEdge.findMany();
     expect(pending).toHaveLength(1);
     expect(pending[0].targetId).toBe(missingId);
-    expect(pending[0].label).toBe('depends on');
+    expect(pending[0].name).toBe('depends on');
   });
 
   it('resolves a PendingEdge to a real Edge when the target node is later synced', async () => {
@@ -250,6 +250,6 @@ describe('syncGraphFromGithub', () => {
     expect(await db.pendingEdge.count()).toBe(0);
     const edges = await db.edge.findMany();
     expect(edges).toHaveLength(1);
-    expect(edges[0].label).toBe('depends on');
+    expect(edges[0].name).toBe('depends on');
   });
 });

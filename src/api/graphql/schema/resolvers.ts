@@ -109,6 +109,7 @@ import {
   composeInstalledAgentUrn,
 } from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
+import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import {
   NodeLocConflictError,
   NodeNotFoundError,
@@ -3803,13 +3804,46 @@ export const resolvers = {
       // (issue #105), `targetId` accepts ID, full URN, memory-prefixed
       // loc, or short loc — `resolveNodeRef` is the single resolver
       // and throws `NodeNotFoundError` on miss.
-      let resolvedEdges: Array<{ targetNodeId: string; label: string | null }> | null = null;
+      // Spec 037: edges are first-class. Carry the target's loc so the
+      // edge loc can be derived (<sourceLoc>:<name>:<targetLoc>) when the
+      // caller doesn't author one; validate any author-supplied loc here.
+      let resolvedEdges: Array<{
+        targetNodeId: string;
+        targetLoc: string;
+        name: string | null;
+        loc: string | null;
+        description: string | null;
+        isRunnable: boolean | null;
+      }> | null = null;
       if (input.edges !== undefined) {
         resolvedEdges = [];
         for (const e of input.edges) {
+          if (e.loc != null && e.loc !== '') {
+            try {
+              validateLoc(e.loc);
+            } catch (err) {
+              if (err instanceof InvalidLocError) {
+                throw new GraphQLError(err.message, {
+                  extensions: { code: err.name, loc: err.loc, segment: err.segment },
+                });
+              }
+              throw err;
+            }
+          }
           try {
             const { id: targetNodeId } = await resolveNodeRef(ctx.db, e.targetId, input.memoryId);
-            resolvedEdges.push({ targetNodeId, label: e.label ?? null });
+            const tgt = await ctx.db.node.findUnique({
+              where: { id: targetNodeId },
+              select: { loc: true },
+            });
+            resolvedEdges.push({
+              targetNodeId,
+              targetLoc: tgt?.loc ?? '',
+              name: e.name ?? null,
+              loc: e.loc ?? null,
+              description: e.description ?? null,
+              isRunnable: e.isRunnable ?? null,
+            });
           } catch (err) {
             if (err instanceof NodeNotFoundError) {
               throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
@@ -3973,19 +4007,22 @@ export const resolvers = {
       let finalNode = node;
       if (resolvedEdges !== null) {
         // Replace the source's outgoing edges with the resolved set.
-        // After deleteMany clears every existing edge for `sourceId`
-        // there can be no `(sourceId, targetId, label)` collision, so
-        // a single createMany with skipDuplicates: true (a defense
-        // against a duplicate inside the input array itself) is one
-        // round-trip in place of N upserts.
+        // skipDuplicates: true defends against a duplicate (loc, memoryId)
+        // inside the input array itself (e.g. two edges that derive the
+        // same loc). Spec 037: each edge carries memoryId (= source's
+        // memory) and a loc (author-supplied or derived).
         await ctx.db.edge.deleteMany({ where: { sourceId: node.id } });
         await ctx.db.pendingEdge.deleteMany({ where: { sourceId: node.id } });
         if (resolvedEdges.length > 0) {
           await ctx.db.edge.createMany({
             data: resolvedEdges.map((e) => ({
+              memoryId: node.memoryId,
               sourceId: node.id,
               targetId: e.targetNodeId,
-              label: e.label ?? '',
+              loc: e.loc ?? deriveEdgeLoc(node.loc, e.name, e.targetLoc),
+              name: e.name,
+              description: e.description,
+              isRunnable: e.isRunnable,
               createdBy,
             })),
             skipDuplicates: true,
@@ -4044,12 +4081,15 @@ export const resolvers = {
 
     createEdge: async (
       _: unknown,
-      { sourceNodeId, targetNodeId, label, condition, priority, data }: {
+      { sourceNodeId, targetNodeId, name, loc, description, isRunnable, condition, priority, data }: {
         sourceNodeId: string;
         targetNodeId: string;
-        label: string;
-        condition?: unknown;
         // GraphQL nullable args: non-JS clients send explicit nulls.
+        name?: string | null;
+        loc?: string | null;
+        description?: string | null;
+        isRunnable?: boolean | null;
+        condition?: unknown;
         priority?: number | null;
         data?: Record<string, unknown> | null;
       },
@@ -4059,12 +4099,34 @@ export const resolvers = {
       if (condition !== undefined && condition !== null) {
         throwOnInvalidCondition(condition);
       }
+      // Spec 037: an edge carries a memory-unique `loc` (its identity + URN
+      // suffix), with `memoryId` denormalized from the source node. Fetch
+      // both endpoints to compose/derive the loc.
+      const [src, tgt] = await Promise.all([
+        ctx.db.node.findUnique({ where: { id: sourceNodeId }, select: { loc: true, memoryId: true } }),
+        ctx.db.node.findUnique({ where: { id: targetNodeId }, select: { loc: true } }),
+      ]);
+      if (!src) throw new GraphQLError(`Source node not found: "${sourceNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+      if (!tgt) throw new GraphQLError(`Target node not found: "${targetNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+      const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
+      try {
+        validateLoc(edgeLoc);
+      } catch (e) {
+        if (e instanceof InvalidLocError) {
+          throw new GraphQLError(e.message, { extensions: { code: e.name, loc: e.loc, segment: e.segment } });
+        }
+        throw e;
+      }
       return ctx.db.edge.create({
         data: {
           id: generateId(),
+          memoryId: src.memoryId,
           sourceId: sourceNodeId,
           targetId: targetNodeId,
-          label,
+          loc: edgeLoc,
+          name: name ?? null,
+          description: description ?? null,
+          isRunnable: isRunnable ?? null,
           condition: (condition ?? null) as InputJsonValue,
           // != null: the GraphQL arg is nullable, and non-JS clients (the
           // Go CLI) send explicit nulls for unset args. priority is a
@@ -4082,9 +4144,12 @@ export const resolvers = {
 
     updateEdge: async (
       _: unknown,
-      { edgeId, label, condition, priority, data }: {
+      { edgeId, name, loc, description, isRunnable, condition, priority, data }: {
         edgeId: string;
-        label?: string;
+        name?: string | null;
+        loc?: string | null;
+        description?: string | null;
+        isRunnable?: boolean | null;
         condition?: unknown;
         priority?: number | null;
         data?: Record<string, unknown> | null;
@@ -4095,10 +4160,23 @@ export const resolvers = {
       if (condition !== undefined && condition !== null) {
         throwOnInvalidCondition(condition);
       }
+      if (loc != null && loc !== '') {
+        try {
+          validateLoc(loc);
+        } catch (e) {
+          if (e instanceof InvalidLocError) {
+            throw new GraphQLError(e.message, { extensions: { code: e.name, loc: e.loc, segment: e.segment } });
+          }
+          throw e;
+        }
+      }
       // Null semantics differ per arg (#263):
       // - condition/data: null CLEARS the stored value — the spec'd
       //   edge-conditions contract ("null = always fires") that the portal
       //   condition editor relies on.
+      // - name/description: null CLEARS (both nullable since spec 037).
+      // - loc: null/empty = UNSET (keep stored); loc is the identity and
+      //   can't be cleared. isRunnable: undefined preserves, else set.
       // - priority: null = UNSET (keep stored). The column is a
       //   non-nullable Int, so null is never meaningful — and forwarding
       //   it makes Prisma fail with a misleading "Argument source is
@@ -4109,7 +4187,10 @@ export const resolvers = {
       return ctx.db.edge.update({
         where: { id: edgeId },
         data: {
-          ...(label !== undefined ? { label } : {}),
+          ...(name !== undefined ? { name: name ?? null } : {}),
+          ...(loc != null && loc !== '' ? { loc } : {}),
+          ...(description !== undefined ? { description: description ?? null } : {}),
+          ...(isRunnable !== undefined ? { isRunnable: isRunnable ?? null } : {}),
           ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
           ...(priority != null ? { priority } : {}),
           ...(data !== undefined ? { data: data as InputJsonValue } : {}),
@@ -4301,9 +4382,18 @@ export const resolvers = {
           const source = await tx.node.findUnique({ where: { loc_memoryId: { loc: edge.sourceLoc, memoryId: resolvedMemoryId } } });
           const target = await tx.node.findFirst({ where: { loc: edge.targetLoc } });
           if (source && target) {
+            const edgeLoc = edge.loc ?? deriveEdgeLoc(source.loc, edge.name ?? null, target.loc);
             await tx.edge.upsert({
-              where: { sourceId_targetId_label: { sourceId: source.id, targetId: target.id, label: edge.label } },
-              create: { sourceId: source.id, targetId: target.id, label: edge.label },
+              where: { loc_memoryId: { loc: edgeLoc, memoryId: resolvedMemoryId } },
+              create: {
+                memoryId: resolvedMemoryId,
+                sourceId: source.id,
+                targetId: target.id,
+                loc: edgeLoc,
+                name: edge.name ?? null,
+                description: edge.description ?? null,
+                isRunnable: edge.isRunnable ?? null,
+              },
               update: {},
             });
           }
@@ -7118,7 +7208,10 @@ export const resolvers = {
       const edgeSnapshots = edges.map((e) => ({
         sourceLoc: e.source.loc,
         targetLoc: e.target.loc,
-        label: e.label,
+        loc: e.loc,
+        name: e.name,
+        description: e.description,
+        isRunnable: e.isRunnable,
         data: e.data,
       }));
 
@@ -7258,17 +7351,26 @@ export const resolvers = {
         locToId.set(loc, upserted.id);
       }
 
-      // Restore edges from snapshot
+      // Restore edges from snapshot. Spec 037: derive loc when an older
+      // snapshot predates the edge `loc`/`name` fields (it would carry the
+      // legacy `label`); memoryId is the system memory being restored into.
       for (const e of snapshot.edges) {
         const sourceId = locToId.get(e.sourceLoc as string);
         const targetId = locToId.get(e.targetLoc as string);
         if (sourceId && targetId) {
+          const edgeName = ((e.name ?? e.label) as string | null) ?? null;
+          const edgeLoc = (e.loc as string | undefined)
+            ?? deriveEdgeLoc(e.sourceLoc as string, edgeName, e.targetLoc as string);
           await ctx.db.edge.create({
             data: {
               id: generateId(),
+              memoryId: sysMemId,
               sourceId,
               targetId,
-              label: (e.label as string) ?? '',
+              loc: edgeLoc,
+              name: edgeName,
+              description: (e.description as string | null) ?? null,
+              isRunnable: (e.isRunnable as boolean | null) ?? null,
               data: (e.data ?? null) as InputJsonValue,
             },
           });
@@ -8812,7 +8914,10 @@ export const resolvers = {
 
 interface NodeEdgeInput {
   targetId: string;
-  label?: string;
+  name?: string | null;
+  loc?: string | null;
+  description?: string | null;
+  isRunnable?: boolean | null;
 }
 
 interface NodeInput {
@@ -8841,7 +8946,10 @@ interface NodeInput {
 interface EdgeInput {
   sourceLoc: string;
   targetLoc: string;
-  label: string;
+  name?: string | null;
+  loc?: string | null;
+  description?: string | null;
+  isRunnable?: boolean | null;
 }
 
 interface SessionInput {

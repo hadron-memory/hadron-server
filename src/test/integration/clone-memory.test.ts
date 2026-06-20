@@ -4,6 +4,7 @@ import { cleanDb } from '../helpers.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { generateId } from '../../lib/id.js';
 import { computeContentHash } from '../../lib/contentHash.js';
+import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import {
   rewriteMemoryUrnRefs,
   memoryUrnForms,
@@ -177,17 +178,40 @@ describe('cloneMemory', () => {
       data: { id: generateId(), memoryId: otherMem.id, loc: 'x', name: 'X' },
     });
 
+    // Spec 037: edges carry `memoryId` (denormalized from the source node) and a
+    // memory-unique `loc` derived from the endpoint locs + name. All three
+    // sources live in `source`, so memoryId is source.id (the cross-memory
+    // see-also edge is keyed to the SOURCE's memory).
     await db.edge.create({
-      data: { sourceId: guide.id, targetId: setup.id, label: 'routes-to', priority: 2 },
+      data: {
+        memoryId: source.id,
+        sourceId: guide.id,
+        targetId: setup.id,
+        loc: deriveEdgeLoc(guide.loc, 'routes-to', setup.loc),
+        name: 'routes-to',
+        priority: 2,
+      },
     });
     await db.edge.create({
-      data: { sourceId: guide.id, targetId: external.id, label: 'see-also' },
+      data: {
+        memoryId: source.id,
+        sourceId: guide.id,
+        targetId: external.id,
+        loc: deriveEdgeLoc(guide.loc, 'see-also', external.loc),
+        name: 'see-also',
+      },
     });
     await db.edge.create({
-      data: { sourceId: setup.id, targetId: deleted.id, label: 'dangling' },
+      data: {
+        memoryId: source.id,
+        sourceId: setup.id,
+        targetId: deleted.id,
+        loc: deriveEdgeLoc(setup.loc, 'dangling', deleted.loc),
+        name: 'dangling',
+      },
     });
     await db.pendingEdge.create({
-      data: { sourceId: guide.id, targetId: 'org-a::src-mem::missing:loc', label: 'pends' },
+      data: { sourceId: guide.id, targetId: 'org-a::src-mem::missing:loc', name: 'pends' },
     });
 
     const clone = await resolvers.Mutation.cloneMemory(
@@ -248,11 +272,11 @@ describe('cloneMemory', () => {
       where: { sourceId: { in: cloneNodes.map((n) => n.id) } },
     });
     expect(cloneEdges).toHaveLength(2);
-    const routes = cloneEdges.find((e) => e.label === 'routes-to')!;
+    const routes = cloneEdges.find((e) => e.name === 'routes-to')!;
     expect(routes.sourceId).toBe(cloneGuide.id);
     expect(routes.targetId).toBe(cloneSetup.id);
     expect(routes.priority).toBe(2);
-    const seeAlso = cloneEdges.find((e) => e.label === 'see-also')!;
+    const seeAlso = cloneEdges.find((e) => e.name === 'see-also')!;
     expect(seeAlso.targetId).toBe(external.id);
 
     // PendingEdge: source remapped, target string rewritten.

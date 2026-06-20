@@ -74,7 +74,7 @@ describe('buildNodeFrontmatter', () => {
     expect(buildNodeFrontmatter(base)).not.toHaveProperty('nodes');
     expect(buildNodeFrontmatter(base, [])).not.toHaveProperty('nodes');
     const fm = buildNodeFrontmatter(base, [
-      { target: { id: 't1', loc: 'srv:msg' }, label: 'p1: feature' },
+      { target: { id: 't1', loc: 'srv:msg' }, name: 'p1: feature' },
     ]);
     expect(fm.nodes).toEqual([{ id: 't1', loc: 'srv:msg', rel: 'p1: feature' }]);
   });
@@ -83,27 +83,27 @@ describe('buildNodeFrontmatter', () => {
 describe('buildEdgeFrontmatter', () => {
   it('emits { id, loc, rel } in that order when loc is known', () => {
     const [edge] = buildEdgeFrontmatter([
-      { target: { id: 't1', loc: 'srv:msg' }, label: 'p1: feature' },
+      { target: { id: 't1', loc: 'srv:msg' }, name: 'p1: feature' },
     ]);
     expect(Object.keys(edge)).toEqual(['id', 'loc', 'rel']);
     expect(edge).toEqual({ id: 't1', loc: 'srv:msg', rel: 'p1: feature' });
   });
 
-  it('omits loc when unknown, and renders a null label as empty rel', () => {
-    const [edge] = buildEdgeFrontmatter([{ target: { id: 't1' }, label: null }]);
+  it('omits loc when unknown, and renders a null name as empty rel', () => {
+    const [edge] = buildEdgeFrontmatter([{ target: { id: 't1' }, name: null }]);
     expect(edge).toEqual({ id: 't1', rel: '' });
   });
 
   it('emits condition and non-zero priority when set, omits both at their defaults', () => {
     const condition = { '==': [{ var: 'agent.role' }, 'mentor'] };
     const [gated] = buildEdgeFrontmatter([
-      { target: { id: 't1', loc: 'a:b' }, label: 'r', condition, priority: 5 },
+      { target: { id: 't1', loc: 'a:b' }, name: 'r', condition, priority: 5 },
     ]);
     expect(gated).toEqual({ id: 't1', loc: 'a:b', rel: 'r', condition, priority: 5 });
 
     // condition null + priority 0 (the DB default) → both omitted.
     const [plain] = buildEdgeFrontmatter([
-      { target: { id: 't1' }, label: 'r', condition: null, priority: 0 },
+      { target: { id: 't1' }, name: 'r', condition: null, priority: 0 },
     ]);
     expect(plain).toEqual({ id: 't1', rel: 'r' });
   });
@@ -112,8 +112,8 @@ describe('buildEdgeFrontmatter', () => {
     // target is a required FK (type-impossible to be null), but the runtime
     // guard must not crash the sync if a partial edge ever appears.
     const edges: EdgeForGit[] = [
-      { target: null as unknown as EdgeForGit['target'], label: 'orphan' },
-      { target: { id: 't1' }, label: 'ok' },
+      { target: null as unknown as EdgeForGit['target'], name: 'orphan' },
+      { target: { id: 't1' }, name: 'ok' },
     ];
     expect(buildEdgeFrontmatter(edges)).toEqual([{ id: 't1', rel: 'ok' }]);
   });
@@ -217,13 +217,13 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
     const parentFm = buildNodeFrontmatter(
       { id: 'id02', name: 'W2', tags: ['spec'] },
       [
-        { target: { id: 'id010', loc: 'srv:msg:010' }, label: 'p1: parent' },
-        { target: { id: 'id00', loc: 'srv:msg:010:00' }, label: 'inherits' },
+        { target: { id: 'id010', loc: 'srv:msg:010' }, name: 'p1: parent' },
+        { target: { id: 'id00', loc: 'srv:msg:010:00' }, name: 'inherits' },
       ],
     );
     const childFm = buildNodeFrontmatter(
       { id: 'id04', name: 'Deep link', tags: ['spec'] },
-      [{ target: { id: 'id02', loc: 'srv:msg:010:02' }, label: 'p2: flow' }],
+      [{ target: { id: 'id02', loc: 'srv:msg:010:02' }, name: 'p2: flow' }],
     );
 
     const parentPath = nodeFilePath(graphRoot, 'srv:msg:010:02');
@@ -242,10 +242,10 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
     ]);
     // Inline `nodes:` edges survived — no sidecar was written or read.
     expect(edges).toContainEqual(
-      expect.objectContaining({ sourceId: 'id02', targetId: 'id010', label: 'p1: parent' }),
+      expect.objectContaining({ sourceId: 'id02', targetId: 'id010', name: 'p1: parent' }),
     );
     expect(edges).toContainEqual(
-      expect.objectContaining({ sourceId: 'id04', targetId: 'id02', label: 'p2: flow' }),
+      expect.objectContaining({ sourceId: 'id04', targetId: 'id02', name: 'p2: flow' }),
     );
   });
 
@@ -266,7 +266,7 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
     // inline edge, then run the exact cleanup the git writers perform.
     const newPath = nodeFilePath(graphRoot, 'srv:msg:010:02');
     const fm = buildNodeFrontmatter({ id: 'id02', name: 'W2', tags: [] }, [
-      { target: { id: 'id010', loc: 'srv:msg:010' }, label: 'p1: parent' },
+      { target: { id: 'id010', loc: 'srv:msg:010' }, name: 'p1: parent' },
     ]);
     writeFileSync(newPath, `---\n${stringify(fm, { lineWidth: 0 }).trim()}\n---\n\nnew body\n`, 'utf-8');
     const legacy = orphanedLegacyPaths(graphRoot, 'srv:msg:010:02');
@@ -281,7 +281,7 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
     expect(graph.nodes.filter((n) => n.loc === 'srv:msg:010:02')).toHaveLength(1);
     // The fresh inline edge won; the stale sidecar edge is gone.
     expect(edges).toContainEqual(
-      expect.objectContaining({ sourceId: 'id02', targetId: 'id010', label: 'p1: parent' }),
+      expect.objectContaining({ sourceId: 'id02', targetId: 'id010', name: 'p1: parent' }),
     );
     expect(edges.some((e) => e.targetId === 'STALE')).toBe(false);
   });
@@ -289,7 +289,7 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
   it('round-trips edge condition + priority through the inline nodes: array', async () => {
     const condition = { '==': [{ var: 'agent.role' }, 'mentor'] };
     const fm = buildNodeFrontmatter({ id: 'src1', name: 'Source', tags: [] }, [
-      { target: { id: 'tgt1', loc: 'a:b' }, label: 'gated', condition, priority: 7 },
+      { target: { id: 'tgt1', loc: 'a:b' }, name: 'gated', condition, priority: 7 },
     ]);
     const mdPath = nodeFilePath(graphRoot, 'a');
     writeFileSync(mdPath, `---\n${stringify(fm, { lineWidth: 0 }).trim()}\n---\n\nbody\n`, 'utf-8');
@@ -299,7 +299,7 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
       expect.objectContaining({
         sourceId: 'src1',
         targetId: 'tgt1',
-        label: 'gated',
+        name: 'gated',
         condition,
         priority: 7,
       }),

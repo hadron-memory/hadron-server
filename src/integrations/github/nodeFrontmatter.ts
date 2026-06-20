@@ -31,14 +31,19 @@ export interface FrontmatterNodeFields {
 
 /**
  * An outgoing edge as needed for the inline `nodes:` frontmatter — the target
- * node (id + loc), the relationship label, and the gating state. Both export
+ * node (id + loc), the relationship name, and the gating state. Both export
  * paths fetch `outgoingEdges` with the full target node included (and all the
  * edge's scalar columns), so `loc`, `condition`, and `priority` are available
  * at runtime.
  */
 export interface EdgeForGit {
   target: { id: string; loc?: string | null };
-  label: string | null;
+  /** Relationship name (was `label`); emitted on the `rel` key for back-compat. */
+  name: string | null;
+  /** Edge description (spec 037); emitted only when set. */
+  description?: string | null;
+  /** Whether the edge is runnable (spec 037); emitted only when set. */
+  isRunnable?: boolean | null;
   /** JSONLogic gating expression; null/undefined when the edge always fires.
    *  Emitted only when set, so an always-fires edge stays uncluttered. */
   condition?: unknown;
@@ -104,9 +109,9 @@ export function buildNodeFrontmatter(
 /**
  * Build the inline `nodes:` edge array for a node's frontmatter. Emits
  * `{ id, loc?, rel }`: the importer keys off `id` (`e.id ?? e.target`) and
- * reads `rel` as the label; `loc` (the target's human-readable citation) is
- * carried purely for readability and is the key the frontmatter `nodes:`
- * shape declares (`NodeYaml.nodes`). A null label renders as an empty `rel`.
+ * reads `rel` into the edge name; `loc` (the target's human-readable citation)
+ * is carried purely for readability and is the key the frontmatter `nodes:`
+ * shape declares (`NodeYaml.nodes`). A null name renders as an empty `rel`.
  *
  * Supersedes the old `.<seg>/edges.yaml` sidecar (which emitted `target`
  * instead of `loc`) — edges now live inline in the node's own `.md`.
@@ -127,7 +132,9 @@ export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<
     .map((e) => {
       const entry: Record<string, unknown> = { id: e.target.id };
       if (e.target.loc) entry.loc = e.target.loc;
-      entry.rel = e.label ?? '';
+      entry.rel = e.name ?? '';
+      if (e.description) entry.description = e.description;
+      if (e.isRunnable != null) entry.isRunnable = e.isRunnable;
       if (e.condition != null) entry.condition = e.condition;
       if (typeof e.priority === 'number' && e.priority !== 0) entry.priority = e.priority;
       return entry;

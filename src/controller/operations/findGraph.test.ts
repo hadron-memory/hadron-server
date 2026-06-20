@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { generateId } from '../../lib/id.js';
 import { cleanDb, createDbNode, createDbOrgAndGraph } from '../../test/helpers.js';
+import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { findGraph } from './findGraph.js';
 
 beforeEach(async () => {
@@ -64,12 +65,19 @@ describe('findGraph', () => {
     });
 
     await db.edge.create({
-      data: { id: generateId(), sourceId: nodeA.id, targetId: nodeB.id, label: 'links to' },
+      data: {
+        id: generateId(),
+        memoryId: nodeA.memoryId,
+        sourceId: nodeA.id,
+        targetId: nodeB.id,
+        loc: deriveEdgeLoc(nodeA.loc, 'links to', nodeB.loc),
+        name: 'links to',
+      },
     });
 
     const result = await findGraph('org/g');
     const a = result!.nodes.find((n) => n.loc === 'org.g.a') as any;
     expect(a.outgoingEdges).toHaveLength(1);
-    expect(a.outgoingEdges[0].label).toBe('links to');
+    expect(a.outgoingEdges[0].name).toBe('links to');
   });
 });

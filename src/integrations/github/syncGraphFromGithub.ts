@@ -6,6 +6,7 @@ import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
+import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
@@ -128,15 +129,31 @@ export const syncGraphFromGithub = async (
           plaintext: { content: node.content ?? null, abstract: node.abstract ?? null },
         });
 
-        // Resolve any cross-repo PendingEdges that were waiting for this node
+        // Resolve any cross-repo PendingEdges that were waiting for this node.
+        // Spec 037: the promoted Edge lives in its SOURCE node's memory (which
+        // may differ from this repo's memory for cross-repo edges); derive its
+        // loc from the source loc + name + this node's (target) loc.
         const pending = await tx.pendingEdge.findMany({ where: { targetId: nodeId } });
         for (const p of pending) {
-          const label = p.label ?? '';
-          await tx.edge.upsert({
-            where: { sourceId_targetId_label: { sourceId: p.sourceId, targetId: p.targetId, label } },
-            create: { id: generateId(), sourceId: p.sourceId, targetId: p.targetId, label },
-            update: {},
+          const pSrc = await tx.node.findUnique({
+            where: { id: p.sourceId },
+            select: { loc: true, memoryId: true },
           });
+          if (pSrc) {
+            const pLoc = p.loc ?? deriveEdgeLoc(pSrc.loc, p.name, loc);
+            await tx.edge.upsert({
+              where: { loc_memoryId: { loc: pLoc, memoryId: pSrc.memoryId } },
+              create: {
+                id: generateId(),
+                memoryId: pSrc.memoryId,
+                sourceId: p.sourceId,
+                targetId: p.targetId,
+                loc: pLoc,
+                name: p.name,
+              },
+              update: {},
+            });
+          }
           await tx.pendingEdge.delete({ where: { id: p.id } });
         }
       }
@@ -146,25 +163,39 @@ export const syncGraphFromGithub = async (
       });
 
       for (const edge of edges) {
-        const label = edge.label ?? '';
         const targetExists = await tx.node.findUnique({
           where: { id: edge.targetId },
-          select: { id: true },
+          select: { id: true, loc: true },
         });
         if (targetExists) {
+          // Spec 037: the edge's identity is its loc within the source's
+          // memory (= graph.id here; the source came from this repo). Derive
+          // it deterministically so re-syncs are idempotent.
+          const edgeLoc = deriveEdgeLoc(edge.sourceLoc, edge.name, targetExists.loc);
           await tx.edge.upsert({
-            where: { sourceId_targetId_label: { sourceId: edge.sourceId, targetId: edge.targetId, label } },
-            create: { id: generateId(), sourceId: edge.sourceId, targetId: edge.targetId, label },
+            where: { loc_memoryId: { loc: edgeLoc, memoryId: graph.id } },
+            create: {
+              id: generateId(),
+              memoryId: graph.id,
+              sourceId: edge.sourceId,
+              targetId: edge.targetId,
+              loc: edgeLoc,
+              name: edge.name,
+              description: edge.description ?? null,
+              isRunnable: edge.isRunnable ?? null,
+            },
             update: {},
           });
           await tx.pendingEdge.deleteMany({
             where: { sourceId: edge.sourceId, targetId: edge.targetId },
           });
         } else {
+          // Target not synced yet — park as a PendingEdge. loc is derived at
+          // promotion time (once the target arrives and its loc is known).
           await tx.pendingEdge.upsert({
             where: { sourceId_targetId: { sourceId: edge.sourceId, targetId: edge.targetId } },
-            create: { id: generateId(), sourceId: edge.sourceId, targetId: edge.targetId, label: edge.label },
-            update: { label: edge.label },
+            create: { id: generateId(), sourceId: edge.sourceId, targetId: edge.targetId, name: edge.name },
+            update: { name: edge.name },
           });
           pendingEdgeCount++;
         }

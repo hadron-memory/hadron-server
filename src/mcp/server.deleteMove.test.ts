@@ -29,6 +29,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -103,9 +104,11 @@ beforeEach(async () => {
   await db.edge.create({
     data: {
       id: generateId(),
+      memoryId: edgeSource.memoryId,
       sourceId: edgeSource.id,
       targetId: edgeTarget.id,
-      label: 'cites',
+      loc: deriveEdgeLoc(edgeSource.loc, 'cites', edgeTarget.loc),
+      name: 'cites',
     },
   });
 
@@ -323,17 +326,21 @@ describe('h-move-node — return record (#185 F1)', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: fx.memory.id,
         sourceId: fx.nodes.moveSource.id,
         targetId: fx.nodes.edgeTarget.id,
-        label: 'documents',
+        loc: deriveEdgeLoc(fx.nodes.moveSource.loc, 'documents', fx.nodes.edgeTarget.loc),
+        name: 'documents',
       },
     });
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: fx.memory.id,
         sourceId: fx.nodes.edgeSource.id,
         targetId: fx.nodes.moveSource.id,
-        label: 'cites',
+        loc: deriveEdgeLoc(fx.nodes.edgeSource.loc, 'cites', fx.nodes.moveSource.loc),
+        name: 'cites',
       },
     });
 
@@ -690,7 +697,7 @@ describe('h-delete-node — PendingEdge target-side cleanup (#1)', () => {
         id: generateId(),
         sourceId: pendingHost.id,
         targetId: fx.nodes.leaf.id,
-        label: 'pending-link',
+        name: 'pending-link',
       },
     });
 
@@ -735,9 +742,11 @@ describe('h-delete-node — cross-memory edge gate (#4)', () => {
     await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: neighborSrc.memoryId,
         sourceId: neighborSrc.id,
         targetId: fx.nodes.leaf.id,
-        label: 'cross-mem-ref',
+        loc: deriveEdgeLoc(neighborSrc.loc, 'cross-mem-ref', fx.nodes.leaf.loc),
+        name: 'cross-mem-ref',
       },
     });
 
@@ -775,9 +784,11 @@ describe('h-delete-node — cross-memory edge gate (#4)', () => {
     const bridgingEdge = await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: neighborSrc.memoryId,
         sourceId: neighborSrc.id,
         targetId: fx.nodes.leaf.id,
-        label: 'cross-mem-ref',
+        loc: deriveEdgeLoc(neighborSrc.loc, 'cross-mem-ref', fx.nodes.leaf.loc),
+        name: 'cross-mem-ref',
       },
     });
 
@@ -825,9 +836,11 @@ describe('h-delete-node — cross-memory edge gate (#4)', () => {
     const edge = await db.edge.create({
       data: {
         id: generateId(),
+        memoryId: neighborSrc.memoryId,
         sourceId: neighborSrc.id,
         targetId: fx.nodes.leaf.id,
-        label: 'cross-mem-ref',
+        loc: deriveEdgeLoc(neighborSrc.loc, 'cross-mem-ref', fx.nodes.leaf.loc),
+        name: 'cross-mem-ref',
       },
     });
 
