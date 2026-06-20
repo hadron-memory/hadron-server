@@ -2277,8 +2277,14 @@ export const resolvers = {
         // `memoryUrn` path below, which throws FORBIDDEN. Precedence over
         // `memoryUrn` when both are supplied. The vector/hybrid branches
         // further narrow this to vector-indexed memories downstream.
-        scopeIds =
-          accessible === null ? memoryIds : memoryIds.filter((id) => accessible.includes(id));
+        // Set membership keeps the intersection O(N+M), matching the `nodes`
+        // resolver (PR #308 review — bito/gemini).
+        if (accessible === null) {
+          scopeIds = memoryIds;
+        } else {
+          const allowed = new Set(accessible);
+          scopeIds = memoryIds.filter((id) => allowed.has(id));
+        }
       } else if (memoryUrn) {
         const { id } = await resolveMemoryRef(ctx.db, memoryUrn);
         if (accessible !== null && !accessible.includes(id)) {
