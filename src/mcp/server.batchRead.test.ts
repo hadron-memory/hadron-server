@@ -106,7 +106,7 @@ async function addNode(args: {
   name: string;
   content?: string;
   abstract?: string;
-  edges?: Array<{ targetUrn: string; label: string }>;
+  edges?: Array<{ targetUrn: string; name: string }>;
 }) {
   const srv = createTestableMcpServer(adminAuth());
   const params: Record<string, unknown> = { urn: nodeUrn(args.loc), name: args.name };
@@ -129,7 +129,7 @@ function readNode(urn: string, contentScope: 'content' | 'abstract' | 'all') {
 describe('h-read-nodes — explicit set', () => {
   it('returns all nodes with content + edges, in INPUT order', async () => {
     await addNode({ loc: 'beta', name: 'NodeBeta', content: 'beta body' });
-    await addNode({ loc: 'alpha', name: 'NodeAlpha', content: 'alpha body', edges: [{ targetUrn: nodeUrn('beta'), label: 'links-to' }] });
+    await addNode({ loc: 'alpha', name: 'NodeAlpha', content: 'alpha body', edges: [{ targetUrn: nodeUrn('beta'), name: 'links-to' }] });
     await addNode({ loc: 'gamma', name: 'NodeGamma', content: 'gamma body' });
 
     // Request in a deliberately non-loc order.
@@ -159,7 +159,7 @@ describe('h-read-nodes — explicit set', () => {
       name: 'NodePar',
       content: 'par body',
       abstract: 'par abstract',
-      edges: [{ targetUrn: nodeUrn('leaf'), label: 'child' }],
+      edges: [{ targetUrn: nodeUrn('leaf'), name: 'child' }],
     });
 
     const single = await readNode(nodeUrn('par'), 'all');

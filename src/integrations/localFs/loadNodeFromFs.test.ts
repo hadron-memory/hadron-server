@@ -189,8 +189,8 @@ describe('loadNodeFromFs', () => {
 
     const { edges } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
     expect(edges).toHaveLength(2);
-    expect(edges[0]).toEqual({ targetId: 'aaaa000000000000000000000000000000', label: 'Related to' });
-    expect(edges[1]).toEqual({ targetId: 'bbbb000000000000000000000000000000', label: 'Also related' });
+    expect(edges[0]).toEqual({ targetId: 'aaaa000000000000000000000000000000', name: 'Related to' });
+    expect(edges[1]).toEqual({ targetId: 'bbbb000000000000000000000000000000', name: 'Also related' });
   });
 
   it('skips legacy edge entries that have no id', async () => {
@@ -282,8 +282,8 @@ describe('loadNodeFromFs — frontmatter format', () => {
 
     const { edges } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
     expect(edges).toHaveLength(2);
-    expect(edges[0]).toEqual({ targetId: 'entities', label: 'Data model' });
-    expect(edges[1]).toEqual({ targetId: 'abc123', label: 'Naming scheme' });
+    expect(edges[0]).toEqual({ targetId: 'entities', name: 'Data model' });
+    expect(edges[1]).toEqual({ targetId: 'abc123', name: 'Naming scheme' });
   });
 
   it('falls back to frontmatter nodes array when no sidecar exists', async () => {
@@ -295,7 +295,7 @@ describe('loadNodeFromFs — frontmatter format', () => {
 
     const { edges } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
     expect(edges).toHaveLength(1);
-    expect(edges[0]).toEqual({ targetId: 'aaa111', label: 'Related' });
+    expect(edges[0]).toEqual({ targetId: 'aaa111', name: 'Related' });
   });
 
   it('preserves JSONLogic condition and priority on edges (Invariant 10)', async () => {
@@ -332,7 +332,7 @@ describe('loadNodeFromFs — frontmatter format', () => {
     const { edges } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
     expect(edges).toHaveLength(1);
     expect(edges[0].targetId).toBe('force-profile');
-    expect(edges[0].label).toBe('force-profile');
+    expect(edges[0].name).toBe('force-profile');
     expect(edges[0].priority).toBe(5);
     expect(edges[0].condition).toEqual({
       and: [
@@ -350,7 +350,7 @@ describe('loadNodeFromFs — frontmatter format', () => {
     });
     const { edges } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
     expect(edges).toHaveLength(1);
-    expect(edges[0]).toEqual({ targetId: 'plain-target', label: 'goes-to' });
+    expect(edges[0]).toEqual({ targetId: 'plain-target', name: 'goes-to' });
     expect(edges[0]).not.toHaveProperty('condition');
     expect(edges[0]).not.toHaveProperty('priority');
   });

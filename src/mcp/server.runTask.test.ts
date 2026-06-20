@@ -26,6 +26,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -142,7 +143,14 @@ beforeEach(async () => {
     isRunnable: false,
   });
   await db.edge.create({
-    data: { id: generateId(), sourceId: addReview.id, targetId: policy.id, label: 'depends-on' },
+    data: {
+      id: generateId(),
+      memoryId: addReview.memoryId,
+      sourceId: addReview.id,
+      targetId: policy.id,
+      loc: deriveEdgeLoc(addReview.loc, 'depends-on', policy.loc),
+      name: 'depends-on',
+    },
   });
 
   // Beta: a single runnable task (for cross-memory widening + memory scoping).

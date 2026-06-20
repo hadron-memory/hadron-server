@@ -56,7 +56,7 @@ describe('createEdge with explicit-null args (CLI shape, #263)', () => {
       {
         sourceNodeId: nodeA.id,
         targetNodeId: nodeB.id,
-        label: 'routes-to',
+        name: 'routes-to',
         condition: null,
         priority: null,
         data: null,
@@ -78,7 +78,7 @@ describe('createEdge with explicit-null args (CLI shape, #263)', () => {
       {
         sourceNodeId: nodeA.id,
         targetNodeId: nodeB.id,
-        label: 'routes-to',
+        name: 'routes-to',
         priority: 7,
         condition,
         data,
@@ -87,11 +87,11 @@ describe('createEdge with explicit-null args (CLI shape, #263)', () => {
     );
     await resolvers.Mutation.updateEdge(
       {},
-      { edgeId: edge.id, label: 'renamed', condition: null, priority: null, data: null },
+      { edgeId: edge.id, name: 'renamed', condition: null, priority: null, data: null },
       adminCtx(),
     );
     const stored = await db.edge.findUniqueOrThrow({ where: { id: edge.id } });
-    expect(stored.label).toBe('renamed');
+    expect(stored.name).toBe('renamed');
     // priority: null = unset — the non-nullable Int keeps its stored value.
     expect(stored.priority).toBe(7);
     // condition/data: null = clear, per the edge-conditions contract

@@ -621,6 +621,7 @@ model Memory {
 
   organization             Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   nodes                    Node[]
+  edges                    Edge[]               // first-class edges, scoped via denormalized memoryId
   embeddings               NodeEmbedding[]      // 033: per-memory vectors (denormalized memoryId)
   assets                   Asset[]
   subscriptions            MemorySubscription[]
@@ -922,11 +923,31 @@ model NodeEmbedding {
 /// relationship — e.g. "imports", "depends_on", "related-to", "cites",
 /// "abstract-of". An edge whose target is not yet synced lives in
 /// PendingEdge until the target arrives.
+/// A directed Node→Node relation, upgraded to a first-class, addressable
+/// entity (it has its own URN `hrn:edge:<org>::<memory>::<loc>`). Edges
+/// drive task execution/automation and the chatbot/conversation platform,
+/// not just describe graph relationships.
 model Edge {
   id        String    @id @default(cuid())
+  /// Denormalized from the SOURCE node's memory so `loc` can be made
+  /// unique within a memory (a unique index can't span the source-node
+  /// table). For cross-memory edges this is the source's memory.
+  memoryId  String    @map("memory_id")
   sourceId  String    @map("source_id")
   targetId  String    @map("target_id")
-  label     String
+  /// Colon-delimited path within the memory — the edge's identity and
+  /// the suffix of its URN (`hrn:edge:<org>::<memory>::<loc>`). Required;
+  /// derived from the endpoints + name when not authored (see
+  /// `src/lib/edgeLoc.ts`). Mirrors `Node.loc`.
+  loc       String
+  /// Free-form relationship name (e.g. imports, depends_on, abstract-of).
+  /// Optional since spec-037 — `loc` is now the identity. (Was `label`.)
+  name      String?
+  /// Human-readable description of the edge (parity with `Node.description`).
+  description String?
+  /// If true, this edge can be executed/run (task automation, conversation
+  /// transitions). Mirrors `Node.isRunnable`.
+  isRunnable Boolean? @map("is_runnable")
   // Edge-condition spec: JSONLogic gating expression. Null = always fires.
   // Validated server-side at save and evaluate time. See
   // src/lib/edge-conditions/.
@@ -957,10 +978,12 @@ model Edge {
   deletedAt DateTime? @map("deleted_at")
   deletedBy String?   @map("deleted_by")
 
-  source Node @relation("SourceNode", fields: [sourceId], references: [id], onDelete: Cascade)
-  target Node @relation("TargetNode", fields: [targetId], references: [id], onDelete: Cascade)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  source Node   @relation("SourceNode", fields: [sourceId], references: [id], onDelete: Cascade)
+  target Node   @relation("TargetNode", fields: [targetId], references: [id], onDelete: Cascade)
 
-  @@unique([sourceId, targetId, label])
+  @@unique([loc, memoryId])
+  @@index([memoryId])
   @@index([targetId])
   @@map("edges")
 }
@@ -974,7 +997,11 @@ model PendingEdge {
   /// Intended target node id — **NOT a foreign key**; resolved at
   /// promotion time.
   targetId  String    @map("target_id")
-  label     String?
+  /// Edge loc carried so an authored loc survives until promotion; the
+  /// promoted Edge derives one when this is null. (Mirrors `Edge.loc`.)
+  loc       String?
+  /// Free-form relationship name (was `label`).
+  name      String?
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by")
   updatedAt DateTime? @map("updated_at")

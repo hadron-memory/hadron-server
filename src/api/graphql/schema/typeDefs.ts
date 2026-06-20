@@ -267,7 +267,18 @@ export const typeDefs = `#graphql
     id: ID!
     source: Node!
     target: Node!
-    label: String!
+    # Colon-delimited path within the (source node's) memory — the edge's
+    # identity and the suffix of its URN hrn:edge:<org>::<memory>::<loc>.
+    # Compose the full URN client-side as <source.memory.urn>::<loc>, the
+    # same way node URNs are composed.
+    loc: String!
+    # Free-form relationship name (e.g. imports, depends_on). Optional since
+    # spec 037 — loc is the identity. (Was the required 'label'.)
+    name: String
+    description: String
+    # If true, this edge can be executed/run (task automation, conversation
+    # transitions). Mirrors Node.isRunnable.
+    isRunnable: Boolean
     # JSONLogic gating expression. Null = always fires. Validated against
     # the v1 operator subset and the five variable scopes (memory.*,
     # chat.*, agent.*, message.data.*, now()/today()).
@@ -1139,7 +1150,12 @@ export const typeDefs = `#graphql
     node's memory.
     """
     targetId: String!
-    label: String
+    "Relationship name (was 'label'). Optional — loc is the identity."
+    name: String
+    "Explicit edge loc. Omit to derive <sourceLoc>:<name>:<targetLoc>."
+    loc: String
+    description: String
+    isRunnable: Boolean
   }
 
   input NodeInput {
@@ -1182,7 +1198,12 @@ export const typeDefs = `#graphql
   input EdgeInput {
     sourceLoc: String!
     targetLoc: String!
-    label: String!
+    "Relationship name (was 'label'). Optional — loc is the identity."
+    name: String
+    "Explicit edge loc. Omit to derive <sourceLoc>:<name>:<targetLoc>."
+    loc: String
+    description: String
+    isRunnable: Boolean
   }
 
   input SessionInput {
@@ -1723,8 +1744,8 @@ export const typeDefs = `#graphql
     #   non-nullable Int, so null is never a meaningful value for it.
     # Clients that serialize unset args as explicit nulls must omit them
     # instead, or they will clear stored conditions/data on update.
-    createEdge(sourceNodeId: ID!, targetNodeId: ID!, label: String!, condition: JSON, priority: Int, data: JSON): Edge!
-    updateEdge(edgeId: ID!, label: String, condition: JSON, priority: Int, data: JSON): Edge!
+    createEdge(sourceNodeId: ID!, targetNodeId: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
+    updateEdge(edgeId: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeId: ID!): Boolean!
 
     # Asset upload — v1 (spec 004)

@@ -28,7 +28,7 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
 
 let admin: { id: string };
 let memory: { id: string; urn: string };
-let source: { id: string };
+let source: { id: string; loc: string; memoryId: string };
 let topLevel: { id: string; loc: string };
 let nested: { id: string; loc: string };
 
@@ -66,11 +66,17 @@ beforeEach(async () => {
 /** End-to-end helper: resolve, then write. Mirrors what the MCP tools do. */
 async function resolveAndWrite(targetId: string): Promise<string | null> {
   const r = await resolveEdgeRefs(
-    [{ targetId, label: 'use this pattern' }],
+    [{ targetId, name: 'use this pattern' }],
     memory.id,
   );
   if ('error' in r) return r.error;
-  await replaceOutgoingEdges({ sourceNodeId: source.id, resolved: r.resolved, createdBy: admin.id });
+  await replaceOutgoingEdges({
+    sourceNodeId: source.id,
+    sourceLoc: source.loc,
+    sourceMemoryId: source.memoryId,
+    resolved: r.resolved,
+    createdBy: admin.id,
+  });
   return null;
 }
 
@@ -137,7 +143,7 @@ describe('resolveEdgeRefs — canonical `::` URN inputs (#183)', () => {
 
 describe('resolveEdgeRefs — error handling', () => {
   it('returns an error for an unresolvable short loc and writes nothing', async () => {
-    const r = await resolveEdgeRefs([{ targetId: 'does-not-exist', label: 'x' }], memory.id);
+    const r = await resolveEdgeRefs([{ targetId: 'does-not-exist', name: 'x' }], memory.id);
     expect('error' in r && r.error).toMatch(/Edge target not found.*does-not-exist/);
     // Caller would not call replaceOutgoingEdges in this branch, so no
     // edges or pending_edges should ever appear.
@@ -147,7 +153,7 @@ describe('resolveEdgeRefs — error handling', () => {
 
   it('returns an error for an unresolvable URN and writes nothing', async () => {
     const r = await resolveEdgeRefs(
-      [{ targetId: `urn:node:${memory.urn}:gone`, label: 'x' }],
+      [{ targetId: `urn:node:${memory.urn}:gone`, name: 'x' }],
       memory.id,
     );
     expect('error' in r && r.error).toMatch(/Edge target not found/);
@@ -161,28 +167,40 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
     // Seed an existing edge.
     await replaceOutgoingEdges({
       sourceNodeId: source.id,
-      resolved: [{ targetNodeId: topLevel.id, label: 'a' }],
+      sourceLoc: source.loc,
+      sourceMemoryId: source.memoryId,
+      resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc, name: 'a', loc: null, description: null, isRunnable: null }],
       createdBy: admin.id,
     });
     // Replace with a different one.
     await replaceOutgoingEdges({
       sourceNodeId: source.id,
-      resolved: [{ targetNodeId: nested.id, label: 'cites' }],
+      sourceLoc: source.loc,
+      sourceMemoryId: source.memoryId,
+      resolved: [{ targetNodeId: nested.id, targetLoc: nested.loc, name: 'cites', loc: null, description: null, isRunnable: null }],
       createdBy: admin.id,
     });
     const edges = await db.edge.findMany({ where: { sourceId: source.id } });
     expect(edges).toHaveLength(1);
     expect(edges[0].targetId).toBe(nested.id);
-    expect(edges[0].label).toBe('cites');
+    expect(edges[0].name).toBe('cites');
   });
 
   it('clears all edges when called with an empty array', async () => {
     await replaceOutgoingEdges({
       sourceNodeId: source.id,
-      resolved: [{ targetNodeId: topLevel.id, label: 'a' }],
+      sourceLoc: source.loc,
+      sourceMemoryId: source.memoryId,
+      resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc, name: 'a', loc: null, description: null, isRunnable: null }],
       createdBy: admin.id,
     });
-    await replaceOutgoingEdges({ sourceNodeId: source.id, resolved: [], createdBy: admin.id });
+    await replaceOutgoingEdges({
+      sourceNodeId: source.id,
+      sourceLoc: source.loc,
+      sourceMemoryId: source.memoryId,
+      resolved: [],
+      createdBy: admin.id,
+    });
     expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(0);
   });
 
@@ -192,17 +210,18 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
     // the prior edge stays intact, no half-written state.
     await replaceOutgoingEdges({
       sourceNodeId: source.id,
-      resolved: [{ targetNodeId: topLevel.id, label: 'seed' }],
+      sourceLoc: source.loc,
+      sourceMemoryId: source.memoryId,
+      resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc, name: 'seed', loc: null, description: null, isRunnable: null }],
       createdBy: admin.id,
     });
-    // Force a unique-constraint failure by passing two rows with the
-    // same (sourceId, targetId, label) and skipDuplicates: true. With
-    // skipDuplicates the duplicate is silently dropped and the
-    // transaction commits — but the prior `seed` edge is gone (a
-    // legitimate replacement). To assert atomicity under failure, we
-    // wrap the call in a try/catch and inject a failure by including
-    // a row whose targetId references a node that gets deleted between
-    // resolution and write.
+    // Force a per-memory `loc` unique collision by passing two rows that
+    // derive the same loc and skipDuplicates: true. With skipDuplicates
+    // the duplicate is silently dropped and the transaction commits —
+    // but the prior `seed` edge is gone (a legitimate replacement). To
+    // assert atomicity under failure, we wrap the call in a try/catch
+    // and inject a failure by including a row whose targetId references
+    // a node that gets deleted between resolution and write.
     const ghost = await db.node.create({
       data: { id: generateId(), memoryId: memory.id, loc: 'ghost', name: 'ghost' },
     });
@@ -211,7 +230,9 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
     try {
       await replaceOutgoingEdges({
         sourceNodeId: source.id,
-        resolved: [{ targetNodeId: ghost.id, label: 'will-fk-error' }],
+        sourceLoc: source.loc,
+        sourceMemoryId: source.memoryId,
+        resolved: [{ targetNodeId: ghost.id, targetLoc: 'ghost', name: 'will-fk-error', loc: null, description: null, isRunnable: null }],
         createdBy: admin.id,
       });
     } catch {
@@ -222,7 +243,7 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
     // deleteMany, leaving the original `seed` edge intact.
     const edges = await db.edge.findMany({ where: { sourceId: source.id } });
     expect(edges).toHaveLength(1);
-    expect(edges[0].label).toBe('seed');
+    expect(edges[0].name).toBe('seed');
   });
 });
 
@@ -230,8 +251,8 @@ describe('two-phase API — partial-apply prevention', () => {
   it('does not call replaceOutgoingEdges when resolution fails (caller pattern)', async () => {
     const r = await resolveEdgeRefs(
       [
-        { targetId: topLevel.id, label: 'good' },
-        { targetId: 'does-not-exist', label: 'bad' },
+        { targetId: topLevel.id, name: 'good' },
+        { targetId: 'does-not-exist', name: 'bad' },
       ],
       memory.id,
     );

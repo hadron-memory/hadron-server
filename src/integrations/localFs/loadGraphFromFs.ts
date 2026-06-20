@@ -11,8 +11,13 @@ interface FsGraph {
 
 export interface GraphEdge {
   sourceId: string;
+  /** Source node's loc — used to derive the edge loc at sync-write time. */
+  sourceLoc: string;
   targetId: string;
-  label: string;
+  /** Relationship name (was `label`). */
+  name: string | null;
+  description?: string | null;
+  isRunnable?: boolean | null;
   /** JSONLogic gating expression preserved through .node/ import. Null/undefined = always fires. */
   condition?: unknown;
   /** Edge resolution-order hook (lower fires first). */
@@ -81,8 +86,11 @@ export const loadGraphFromFs = async (
       for (const edge of result.edges) {
         edges.push({
           sourceId: result.node.id!,
+          sourceLoc: result.node.loc!,
           targetId: edge.targetId,
-          label: edge.label,
+          name: edge.name,
+          ...(edge.description != null ? { description: edge.description } : {}),
+          ...(edge.isRunnable != null ? { isRunnable: edge.isRunnable } : {}),
           ...(edge.condition !== undefined ? { condition: edge.condition } : {}),
           ...(edge.priority !== undefined ? { priority: edge.priority } : {}),
         });

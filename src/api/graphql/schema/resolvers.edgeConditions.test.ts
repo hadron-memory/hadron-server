@@ -12,6 +12,11 @@ import { resolvers, type Context } from './resolvers.js';
 // createEdge / updateEdge resolvers touch.
 function mockDb() {
   return {
+    // Spec 037: createEdge fetches both endpoints to compose/derive the edge
+    // loc + denormalize memoryId. A single stub serves source and target.
+    node: {
+      findUnique: vi.fn().mockResolvedValue({ loc: 'l', memoryId: 'mem-1' }),
+    },
     edge: {
       create: vi.fn().mockImplementation(async ({ data }: { data: unknown }) => ({
         id: 'edge-1',
@@ -53,7 +58,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       {
         sourceNodeId: 'node-source',
         targetNodeId: 'node-target',
-        label: 'force-profile',
+        name: 'force-profile',
         condition,
       },
       testCtx,
@@ -69,7 +74,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       {
         sourceNodeId: 'node-source',
         targetNodeId: 'node-target',
-        label: 'urgent',
+        name: 'urgent',
         condition: null,
         priority: 5,
       },
@@ -89,7 +94,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       {
         sourceNodeId: 'node-source',
         targetNodeId: 'node-target',
-        label: 'routes-to',
+        name: 'routes-to',
         condition: null,
         priority: null,
         data: null,
@@ -104,7 +109,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
   it('updateEdge nulls: priority omitted (unset), condition/data forwarded as clear (#263)', async () => {
     await mutations.updateEdge(
       null,
-      { edgeId: 'edge-1', label: 'renamed', condition: null, priority: null, data: null },
+      { edgeId: 'edge-1', name: 'renamed', condition: null, priority: null, data: null },
       testCtx,
     );
     const calls = (testCtx.db.edge.update as ReturnType<typeof vi.fn>).mock.calls;
@@ -114,7 +119,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     // condition/data keep the spec'd null-clears contract.
     expect(calls[0][0].data.condition).toBeNull();
     expect(calls[0][0].data.data).toBeNull();
-    expect(calls[0][0].data.label).toBe('renamed');
+    expect(calls[0][0].data.name).toBe('renamed');
   });
 
   it('rejects a disallowed operator with INVALID_EDGE_CONDITION / DISALLOWED_OPERATOR', async () => {
@@ -124,7 +129,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
         {
           sourceNodeId: 'a',
           targetNodeId: 'b',
-          label: 'l',
+          name: 'l',
           condition: { cat: ['x', 'y'] },
         },
         testCtx,
@@ -146,7 +151,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
         {
           sourceNodeId: 'a',
           targetNodeId: 'b',
-          label: 'l',
+          name: 'l',
           condition: { var: 'session.foo' },
         },
         testCtx,
@@ -167,7 +172,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
         {
           sourceNodeId: 'a',
           targetNodeId: 'b',
-          label: 'l',
+          name: 'l',
           condition: { var: 'message.data.exception' },
         },
         testCtx,
@@ -186,7 +191,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await expect(
       mutations.createEdge(
         null,
-        { sourceNodeId: 'a', targetNodeId: 'b', label: 'l', condition: huge },
+        { sourceNodeId: 'a', targetNodeId: 'b', name: 'l', condition: huge },
         testCtx,
       ),
     ).rejects.toMatchObject({
@@ -203,7 +208,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await expect(
       mutations.createEdge(
         null,
-        { sourceNodeId: 'a', targetNodeId: 'b', label: 'l', condition: nested },
+        { sourceNodeId: 'a', targetNodeId: 'b', name: 'l', condition: nested },
         testCtx,
       ),
     ).rejects.toMatchObject({
@@ -220,7 +225,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       {
         sourceNodeId: 'a',
         targetNodeId: 'b',
-        label: 'unconditional',
+        name: 'unconditional',
         condition: null,
       },
       testCtx,
@@ -260,7 +265,7 @@ describe('GraphQL Mutation.updateEdge — condition validation', () => {
   it('does not touch condition when omitted', async () => {
     await mutations.updateEdge(
       null,
-      { edgeId: 'edge-1', label: 'new-label' },
+      { edgeId: 'edge-1', name: 'new-label' },
       testCtx,
     );
     const calls = (testCtx.db.edge.update as ReturnType<typeof vi.fn>).mock.calls;

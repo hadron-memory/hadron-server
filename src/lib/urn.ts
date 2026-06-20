@@ -1205,9 +1205,29 @@ export function formatCanonicalUrn(
  * two surfaces can't drift on node-URN shape.
  */
 export function composeNodeUrn(memUrn: string, loc: string): string {
+  return composeMemoryScopedUrn('node', memUrn, loc);
+}
+
+/**
+ * Build a canonical `hrn:edge:<mem>::<loc>` URN from a memory URN + an edge
+ * loc. Spec 037: edges are first-class, addressable peers of nodes — same
+ * memory-scoped, loc-addressed shape, distinguished only by the `edge` type
+ * word. The edge's memory is its SOURCE node's memory.
+ */
+export function composeEdgeUrn(memUrn: string, loc: string): string {
+  return composeMemoryScopedUrn('edge', memUrn, loc);
+}
+
+/**
+ * Shared core of {@link composeNodeUrn} / {@link composeEdgeUrn}: canonicalize
+ * the memory URN to a known-shape bare form, then attach `loc` as a single
+ * leaf path-segment with `::` so a multi-atom loc (e.g. `review:sort`) stays
+ * one leaf rather than being re-split into hierarchy levels.
+ */
+function composeMemoryScopedUrn(type: 'node' | 'edge', memUrn: string, loc: string): string {
   const memCanonical = formatCanonicalUrn('memory', memUrn);
   const bareMemCanonical = memCanonical.substring(`${CANONICAL_SCHEME}:memory:`.length);
-  return `${CANONICAL_SCHEME}:node:${bareMemCanonical}::${loc}`;
+  return `${CANONICAL_SCHEME}:${type}:${bareMemCanonical}::${loc}`;
 }
 
 /**

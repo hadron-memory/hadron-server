@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
+import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import type { EmbeddingClient } from '../../lib/embedding/index.js';
 import {
   setEmbeddingClientForTests,
@@ -67,9 +68,23 @@ async function seedNode(opts: { loc: string; name?: string; description?: string
   return nodeId;
 }
 
-async function seedEdge(srcId: string, tgtId: string, label = 'rel'): Promise<void> {
+async function seedEdge(srcId: string, tgtId: string, name = 'rel'): Promise<void> {
+  // Spec 037: edges carry a memory-unique `loc` (derived from endpoint locs +
+  // name) and `memoryId` (denormalized from the source node). All seeded nodes
+  // live in `memId`, so derive both from the endpoints.
+  const [src, tgt] = await Promise.all([
+    db.node.findUniqueOrThrow({ where: { id: srcId }, select: { loc: true, memoryId: true } }),
+    db.node.findUniqueOrThrow({ where: { id: tgtId }, select: { loc: true } }),
+  ]);
   await db.edge.create({
-    data: { id: generateId(), sourceId: srcId, targetId: tgtId, label },
+    data: {
+      id: generateId(),
+      memoryId: src.memoryId,
+      sourceId: srcId,
+      targetId: tgtId,
+      loc: deriveEdgeLoc(src.loc, name, tgt.loc),
+      name,
+    },
   });
 }
 
