@@ -103,3 +103,41 @@ describe('Query.nodes memory filter', () => {
     ).rejects.toThrow();
   });
 });
+
+describe('Query.nodes memoryIds (plural) filter — issue #355', () => {
+  it('scopes to a SET of memories by id', async () => {
+    const nodes = await resolvers.Query.nodes(
+      null, { memoryIds: [memA1.id, memA2.id] }, userActx(),
+    );
+    expect(nodes.map((n) => n.loc).sort()).toEqual(['one', 'two']);
+  });
+
+  it('scopes to a subset of the accessible memories', async () => {
+    const nodes = await resolvers.Query.nodes(null, { memoryIds: [memA2.id] }, userActx());
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].loc).toBe('two');
+  });
+
+  it('intersects with the access filter: inaccessible ids are silently dropped', async () => {
+    // memB belongs to org-b, which userA cannot read. The whole search must
+    // not fail — the inaccessible id is simply dropped from the set.
+    const nodes = await resolvers.Query.nodes(
+      null, { memoryIds: [memA1.id, memB.id] }, userActx(),
+    );
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].loc).toBe('one');
+  });
+
+  it('takes precedence over the singular `memory` arg when both are supplied', async () => {
+    const nodes = await resolvers.Query.nodes(
+      null, { memory: memA1.id, memoryIds: [memA2.id] }, userActx(),
+    );
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].loc).toBe('two');
+  });
+
+  it('an empty memoryIds array falls through to all accessible memories', async () => {
+    const nodes = await resolvers.Query.nodes(null, { memoryIds: [] }, userActx());
+    expect(nodes).toHaveLength(2);
+  });
+});
