@@ -170,6 +170,7 @@ import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchC
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { createNode } from '../../../controller/operations/createNode.js';
+import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import {
   listInboxMessages,
   replyToMessage,
@@ -4011,6 +4012,16 @@ export const resolvers = {
         abstractOriginHash: _stripCallerSupplied,
         ...nodeFieldsClean
       } = nodeFields as Record<string, unknown>;
+
+      // Auto-assign `seq` for a NEW node joining an already-ordered sibling
+      // list: with no explicit seq it inherits max(sibling seq)+1 and lands at
+      // the end. Create-only; an explicit input.seq always wins; an unordered /
+      // empty sibling list leaves seq null (nextSiblingSeq returns null).
+      const seqForCreate =
+        existing == null && input.seq == null
+          ? await nextSiblingSeq(ctx.db, input.memoryId, input.loc)
+          : undefined;
+
       const node = await ctx.db.node.upsert({
         where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
         create: {
@@ -4019,6 +4030,7 @@ export const resolvers = {
           tags,
           createdBy,
           ...hashPayload,
+          ...(seqForCreate != null ? { seq: seqForCreate } : {}),
         } as Prisma.NodeUncheckedCreateInput,
         update: {
           ...nodeFieldsClean,
