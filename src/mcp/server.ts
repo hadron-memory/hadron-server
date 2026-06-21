@@ -2597,6 +2597,7 @@ export function createMcpServerInstance(
       const nextAbstractOriginHash: string | null =
         normalizedAbstract !== null ? computeContentHash(content ?? null) : null;
 
+      // Spec: cor:dmo:020:01 (Node ordering).
       // Auto-assign `seq` for a NEW node joining an already-ordered sibling
       // list (parity with the GraphQL upsertNode resolver). Create-only; an
       // explicit `seq` arg wins; an unordered / empty list leaves it null.
