@@ -2636,7 +2636,10 @@ export function createMcpServerInstance(
           abstract: normalizedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
           content: content ?? null,
-          seq: seq ?? null,
+          // seq is structural ordering, not content: preserve it on update when
+          // omitted (parity with the upsertNode resolver) so a content-only
+          // re-write doesn't wipe a node out of its ordered list (PR #309 review).
+          ...(seq !== undefined ? { seq } : {}),
           tags: tags ?? [],
           ...(properties !== undefined ? { properties: properties as any } : {}),
           ...(nodeData !== undefined ? { data: nodeData as any } : {}),

@@ -118,4 +118,13 @@ describe('h-add-node — mirrors the auto-seq rule (parity)', () => {
     const created = await db.node.findUnique({ where: { loc_memoryId: { loc: 'parent:c', memoryId } } });
     expect(created?.seq).toBe(88);
   });
+
+  it('preserves an existing seq on update when omitted (parity with upsertNode)', async () => {
+    await seedSibling('parent:a', 1);
+    await seedSibling('parent:b', 2);
+    const srv = createTestableMcpServer(adminAuth());
+    await srv.callToolText('h-add-node', { urn: `${memoryUrn}::parent:a`, name: 'renamed' });
+    const updated = await db.node.findUnique({ where: { loc_memoryId: { loc: 'parent:a', memoryId } } });
+    expect(updated?.seq).toBe(1);
+  });
 });

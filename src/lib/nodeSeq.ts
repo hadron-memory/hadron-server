@@ -38,7 +38,10 @@ export async function nextSiblingSeq(
       deletedAt: null,
       seq: { not: null },
       ...(parentPrefix ? { loc: { startsWith: parentPrefix } } : {}),
-      NOT: { loc },
+      // Exclude the node itself; for root-level locs (no parentPrefix) also let
+      // the DB drop nested nodes so we don't scan the whole memory's ordered
+      // rows (PR #309 review). Array NOT = AND of negations.
+      NOT: parentPrefix ? { loc } : [{ loc }, { loc: { contains: ':' } }],
     },
     select: { loc: true, seq: true },
   });
