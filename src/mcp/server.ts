@@ -60,6 +60,7 @@ import {
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { computeContentHash } from '../lib/contentHash.js';
+import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { reciprocalRankFusion } from '../lib/rrf.js';
@@ -2596,6 +2597,16 @@ export function createMcpServerInstance(
       const nextAbstractOriginHash: string | null =
         normalizedAbstract !== null ? computeContentHash(content ?? null) : null;
 
+      // Auto-assign `seq` for a NEW node joining an already-ordered sibling
+      // list (parity with the GraphQL upsertNode resolver). Create-only; an
+      // explicit `seq` arg wins; an unordered / empty list leaves it null.
+      const createSeq =
+        seq !== undefined
+          ? seq
+          : existing == null
+            ? await nextSiblingSeq(db, memoryId, loc)
+            : null;
+
       const upserted = await db.node.upsert({
         where: { loc_memoryId: { loc, memoryId } },
         create: {
@@ -2609,7 +2620,7 @@ export function createMcpServerInstance(
           abstract: normalizedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
           content: content ?? null,
-          seq: seq ?? null,
+          seq: createSeq,
           tags: tags ?? [],
           properties: properties as any ?? undefined,
           data: nodeData as any ?? undefined,
@@ -2625,7 +2636,10 @@ export function createMcpServerInstance(
           abstract: normalizedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
           content: content ?? null,
-          seq: seq ?? null,
+          // seq is structural ordering, not content: preserve it on update when
+          // omitted (parity with the upsertNode resolver) so a content-only
+          // re-write doesn't wipe a node out of its ordered list (PR #309 review).
+          ...(seq !== undefined ? { seq } : {}),
           tags: tags ?? [],
           ...(properties !== undefined ? { properties: properties as any } : {}),
           ...(nodeData !== undefined ? { data: nodeData as any } : {}),
