@@ -105,7 +105,7 @@ function textResult(text: string) {
  * server expose?", not "what release of the hadron-server repo am I
  * talking to?"
  */
-export const HADRON_SERVER_VERSION = '0.5.0';
+export const HADRON_SERVER_VERSION = '0.6.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"
@@ -2965,7 +2965,7 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── hadron_replace_globally ──────────────────────────────────────────────
+  // ── hadron_replace_text ──────────────────────────────────────────────
   //
   // Bulk literal/regex search-and-replace across many nodes at once. Delegates
   // to the GraphQL searchReplaceInNodes resolver so there is ONE implementation
@@ -2975,7 +2975,7 @@ export function createMcpServerInstance(
   // resolver owns that logic.
 
   server.tool(
-    'hadron_replace_globally',
+    'hadron_replace_text',
     "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Honors write permissions, version history (each change is undoable), and re-embeds changed nodes.",
     {
       oldText: z.string().describe('Text to find (literal substring), or a regular-expression source when regex:true. Must be non-empty.'),
