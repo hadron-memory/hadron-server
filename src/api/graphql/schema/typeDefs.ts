@@ -1195,6 +1195,84 @@ export const typeDefs = `#graphql
     createOnly: Boolean
   }
 
+  """
+  Text-bearing Node fields that searchReplaceInNodes may rewrite. JSON fields
+  (data, properties) and the structural 'loc' are intentionally excluded in v1.
+  """
+  enum NodeTextField {
+    content
+    name
+    alias
+    description
+    abstract
+    tags
+  }
+
+  """
+  Bulk literal/regex search-and-replace across selected nodes.
+
+  Selection is a union — at least one of 'nodeIds' or 'memoryIds' is required:
+    - nodeIds:   explicit nodes (IDs or fully-qualified URNs).
+    - memoryIds: every live node in those memories (IDs or URNs).
+    - prefix:    further restrict the memoryIds set to the node at 'prefix'
+                 plus its descendants, matched on colon loc-path boundaries
+                 (so 'auth' matches 'auth' and 'auth:tokens' but not
+                 'authoring'). Requires 'memoryIds' — loc is only unique
+                 within a memory.
+
+  Matching is literal substring by default; set 'regex: true' to treat
+  'oldText' as a RegExp source (and 'newText' as a replacement pattern with
+  dollar-sign backrefs). 'caseInsensitive' toggles case folding. Matching is
+  always global.
+
+  Set 'dryRun: true' to get per-node/per-field match counts WITHOUT writing.
+  """
+  input SearchReplaceInNodesInput {
+    "Text (literal) or RegExp source (regex mode) to find. Must be non-empty."
+    oldText: String!
+    "Replacement. May be empty (deletes the matched text). Regex mode honors dollar-sign backrefs."
+    newText: String!
+    "Explicit node IDs or fully-qualified URNs."
+    nodeIds: [ID!]
+    "Memory IDs or URNs — selects every live node in each."
+    memoryIds: [ID!]
+    "Loc-prefix filter applied within 'memoryIds' (parent loc + descendants)."
+    prefix: String
+    "Which text fields to search. At least one required."
+    fields: [NodeTextField!]!
+    caseInsensitive: Boolean = false
+    "Treat oldText as a RegExp source and newText as a replacement pattern."
+    regex: Boolean = false
+    "When true, report matches without writing anything."
+    dryRun: Boolean = false
+  }
+
+  type SearchReplaceFieldResult {
+    field: NodeTextField!
+    matches: Int!
+  }
+
+  type SearchReplaceNodeResult {
+    nodeId: ID!
+    loc: String!
+    memoryId: ID!
+    "Total replacements across all searched fields on this node."
+    replacements: Int!
+    fields: [SearchReplaceFieldResult!]!
+  }
+
+  type SearchReplaceResult {
+    "Nodes the selection resolved to (after auth + prefix filtering)."
+    nodesScanned: Int!
+    "Nodes with at least one replacement."
+    nodesChanged: Int!
+    totalReplacements: Int!
+    "Echoes the request — true means nothing was written."
+    dryRun: Boolean!
+    "Per-node breakdown; only nodes with at least one match are listed."
+    results: [SearchReplaceNodeResult!]!
+  }
+
   input EdgeInput {
     sourceLoc: String!
     targetLoc: String!
@@ -1739,6 +1817,11 @@ export const typeDefs = `#graphql
   type Mutation {
     # Create or update a single node
     upsertNode(input: NodeInput!): Node!
+
+    # Bulk search-and-replace text across selected nodes (literal or regex).
+    # Honors per-memory write auth, encryption, version history, abstract
+    # staleness, and re-embedding. Supports dryRun preview.
+    searchReplaceInNodes(input: SearchReplaceInNodesInput!): SearchReplaceResult!
 
     # Delete a node by loc within a specific memory
     deleteNode(loc: String!, memoryId: String!): Boolean!
