@@ -1,5 +1,5 @@
 /**
- * Spec 033 US3 — shared search helpers used by both the MCP h-find-nodes
+ * Spec 033 US3 — shared search helpers used by both the MCP hadron_find_nodes
  * surface (`src/mcp/server.ts`) and the GraphQL nodeSearch resolver
  * (`src/api/graphql/schema/resolvers.ts`).
  *
@@ -13,7 +13,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 
 /**
  * Substring match across name + loc + description + tags. The keyword
- * search predicate for h-find-nodes.
+ * search predicate for hadron_find_nodes.
  *
  * Issue #170: `*` and trimmed-empty are "match all" — without this an
  * agent surveying a memory will reasonably try `query: "*"` first, get
@@ -39,7 +39,7 @@ export function matchesQuery(
  * results in DB order for stability; this helper feeds the RRF input
  * only on the hybrid path.
  *
- * Signal ordering per contracts/h-find-nodes.md:
+ * Signal ordering per contracts/hadron_find_nodes.md:
  *   1. Distinct query terms matched (desc) — does the node hit MORE of
  *      the query? Strong indicator.
  *   2. Total term frequency across the haystack (desc) — secondary

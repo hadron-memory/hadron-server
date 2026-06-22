@@ -39,7 +39,7 @@ describe('tagsInputSchema — comma-separated string coercion (#246)', () => {
   });
 
   it('preserves undefined when optional (omitted → preserve, not cleared)', () => {
-    // h-update-node gates on `tags !== undefined`; the optional wrapper
+    // hadron_update_node gates on `tags !== undefined`; the optional wrapper
     // must short-circuit before preprocess so an omitted tags stays
     // undefined rather than failing array validation.
     expect(tagsInputSchema.optional().parse(undefined)).toBeUndefined();

@@ -166,7 +166,7 @@ describe('US2 — chunk-level retrieval (SC-005)', () => {
     const srv = createTestableMcpServer(adminAuth());
     // chunk-level — should surface the passage with chunkIndex 0 (the
     // section containing "alpha").
-    const chunkOut = await srv.callToolText('h-find-nodes', {
+    const chunkOut = await srv.callToolText('hadron_find_nodes', {
       query: 'alpha',
       mode: 'vector',
       memoryUrn: memUrn,
@@ -178,7 +178,7 @@ describe('US2 — chunk-level retrieval (SC-005)', () => {
     expect(chunkOut).toContain('alpha keyword');
     // node-level — should surface the parent node URN once (despite the
     // node having 3 chunks).
-    const nodeOut = await srv.callToolText('h-find-nodes', {
+    const nodeOut = await srv.callToolText('hadron_find_nodes', {
       query: 'alpha',
       mode: 'vector',
       memoryUrn: memUrn,
@@ -255,10 +255,10 @@ describe('US2 — chunk-level retrieval (SC-005)', () => {
 });
 
 describe('US2 — granularity:chunk rejection (PR-225 review)', () => {
-  it('MCP h-find-nodes: granularity:chunk with mode:hybrid → text reject', async () => {
+  it('MCP hadron_find_nodes: granularity:chunk with mode:hybrid → text reject', async () => {
     setEmbeddingClientForTests(stubClient({}));
     const srv = createTestableMcpServer(adminAuth());
-    const out = await srv.callToolText('h-find-nodes', {
+    const out = await srv.callToolText('hadron_find_nodes', {
       query: 'anything',
       mode: 'hybrid',
       memoryUrn: memUrn,
@@ -268,12 +268,12 @@ describe('US2 — granularity:chunk rejection (PR-225 review)', () => {
     expect(out).toContain('mode:hybrid');
   });
 
-  it('MCP h-find-nodes: granularity:chunk with mode:keyword (or default) → text reject', async () => {
+  it('MCP hadron_find_nodes: granularity:chunk with mode:keyword (or default) → text reject', async () => {
     setEmbeddingClientForTests(stubClient({}));
     const srv = createTestableMcpServer(adminAuth());
     // No mode → defaults to keyword. Spec is the same: chunk needs
     // mode:vector explicitly.
-    const out = await srv.callToolText('h-find-nodes', {
+    const out = await srv.callToolText('hadron_find_nodes', {
       query: 'anything',
       memoryUrn: memUrn,
       granularity: 'chunk',

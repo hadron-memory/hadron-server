@@ -1,5 +1,5 @@
 /**
- * Behavioral coverage for h-run-task — run a task by loose name (spec
+ * Behavioral coverage for hadron_run_task — run a task by loose name (spec
  * cor:api:060). Drives the real production closure via createTestableMcpServer,
  * which never connects a transport, so getClientCapabilities() is undefined and
  * the tool takes the FALLBACK (list-relay) path — exactly the surface these
@@ -16,7 +16,7 @@
  *   - Disambiguation (cor:api:060:03): ambiguous / absent hint returns the
  *     candidate list for re-invocation by `urn`.
  *   - URN bypass + shared core: a fully-qualified `urn` runs directly and is
- *     byte-identical to h-run-action (the extracted run core).
+ *     byte-identical to hadron_run_action (the extracted run core).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -162,9 +162,9 @@ beforeEach(async () => {
   fx = { admin, viewer, alpha, beta, gamma };
 });
 
-describe('h-run-task — runnable predicate (cor:api:060:01)', () => {
+describe('hadron_run_task — runnable predicate (cor:api:060:01)', () => {
   it('runs a unique match, substitutes args, and inlines edge dependencies', async () => {
-    const text = await createTestableMcpServer(adminAuth()).callToolText('h-run-task', {
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
       task: 'Add review',
       memory: 'Alpha',
       args: { who: 'Alice' },
@@ -176,7 +176,7 @@ describe('h-run-task — runnable predicate (cor:api:060:01)', () => {
   });
 
   it('never offers or runs a nodeType:"task" node that is not isRunnable', async () => {
-    const text = await createTestableMcpServer(adminAuth()).callToolText('h-run-task', {
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
       task: 'draft',
       memory: 'Alpha',
     });
@@ -186,22 +186,22 @@ describe('h-run-task — runnable predicate (cor:api:060:01)', () => {
   });
 });
 
-describe('h-run-task — disambiguation (cor:api:060:03, fallback/list path)', () => {
+describe('hadron_run_task — disambiguation (cor:api:060:03, fallback/list path)', () => {
   it('returns the candidate list when a task hint is ambiguous', async () => {
-    const text = await createTestableMcpServer(adminAuth()).callToolText('h-run-task', {
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
       task: 'add',
       memory: 'Alpha',
     });
     expect(text).toContain('Multiple tasks match "add" in Alpha');
     expect(text).toContain('Add review');
     expect(text).toContain('Add note');
-    expect(text).toContain('Re-run h-run-task with `urn`');
+    expect(text).toContain('Re-run hadron_run_task with `urn`');
     // The non-runnable "Add review draft" must not appear.
     expect(text).not.toContain('notes:draft');
   });
 
   it('lists the runnable tasks when no task hint is given', async () => {
-    const text = await createTestableMcpServer(adminAuth()).callToolText('h-run-task', {
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
       memory: 'Alpha',
     });
     expect(text).toContain('Tasks in Alpha — pick one to run');
@@ -212,26 +212,26 @@ describe('h-run-task — disambiguation (cor:api:060:03, fallback/list path)', (
   });
 
   it('reports cleanly when a memory has no runnable tasks', async () => {
-    const text = await createTestableMcpServer(adminAuth()).callToolText('h-run-task', {
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
       memory: 'Gamma',
     });
     expect(text).toContain('No runnable tasks in Gamma');
   });
 });
 
-describe('h-run-task — resolution by name (cor:api:060:02)', () => {
+describe('hadron_run_task — resolution by name (cor:api:060:02)', () => {
   it('defaults to the session active memory when no memory hint is given', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('h-set-active-memory', { memoryUrn: fx.alpha.urn });
+    await srv.callToolText('hadron_set_active_memory', { memoryUrn: fx.alpha.urn });
     // Three memories exist; without the active-memory default this would prompt
     // for a memory pick. With it set, the task resolves inside Alpha and runs.
-    const text = await srv.callToolText('h-run-task', { task: 'Add note' });
+    const text = await srv.callToolText('hadron_run_task', { task: 'Add note' });
     expect(text).toContain('# Node: Add note');
     expect(text).toContain('Add a note here');
   });
 
   it('widens to other readable memories on a miss but never auto-runs', async () => {
-    const text = await createTestableMcpServer(adminAuth()).callToolText('h-run-task', {
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
       task: 'Deploy',
       memory: 'Alpha',
     });
@@ -244,7 +244,7 @@ describe('h-run-task — resolution by name (cor:api:060:02)', () => {
   });
 
   it('never discloses memories the caller cannot read', async () => {
-    const text = await createTestableMcpServer(viewerAuth()).callToolText('h-run-task', {
+    const text = await createTestableMcpServer(viewerAuth()).callToolText('hadron_run_task', {
       task: 'add',
     });
     expect(text).toContain('No memories you can read');
@@ -253,18 +253,18 @@ describe('h-run-task — resolution by name (cor:api:060:02)', () => {
   });
 });
 
-describe('h-run-task — URN bypass + shared run core', () => {
-  it('runs a fully-qualified URN directly, identical to h-run-action', async () => {
+describe('hadron_run_task — URN bypass + shared run core', () => {
+  it('runs a fully-qualified URN directly, identical to hadron_run_action', async () => {
     const srv = createTestableMcpServer(adminAuth());
     const urn = nodeUrnOf(fx.alpha, 'tasks:add-note');
-    const viaTask = await srv.callToolText('h-run-task', { urn });
-    const viaAction = await srv.callToolText('h-run-action', { urn });
+    const viaTask = await srv.callToolText('hadron_run_task', { urn });
+    const viaAction = await srv.callToolText('hadron_run_action', { urn });
     expect(viaTask).toContain('# Node: Add note');
     expect(viaTask).toEqual(viaAction); // byte-identical via the extracted core
   });
 
   it('URN bypass ignores the runnable predicate (runs any readable node)', async () => {
-    const text = await createTestableMcpServer(adminAuth()).callToolText('h-run-task', {
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
       urn: nodeUrnOf(fx.alpha, 'notes:draft'),
     });
     expect(text).toContain('# Node: Add review draft');
@@ -272,10 +272,10 @@ describe('h-run-task — URN bypass + shared run core', () => {
   });
 });
 
-describe('isRunnable write path (h-add-node / h-update-node / GraphQL upsertNode)', () => {
-  it('h-add-node creates a runnable node that h-run-task then finds and runs', async () => {
+describe('isRunnable write path (hadron_create_node / hadron_update_node / GraphQL upsertNode)', () => {
+  it('hadron_create_node creates a runnable node that hadron_run_task then finds and runs', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('h-add-node', {
+    await srv.callToolText('hadron_create_node', {
       urn: nodeUrnOf(fx.alpha, 'tasks:brand-new'),
       name: 'Brand new task',
       nodeType: 'info',
@@ -288,14 +288,14 @@ describe('isRunnable write path (h-add-node / h-update-node / GraphQL upsertNode
     });
     expect(row?.isRunnable).toBe(true);
 
-    const text = await srv.callToolText('h-run-task', { task: 'Brand new', memory: 'Alpha' });
+    const text = await srv.callToolText('hadron_run_task', { task: 'Brand new', memory: 'Alpha' });
     expect(text).toContain('# Node: Brand new task');
     expect(text).toContain('do the new thing');
   });
 
-  it('h-update-node can clear isRunnable, removing the node from the task list', async () => {
+  it('hadron_update_node can clear isRunnable, removing the node from the task list', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('h-update-node', {
+    await srv.callToolText('hadron_update_node', {
       urn: nodeUrnOf(fx.alpha, 'tasks:add-note'),
       isRunnable: false,
     });
@@ -305,13 +305,13 @@ describe('isRunnable write path (h-add-node / h-update-node / GraphQL upsertNode
     });
     expect(row?.isRunnable).toBe(false);
 
-    const text = await srv.callToolText('h-run-task', { task: 'Add note', memory: 'Alpha' });
+    const text = await srv.callToolText('hadron_run_task', { task: 'Add note', memory: 'Alpha' });
     expect(text).toContain('No runnable task matching "Add note" in Alpha');
   });
 
-  it('h-update-node preserves isRunnable when the field is omitted (partial update)', async () => {
+  it('hadron_update_node preserves isRunnable when the field is omitted (partial update)', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('h-update-node', {
+    await srv.callToolText('hadron_update_node', {
       urn: nodeUrnOf(fx.alpha, 'tasks:add-review'),
       description: 'touched',
     });

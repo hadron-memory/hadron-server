@@ -1,6 +1,6 @@
 /**
  * Global search engine — cross-entity search shared by the GraphQL
- * `globalSearch` query and the MCP `h-search` tool.
+ * `globalSearch` query and the MCP `hadron_search` tool.
  *
  * Flow: classify the query (smart-sniff unless explicit `fields`) → run the
  * selected per-entity adapters concurrently (each applies its own access

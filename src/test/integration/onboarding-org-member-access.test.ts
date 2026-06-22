@@ -5,7 +5,7 @@
  * the portal shows.
  *
  * This is the exact "Micromentor onboarding incident" (2026-06-13): before the
- * fix, h-list-memories returned nothing and h-find-nodes/h-read-node answered
+ * fix, hadron_list_memories returned nothing and hadron_find_nodes/hadron_get_node answered
  * "Memory not found" for a freshly-onboarded org member until they installed
  * an Agent. The test drives the real MCP tool closures (auth → getMemoryAccess
  * → canReadMemory → render) via createTestableMcpServer — no HTTP transport.
@@ -80,9 +80,9 @@ beforeEach(async () => {
 });
 
 describe('onboarding: org member (no App) has read access to the org memory over MCP', () => {
-  it('h-list-memories surfaces the org memory for a bare org member', async () => {
+  it('hadron_list_memories surfaces the org memory for a bare org member', async () => {
     const srv = createTestableMcpServer(memberAuth());
-    const text = await srv.callToolText('h-list-memories', {});
+    const text = await srv.callToolText('hadron_list_memories', {});
     // The URN renders in canonical form (hrn:memory:micromentor.org::mmdata);
     // assert on the org + slug rather than the stored bare separator.
     expect(text).toContain('micromentor.org');
@@ -90,16 +90,16 @@ describe('onboarding: org member (no App) has read access to the org memory over
     expect(text).not.toMatch(/^0 accessible memories/);
   });
 
-  it('h-find-nodes returns the memory contents (not "Memory not found")', async () => {
+  it('hadron_find_nodes returns the memory contents (not "Memory not found")', async () => {
     const srv = createTestableMcpServer(memberAuth());
-    const text = await srv.callToolText('h-find-nodes', { query: '*', memoryUrn: fx.memory.urn });
+    const text = await srv.callToolText('hadron_find_nodes', { query: '*', memoryUrn: fx.memory.urn });
     expect(text).not.toContain('Memory not found');
     expect(text).toContain(fx.nodeLoc);
   });
 
-  it('h-read-node reads a node in the org memory', async () => {
+  it('hadron_get_node reads a node in the org memory', async () => {
     const srv = createTestableMcpServer(memberAuth());
-    const text = await srv.callToolText('h-read-node', {
+    const text = await srv.callToolText('hadron_get_node', {
       urn: `hrn:node:${fx.memory.urn}:${fx.nodeLoc}`,
     });
     expect(text).toContain('Onboarding preflight checklist.');
@@ -107,7 +107,7 @@ describe('onboarding: org member (no App) has read access to the org memory over
 
   it('negative control: a non-member is still denied (no over-grant)', async () => {
     const srv = createTestableMcpServer(outsiderAuth());
-    const text = await srv.callToolText('h-find-nodes', { query: '*', memoryUrn: fx.memory.urn });
+    const text = await srv.callToolText('hadron_find_nodes', { query: '*', memoryUrn: fx.memory.urn });
     expect(text).toContain('Memory not found');
     expect(text).not.toContain(fx.nodeLoc);
   });

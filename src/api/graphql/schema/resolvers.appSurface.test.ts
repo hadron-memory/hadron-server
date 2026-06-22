@@ -105,7 +105,7 @@ describe('createApp accepts absorbed Station fields', () => {
         role: 'CONTRIBUTOR',
         description: 'a chatbot',
         systemPrompt: 'you are helpful',
-        agentTools: ['h-find-node', 'h-read-node'],
+        agentTools: ['hadron_find_nodes', 'hadron_get_node'],
         aiProvider: 'anthropic',
         aiModel: 'claude-sonnet-4-20250514',
         aiApiKey: 'sk-fake-key',
@@ -117,7 +117,7 @@ describe('createApp accepts absorbed Station fields', () => {
     expect(created.role).toBe('CONTRIBUTOR');
     expect(created.description).toBe('a chatbot');
     expect(created.systemPrompt).toBe('you are helpful');
-    expect(created.agentTools).toEqual(['h-find-node', 'h-read-node']);
+    expect(created.agentTools).toEqual(['hadron_find_nodes', 'hadron_get_node']);
     // 036-ai-service-config: the legacy args land in the App's 'default'
     // registry config (columns dropped).
     const config = await db.aiServiceConfig.findFirstOrThrow({
@@ -160,7 +160,7 @@ describe('updateApp updates absorbed Station fields', () => {
         role: 'ADMIN',
         description: 'updated',
         systemPrompt: 'updated prompt',
-        agentTools: ['h-create-node'],
+        agentTools: ['hadron_create_node'],
         aiProvider: 'openai',
         aiModel: 'gpt-4',
         aiApiKey: 'sk-new-key',
@@ -171,7 +171,7 @@ describe('updateApp updates absorbed Station fields', () => {
     expect(updated.role).toBe('ADMIN');
     expect(updated.description).toBe('updated');
     expect(updated.systemPrompt).toBe('updated prompt');
-    expect(updated.agentTools).toEqual(['h-create-node']);
+    expect(updated.agentTools).toEqual(['hadron_create_node']);
     const config = await db.aiServiceConfig.findFirstOrThrow({
       where: { appId: created.id, name: 'default' },
     });

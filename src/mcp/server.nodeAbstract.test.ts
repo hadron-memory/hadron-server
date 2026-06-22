@@ -1,16 +1,16 @@
 /**
  * Spec 031 — Node `abstract` field. Behavioral coverage for the MCP
- * surface: h-add-node, h-update-node, h-read-node (the load-bearing
+ * surface: hadron_create_node, hadron_update_node, hadron_get_node (the load-bearing
  * contentScope matrix + Source: abstract-fallback marker), and
- * h-validate sparse-rule extension.
+ * hadron_validate sparse-rule extension.
  *
  * What this file pins:
  *
- *   - Round-trip: h-add-node persists abstract → h-read-node with
+ *   - Round-trip: hadron_create_node persists abstract → hadron_get_node with
  *     contentScope='abstract' returns it verbatim.
  *
  *   - The 12-cell contentScope × abstract-state × content-state matrix
- *     per contracts/h-read-node.md. Especially:
+ *     per contracts/hadron_get_node.md. Especially:
  *       * default scope is byte-identical to pre-spec for nodes with
  *         abstract IS NULL (SC-004 backstop)
  *       * content fallback fires only under 'content' scope when
@@ -18,7 +18,7 @@
  *       * 'Source: abstract-fallback' meta line appears in that single
  *         cell, nowhere else
  *
- *   - h-update-node partial-update semantics: omitted preserves, null
+ *   - hadron_update_node partial-update semantics: omitted preserves, null
  *     clears, string replaces.
  *
  *   - FR-008 length-cap rejection: > 2000 chars throws
@@ -30,7 +30,7 @@
  *
  *   - FR-005 invalid contentScope: rejected (zod enum validation).
  *
- *   - FR-011: h-validate sparse-node check considers abstract as
+ *   - FR-011: hadron_validate sparse-node check considers abstract as
  *     legitimate content (only flags when description AND content AND
  *     abstract are all null).
  *
@@ -114,7 +114,7 @@ async function addNode(args: {
   if (args.content !== undefined) params.content = args.content;
   if (args.description !== undefined) params.description = args.description;
   if (args.nodeType !== undefined) params.nodeType = args.nodeType;
-  return srv.callToolText('h-add-node', params);
+  return srv.callToolText('hadron_create_node', params);
 }
 
 async function readNode(loc: string, contentScope?: 'content' | 'abstract' | 'all') {
@@ -123,7 +123,7 @@ async function readNode(loc: string, contentScope?: 'content' | 'abstract' | 'al
     urn: `abs-org::absmem::${loc}`,
   };
   if (contentScope !== undefined) params.contentScope = contentScope;
-  return srv.callToolText('h-read-node', params);
+  return srv.callToolText('hadron_get_node', params);
 }
 
 async function updateNode(args: {
@@ -137,7 +137,7 @@ async function updateNode(args: {
   };
   if ('abstract' in args) params.abstract = args.abstract;
   if (args.name !== undefined) params.name = args.name;
-  return srv.callToolText('h-update-node', params);
+  return srv.callToolText('hadron_update_node', params);
 }
 
 async function readPersistedAbstract(loc: string): Promise<string | null> {
@@ -150,13 +150,13 @@ async function readPersistedAbstract(loc: string): Promise<string | null> {
 
 // ───── US1 round-trip (acceptance scenarios 1, 2) ─────────────────────────
 
-describe('US1 round-trip — h-add-node / h-update-node persist abstract', () => {
-  it('US1.1 — h-add-node with abstract persists the value', async () => {
+describe('US1 round-trip — hadron_create_node / hadron_update_node persist abstract', () => {
+  it('US1.1 — hadron_create_node with abstract persists the value', async () => {
     await addNode({ loc: 'rt1', abstract: SHORT_ABSTRACT });
     expect(await readPersistedAbstract('rt1')).toBe(SHORT_ABSTRACT);
   });
 
-  it('US1.2 — h-update-node replaces an existing abstract', async () => {
+  it('US1.2 — hadron_update_node replaces an existing abstract', async () => {
     await addNode({ loc: 'rt2', abstract: 'Original.' });
     await updateNode({ loc: 'rt2', abstract: REVISED_ABSTRACT });
     expect(await readPersistedAbstract('rt2')).toBe(REVISED_ABSTRACT);
@@ -165,7 +165,7 @@ describe('US1 round-trip — h-add-node / h-update-node persist abstract', () =>
 
 // ───── contentScope matrix (US1.3–US1.6, US1.10–US1.13) ───────────────────
 
-describe('US1 contentScope matrix — h-read-node response shapes', () => {
+describe('US1 contentScope matrix — hadron_get_node response shapes', () => {
   it('US1.3 — default scope on a node with content + abstract: meta + --- + content, no abstract surfaced, no Source: marker', async () => {
     await addNode({
       loc: 'm-cb',
@@ -297,9 +297,9 @@ describe('US1 contentScope matrix — h-read-node response shapes', () => {
   });
 });
 
-// ───── h-update-node partial-update semantics (US1.7, US1.8) ──────────────
+// ───── hadron_update_node partial-update semantics (US1.7, US1.8) ──────────────
 
-describe('US1 partial-update semantics — h-update-node', () => {
+describe('US1 partial-update semantics — hadron_update_node', () => {
   it('US1.7 — omitting `abstract` preserves the existing value', async () => {
     await addNode({ loc: 'pu1', abstract: SHORT_ABSTRACT });
     await updateNode({ loc: 'pu1', name: 'Renamed' }); // no abstract field
@@ -319,10 +319,10 @@ describe('US1 invalid contentScope rejection', () => {
   it("US1.9 — contentScope='something-else' is rejected with allowed-values error", async () => {
     await addNode({ loc: 'iv', abstract: SHORT_ABSTRACT });
     const srv = createTestableMcpServer(adminAuth());
-    // h-read-node defensively validates the enum and returns the typed
-    // error message as the tool result (same convention as h-add-node's
+    // hadron_get_node defensively validates the enum and returns the typed
+    // error message as the tool result (same convention as hadron_create_node's
     // length-cap path). zod's enum check covers the transport layer.
-    const text = await srv.callToolText('h-read-node', {
+    const text = await srv.callToolText('hadron_get_node', {
       urn: 'abs-org::absmem::iv',
       contentScope: 'summary',
     });
@@ -335,9 +335,9 @@ describe('US1 invalid contentScope rejection', () => {
 // ───── FR-008 length cap ──────────────────────────────────────────────────
 
 describe('FR-008 — length-cap rejection', () => {
-  it('rejects abstract > 2000 chars on h-add-node with a 2000-citing error', async () => {
+  it('rejects abstract > 2000 chars on hadron_create_node with a 2000-citing error', async () => {
     const overlong = 'x'.repeat(2001);
-    // h-add-node surfaces the typed error as a tool-result string (the
+    // hadron_create_node surfaces the typed error as a tool-result string (the
     // MCP transport convention) rather than throwing — assert the body.
     const text = await addNode({ loc: 'lc1', abstract: overlong });
     expect(text).toContain('2000');
@@ -350,7 +350,7 @@ describe('FR-008 — length-cap rejection', () => {
     expect(row).toBeNull();
   });
 
-  it('rejects abstract > 2000 chars on h-update-node — original value preserved', async () => {
+  it('rejects abstract > 2000 chars on hadron_update_node — original value preserved', async () => {
     await addNode({ loc: 'lc2', abstract: 'Original.' });
     const overlong = 'y'.repeat(2001);
     const text = await updateNode({ loc: 'lc2', abstract: overlong });
@@ -391,23 +391,23 @@ describe('FR-009 (extended) — trim-then-check normalization', () => {
     expect(await readPersistedAbstract('ws4')).toBe(padded);
   });
 
-  it("h-update-node with whitespace-only string clears the abstract", async () => {
+  it("hadron_update_node with whitespace-only string clears the abstract", async () => {
     await addNode({ loc: 'ws5', abstract: SHORT_ABSTRACT });
     await updateNode({ loc: 'ws5', abstract: '   ' });
     expect(await readPersistedAbstract('ws5')).toBeNull();
   });
 });
 
-// ───── FR-011 — h-validate sparse-node rule ───────────────────────────────
+// ───── FR-011 — hadron_validate sparse-node rule ───────────────────────────────
 
-describe('FR-011 — h-validate sparse-node rule extension', () => {
+describe('FR-011 — hadron_validate sparse-node rule extension', () => {
   async function validate(memoryUrn: string) {
     const srv = createTestableMcpServer(adminAuth());
-    return srv.callToolText('h-validate', { memoryUrn });
+    return srv.callToolText('hadron_validate', { memoryUrn });
   }
 
   // createMemory provisions a root node that has no description / content /
-  // abstract — h-validate will (correctly) flag it. We assert against the
+  // abstract — hadron_validate will (correctly) flag it. We assert against the
   // specific test-node URN being absent/present rather than against the
   // total sparse-count, so the memory-root noise floor doesn't matter.
 

@@ -1,5 +1,5 @@
 /**
- * 033-rag-vector-retrieval Phase 8 polish T058 — h-validate surfaces
+ * 033-rag-vector-retrieval Phase 8 polish T058 — hadron_validate surfaces
  * embedding-failure diagnosability.
  *
  * `embedding_failed_at` is stamped on EVERY failed embed attempt:
@@ -8,7 +8,7 @@
  *     failedAt stays
  *   - permanent #206 encrypted-no-plaintext → same shape as the cap
  *
- * h-validate surfaces ALL of these because each is operator-useful: an
+ * hadron_validate surfaces ALL of these because each is operator-useful: an
  * in-flight retry tells the operator "this has failed at least once
  * but the sweep will retry"; a terminal failure tells them "this will
  * never embed without intervention." Without this surface an empty
@@ -69,10 +69,10 @@ afterAll(async () => {
 
 async function validate(): Promise<string> {
   const srv = createTestableMcpServer(adminAuth());
-  return srv.callToolText('h-validate', { memoryUrn: memUrn });
+  return srv.callToolText('hadron_validate', { memoryUrn: memUrn });
 }
 
-describe('Phase 8 T058 — h-validate surfaces embedding-failure diagnosability', () => {
+describe('Phase 8 T058 — hadron_validate surfaces embedding-failure diagnosability', () => {
   it('node with embeddingFailedAt set + an error message → [embed-failed] line in output', async () => {
     const nodeId = generateId();
     await db.node.create({
@@ -142,7 +142,7 @@ describe('Phase 8 T058 — h-validate surfaces embedding-failure diagnosability'
   it('node with embeddingFailedAt + still-pending retry (failedAt AND pendingAt both set) → flagged', async () => {
     // The in-flight retry shape: markTransientFailure stamps both
     // embeddingFailedAt AND keeps embeddingPendingAt set when the
-    // attempts cap hasn't been reached. h-validate flags these too
+    // attempts cap hasn't been reached. hadron_validate flags these too
     // (PR-226 review, Copilot) so the operator sees "this has failed
     // at least once but the sweep will retry."
     await db.node.create({

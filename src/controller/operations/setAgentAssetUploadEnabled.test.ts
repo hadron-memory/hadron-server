@@ -70,7 +70,7 @@ describe('setAgentAssetUploadEnabled', () => {
   it('removes asset:upload from agentTools when disabling', async () => {
     await db.app.update({
       where: { id: app.id },
-      data: { agentTools: ['asset:upload', 'h-find-node'] },
+      data: { agentTools: ['asset:upload', 'hadron_find_nodes'] },
     });
     const updated = await setAgentAssetUploadEnabled(
       db,
@@ -79,7 +79,7 @@ describe('setAgentAssetUploadEnabled', () => {
       isAdminFor,
     );
     expect(updated.agentTools).not.toContain('asset:upload');
-    expect(updated.agentTools).toContain('h-find-node');
+    expect(updated.agentTools).toContain('hadron_find_nodes');
   });
 
   it('is a no-op when already in the desired state', async () => {

@@ -12,7 +12,7 @@
  * away later — bumping k has subtle effects on rank-1 dominance.
  *
  * **Important — keyword rank must already be a relevance ranking, not the
- * default alphabetical-by-loc list.** Today's `h-find-nodes` keyword path
+ * default alphabetical-by-loc list.** Today's `hadron_find_nodes` keyword path
  * returns hits sorted by `loc` for stability; feeding that raw into RRF as
  * the "rank" lets alphabetical order drive the fused ordering. The caller
  * is responsible for re-ranking the keyword list (distinct-query-terms-matched

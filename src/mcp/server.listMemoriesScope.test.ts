@@ -1,15 +1,15 @@
 /**
- * h-list-memories: a caller's OWN personal/private memories are discoverable
+ * hadron_list_memories: a caller's OWN personal/private memories are discoverable
  * over MCP (the CLI-vs-MCP asymmetry reported in #282), and the active scope is
  * surfaced so a narrow App-Key listing isn't silently mistaken for "no access".
  *
  * Personal/private memories are intentionally absent from getMemoryAccess (it
- * backs getAccessibleMemoryIds, kept personal-free). h-list-memories folds in
+ * backs getAccessibleMemoryIds, kept personal-free). hadron_list_memories folds in
  * the caller's own ones through the canReadMemory / canWriteToMemory gates, so
- * the listing always matches what h-read-node would allow — and an App-Key
+ * the listing always matches what hadron_get_node would allow — and an App-Key
  * caller (no userId) never folds any, preserving per-App isolation.
  *
- * Harness: createTestableMcpServer drives the real h-list-memories closure with
+ * Harness: createTestableMcpServer drives the real hadron_list_memories closure with
  * no HTTP transport, mirroring server.memoryData.test.ts.
  */
 
@@ -62,12 +62,12 @@ function userAuth(userId: string): AuthContext {
   return { userId, roles: [], clientId: `user:${userId}` };
 }
 
-describe('h-list-memories — own personal memories + scope (#282)', () => {
+describe('hadron_list_memories — own personal memories + scope (#282)', () => {
   it("lists the caller's own free-standing personal memory, tagged read-write", async () => {
     const owner = await createUser('owner');
     const mem = await createFreeStanding(owner.id, 'personal', 'nexus-notes');
 
-    const text = await createTestableMcpServer(userAuth(owner.id)).callToolText('h-list-memories', {});
+    const text = await createTestableMcpServer(userAuth(owner.id)).callToolText('hadron_list_memories', {});
 
     expect(text).toContain(mem.name);
     expect(text).toMatch(/\(personal, read-write\)/);
@@ -77,7 +77,7 @@ describe('h-list-memories — own personal memories + scope (#282)', () => {
     const owner = await createUser('owner-priv');
     await createFreeStanding(owner.id, 'private', 'secret-notes');
 
-    const text = await createTestableMcpServer(userAuth(owner.id)).callToolText('h-list-memories', {});
+    const text = await createTestableMcpServer(userAuth(owner.id)).callToolText('hadron_list_memories', {});
 
     expect(text).toContain('secret-notes');
     expect(text).toMatch(/\(private, read-write\)/);
@@ -95,7 +95,7 @@ describe('h-list-memories — own personal memories + scope (#282)', () => {
     });
     await createFreeStanding(owner.id, 'personal', 'owner-only-secret');
 
-    const text = await createTestableMcpServer(userAuth(other.id)).callToolText('h-list-memories', {});
+    const text = await createTestableMcpServer(userAuth(other.id)).callToolText('hadron_list_memories', {});
 
     expect(text).toContain('shared-kn'); // org-read works
     expect(text).not.toContain('owner-only-secret'); // but not the other user's personal memory
@@ -107,7 +107,7 @@ describe('h-list-memories — own personal memories + scope (#282)', () => {
     await createFreeStanding(someUser.id, 'personal', 'should-not-appear');
 
     const auth: AuthContext = { appId: app.id, organizationId: orgId };
-    const text = await createTestableMcpServer(auth).callToolText('h-list-memories', {});
+    const text = await createTestableMcpServer(auth).callToolText('hadron_list_memories', {});
 
     expect(text).toContain('Scope: App key');
     expect(text).not.toContain('should-not-appear');
@@ -117,7 +117,7 @@ describe('h-list-memories — own personal memories + scope (#282)', () => {
     const owner = await createUser('scopey');
     await createFreeStanding(owner.id, 'personal', 'mine');
 
-    const text = await createTestableMcpServer(userAuth(owner.id)).callToolText('h-list-memories', {});
+    const text = await createTestableMcpServer(userAuth(owner.id)).callToolText('hadron_list_memories', {});
 
     expect(text).toContain('Scope: user');
     expect(text).toContain('no active App');

@@ -5,7 +5,7 @@
  * HTTP 409 (preserved per FR-016 as the fall-through for legacy callers).
  * They surface as MCP **tool-error** envelopes — `{ isError: true,
  * content: [{ type: 'text', text: '[<code>] <message>' }] }` — returned
- * from `h-list-apps`, `h-set-active-app`, and the resolver dispatch when
+ * from `hadron_list_apps`, `hadron_set_active_app`, and the resolver dispatch when
  * a session has engaged with the new regimes.
  *
  * The `[<code>] ` prefix carries the machine-readable code inline so tests
@@ -24,7 +24,7 @@ export const APP_SELECTION_ERROR_CODES = {
   APP_UNAVAILABLE: 'app_unavailable',
   /** Caller's AppMember row was deleted (revocation, App delete, App uninstall) since selection. */
   APP_MEMBER_REVOKED: 'app_member_revoked',
-  /** Multi-App user called a strict-list tool without selecting first (engaged-client path; the session has used `h-list-apps` / `h-set-active-app` since session-init). */
+  /** Multi-App user called a strict-list tool without selecting first (engaged-client path; the session has used `hadron_list_apps` / `hadron_set_active_app` since session-init). */
   NO_ACTIVE_APP: 'no_active_app',
   /** Spec-025 FR-016 fall-through: multi-App user called a strict-list tool from an un-engaged session (never used the new App-selection surface). The literal `multiple_apps_resolved` token is preserved verbatim in the envelope's text prefix so SC-003's production-log grep continues to work. */
   MULTIPLE_APPS_RESOLVED: 'multiple_apps_resolved',

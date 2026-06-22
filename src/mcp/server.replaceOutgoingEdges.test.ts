@@ -1,6 +1,6 @@
 /**
  * Issue #107 regression — `resolveEdgeRefs` + `replaceOutgoingEdges`
- * (the helpers used by the MCP `h-add-node` / `h-update-node` tools)
+ * (the helpers used by the MCP `hadron_create_node` / `hadron_update_node` tools)
  * must accept all four `targetId` reference shapes for top-level
  * (single-segment loc) and nested targets, and surface a typed error
  * for unresolvable refs without mutating the source node — instead of
@@ -110,7 +110,7 @@ describe('resolveEdgeRefs — nested target', () => {
 });
 
 describe('resolveEdgeRefs — canonical `::` URN inputs (#183)', () => {
-  // h-read-node accepts canonical-form node URNs (it routes through
+  // hadron_get_node accepts canonical-form node URNs (it routes through
   // `splitNodeUrn`, which understands `::`). The edge-target resolver
   // used a colon-naive `.split(':')` and produced empty segments for
   // those same inputs — they silently failed with "Edge target not
@@ -119,7 +119,7 @@ describe('resolveEdgeRefs — canonical `::` URN inputs (#183)', () => {
 
   it('resolves a canonical `<org>::<memory>::<loc>` bare URN', async () => {
     // memory.urn is stored bare in legacy form (`<org>:<memory>`);
-    // construct the canonical-form input the way h-read-node would
+    // construct the canonical-form input the way hadron_get_node would
     // round-trip it.
     const canonicalRef = `${memory.urn.replace(':', '::')}::${nested.loc}`;
     expect(await resolveAndWrite(canonicalRef)).toBeNull();

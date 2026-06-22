@@ -2,7 +2,7 @@
  * Regression test — cross-memory same-loc nodes must NOT be collapsed.
  *
  * Latent bug surfaced 2026-06-02: `deduplicateNodes` (and the inline
- * loc-keyed dedup blocks in h-find-nodes and the nodeSearch keyword
+ * loc-keyed dedup blocks in hadron_find_nodes and the nodeSearch keyword
  * helper) keyed solely by `loc`, so multiple memories each owning a node
  * called `start-here` ended up collapsed to ONE entry in the portal's
  * `Query.nodes` view. MCP and GraphQL both affected.
@@ -150,10 +150,10 @@ describe('Cross-memory same-loc nodes survive deduplication', () => {
     expect(matches[0].name).toBe('canonical');
   });
 
-  it('MCP h-find-nodes (no memoryUrn, keyword default) returns all three', async () => {
+  it('MCP hadron_find_nodes (no memoryUrn, keyword default) returns all three', async () => {
     await seedThreeMemoriesEachWithStartHere();
     const srv = createTestableMcpServer(adminAuth());
-    const out = await srv.callToolText('h-find-nodes', {
+    const out = await srv.callToolText('hadron_find_nodes', {
       query: 'start-here',
     });
     // The "Found N node(s)" header reflects the un-collapsed count.

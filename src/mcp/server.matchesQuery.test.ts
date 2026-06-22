@@ -1,5 +1,5 @@
 /**
- * Issue #170 — `matchesQuery` wildcard / match-all semantics for h-find-nodes.
+ * Issue #170 — `matchesQuery` wildcard / match-all semantics for hadron_find_nodes.
  *
  * Pre-fix, `query: "*"` was treated as a literal substring and returned
  * "No nodes found matching '*'." even against a populated memory. An

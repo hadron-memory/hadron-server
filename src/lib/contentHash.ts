@@ -11,8 +11,8 @@ import { createHash } from 'crypto';
  *
  * The hash is computed over the **plaintext** content. On encrypted
  * memories, callers MUST surface plaintext content before invoking
- * this helper (spec 032 FR-009). For `h-read-node`, `decryptNodesBatch`
- * runs before the staleness check. For `h-validate`, the staleness
+ * this helper (spec 032 FR-009). For `hadron_get_node`, `decryptNodesBatch`
+ * runs before the staleness check. For `hadron_validate`, the staleness
  * check is gated on `!memory.isEncrypted` in v1 (the validator doesn't
  * decrypt); the encryption-parity follow-up will lift that gate.
  *

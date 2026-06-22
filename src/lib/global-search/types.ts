@@ -1,6 +1,6 @@
 /**
  * Global search — shared types for the cross-entity search engine that backs
- * both the GraphQL `globalSearch` query and the MCP `h-search` tool.
+ * both the GraphQL `globalSearch` query and the MCP `hadron_search` tool.
  *
  * Lives in `src/lib/` with NO MCP / GraphQL deps (mirrors `src/lib/search.ts`)
  * so both consumers import from a leaf module. Each surface builds a

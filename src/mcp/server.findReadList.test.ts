@@ -4,25 +4,25 @@
  *
  * What this file pins:
  *
- *   - #188 BOLA — h-find-nodes / h-list-nodes route through canReadMemory
+ *   - #188 BOLA — hadron_find_nodes / hadron_list_nodes route through canReadMemory
  *     for both the `memoryUrn` branch and the `parentRel` branch. Before
  *     the fix, `where.memoryId = mem.id` overrode the access-scoped filter,
  *     letting any authenticated caller search/browse any memory by URN.
  *
- *   - #180 Bug 2 — soft-deleted nodes excluded from h-find-nodes,
- *     h-read-node, h-read-next-node, h-list-nodes. Edge includes on those
+ *   - #180 Bug 2 — soft-deleted nodes excluded from hadron_find_nodes,
+ *     hadron_get_node, hadron_get_next_node, hadron_list_nodes. Edge includes on those
  *     paths additionally hide edges whose other-end node is tombstoned
  *     (so `Related:` and `Referenced by:` don't leak dangling refs).
  *
- *   - #186 — h-read-node + h-read-next-node emit a `Type: <nodeType>` line
+ *   - #186 — hadron_get_node + hadron_get_next_node emit a `Type: <nodeType>` line
  *     so portal-render / tool-dispatch nodeType drift is detectable.
  *
- *   - #185 Friction 4 — h-list-nodes at depth=1 synthesizes implicit
+ *   - #185 Friction 4 — hadron_list_nodes at depth=1 synthesizes implicit
  *     depth-1 parents whose only children sit at depth ≥ 2. Before the
  *     fix the walk-up loop early-exited any node beyond `maxDepth`, so
  *     deeply-nested orphans rendered as missing branches.
  *
- *   - #170 — h-find-nodes `query: "*"` survey-mode smoke (the matchesQuery
+ *   - #170 — hadron_find_nodes `query: "*"` survey-mode smoke (the matchesQuery
  *     unit covers branch logic; this is the end-to-end version that
  *     exercises the soft-delete + access-scope plumbing as well).
  *
@@ -234,10 +234,10 @@ beforeEach(async () => {
 // #188 — BOLA regression
 // ---------------------------------------------------------------------------
 
-describe('#188 BOLA — h-find-nodes scope override is gated by canReadMemory', () => {
+describe('#188 BOLA — hadron_find_nodes scope override is gated by canReadMemory', () => {
   it('returns "Memory not found" when a non-admin without access passes the memory URN', async () => {
     const srv = createTestableMcpServer(viewerAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: '*',
       memoryUrn: fx.memory.urn,
     });
@@ -250,7 +250,7 @@ describe('#188 BOLA — h-find-nodes scope override is gated by canReadMemory', 
 
   it('returns the data for an admin caller passing the same URN (control)', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: '*',
       memoryUrn: fx.memory.urn,
     });
@@ -267,7 +267,7 @@ describe('#188 BOLA — h-find-nodes scope override is gated by canReadMemory', 
     // ordinary "no match" envelope. No memory-existence leak; the agent's
     // search just returns empty.
     const srv = createTestableMcpServer(viewerAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: '*',
       parentRel: `urn:node:${fx.memory.urn}:archive`,
     });
@@ -276,10 +276,10 @@ describe('#188 BOLA — h-find-nodes scope override is gated by canReadMemory', 
   });
 });
 
-describe('#188 BOLA — h-list-nodes scope override is gated by canReadMemory', () => {
+describe('#188 BOLA — hadron_list_nodes scope override is gated by canReadMemory', () => {
   it('returns "Memory not found" when a non-admin without access passes the memory URN', async () => {
     const srv = createTestableMcpServer(viewerAuth());
-    const text = await srv.callToolText('h-list-nodes', {
+    const text = await srv.callToolText('hadron_list_nodes', {
       memoryUrn: fx.memory.urn,
       depth: 2,
     });
@@ -289,7 +289,7 @@ describe('#188 BOLA — h-list-nodes scope override is gated by canReadMemory', 
 
   it('returns the tree for an admin caller passing the same URN (control)', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-list-nodes', {
+    const text = await srv.callToolText('hadron_list_nodes', {
       memoryUrn: fx.memory.urn,
       depth: 2,
     });
@@ -298,13 +298,13 @@ describe('#188 BOLA — h-list-nodes scope override is gated by canReadMemory', 
   });
 
   it('returns the empty-subtree envelope (no leak) when a non-admin passes a parentRel that resolves to an inaccessible memory', async () => {
-    // Same shape as the h-find-nodes BOLA parentRel test: resolveLocFromUrn
+    // Same shape as the hadron_find_nodes BOLA parentRel test: resolveLocFromUrn
     // can't surface a memoryId for a non-admin viewer, the listing scopes
-    // to their empty access set, and h-list-nodes reports "No child nodes
+    // to their empty access set, and hadron_list_nodes reports "No child nodes
     // found" — same envelope it would emit against an accessible memory
     // with no children at that prefix. No memory-existence leak.
     const srv = createTestableMcpServer(viewerAuth());
-    const text = await srv.callToolText('h-list-nodes', {
+    const text = await srv.callToolText('hadron_list_nodes', {
       parentRel: `urn:node:${fx.memory.urn}:archive`,
       depth: 1,
     });
@@ -318,10 +318,10 @@ describe('#188 BOLA — h-list-nodes scope override is gated by canReadMemory', 
 // #180 Bug 2 — soft-deleted nodes excluded from find / read / list / next
 // ---------------------------------------------------------------------------
 
-describe('#180 Bug 2 — h-find-nodes excludes soft-deleted nodes', () => {
+describe('#180 Bug 2 — hadron_find_nodes excludes soft-deleted nodes', () => {
   it('does not surface a tombstoned node in keyword results', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: 'archived',
       memoryUrn: fx.memory.urn,
     });
@@ -330,7 +330,7 @@ describe('#180 Bug 2 — h-find-nodes excludes soft-deleted nodes', () => {
 
   it('does not surface a tombstoned node in wildcard survey', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: '*',
       memoryUrn: fx.memory.urn,
     });
@@ -340,10 +340,10 @@ describe('#180 Bug 2 — h-find-nodes excludes soft-deleted nodes', () => {
   });
 });
 
-describe('#180 Bug 2 — h-read-node treats soft-deleted nodes as not found', () => {
+describe('#180 Bug 2 — hadron_get_node treats soft-deleted nodes as not found', () => {
   it('returns "not found" for a tombstoned URN (no last-content leak)', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-read-node', {
+    const text = await srv.callToolText('hadron_get_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.archiveOldTombstoned.loc}`,
     });
     expect(text).toMatch(/not found/i);
@@ -352,17 +352,17 @@ describe('#180 Bug 2 — h-read-node treats soft-deleted nodes as not found', ()
 
   it('still reads a live node normally (control)', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-read-node', {
+    const text = await srv.callToolText('hadron_get_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.archive.loc}`,
     });
     expect(text).toContain(fx.nodes.archive.loc);
   });
 });
 
-describe('#180 Bug 2 — h-list-nodes omits soft-deleted nodes', () => {
+describe('#180 Bug 2 — hadron_list_nodes omits soft-deleted nodes', () => {
   it('does not include tombstoned children in the tree', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-list-nodes', {
+    const text = await srv.callToolText('hadron_list_nodes', {
       memoryUrn: fx.memory.urn,
       depth: 3,
     });
@@ -371,7 +371,7 @@ describe('#180 Bug 2 — h-list-nodes omits soft-deleted nodes', () => {
   });
 });
 
-describe('#180 Bug 2 — h-read-next-node skips soft-deleted siblings', () => {
+describe('#180 Bug 2 — hadron_get_next_node skips soft-deleted siblings', () => {
   beforeEach(async () => {
     // Add a parent + ordered live siblings + one tombstoned sibling to
     // exercise the next-by-seq walk.
@@ -419,7 +419,7 @@ describe('#180 Bug 2 — h-read-next-node skips soft-deleted siblings', () => {
 
   it('next-after-a returns c, not the tombstoned b-dead', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-read-next-node', {
+    const text = await srv.callToolText('hadron_get_next_node', {
       parent: `urn:node:${fx.memory.urn}:walk`,
       current: `urn:node:${fx.memory.urn}:walk:a`,
     });
@@ -429,9 +429,9 @@ describe('#180 Bug 2 — h-read-next-node skips soft-deleted siblings', () => {
 });
 
 describe('#180 Bug 2 — edge includes filter tombstoned target/source', () => {
-  it('h-read-node Related section hides edges to a tombstoned target', async () => {
+  it('hadron_get_node Related section hides edges to a tombstoned target', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-read-node', {
+    const text = await srv.callToolText('hadron_get_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.edgeSource.loc}`,
     });
     // Edge to liveTarget is shown.
@@ -440,18 +440,18 @@ describe('#180 Bug 2 — edge includes filter tombstoned target/source', () => {
     expect(text).not.toContain(fx.nodes.tombstonedTarget.loc);
   });
 
-  it('h-read-node Referenced-by section hides edges from a tombstoned source', async () => {
+  it('hadron_get_node Referenced-by section hides edges from a tombstoned source', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-read-node', {
+    const text = await srv.callToolText('hadron_get_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.witness.loc}`,
     });
     expect(text).toContain(fx.nodes.liveIncomingSource.loc);
     expect(text).not.toContain(fx.nodes.tombstonedIncomingSource.loc);
   });
 
-  it('h-find-nodes brief mode hides edges to tombstoned targets', async () => {
+  it('hadron_find_nodes brief mode hides edges to tombstoned targets', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: 'edge source',
       memoryUrn: fx.memory.urn,
       brief: true,
@@ -466,10 +466,10 @@ describe('#180 Bug 2 — edge includes filter tombstoned target/source', () => {
 // #186 — Type: meta line in read tools
 // ---------------------------------------------------------------------------
 
-describe('#186 — h-read-node surfaces nodeType in formatted output', () => {
+describe('#186 — hadron_get_node surfaces nodeType in formatted output', () => {
   it('renders Type: parent for a parent-type node', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-read-node', {
+    const text = await srv.callToolText('hadron_get_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.archive.loc}`,
     });
     expect(text).toMatch(/^Type: parent$/m);
@@ -477,7 +477,7 @@ describe('#186 — h-read-node surfaces nodeType in formatted output', () => {
 
   it('renders Type: info for the default nodeType', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-read-node', {
+    const text = await srv.callToolText('hadron_get_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.witness.loc}`,
     });
     expect(text).toMatch(/^Type: info$/m);
@@ -488,10 +488,10 @@ describe('#186 — h-read-node surfaces nodeType in formatted output', () => {
 // #185 Friction 4 — implicit parents at depth=1
 // ---------------------------------------------------------------------------
 
-describe('#185 F4 — h-list-nodes synthesizes implicit parents at depth=1', () => {
+describe('#185 F4 — hadron_list_nodes synthesizes implicit parents at depth=1', () => {
   it('shows a depth-1 (missing) row for a depth-3 orphan even at maxDepth=1', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-list-nodes', {
+    const text = await srv.callToolText('hadron_list_nodes', {
       memoryUrn: fx.memory.urn,
       depth: 1,
     });
@@ -500,10 +500,10 @@ describe('#185 F4 — h-list-nodes synthesizes implicit parents at depth=1', () 
     // count (its only direct child is `findings:foo`, which IS a real
     // child even though that one is also implicit downstream).
     expect(text).toContain('findings');
-    expect(text).toMatch(/findings.*missing.*use h-add-parent-node/);
+    expect(text).toMatch(/findings.*missing.*use hadron_create_parent_node/);
     // Other depth-1 implicit parent for `project:notes`.
     expect(text).toContain('project');
-    expect(text).toMatch(/project.*missing.*use h-add-parent-node/);
+    expect(text).toMatch(/project.*missing.*use hadron_create_parent_node/);
   });
 });
 
@@ -511,10 +511,10 @@ describe('#185 F4 — h-list-nodes synthesizes implicit parents at depth=1', () 
 // #170 — wildcard end-to-end smoke
 // ---------------------------------------------------------------------------
 
-describe('#170 — h-find-nodes wildcard survey end-to-end', () => {
+describe('#170 — hadron_find_nodes wildcard survey end-to-end', () => {
   it('query="*" returns every live node in the scoped memory', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: '*',
       memoryUrn: fx.memory.urn,
     });
@@ -530,10 +530,10 @@ describe('#170 — h-find-nodes wildcard survey end-to-end', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Spec 031 US2 — h-find-nodes preview surfaces the abstract
+// Spec 031 US2 — hadron_find_nodes preview surfaces the abstract
 // ---------------------------------------------------------------------------
 
-describe('spec 031 US2 — h-find-nodes preview includes the abstract', () => {
+describe('spec 031 US2 — hadron_find_nodes preview includes the abstract', () => {
   const SHORT_ABSTRACT =
     'Paragraph-length summary that should appear in the preview as an indented block beneath the description line.';
   const MULTI_LINE_ABSTRACT = 'First paragraph.\n\nSecond paragraph.';
@@ -545,7 +545,7 @@ describe('spec 031 US2 — h-find-nodes preview includes the abstract', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: 'finding',
       memoryUrn: fx.memory.urn,
     });
@@ -565,7 +565,7 @@ describe('spec 031 US2 — h-find-nodes preview includes the abstract', () => {
   it('US2.2 — node without abstract renders byte-identically to pre-spec preview', async () => {
     // archive node — no abstract by default; description set in the fixture.
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: 'archive',
       memoryUrn: fx.memory.urn,
     });
@@ -586,7 +586,7 @@ describe('spec 031 US2 — h-find-nodes preview includes the abstract', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: 'witness',
       memoryUrn: fx.memory.urn,
     });
@@ -606,7 +606,7 @@ describe('spec 031 US2 — h-find-nodes preview includes the abstract', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: 'witness',
       memoryUrn: fx.memory.urn,
     });
@@ -624,7 +624,7 @@ describe('spec 031 US2 — h-find-nodes preview includes the abstract', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: 'finding',
       brief: true,
       memoryUrn: fx.memory.urn,
@@ -644,7 +644,7 @@ describe('spec 031 US2 — h-find-nodes preview includes the abstract', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-find-nodes', {
+    const text = await srv.callToolText('hadron_find_nodes', {
       query: UNIQUE_TERM,
       memoryUrn: fx.memory.urn,
     });

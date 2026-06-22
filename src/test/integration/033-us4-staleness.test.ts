@@ -133,7 +133,7 @@ afterAll(() => {
 
 async function findNodesVector(query: string): Promise<string> {
   const srv = createTestableMcpServer(adminAuth());
-  return srv.callToolText('h-find-nodes', {
+  return srv.callToolText('hadron_find_nodes', {
     query,
     mode: 'vector',
     memoryUrn: memUrn,
@@ -206,7 +206,7 @@ describe('US4 — stale abstract-vector hits served + marked', () => {
     const stale = await findNodesVector('architecture');
     expect(stale).toContain('Source: abstract-stale');
 
-    // Simulate the author re-affirming the abstract — same flow as h-update-node
+    // Simulate the author re-affirming the abstract — same flow as hadron_update_node
     // with `abstract` supplied: spec 032 FR-003 re-stamps abstractOriginHash from
     // current content. Direct DB write so the test stays focused on the read-side
     // marker logic.
@@ -251,7 +251,7 @@ describe('US4 — stale abstract-vector hits served + marked', () => {
     expect(out).toContain('enc-stale');
     // Spec 033 FR-025: write-time plaintext stamping means the predicate IS
     // computable at read time even on encrypted memories — unlike spec 032's
-    // h-read-node which had to gate this with !memory.isEncrypted.
+    // hadron_get_node which had to gate this with !memory.isEncrypted.
     expect(out).toContain('Source: abstract-stale');
   });
 });

@@ -6,7 +6,7 @@
  * two global-search surfaces compute an **identical** org scope and cannot
  * re-diverge:
  *   - the GraphQL `globalSearch` resolver (`src/api/graphql/schema/resolvers.ts`), and
- *   - the MCP `h-search` tool (`src/mcp/server.ts`).
+ *   - the MCP `hadron_search` tool (`src/mcp/server.ts`).
  *
  * Org membership is the scope for the org-rooted entity slices of global search
  * (Organization / Agent / App / AiServiceConfig). Memory + Node scoping uses the

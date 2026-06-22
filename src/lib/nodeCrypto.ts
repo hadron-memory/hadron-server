@@ -20,7 +20,7 @@ import { sessionKeyCache } from './sessionKeyCache.js';
  * paragraph-length summary of `content`, so leaking it plaintext on an
  * encrypted memory would defeat the encryption guarantee for the most
  * informative ~2000 chars per node (the same data the RAG follow-up will
- * vectorize). Trade-off: h-find-nodes previews and any future RAG/preview
+ * vectorize). Trade-off: hadron_find_nodes previews and any future RAG/preview
  * surface on encrypted memories require an active session key, the same
  * way `content` reads already do. Documented in PR-201 review round-2.
  */

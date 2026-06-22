@@ -7,9 +7,9 @@
  *   - HADRON_SERVER_VERSION is exposed unchanged through both surfaces
  *     (no copy in the McpServer constructor — verified by grep so the
  *     hardcoded literal can't drift back in).
- *   - h-set-active-memory's success message includes the bound server
+ *   - hadron_set_active_memory's success message includes the bound server
  *     URL + version inline.
- *   - h-server-info returns server + version, requires no auth context
+ *   - hadron_server_info returns server + version, requires no auth context
  *     beyond the basic AuthContext shape, and does not expose
  *     DATABASE_URL (or any other credential-bearing value).
  */
@@ -132,7 +132,7 @@ describe('source audit — no hardcoded version literal in createMcpServerInstan
   });
 });
 
-describe('h-set-active-memory — includes deployment info in success message (#187 / #190)', () => {
+describe('hadron_set_active_memory — includes deployment info in success message (#187 / #190)', () => {
   let admin: { id: string };
   let memory: { id: string; urn: string };
 
@@ -166,7 +166,7 @@ describe('h-set-active-memory — includes deployment info in success message (#
       clientId: `user:${admin.id}`,
     };
     const srv = createTestableMcpServer(auth);
-    const text = await srv.callToolText('h-set-active-memory', {
+    const text = await srv.callToolText('hadron_set_active_memory', {
       memoryUrn: memory.urn,
     });
 
@@ -176,7 +176,7 @@ describe('h-set-active-memory — includes deployment info in success message (#
   });
 });
 
-describe('h-server-info — returns server identity (#187 / #190)', () => {
+describe('hadron_server_info — returns server identity (#187 / #190)', () => {
   let admin: { id: string };
 
   beforeEach(async () => {
@@ -198,7 +198,7 @@ describe('h-server-info — returns server identity (#187 / #190)', () => {
       clientId: `user:${admin.id}`,
     };
     const srv = createTestableMcpServer(auth);
-    const text = await srv.callToolText('h-server-info', {});
+    const text = await srv.callToolText('hadron_server_info', {});
 
     expect(text).toMatch(/^server: https:\/\/gamma\.hadronmemory\.com$/m);
     expect(text).toMatch(new RegExp(`^version: ${HADRON_SERVER_VERSION}$`, 'm'));
@@ -218,7 +218,7 @@ describe('h-server-info — returns server identity (#187 / #190)', () => {
       clientId: `user:${admin.id}`,
     };
     const srv = createTestableMcpServer(auth);
-    const text = await srv.callToolText('h-server-info', {});
+    const text = await srv.callToolText('hadron_server_info', {});
 
     expect(text).not.toContain('my-secret-pass');
     expect(text).not.toContain('my-secret-user');
@@ -239,7 +239,7 @@ describe('h-server-info — returns server identity (#187 / #190)', () => {
       clientId: 'anonymous',
     };
     const srv = createTestableMcpServer(auth);
-    const text = await srv.callToolText('h-server-info', {});
+    const text = await srv.callToolText('hadron_server_info', {});
 
     expect(text).toMatch(/server:/);
     expect(text).toMatch(/version:/);

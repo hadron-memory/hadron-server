@@ -153,7 +153,7 @@ describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
     // Spec 025 originally returned HTTP 409 `multiple_apps_resolved` here.
     // Spec 026 §FR-016 refinement: the 409 is moved from session-init to
     // per-tool-call layer (as an MCP tool-error envelope), so multi-App
-    // users can OPEN a session and call `h-list-apps` / `h-set-active-app`
+    // users can OPEN a session and call `hadron_list_apps` / `hadron_set_active_app`
     // to pick an App. This unblocks Claude Desktop OAuth users —
     // see specs/026-app-identification-regimes/spec.md §Background.
     await createAppForUser('alpha', user.id);

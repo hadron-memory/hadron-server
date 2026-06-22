@@ -1,9 +1,9 @@
 /**
- * #234 — nodeSearch / h-find-nodes must degrade gracefully when the
+ * #234 — nodeSearch / hadron_find_nodes must degrade gracefully when the
  * embedding endpoint is configured but unreachable at query time.
  *
  * The bug: the vector + hybrid branches of both surfaces (GraphQL
- * `Query.nodeSearch` and MCP `h-find-nodes`) called `embed()` outside
+ * `Query.nodeSearch` and MCP `hadron_find_nodes`) called `embed()` outside
  * any try/catch. When the endpoint was up at config time but down at
  * query time (service crashed, DNS failed, egress blocked), the raw
  * `EmbeddingRequestError: fetch failed` propagated out of the resolver
@@ -186,17 +186,17 @@ describe('#234 — GraphQL nodeSearch degrades when embed() throws', () => {
 });
 
 // ---------------------------------------------------------------------------
-// MCP — h-find-nodes
+// MCP — hadron_find_nodes
 // ---------------------------------------------------------------------------
 
-describe('#234 — MCP h-find-nodes degrades when embed() throws', () => {
+describe('#234 — MCP hadron_find_nodes degrades when embed() throws', () => {
   it('mode:vector → returns the [embedding_unavailable] envelope, does not throw', async () => {
     await seedNode({ loc: 'noise', description: 'unrelated' });
 
     const srv = createTestableMcpServer(adminAuth());
     // Pre-fix: this throws `EmbeddingRequestError: fetch failed`.
     // Post-fix: the [embedding_unavailable] envelope is returned.
-    const out = await srv.callToolText('h-find-nodes', {
+    const out = await srv.callToolText('hadron_find_nodes', {
       query: 'natural language query',
       memoryUrn: memUrn,
       mode: 'vector',
@@ -213,7 +213,7 @@ describe('#234 — MCP h-find-nodes degrades when embed() throws', () => {
     await seedNode({ loc: 'noise', description: 'unrelated' });
 
     const srv = createTestableMcpServer(adminAuth());
-    const out = await srv.callToolText('h-find-nodes', {
+    const out = await srv.callToolText('hadron_find_nodes', {
       query: 'delta',
       memoryUrn: memUrn,
       mode: 'hybrid',
@@ -233,7 +233,7 @@ describe('#234 — MCP h-find-nodes degrades when embed() throws', () => {
     await seedNode({ loc: 'kw-direct', description: 'matches epsilon' });
 
     const srv = createTestableMcpServer(adminAuth());
-    const out = await srv.callToolText('h-find-nodes', {
+    const out = await srv.callToolText('hadron_find_nodes', {
       query: 'epsilon',
       memoryUrn: memUrn,
       mode: 'keyword',

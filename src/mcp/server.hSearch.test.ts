@@ -1,5 +1,5 @@
 /**
- * h-search (global cross-entity search) MCP tool coverage. Drives the real
+ * hadron_search (global cross-entity search) MCP tool coverage. Drives the real
  * production tool closure via createTestableMcpServer (which bypasses zod, so
  * this also exercises the handler's defensive arg normalization).
  */
@@ -37,23 +37,23 @@ beforeEach(async () => {
   });
 });
 
-describe('h-search', () => {
+describe('hadron_search', () => {
   it('returns a ranked cross-entity list', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-search', { query: 'Alpha' });
+    const text = await srv.callToolText('hadron_search', { query: 'Alpha' });
     expect(text).toContain('[memory]');
     expect(text).toContain('Alpha Memory');
   });
 
   it('rejects unauthenticated callers', async () => {
     const srv = createTestableMcpServer({} as AuthContext);
-    const text = await srv.callToolText('h-search', { query: 'Alpha' });
+    const text = await srv.callToolText('hadron_search', { query: 'Alpha' });
     expect(text).toBe('Not authenticated.');
   });
 
   it('normalizes junk entityTypes defensively (zod is bypassed in tests)', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-search', {
+    const text = await srv.callToolText('hadron_search', {
       query: 'Juno',
       entityTypes: ['agent', 'bogus', 123],
     });
@@ -62,7 +62,7 @@ describe('h-search', () => {
 
   it('honors a valid entityTypes filter', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-search', { query: 'Juno', entityTypes: ['memory'] });
+    const text = await srv.callToolText('hadron_search', { query: 'Juno', entityTypes: ['memory'] });
     expect(text).toContain('No results');
   });
 });

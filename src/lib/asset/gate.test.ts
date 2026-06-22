@@ -18,12 +18,12 @@ describe('asset / gate (v1 — per-App)', () => {
   describe('isAssetToolEnabled', () => {
     it('returns true when the key is in agentTools', () => {
       expect(isAssetToolEnabled({ agentTools: ['asset:upload'] })).toBe(true);
-      expect(isAssetToolEnabled({ agentTools: ['h-find-node', 'asset:upload', 'h-read-node'] })).toBe(true);
+      expect(isAssetToolEnabled({ agentTools: ['hadron_find_nodes', 'asset:upload', 'hadron_get_node'] })).toBe(true);
     });
 
     it('returns false when the key is missing', () => {
       expect(isAssetToolEnabled({ agentTools: [] })).toBe(false);
-      expect(isAssetToolEnabled({ agentTools: ['h-find-node'] })).toBe(false);
+      expect(isAssetToolEnabled({ agentTools: ['hadron_find_nodes'] })).toBe(false);
     });
 
     it('does not match a related-but-different key', () => {
@@ -39,7 +39,7 @@ describe('asset / gate (v1 — per-App)', () => {
 
     it('throws ToolNotEnabledError when disabled', () => {
       expect(() => assertAssetToolEnabled({ agentTools: [] })).toThrow(ToolNotEnabledError);
-      expect(() => assertAssetToolEnabled({ agentTools: ['h-find-node'] })).toThrow(/TOOL_NOT_ENABLED/);
+      expect(() => assertAssetToolEnabled({ agentTools: ['hadron_find_nodes'] })).toThrow(/TOOL_NOT_ENABLED/);
     });
 
     it('attaches the tool key to the error', () => {

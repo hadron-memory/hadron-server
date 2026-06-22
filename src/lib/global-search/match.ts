@@ -4,7 +4,7 @@
  * Tiered relevance: exact (3) > prefix (2) > substring (1), weighted per field
  * so a URN/name/PK hit outranks a description/content hit of the same tier.
  * Ranking is intentionally simple — cross-entity semantic ranking is out of
- * scope (that's `nodeSearch`/`h-find-nodes`' job).
+ * scope (that's `nodeSearch`/`hadron_find_nodes`' job).
  */
 
 import { formatCanonicalUrn } from '../urn.js';

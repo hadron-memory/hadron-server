@@ -12,7 +12,7 @@
  * Before this helper, the portal granted org members read on org `knowledge`
  * memories (via `OrgMember`), while MCP keyed *solely* off `AppMember` rows
  * (`resolveUserApps`). A freshly-onboarded org member therefore saw memories
- * in the portal but `h-list-memories` returned nothing until they installed an
+ * in the portal but `hadron_list_memories` returned nothing until they installed an
  * Agent — the Micromentor onboarding incident (2026-06-13). Routing both
  * surfaces through this one query closes that divergence by construction.
  *

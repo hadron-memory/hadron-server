@@ -258,7 +258,7 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     });
     if (encCount > 0) {
       ctx.degraded.push(
-        `Content search skipped ${encCount} encrypted ${encCount === 1 ? 'memory' : 'memories'} — substring search cannot read encrypted content. Use semantic search (nodeSearch / h-find-nodes).`,
+        `Content search skipped ${encCount} encrypted ${encCount === 1 ? 'memory' : 'memories'} — substring search cannot read encrypted content. Use semantic search (nodeSearch / hadron_find_nodes).`,
       );
     }
   }

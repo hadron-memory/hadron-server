@@ -1,7 +1,7 @@
 /**
  * Task — a new node added to an already-ordered sibling list gets the next
  * `seq` (lands at the end). Covered on BOTH single-node create surfaces that
- * carry a seq: the GraphQL `upsertNode` resolver and the MCP `h-add-node`
+ * carry a seq: the GraphQL `upsertNode` resolver and the MCP `hadron_create_node`
  * tool, which share `nextSiblingSeq` (src/lib/nodeSeq.ts).
  */
 
@@ -50,7 +50,7 @@ beforeEach(async () => {
   const memory = await resolvers.Mutation.createMemory({}, { orgId, name: 'seqmem' }, gqlCtx());
   memoryId = memory.id;
   // Fully-qualified memory URN (org::memory) for node-URN construction. The
-  // stored urn uses a single colon (seqa-org:seqmem); h-add-node wants the
+  // stored urn uses a single colon (seqa-org:seqmem); hadron_create_node wants the
   // org::memory::loc form.
   memoryUrn = 'seqa-org::seqmem';
 });
@@ -101,12 +101,12 @@ describe('upsertNode — auto-assign seq into an ordered sibling list', () => {
   });
 });
 
-describe('h-add-node — mirrors the auto-seq rule (parity)', () => {
+describe('hadron_create_node — mirrors the auto-seq rule (parity)', () => {
   it('assigns the next seq into an ordered sibling list', async () => {
     await seedSibling('parent:a', 1);
     await seedSibling('parent:b', 2);
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('h-add-node', { urn: `${memoryUrn}::parent:c`, name: 'c' });
+    await srv.callToolText('hadron_create_node', { urn: `${memoryUrn}::parent:c`, name: 'c' });
     const created = await db.node.findUnique({ where: { loc_memoryId: { loc: 'parent:c', memoryId } } });
     expect(created?.seq).toBe(3);
   });
@@ -114,7 +114,7 @@ describe('h-add-node — mirrors the auto-seq rule (parity)', () => {
   it('respects an explicit seq', async () => {
     await seedSibling('parent:a', 1);
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('h-add-node', { urn: `${memoryUrn}::parent:c`, name: 'c', seq: 88 });
+    await srv.callToolText('hadron_create_node', { urn: `${memoryUrn}::parent:c`, name: 'c', seq: 88 });
     const created = await db.node.findUnique({ where: { loc_memoryId: { loc: 'parent:c', memoryId } } });
     expect(created?.seq).toBe(88);
   });
@@ -123,7 +123,7 @@ describe('h-add-node — mirrors the auto-seq rule (parity)', () => {
     await seedSibling('parent:a', 1);
     await seedSibling('parent:b', 2);
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('h-add-node', { urn: `${memoryUrn}::parent:a`, name: 'renamed' });
+    await srv.callToolText('hadron_create_node', { urn: `${memoryUrn}::parent:a`, name: 'renamed' });
     const updated = await db.node.findUnique({ where: { loc_memoryId: { loc: 'parent:a', memoryId } } });
     expect(updated?.seq).toBe(1);
   });

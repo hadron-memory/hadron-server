@@ -4,7 +4,7 @@
  * Every Edge needs a memory-unique `loc` (its identity + URN suffix), but most
  * creation paths don't author one: the migration backfill of existing rows,
  * Git sync (frontmatter historically carried only `rel:`), `cloneMemory`, and
- * the `h-add-edge` tool. For those, we DERIVE a loc deterministically from the
+ * the `hadron_create_edge` tool. For those, we DERIVE a loc deterministically from the
  * endpoints + name so that:
  *   - it is unique exactly where the old `(source, target, name)` triple was
  *     (node locs are unique within a memory, so source/target locs identify the
