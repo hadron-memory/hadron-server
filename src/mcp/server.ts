@@ -105,7 +105,7 @@ function textResult(text: string) {
  * server expose?", not "what release of the hadron-server repo am I
  * talking to?"
  */
-export const HADRON_SERVER_VERSION = '0.4.0';
+export const HADRON_SERVER_VERSION = '0.5.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"
@@ -4179,11 +4179,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     };
   }
 
-  // ── hadron_chat_start ─────────────────────────────────────────────────────
+  // ── hadron_chatbot_start ─────────────────────────────────────────────────────
 
   server.tool(
-    'hadron_chat_start',
-    'Start a new chat session with an agent. Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call hadron_chat_process with the result.',
+    'hadron_chatbot_start',
+    'Start a new chat session with an agent. Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call hadron_chatbot_process with the result.',
     {
       agentId: z.string().describe('ID of the agent to chat with'),
       userId: z.string().optional().describe('User/persona identifier (e.g. "alex-chen"). Used to scope the per-user memory. If omitted, uses the authenticated user.'),
@@ -4208,13 +4208,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_chat_send ──────────────────────────────────────────────────────
+  // ── hadron_chatbot_send ──────────────────────────────────────────────────────
 
   server.tool(
-    'hadron_chat_send',
-    "Send a user message in an existing chat. Returns the recompiled system prompt for the current stage, tool schema, message history, and whether summarization is needed. Use the returned prompt + tools to generate the assistant's response, then call hadron_chat_process.",
+    'hadron_chatbot_send',
+    "Send a user message in an existing chat. Returns the recompiled system prompt for the current stage, tool schema, message history, and whether summarization is needed. Use the returned prompt + tools to generate the assistant's response, then call hadron_chatbot_process.",
     {
-      chatId: z.string().describe('Chat ID returned by hadron_chat_start (e.g. "chats:20260417-abc12345-onboarding")'),
+      chatId: z.string().describe('Chat ID returned by hadron_chatbot_start (e.g. "chats:20260417-abc12345-onboarding")'),
       userMessage: z.string().describe("The user's message text"),
     },
     async ({ chatId, userMessage }) => {
@@ -4235,10 +4235,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_chat_process ───────────────────────────────────────────────────
+  // ── hadron_chatbot_process ───────────────────────────────────────────────────
 
   server.tool(
-    'hadron_chat_process',
+    'hadron_chatbot_process',
     "Process the LLM's structured response for a chat turn. The toolResponse must match the respond() tool schema: { message, data, next_stage }. Hadron saves the assistant message, extracts data into user memory, and handles stage transitions. Returns the display message, whether a stage transition occurred, and the new stage name.",
     {
       chatId: z.string().describe('Chat ID'),
@@ -4269,10 +4269,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_chat_get_routing_map ───────────────────────────────────────────
+  // ── hadron_chatbot_get_routing_map ───────────────────────────────────────────
 
   server.tool(
-    'hadron_chat_get_routing_map',
+    'hadron_chatbot_get_routing_map',
     "Download the full routing map for an agent: topics, conversations (with goals/signals), stages, and edges. Use this to understand the chatbot's conversation structure before routing.",
     {
       agentId: z.string().describe('ID of the agent'),
@@ -4335,10 +4335,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_chat_get_route_history ──────────────────────────────────────────
+  // ── hadron_chatbot_get_route_history ──────────────────────────────────────────
 
   server.tool(
-    'hadron_chat_get_route_history',
+    'hadron_chatbot_get_route_history',
     'Get the route history and goal stack for a chat. Shows where the chat has been and what goals are active.',
     {
       chatId: z.string().describe('Chat ID'),
@@ -4363,10 +4363,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_chat_push_goal ──────────────────────────────────────────────────
+  // ── hadron_chatbot_push_goal ──────────────────────────────────────────────────
 
   server.tool(
-    'hadron_chat_push_goal',
+    'hadron_chatbot_push_goal',
     'Push a new goal onto the goal stack. Use this when the user mentions something they want to do later, or when a detour is needed.',
     {
       chatId: z.string().describe('Chat ID'),
@@ -4404,10 +4404,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_chat_pop_goal ───────────────────────────────────────────────────
+  // ── hadron_chatbot_pop_goal ───────────────────────────────────────────────────
 
   server.tool(
-    'hadron_chat_pop_goal',
+    'hadron_chatbot_pop_goal',
     'Complete the current goal and return to the previous one. Use this when a detour conversation has finished its purpose.',
     {
       chatId: z.string().describe('Chat ID'),
@@ -4450,10 +4450,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_chat_add_training_entry ───────────────────────────────────────
+  // ── hadron_chatbot_add_training_entry ───────────────────────────────────────
 
   server.tool(
-    'hadron_chat_add_training_entry',
+    'hadron_chatbot_add_training_entry',
     'Add a user statement to the agent-wide routing training set. These entries help the routing engine match future user messages to the right conversation. Stored in the system memory (not encrypted user memory).',
     {
       agentId: z.string().describe('ID of the agent'),
@@ -4517,10 +4517,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_chat_define_persona ───────────────────────────────────────────
+  // ── hadron_chatbot_define_persona ───────────────────────────────────────────
 
   server.tool(
-    'hadron_chat_define_persona',
+    'hadron_chatbot_define_persona',
     'Define a test persona for automated chatbot testing. The persona has a name, description, opening message, and optionally an expected conversation path. Stored in the system memory under test-personas:*.',
     {
       agentId: z.string().describe('ID of the agent'),
@@ -4586,10 +4586,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_chat_list_personas ──────────────────────────────────────────
+  // ── hadron_chatbot_list_personas ──────────────────────────────────────────
 
   server.tool(
-    'hadron_chat_list_personas',
+    'hadron_chatbot_list_personas',
     'List all test personas defined for an agent.',
     {
       agentId: z.string().describe('ID of the agent'),
@@ -4610,7 +4610,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           orderBy: { loc: 'asc' },
         });
 
-        if (personas.length === 0) return textResult('No test personas defined. Use hadron_chat_define_persona to create one.');
+        if (personas.length === 0) return textResult('No test personas defined. Use hadron_chatbot_define_persona to create one.');
 
         const lines = personas.map((p) => {
           const d = (p.data as Record<string, unknown>) ?? {};
@@ -4623,11 +4623,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_chat_run_persona ────────────────────────────────────────────
+  // ── hadron_chatbot_run_persona ────────────────────────────────────────────
 
   server.tool(
-    'hadron_chat_run_persona',
-    'Run a test persona through the chatbot in "dry run" mode. This starts a chat as the persona, sends their opening message, and returns the chatbot\'s compiled prompt + tool schema so the client LLM can generate the response. Call hadron_chat_process with the response, then call this tool again with the next follow-up message. Use this iteratively to walk through the full conversation.\n\nWorkflow:\n1. Call hadron_chat_run_persona to start (sets up chat, sends opening message)\n2. Read the returned prompt, generate a chatbot response as the client LLM\n3. Call hadron_chat_process with the response\n4. Call hadron_chat_run_persona again with step=1 (next follow-up)\n5. Repeat until all follow-ups are done or the conversation ends\n\nAt the end, call hadron_chat_get_route_history to see the full path taken.',
+    'hadron_chatbot_run_persona',
+    'Run a test persona through the chatbot in "dry run" mode. This starts a chat as the persona, sends their opening message, and returns the chatbot\'s compiled prompt + tool schema so the client LLM can generate the response. Call hadron_chatbot_process with the response, then call this tool again with the next follow-up message. Use this iteratively to walk through the full conversation.\n\nWorkflow:\n1. Call hadron_chatbot_run_persona to start (sets up chat, sends opening message)\n2. Read the returned prompt, generate a chatbot response as the client LLM\n3. Call hadron_chatbot_process with the response\n4. Call hadron_chatbot_run_persona again with step=1 (next follow-up)\n5. Repeat until all follow-ups are done or the conversation ends\n\nAt the end, call hadron_chatbot_get_route_history to see the full path taken.',
     {
       agentId: z.string().describe('ID of the agent'),
       personaLoc: z.string().describe('Loc of the persona (e.g. "test-personas:maria-santos")'),
@@ -4683,7 +4683,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             systemMessage: sendResult.systemMessage,
             tools: sendResult.tools,
             messageHistory: sendResult.messageHistory,
-            instruction: 'Generate a chatbot response based on the systemMessage and tools above. Then call hadron_chat_process with chatId, message, data, and next_stage. After that, call hadron_chat_run_persona with step=1 to send the next follow-up.',
+            instruction: 'Generate a chatbot response based on the systemMessage and tools above. Then call hadron_chatbot_process with chatId, message, data, and next_stage. After that, call hadron_chatbot_run_persona with step=1 to send the next follow-up.',
           }, null, 2));
         }
 
@@ -4741,7 +4741,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           systemMessage: sendResult.systemMessage,
           tools: sendResult.tools,
           messageHistory: sendResult.messageHistory,
-          instruction: `Generate a chatbot response for: "${userMessage}". Then call hadron_chat_process, then hadron_chat_run_persona with step=${currentStep + 1}.`,
+          instruction: `Generate a chatbot response for: "${userMessage}". Then call hadron_chatbot_process, then hadron_chatbot_run_persona with step=${currentStep + 1}.`,
         }, null, 2));
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to run persona'}`);
