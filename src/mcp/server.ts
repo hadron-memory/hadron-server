@@ -2965,6 +2965,87 @@ export function createMcpServerInstance(
     },
   );
 
+  // ── hadron_replace_globally ──────────────────────────────────────────────
+  //
+  // Bulk literal/regex search-and-replace across many nodes at once. Delegates
+  // to the GraphQL searchReplaceInNodes resolver so there is ONE implementation
+  // of the write invariants (per-memory auth, encryption, version history,
+  // abstract-staleness, re-embedding, git mirror). Unlike the other MCP write
+  // tools (#206), the delegated path encrypts/decrypts correctly because the
+  // resolver owns that logic.
+
+  server.tool(
+    'hadron_replace_globally',
+    "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Honors write permissions, version history (each change is undoable), and re-embeds changed nodes.",
+    {
+      oldText: z.string().describe('Text to find (literal substring), or a regular-expression source when regex:true. Must be non-empty.'),
+      newText: z.string().describe('Replacement text. May be empty to delete the matched text. In regex mode, $1/$<name>/$& are honored.'),
+      nodeUrns: z.array(z.string()).optional().describe('Explicit nodes to edit — fully-qualified node URNs (org::memory::loc) or ID-shape values.'),
+      memoryUrns: z.array(z.string()).optional().describe('Edit every live node in these memories — fully-qualified memory URNs (org::memory) or ID-shape values. At least one of nodeUrns / memoryUrns is required.'),
+      prefix: z.string().optional().describe("Restrict the memoryUrns selection to a subtree: the node at this loc plus its descendants. Requires memoryUrns (loc is only unique within a memory)."),
+      fields: z.array(z.enum(['content', 'name', 'alias', 'description', 'abstract', 'tags']))
+        .describe('Which text fields to search. At least one required.'),
+      caseInsensitive: z.boolean().optional().describe('Match case-insensitively (default false).'),
+      regex: z.boolean().optional().describe('Treat oldText as a regular-expression source and newText as a replacement pattern (default false).'),
+      dryRun: z.boolean().optional().describe('Preview only: report per-node match counts WITHOUT writing anything. Strongly recommended before a real run.'),
+    },
+    async ({ oldText, newText, nodeUrns, memoryUrns, prefix, fields, caseInsensitive, regex, dryRun }) => {
+      // Build a GraphQL Context from the MCP auth. Include appId + sessionId so
+      // app-keyed write authorization (requireMemoryWriteAccess) resolves the
+      // same way it does for hadron_create_node / hadron_update_node.
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+
+      // The resolver accepts IDs OR URNs for both selectors, so URNs pass
+      // through unchanged.
+      try {
+        const result = await resolvers.Mutation.searchReplaceInNodes(
+          {},
+          {
+            input: {
+              oldText,
+              newText,
+              nodeIds: nodeUrns,
+              memoryIds: memoryUrns,
+              prefix,
+              fields,
+              caseInsensitive: caseInsensitive ?? false,
+              regex: regex ?? false,
+              dryRun: dryRun ?? false,
+            },
+          } as never,
+          ctx,
+        );
+
+        // Render a compact, URN-addressed summary.
+        const lines = await Promise.all(
+          result.results.map(async (r: { loc: string; memoryId: string; replacements: number; fields: Array<{ field: string; matches: number }> }) => {
+            const urn = await nodeUrn(r.loc, r.memoryId);
+            const breakdown = r.fields.map((f) => `${f.field}×${f.matches}`).join(', ');
+            return `  - ${urn} (${r.replacements}: ${breakdown})`;
+          }),
+        );
+
+        const verb = result.dryRun ? 'Would replace' : 'Replaced';
+        const header =
+          `${verb} ${result.totalReplacements} occurrence(s) across ` +
+          `${result.nodesChanged} of ${result.nodesScanned} node(s) scanned` +
+          (result.dryRun ? ' (dry run — nothing written).' : '.');
+
+        return textResult(lines.length ? `${header}\n${lines.join('\n')}` : header);
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`);
+      }
+    },
+  );
+
   // ── hadron_create_edge ───────────────────────────────────────────────────────────
   //
   // Issue #183 — hadron_update_node.edges replaces the full outgoing-edge set,
