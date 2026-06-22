@@ -17,6 +17,12 @@ import {
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
+import {
+  buildReplacer,
+  replaceInTags,
+  SearchReplaceInvalidPatternError,
+  type Replacer,
+} from '../../../lib/searchReplace.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
 import {
   enqueueNodeEmbedding,
@@ -4109,6 +4115,361 @@ export const resolvers = {
       });
 
       return finalNode;
+    },
+
+    // Bulk literal/regex search-and-replace across selected nodes. Reuses the
+    // single-write invariants from upsertNode (per-memory write auth,
+    // decrypt→replace→re-encrypt, NodeVersion snapshot, abstractOriginHash
+    // recompute, re-embed, git mirror) but keyed off existing node rows rather
+    // than a full NodeInput. Selection is the union of nodeIds + (memoryIds,
+    // optionally narrowed by a loc `prefix`). See SearchReplaceInNodesInput.
+    searchReplaceInNodes: async (
+      _: unknown,
+      { input }: { input: SearchReplaceInNodesInput },
+      ctx: Context,
+    ) => {
+      const {
+        oldText,
+        newText,
+        nodeIds,
+        memoryIds,
+        prefix,
+        fields,
+        caseInsensitive = false,
+        regex = false,
+        dryRun = false,
+      } = input;
+
+      const hasNodeIds = Array.isArray(nodeIds) && nodeIds.length > 0;
+      const hasMemoryIds = Array.isArray(memoryIds) && memoryIds.length > 0;
+      const usePrefix = prefix != null && prefix !== '';
+
+      if (!hasNodeIds && !hasMemoryIds) {
+        throw new GraphQLError(
+          'searchReplaceInNodes requires at least one of `nodeIds` or `memoryIds`.',
+          { extensions: { code: 'SEARCH_REPLACE_NO_SELECTION' } },
+        );
+      }
+      if (usePrefix && !hasMemoryIds) {
+        throw new GraphQLError(
+          'searchReplaceInNodes: `prefix` requires `memoryIds` (loc is only unique within a memory).',
+          { extensions: { code: 'SEARCH_REPLACE_PREFIX_WITHOUT_MEMORY' } },
+        );
+      }
+      if (!Array.isArray(fields) || fields.length === 0) {
+        throw new GraphQLError(
+          'searchReplaceInNodes requires at least one field in `fields`.',
+          { extensions: { code: 'SEARCH_REPLACE_NO_FIELDS' } },
+        );
+      }
+      const fieldSet = new Set<string>(fields);
+
+      // Build (and validate) the replacer up front — a bad pattern fails the
+      // whole request before any node is touched.
+      let replacer: Replacer;
+      try {
+        replacer = buildReplacer(oldText, newText, { caseInsensitive, regex });
+      } catch (e) {
+        if (e instanceof SearchReplaceInvalidPatternError) {
+          throw new GraphQLError(e.message, {
+            extensions: { code: e.name, pattern: e.pattern, reason: e.reason },
+          });
+        }
+        throw e;
+      }
+
+      // ── Resolve selection → deduped raw node rows (write-auth per memory) ──
+      type NodeRow = NonNullable<Awaited<ReturnType<typeof ctx.db.node.findUnique>>>;
+      const nodeById = new Map<string, NodeRow>();
+      const authedMemories = new Set<string>();
+      const ensureAuthed = async (memoryId: string) => {
+        if (authedMemories.has(memoryId)) return;
+        await requireMemoryWriteAccess(ctx, memoryId);
+        authedMemories.add(memoryId);
+      };
+
+      if (hasMemoryIds) {
+        for (const ref of memoryIds!) {
+          const { id: memId } = await resolveMemoryRef(ctx.db, ref);
+          await ensureAuthed(memId);
+          const where: Prisma.NodeWhereInput = { memoryId: memId, deletedAt: null };
+          if (usePrefix) {
+            // Match the node at `prefix` plus its descendants, on `:` path
+            // boundaries (so 'auth' won't catch 'authoring').
+            where.OR = [{ loc: prefix }, { loc: { startsWith: `${prefix}:` } }];
+          }
+          const rows = await ctx.db.node.findMany({ where });
+          for (const r of rows) nodeById.set(r.id, r as NodeRow);
+        }
+      }
+
+      if (hasNodeIds) {
+        for (const ref of nodeIds!) {
+          // Explicit refs must be IDs or fully-qualified URNs (no memory ctx).
+          const { id } = await resolveNodeRef(ctx.db, ref);
+          if (nodeById.has(id)) continue;
+          const row = await ctx.db.node.findUnique({ where: { id } });
+          if (!row || row.deletedAt) continue;
+          await ensureAuthed(row.memoryId);
+          nodeById.set(id, row);
+        }
+      }
+
+      const rawNodes = [...nodeById.values()];
+
+      // ── Compute pass: replace on PLAINTEXT, validate, plan writes ──
+      // All validation (empty name, abstract cap, SESSION_EXPIRED) happens here
+      // so the request fails before the write transaction opens.
+      const memEncCache = new Map<string, { id: string; isEncrypted: boolean }>();
+      const getMemEnc = async (memoryId: string) => {
+        let info = memEncCache.get(memoryId);
+        if (!info) {
+          info = await getMemoryEncryptionInfo(ctx.db, memoryId);
+          memEncCache.set(memoryId, info);
+        }
+        return info;
+      };
+
+      interface Plan {
+        raw: NodeRow;
+        isEncrypted: boolean;
+        changed: Record<string, unknown>; // plaintext field → new value
+        plaintext: { content: string | null; abstract: string | null };
+        fieldResults: Array<{ field: string; matches: number }>;
+        total: number;
+        abstractChanged: boolean;
+        contentChanged: boolean;
+        ownerRepo: string;
+      }
+      const plans: Plan[] = [];
+
+      for (const raw of rawNodes) {
+        const memEnc = await getMemEnc(raw.memoryId);
+        if (memEnc.isEncrypted && !sessionKeyCache.getByMemoryId(memEnc.id)) {
+          throw new GraphQLError(
+            `SESSION_EXPIRED: memory ${memEnc.id} is encrypted but no active session key is available.`,
+            { extensions: { code: 'SESSION_EXPIRED', memoryId: memEnc.id } },
+          );
+        }
+        // Decrypt a working copy to plaintext; `raw` stays ciphertext so the
+        // NodeVersion snapshot below matches upsertNode's snapshot shape.
+        const pt = { ...raw } as NodeRow;
+        if (memEnc.isEncrypted) decryptNodeFields(pt, memEnc);
+
+        const changed: Record<string, unknown> = {};
+        const fieldResults: Array<{ field: string; matches: number }> = [];
+        let total = 0;
+        let abstractChanged = false;
+        let contentChanged = false;
+
+        if (fieldSet.has('name')) {
+          const r = replacer.apply(pt.name ?? '');
+          if (r.count > 0) {
+            if (r.value.trim() === '') {
+              throw new GraphQLError(
+                `searchReplaceInNodes: replacing in 'name' of node ${pt.loc} (${pt.id}) would leave it empty.`,
+                { extensions: { code: 'SEARCH_REPLACE_EMPTY_NAME', nodeId: pt.id, loc: pt.loc } },
+              );
+            }
+            changed.name = r.value;
+            total += r.count;
+            fieldResults.push({ field: 'name', matches: r.count });
+          }
+        }
+
+        for (const f of ['alias', 'description'] as const) {
+          if (!fieldSet.has(f)) continue;
+          const cur = pt[f];
+          if (cur == null) continue;
+          const r = replacer.apply(cur);
+          if (r.count > 0) {
+            changed[f] = r.value;
+            total += r.count;
+            fieldResults.push({ field: f, matches: r.count });
+          }
+        }
+
+        if (fieldSet.has('abstract') && pt.abstract != null) {
+          const r = replacer.apply(pt.abstract);
+          if (r.count > 0) {
+            if (r.value.length > 2000) {
+              const err = new NodeAbstractTooLongError(r.value.length);
+              throw new GraphQLError(`${err.message} (node ${pt.loc} / ${pt.id})`, {
+                extensions: {
+                  code: err.name,
+                  length: err.length,
+                  max: err.max,
+                  nodeId: pt.id,
+                  loc: pt.loc,
+                },
+              });
+            }
+            // Whitespace-only result normalizes to null, matching upsertNode.
+            changed.abstract = r.value.trim() === '' ? null : r.value;
+            abstractChanged = true;
+            total += r.count;
+            fieldResults.push({ field: 'abstract', matches: r.count });
+          }
+        }
+
+        if (fieldSet.has('content') && pt.content != null) {
+          const r = replacer.apply(pt.content);
+          if (r.count > 0) {
+            changed.content = r.value;
+            contentChanged = true;
+            total += r.count;
+            fieldResults.push({ field: 'content', matches: r.count });
+          }
+        }
+
+        if (fieldSet.has('tags')) {
+          const curTags = deserializeTags(pt.tags) as string[];
+          const r = replaceInTags(curTags, replacer);
+          if (r.count > 0) {
+            changed.tags = r.value;
+            total += r.count;
+            fieldResults.push({ field: 'tags', matches: r.count });
+          }
+        }
+
+        if (total > 0) {
+          plans.push({
+            raw,
+            isEncrypted: memEnc.isEncrypted,
+            changed,
+            plaintext: {
+              content: contentChanged ? (changed.content as string) : pt.content,
+              abstract: abstractChanged ? (changed.abstract as string | null) : pt.abstract,
+            },
+            fieldResults,
+            total,
+            abstractChanged,
+            contentChanged,
+            ownerRepo: (raw as { ownerRepo?: string | null }).ownerRepo ?? '',
+          });
+        }
+      }
+
+      const buildResult = () => ({
+        nodesScanned: rawNodes.length,
+        nodesChanged: plans.length,
+        totalReplacements: plans.reduce((a, p) => a + p.total, 0),
+        dryRun,
+        results: plans.map((p) => ({
+          nodeId: p.raw.id,
+          loc: p.raw.loc,
+          memoryId: p.raw.memoryId,
+          replacements: p.total,
+          fields: p.fieldResults,
+        })),
+      });
+
+      if (dryRun) return buildResult();
+
+      // ── Write pass: version snapshot + node update, all-or-nothing ──
+      await ctx.db.$transaction(async (tx) => {
+        for (const p of plans) {
+          const raw = p.raw;
+          await tx.nodeVersion.create({
+            data: {
+              nodeId: raw.id,
+              loc: raw.loc,
+              name: raw.name,
+              alias: raw.alias,
+              description: raw.description,
+              abstract: raw.abstract,
+              abstractOriginHash: raw.abstractOriginHash,
+              content: raw.content,
+              tags: raw.tags as string[],
+              editedBy: ctx.clientId ?? ctx.userId ?? null,
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+          });
+
+          const data: Record<string, unknown> = {};
+          // Encrypt content/abstract for encrypted memories before persisting.
+          if (p.isEncrypted && ('content' in p.changed || 'abstract' in p.changed)) {
+            const key = sessionKeyCache.getByMemoryId(raw.memoryId)!; // validated above
+            const enc = encryptNodeFieldsWithKey(
+              {
+                content: 'content' in p.changed ? (p.changed.content as string | null) : null,
+                abstract: 'abstract' in p.changed ? (p.changed.abstract as string | null) : null,
+              },
+              key,
+            );
+            if ('content' in p.changed) data.content = enc.content;
+            if ('abstract' in p.changed) data.abstract = enc.abstract;
+          } else {
+            if ('content' in p.changed) data.content = p.changed.content;
+            if ('abstract' in p.changed) data.abstract = p.changed.abstract;
+          }
+          if ('name' in p.changed) data.name = p.changed.name;
+          if ('alias' in p.changed) data.alias = p.changed.alias;
+          if ('description' in p.changed) data.description = p.changed.description;
+          if ('tags' in p.changed) data.tags = serializeTags(p.changed.tags as string[]);
+
+          // abstractOriginHash tracks "content when the abstract was authored".
+          // Recompute (against post-replace plaintext content) only when the
+          // abstract itself changed — a content-only edit intentionally leaves
+          // the hash so staleness detection fires (matches upsertNode).
+          if (p.abstractChanged) {
+            data.abstractOriginHash = computeContentHash(p.plaintext.content);
+          }
+
+          await tx.node.update({ where: { id: raw.id }, data });
+        }
+      });
+
+      // ── Post-commit side effects (best-effort, mirror upsertNode) ──
+      for (const p of plans) {
+        // Re-embed when the embedded text (content/abstract) changed.
+        if (p.contentChanged || p.abstractChanged) {
+          void enqueueNodeEmbedding(ctx.db, {
+            nodeId: p.raw.id,
+            memoryId: p.raw.memoryId,
+            plaintext: { content: p.plaintext.content, abstract: p.plaintext.abstract },
+          });
+        }
+        // Mirror to git so a later (repo-wins) sync can't revert the edit.
+        // Re-fetch with edges and decrypt to plaintext, as writeNodeToGit needs.
+        void (async () => {
+          const fresh = await ctx.db.node.findUnique({
+            where: { id: p.raw.id },
+            include: { outgoingEdges: { include: { target: true } } },
+          });
+          if (!fresh) return;
+          if (p.isEncrypted) {
+            const memEnc = await getMemEnc(fresh.memoryId);
+            decryptNodeFields(fresh, memEnc);
+          }
+          await writeNodeToGit(
+            {
+              id: fresh.id,
+              loc: fresh.loc,
+              name: fresh.name,
+              nodeType: fresh.nodeType,
+              alias: fresh.alias,
+              description: fresh.description,
+              abstract: fresh.abstract,
+              abstractOriginHash: fresh.abstractOriginHash,
+              contentHash: fresh.contentHash,
+              content: fresh.content,
+              tags: deserializeTags(fresh.tags) as string[],
+              seq: fresh.seq,
+              data: fresh.data,
+              properties: fresh.properties,
+              outgoingEdges: fresh.outgoingEdges ?? [],
+            },
+            p.ownerRepo,
+            ctx.clientId,
+            fresh.memoryId,
+          );
+        })().catch((err) => {
+          console.error('[searchReplaceInNodes] git write error:', err);
+        });
+      }
+
+      return buildResult();
     },
 
     deleteNode: async (_: unknown, { loc: rawLoc, memoryId }: { loc: string; memoryId: string }, ctx: Context) => {
@@ -8984,6 +9345,20 @@ interface NodeInput {
   ownerRepo?: string;
   edges?: NodeEdgeInput[];
   createOnly?: boolean;
+}
+
+type NodeTextField = 'content' | 'name' | 'alias' | 'description' | 'abstract' | 'tags';
+
+interface SearchReplaceInNodesInput {
+  oldText: string;
+  newText: string;
+  nodeIds?: string[];
+  memoryIds?: string[];
+  prefix?: string;
+  fields: NodeTextField[];
+  caseInsensitive?: boolean;
+  regex?: boolean;
+  dryRun?: boolean;
 }
 
 interface EdgeInput {
