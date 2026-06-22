@@ -110,7 +110,7 @@ export async function resolveNodeRef(
   // memory/loc boundary is unambiguous regardless of any `:` atoms
   // inside the loc itself (e.g. `chats:vocabulary`). Fall back to
   // single-`:` for legacy / pre-021 inputs still in flight. Without
-  // this, canonical-form URNs that `h-read-node` happily accepts
+  // this, canonical-form URNs that `hadron_get_node` happily accepts
   // (because it routes through `splitNodeUrn`) silently failed as
   // edge targets — the colon-naive `.split(':')` produced empty
   // segments, the memory lookup missed, and the resolver fell

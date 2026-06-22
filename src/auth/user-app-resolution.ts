@@ -6,7 +6,7 @@
  *
  * Spec 026-app-identification-regimes adds **directory-aware** (regime b,
  * via MCP `initialize` capability parameter) and **session-scoped**
- * (regime c, via `h-set-active-app` MCP tool). Both depend on a richer
+ * (regime c, via `hadron_set_active_app` MCP tool). Both depend on a richer
  * identifier resolver — `resolveAppIdentifier` below — that takes a
  * user-supplied string (URN or short form) and answers which App (if any)
  * the user means.
@@ -22,10 +22,10 @@
  *      spec-025 HTTP 409 at session-init is gone per spec 026 FR-010 +
  *      R-N reversal). Per-strict-tool dispatch then surfaces either a
  *      typed `[no_active_app]` envelope (engaged session — has used
- *      `h-list-apps` / `h-set-active-app` / regime-b initialize-param)
+ *      `hadron_list_apps` / `hadron_set_active_app` / regime-b initialize-param)
  *      or a `[multiple_apps_resolved]` envelope (un-engaged session,
  *      FR-016 fall-through with the literal token preserved for SC-003
- *      log-grep). Advisory tools (`h-list-memories`, `h-find-nodes`,
+ *      log-grep). Advisory tools (`hadron_list_memories`, `hadron_find_nodes`,
  *      URN-input reads/writes) ignore the multi-app state and proceed
  *      with the cross-App union access per D-2026-05-21-003.
  *   5. `resolveAppForRequest` returns `'no-app'` → existing zero-App
@@ -136,7 +136,7 @@ export interface ResolvedUserAppWithMeta {
 
 /**
  * Same active-Apps filter as `resolveUserApps`, but returns the richer
- * shape consumed by `h-list-apps`, `h-set-active-app`, and
+ * shape consumed by `hadron_list_apps`, `hadron_set_active_app`, and
  * `resolveAppIdentifier`. Kept as a sibling helper rather than extending
  * `resolveUserApps` so spec-025 callers (regime a dispatch) continue to
  * select only the minimal fields they need.

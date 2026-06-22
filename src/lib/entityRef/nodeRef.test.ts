@@ -248,7 +248,7 @@ describe('resolveNodeRef', () => {
   // ===================================================================
   // Issue #183 — canonical `::` URN inputs as edge targets.
   //
-  // h-read-node accepts canonical-form node URNs (it routes through
+  // hadron_get_node accepts canonical-form node URNs (it routes through
   // `splitNodeUrn`, which understands `::`). The edge-target lookup
   // used a colon-naive `parts = ref.split(':')` and produced malformed
   // memory URNs (empty segments) for `::`-separated inputs — so the

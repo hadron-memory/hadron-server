@@ -91,7 +91,7 @@ function textResult(text: string) {
  * protocol-level server identity. Used both as the `version` field in
  * the McpServer constructor (the MCP initialize response's server
  * identity) and in the deployment-info diagnostics surface (h-server-
- * info / h-set-active-memory success message).
+ * info / hadron_set_active_memory success message).
  *
  * Bump when the MCP tool surface changes in a way callers should be
  * able to detect: new tool added, tool removed or renamed, response-
@@ -109,7 +109,7 @@ export const HADRON_SERVER_VERSION = '0.3.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"
- * from the agent side. Agents can call h-server-info (this exact object,
+ * from the agent side. Agents can call hadron_server_info (this exact object,
  * formatted) to see the bound deployment URL + version; h-set-active-
  * memory's success message also includes it inline.
  *
@@ -135,7 +135,7 @@ export function getDeploymentInfo(): DeploymentInfo {
   // pattern in src/auth/oauth.ts which special-cases `BASE_URL === '/'`
   // (a known sentinel left by Vitest's globalSetup when no explicit
   // value is configured). Without this guard a single empty/`"/"`
-  // value silently propagates into `server: ` lines and h-server-info
+  // value silently propagates into `server: ` lines and hadron_server_info
   // output — exactly the wrong-server-but-no-way-to-tell symptom this
   // surface exists to fix. Gemini review caught this on PR-191.
   const raw = process.env.BASE_URL;
@@ -233,7 +233,7 @@ export type ResolvedEdge = {
  * target aborts the mutation cleanly without committing the source
  * upsert/update.
  *
- * Issue #107: prior inline logic in h-add-node / h-update-node used a
+ * Issue #107: prior inline logic in hadron_create_node / hadron_update_node used a
  * `targetId.includes(':')` heuristic plus `findFirst({loc})` (no
  * memory scope), which silently no-op'd memory-prefixed/URN forms and
  * FK-errored on single-segment short locs.
@@ -277,7 +277,7 @@ export async function resolveEdgeRefs(
  * destructively (other edges on the source are left alone) and
  * idempotently (re-running with the same loc is a no-op against
  * the `@@unique([loc, memoryId])` identity). Backs the
- * `h-add-edge` MCP tool — extracted so the auth-gated flow (resolve
+ * `hadron_create_edge` MCP tool — extracted so the auth-gated flow (resolve
  * source → check write → resolve target → check read → upsert) is
  * directly testable without wiring a full MCP transport handshake.
  *
@@ -338,8 +338,8 @@ export async function addEdge(args: {
     throw e;
   }
 
-  // Resolve source strictly — h-add-edge never auto-creates the
-  // source (use h-add-node for that).
+  // Resolve source strictly — hadron_create_edge never auto-creates the
+  // source (use hadron_create_node for that).
   const { memoryUrn: sourceMemoryUrn, loc: sourceLoc } = splitNodeUrn(rawSource);
   const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
   if (!sourceMem) {
@@ -480,9 +480,9 @@ async function edgeUrn(loc: string, memoryId: string): Promise<string> {
 // Spec 033 US3 — search helpers moved to src/lib/search.ts to break the
 // circular dependency that was forming once GraphQL nodeSearch started
 // importing them (mcp/server.ts already imports from resolvers.ts via the
-// chat tools). Imported here for the h-find-nodes dispatch + re-exported
+// chat tools). Imported here for the hadron_find_nodes dispatch + re-exported
 // for backwards compatibility with callers that still import these from
-// `mcp/server.ts` (h-find-nodes tests).
+// `mcp/server.ts` (hadron_find_nodes tests).
 import {
   matchesQuery,
   keywordRelevanceRank,
@@ -514,7 +514,7 @@ async function resolveLocFromUrn(
   //   - If Memory.urn is canonical (`acme.com::dev`), the input
   //     starts with `acme.com::dev:` (one trailing colon, not two),
   //     so the strip leaves a leading `:` in the returned loc.
-  // Either way, callers (h-list-nodes / h-find-nodes) end up with a
+  // Either way, callers (hadron_list_nodes / hadron_find_nodes) end up with a
   // bogus prefix that breaks depth math and `startsWith(prefix + ':')`
   // scoping. splitNodeUrn handles both grammars uniformly.
   const parsed = parseUrnInput(rawInput);
@@ -581,7 +581,7 @@ async function resolveMemoryByUrn(
   // vice versa. Previously this normalized to legacy only and used an
   // equality lookup — that broke for the canonical-stored case, which
   // the resolveNodeRef tests in this PR already exercise (and the
-  // h-add-edge source path inherits the same hazard via splitNodeUrn).
+  // hadron_create_edge source path inherits the same hazard via splitNodeUrn).
   const legacyForm = normalizeUrnForLookup(parsed.value);
   const canonicalForm = legacyForm.includes(':')
     ? legacyForm.split(':').join('::')
@@ -599,13 +599,13 @@ async function resolveMemoryByUrn(
 
 /**
  * Shared single-node read projection — the meta block + contentScope-driven
- * body that `h-read-node` returns. Extracted so `h-read-nodes` (batch) emits
+ * body that `hadron_get_node` returns. Extracted so `hadron_get_nodes` (batch) emits
  * the *identical* per-node projection (spec cor:api:040:01 — "the per-node
  * projection is identical to the single-node read"); the two surfaces share
  * one renderer and cannot drift. Pure formatting — the caller fetches the
  * node (with outgoing/incoming edges + `memory.isEncrypted`), validates
  * `contentScope`, and fires any usage event; this only renders. Response
- * matrix: specs/031-node-abstract-field/contracts/h-read-node.md (spec 031 + 032).
+ * matrix: specs/031-node-abstract-field/contracts/hadron_get_node.md (spec 031 + 032).
  */
 type ReadProjectionNode = {
   name: string;
@@ -687,7 +687,7 @@ async function renderNodeReadProjection(
     .filter(Boolean)
     .join('\n');
 
-  // Response matrix (specs/031-node-abstract-field/contracts/h-read-node.md).
+  // Response matrix (specs/031-node-abstract-field/contracts/hadron_get_node.md).
   if (scope === 'abstract') {
     // meta + abstract (no `---`, no body). Meta alone when abstract null.
     return hasAbstract ? `${meta}\n\n${node.abstract}` : meta;
@@ -724,14 +724,14 @@ export function createMcpServerInstance(
 
   // Per-session state — this server instance is built once per MCP session
   // (see the createMcpServerInstance call sites), so this closure variable is
-  // genuinely per-session. Set via `h-set-active-memory`. Spec 022 D4a kept it
-  // advisory; spec cor:api:060 (h-run-task) is its first server-side reader,
+  // genuinely per-session. Set via `hadron_set_active_memory`. Spec 022 D4a kept it
+  // advisory; spec cor:api:060 (hadron_run_task) is its first server-side reader,
   // consuming it as the default memory scope when a by-name run gives no
   // `memory` hint. Spec-022 URN-input tools still MUST NOT fall back to it —
   // they require a fully-qualified URN.
   let activeMemoryUrn: string | undefined;
 
-  // Spec 026 — has the session called `h-list-apps` or `h-set-active-app`,
+  // Spec 026 — has the session called `hadron_list_apps` or `hadron_set_active_app`,
   // or had a regime-(b) `initialize` envelope attempted? Toggles which
   // error fires when a multi-App user calls an App-scoped tool without
   // selection: typed `no_active_app` (new) vs. legacy
@@ -774,7 +774,7 @@ export function createMcpServerInstance(
       // place to add a per-call re-resolve OR an invalidation hook on
       // AppMember mutations.
       if (engagedWithNewSurface) {
-        const message = `No active Hadron App. Call h-list-apps to see options, then h-set-active-app with the one you want. If you're calling from a project directory, set 'app' in '.hadron/config.json'.`;
+        const message = `No active Hadron App. Call hadron_list_apps to see options, then hadron_set_active_app with the one you want. If you're calling from a project directory, set 'app' in '.hadron/config.json'.`;
         mcpLog('warn', 'no_active_app_typed_error', { userId: auth.userId, mcpSessionId: sid });
         return appSelectionError(APP_SELECTION_ERROR_CODES.NO_ACTIVE_APP, message);
       }
@@ -783,7 +783,7 @@ export function createMcpServerInstance(
       // envelope's `[<code>]` prefix so SC-003's production-log grep
       // continues to work even when the legacy spec-025 HTTP 409 path is
       // gone.
-      const message = `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance. Or call h-list-apps to see your accessible Apps and h-set-active-app to pick one.`;
+      const message = `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance. Or call hadron_list_apps to see your accessible Apps and hadron_set_active_app to pick one.`;
       mcpLog('warn', 'multiple_apps_resolved_fallthrough', { userId: auth.userId, mcpSessionId: sid });
       return appSelectionError(APP_SELECTION_ERROR_CODES.MULTIPLE_APPS_RESOLVED, message);
     }
@@ -791,11 +791,11 @@ export function createMcpServerInstance(
     return null; // zero-App or other path — fall through
   }
 
-  // ── h-search ─────────────────────────────────────────────────────────────
+  // ── hadron_search ─────────────────────────────────────────────────────────────
 
   server.tool(
-    'h-search',
-    "Global cross-entity search across organizations, memories, nodes, agents, apps, AI service configs, and users — returns one ranked, flat list. By default the query shape is smart-sniffed: a PK-shaped input does an exact id lookup, a URN-shaped input matches URNs, free text matches name + URN. Pass `fields` to force which fields to match (overrides the sniff) and `entityTypes` to restrict the kinds. `pk` is exact-match; the rest are case-insensitive substring. `content` (node bodies) is opt-in and skips encrypted memories. For node-only, vector/semantic search, use h-find-nodes instead.",
+    'hadron_search',
+    "Global cross-entity search across organizations, memories, nodes, agents, apps, AI service configs, and users — returns one ranked, flat list. By default the query shape is smart-sniffed: a PK-shaped input does an exact id lookup, a URN-shaped input matches URNs, free text matches name + URN. Pass `fields` to force which fields to match (overrides the sniff) and `entityTypes` to restrict the kinds. `pk` is exact-match; the rest are case-insensitive substring. `content` (node bodies) is opt-in and skips encrypted memories. For node-only, vector/semantic search, use hadron_find_nodes instead.",
     {
       query: z
         .string()
@@ -860,14 +860,14 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-list-memories ──────────────────────────────────────────────────────
+  // ── hadron_list_memories ──────────────────────────────────────────────────────
 
   server.tool(
-    'h-list-memories',
+    'hadron_list_memories',
     'List all memories this caller has access to, with URN and access level (read-only or read-write).',
     {},
     async () => {
-      // Spec 026 / D-2026-05-21-003: h-list-memories is advisory — it
+      // Spec 026 / D-2026-05-21-003: hadron_list_memories is advisory — it
       // works without an active App. When auth.appId is unset but
       // auth.userId is set (multi-App OAuth caller without selection),
       // getMemoryAccess unions memory access across the user's
@@ -886,7 +886,7 @@ export function createMcpServerInstance(
       // Fold them in here, gated on auth.userId: App-Key callers (no userId)
       // get none, preserving per-App isolation. canReadMemory / canWriteToMemory
       // are the canonical gates, so the listing can never disagree with what
-      // h-read-node allows — including per-App isolation for app-scoped personal
+      // hadron_get_node allows — including per-App isolation for app-scoped personal
       // rows and the spec-034 free-standing owner-only case.
       if (auth.userId) {
         const owned = await db.memory.findMany({
@@ -922,7 +922,7 @@ export function createMcpServerInstance(
           ? `Scope: user · active App ${who} — this App's agent memories + org-readable memories + your personal memories scoped to this App.`
           : `Scope: App key · ${who} (App-scoped) — this App's agent memories only; personal and org-readable memories require user authentication and are not shown to an App key.`;
       } else if (auth.userId) {
-        scope = `Scope: user · no active App — the union across your Apps + org-readable memories + all your personal memories. Select one with h-set-active-app to narrow the view.`;
+        scope = `Scope: user · no active App — the union across your Apps + org-readable memories + all your personal memories. Select one with hadron_set_active_app to narrow the view.`;
       } else {
         scope = `Scope: ${auth.clientId ?? 'authenticated caller'}.`;
       }
@@ -946,7 +946,7 @@ export function createMcpServerInstance(
         const head = `- **${formatCanonicalUrn('memory', m.urn)}** — ${m.name} (${cls}${level})`;
         // Free-form metadata bag (no server-side semantics). Surfaced
         // read-only on its own indented line, only when non-null so the
-        // listing stays scannable — mirrors h-read-node's `Data: <json>`
+        // listing stays scannable — mirrors hadron_get_node's `Data: <json>`
         // idiom. Writing `data` is a GraphQL-only path: the MCP surface has
         // no memory-mutation tool (memories are created/edited via
         // createMemory / updateMemory). MCP also bypasses encryption (#206),
@@ -959,10 +959,10 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-set-active-memory ──────────────────────────────────────────────────
+  // ── hadron_set_active_memory ──────────────────────────────────────────────────
 
   server.tool(
-    'h-set-active-memory',
+    'hadron_set_active_memory',
     'Set the active memory for this session. Subsequent tree tools will use this as the default scope.',
     {
       memoryUrn: z.string().describe('Memory URN, e.g. hadronmemory.com::dev or hrn:memory:hadronmemory.com::dev'),
@@ -989,7 +989,7 @@ export function createMcpServerInstance(
       // scoping point behaves consistently.
       const mem = await resolveMemoryByUrn(memoryUrn);
       if (!mem) {
-        return textResult(`Memory not found: '${memoryUrn}'. Use h-list-memories to see what's available.`);
+        return textResult(`Memory not found: '${memoryUrn}'. Use hadron_list_memories to see what's available.`);
       }
       if (!(await canReadMemory(db, auth, mem.id))) {
         return textResult(`Access denied: '${memoryUrn}'.`);
@@ -1014,7 +1014,7 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-server-info ────────────────────────────────────────────────────────
+  // ── hadron_server_info ────────────────────────────────────────────────────────
   //
   // #187 / #190 — exposes the bound deployment URL + hadron-server
   // version so an agent can answer "which server am I talking to?"
@@ -1040,7 +1040,7 @@ export function createMcpServerInstance(
   // explains how to add a path-only `dbName` field.
 
   server.tool(
-    'h-server-info',
+    'hadron_server_info',
     'Returns the identity of the hadron-server this MCP session is bound to: the deployment URL and server version. Useful when a caller has two MCP namespaces wired up and needs to know which one a tool call landed on (see #190 for context). No arguments. Returns plain key:value pairs. Does NOT require an active App or any memory access.',
     {},
     async () => {
@@ -1053,11 +1053,11 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-list-apps (spec 026 regime c) ──────────────────────────────────────
+  // ── hadron_list_apps (spec 026 regime c) ──────────────────────────────────────
 
   server.tool(
-    'h-list-apps',
-    'List the Hadron Apps you have access to. Use this to find an App to pass to h-set-active-app, or to check what an `app` field in `.hadron/config.json` resolves to.',
+    'hadron_list_apps',
+    'List the Hadron Apps you have access to. Use this to find an App to pass to hadron_set_active_app, or to check what an `app` field in `.hadron/config.json` resolves to.',
     {},
     async () => {
       // Auth gate first; only then mark the session "engaged" so an
@@ -1102,17 +1102,17 @@ export function createMcpServerInstance(
           : `${apps.length} accessible apps:`;
       const trailer =
         apps.length === 1
-          ? `\n\n(You only have one App, so h-set-active-app isn't required — it's already the active one by default.)`
+          ? `\n\n(You only have one App, so hadron_set_active_app isn't required — it's already the active one by default.)`
           : '';
       return textResult(`${header}\n\n${lines.join('\n')}${trailer}`);
     },
   );
 
-  // ── h-set-active-app (spec 026 regime c) ─────────────────────────────────
+  // ── hadron_set_active_app (spec 026 regime c) ─────────────────────────────────
 
   server.tool(
-    'h-set-active-app',
-    "Set the active Hadron App for this session. Subsequent tools (h-find-nodes, h-add-node, etc.) will use this as the App scope. Pass the App URN (e.g. 'hrn:app:acme-corp::notes') or an App name that matches exactly one App you have access to. Use h-list-apps to see options.",
+    'hadron_set_active_app',
+    "Set the active Hadron App for this session. Subsequent tools (hadron_find_nodes, hadron_create_node, etc.) will use this as the App scope. Pass the App URN (e.g. 'hrn:app:acme-corp::notes') or an App name that matches exactly one App you have access to. Use hadron_list_apps to see options.",
     {
       app: z
         .string()
@@ -1128,7 +1128,7 @@ export function createMcpServerInstance(
         // can programmatically distinguish misuse from a successful no-op.
         return appSelectionError(
           APP_SELECTION_ERROR_CODES.APP_NOT_FOUND,
-          'AppKey callers already carry App identity in the credential; h-set-active-app is not applicable.',
+          'AppKey callers already carry App identity in the credential; hadron_set_active_app is not applicable.',
         );
       }
       if (!auth.userId) {
@@ -1156,7 +1156,7 @@ export function createMcpServerInstance(
             appUrn: r.app.urn,
           });
           return textResult(
-            `Active App set to: **${formatCanonicalUrn('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call h-set-active-app again with a different identifier to switch, or h-list-apps to see other options.`,
+            `Active App set to: **${formatCanonicalUrn('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call hadron_set_active_app again with a different identifier to switch, or hadron_list_apps to see other options.`,
           );
         }
         case 'ambiguous': {
@@ -1177,29 +1177,29 @@ export function createMcpServerInstance(
         case 'unavailable': {
           return appSelectionError(
             APP_SELECTION_ERROR_CODES.APP_UNAVAILABLE,
-            `App '${app}' is no longer available (${r.reason}). Ask the App owner to reinstall, or pick another with h-list-apps.`,
+            `App '${app}' is no longer available (${r.reason}). Ask the App owner to reinstall, or pick another with hadron_list_apps.`,
           );
         }
         case 'not-member': {
           return appSelectionError(
             APP_SELECTION_ERROR_CODES.APP_NOT_FOUND,
-            `No accessible App matches '${app}'. Use h-list-apps to see what's available.`,
+            `No accessible App matches '${app}'. Use hadron_list_apps to see what's available.`,
           );
         }
         case 'not-found': {
           return appSelectionError(
             APP_SELECTION_ERROR_CODES.APP_NOT_FOUND,
-            `No accessible App matches '${app}'. Use h-list-apps to see what's available.`,
+            `No accessible App matches '${app}'. Use hadron_list_apps to see what's available.`,
           );
         }
       }
     },
   );
 
-  // ── h-add-parent-node ───────────────────────────────────────────────────
+  // ── hadron_create_parent_node ───────────────────────────────────────────────────
 
   server.tool(
-    'h-add-parent-node',
+    'hadron_create_parent_node',
     'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes. The URN MUST be fully qualified (org::memory::loc).',
     {
       urn: z.string().describe('Fully-qualified node URN for the new section, e.g. "acme.com::mmdata::services" or "acme.com::mmdata::services:db-helpers"'),
@@ -1263,11 +1263,11 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-find-nodes ─────────────────────────────────────────────────────────
+  // ── hadron_find_nodes ─────────────────────────────────────────────────────────
 
   server.tool(
-    'h-find-nodes',
-    'Substring/keyword search across node name, loc, description, and tags. ALL whitespace-separated terms must appear (case-insensitive) somewhere in those fields — no semantic / vector search, no fuzzy matching, no stemming, and node BODY content is NOT indexed. Multi-word natural-language queries that don\'t share literal substrings with the corpus will return zero hits; pick discriminating keywords. Pass `query: "*"` (or `""`) to match every node — useful as a first survey before adding to a memory. To browse the tree structure, use `h-list-nodes` instead. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory. Soft-deleted nodes are excluded.',
+    'hadron_find_nodes',
+    'Substring/keyword search across node name, loc, description, and tags. ALL whitespace-separated terms must appear (case-insensitive) somewhere in those fields — no semantic / vector search, no fuzzy matching, no stemming, and node BODY content is NOT indexed. Multi-word natural-language queries that don\'t share literal substrings with the corpus will return zero hits; pick discriminating keywords. Pass `query: "*"` (or `""`) to match every node — useful as a first survey before adding to a memory. To browse the tree structure, use `hadron_list_nodes` instead. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory. Soft-deleted nodes are excluded.',
     {
       query: z.string().describe('For mode:keyword (default) — whitespace-separated keywords; each must literally appear (case-insensitive) in name/loc/description/tags. For mode:vector / mode:hybrid — a natural-language query embedded and matched semantically against the memory\'s vector index (spec 033). Use "*" or "" to match all nodes (keyword survey mode; rejected for mode:vector).'),
       mode: z.enum(['keyword', 'vector', 'hybrid']).optional().describe('keyword (default): substring match — output is byte-identical to today\'s no-mode behavior. vector: semantic search over the memory\'s vector index (requires vectorIndexEnabled). hybrid: keyword + vector fused by reciprocal-rank fusion (RRF, k=60). On a non-indexed memory, mode:hybrid degrades to keyword-only and emits a [degraded:no_vector_index] note. Spec 033.'),
@@ -1328,7 +1328,7 @@ export function createMcpServerInstance(
         const mem = await resolveMemoryByUrn(memoryUrn);
         if (!mem) {
           return textResult(
-            `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
+            `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
           );
         }
         // #188 (Gemini): the prior `where.memoryId = mem.id` override
@@ -1336,11 +1336,11 @@ export function createMcpServerInstance(
         // caller could search any memory by URN. Route through
         // canReadMemory so personal/private memories (FR-016 strict
         // ownership; ADMIN/OWNER do NOT bypass) and non-admin scope-map
-        // gating both apply. Match h-read-node's "not found" phrasing
+        // gating both apply. Match hadron_get_node's "not found" phrasing
         // so the response doesn't distinguish absence from denial.
         if (!(await canReadMemory(db, auth, mem.id))) {
           return textResult(
-            `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
+            `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
           );
         }
         where.memoryId = mem.id;
@@ -1406,7 +1406,7 @@ export function createMcpServerInstance(
             );
           }
           // Hybrid + no indexed memory → degrade to keyword-only per
-          // contracts/h-find-nodes.md "Result envelope" section.
+          // contracts/hadron_find_nodes.md "Result envelope" section.
           hybridDegradedNote =
             'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]';
         }
@@ -1444,7 +1444,7 @@ export function createMcpServerInstance(
           // each tell the operator something different about what to
           // fix.
           console.warn(
-            '[h-find-nodes vector] embed() failed; returning empty envelope.',
+            '[hadron_find_nodes vector] embed() failed; returning empty envelope.',
             err,
           );
           return textResult(
@@ -1594,7 +1594,7 @@ export function createMcpServerInstance(
           // Log the full error object so the typed cause survives in
           // operator-readable form.
           console.warn(
-            '[h-find-nodes hybrid] embed() failed; falling back to keyword-only.',
+            '[hadron_find_nodes hybrid] embed() failed; falling back to keyword-only.',
             err,
           );
           hybridDegradedNote =
@@ -1806,8 +1806,8 @@ export function createMcpServerInstance(
         if (n.description) parts.push(`  ${n.description}`);
         // Spec 031 US2 — surface the abstract as a two-space-indented block
         // beneath the description (no `>` prefix; matches the existing
-        // description-line format in this tool — h-read-node uses `>` but
-        // h-find-nodes never has). Multi-paragraph abstracts get the
+        // description-line format in this tool — hadron_get_node uses `>` but
+        // hadron_find_nodes never has). Multi-paragraph abstracts get the
         // prefix on each line. Excluded from brief mode (preserves the
         // existing brief contract; index-info-only). Per PR-196 US3
         // deferral, the matchesQuery haystack is NOT extended — abstract
@@ -1837,10 +1837,10 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-read-node ──────────────────────────────────────────────────────────
+  // ── hadron_get_node ──────────────────────────────────────────────────────────
 
   server.tool(
-    'h-read-node',
+    'hadron_get_node',
     "Read a node by its fully-qualified URN. The URN MUST be fully qualified (org::memory::loc). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; not emitted on encrypted memories in v1 — see #206). Spec 031 + 032.",
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::architecture" or "hrn:node:acme.com::mmdata::architecture"'),
@@ -1926,17 +1926,17 @@ export function createMcpServerInstance(
         return textResult(err.message);
       }
       const scope = contentScope ?? 'content';
-      // Shared with h-read-nodes (batch) so the per-node projection can never
+      // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
       return textResult(await renderNodeReadProjection(node, scope));
     },
   );
 
-  // ── h-read-nodes (batch multi-node read) ──────────────────────────────────
+  // ── hadron_get_nodes (batch multi-node read) ──────────────────────────────────
 
   server.tool(
-    'h-read-nodes',
-    "Batch read — return the full per-node projection (meta + edges + contentScope body, identical to h-read-node) for MANY nodes in one call. Two mutually-exclusive forms: (1) `urns` — an explicit list of fully-qualified node URNs, returned in input order; (2) `memoryUrn` + `locPrefix` — every readable node whose loc starts with the prefix in one memory, returned in loc order. Optional `contentScope` ('content' default | 'abstract' | 'all') applies to every node, so abstract-only triage is cheap. Per-node authorization: unreadable or non-existent refs are reported in a separate Unavailable list (denied and not-found are indistinguishable) and never fail the batch. Bounded by hard caps — exceeding the node-count cap is a loud error; exceeding the response-size cap returns a partial result flagged `truncated` (never a silent short read). Spec cor:api:040.",
+    'hadron_get_nodes',
+    "Batch read — return the full per-node projection (meta + edges + contentScope body, identical to hadron_get_node) for MANY nodes in one call. Two mutually-exclusive forms: (1) `urns` — an explicit list of fully-qualified node URNs, returned in input order; (2) `memoryUrn` + `locPrefix` — every readable node whose loc starts with the prefix in one memory, returned in loc order. Optional `contentScope` ('content' default | 'abstract' | 'all') applies to every node, so abstract-only triage is cheap. Per-node authorization: unreadable or non-existent refs are reported in a separate Unavailable list (denied and not-found are indistinguishable) and never fail the batch. Bounded by hard caps — exceeding the node-count cap is a loud error; exceeding the response-size cap returns a partial result flagged `truncated` (never a silent short read). Spec cor:api:040.",
     {
       urns: z
         .array(z.string())
@@ -1953,10 +1953,10 @@ export function createMcpServerInstance(
       contentScope: z
         .enum(['content', 'abstract', 'all'])
         .optional()
-        .describe("Per-node projection scope, as on h-read-node. Default 'content'."),
+        .describe("Per-node projection scope, as on hadron_get_node. Default 'content'."),
     },
     async ({ urns, memoryUrn, locPrefix, contentScope }) => {
-      // Defensive contentScope validation — parity with h-read-node (covers
+      // Defensive contentScope validation — parity with hadron_get_node (covers
       // direct-handler callers that bypass the transport's zod parsing).
       if (
         contentScope !== undefined &&
@@ -1975,7 +1975,7 @@ export function createMcpServerInstance(
       // Exactly one form (FR-002: both capabilities exist; one tool, two modes).
       if (hasSet === hasPrefix) {
         return textResult(
-          'h-read-nodes: provide EITHER `urns` (an explicit set) OR `memoryUrn` + `locPrefix` (a subtree) — not both, not neither.',
+          'hadron_get_nodes: provide EITHER `urns` (an explicit set) OR `memoryUrn` + `locPrefix` (a subtree) — not both, not neither.',
         );
       }
 
@@ -2006,7 +2006,7 @@ export function createMcpServerInstance(
         });
         if (rows.length > BATCH_READ_MAX_NODES) {
           return textResult(
-            `h-read-nodes: prefix "${locPrefix}" matches more than the ${BATCH_READ_MAX_NODES}-node cap. Narrow the prefix (or page by sub-prefix); the batch read does not silently truncate.`,
+            `hadron_get_nodes: prefix "${locPrefix}" matches more than the ${BATCH_READ_MAX_NODES}-node cap. Narrow the prefix (or page by sub-prefix); the batch read does not silently truncate.`,
           );
         }
         ordered.push(...(rows as unknown as Array<ReadProjectionNode & { id: string }>));
@@ -2016,7 +2016,7 @@ export function createMcpServerInstance(
         // any work (cor:api:040:02).
         if (urns!.length > BATCH_READ_MAX_NODES) {
           return textResult(
-            `h-read-nodes: ${urns!.length} URNs exceeds the ${BATCH_READ_MAX_NODES}-node cap. Split into smaller batches; the batch read does not silently truncate.`,
+            `hadron_get_nodes: ${urns!.length} URNs exceeds the ${BATCH_READ_MAX_NODES}-node cap. Split into smaller batches; the batch read does not silently truncate.`,
           );
         }
         // Dedup the input set up front so a repeated URN isn't rendered (and
@@ -2076,7 +2076,7 @@ export function createMcpServerInstance(
       // stop and flag `truncated` (cor:api:040:02) — never a silent short read.
       // At least one node always renders so a single oversize node still
       // returns. One `read` UsageEvent per RETURNED node (cor:api:040:01 —
-      // per-node parity with h-read-node).
+      // per-node parity with hadron_get_node).
       const blocks: string[] = [];
       const omitted: string[] = [];
       const readEvents: Prisma.UsageEventCreateManyInput[] = [];
@@ -2107,7 +2107,7 @@ export function createMcpServerInstance(
         });
       }
       // One batched insert for all returned nodes' read events, fire-and-forget
-      // (parity with h-read-node's non-blocking single create). A per-node
+      // (parity with hadron_get_node's non-blocking single create). A per-node
       // create loop would fire up to BATCH_READ_MAX_NODES concurrent unawaited
       // inserts and pressure the connection pool — createMany is one round-trip
       // (PR #283 review).
@@ -2138,10 +2138,10 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-read-next-node ─────────────────────────────────────────────────────
+  // ── hadron_get_next_node ─────────────────────────────────────────────────────
 
   server.tool(
-    'h-read-next-node',
+    'hadron_get_next_node',
     'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted. The URN MUST be fully qualified (org::memory::loc).',
     {
       parent: z.string().describe('Fully-qualified parent node URN, e.g. "acme.com:mmdata:sections"'),
@@ -2234,7 +2234,7 @@ export function createMcpServerInstance(
         const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
         return `  - ${targetUrn} (${e.target.name}) — ${e.name ?? e.loc}`;
       }));
-      // #186: nodeType in the meta block, mirroring h-read-node's format.
+      // #186: nodeType in the meta block, mirroring hadron_get_node's format.
       const meta = [
         `**${node.name}**`,
         urn,
@@ -2251,10 +2251,10 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-list-nodes ─────────────────────────────────────────────────────────
+  // ── hadron_list_nodes ─────────────────────────────────────────────────────────
 
   server.tool(
-    'h-list-nodes',
+    'hadron_list_nodes',
     'Browse the tree structure of a Hadron memory. Returns an indented tree view.',
     {
       parentRel: z.string().optional().describe('Parent node rel path; omit to list from memory root'),
@@ -2269,7 +2269,7 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      // Normalize parentRel once (matches the h-find-nodes pattern).
+      // Normalize parentRel once (matches the hadron_find_nodes pattern).
       const trimmedParentRel = parentRel?.trim();
 
       // Spec 022 (FR-003): no fallback to `activeMemoryUrn`. Caller MUST
@@ -2288,7 +2288,7 @@ export function createMcpServerInstance(
         const resolved = await resolveLocFromUrn(trimmedParentRel, memoryIds);
         prefix = resolved.loc;
         memoryId = resolved.memoryId;
-        // #188 (Gemini): canReadMemory gate matches h-find-nodes.
+        // #188 (Gemini): canReadMemory gate matches hadron_find_nodes.
         // resolveLocFromUrn's accessibleMemoryIds filter handles non-
         // admin scope, but ADMIN/OWNER pass null and would otherwise
         // be able to browse another user's personal/private memory.
@@ -2310,14 +2310,14 @@ export function createMcpServerInstance(
           const mem = await resolveMemoryByUrn(memoryUrn);
           if (!mem) {
             return textResult(
-              `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
+              `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
             );
           }
           // #188 (Gemini): canReadMemory gate — same shape as the
-          // h-find-nodes memoryUrn branch.
+          // hadron_find_nodes memoryUrn branch.
           if (!(await canReadMemory(db, auth, mem.id))) {
             return textResult(
-              `Memory not found or invalid: '${memoryUrn}'. Use h-list-memories to see what is available.`,
+              `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
             );
           }
           memoryId = mem.id;
@@ -2458,7 +2458,7 @@ export function createMcpServerInstance(
         }
         // Synthesized intermediate. Surface the gap explicitly rather
         // than silently rendering it as a real row.
-        return `${indent}├── ${nUrn} — (missing — use h-add-parent-node to materialize)${childInfo}`;
+        return `${indent}├── ${nUrn} — (missing — use hadron_create_parent_node to materialize)${childInfo}`;
       }));
 
       const header = `Tree: ${prefix || memoryUrn}`;
@@ -2470,7 +2470,7 @@ export function createMcpServerInstance(
   // Length cap on the raw input; then trim-then-check (empty AND
   // whitespace-only collapse to null; non-empty trimmed values persist
   // untrimmed so intentional surrounding whitespace on real paragraphs
-  // is lossless). `undefined` (key absent on h-update-node) is passed
+  // is lossless). `undefined` (key absent on hadron_update_node) is passed
   // through unchanged so the caller can implement "omitted = preserve"
   // by spreading conditionally. The throw is the typed-error class —
   // the MCP transport catches and surfaces the error message to the
@@ -2485,18 +2485,18 @@ export function createMcpServerInstance(
     return raw;
   }
 
-  // ── h-add-node ───────────────────────────────────────────────────────────
+  // ── hadron_create_node ───────────────────────────────────────────────────────────
 
   server.tool(
-    'h-add-node',
+    'hadron_create_node',
     'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (org::memory::loc). Requires write access to the memory.',
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports" or "hrn:node:acme.com::mmdata::review:sort-imports". Both bare and prefixed forms accepted. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
-      isRunnable: z.boolean().optional().describe('Whether this node can be run as a task by h-run-task (cor:api:060). Defaults to not-runnable.'),
+      isRunnable: z.boolean().optional().describe('Whether this node can be run as a task by hadron_run_task (cor:api:060). Defaults to not-runnable.'),
       description: z.string().optional().describe('Short description'),
-      abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on h-read-node via the contentScope parameter. (h-find-nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
+      abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
       seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
       tags: tagsInputSchema.optional().describe('Tags'),
@@ -2588,7 +2588,7 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      // Spec 032 — h-add-node is upsert-semantically a fresh write: every
+      // Spec 032 — hadron_create_node is upsert-semantically a fresh write: every
       // call writes the full set of provided fields. If the caller is
       // supplying an abstract, the hash is recomputed from the supplied
       // content (FR-003). Null/empty content with an abstract yields null
@@ -2724,7 +2724,7 @@ export function createMcpServerInstance(
           properties: nodeForGit.properties,
           outgoingEdges: nodeForGit.outgoingEdges ?? [],
         }, '', auth.clientId, memoryId).catch((err) => {
-          console.error('[h-add-node] git write error:', err);
+          console.error('[hadron_create_node] git write error:', err);
         });
       }
 
@@ -2741,18 +2741,18 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-update-node ────────────────────────────────────────────────────────
+  // ── hadron_update_node ────────────────────────────────────────────────────────
 
   server.tool(
-    'h-update-node',
+    'hadron_update_node',
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (org::memory::loc).',
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports"'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node type: info, data, task, record, chat, plan, parent'),
-      isRunnable: z.boolean().optional().describe('Set whether this node can be run as a task by h-run-task. Pass true/false; omit to preserve.'),
+      isRunnable: z.boolean().optional().describe('Set whether this node can be run as a task by hadron_run_task. Pass true/false; omit to preserve.'),
       description: z.string().optional().describe('New short description'),
-      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on h-read-node via contentScope; h-find-nodes preview surfacing ships in spec 031 US2. Spec 031.'),
+      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. Spec 031.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007).'),
       seq: z.number().optional().describe('New sort order among siblings'),
       tags: tagsInputSchema.optional().describe('Replace tags'),
@@ -2799,7 +2799,7 @@ export function createMcpServerInstance(
       // so an unresolvable target rolls back cleanly with no source-
       // node mutation. Issue #107 review feedback.
       //
-      // Spec 022: pre-validate edge URN qualification (matches h-add-node).
+      // Spec 022: pre-validate edge URN qualification (matches hadron_create_node).
       let resolvedEdges: ResolvedEdge[] | null = null;
       if (edges !== undefined) {
         for (const edge of edges) {
@@ -2943,7 +2943,7 @@ export function createMcpServerInstance(
           properties: updatedNode.properties,
           outgoingEdges: updatedNode.outgoingEdges ?? [],
         }, '', auth.clientId, existing.memoryId).catch((err) => {
-          console.error('[h-update-node] git write error:', err);
+          console.error('[hadron_update_node] git write error:', err);
         });
       }
 
@@ -2965,20 +2965,20 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-add-edge ───────────────────────────────────────────────────────────
+  // ── hadron_create_edge ───────────────────────────────────────────────────────────
   //
-  // Issue #183 — h-update-node.edges replaces the full outgoing-edge set,
+  // Issue #183 — hadron_update_node.edges replaces the full outgoing-edge set,
   // which means the only way to add a single edge to an existing node
-  // without h-add-edge is to re-send EVERY existing edge plus the new
+  // without hadron_create_edge is to re-send EVERY existing edge plus the new
   // one. Easy to drop edges by accident. This tool fills that gap with
   // an idempotent single-edge upsert that leaves all other edges alone.
 
   server.tool(
-    'h-add-edge',
-    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike h-update-node, which replaces the full edge set). Idempotent: re-running with the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). The source URN MUST be a fully-qualified node URN (org::memory::loc) — ID-shape sources are rejected because the write-permission check needs the source memory, which is derived from the URN. The target URN may be fully-qualified OR an ID-shape value. Both endpoints must already exist — use h-add-node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
+    'hadron_create_edge',
+    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike hadron_update_node, which replaces the full edge set). Idempotent: re-running with the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). The source URN MUST be a fully-qualified node URN (org::memory::loc) — ID-shape sources are rejected because the write-permission check needs the source memory, which is derived from the URN. The target URN may be fully-qualified OR an ID-shape value. Both endpoints must already exist — use hadron_create_node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
     {
       sourceUrn: z.string().describe('Fully-qualified source node URN, e.g. "acme.com::mmdata::services:db-helper". ID-shape sources are not accepted (the source\'s memory must be recoverable from the URN for the permission check). The source node must already exist; this tool will not create it.'),
-      targetUrn: z.string().describe('Fully-qualified target node URN OR an ID-shape value. The target must already exist; use h-add-node first if it does not.'),
+      targetUrn: z.string().describe('Fully-qualified target node URN OR an ID-shape value. The target must already exist; use hadron_create_node first if it does not.'),
       name: z.string().optional().describe('Relationship name (was "label"), e.g. "depends-on", "documents", "supersedes". Optional — loc is the identity.'),
       loc: z.string().optional().describe('Explicit edge loc (its identity + URN suffix hrn:edge:<org>::<memory>::<loc>). Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
       description: z.string().optional().describe('Human-readable description of the edge.'),
@@ -2993,7 +2993,7 @@ export function createMcpServerInstance(
     },
   );
 
-  // ── h-delete-node ────────────────────────────────────────────────────────
+  // ── hadron_delete_node ────────────────────────────────────────────────────────
   //
   // #180 Bug 1 — agents had no way to remove a node they created in error.
   // Soft-delete is the default; `hard: true` opts into the row delete.
@@ -3026,7 +3026,7 @@ export function createMcpServerInstance(
   // half-complete state where the descendant is silently orphaned.
 
   server.tool(
-    'h-delete-node',
+    'hadron_delete_node',
     `Delete a node. Soft-delete by default (sets deletedAt; node disappears from find/read/list and is excluded from Related / Referenced-by edge surfaces). Pass \`hard: true\` to remove the row entirely.
 
 Hard-delete cascades to Edge (both directions) and NodeVersion via FK. PendingEdge source-side rows also cascade via FK, but the target-side column is intentionally not a foreign key — those rows are deleted explicitly inside the same transaction. UsageEvent.nodeId is SetNull so audit history is preserved.
@@ -3181,13 +3181,13 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
     },
   );
 
-  // ── h-move-node ──────────────────────────────────────────────────────────
+  // ── hadron_move_node ──────────────────────────────────────────────────────────
 
   server.tool(
-    'h-move-node',
+    'hadron_move_node',
     `Move or rename a node, optionally across memories. The node keeps its stable ID so all edge references remain valid. Both URNs MUST be fully qualified (org::memory::loc).
 
-Collision policy: if a live node already occupies \`targetUrn\`, the call refuses with a URN_ALREADY_EXISTS error. Pass \`overwrite: true\` to soft-delete the existing target first; the evicted row is re-stamped to \`<loc>__deleted-<full-id>\` so the unique \`(loc, memoryId)\` constraint doesn't block. Hard-overwrite isn't supported — call h-delete-node (hard: true) on the target first if you need that.
+Collision policy: if a live node already occupies \`targetUrn\`, the call refuses with a URN_ALREADY_EXISTS error. Pass \`overwrite: true\` to soft-delete the existing target first; the evicted row is re-stamped to \`<loc>__deleted-<full-id>\` so the unique \`(loc, memoryId)\` constraint doesn't block. Hard-overwrite isn't supported — call hadron_delete_node (hard: true) on the target first if you need that.
 
 Descendants of the source node are NOT moved automatically — they remain at their original locs and become children of an implicit parent at the old prefix. Move them explicitly if needed.
 
@@ -3300,7 +3300,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
 
         // NodeVersion snapshot of the pre-move state — mirrors the
-        // pattern h-update-node already follows. Loc / name / memoryId
+        // pattern hadron_update_node already follows. Loc / name / memoryId
         // changes are audit-worthy. Spec 031 — `abstract` is included so
         // version history captures the pre-move state in full. Spec 032
         // — `abstractOriginHash` joins on the same logic (every snapshot
@@ -3358,13 +3358,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return textResult(
           `URN_ALREADY_EXISTS: A live node already occupies "${result.targetUrn}". ` +
             `Pass overwrite: true to soft-delete it first and move into its place, ` +
-            `or use h-delete-node (hard: true) to compact it before retrying.`,
+            `or use hadron_delete_node (hard: true) to compact it before retrying.`,
         );
       }
 
       const { moved, childCount } = result;
 
-      // Empty sections omitted, matching h-read-node's pattern (PR-189
+      // Empty sections omitted, matching hadron_get_node's pattern (PR-189
       // review feedback).
       const lines: string[] = [
         `Moved "${fromUrn}" → "${toUrn}".`,
@@ -3390,17 +3390,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-run-action ─────────────────────────────────────────────────────────
+  // ── hadron_run_action ─────────────────────────────────────────────────────────
 
   server.tool(
-    'h-run-action',
+    'hadron_run_action',
     'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (org::memory::loc).',
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::actions:review"'),
       args: z.record(z.string(), z.string()).optional().describe('Action arguments as key-value pairs'),
     },
     async ({ urn: rawUrn, args }) => {
-      // Spec 022 qualification + loading + rendering are shared with h-run-task
+      // Spec 022 qualification + loading + rendering are shared with hadron_run_task
       // (cor:api:060) via loadNodeForRun / renderRunNode below.
       const loaded = await loadNodeForRun(rawUrn);
       if ('error' in loaded) return textResult(loaded.error);
@@ -3408,13 +3408,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── Shared run core (h-run-action + h-run-task, spec cor:api:060) ──────────
+  // ── Shared run core (hadron_run_action + hadron_run_task, spec cor:api:060) ──────────
   //
   // Loading a node for execution and rendering its run-bundle are factored out
-  // so the direct-URN runner (h-run-action, above) and the by-name runner
-  // (h-run-task, below) produce a byte-identical bundle and record the same
+  // so the direct-URN runner (hadron_run_action, above) and the by-name runner
+  // (hadron_run_task, below) produce a byte-identical bundle and record the same
   // action-run usage event. These are hoisted function declarations, so the
-  // thinned h-run-action handler above resolves them at call time.
+  // thinned hadron_run_action handler above resolves them at call time.
 
   type RunNode = Prisma.NodeGetPayload<{
     include: { outgoingEdges: { include: { target: true } } };
@@ -3486,7 +3486,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     return parts.join('\n\n');
   }
 
-  // ── h-run-task name resolution (spec cor:api:060) ─────────────────────────
+  // ── hadron_run_task name resolution (spec cor:api:060) ─────────────────────────
 
   type RunTaskMem = { id: string; urn: string; name: string };
   type RunTaskNode = {
@@ -3652,7 +3652,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       (c, i) => `${i + 1}. ${c.label}${c.description ? ` — ${c.description}` : ''}\n   urn: ${c.urn}`,
     );
     return textResult(
-      `${header}\n\n${lines.join('\n')}\n\nRe-run h-run-task with \`urn\` set to your choice.`,
+      `${header}\n\n${lines.join('\n')}\n\nRe-run hadron_run_task with \`urn\` set to your choice.`,
     );
   }
 
@@ -3663,7 +3663,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     const mems = await listRunnableMemories();
     if (mems.length === 0) {
       return {
-        done: textResult('No memories you can read. Use h-list-memories to see what is available.'),
+        done: textResult('No memories you can read. Use hadron_list_memories to see what is available.'),
       };
     }
     const asRankable = (m: RunTaskMem) => ({ ...m, alias: null, loc: m.urn, description: null });
@@ -3674,7 +3674,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (matches.length === 0) {
         return {
           done: textResult(
-            `No memory matching "${hint}". Use h-list-memories to see what is available.`,
+            `No memory matching "${hint}". Use hadron_list_memories to see what is available.`,
           ),
         };
       }
@@ -3694,7 +3694,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const lines = matches.map((m, i) => `${i + 1}. ${m.name}\n   memory: ${m.urn}`);
       return {
         done: textResult(
-          `Multiple memories match "${hint}":\n\n${lines.join('\n')}\n\nRe-run h-run-task with \`memory\` set to one of these.`,
+          `Multiple memories match "${hint}":\n\n${lines.join('\n')}\n\nRe-run hadron_run_task with \`memory\` set to one of these.`,
         ),
       };
     }
@@ -3721,7 +3721,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     const names = mems.slice(0, RUN_TASK_PICK_CAP).map((m) => m.name).join(', ');
     return {
       done: textResult(
-        `Pass a \`memory\` hint (or set an active memory with h-set-active-memory). You can reach: ${names}.`,
+        `Pass a \`memory\` hint (or set an active memory with hadron_set_active_memory). You can reach: ${names}.`,
       ),
     };
   }
@@ -3743,10 +3743,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     return rankByHint(nodes, hint).map((n) => ({ mem: memById.get(n.memoryId)!, node: n }));
   }
 
-  // ── h-run-task ─────────────────────────────────────────────────────────────
+  // ── hadron_run_task ─────────────────────────────────────────────────────────────
 
   server.tool(
-    'h-run-task',
+    'hadron_run_task',
     "Run a task — a runnable node (isRunnable=true) — by loose name, without a fully-qualified URN. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. Reuses the action runner: {{arg}} substitution, inlined dependencies, and an action-run usage event. Spec cor:api:060.",
     {
       task: z
@@ -3784,7 +3784,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           ? (a.args as Record<string, string>)
           : undefined;
 
-      // URN bypass — run directly, exactly like h-run-action (cor:api:060:02).
+      // URN bypass — run directly, exactly like hadron_run_action (cor:api:060:02).
       if (directUrn) {
         const loaded = await loadNodeForRun(directUrn);
         if ('error' in loaded) return textResult(loaded.error);
@@ -3840,10 +3840,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-start-session ──────────────────────────────────────────────────────
+  // ── hadron_start_session ──────────────────────────────────────────────────────
 
   server.tool(
-    'h-start-session',
+    'hadron_start_session',
     'Start a new work session. All subsequent tool calls can reference this session ID for attribution.',
     {
       description: z.string().describe("What this session is about"),
@@ -3890,10 +3890,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-end-session ────────────────────────────────────────────────────────
+  // ── hadron_end_session ────────────────────────────────────────────────────────
 
   server.tool(
-    'h-end-session',
+    'hadron_end_session',
     'End a session. Records summary and final metrics.',
     {
       id: z.string().describe('Session ID to end'),
@@ -3904,7 +3904,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       errorCount: z.number().optional().describe('Number of errors encountered'),
     },
     async ({ id, summary, inputTokens, outputTokens, turnCount, errorCount }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool: paired with h-start-session.
+      // Spec 026 / D-2026-05-21-003 strict tool: paired with hadron_start_session.
       const appScopeError = requireAppScope();
       if (appScopeError) return appScopeError;
 
@@ -3927,11 +3927,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-validate ───────────────────────────────────────────────────────────
+  // ── hadron_validate ───────────────────────────────────────────────────────────
 
   server.tool(
-    'h-validate',
-    'Check a memory for broken edge references, sparse nodes, stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), and embedding-failure flags (spec 033 — nodes with `embedding_failed_at` set; covers BOTH in-flight transient failures awaiting retry AND terminal failures, including the #206 encrypted-no-plaintext perma-fail class). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (h-validate does not decrypt; tracked by #206).',
+    'hadron_validate',
+    'Check a memory for broken edge references, sparse nodes, stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), and embedding-failure flags (spec 033 — nodes with `embedding_failed_at` set; covers BOTH in-flight transient failures awaiting retry AND terminal failures, including the #206 encrypted-no-plaintext perma-fail class). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (hadron_validate does not decrypt; tracked by #206).',
     {
       memoryUrn: z.string().describe('Fully-qualified memory URN, e.g. "acme.com:mmdata"'),
     },
@@ -3953,13 +3953,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
 
       // Spec 032 FR-011 — encryption gate for the stale-abstract check.
-      // h-validate does NOT call decryptNodesBatch, so on encrypted
+      // hadron_validate does NOT call decryptNodesBatch, so on encrypted
       // memories `node.content` is ciphertext and
       // `computeContentHash(ciphertext)` would compare unequal to every
       // plaintext-derived abstractOriginHash (false-positive on every
       // node). v1 skips the check; the #206 encryption-parity follow-up
       // adds a decrypt step before this loop. Symmetric with the
-      // h-read-node gate (US2). Riding the existing nodes findMany
+      // hadron_get_node gate (US2). Riding the existing nodes findMany
       // (memory column auto-projected via separate findUnique) keeps
       // the wider blast radius of changing resolveMemoryByUrn contained.
       const memEnc = await db.memory.findUnique({
@@ -3990,7 +3990,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           issues.push(`[sparse] ${nUrn} — no description, content, or abstract`);
         }
         // Spec 032 FR-011 — stale-abstract warning. Mirrors the
-        // h-read-node predicate (US2). The explicit `abstractOriginHash
+        // hadron_get_node predicate (US2). The explicit `abstractOriginHash
         // != null` guard short-circuits legacy pre-spec-032 rows so the
         // validator stays quiet by design on data that pre-dates the
         // signal (PR-207 review item 5).
@@ -4011,7 +4011,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         //     cleared, failedAt stays (giveUp branch)
         //   - permanent encrypted-no-plaintext (#206) → same shape as
         //     the cap (markPermanentFailure)
-        // h-validate surfaces ALL of these because each is operator-
+        // hadron_validate surfaces ALL of these because each is operator-
         // useful: in-flight retries say "this node has failed at least
         // once but the sweep will retry"; terminal failures say "this
         // node will never embed without intervention." PR-226 review
@@ -4019,9 +4019,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // the terminal cases.
         //
         // Why this matters: an empty vector index from outside
-        // h-validate looks identical to "no hits matched". Surfacing
+        // hadron_validate looks identical to "no hits matched". Surfacing
         // the failure flag here gives operators (and the agents who
-        // proactively run h-validate before debugging an empty index)
+        // proactively run hadron_validate before debugging an empty index)
         // a single-tool diagnostic surface. Default Prisma findMany
         // without a select includes every scalar column, so
         // embeddingFailedAt + embeddingError are already on `node`
@@ -4044,10 +4044,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-sync-graph ─────────────────────────────────────────────────────────
+  // ── hadron_sync_graph ─────────────────────────────────────────────────────────
 
   server.tool(
-    'h-sync-graph',
+    'hadron_sync_graph',
     'Trigger an on-demand sync for a memory from its GitHub source. The memory URN MUST be fully qualified.',
     {
       memoryUrn: z.string().describe('Fully-qualified memory URN, e.g. "acme.com:mmdata"'),
@@ -4098,11 +4098,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     };
   }
 
-  // ── h-chat-start ─────────────────────────────────────────────────────
+  // ── hadron_chat_start ─────────────────────────────────────────────────────
 
   server.tool(
-    'h-chat-start',
-    'Start a new chat session with an agent. Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call h-chat-process with the result.',
+    'hadron_chat_start',
+    'Start a new chat session with an agent. Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call hadron_chat_process with the result.',
     {
       agentId: z.string().describe('ID of the agent to chat with'),
       userId: z.string().optional().describe('User/persona identifier (e.g. "alex-chen"). Used to scope the per-user memory. If omitted, uses the authenticated user.'),
@@ -4127,13 +4127,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-chat-send ──────────────────────────────────────────────────────
+  // ── hadron_chat_send ──────────────────────────────────────────────────────
 
   server.tool(
-    'h-chat-send',
-    "Send a user message in an existing chat. Returns the recompiled system prompt for the current stage, tool schema, message history, and whether summarization is needed. Use the returned prompt + tools to generate the assistant's response, then call h-chat-process.",
+    'hadron_chat_send',
+    "Send a user message in an existing chat. Returns the recompiled system prompt for the current stage, tool schema, message history, and whether summarization is needed. Use the returned prompt + tools to generate the assistant's response, then call hadron_chat_process.",
     {
-      chatId: z.string().describe('Chat ID returned by h-chat-start (e.g. "chats:20260417-abc12345-onboarding")'),
+      chatId: z.string().describe('Chat ID returned by hadron_chat_start (e.g. "chats:20260417-abc12345-onboarding")'),
       userMessage: z.string().describe("The user's message text"),
     },
     async ({ chatId, userMessage }) => {
@@ -4154,10 +4154,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-chat-process ───────────────────────────────────────────────────
+  // ── hadron_chat_process ───────────────────────────────────────────────────
 
   server.tool(
-    'h-chat-process',
+    'hadron_chat_process',
     "Process the LLM's structured response for a chat turn. The toolResponse must match the respond() tool schema: { message, data, next_stage }. Hadron saves the assistant message, extracts data into user memory, and handles stage transitions. Returns the display message, whether a stage transition occurred, and the new stage name.",
     {
       chatId: z.string().describe('Chat ID'),
@@ -4188,10 +4188,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-chat-get-routing-map ───────────────────────────────────────────
+  // ── hadron_chat_get_routing_map ───────────────────────────────────────────
 
   server.tool(
-    'h-chat-get-routing-map',
+    'hadron_chat_get_routing_map',
     "Download the full routing map for an agent: topics, conversations (with goals/signals), stages, and edges. Use this to understand the chatbot's conversation structure before routing.",
     {
       agentId: z.string().describe('ID of the agent'),
@@ -4254,10 +4254,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-chat-get-route-history ──────────────────────────────────────────
+  // ── hadron_chat_get_route_history ──────────────────────────────────────────
 
   server.tool(
-    'h-chat-get-route-history',
+    'hadron_chat_get_route_history',
     'Get the route history and goal stack for a chat. Shows where the chat has been and what goals are active.',
     {
       chatId: z.string().describe('Chat ID'),
@@ -4282,10 +4282,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-chat-push-goal ──────────────────────────────────────────────────
+  // ── hadron_chat_push_goal ──────────────────────────────────────────────────
 
   server.tool(
-    'h-chat-push-goal',
+    'hadron_chat_push_goal',
     'Push a new goal onto the goal stack. Use this when the user mentions something they want to do later, or when a detour is needed.',
     {
       chatId: z.string().describe('Chat ID'),
@@ -4323,10 +4323,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-chat-pop-goal ───────────────────────────────────────────────────
+  // ── hadron_chat_pop_goal ───────────────────────────────────────────────────
 
   server.tool(
-    'h-chat-pop-goal',
+    'hadron_chat_pop_goal',
     'Complete the current goal and return to the previous one. Use this when a detour conversation has finished its purpose.',
     {
       chatId: z.string().describe('Chat ID'),
@@ -4369,10 +4369,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-chat-add-training-entry ───────────────────────────────────────
+  // ── hadron_chat_add_training_entry ───────────────────────────────────────
 
   server.tool(
-    'h-chat-add-training-entry',
+    'hadron_chat_add_training_entry',
     'Add a user statement to the agent-wide routing training set. These entries help the routing engine match future user messages to the right conversation. Stored in the system memory (not encrypted user memory).',
     {
       agentId: z.string().describe('ID of the agent'),
@@ -4436,10 +4436,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-chat-define-persona ───────────────────────────────────────────
+  // ── hadron_chat_define_persona ───────────────────────────────────────────
 
   server.tool(
-    'h-chat-define-persona',
+    'hadron_chat_define_persona',
     'Define a test persona for automated chatbot testing. The persona has a name, description, opening message, and optionally an expected conversation path. Stored in the system memory under test-personas:*.',
     {
       agentId: z.string().describe('ID of the agent'),
@@ -4505,10 +4505,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-chat-list-personas ──────────────────────────────────────────
+  // ── hadron_chat_list_personas ──────────────────────────────────────────
 
   server.tool(
-    'h-chat-list-personas',
+    'hadron_chat_list_personas',
     'List all test personas defined for an agent.',
     {
       agentId: z.string().describe('ID of the agent'),
@@ -4529,7 +4529,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           orderBy: { loc: 'asc' },
         });
 
-        if (personas.length === 0) return textResult('No test personas defined. Use h-chat-define-persona to create one.');
+        if (personas.length === 0) return textResult('No test personas defined. Use hadron_chat_define_persona to create one.');
 
         const lines = personas.map((p) => {
           const d = (p.data as Record<string, unknown>) ?? {};
@@ -4542,11 +4542,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── h-chat-run-persona ────────────────────────────────────────────
+  // ── hadron_chat_run_persona ────────────────────────────────────────────
 
   server.tool(
-    'h-chat-run-persona',
-    'Run a test persona through the chatbot in "dry run" mode. This starts a chat as the persona, sends their opening message, and returns the chatbot\'s compiled prompt + tool schema so the client LLM can generate the response. Call h-chat-process with the response, then call this tool again with the next follow-up message. Use this iteratively to walk through the full conversation.\n\nWorkflow:\n1. Call h-chat-run-persona to start (sets up chat, sends opening message)\n2. Read the returned prompt, generate a chatbot response as the client LLM\n3. Call h-chat-process with the response\n4. Call h-chat-run-persona again with step=1 (next follow-up)\n5. Repeat until all follow-ups are done or the conversation ends\n\nAt the end, call h-chat-get-route-history to see the full path taken.',
+    'hadron_chat_run_persona',
+    'Run a test persona through the chatbot in "dry run" mode. This starts a chat as the persona, sends their opening message, and returns the chatbot\'s compiled prompt + tool schema so the client LLM can generate the response. Call hadron_chat_process with the response, then call this tool again with the next follow-up message. Use this iteratively to walk through the full conversation.\n\nWorkflow:\n1. Call hadron_chat_run_persona to start (sets up chat, sends opening message)\n2. Read the returned prompt, generate a chatbot response as the client LLM\n3. Call hadron_chat_process with the response\n4. Call hadron_chat_run_persona again with step=1 (next follow-up)\n5. Repeat until all follow-ups are done or the conversation ends\n\nAt the end, call hadron_chat_get_route_history to see the full path taken.',
     {
       agentId: z.string().describe('ID of the agent'),
       personaLoc: z.string().describe('Loc of the persona (e.g. "test-personas:maria-santos")'),
@@ -4602,7 +4602,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             systemMessage: sendResult.systemMessage,
             tools: sendResult.tools,
             messageHistory: sendResult.messageHistory,
-            instruction: 'Generate a chatbot response based on the systemMessage and tools above. Then call h-chat-process with chatId, message, data, and next_stage. After that, call h-chat-run-persona with step=1 to send the next follow-up.',
+            instruction: 'Generate a chatbot response based on the systemMessage and tools above. Then call hadron_chat_process with chatId, message, data, and next_stage. After that, call hadron_chat_run_persona with step=1 to send the next follow-up.',
           }, null, 2));
         }
 
@@ -4660,7 +4660,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           systemMessage: sendResult.systemMessage,
           tools: sendResult.tools,
           messageHistory: sendResult.messageHistory,
-          instruction: `Generate a chatbot response for: "${userMessage}". Then call h-chat-process, then h-chat-run-persona with step=${currentStep + 1}.`,
+          instruction: `Generate a chatbot response for: "${userMessage}". Then call hadron_chat_process, then hadron_chat_run_persona with step=${currentStep + 1}.`,
         }, null, 2));
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to run persona'}`);
@@ -4680,7 +4680,7 @@ const transports = new Map<string, StreamableHTTPServerTransport>();
 /**
  * Spec 026 — per-MCP-session active App, used by both regime (b)
  * (directory-aware, seeded from `initialize` capability parameter) and
- * regime (c) (session-scoped, set by the `h-set-active-app` tool).
+ * regime (c) (session-scoped, set by the `hadron_set_active_app` tool).
  * Keyed by transport `sessionId`. Cleaned up in `transport.onclose`
  * alongside `transports.delete(sid)`. Single-replica only per spec 026
  * §Clarifications Q3; horizontal scale-out requires either sticky
@@ -4782,7 +4782,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   // **Spec-026 change** (relative to spec-025):
   // - The legacy `multiple_apps_resolved` HTTP 409 NO LONGER fires here at
   //   session-init time. Spec 026 requires multi-App sessions to OPEN so
-  //   the user can call `h-list-apps` + `h-set-active-app` to pick an App.
+  //   the user can call `hadron_list_apps` + `hadron_set_active_app` to pick an App.
   // - For multi-App users, `auth.appId` is left unset at session-init and
   //   the resolution is cached for per-tool-call dispatch.
   // - Single-App users continue to get `auth.appId` populated here (regime

@@ -5,7 +5,7 @@
  *
  * What US1 pins:
  *
- *   - The 9-row partial-update matrix from contracts/h-update-node.md:
+ *   - The 9-row partial-update matrix from contracts/hadron_update_node.md:
  *     across (abstract: absent|null|string) × (content: absent|null|string),
  *     `abstractOriginHash` settles to the right value per FR-003 through
  *     FR-007.
@@ -19,12 +19,12 @@
  *     because the read-time check requires content non-null).
  *
  *   - NodeVersion snapshot captures `existing.abstractOriginHash` on
- *     h-update-node so version history round-trips the hash.
+ *     hadron_update_node so version history round-trips the hash.
  *
- *   - h-move-node NodeVersion snapshot also captures the hash (spec 031
+ *   - hadron_move_node NodeVersion snapshot also captures the hash (spec 031
  *     lesson: every snapshot site must include new columns).
  *
- *   - `h-add-node` is upsert-semantically a fresh write: every call
+ *   - `hadron_create_node` is upsert-semantically a fresh write: every call
  *     computes the hash from supplied content.
  *
  *   - `Node.contentHash` is NOT touched on any write path
@@ -97,7 +97,7 @@ async function addNode(args: {
   };
   if (args.abstract !== undefined) params.abstract = args.abstract;
   if (args.content !== undefined) params.content = args.content;
-  return srv.callToolText('h-add-node', params);
+  return srv.callToolText('hadron_create_node', params);
 }
 
 async function updateNode(args: {
@@ -113,7 +113,7 @@ async function updateNode(args: {
   if ('abstract' in args) params.abstract = args.abstract;
   if ('content' in args) params.content = args.content;
   if (args.name !== undefined) params.name = args.name;
-  return srv.callToolText('h-update-node', params);
+  return srv.callToolText('hadron_update_node', params);
 }
 
 async function readRow(loc: string) {
@@ -123,9 +123,9 @@ async function readRow(loc: string) {
   });
 }
 
-// ─── h-add-node: fresh-write semantics ─────────────────────────────────
+// ─── hadron_create_node: fresh-write semantics ─────────────────────────────────
 
-describe('h-add-node — abstractOriginHash on fresh writes', () => {
+describe('hadron_create_node — abstractOriginHash on fresh writes', () => {
   it('FR-003 — abstract + content together: hash = computeContentHash(content)', async () => {
     await addNode({ loc: 'add1', abstract: 'X', content: 'Y' });
     const row = await readRow('add1');
@@ -147,16 +147,16 @@ describe('h-add-node — abstractOriginHash on fresh writes', () => {
   it('does NOT touch contentHash (external-producer domain preserved)', async () => {
     await addNode({ loc: 'add4', abstract: 'X', content: 'Y' });
     const row = await readRow('add4');
-    // contentHash stays null because no external producer set it; h-add-node
+    // contentHash stays null because no external producer set it; hadron_create_node
     // does not populate it. This pins the "Node.contentHash is NOT touched"
     // invariant from data-model.md.
     expect(row?.contentHash).toBeNull();
   });
 });
 
-// ─── h-update-node: 9-row partial-update matrix ────────────────────────
+// ─── hadron_update_node: 9-row partial-update matrix ────────────────────────
 
-describe('h-update-node — abstractOriginHash 9-row matrix', () => {
+describe('hadron_update_node — abstractOriginHash 9-row matrix', () => {
   it('row 1 (both absent) — hash preserved', async () => {
     await addNode({ loc: 'u1', abstract: 'X', content: 'Y' });
     await updateNode({ loc: 'u1', name: 'renamed' });
@@ -235,7 +235,7 @@ describe('h-update-node — abstractOriginHash 9-row matrix', () => {
 // ─── NodeVersion snapshots capture the hash ────────────────────────────
 
 describe('NodeVersion snapshots capture abstractOriginHash', () => {
-  it('h-update-node snapshot captures existing.abstractOriginHash', async () => {
+  it('hadron_update_node snapshot captures existing.abstractOriginHash', async () => {
     await addNode({ loc: 'v1', abstract: 'X', content: 'Y' });
     const before = await readRow('v1');
     // Trigger an update that creates a version
@@ -248,14 +248,14 @@ describe('NodeVersion snapshots capture abstractOriginHash', () => {
     expect(versions[0].abstractOriginHash).toBe(computeContentHash('Y'));
   });
 
-  it('h-move-node snapshot captures existing.abstractOriginHash', async () => {
+  it('hadron_move_node snapshot captures existing.abstractOriginHash', async () => {
     // Spec 031 lesson + PR-209 Copilot review: every NodeVersion.create
     // site must be exercised. Without this test, a future refactor that
-    // drops the column from the h-move-node snapshot won't be caught.
+    // drops the column from the hadron_move_node snapshot won't be caught.
     await addNode({ loc: 'v2', abstract: 'X', content: 'Y' });
     const before = await readRow('v2');
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('h-move-node', {
+    await srv.callToolText('hadron_move_node', {
       urn: 'stale-org::stalemem::v2',
       targetUrn: 'stale-org::stalemem::v2moved',
     });
@@ -270,10 +270,10 @@ describe('NodeVersion snapshots capture abstractOriginHash', () => {
   });
 });
 
-// ─── US2: h-read-node `Source: abstract-stale` marker (FR-010) ─────────
+// ─── US2: hadron_get_node `Source: abstract-stale` marker (FR-010) ─────────
 
 /**
- * The US2 marker behaviour matrix per contracts/h-read-node.md:
+ * The US2 marker behaviour matrix per contracts/hadron_get_node.md:
  *
  *   - fresh + 'all'                         → no marker
  *   - stale + 'all'                         → marker present
@@ -289,7 +289,7 @@ describe('NodeVersion snapshots capture abstractOriginHash', () => {
  * NOT call `decryptNodesBatch` (asymmetry tracked by #206), so computing
  * `computeContentHash(node.content)` against ciphertext would false-
  * positive on every node. v1 skips the staleness check entirely on
- * encrypted memories — symmetric with the h-validate gate (US3). The
+ * encrypted memories — symmetric with the hadron_validate gate (US3). The
  * encryption-parity follow-up lifts the gate.
  */
 async function readNode(loc: string, contentScope?: 'content' | 'abstract' | 'all') {
@@ -298,10 +298,10 @@ async function readNode(loc: string, contentScope?: 'content' | 'abstract' | 'al
     urn: `stale-org::stalemem::${loc}`,
   };
   if (contentScope !== undefined) params.contentScope = contentScope;
-  return srv.callToolText('h-read-node', params);
+  return srv.callToolText('hadron_get_node', params);
 }
 
-describe('h-read-node — `Source: abstract-stale` marker (US2)', () => {
+describe('hadron_get_node — `Source: abstract-stale` marker (US2)', () => {
   it("fresh node + 'all': no `Source: abstract-stale`", async () => {
     await addNode({ loc: 'r1', abstract: 'X', content: 'Y' });
     const out = await readNode('r1', 'all');
@@ -361,7 +361,7 @@ describe('h-read-node — `Source: abstract-stale` marker (US2)', () => {
   it('encrypted memory: marker is SUPPRESSED (v1 gate, deferred to #206 encryption-parity)', async () => {
     // Mark the memory encrypted AFTER seeding plaintext content + a stale
     // hash. The gate is `!memory.isEncrypted` — on an encrypted memory,
-    // h-read-node doesn't decrypt today, so computing hash from
+    // hadron_get_node doesn't decrypt today, so computing hash from
     // (possibly-)ciphertext content would false-positive. The gate skips
     // the predicate entirely; the marker MUST NOT emit on any read of
     // an encrypted memory in v1.
@@ -384,14 +384,14 @@ describe('h-read-node — `Source: abstract-stale` marker (US2)', () => {
   });
 });
 
-// ─── US3: h-validate `[stale-abstract]` warning (FR-011) ────────────────
+// ─── US3: hadron_validate `[stale-abstract]` warning (FR-011) ────────────────
 
 /**
- * h-validate scans the memory and emits one warning line per stale node.
- * Predicate mirrors h-read-node's (US2): four clauses + the `!= null`
+ * hadron_validate scans the memory and emits one warning line per stale node.
+ * Predicate mirrors hadron_get_node's (US2): four clauses + the `!= null`
  * legacy short-circuit + the `!memory.isEncrypted` gate.
  *
- * Encryption gate: h-validate doesn't decrypt — staleness on encrypted
+ * Encryption gate: hadron_validate doesn't decrypt — staleness on encrypted
  * memories would compare a plaintext hash against the hash of ciphertext
  * content and fire false-positives on every node. v1 skips the check on
  * encrypted memories; the encryption-parity follow-up (#206) lifts the
@@ -399,10 +399,10 @@ describe('h-read-node — `Source: abstract-stale` marker (US2)', () => {
  */
 async function validate() {
   const srv = createTestableMcpServer(adminAuth());
-  return srv.callToolText('h-validate', { memoryUrn: 'stale-org::stalemem' });
+  return srv.callToolText('hadron_validate', { memoryUrn: 'stale-org::stalemem' });
 }
 
-describe('h-validate — `[stale-abstract]` warning (US3)', () => {
+describe('hadron_validate — `[stale-abstract]` warning (US3)', () => {
   it('flags a single stale node', async () => {
     await addNode({ loc: 'v-stale', abstract: 'X', content: 'Y' });
     await updateNode({ loc: 'v-stale', content: "Y'" });
@@ -434,7 +434,7 @@ describe('h-validate — `[stale-abstract]` warning (US3)', () => {
     // The fresh node is not flagged for staleness; m-fresh should appear
     // nowhere as a stale-abstract subject.
     expect(out).not.toMatch(/\[stale-abstract\][^\n]*m-fresh/);
-    // Spec 032 broken-ref coverage lives in the preexisting h-validate
+    // Spec 032 broken-ref coverage lives in the preexisting hadron_validate
     // tests; this scenario focuses on the multi-issue-type interaction
     // between sparse and stale-abstract (the two scopes 031 + 032 own).
   });
@@ -454,7 +454,7 @@ describe('h-validate — `[stale-abstract]` warning (US3)', () => {
 
   it('encrypted memory: zero `[stale-abstract]` warnings (v1 gate, deferred to #206)', async () => {
     // Seed a stale node on a plaintext memory, then flip the memory to
-    // encrypted. h-validate doesn't decrypt; computing the hash against
+    // encrypted. hadron_validate doesn't decrypt; computing the hash against
     // (possibly-)ciphertext content would false-positive on every node.
     // The gate suppresses the check entirely until the encryption-parity
     // follow-up lifts it. No try/finally needed — cleanDb in beforeEach

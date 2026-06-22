@@ -105,7 +105,7 @@ describe('createApp accepts absorbed Station fields', () => {
         role: 'CONTRIBUTOR',
         description: 'a chatbot',
         systemPrompt: 'you are helpful',
-        agentTools: ['h-find-node', 'h-read-node'],
+        agentTools: ['h-find-node', 'hadron_get_node'],
         aiProvider: 'anthropic',
         aiModel: 'claude-sonnet-4-20250514',
         aiApiKey: 'sk-fake-key',
@@ -117,7 +117,7 @@ describe('createApp accepts absorbed Station fields', () => {
     expect(created.role).toBe('CONTRIBUTOR');
     expect(created.description).toBe('a chatbot');
     expect(created.systemPrompt).toBe('you are helpful');
-    expect(created.agentTools).toEqual(['h-find-node', 'h-read-node']);
+    expect(created.agentTools).toEqual(['h-find-node', 'hadron_get_node']);
     // 036-ai-service-config: the legacy args land in the App's 'default'
     // registry config (columns dropped).
     const config = await db.aiServiceConfig.findFirstOrThrow({

@@ -1,6 +1,6 @@
 // Validation for the `parentRel` parameter on MCP tools that browse or
-// write into a memory subtree (h-add-parent-node, h-find-nodes,
-// h-list-nodes). Filed as #2 of issue #100: a stricter input check
+// write into a memory subtree (hadron_create_parent_node, hadron_find_nodes,
+// hadron_list_nodes). Filed as #2 of issue #100: a stricter input check
 // prevents callers from accidentally producing structurally-malformed
 // node URNs (e.g. literal `""`, full `urn:agent:...` URNs embedded as
 // path segments).

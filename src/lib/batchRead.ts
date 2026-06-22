@@ -2,7 +2,7 @@
  * Hard caps for the batch node read (spec cor:api:040:02).
  *
  * BOTH a node-count cap and a response-size cap bound every batch read, on both
- * transports (MCP h-read-nodes + the GraphQL batch query). Exceeding either is
+ * transports (MCP hadron_get_nodes + the GraphQL batch query). Exceeding either is
  * LOUD — a typed error (count) or an explicit `truncated` flag (size) — never a
  * silent short read. That loud-never-silent contract is the durable rule and
  * the direct lesson of hadron-cli#23 (a bulk read that silently truncated at

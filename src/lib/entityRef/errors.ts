@@ -70,7 +70,7 @@ export class NodeLocConflictError extends Error {
 }
 
 /**
- * Surfaced by `h-add-node`, `h-update-node`, `upsertNode` (GraphQL), and
+ * Surfaced by `hadron_create_node`, `hadron_update_node`, `upsertNode` (GraphQL), and
  * the node.yaml importer when an `abstract` argument exceeds the spec-031
  * 2000-character cap. The cap is API-boundary validation (not a DB CHECK)
  * per data-model.md V1 / research D2 — "caps are validation, not
@@ -92,7 +92,7 @@ export class NodeAbstractTooLongError extends Error {
 }
 
 /**
- * Surfaced by `h-read-node` when `contentScope` is outside the allowed
+ * Surfaced by `hadron_get_node` when `contentScope` is outside the allowed
  * enum (`'content' | 'abstract' | 'all'`). Zod's `.enum()` produces the
  * validation error at the MCP boundary; this class exists for the
  * GraphQL surface and for any internal caller that re-validates.

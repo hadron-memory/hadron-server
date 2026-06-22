@@ -18,7 +18,7 @@ describe('asset / gate (v1 — per-App)', () => {
   describe('isAssetToolEnabled', () => {
     it('returns true when the key is in agentTools', () => {
       expect(isAssetToolEnabled({ agentTools: ['asset:upload'] })).toBe(true);
-      expect(isAssetToolEnabled({ agentTools: ['h-find-node', 'asset:upload', 'h-read-node'] })).toBe(true);
+      expect(isAssetToolEnabled({ agentTools: ['h-find-node', 'asset:upload', 'hadron_get_node'] })).toBe(true);
     });
 
     it('returns false when the key is missing', () => {

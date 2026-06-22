@@ -53,7 +53,7 @@ const toolCallBody = {
   jsonrpc: '2.0',
   id: 7,
   method: 'tools/call',
-  params: { name: 'h-server-info', arguments: {} },
+  params: { name: 'hadron_server_info', arguments: {} },
 };
 
 const initializeBody = {

@@ -3783,7 +3783,7 @@ export const resolvers = {
       // + whitespace-only collapse to null; non-empty trimmed values
       // persist untrimmed so intentional surrounding whitespace on real
       // paragraphs is lossless). Applied at the resolver layer so this
-      // surface matches the MCP h-add-node / h-update-node semantics.
+      // surface matches the MCP hadron_create_node / hadron_update_node semantics.
       // `undefined` (key absent) means "preserve existing" and bypasses
       // both checks.
       //
@@ -3934,7 +3934,7 @@ export const resolvers = {
       // content (FR-009), so this runs BEFORE the encryption block below
       // that mutates nodeFields.content to ciphertext.
       //
-      // Matrix per contracts/h-update-node.md:
+      // Matrix per contracts/hadron_update_node.md:
       //   - input.abstract === undefined  → preserve hash (omit from payload)
       //   - input.abstract === null       → clear hash
       //   - input.abstract is string      → hash from current content
@@ -5799,7 +5799,7 @@ export const resolvers = {
       // unchanged (and vice versa). Spec 032 — `abstractOriginHash`
       // applied verbatim per plan D4 (no recomputation on restore;
       // legacy null hashes short-circuit the staleness check via the
-      // NOT NULL guard in h-read-node).
+      // NOT NULL guard in hadron_get_node).
       const restored = await ctx.db.node.update({
         where: { id: node.id },
         data: {

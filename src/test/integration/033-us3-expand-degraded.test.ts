@@ -136,7 +136,7 @@ describe('US3 — `expand:N` appends undirected neighbors after ranked hits', ()
     await seedEdge(backId, hubId, 'rel-in');
 
     const srv = createTestableMcpServer(adminAuth());
-    const out = await srv.callToolText('h-find-nodes', {
+    const out = await srv.callToolText('hadron_find_nodes', {
       query: 'hub',
       memoryUrn: memUrn,
       expand: 1,
@@ -160,7 +160,7 @@ describe('US3 — `expand:N` appends undirected neighbors after ranked hits', ()
     await seedEdge(aId, bId, 'rel');
 
     const srv = createTestableMcpServer(adminAuth());
-    const out = await srv.callToolText('h-find-nodes', {
+    const out = await srv.callToolText('hadron_find_nodes', {
       query: 'alpha',
       memoryUrn: memUrn,
       expand: 1,
@@ -182,7 +182,7 @@ describe('US3 — `expand:N` appends undirected neighbors after ranked hits', ()
     await seedEdge(hubId, leafId, 'rel');
 
     const srv = createTestableMcpServer(adminAuth());
-    const out = await srv.callToolText('h-find-nodes', {
+    const out = await srv.callToolText('hadron_find_nodes', {
       query: 'hub',
       memoryUrn: memUrn,
     });

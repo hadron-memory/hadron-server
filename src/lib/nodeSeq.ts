@@ -1,6 +1,6 @@
 /**
  * Sibling ordering helper, shared by the two single-node create surfaces
- * (the GraphQL `upsertNode` resolver and the MCP `h-add-node` tool) so they
+ * (the GraphQL `upsertNode` resolver and the MCP `hadron_create_node` tool) so they
  * assign `seq` identically.
  *
  * Rule (task): when a new node is added to an ALREADY-ORDERED sibling list it
@@ -20,7 +20,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
  *
  * Siblings = the direct children of the new node's parent loc within the same
  * memory (same depth, same parent prefix) — the same direct-child rule
- * `h-read-next-node` uses to walk ordered children. Soft-deleted rows are
+ * `hadron_get_next_node` uses to walk ordered children. Soft-deleted rows are
  * excluded, and the node itself is excluded (harmless on a fresh create,
  * correct when an upsert targets an existing loc).
  */

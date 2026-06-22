@@ -1,16 +1,16 @@
 /**
  * Behavioral coverage for PR-B (#180 Bug 1 + #185 F1/F2):
  *
- *   - h-delete-node — soft default; `hard: true` opt-in; refuses without
+ *   - hadron_delete_node — soft default; `hard: true` opt-in; refuses without
  *     `recursive: true` when descendants exist; permission gated by
  *     canWriteToMemory; idempotent on already-tombstoned input under
  *     the soft path.
  *
- *   - h-move-node ergonomics — returns the moved node's record
+ *   - hadron_move_node ergonomics — returns the moved node's record
  *     (name, type, tags, edge counts, child count) so post-move
- *     verification doesn't need a follow-up h-read-node.
+ *     verification doesn't need a follow-up hadron_get_node.
  *
- *   - h-move-node collision policy — refuses with URN_ALREADY_EXISTS by
+ *   - hadron_move_node collision policy — refuses with URN_ALREADY_EXISTS by
  *     default; `overwrite: true` soft-deletes the existing live target
  *     and moves into the freed slot; a soft-deleted target at the same
  *     URN is re-stamped out of the way (it would otherwise block the
@@ -142,13 +142,13 @@ beforeEach(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// #180 Bug 1 — h-delete-node
+// #180 Bug 1 — hadron_delete_node
 // ---------------------------------------------------------------------------
 
-describe('h-delete-node — soft delete (default)', () => {
+describe('hadron_delete_node — soft delete (default)', () => {
   it('tombstones a leaf node and returns a soft-deleted confirmation', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.leaf.loc}`,
     });
 
@@ -167,7 +167,7 @@ describe('h-delete-node — soft delete (default)', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.leaf.loc}`,
     });
 
@@ -177,7 +177,7 @@ describe('h-delete-node — soft delete (default)', () => {
 
   it('refuses when the node has live descendants and `recursive: true` is omitted', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.parent.loc}`,
     });
 
@@ -191,7 +191,7 @@ describe('h-delete-node — soft delete (default)', () => {
 
   it('cascades soft-delete to every live descendant when `recursive: true`', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.parent.loc}`,
       recursive: true,
     });
@@ -210,10 +210,10 @@ describe('h-delete-node — soft delete (default)', () => {
   });
 });
 
-describe('h-delete-node — hard delete', () => {
+describe('hadron_delete_node — hard delete', () => {
   it('removes the row entirely when `hard: true` and cascades to edges', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.edgeSource.loc}`,
       hard: true,
     });
@@ -241,7 +241,7 @@ describe('h-delete-node — hard delete', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.leaf.loc}`,
       hard: true,
     });
@@ -252,7 +252,7 @@ describe('h-delete-node — hard delete', () => {
 
   it('cascades hard-delete recursively (full subtree gone)', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.parent.loc}`,
       hard: true,
       recursive: true,
@@ -268,10 +268,10 @@ describe('h-delete-node — hard delete', () => {
   });
 });
 
-describe('h-delete-node — access control', () => {
+describe('hadron_delete_node — access control', () => {
   it('returns "not found" for a non-admin caller without write access (no existence leak)', async () => {
     const srv = createTestableMcpServer(viewerAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.leaf.loc}`,
     });
 
@@ -283,7 +283,7 @@ describe('h-delete-node — access control', () => {
 
   it('returns "not found" for a missing URN under an accessible memory (no probing)', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:nope`,
     });
 
@@ -292,10 +292,10 @@ describe('h-delete-node — access control', () => {
 });
 
 // ---------------------------------------------------------------------------
-// #185 F1 + F2 — h-move-node ergonomics + collision policy
+// #185 F1 + F2 — hadron_move_node ergonomics + collision policy
 // ---------------------------------------------------------------------------
 
-describe('h-move-node — return record (#185 F1)', () => {
+describe('hadron_move_node — return record (#185 F1)', () => {
   it('returns the moved node\'s record on success (name, type, tags) and omits empty sections', async () => {
     // Give the source a tag so the record surfaces a non-empty Tags line.
     await db.node.update({
@@ -304,7 +304,7 @@ describe('h-move-node — return record (#185 F1)', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-move-node', {
+    const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:relocated`,
     });
@@ -313,7 +313,7 @@ describe('h-move-node — return record (#185 F1)', () => {
     expect(text).toMatch(/Type: info/);
     expect(text).toMatch(/Tags: demo, p2/);
     // Empty sections (zero edges, zero children) are omitted — matches
-    // h-read-node's pattern (PR-189 review).
+    // hadron_get_node's pattern (PR-189 review).
     expect(text).not.toMatch(/Edges:/);
     expect(text).not.toMatch(/Children:/);
   });
@@ -345,7 +345,7 @@ describe('h-move-node — return record (#185 F1)', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-move-node', {
+    const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:relocated`,
     });
@@ -382,7 +382,7 @@ describe('h-move-node — return record (#185 F1)', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-move-node', {
+    const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:relocated`,
     });
@@ -412,7 +412,7 @@ describe('h-move-node — return record (#185 F1)', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-move-node', {
+    const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:relocated`,
     });
@@ -423,7 +423,7 @@ describe('h-move-node — return record (#185 F1)', () => {
 
   it('writes a NodeVersion snapshot of the pre-move state', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('h-move-node', {
+    await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:relocated`,
     });
@@ -438,10 +438,10 @@ describe('h-move-node — return record (#185 F1)', () => {
   });
 });
 
-describe('h-move-node — collision policy (#185 F2)', () => {
+describe('hadron_move_node — collision policy (#185 F2)', () => {
   it('refuses with URN_ALREADY_EXISTS when a live node occupies the target', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-move-node', {
+    const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:${fx.nodes.moveTarget.loc}`,
     });
@@ -460,7 +460,7 @@ describe('h-move-node — collision policy (#185 F2)', () => {
 
   it('with `overwrite: true`, soft-deletes the existing live target and moves into its slot', async () => {
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-move-node', {
+    const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:${fx.nodes.moveTarget.loc}`,
       overwrite: true,
@@ -542,7 +542,7 @@ describe('h-move-node — collision policy (#185 F2)', () => {
     expect(ghostA.id.slice(0, 8)).toBe(liveB.id.slice(0, 8));
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-move-node', {
+    const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${mover.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:twin-target`,
       overwrite: true,
@@ -571,7 +571,7 @@ describe('h-move-node — collision policy (#185 F2)', () => {
   it('moves over a tombstoned ghost by re-stamping its loc out of the way', async () => {
     // moveTombstone sits at `relocate:ghost` with deletedAt set.
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-move-node', {
+    const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:${fx.nodes.moveTombstone.loc}`,
     });
@@ -598,7 +598,7 @@ describe('h-move-node — collision policy (#185 F2)', () => {
   });
 });
 
-describe('h-move-node — cross-memory move + permission denial', () => {
+describe('hadron_move_node — cross-memory move + permission denial', () => {
   it('moves a node across memories (admin caller; write access on both)', async () => {
     // Create a second memory in the same org so the admin has write
     // access to both.
@@ -609,7 +609,7 @@ describe('h-move-node — cross-memory move + permission denial', () => {
     );
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-move-node', {
+    const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${otherMemory.urn}:imported`,
     });
@@ -631,7 +631,7 @@ describe('h-move-node — cross-memory move + permission denial', () => {
 
   it('refuses with "write access denied for source memory" when the caller lacks source write', async () => {
     const srv = createTestableMcpServer(viewerAuth());
-    const text = await srv.callToolText('h-move-node', {
+    const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:somewhere-else`,
     });
@@ -671,7 +671,7 @@ describe('h-move-node — cross-memory move + permission denial', () => {
   });
 });
 
-describe('h-delete-node — PendingEdge target-side cleanup (#1)', () => {
+describe('hadron_delete_node — PendingEdge target-side cleanup (#1)', () => {
   it('explicitly deletes PendingEdge rows where targetId matches a hard-deleted node', async () => {
     // PendingEdge.targetId is NOT a FK (schema.prisma:836), so the
     // Node-FK cascade misses it. Without the explicit deleteMany this
@@ -702,7 +702,7 @@ describe('h-delete-node — PendingEdge target-side cleanup (#1)', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('h-delete-node', {
+    await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.leaf.loc}`,
       hard: true,
     });
@@ -719,7 +719,7 @@ describe('h-delete-node — PendingEdge target-side cleanup (#1)', () => {
   });
 });
 
-describe('h-delete-node — cross-memory edge gate (#4)', () => {
+describe('hadron_delete_node — cross-memory edge gate (#4)', () => {
   it('refuses hard-delete when an edge bridges this memory to another, without cascadeCrossMemoryEdges: true', async () => {
     // Create a second memory + a node there + an edge into the
     // to-be-deleted node from that other memory. Hard-delete should
@@ -751,7 +751,7 @@ describe('h-delete-node — cross-memory edge gate (#4)', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.leaf.loc}`,
       hard: true,
     });
@@ -793,7 +793,7 @@ describe('h-delete-node — cross-memory edge gate (#4)', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.leaf.loc}`,
       hard: true,
       cascadeCrossMemoryEdges: true,
@@ -845,7 +845,7 @@ describe('h-delete-node — cross-memory edge gate (#4)', () => {
     });
 
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('h-delete-node', {
+    const text = await srv.callToolText('hadron_delete_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.leaf.loc}`,
     });
 

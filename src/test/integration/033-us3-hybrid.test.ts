@@ -1,5 +1,5 @@
 /**
- * 033-rag-vector-retrieval US3 — mode:hybrid (RRF fusion) on h-find-nodes.
+ * 033-rag-vector-retrieval US3 — mode:hybrid (RRF fusion) on hadron_find_nodes.
  *
  * What US3 pins (SC-007):
  *   - No `mode` → byte-identical to today's keyword search (no [degraded],
@@ -135,7 +135,7 @@ async function findNodes(args: {
     memoryUrn: memUrn,
   };
   if (args.mode) params.mode = args.mode;
-  return srv.callToolText('h-find-nodes', params);
+  return srv.callToolText('hadron_find_nodes', params);
 }
 
 describe('US3 — `mode:hybrid` runs RRF over keyword + vector halves', () => {

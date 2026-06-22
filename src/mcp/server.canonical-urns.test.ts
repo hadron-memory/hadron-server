@@ -16,8 +16,8 @@
  *   - quickstart.md — manual end-to-end Claude Desktop OAuth replay (T021)
  *
  * Deferred to follow-up: full DB-backed per-tool integration tests that
- * invoke `handleMcpRequest` and assert on response payloads (h-list-apps,
- * h-set-active-app, h-set-active-memory, h-find-nodes, h-read-node).
+ * invoke `handleMcpRequest` and assert on response payloads (hadron_list_apps,
+ * hadron_set_active_app, hadron_set_active_memory, hadron_find_nodes, hadron_get_node).
  * Rationale: every URN emission in the MCP surface routes through
  * formatCanonicalUrn (verified by the grep audit below). The wrapper's
  * behavior is fully unit-tested. End-to-end behavior is verified by
@@ -186,7 +186,7 @@ describe('spec 027 US2: legacy input → canonical output (composition guarantee
   // response composer using formatCanonicalUrn → canonical output.
   //
   // The full DB-backed per-tool integration tests asserting end-to-end
-  // (input legacy URN to h-read-node → response echoes canonical URN)
+  // (input legacy URN to hadron_get_node → response echoes canonical URN)
   // are deferred per the file header — high boilerplate cost relative
   // to the composition-level guarantee.
   //
@@ -194,19 +194,19 @@ describe('spec 027 US2: legacy input → canonical output (composition guarantee
   // for the URN shapes each affected MCP tool emits.
 
   it('legacy single-colon Memory URN input round-trips to canonical output', () => {
-    // h-set-active-memory accepts memoryUrn input; response echoes the
+    // hadron_set_active_memory accepts memoryUrn input; response echoes the
     // resolved memory's URN via formatCanonicalUrn('memory', mem.urn).
     // If mem.urn is still legacy in DB, the wrapper canonicalizes.
     expect(formatCanonicalUrn('memory', 'acme.com:dev')).toBe('hrn:memory:acme.com::dev');
   });
 
   it('legacy single-colon App URN input round-trips to canonical output', () => {
-    // h-set-active-app and h-list-apps emit App URNs via
+    // hadron_set_active_app and hadron_list_apps emit App URNs via
     // formatCanonicalUrn('app', a.urn).
     expect(formatCanonicalUrn('app', 'acme-corp:notes')).toBe('hrn:app:acme-corp::notes');
   });
 
-  it('h-list-apps style — multiple bare App URNs canonicalize independently', () => {
+  it('hadron_list_apps style — multiple bare App URNs canonicalize independently', () => {
     const apps = ['acme-corp:mealplan', 'mentor-co:juno', 'startup.io::beta'];
     const canonical = apps.map((u) => formatCanonicalUrn('app', u));
     expect(canonical).toEqual([
@@ -349,7 +349,7 @@ describe('spec 027 US3: error messages quote canonical-form recovery templates',
     expect(thrown!.message).toContain('<org>::<memory>[::path]');
   });
 
-  it('wrong-prefix error in h-set-active-memory quotes canonical examples', () => {
+  it('wrong-prefix error in hadron_set_active_memory quotes canonical examples', () => {
     // The error template at src/mcp/server.ts:367 (`Pass
     // 'hadronmemory.com::dev' or 'urn:memory:hadronmemory.com::dev'.`)
     // is a free-form string constructed at runtime; verify by reading

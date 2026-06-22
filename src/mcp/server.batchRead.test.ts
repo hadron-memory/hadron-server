@@ -1,13 +1,13 @@
 /**
- * Spec cor:api:040 — batch node read (h-read-nodes). Behavioral coverage for
+ * Spec cor:api:040 — batch node read (hadron_get_nodes). Behavioral coverage for
  * the MCP surface, driving the production closure via createTestableMcpServer.
  *
  * What this file pins:
  *   - Explicit-set form: full per-node projection (content + edges) for many
  *     URNs in one call, returned in INPUT order (cor:api:040:01).
  *   - Prefix-subtree form: every readable node under a loc-prefix, in LOC order.
- *   - Per-node projection parity with h-read-node — the batch block for a node
- *     is byte-identical to a single h-read-node of that node (the shared
+ *   - Per-node projection parity with hadron_get_node — the batch block for a node
+ *     is byte-identical to a single hadron_get_node of that node (the shared
  *     renderNodeReadProjection contract).
  *   - contentScope: 'abstract' returns abstracts, omits bodies.
  *   - Per-node authorization + partial success (cor:api:040:03): a mix of
@@ -113,20 +113,20 @@ async function addNode(args: {
   if (args.content !== undefined) params.content = args.content;
   if (args.abstract !== undefined) params.abstract = args.abstract;
   if (args.edges !== undefined) params.edges = args.edges;
-  return srv.callToolText('h-add-node', params);
+  return srv.callToolText('hadron_create_node', params);
 }
 
 function batchRead(params: Record<string, unknown>, auth: AuthContext = adminAuth()) {
-  return createTestableMcpServer(auth).callToolText('h-read-nodes', params);
+  return createTestableMcpServer(auth).callToolText('hadron_get_nodes', params);
 }
 
 function readNode(urn: string, contentScope: 'content' | 'abstract' | 'all') {
-  return createTestableMcpServer(adminAuth()).callToolText('h-read-node', { urn, contentScope });
+  return createTestableMcpServer(adminAuth()).callToolText('hadron_get_node', { urn, contentScope });
 }
 
 // ───── explicit-set form ──────────────────────────────────────────────────
 
-describe('h-read-nodes — explicit set', () => {
+describe('hadron_get_nodes — explicit set', () => {
   it('returns all nodes with content + edges, in INPUT order', async () => {
     await addNode({ loc: 'beta', name: 'NodeBeta', content: 'beta body' });
     await addNode({ loc: 'alpha', name: 'NodeAlpha', content: 'alpha body', edges: [{ targetUrn: nodeUrn('beta'), name: 'links-to' }] });
@@ -152,7 +152,7 @@ describe('h-read-nodes — explicit set', () => {
     expect(iA).toBeLessThan(iB);
   });
 
-  it('per-node projection is byte-identical to a single h-read-node', async () => {
+  it('per-node projection is byte-identical to a single hadron_get_node', async () => {
     await addNode({ loc: 'leaf', name: 'NodeLeaf', content: 'leaf body' });
     await addNode({
       loc: 'par',
@@ -185,12 +185,12 @@ describe('h-read-nodes — explicit set', () => {
 
 // ───── per-node authorization + partial success (cor:api:040:03) ───────────
 
-describe('h-read-nodes — partial success', () => {
+describe('hadron_get_nodes — partial success', () => {
   it('returns the readable subset; lists denied + not-found as Unavailable without leaking content', async () => {
     await addNode({ loc: 'ok', name: 'NodeOk', content: 'readable body' });
     // A node in user2's personal memory — denied for the admin caller.
     const secretUrn = `${PMEM_URN}::secret`;
-    await createTestableMcpServer(user2Auth()).callToolText('h-add-node', {
+    await createTestableMcpServer(user2Auth()).callToolText('hadron_create_node', {
       urn: secretUrn,
       name: 'SecretNode',
       content: 'SECRET personal content',
@@ -214,7 +214,7 @@ describe('h-read-nodes — partial success', () => {
 
 // ───── prefix-subtree form ─────────────────────────────────────────────────
 
-describe('h-read-nodes — prefix subtree', () => {
+describe('hadron_get_nodes — prefix subtree', () => {
   it('returns every node under the prefix in loc order, with content', async () => {
     await addNode({ loc: 'sec:03', name: 'Sec03', content: 'third' });
     await addNode({ loc: 'sec:01', name: 'Sec01', content: 'first' });
@@ -241,7 +241,7 @@ describe('h-read-nodes — prefix subtree', () => {
 
 // ───── hard caps (cor:api:040:02) ──────────────────────────────────────────
 
-describe('h-read-nodes — hard caps', () => {
+describe('hadron_get_nodes — hard caps', () => {
   it('over the node-count cap is a LOUD error, not a silent short read', async () => {
     const tooMany = Array.from({ length: BATCH_READ_MAX_NODES + 1 }, (_, i) => nodeUrn(`d${i}`));
     const out = await batchRead({ urns: tooMany });
@@ -265,7 +265,7 @@ describe('h-read-nodes — hard caps', () => {
 
 // ───── form validation ─────────────────────────────────────────────────────
 
-describe('h-read-nodes — form validation', () => {
+describe('hadron_get_nodes — form validation', () => {
   it('rejects neither form', async () => {
     const out = await batchRead({});
     expect(out).toContain('provide EITHER');

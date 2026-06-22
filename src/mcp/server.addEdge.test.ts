@@ -1,6 +1,6 @@
 /**
  * Issue #183 review feedback — direct tests for `addEdge` (the helper
- * backing the h-add-edge MCP tool).
+ * backing the hadron_create_edge MCP tool).
  *
  * Pins the contract that the tool surface emits and the auth-gated
  * flow nobody else exercises: source qualification, source-missing
@@ -125,7 +125,7 @@ describe('addEdge — non-destructive + idempotent', () => {
     })).toBe(1);
   });
 
-  it('leaves pre-existing edges on the same source intact (unlike h-update-node)', async () => {
+  it('leaves pre-existing edges on the same source intact (unlike hadron_update_node)', async () => {
     // Seed an unrelated outgoing edge directly via DB (not via the
     // tool, so we're sure the new tool can't influence its existence).
     await db.edge.create({
@@ -179,7 +179,7 @@ describe('addEdge — non-destructive + idempotent', () => {
 
 describe('addEdge — URN-form dispatch', () => {
   it('accepts a canonical `::` target URN (issue #183 read/write symmetry)', async () => {
-    // Same shape `h-read-node` emits. The pre-fix tool would have
+    // Same shape `hadron_get_node` emits. The pre-fix tool would have
     // returned `Edge target not found` for this exact input.
     const canonicalTarget = `urn:node:${memory.urn.replace(':', '::')}::${topLevel.loc}`;
 

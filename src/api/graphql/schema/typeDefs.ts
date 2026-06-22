@@ -210,7 +210,7 @@ export const typeDefs = `#graphql
     name: String!
     alias: String
     description: String
-    "Paragraph-length summary of this node. Opt-in on h-read-node via the contentScope parameter. h-find-nodes preview surfacing ships in spec 031 US2 — not yet live. Never surfaced in h-list-nodes. Cap is 2000 characters; longer values are rejected with NodeAbstractTooLongError. Empty + whitespace-only values normalize to null. Spec 031."
+    "Paragraph-length summary of this node. Opt-in on hadron_get_node via the contentScope parameter. hadron_find_nodes preview surfacing ships in spec 031 US2 — not yet live. Never surfaced in hadron_list_nodes. Cap is 2000 characters; longer values are rejected with NodeAbstractTooLongError. Empty + whitespace-only values normalize to null. Spec 031."
     abstract: String
     "Spec 032 — fingerprint of the content value at the time abstract was authored. SHA-256 of plaintext content, truncated to 8 hex chars. Compared at read time against computeContentHash(node.content) to detect staleness; when the two values differ AND abstractOriginHash is non-null, the abstract may not reflect current content. System-managed; never settable via NodeInput."
     abstractOriginHash: String
@@ -234,7 +234,7 @@ export const typeDefs = `#graphql
     embeddingFailedAt: String
     """
     Spec 033 — last embed error message (diagnosability; also surfaced
-    by h-validate). Common values: encrypted-no-plaintext (#206),
+    by hadron_validate). Common values: encrypted-no-plaintext (#206),
     embedding-endpoint-unreachable, dimension-mismatch. Null when no
     failure has been recorded since the most recent success or revoke.
     System-managed.
@@ -1168,13 +1168,13 @@ export const typeDefs = `#graphql
     """
     memoryId: String!
     nodeType: String
-    "Whether this node can be run as a task by h-run-task (cor:api:060). Omit to preserve on update."
+    "Whether this node can be run as a task by hadron_run_task (cor:api:060). Omit to preserve on update."
     isRunnable: Boolean
     loc: String!
     name: String!
     alias: String
     description: String
-    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract (h-read-node opt-in via contentScope; h-find-nodes preview ships in US2). Optional. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."
+    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract (hadron_get_node opt-in via contentScope; hadron_find_nodes preview ships in US2). Optional. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."
     abstract: String
     content: String
     seq: Int
@@ -1418,7 +1418,7 @@ export const typeDefs = `#graphql
     vector-aware entrypoint per spec 033 contract.
 
     mode defaults to vector (the vector-aware entrypoint design — the
-    MCP h-find-nodes tool defaults to keyword for backward-compat,
+    MCP hadron_find_nodes tool defaults to keyword for backward-compat,
     a deliberate divergence between the two surfaces). expand (graph
     neighbor depth 0..3, default 0) and granularity:chunk (passage
     retrieval, vector-mode only) are both fully live.

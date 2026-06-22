@@ -47,7 +47,7 @@ describe('Phase 1 — App schema absorbs Station fields', () => {
         role: 'CONTRIBUTOR',
         description: 'a chatbot app',
         systemPrompt: 'you are helpful',
-        agentTools: ['h-find-node', 'h-read-node'],
+        agentTools: ['h-find-node', 'hadron_get_node'],
         // 036-ai-service-config: AI settings live in AiServiceConfig rows
         // now (the legacy ai_* columns were dropped).
         aiServiceConfigs: {
@@ -67,7 +67,7 @@ describe('Phase 1 — App schema absorbs Station fields', () => {
     expect(app.role).toBe('CONTRIBUTOR');
     expect(app.description).toBe('a chatbot app');
     expect(app.systemPrompt).toBe('you are helpful');
-    expect(app.agentTools).toEqual(['h-find-node', 'h-read-node']);
+    expect(app.agentTools).toEqual(['h-find-node', 'hadron_get_node']);
     expect(app.aiServiceConfigs[0]?.provider).toBe('anthropic');
     expect(app.aiServiceConfigs[0]?.model).toBe('claude-sonnet-4-20250514');
     expect(app.aiServiceConfigs[0]?.apiKeyEncrypted).toBe('opaque-blob');
