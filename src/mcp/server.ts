@@ -90,8 +90,8 @@ function textResult(text: string) {
  * Hadron MCP server version — single source of truth for the MCP-
  * protocol-level server identity. Used both as the `version` field in
  * the McpServer constructor (the MCP initialize response's server
- * identity) and in the deployment-info diagnostics surface (h-server-
- * info / hadron_set_active_memory success message).
+ * identity) and in the deployment-info diagnostics surface
+ * (hadron_server_info / hadron_set_active_memory success message).
  *
  * Bump when the MCP tool surface changes in a way callers should be
  * able to detect: new tool added, tool removed or renamed, response-
@@ -110,8 +110,8 @@ export const HADRON_SERVER_VERSION = '0.3.0';
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"
  * from the agent side. Agents can call hadron_server_info (this exact object,
- * formatted) to see the bound deployment URL + version; h-set-active-
- * memory's success message also includes it inline.
+ * formatted) to see the bound deployment URL + version;
+ * hadron_set_active_memory's success message also includes it inline.
  *
  * Motivated by #187 / #190 (dual-MCP-namespace divergence): when
  * `mcp__hadron__*` and `mcp__claude_ai_Hadron__*` are bound to different
@@ -1004,8 +1004,8 @@ export function createMcpServerInstance(
       // notice they've reached the wrong hadron-server when two
       // namespaces (`mcp__hadron__*` vs `mcp__claude_ai_Hadron__*`) are
       // bound to different deployments. Cheap to surface, hard to
-      // ignore in transcripts. Full diagnostic dump lives on h-server-
-      // info; this is the inline hint.
+      // ignore in transcripts. Full diagnostic dump lives on
+      // hadron_server_info; this is the inline hint.
       const dep = getDeploymentInfo();
       return textResult(
         `Active memory set to: ${formatCanonicalUrn('memory', mem.urn)} ` +
