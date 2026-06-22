@@ -1,5 +1,5 @@
 /**
- * hadron_replace_globally — MCP surface for bulk search-and-replace. The tool
+ * hadron_replace_text — MCP surface for bulk search-and-replace. The tool
  * delegates to the GraphQL searchReplaceInNodes resolver (so the write
  * invariants are tested in resolvers.searchReplace.test.ts); this file covers
  * the MCP-specific concerns: URN-based selection, the dryRun-vs-write text
@@ -55,11 +55,11 @@ beforeEach(async () => {
   memory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'rg-mem' }, adminCtx());
 });
 
-describe('hadron_replace_globally', () => {
+describe('hadron_replace_text', () => {
   it('dryRun reports matches without writing and labels the preview', async () => {
     const a = await makeNode('a', { content: 'cat cat' });
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('hadron_replace_globally', {
+    const text = await srv.callToolText('hadron_replace_text', {
       oldText: 'cat',
       newText: 'dog',
       memoryUrns: [memory.urn],
@@ -76,7 +76,7 @@ describe('hadron_replace_globally', () => {
   it('writes the replacement across a memory and renders a per-node summary', async () => {
     const a = await makeNode('a', { content: 'the cat', tags: ['cat', 'pet'] });
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('hadron_replace_globally', {
+    const text = await srv.callToolText('hadron_replace_text', {
       oldText: 'cat',
       newText: 'dog',
       memoryUrns: [memory.urn],
@@ -96,7 +96,7 @@ describe('hadron_replace_globally', () => {
     const a = await makeNode('topic:a', { content: 'cat' });
     await makeNode('topic:b', { content: 'cat' });
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('hadron_replace_globally', {
+    const text = await srv.callToolText('hadron_replace_text', {
       oldText: 'cat',
       newText: 'dog',
       nodeUrns: [a.id], // ID-shape values are accepted alongside URNs
@@ -109,7 +109,7 @@ describe('hadron_replace_globally', () => {
   it('returns a graceful error (not a throw) when write access is denied', async () => {
     await makeNode('a', { content: 'cat' });
     const srv = createTestableMcpServer(viewerAuth());
-    const text = await srv.callToolText('hadron_replace_globally', {
+    const text = await srv.callToolText('hadron_replace_text', {
       oldText: 'cat',
       newText: 'dog',
       memoryUrns: [memory.urn],
@@ -122,7 +122,7 @@ describe('hadron_replace_globally', () => {
   it('surfaces an invalid-regex error as text', async () => {
     await makeNode('a', { content: 'cat' });
     const srv = createTestableMcpServer(adminAuth());
-    const text = await srv.callToolText('hadron_replace_globally', {
+    const text = await srv.callToolText('hadron_replace_text', {
       oldText: '(',
       newText: 'x',
       memoryUrns: [memory.urn],
