@@ -105,7 +105,7 @@ function textResult(text: string) {
  * server expose?", not "what release of the hadron-server repo am I
  * talking to?"
  */
-export const HADRON_SERVER_VERSION = '0.3.0';
+export const HADRON_SERVER_VERSION = '0.4.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"
