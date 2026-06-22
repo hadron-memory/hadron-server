@@ -4013,6 +4013,7 @@ export const resolvers = {
         ...nodeFieldsClean
       } = nodeFields as Record<string, unknown>;
 
+      // Spec: cor:dmo:020:01 (Node ordering).
       // Auto-assign `seq` for a NEW node joining an already-ordered sibling
       // list: with no explicit seq it inherits max(sibling seq)+1 and lands at
       // the end. Create-only; an explicit input.seq always wins; an unordered /

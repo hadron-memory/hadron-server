@@ -7,6 +7,8 @@
  * should get the next seq, landing at the end. "Ordered" means at least one
  * sibling already carries a `seq`; an unordered (or empty) list is left alone
  * so we never impose an order that wasn't there.
+ *
+ * Spec: cor:dmo:020:01 (Node ordering).
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
