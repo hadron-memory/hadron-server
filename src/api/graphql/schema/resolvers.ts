@@ -114,6 +114,7 @@ import {
   formatUrn,
   composeInstalledAgentUrn,
   formatCanonicalUrn,
+  type CanonicalUrnType,
 } from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
@@ -543,6 +544,21 @@ async function sessionScopeFilter(ctx: Context): Promise<Record<string, unknown>
 async function memoryAccessFilter(ctx: Context): Promise<Record<string, unknown>> {
   const ids = await getAccessibleMemoryIds(ctx);
   return ids === null ? {} : { memoryId: { in: ids } };
+}
+
+// 298 follow-up: canonicalizing a stored URN on read must never take down the
+// whole query. A single legacy or corrupted row — e.g. a pre-fix updateMemory
+// that persisted `<org>:memory:<org>::<slug>` — would otherwise throw inside a
+// non-nullable `urn` field resolver and null out the entire parent list (the
+// myOrganizations / organization 500 that took down every memory-listing page).
+// Fall back to the raw stored value so the row still renders; the corrupted
+// data is repaired separately and can't hold the rest of the response hostage.
+function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
+  try {
+    return formatCanonicalUrn(type, raw);
+  } catch {
+    return raw;
+  }
 }
 
 /**
@@ -1573,7 +1589,7 @@ export const resolvers = {
       if (!urn) throw new Error('Memory URN is required but not found (partial query?)');
 
       // Already canonical (contains `::`) — pass through
-      if (urn.includes('::')) return formatCanonicalUrn('memory', urn);
+      if (urn.includes('::')) return safeCanonicalUrn('memory', urn);
 
       // Check for install-shape pattern with role markers. The canonical role
       // markers are: system, app-mem, app-user, group-mem, priv. A role marker
@@ -1608,12 +1624,12 @@ export const resolvers = {
           const marker = parts[roleMarkerIdx];
           const afterMarker = parts.slice(roleMarkerIdx + 1).join(':');
           const normalized = afterMarker ? `${beforeMarker}::${marker}:${afterMarker}` : `${beforeMarker}::${marker}`;
-          return formatCanonicalUrn('memory', normalized);
+          return safeCanonicalUrn('memory', normalized);
         }
       }
 
       // Standard memory (no role markers) — use default canonicalization
-      return formatCanonicalUrn('memory', urn);
+      return safeCanonicalUrn('memory', urn);
     },
   },
   App: {
@@ -1734,7 +1750,7 @@ export const resolvers = {
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
     urn: (a: { urn?: string | null }) => {
       if (!a.urn) throw new Error('App URN is required but not found (partial query?)');
-      return formatCanonicalUrn('app', a.urn);
+      return safeCanonicalUrn('app', a.urn);
     },
   },
   // 023-app-shape US1: the App↔Agent N:M join.
@@ -1950,7 +1966,7 @@ export const resolvers = {
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
     urn: (o: { urn?: string | null }) => {
       if (!o.urn) throw new Error('Organization URN is required but not found (partial query?)');
-      return formatCanonicalUrn('org', o.urn);
+      return safeCanonicalUrn('org', o.urn);
     },
   },
   ExchangeConnection: {
@@ -2065,7 +2081,7 @@ export const resolvers = {
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
     urn: (a: { urn?: string | null }) => {
       if (!a.urn) throw new Error('Agent URN is required but not found (partial query?)');
-      return formatCanonicalUrn('agent', a.urn);
+      return safeCanonicalUrn('agent', a.urn);
     },
   },
   UsageEvent: {
