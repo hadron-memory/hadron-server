@@ -174,3 +174,28 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
     expect(linkedAgent.memoryItems).toHaveLength(1);
   });
 });
+
+// 298 follow-up regression: a corrupted/legacy stored URN must not throw inside
+// the non-nullable `urn` field resolver — that error nulls out the whole
+// parent list and 500s every memory-listing page (`/app/orgs`). The resolver
+// must fall back to the raw stored value. Reproduces the
+// `hadronmemory.com:memory:hadronmemory.com::experiments` shape a pre-fix
+// updateMemory persisted.
+describe('urn field resolvers — corrupted URN falls back to raw, never throws', () => {
+  const corrupted = 'hadronmemory.com:memory:hadronmemory.com::experiments';
+
+  it('Memory.urn returns the raw value instead of throwing on a malformed URN', () => {
+    expect(() => resolvers.Memory.urn({ urn: corrupted })).not.toThrow();
+    expect(resolvers.Memory.urn({ urn: corrupted })).toBe(corrupted);
+  });
+
+  it('Memory.urn still canonicalizes a valid legacy single-colon URN', () => {
+    expect(resolvers.Memory.urn({ urn: 'acme.com:dev' })).toBe('hrn:memory:acme.com::dev');
+  });
+
+  it('Agent / App / Organization urn resolvers also fall back instead of throwing', () => {
+    expect(resolvers.Agent.urn({ urn: corrupted })).toBe(corrupted);
+    expect(resolvers.App.urn({ urn: corrupted })).toBe(corrupted);
+    expect(resolvers.Organization.urn({ urn: corrupted })).toBe(corrupted);
+  });
+});
