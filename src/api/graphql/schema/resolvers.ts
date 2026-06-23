@@ -1536,8 +1536,10 @@ export const resolvers = {
     // for both legacy and migrated rows. For install-shape memories with
     // role markers, preserves the marker:id boundary to avoid breaking the
     // canonical form (e.g. `org:agent:app-user:id` → `org::agent::app-user:id`).
-    urn: (g: { urn: string }) => {
+    urn: (g: { urn?: string | null }) => {
       const urn = g.urn;
+      if (!urn) throw new Error('Memory URN is required but not found (partial query?)');
+
       // Already canonical (contains `::`) — pass through
       if (urn.includes('::')) return formatCanonicalUrn('memory', urn);
 
@@ -1698,7 +1700,10 @@ export const resolvers = {
     },
     // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
-    urn: (a: { urn: string }) => formatCanonicalUrn('app', a.urn),
+    urn: (a: { urn?: string | null }) => {
+      if (!a.urn) throw new Error('App URN is required but not found (partial query?)');
+      return formatCanonicalUrn('app', a.urn);
+    },
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
@@ -1911,7 +1916,10 @@ export const resolvers = {
     },
     // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
-    urn: (o: { urn: string }) => formatCanonicalUrn('org', o.urn),
+    urn: (o: { urn?: string | null }) => {
+      if (!o.urn) throw new Error('Organization URN is required but not found (partial query?)');
+      return formatCanonicalUrn('org', o.urn);
+    },
   },
   ExchangeConnection: {
     lastSyncAt: (c: { lastSyncAt?: Date | string | null }) => toISO(c.lastSyncAt),
@@ -2023,7 +2031,10 @@ export const resolvers = {
     },
     // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
-    urn: (a: { urn: string }) => formatCanonicalUrn('agent', a.urn),
+    urn: (a: { urn?: string | null }) => {
+      if (!a.urn) throw new Error('Agent URN is required but not found (partial query?)');
+      return formatCanonicalUrn('agent', a.urn);
+    },
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
