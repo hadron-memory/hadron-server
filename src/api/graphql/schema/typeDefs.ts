@@ -1437,6 +1437,68 @@ export const typeDefs = `#graphql
     organizationId: ID
   }
 
+  """
+  issue #323: where a single grant in an EffectiveAccess result comes from.
+  """
+  enum AccessSource {
+    "Platform ADMIN/OWNER."
+    PLATFORM_ROLE
+    "ADMIN/OWNER (or, for org-readable knowledge, any Role) of the owning org."
+    ORG_ROLE
+    "personal/private memory owner (Memory.userId)."
+    MEMORY_PRINCIPAL
+    "group-class team membership row (MemoryMember)."
+    MEMORY_MEMBER
+    "personal-class cross-user grant (MemoryShare)."
+    MEMORY_SHARE
+    "node inherits its memory's access."
+    NODE_INHERITED
+    "AppMember row."
+    APP_MEMBER
+    "active AgentSubscription, or an org-level AgentOrgGrant the user inherits."
+    AGENT_SUBSCRIPTION
+    "admin of the AI config's owning entity."
+    AICONFIG_OWNER
+    "resource is publicly / universally visible."
+    PUBLIC_VISIBILITY
+  }
+
+  """
+  issue #323: one reason a subject has (or would have) access to a resource.
+  """
+  type AccessGrant {
+    source: AccessSource!
+    "The role/level this particular grant confers."
+    role: String!
+    "Human label for the grant's origin (owning org URN, the inherited memory URN, the app URN, etc.); null when the grant has no distinct origin."
+    via: String
+  }
+
+  """
+  issue #323: the effective access a single user has to a single resource,
+  with the grants that confer it. An empty grants list (with all capabilities
+  false and role null) is a first-class 'no access' answer, NOT an error.
+  """
+  type EffectiveAccess {
+    user: User!
+    "Canonical URN of the resolved resource (the AiServiceConfig id when the resource is a config, which has no URN)."
+    resourceUrn: String!
+    "memory | node | app | agent | aiServiceConfig."
+    resourceKind: String!
+
+    canRead: Boolean!
+    canWrite: Boolean!
+    "Manage grants / settings (admin/owner-equivalent)."
+    canManage: Boolean!
+    canDelete: Boolean!
+
+    "Highest single clean role label (e.g. owner, writer, ADMIN); null when access is purely capability-based or absent."
+    role: String
+
+    "The reasons access is granted. Empty means no access. Ordered strongest-first."
+    grants: [AccessGrant!]!
+  }
+
   type Query {
     """
     Resolve a fully-qualified, \`hrn:<type>:\`-prefixed Hadron URN (legacy \`urn:\` scheme also accepted) to the ids
@@ -1455,6 +1517,31 @@ export const typeDefs = `#graphql
     (\`org::slug\` could be a memory or an agent) and resolve to null.
     """
     resolveUrn(urn: String!): UrnResolution
+
+    """
+    issue #323: resolve the effective access a single user has to a single
+    resource, with the grants that confer it. The authoritative backing for
+    the 'hadron access check <user> <resource>' audit command — one resolver
+    that reuses the server's authorization rules instead of re-deriving them
+    client-side.
+
+    'user' accepts a User ID (Users have no URN today). 'resource' accepts an
+    ID or a fully-qualified hrn:<type>: URN; the kind is dispatched the same
+    way resolveUrn dispatches (memory | node | app | agent), and a bare ID
+    with no scheme is treated as an AiServiceConfig id (the only URN-less
+    kind).
+
+    Authorization (who may CALL this): the same visibility bar already
+    enforced on the underlying grant tables — a platform ADMIN/OWNER, an
+    ADMIN/OWNER of the resource's owning org, or (for a strict-owner memory)
+    the memory's principal. Everyone else gets FORBIDDEN, NOT a silent empty
+    result, so the command can't probe access it isn't allowed to audit.
+
+    A subject with no access is a SUCCESS with an empty grants list (all
+    capabilities false, role null) — not NOT_FOUND. An unresolvable or
+    unknown resource ref is NOT_FOUND.
+    """
+    effectiveAccess(user: ID!, resource: ID!): EffectiveAccess!
 
     # Get a single node by its loc path (raw: true to skip template compilation)
     node(loc: String!, raw: Boolean): Node

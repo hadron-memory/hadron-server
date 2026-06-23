@@ -148,6 +148,11 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import {
+  resolveResource as resolveAccessResource,
+  callerCanAudit,
+  computeEffectiveAccess,
+} from '../../../lib/auth/effectiveAccess.js';
 import { globalSearch as runGlobalSearch } from '../../../lib/global-search/index.js';
 import type {
   SearchEntityType,
@@ -2208,6 +2213,48 @@ export const resolvers = {
         default:
           return null;
       }
+    },
+
+    effectiveAccess: async (
+      _: unknown,
+      { user, resource }: { user: string; resource: string },
+      ctx: Context,
+    ) => {
+      // Subject — the user whose access we are auditing. Users have no URN
+      // today, so this is a User id. Unknown subject → NOT_FOUND.
+      const subjectUser = await ctx.db.user.findUnique({ where: { id: user } });
+      if (!subjectUser) {
+        throw new GraphQLError('User not found', { extensions: { code: 'NOT_FOUND' } });
+      }
+
+      // Resolve the resource ref (id or fully-qualified URN). Dispatches on
+      // URN type exactly like resolveUrn; a bare id falls through to
+      // AiServiceConfig (the only URN-less kind). Unresolvable → NOT_FOUND.
+      const resolved = await resolveAccessResource(ctx.db, resource, {
+        parseType: (ref) => parseUrnInput(ref).type,
+        resolveMemoryRef,
+        resolveNodeRef,
+        resolveAppRef,
+        resolveAgentRef,
+      });
+      if (!resolved) {
+        throw new GraphQLError('Resource not found', { extensions: { code: 'NOT_FOUND' } });
+      }
+
+      // Who may CALL this — the same visibility bar as the underlying grant
+      // tables. A non-privileged caller gets FORBIDDEN, never a silent empty
+      // result, so the audit command can't probe access it isn't allowed to.
+      if (!(await callerCanAudit(ctx.db, { userId: ctx.userId, roles: ctx.roles }, resolved))) {
+        throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+      }
+
+      const result = await computeEffectiveAccess(
+        ctx.db,
+        { id: subjectUser.id, roles: subjectUser.roles },
+        resolved,
+      );
+      // Attach the loaded User row so the User field resolvers work off it.
+      return { ...result, user: subjectUser };
     },
 
     node: async (_: unknown, { loc: rawLoc, raw }: { loc: string; raw?: boolean }, ctx: Context) => {
