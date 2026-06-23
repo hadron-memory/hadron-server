@@ -9478,12 +9478,24 @@ export const resolvers = {
         // Find the memory by URN using case-insensitive matching (legacy `:` and canonical `::` forms).
         const parsedMemUrn = parseUrnInput(resolvedMemoryUrn.trim());
         const normalizedMemUrn = normalizeUrnForLookup(parsedMemUrn.value);
+        // Build the canonical form from the normalized (legacy) form.
+        const partsMemUrn = normalizedMemUrn.split(':');
+        let roleMarkerIdxMem = -1;
+        for (let i = partsMemUrn.length - 1; i >= 0; i--) {
+          if (['system', 'app-mem', 'app-user', 'group-mem', 'priv'].includes(partsMemUrn[i])) {
+            roleMarkerIdxMem = i;
+            break;
+          }
+        }
+        const canonicalMemUrn = roleMarkerIdxMem >= 0
+          ? partsMemUrn.slice(0, roleMarkerIdxMem).join('::') + '::' + partsMemUrn[roleMarkerIdxMem] + (partsMemUrn.slice(roleMarkerIdxMem + 1).length ? ':' + partsMemUrn.slice(roleMarkerIdxMem + 1).join(':') : '')
+          : partsMemUrn.join('::');
+
         const memory = await ctx.db.memory.findFirst({
           where: {
             OR: [
               { urn: normalizedMemUrn },
-              // Also match the other form (legacy vs canonical)
-              { urn: normalizedMemUrn.includes(':') ? normalizedMemUrn.replace(/::/, ':') : normalizedMemUrn.replace(/:(?!:)/, '::') },
+              { urn: canonicalMemUrn },
             ],
             deletedAt: null,
           },
@@ -9505,6 +9517,10 @@ export const resolvers = {
             extensions: { code: 'NOT_FOUND' },
           });
         }
+
+        // Decrypt the node and its outgoing edge targets if the memory is encrypted.
+        const nodesToDecrypt = [node, ...node.outgoingEdges.map(e => e.target)];
+        await decryptNodesBatch(ctx.db, nodesToDecrypt);
 
         // Render the node with Mustache template compilation and inlined edges.
         let actionContent = node.content || '';
@@ -9540,7 +9556,7 @@ export const resolvers = {
               nodeId: node.id,
               appId: ctx.appId ?? null,
               createdBy: ctx.userId ?? null,
-              sessionId: null,
+              sessionId: ctx.sessionId ?? null,
               actionArgs: stringArgs,
             },
           })
@@ -9575,11 +9591,28 @@ export const resolvers = {
 
       if (m) {
         // Memory hint supplied — resolve by name/urn.
+        const normalizedM = normalizeUrnForLookup(m);
+        const partsM = normalizedM.split(':');
+        let roleMarkerIdxM = -1;
+        for (let i = partsM.length - 1; i >= 0; i--) {
+          if (['system', 'app-mem', 'app-user', 'group-mem', 'priv'].includes(partsM[i])) {
+            roleMarkerIdxM = i;
+            break;
+          }
+        }
+        const canonicalM = roleMarkerIdxM >= 0
+          ? partsM.slice(0, roleMarkerIdxM).join('::') + '::' + partsM[roleMarkerIdxM] + (partsM.slice(roleMarkerIdxM + 1).length ? ':' + partsM.slice(roleMarkerIdxM + 1).join(':') : '')
+          : partsM.join('::');
+
         const candidates = await ctx.db.memory.findMany({
           where: {
             id: { in: accessibleMemoryIds },
             deletedAt: null,
-            OR: [{ name: { contains: m, mode: 'insensitive' } }, { urn: m }],
+            OR: [
+              { name: { contains: m, mode: 'insensitive' } },
+              { urn: normalizedM },
+              { urn: canonicalM },
+            ],
           },
           select: { id: true, urn: true, name: true },
         });
@@ -9653,18 +9686,14 @@ export const resolvers = {
         }
 
         // Unique match — run it.
-        // Convert memory URN (single-colon form) to node URN (canonical double-colon form).
-        const i = resolvedMemory.urn.indexOf(':');
-        const nodeUrn = `${resolvedMemory.urn.slice(0, i)}::${resolvedMemory.urn.slice(i + 1)}::${matches[0].loc}`;
+        const nodeUrn = composeNodeUrn(resolvedMemory.urn, matches[0].loc);
         return loadAndRender(nodeUrn);
       } else {
         // No task hint — require explicit choice (GraphQL cannot offer a picker,
         // so we error and list the options).
         if (runnableNodes.length === 1) {
           // Exactly one option — run it.
-          // Convert memory URN (single-colon form) to node URN (canonical double-colon form).
-          const i = resolvedMemory.urn.indexOf(':');
-          const nodeUrn = `${resolvedMemory.urn.slice(0, i)}::${resolvedMemory.urn.slice(i + 1)}::${runnableNodes[0].loc}`;
+          const nodeUrn = composeNodeUrn(resolvedMemory.urn, runnableNodes[0].loc);
           return loadAndRender(nodeUrn);
         }
 
