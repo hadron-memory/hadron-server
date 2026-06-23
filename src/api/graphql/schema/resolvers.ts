@@ -147,6 +147,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import {
   resolveResource as resolveAccessResource,
@@ -2236,6 +2237,7 @@ export const resolvers = {
         resolveNodeRef,
         resolveAppRef,
         resolveAgentRef,
+        resolveOrgRef,
       });
       if (!resolved) {
         throw new GraphQLError('Resource not found', { extensions: { code: 'NOT_FOUND' } });
@@ -5122,14 +5124,47 @@ export const resolvers = {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
       await requireOrgRole(ctx, resolvedId, 'ADMIN');
-      return ctx.db.organization.update({
+
+      const data = {
+        ...(name ? { name } : {}),
+        ...(urn ? { urn } : {}),
+        ...(isVisible !== undefined ? { isVisible } : {}),
+      };
+
+      // Fast path: no URN change requested → a plain update.
+      if (!urn) {
+        return ctx.db.organization.update({
+          where: { id: resolvedId },
+          data,
+          include: ORG_INCLUDE,
+        });
+      }
+
+      // The org URN is denormalized into the `urn` column of every Memory,
+      // Agent and App it owns (baked in at creation as `<orgUrn>::…`). Renaming
+      // the org URN must rewrite those child copies too, or they dangle (issue
+      // #337) — `propagateOrgUrnRename`. Do the rename and the child rewrite in
+      // one transaction so they commit (or roll back) together.
+      const current = await ctx.db.organization.findUniqueOrThrow({
         where: { id: resolvedId },
-        data: {
-          ...(name ? { name } : {}),
-          ...(urn ? { urn } : {}),
-          ...(isVisible !== undefined ? { isVisible } : {}),
-        },
-        include: ORG_INCLUDE,
+        select: { urn: true },
+      });
+      if (current.urn === urn) {
+        return ctx.db.organization.update({
+          where: { id: resolvedId },
+          data,
+          include: ORG_INCLUDE,
+        });
+      }
+
+      return ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
+        const updated = await tx.organization.update({
+          where: { id: resolvedId },
+          data,
+          include: ORG_INCLUDE,
+        });
+        await propagateOrgUrnRename(tx, resolvedId, current.urn, urn);
+        return updated;
       });
     },
 

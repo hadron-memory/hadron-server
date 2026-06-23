@@ -39,7 +39,13 @@ import { isId } from '../entityRef/shape.js';
 
 // ─── Public types ─────────────────────────────────────────────────────────
 
-export type ResourceKind = 'memory' | 'node' | 'app' | 'agent' | 'aiServiceConfig';
+export type ResourceKind =
+  | 'memory'
+  | 'node'
+  | 'app'
+  | 'agent'
+  | 'aiServiceConfig'
+  | 'organization';
 
 export type AccessSource =
   | 'PLATFORM_ROLE'
@@ -147,7 +153,8 @@ export type ResolvedResource =
   | { kind: 'node'; node: { id: string; loc: string }; memory: MemoryForAccess }
   | { kind: 'app'; app: { id: string; urn: string; organizationId: string } }
   | { kind: 'agent'; agent: { id: string; urn: string; organizationId: string } }
-  | { kind: 'aiServiceConfig'; config: ConfigForAccess };
+  | { kind: 'aiServiceConfig'; config: ConfigForAccess }
+  | { kind: 'organization'; org: { id: string; urn: string } };
 
 // ─── Org-role helper ────────────────────────────────────────────────────────
 
@@ -525,6 +532,48 @@ async function aiServiceConfigGrants(
   return grants;
 }
 
+/**
+ * Organization access. The org's own members and platform admins reach it:
+ *   - platform admin → full (read/write/manage/delete);
+ *   - org OWNER/ADMIN → administer it (read/write/manage) but NOT delete —
+ *     deleting an org is platform-admin only (`deleteOrganization` gates on the
+ *     global ADMIN role), whereas renaming/settings/members is org-ADMIN
+ *     (`updateOrganization` → requireOrgRole ADMIN);
+ *   - org CONTRIBUTOR/READER → read (they can see the org they belong to).
+ */
+async function organizationGrants(
+  db: PrismaClient,
+  subject: Subject,
+  org: { id: string; urn: string },
+): Promise<InternalGrant[]> {
+  const grants: InternalGrant[] = [];
+
+  if (isPlatformAdmin(subject.roles)) {
+    grants.push({
+      source: 'PLATFORM_ROLE',
+      role: subject.roles.includes('OWNER') ? 'OWNER' : 'ADMIN',
+      via: null,
+      caps: FULL,
+    });
+  }
+
+  const memberRole = await orgMemberRole(db, org.id, subject.id);
+  if (memberRole === 'ADMIN' || memberRole === 'OWNER') {
+    // Administer (rename/settings/members) but not delete — delete is
+    // platform-admin only, so an org admin's grant stops short of FULL.
+    grants.push({
+      source: 'ORG_ROLE',
+      role: memberRole,
+      via: org.urn,
+      caps: { read: true, write: true, manage: true, delete: false },
+    });
+  } else if (memberRole === 'CONTRIBUTOR' || memberRole === 'READER') {
+    grants.push({ source: 'ORG_ROLE', role: memberRole, via: org.urn, caps: READ });
+  }
+
+  return grants;
+}
+
 // ─── Assembly ───────────────────────────────────────────────────────────────
 
 function assemble(
@@ -612,6 +661,10 @@ export async function computeEffectiveAccess(
       // AiServiceConfig has no URN; echo the id as the resource identifier.
       return assemble(subject.id, resolved.config.id, 'aiServiceConfig', grants);
     }
+    case 'organization': {
+      const grants = await organizationGrants(db, subject, resolved.org);
+      return assemble(subject.id, resolved.org.urn, 'organization', grants);
+    }
   }
 }
 
@@ -652,6 +705,8 @@ export async function callerCanAudit(
       return isOrgAdmin(resolved.app.organizationId);
     case 'agent':
       return isOrgAdmin(resolved.agent.organizationId);
+    case 'organization':
+      return isOrgAdmin(resolved.org.id);
     case 'aiServiceConfig': {
       const c = resolved.config;
       if (c.organizationId) return isOrgAdmin(c.organizationId);
@@ -693,6 +748,7 @@ export async function resolveResource(
     resolveNodeRef: (db: PrismaClient, ref: string) => Promise<{ id: string }>;
     resolveAppRef: (db: PrismaClient, ref: string) => Promise<{ id: string }>;
     resolveAgentRef: (db: PrismaClient, ref: string) => Promise<{ id: string }>;
+    resolveOrgRef: (db: PrismaClient, ref: string) => Promise<{ id: string }>;
   },
 ): Promise<ResolvedResource | null> {
   const type = deps.parseType(ref);
@@ -743,12 +799,22 @@ export async function resolveResource(
         });
         return agent ? { kind: 'agent', agent } : null;
       }
+      case 'org': {
+        const { id } = await deps.resolveOrgRef(db, ref);
+        const org = await db.organization.findUnique({
+          where: { id },
+          select: { id: true, urn: true, deletedAt: true },
+        });
+        return org && !org.deletedAt
+          ? { kind: 'organization', org: { id: org.id, urn: org.urn } }
+          : null;
+      }
       default: {
         // No type word. A bare id (no scheme) is treated as an
         // AiServiceConfig id — the only URN-less resource kind; memory / app /
-        // agent / node all require a typed URN to disambiguate, exactly like
-        // resolveUrn. Anything else (e.g. an hrn:org: URN, a loc) is not an
-        // auditable resource → null.
+        // agent / node / org all require a typed URN to disambiguate, exactly
+        // like resolveUrn. Anything else (e.g. a loc) is not an auditable
+        // resource → null.
         if (!isId(ref)) return null;
         const config = await db.aiServiceConfig.findUnique({
           where: { id: ref },
