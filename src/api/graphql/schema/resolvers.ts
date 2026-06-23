@@ -113,6 +113,7 @@ import {
   validateUrnType,
   formatUrn,
   composeInstalledAgentUrn,
+  formatCanonicalUrn,
 } from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
@@ -1530,6 +1531,58 @@ export const resolvers = {
         orderBy: { createdAt: 'asc' },
       });
     },
+    // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
+    // (e.g. `org:slug`) to canonical spec-021 double-colon form (`org::slug`)
+    // for both legacy and migrated rows. For install-shape memories with
+    // role markers, preserves the marker:id boundary to avoid breaking the
+    // canonical form (e.g. `org:agent:app-user:id` → `org::agent::app-user:id`).
+    urn: (g: { urn?: string | null }) => {
+      const urn = g.urn;
+      if (!urn) throw new Error('Memory URN is required but not found (partial query?)');
+
+      // Already canonical (contains `::`) — pass through
+      if (urn.includes('::')) return formatCanonicalUrn('memory', urn);
+
+      // Check for install-shape pattern with role markers. The canonical role
+      // markers are: system, app-mem, app-user, group-mem, priv. A role marker
+      // is always followed by either `:` (if parameterized, e.g., app-user:id)
+      // or `::` (hierarchy separator in canonical form).
+      // Pattern: `org:agent:role-marker[:id]` where role-marker is one of the
+      // canonical markers. We need to detect this and preserve marker:id boundary.
+      const roleMarkerPattern = /:(?:system|app-mem|app-user|group-mem|priv)(?::|$)/;
+      if (roleMarkerPattern.test(urn)) {
+        // Install-shape memory — carefully convert to canonical form while
+        // preserving the role-marker:id boundary. Split on `:`, but rejoin
+        // hierarchy levels with `::` and single-colon-attached role markers
+        // with `:`. This is tricky: `org:agent:app-user:id` should become
+        // `org::agent::app-user:id`, not `org::agent::app-user::id`.
+        const parts = urn.split(':');
+        // Try to detect the role marker position (it's typically after the
+        // agent slug in install-shape URNs). Walk backwards from the end to
+        // find the role marker.
+        let roleMarkerIdx = -1;
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const part = parts[i];
+          if (['system', 'app-mem', 'app-user', 'group-mem', 'priv'].includes(part)) {
+            roleMarkerIdx = i;
+            break;
+          }
+        }
+
+        if (roleMarkerIdx >= 0) {
+          // Found the role marker. Reconstruct: join everything before the
+          // marker with `::`, keep marker, then `:` + id(s) if present.
+          const beforeMarker = parts.slice(0, roleMarkerIdx).join('::');
+          const marker = parts[roleMarkerIdx];
+          const afterMarker = parts.slice(roleMarkerIdx + 1).join(':');
+          const normalized = afterMarker ? `${beforeMarker}::${marker}:${afterMarker}` : `${beforeMarker}::${marker}`;
+          return formatCanonicalUrn('memory', normalized);
+        }
+      }
+
+      // Standard memory (no role markers) — use default canonicalization
+      return formatCanonicalUrn('memory', urn);
+    },
   },
   App: {
     createdAt: (a: { createdAt: Date | string }) => toISO(a.createdAt)!,
@@ -1644,6 +1697,12 @@ export const resolvers = {
         orderBy: { createdAt: 'asc' },
         include: { app: true, agent: { include: AGENT_INCLUDE } },
       });
+    },
+    // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
+    // to canonical spec-021 double-colon form for both legacy and migrated rows.
+    urn: (a: { urn?: string | null }) => {
+      if (!a.urn) throw new Error('App URN is required but not found (partial query?)');
+      return formatCanonicalUrn('app', a.urn);
     },
   },
   // 023-app-shape US1: the App↔Agent N:M join.
@@ -1855,6 +1914,12 @@ export const resolvers = {
         orderBy: { createdAt: 'asc' },
       });
     },
+    // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
+    // to canonical spec-021 double-colon form for both legacy and migrated rows.
+    urn: (o: { urn?: string | null }) => {
+      if (!o.urn) throw new Error('Organization URN is required but not found (partial query?)');
+      return formatCanonicalUrn('org', o.urn);
+    },
   },
   ExchangeConnection: {
     lastSyncAt: (c: { lastSyncAt?: Date | string | null }) => toISO(c.lastSyncAt),
@@ -1963,6 +2028,12 @@ export const resolvers = {
         where: { agentId: a.id },
         orderBy: { createdAt: 'asc' },
       });
+    },
+    // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
+    // to canonical spec-021 double-colon form for both legacy and migrated rows.
+    urn: (a: { urn?: string | null }) => {
+      if (!a.urn) throw new Error('Agent URN is required but not found (partial query?)');
+      return formatCanonicalUrn('agent', a.urn);
     },
   },
   UsageEvent: {
