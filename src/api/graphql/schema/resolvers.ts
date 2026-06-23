@@ -5612,6 +5612,21 @@ export const resolvers = {
       if (urn !== undefined || (newOrgId && newOrgId !== memory.organizationId)) {
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: effectiveOrgId }, select: { urn: true } });
         const slug = urn ?? memory.urn.split(':').slice(1).join(':');
+        // Guard: a memory slug must be BARE — not a full or embedded URN. The
+        // portal settings form once mis-derived the slug from a canonical
+        // `hrn:memory:<org>::<slug>` and sent `memory:<org>::<slug>`, which
+        // composed into `<org>:memory:<org>::<slug>` and corrupted the row
+        // (the prod /app/orgs outage). Reject a client-supplied slug carrying a
+        // scheme prefix, a URN type marker at the start, or a `::` hierarchy
+        // separator BEFORE the write, so a bad value can never be persisted.
+        // (The org-transfer fallback above derives the slug from the stored,
+        // already-valid URN, so it's only the client `urn` arg we validate.)
+        if (urn !== undefined && /^(hrn|urn|memory|agent|app|node|org):|::/.test(urn)) {
+          throw new GraphQLError(
+            `Invalid memory slug "${urn}": expected a bare slug (e.g. "experiments"), not a full or prefixed URN.`,
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
         newUrn = `${org.urn}:${slug}`;
       }
 
