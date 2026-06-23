@@ -18,10 +18,14 @@
  * predicate: privacy is class-driven; `personal`/`private` are strict
  * single-owner (no platform/org/App bypass); `group` read requires a
  * MemoryMember row; `knowledge` is visibility-gated. This is intentionally
- * NO MORE permissive than the real gates — for `group` it is slightly
- * STRICTER than `getOrgReadableMemoryIds` (which currently also lets any org
- * member read group memories); we follow the spec's MemoryMember rule and
- * never reveal access a per-table query wouldn't.
+ * NO MORE permissive than the real gates: org-role capabilities mirror the
+ * ENFORCED gates (requireMemoryWriteAccess for write, deleteMemory/cloneMemory
+ * for manage, getOrgReadableMemoryIds for read) rather than the narrower
+ * `resolveMemoryAuthorization` predicate — so for `group` an org member's read
+ * matches getOrgReadableMemoryIds, NOT the (stricter) MemoryMember-only
+ * predicate. Where the gates themselves diverge from the predicate that is a
+ * known bug (#324), not this module's to resolve. We never reveal access a
+ * per-table query wouldn't.
  *
  * Capabilities are derived from the grants, so an empty grant list always
  * means no access (canRead/canWrite/canManage/canDelete all false, role null).
@@ -147,8 +151,6 @@ export type ResolvedResource =
 
 // ─── Org-role helper ────────────────────────────────────────────────────────
 
-const ROLE_ORDER: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2, OWNER: 3 };
-
 function isPlatformAdmin(roles: Subject['roles']): boolean {
   return roles.includes('ADMIN') || roles.includes('OWNER');
 }
@@ -247,6 +249,16 @@ async function memoryGrants(
     });
   }
 
+  // Per-user "holding" memories (userMemoryOfAgentId set — e.g. the startChat
+  // no-App knowledge downgrade) are owner-only: getOrgReadableMemoryIds
+  // EXCLUDES them on every clause (each filters userMemoryOfAgentId: null), so
+  // the org-role and PUBLIC org-read paths below MUST NOT confer access to
+  // them — that would over-report read/write the enforced gate denies. Holding
+  // owners reach their own via the identity-scoped clause in
+  // getAccessibleMemoryIds (createdBy match), which this standing-access audit
+  // does not model; under-reporting a holding owner is the safe direction.
+  const isHolding = memory.userMemoryOfAgentId !== null;
+
   // Owning-org role. Mirrors the ENFORCED gates, not the (narrower) predicate:
   //   - ADMIN/OWNER → full: requireMemoryWriteAccess grants write,
   //     deleteMemory/cloneMemory grant manage/delete.
@@ -256,7 +268,7 @@ async function memoryGrants(
   //   - READER → read on knowledge/group org memories only
   //     (getOrgReadableMemoryIds; app-class is reached via AppMember, not org
   //     membership).
-  const memberRole = await orgMemberRole(db, memory.organizationId, subject.id);
+  const memberRole = isHolding ? null : await orgMemberRole(db, memory.organizationId, subject.id);
   if (memberRole === 'ADMIN' || memberRole === 'OWNER') {
     grants.push({
       source: 'ORG_ROLE',
@@ -280,10 +292,16 @@ async function memoryGrants(
     });
   }
 
-  // PUBLIC visibility → readable by anyone.
-  if (memory.visibility === 'PUBLIC') {
+  // PUBLIC visibility → readable by anyone (but not a per-user holding).
+  if (memory.visibility === 'PUBLIC' && !isHolding) {
     grants.push({ source: 'PUBLIC_VISIBILITY', role: 'reader', via: null, caps: READ });
   }
+
+  // NOTE (deliberate omission, tracked by #329): cross-org
+  // MemorySubscription access — requireMemoryWriteAccess + getOrgReadableMemoryIds
+  // both confer read/write when the caller's org holds a CONTRIBUTOR+
+  // MemorySubscription — is not yet modeled here, so a purely subscription-based
+  // grant is under-reported. Under-reporting is the safe direction for an audit.
 
   if (memory.class === 'app' && memory.appId) {
     const member = await db.appMember.findUnique({
@@ -325,8 +343,9 @@ async function memoryGrants(
 }
 
 /**
- * App access. Membership confers use (read+write at the App level); an
- * owner/admin member, the owning-org admin, or a platform admin can manage.
+ * App access. Membership confers use (read+write at the App level); management
+ * (settings, uninstall) is the owning-org admin's or a platform admin's — the
+ * free-form AppMember role string never lifts an AppMember above read+write.
  */
 async function appGrants(
   db: PrismaClient,
@@ -425,14 +444,22 @@ async function agentGrants(
     const orgGrants = await db.agentOrgGrant.findMany({
       where: { agentId: agent.id, orgId: { in: orgIds } },
     });
-    for (const grant of orgGrants) {
-      if (!isLifecycleActive(grant)) continue;
-      grants.push({
-        source: 'AGENT_SUBSCRIPTION',
-        role: 'org-grant',
-        via: await orgUrn(db, grant.orgId),
-        caps: READ,
+    const activeGrants = orgGrants.filter((g) => isLifecycleActive(g));
+    if (activeGrants.length > 0) {
+      // Bulk-resolve the granting orgs' URNs (one query, not one per grant).
+      const orgs = await db.organization.findMany({
+        where: { id: { in: activeGrants.map((g) => g.orgId) } },
+        select: { id: true, urn: true },
       });
+      const urnById = new Map(orgs.map((o) => [o.id, o.urn]));
+      for (const grant of activeGrants) {
+        grants.push({
+          source: 'AGENT_SUBSCRIPTION',
+          role: 'org-grant',
+          via: urnById.get(grant.orgId) ?? grant.orgId,
+          caps: READ,
+        });
+      }
     }
   }
 
@@ -677,6 +704,10 @@ export async function resolveResource(
     return rest as MemoryForAccess;
   };
 
+  // Soft-deleted resources resolve to NOT_FOUND, matching the dedicated
+  // per-kind queries: the injected entity-ref resolvers (resolveNodeRef /
+  // resolveAppRef / resolveAgentRef) all throw NotFound for a deletedAt row —
+  // caught below and collapsed to null — and loadMemory drops deleted memories.
   try {
     switch (type) {
       case 'memory': {

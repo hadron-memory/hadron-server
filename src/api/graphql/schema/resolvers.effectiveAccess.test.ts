@@ -108,6 +108,34 @@ describe('memory — knowledge class', () => {
     expect(res.role).toBe('CONTRIBUTOR');
   });
 
+  it('per-user holding (userMemoryOfAgentId set) is owner-only — org members get nothing', async () => {
+    // A knowledge "holding" memory (e.g. the startChat no-App downgrade) is
+    // excluded from getOrgReadableMemoryIds, so org membership must NOT confer
+    // read/write — even for an ADMIN. Over-reporting here is the one direction
+    // the resolver promises never to take.
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:holdingagent`, name: 'h' },
+    });
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:holding`,
+        name: 'holding',
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
+        userMemoryOfAgentId: agent.id,
+        createdBy: member.id,
+      },
+    });
+    for (const subject of [member.id, orgAdmin.id]) {
+      const res = await call(subject, `hrn:memory:${holding.urn}`, asAdmin());
+      expect(res.canRead).toBe(false);
+      expect(res.canWrite).toBe(false);
+      expect(res.grants).toEqual([]);
+    }
+  });
+
   it('a non-member has no access — empty grants, not an error', async () => {
     const res = await call(stranger.id, `hrn:memory:${graph.urn}`, asAdmin());
     expect(res.canRead).toBe(false);
