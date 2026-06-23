@@ -46,7 +46,7 @@ import {
   hashAppKey,
   mintUserApiKey,
 } from '../../../middleware/auth.js';
-import { canWriteToMemory } from '../../../mcp/access-control.js';
+import { canWriteToMemory, canReadMemory } from '../../../mcp/access-control.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import {
@@ -154,7 +154,7 @@ import type {
   SearchPrincipal,
 } from '../../../lib/global-search/index.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
-import { assertFullyQualifiedUrn, hasSchemePrefix } from '../../../lib/urn.js';
+import { assertFullyQualifiedUrn, hasSchemePrefix, UrnNotQualifiedError, splitNodeUrn, composeNodeUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
@@ -1338,6 +1338,38 @@ async function loadPublishedSnapshot(
   }
 
   return (loc: string) => nodesByLoc.get(loc) ?? null;
+}
+
+// Rank runnable candidates against a loose hint: case-insensitive, matching
+// name/alias/loc/description, exact > prefix > substring.
+// Extracted from hadron_run_task (spec cor:api:060).
+function rankByHint<
+  T extends { name: string; alias?: string | null; loc: string; description?: string | null },
+>(items: T[], hint: string): T[] {
+  const h = hint.trim().toLowerCase();
+  if (!h) return [];
+  const scored: Array<{ item: T; score: number }> = [];
+  for (const item of items) {
+    const name = item.name.toLowerCase();
+    const alias = (item.alias ?? '').toLowerCase();
+    const loc = item.loc.toLowerCase();
+    const desc = (item.description ?? '').toLowerCase();
+    let score = 0;
+    if (name === h || alias === h) score = 100;
+    else if (
+      name.startsWith(h) ||
+      alias.startsWith(h) ||
+      loc === h ||
+      loc.endsWith(`:${h}`)
+    )
+      score = 80;
+    else if (name.includes(h) || alias.includes(h) || loc.includes(h))
+      score = 60;
+    else if (desc.includes(h)) score = 40;
+    if (score > 0) scored.push({ item, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((s) => s.item);
 }
 
 export const resolvers = {
@@ -9383,6 +9415,269 @@ export const resolvers = {
         });
       });
       return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
+    },
+
+    // Spec cor:api:060 — run a task by loose name (mirrors hadron_run_task MCP tool).
+    // Accepts task/memory hints (case-insensitive substring match) or a fully-qualified
+    // URN. Reuses the action runner: {{arg}} substitution, inlined dependencies, usage event.
+    runTask: async (
+      _: unknown,
+      {
+        task: taskHint,
+        memory: memoryHint,
+        urn: directUrn,
+        args: argsInput,
+      }: {
+        task?: string | null;
+        memory?: string | null;
+        urn?: string | null;
+        args?: unknown;
+      },
+      ctx: Context,
+    ) => {
+      // Normalize inputs defensively.
+      const t = typeof taskHint === 'string' ? taskHint.trim() : '';
+      const m = typeof memoryHint === 'string' ? memoryHint.trim() : '';
+      const u = typeof directUrn === 'string' ? directUrn.trim() : '';
+      const args =
+        argsInput && typeof argsInput === 'object' && !Array.isArray(argsInput)
+          ? (argsInput as Record<string, unknown>)
+          : undefined;
+
+      // Normalize args to string values ({{key}} substitution requires strings).
+      const stringArgs = args
+        ? Object.fromEntries(
+            Object.entries(args).map(([k, v]) => [k, String(v ?? '')]),
+          )
+        : undefined;
+
+      // Helper to load a node by URN and render it.
+      const auth = {
+        clientId: ctx.clientId,
+        userId: ctx.userId,
+        appId: ctx.appId,
+        sessionId: ctx.sessionId,
+        roles: ctx.roles,
+        organizationId: ctx.organizationId,
+      };
+
+      const loadAndRender = async (targetNodeUrn: string) => {
+        try {
+          assertFullyQualifiedUrn(targetNodeUrn, 'node');
+        } catch (e) {
+          if (e instanceof UrnNotQualifiedError) {
+            throw new GraphQLError(e.message, {
+              extensions: { code: e.name },
+            });
+          }
+          throw e;
+        }
+
+        const { memoryUrn: resolvedMemoryUrn, loc } = splitNodeUrn(targetNodeUrn);
+
+        // Find the memory by URN using case-insensitive matching (legacy `:` and canonical `::` forms).
+        const parsedMemUrn = parseUrnInput(resolvedMemoryUrn.trim());
+        const normalizedMemUrn = normalizeUrnForLookup(parsedMemUrn.value);
+        const memory = await ctx.db.memory.findFirst({
+          where: {
+            OR: [
+              { urn: normalizedMemUrn },
+              // Also match the other form (legacy vs canonical)
+              { urn: normalizedMemUrn.includes(':') ? normalizedMemUrn.replace(/::/, ':') : normalizedMemUrn.replace(/:(?!:)/, '::') },
+            ],
+            deletedAt: null,
+          },
+          select: { id: true, urn: true },
+        });
+
+        if (!memory || !(await canReadMemory(ctx.db, auth, memory.id))) {
+          throw new GraphQLError(`Memory not found: "${resolvedMemoryUrn}".`, {
+            extensions: { code: 'NOT_FOUND' },
+          });
+        }
+
+        const node = await ctx.db.node.findUnique({
+          where: { loc_memoryId: { loc, memoryId: memory.id } },
+          include: { outgoingEdges: { include: { target: true } } },
+        });
+        if (!node) {
+          throw new GraphQLError(`Node "${targetNodeUrn}" not found.`, {
+            extensions: { code: 'NOT_FOUND' },
+          });
+        }
+
+        // Render the node with Mustache template compilation and inlined edges.
+        let actionContent = node.content || '';
+        if (actionContent.includes('{{')) {
+          // Use compileTemplate for proper Mustache template handling.
+          // Pass stringArgs as the node data for variable substitution.
+          actionContent = await compileTemplate(actionContent, stringArgs ?? null, memory.id, ctx.db, {});
+        }
+
+        const topicSections: string[] = [];
+        for (const edge of node.outgoingEdges) {
+          const target = edge.target;
+          if (target.content) {
+            // Compose the target node URN directly.
+            const targetMemory = await ctx.db.memory.findUniqueOrThrow({
+              where: { id: target.memoryId },
+              select: { urn: true },
+            });
+            const targetUrn = composeNodeUrn(targetMemory.urn, target.loc);
+            topicSections.push(
+              `## Node: ${target.name} (${targetUrn})\n\n${target.content}`,
+            );
+          }
+        }
+
+        // Record usage event (fire-and-forget).
+        ctx.db.usageEvent
+          .create({
+            data: {
+              id: generateId(),
+              type: 'action-run',
+              nodeLoc: loc,
+              nodeId: node.id,
+              appId: ctx.appId ?? null,
+              createdBy: ctx.userId ?? null,
+              sessionId: null,
+              actionArgs: stringArgs,
+            },
+          })
+          .catch(() => {});
+
+        const parts = [`# Node: ${node.name}\n\n${actionContent}`];
+        if (topicSections.length > 0) {
+          parts.push(
+            '---\n\n# Referenced Nodes\n\n' +
+              topicSections.join('\n\n---\n\n'),
+          );
+        }
+        return parts.join('\n\n');
+      };
+
+      // URN bypass — run directly, no resolution.
+      if (u) {
+        return loadAndRender(u);
+      }
+
+      // Resolve memory (required for non-URN path).
+      const accessibleMemoryIdsList = await getAccessibleMemoryIds(ctx);
+      const accessibleMemoryIds = accessibleMemoryIdsList ?? [];
+      if (accessibleMemoryIds.length === 0) {
+        throw new GraphQLError('No memories you can read.', {
+          extensions: { code: 'FORBIDDEN' },
+        });
+      }
+
+      let resolvedMemory: { id: string; urn: string; name: string } | null =
+        null;
+
+      if (m) {
+        // Memory hint supplied — resolve by name/urn.
+        const candidates = await ctx.db.memory.findMany({
+          where: {
+            id: { in: accessibleMemoryIds },
+            deletedAt: null,
+            OR: [{ name: { contains: m, mode: 'insensitive' } }, { urn: m }],
+          },
+          select: { id: true, urn: true, name: true },
+        });
+
+        if (candidates.length === 0) {
+          throw new GraphQLError(`No memory matching "${m}".`, {
+            extensions: { code: 'NOT_FOUND' },
+          });
+        }
+
+        if (candidates.length > 1) {
+          throw new GraphQLError(
+            `Multiple memories match "${m}": ${candidates.map((c) => c.name).join(', ')}. Narrow the hint.`,
+            { extensions: { code: 'AMBIGUOUS' } },
+          );
+        }
+
+        resolvedMemory = candidates[0];
+      } else {
+        // No memory hint — use the first accessible memory (the resolver does not have
+        // access to "active memory" from the MCP session, so we use a default).
+        // For better UX, the caller should provide a memory hint or use the MCP tool.
+        const mem = await ctx.db.memory.findFirst({
+          where: { id: { in: accessibleMemoryIds }, deletedAt: null },
+          select: { id: true, urn: true, name: true },
+        });
+
+        if (!mem) {
+          throw new GraphQLError('No accessible memory found.', {
+            extensions: { code: 'NOT_FOUND' },
+          });
+        }
+
+        resolvedMemory = mem;
+      }
+
+      // Load runnable nodes in the resolved memory.
+      const runnableNodes = await ctx.db.node.findMany({
+        where: { memoryId: resolvedMemory.id, isRunnable: true, deletedAt: null },
+        select: {
+          id: true,
+          loc: true,
+          name: true,
+          alias: true,
+          description: true,
+        },
+      });
+
+      if (runnableNodes.length === 0) {
+        throw new GraphQLError(`No runnable tasks in ${resolvedMemory.name}.`, {
+          extensions: { code: 'NOT_FOUND' },
+        });
+      }
+
+      if (t) {
+        // Task hint supplied — rank and resolve.
+        const matches = rankByHint(runnableNodes, t);
+
+        if (matches.length === 0) {
+          throw new GraphQLError(
+            `No runnable task matching "${t}" in ${resolvedMemory.name}.`,
+            { extensions: { code: 'NOT_FOUND' } },
+          );
+        }
+
+        if (matches.length > 1) {
+          throw new GraphQLError(
+            `Multiple tasks match "${t}" in ${resolvedMemory.name}: ${matches.map((n) => n.name).join(', ')}. Narrow the hint.`,
+            { extensions: { code: 'AMBIGUOUS' } },
+          );
+        }
+
+        // Unique match — run it.
+        // Convert memory URN (single-colon form) to node URN (canonical double-colon form).
+        const i = resolvedMemory.urn.indexOf(':');
+        const nodeUrn = `${resolvedMemory.urn.slice(0, i)}::${resolvedMemory.urn.slice(i + 1)}::${matches[0].loc}`;
+        return loadAndRender(nodeUrn);
+      } else {
+        // No task hint — require explicit choice (GraphQL cannot offer a picker,
+        // so we error and list the options).
+        if (runnableNodes.length === 1) {
+          // Exactly one option — run it.
+          // Convert memory URN (single-colon form) to node URN (canonical double-colon form).
+          const i = resolvedMemory.urn.indexOf(':');
+          const nodeUrn = `${resolvedMemory.urn.slice(0, i)}::${resolvedMemory.urn.slice(i + 1)}::${runnableNodes[0].loc}`;
+          return loadAndRender(nodeUrn);
+        }
+
+        // Multiple options — error with candidates.
+        const candidates = runnableNodes
+          .slice(0, 25)
+          .map((n) => `- ${n.name}${n.description ? ` (${n.description})` : ''}`)
+          .join('\n');
+        throw new GraphQLError(
+          `Multiple runnable tasks in ${resolvedMemory.name}. Specify a task hint or use MCP tool for interactive selection:\n${candidates}`,
+          { extensions: { code: 'AMBIGUOUS' } },
+        );
+      }
     },
   },
 };

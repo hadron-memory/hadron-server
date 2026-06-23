@@ -1847,6 +1847,13 @@ export const typeDefs = `#graphql
     updateEdge(edgeId: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeId: ID!): Boolean!
 
+    # Run a task — a runnable node (isRunnable=true) — by loose name without a fully-qualified URN.
+    # Give task and/or memory names; the server resolves both from what you can read and runs.
+    # Pass a fully-qualified URN to skip resolution and run directly.
+    # Returns the assembled instructions (node content with {{arg}} substitution and referenced nodes).
+    # Spec cor:api:060.
+    runTask(task: String, memory: String, urn: String, args: JSON): String!
+
     # Asset upload — v1 (spec 004)
     beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!
     completeAssetUpload(input: CompleteAssetUploadInput!): Asset!
