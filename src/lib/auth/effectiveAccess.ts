@@ -45,7 +45,8 @@ export type ResourceKind =
   | 'app'
   | 'agent'
   | 'aiServiceConfig'
-  | 'organization';
+  | 'organization'
+  | 'user';
 
 export type AccessSource =
   | 'PLATFORM_ROLE'
@@ -57,6 +58,7 @@ export type AccessSource =
   | 'APP_MEMBER'
   | 'AGENT_SUBSCRIPTION'
   | 'AICONFIG_OWNER'
+  | 'USER_SELF'
   | 'PUBLIC_VISIBILITY';
 
 export interface AccessGrant {
@@ -154,7 +156,8 @@ export type ResolvedResource =
   | { kind: 'app'; app: { id: string; urn: string; organizationId: string } }
   | { kind: 'agent'; agent: { id: string; urn: string; organizationId: string } }
   | { kind: 'aiServiceConfig'; config: ConfigForAccess }
-  | { kind: 'organization'; org: { id: string; urn: string } };
+  | { kind: 'organization'; org: { id: string; urn: string } }
+  | { kind: 'user'; user: { id: string; handle: string | null } };
 
 // ─── Org-role helper ────────────────────────────────────────────────────────
 
@@ -574,6 +577,44 @@ async function organizationGrants(
   return grants;
 }
 
+/**
+ * User access. Unlike memory/app/agent/org a User is not an owned or shared
+ * resource backed by grant tables — the only standing access to a user record
+ * is identity and platform role:
+ *   - the user themselves → read/write/manage their own account, but NOT delete
+ *     (account removal is a platform action, not self-service);
+ *   - platform admin → full (`updateUserRoles` gates on the global ADMIN role);
+ *   - everyone else → none.
+ *
+ * Org-admin "can see a fellow member" directory visibility is deliberately NOT
+ * modeled here — under-reporting is the safe direction for an audit, consistent
+ * with the rest of this module.
+ */
+function userGrants(subject: Subject, user: { id: string }): InternalGrant[] {
+  const grants: InternalGrant[] = [];
+
+  if (isPlatformAdmin(subject.roles)) {
+    grants.push({
+      source: 'PLATFORM_ROLE',
+      role: subject.roles.includes('OWNER') ? 'OWNER' : 'ADMIN',
+      via: null,
+      caps: FULL,
+    });
+  }
+
+  if (subject.id === user.id) {
+    // Self: manage own account (profile/settings) but not delete it.
+    grants.push({
+      source: 'USER_SELF',
+      role: 'self',
+      via: null,
+      caps: { read: true, write: true, manage: true, delete: false },
+    });
+  }
+
+  return grants;
+}
+
 // ─── Assembly ───────────────────────────────────────────────────────────────
 
 function assemble(
@@ -665,6 +706,11 @@ export async function computeEffectiveAccess(
       const grants = await organizationGrants(db, subject, resolved.org);
       return assemble(subject.id, resolved.org.urn, 'organization', grants);
     }
+    case 'user': {
+      const grants = userGrants(subject, resolved.user);
+      const resourceUrn = `hrn:user:${resolved.user.handle ?? resolved.user.id}`;
+      return assemble(subject.id, resourceUrn, 'user', grants);
+    }
   }
 }
 
@@ -707,6 +753,9 @@ export async function callerCanAudit(
       return isOrgAdmin(resolved.agent.organizationId);
     case 'organization':
       return isOrgAdmin(resolved.org.id);
+    case 'user':
+      // A user may audit their own access; platform admins are handled above.
+      return caller.userId === resolved.user.id;
     case 'aiServiceConfig': {
       const c = resolved.config;
       if (c.organizationId) return isOrgAdmin(c.organizationId);
@@ -749,6 +798,7 @@ export async function resolveResource(
     resolveAppRef: (db: PrismaClient, ref: string) => Promise<{ id: string }>;
     resolveAgentRef: (db: PrismaClient, ref: string) => Promise<{ id: string }>;
     resolveOrgRef: (db: PrismaClient, ref: string) => Promise<{ id: string }>;
+    resolveUserRef: (db: PrismaClient, ref: string) => Promise<{ id: string }>;
   },
 ): Promise<ResolvedResource | null> {
   const type = deps.parseType(ref);
@@ -809,12 +859,25 @@ export async function resolveResource(
           ? { kind: 'organization', org: { id: org.id, urn: org.urn } }
           : null;
       }
+      case 'user': {
+        // `hrn:user:<handle>` — recognized by the injected parseType for the
+        // audit surface (the core URN parser does not address users). A user is
+        // keyed by their unique handle; resolveUserRef maps it to the id.
+        const { id } = await deps.resolveUserRef(db, ref);
+        const user = await db.user.findUnique({
+          where: { id },
+          select: { id: true, handle: true, deletedAt: true },
+        });
+        return user && !user.deletedAt
+          ? { kind: 'user', user: { id: user.id, handle: user.handle } }
+          : null;
+      }
       default: {
         // No type word. A bare id (no scheme) is treated as an
         // AiServiceConfig id — the only URN-less resource kind; memory / app /
-        // agent / node / org all require a typed URN to disambiguate, exactly
-        // like resolveUrn. Anything else (e.g. a loc) is not an auditable
-        // resource → null.
+        // agent / node / org / user all require a typed URN to disambiguate,
+        // exactly like resolveUrn. Anything else (e.g. a loc) is not an
+        // auditable resource → null.
         if (!isId(ref)) return null;
         const config = await db.aiServiceConfig.findUnique({
           where: { id: ref },
