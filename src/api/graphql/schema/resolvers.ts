@@ -556,7 +556,10 @@ async function memoryAccessFilter(ctx: Context): Promise<Record<string, unknown>
 function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
   try {
     return formatCanonicalUrn(type, raw);
-  } catch {
+  } catch (err) {
+    // Log so operators can locate + repair corrupted rows — the fallback keeps
+    // the query alive, but the bad data still needs a one-off fix.
+    console.warn(`[safeCanonicalUrn] failed to canonicalize ${type} URN "${raw}"; serving raw value:`, err);
     return raw;
   }
 }
