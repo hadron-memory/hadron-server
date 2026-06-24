@@ -105,7 +105,7 @@ export async function setup() {
   // plain @unique is case-sensitive and can't express this.
   await client.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS users_handle_lower_uniq
-      ON users (lower(handle));
+      ON users (lower(handle)) WHERE handle IS NOT NULL;
   `);
 
   await client.end();

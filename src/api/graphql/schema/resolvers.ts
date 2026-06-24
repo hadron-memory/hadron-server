@@ -5133,16 +5133,17 @@ export const resolvers = {
 
     updateMyProfile: async (
       _: unknown,
-      { name, handle, email }: { name?: string; handle?: string; email?: string },
+      { name, handle, email }: { name?: string; handle?: string | null; email?: string },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
       // A handle is the hrn:user:<handle> slug — normalize to lowercase-canonical
-      // and validate (#325). Empty/whitespace clears it; an illegal handle throws.
+      // and validate (#325). `undefined` leaves it unchanged; `null`/empty clears
+      // it (clients pass explicit null to clear); an illegal handle throws.
       const handleData =
         handle === undefined
           ? {}
-          : { handle: handle.trim() === '' ? null : normalizeHandle(handle) };
+          : { handle: !handle || handle.trim() === '' ? null : normalizeHandle(handle) };
       return ctx.db.user.update({
         where: { id: ctx.userId },
         data: {

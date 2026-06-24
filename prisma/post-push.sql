@@ -146,5 +146,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_agent_name_uniq
 -- lowercased handle can never collide-by-case with an existing one. Prisma's
 -- plain @unique is case-sensitive and can't express a functional index; this
 -- is the real guarantee. Synced with the 325 migration + src/test/globalSetup.ts.
+-- Partial (WHERE handle IS NOT NULL): handle-less users don't bloat the index.
 CREATE UNIQUE INDEX IF NOT EXISTS users_handle_lower_uniq
-  ON users (lower(handle));
+  ON users (lower(handle)) WHERE handle IS NOT NULL;

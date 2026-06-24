@@ -47,6 +47,12 @@ describe('Mutation.updateMyProfile — handle normalization (#325)', () => {
     expect((await db.user.findUnique({ where: { id: user.id } }))?.handle).toBeNull();
   });
 
+  it('clears the handle on explicit null (no crash)', async () => {
+    await db.user.update({ where: { id: user.id }, data: { handle: 'keep' } });
+    await resolvers.Mutation.updateMyProfile({}, { handle: null }, meCtx());
+    expect((await db.user.findUnique({ where: { id: user.id } }))?.handle).toBeNull();
+  });
+
   it('leaves the handle untouched when not provided', async () => {
     await db.user.update({ where: { id: user.id }, data: { handle: 'stable' } });
     await resolvers.Mutation.updateMyProfile({}, { name: 'New Name' }, meCtx());
