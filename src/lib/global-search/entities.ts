@@ -29,6 +29,7 @@ import {
   type FieldCandidate,
 } from './match.js';
 import type { GlobalSearchHit, SearchEntityType, SearchField, SearchPrincipal } from './types.js';
+import { userUrn } from '../userHandle.js';
 
 type AnyWhere = Record<string, unknown>;
 
@@ -477,15 +478,19 @@ async function searchAiServiceConfigs(ctx: AdapterCtx): Promise<GlobalSearchHit[
 }
 
 async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
-  const { fields, q, principal } = ctx;
+  const { fields, q, urnTerm, principal } = ctx;
   // Parity with the searchUsers query: authenticated viewer only.
   if (!principal.viewerUserId) return [];
   const wantName = fields.has('name');
   const wantPk = fields.has('pk');
-  if (!wantName && !wantPk) return [];
+  // A user's URN is hrn:user:<handle>, so URN matching is a match on the handle
+  // column against the prefix-stripped urnTerm (#325).
+  const wantUrn = fields.has('urn');
+  if (!wantName && !wantPk && !wantUrn) return [];
 
   const preds: AnyWhere[] = [];
   if (wantPk) preds.push(pkPred(q));
+  if (wantUrn) preds.push(...urnPreds('handle', urnTerm));
   if (wantName) {
     preds.push(textPred('name', q));
     preds.push(textPred('handle', q));
@@ -502,6 +507,8 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   const hits: GlobalSearchHit[] = [];
   for (const r of rows) {
     const candidates: FieldCandidate[] = [
+      // URN match tiers the handle against the urnTerm (the handle IS the slug).
+      { field: 'urn', value: r.handle ?? '', tier: urnMatchTier(r.handle, urnTerm) },
       { field: 'name', value: r.name },
       { field: 'name', value: r.handle },
       { field: 'name', value: r.githubUsername },
@@ -513,7 +520,7 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     hits.push({
       entityType: 'user',
       id: r.id,
-      urn: null,
+      urn: userUrn(r.handle),
       name: r.name ?? r.handle ?? r.githubUsername ?? r.email ?? null,
       description: null,
       matchedField: m.field,

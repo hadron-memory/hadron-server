@@ -144,9 +144,10 @@ export const typeDefs = `#graphql
 
   """
   One unified, flat globalSearch result — common fields across every entity
-  type so a single ranked list renders uniformly. \`urn\` is null for entities
-  without one (aiServiceConfig, user); \`memoryId\` / \`organizationId\` are
-  convenience handles for building canonical navigation paths.
+  type so a single ranked list renders uniformly. \`urn\` is null for an
+  aiServiceConfig (no URN) and for a user with no handle or a not-URN-legal
+  handle (a user's URN is hrn:user:<handle>); \`memoryId\` / \`organizationId\`
+  are convenience handles for building canonical navigation paths.
   """
   type GlobalSearchHit {
     entityType: SearchEntityType!

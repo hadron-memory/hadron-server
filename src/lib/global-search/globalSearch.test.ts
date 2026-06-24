@@ -217,6 +217,23 @@ describe('globalSearch — smart-sniff', () => {
   });
 });
 
+describe('globalSearch — user URN (#325)', () => {
+  it('matches a user by hrn:user:<handle> on the urn field', async () => {
+    const { hits } = await globalSearch(db, { query: 'hrn:user:needle' }, viewerP());
+    const userHits = byType(hits, 'user');
+    expect(ids(userHits)).toContain(fx.userNeedle);
+    const hit = userHits.find((h) => h.id === fx.userNeedle)!;
+    expect(hit.matchedField).toBe('urn');
+    expect(hit.urn).toBe('hrn:user:needle');
+  });
+
+  it('populates the urn on a name-matched user hit too', async () => {
+    const { hits } = await globalSearch(db, { query: 'Needle' }, viewerP());
+    const hit = byType(hits, 'user').find((h) => h.id === fx.userNeedle)!;
+    expect(hit.urn).toBe('hrn:user:needle');
+  });
+});
+
 describe('globalSearch — access scope', () => {
   it('org-rooted entities are scoped to the caller orgs', async () => {
     // viewer (orgA member): the org-visible Juno + their own PERSONAL draft.

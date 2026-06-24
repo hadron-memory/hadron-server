@@ -114,7 +114,6 @@ import {
   formatUrn,
   composeInstalledAgentUrn,
   formatCanonicalUrn,
-  validateUserSlug,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
@@ -150,7 +149,7 @@ import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { UserNotFoundError } from '../../../lib/entityRef/errors.js';
-import { normalizeHandle, normalizeHandleOrNull } from '../../../lib/userHandle.js';
+import { normalizeHandle, normalizeHandleOrNull, userUrn } from '../../../lib/userHandle.js';
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import {
@@ -1906,22 +1905,9 @@ export const resolvers = {
   },
   User: {
     linkedAt: (u: { linkedAt?: Date | string | null }) => toISO(u.linkedAt ?? null),
-    // Canonical hrn:user:<handle> URN, computed from the handle (spec
-    // cor:urn:010:01). Null for a handle-less user, OR a handle that isn't
-    // URN-legal — handle-charset validation on write is a #325 follow-up, so
-    // until it lands we must not emit an invalid "canonical" URN here.
-    urn: (u: { handle?: string | null }) => {
-      if (!u.handle) return null;
-      // Canonical form is lowercase (#325); guard legality so an unvalidated
-      // legacy handle can't surface as an invalid "canonical" URN.
-      const handle = u.handle.toLowerCase();
-      try {
-        validateUserSlug(handle);
-      } catch {
-        return null;
-      }
-      return formatUrn('user', handle);
-    },
+    // Canonical hrn:user:<handle> URN (spec cor:urn:010:01) — lowercase, and
+    // null for a handle-less or not-URN-legal (grandfathered) handle.
+    urn: (u: { handle?: string | null }) => userUrn(u.handle),
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
     // list only when the queried User is the authenticated user (mirrors
     // 005's User.agentSubscriptions resolver-side gate).
