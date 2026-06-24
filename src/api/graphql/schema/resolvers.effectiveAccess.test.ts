@@ -77,6 +77,31 @@ describe('caller authorization (who may CALL)', () => {
     const res = await call(member.id, `hrn:memory:${graph.urn}`, asAdmin());
     expect(res.resourceKind).toBe('memory');
   });
+
+  it('a plain org member may audit their OWN access to a memory (issue #364)', async () => {
+    // Self-audit is ungated: the member learns only what they could already
+    // infer by trying the operation, so there's no info-leak.
+    const res = await call(member.id, `hrn:memory:${graph.urn}`, ctx({ userId: member.id, roles: ['READER'] }));
+    expect(res.resourceKind).toBe('memory');
+    expect(res.canRead).toBe(true);
+  });
+
+  it('a plain org member may audit their OWN access to an agent (issue #364)', async () => {
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:selfauditagent`, name: 'sa' },
+    });
+    await createDbAgentSubscription(db, member.id, agent.id);
+    const res = await call(member.id, `hrn:agent:${agent.urn}`, ctx({ userId: member.id, roles: ['READER'] }));
+    expect(res.resourceKind).toBe('agent');
+    expect(res.canRead).toBe(true);
+  });
+
+  it('self-audit does NOT let a member audit a DIFFERENT subject (still FORBIDDEN)', async () => {
+    // The relaxation is strictly subject == caller; cross-subject stays gated.
+    await expect(
+      call(orgAdmin.id, `hrn:memory:${graph.urn}`, ctx({ userId: member.id, roles: ['READER'] })),
+    ).rejects.toThrow('Forbidden');
+  });
 });
 
 describe('memory — knowledge class', () => {
@@ -375,9 +400,11 @@ describe('user (hrn:user:<handle>)', () => {
   });
 
   it('a non-admin caller may NOT audit another user (FORBIDDEN)', async () => {
+    // Subject (member) ≠ caller (stranger): a genuine cross-subject audit, still
+    // gated. (Self-audit, where subject == caller, is allowed — see #364.)
     const h = await withHandle(member.id, 'mem-handle4');
     await expect(
-      call(stranger.id, `hrn:user:${h}`, ctx({ userId: stranger.id, roles: ['READER'] })),
+      call(member.id, `hrn:user:${h}`, ctx({ userId: stranger.id, roles: ['READER'] })),
     ).rejects.toThrow(/forbidden/i);
   });
 

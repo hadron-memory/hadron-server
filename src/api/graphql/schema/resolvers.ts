@@ -2297,7 +2297,16 @@ export const resolvers = {
       // Who may CALL this — the same visibility bar as the underlying grant
       // tables. A non-privileged caller gets FORBIDDEN, never a silent empty
       // result, so the audit command can't probe access it isn't allowed to.
-      if (!(await callerCanAudit(ctx.db, { userId: ctx.userId, roles: ctx.roles }, resolved))) {
+      //
+      // Self-audit is always allowed (issue #364): a user auditing their OWN
+      // effective access learns nothing they couldn't already infer by trying
+      // the operation, so there's no info-leak. Every other (cross-subject)
+      // case stays gated by callerCanAudit exactly as before.
+      const isSelfAudit = !!ctx.userId && subjectUser.id === ctx.userId;
+      if (
+        !isSelfAudit &&
+        !(await callerCanAudit(ctx.db, { userId: ctx.userId, roles: ctx.roles }, resolved))
+      ) {
         throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       }
 
