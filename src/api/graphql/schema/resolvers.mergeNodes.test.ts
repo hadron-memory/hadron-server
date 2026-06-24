@@ -108,6 +108,18 @@ describe('mergeNodes — field merge', () => {
     expect(out.description).toBe('td'); // untouched
     expect(out.tags).toEqual(['y']); // untouched
   });
+
+  it('does not fold a non-object (array/scalar) source JSON into a null target', async () => {
+    // mergeJson must reject a non-plain-object source even when the target is
+    // null — otherwise an array/scalar would be written into data/properties.
+    const src = await makeNode('src', { data: [1, 2, 3], properties: 'scalar' });
+    const tgt = await makeNode('tgt', {}); // data + properties null
+
+    const out = await merge({ source: src.id, target: tgt.id, include: ['DATA', 'PROPERTIES'] });
+
+    expect(out.data).toBeNull();
+    expect(out.properties).toBeNull();
+  });
 });
 
 describe('mergeNodes — source lifecycle', () => {
@@ -257,6 +269,45 @@ describe('mergeNodes — encryption', () => {
     const raw = await db.node.findUnique({ where: { id: tgt.id } });
     expect(raw?.content?.startsWith('enc:v1:')).toBe(true);
     expect(raw?.content).not.toContain('secret');
+  });
+
+  it('runs an edge-only merge on an encrypted memory without a session key', async () => {
+    // Only content/abstract/data are encrypted, so an EDGES-only merge needs
+    // no key — it must not fail with SESSION_EXPIRED after the session ends.
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'mn-org:eo-agent', name: 'eo-agent', type: 'CHATBOT', surfaces: ['api'] },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'eo-app', urn: 'mn-org:eo-app', createUserPermission: 'IMPLICIT', identifyUserMethod: 'SECRET' },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+
+    const key = generateDataKey().raw.toString('base64');
+    const appCtx: Context = { db, appId: app.id, roles: ['ADMIN'], organizationId: org.id };
+    const session = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-eo', dataKey: key }, appCtx,
+    );
+    const memId = session.memoryId!;
+    const sCtx: Context = { ...appCtx, sessionId: session.id };
+
+    const src = await resolvers.Mutation.upsertNode({}, { input: { memoryId: memId, loc: 'src', name: 'src', content: 'secret s' } }, sCtx);
+    const tgt = await resolvers.Mutation.upsertNode({}, { input: { memoryId: memId, loc: 'tgt', name: 'tgt', content: 'secret t' } }, sCtx);
+    const other = await resolvers.Mutation.upsertNode({}, { input: { memoryId: memId, loc: 'other', name: 'other' } }, sCtx);
+    await db.edge.create({ data: { id: generateId(), memoryId: memId, sourceId: src.id, targetId: other.id, loc: 'src:rel:other' } });
+
+    // End the session → no live key for this memory.
+    await resolvers.Mutation.endAgentSession({}, { sessionId: session.id }, appCtx);
+    sessionKeyCache.clear();
+
+    const out = await resolvers.Mutation.mergeNodes(
+      {}, { input: { source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true } } as never, sCtx,
+    );
+
+    // Merge succeeded: the edge transferred to the target.
+    expect(await db.edge.count({ where: { sourceId: tgt.id } })).toBe(1);
+    expect(await db.node.findUnique({ where: { id: src.id } })).toBeNull();
+    // No key available → encrypted content is returned as-is (ciphertext), not decrypted.
+    expect(out.content?.startsWith('enc:v1:')).toBe(true);
   });
 });
 

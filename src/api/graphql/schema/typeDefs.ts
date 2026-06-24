@@ -1288,7 +1288,7 @@ export const typeDefs = `#graphql
     isRunnable: Boolean
   }
 
-  "A node field mergeNodes can fold from source into target."
+  "A node field that mergeNodes can fold from the source into the target."
   enum NodeMergeField {
     "Concatenate source content after target content (blank-line separated)."
     CONTENT

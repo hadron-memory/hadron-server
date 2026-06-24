@@ -5113,6 +5113,7 @@ export const resolvers = {
       // Same-memory merge (the common case): write access to the target's
       // memory already covers the source. Only run a separate source check
       // when the nodes live in different memories.
+      const authedMemories = new Set<string>([target.memoryId]);
       if (source.memoryId !== target.memoryId) {
         const touchesSource = deleteSource || fields.has('EDGES');
         if (touchesSource) {
@@ -5123,27 +5124,54 @@ export const resolvers = {
           });
         }
       }
+      authedMemories.add(source.memoryId);
 
-      // Decrypt working copies to plaintext. The raw `target` row stays
-      // ciphertext so the NodeVersion snapshot matches upsertNode's shape.
-      const srcEnc = await getMemoryEncryptionInfo(ctx.db, source.memoryId);
-      const tgtEnc = await getMemoryEncryptionInfo(ctx.db, target.memoryId);
-      if (srcEnc.isEncrypted && !sessionKeyCache.getByMemoryId(srcEnc.id)) {
+      // Edge transfer can mutate edges whose denormalized memory is NEITHER
+      // the source's nor the target's: an INCOMING edge from a third memory
+      // gets its endpoint re-pointed (or dropped) here. Require write access
+      // to every such memory before touching it, so a merge can't re-point or
+      // delete edges in a memory the caller can't write. Cheap pre-pass: pull
+      // just the distinct memoryIds of edges touching the source.
+      if (fields.has('EDGES')) {
+        const edgeMems = await ctx.db.edge.findMany({
+          where: { OR: [{ sourceId: source.id }, { targetId: source.id }] },
+          select: { memoryId: true },
+          distinct: ['memoryId'],
+        });
+        for (const { memoryId } of edgeMems) {
+          if (authedMemories.has(memoryId)) continue;
+          await requireMemoryWriteAccess(ctx, memoryId);
+          authedMemories.add(memoryId);
+        }
+      }
+
+      // Only content/abstract/data are encrypted at rest, so an edge-only or
+      // tags/description/properties-only merge needs no session key. Gate the
+      // key requirement + decrypt on whether an encrypted field actually
+      // participates, so those merges work on an encrypted memory without a
+      // live session (and don't fail with a spurious SESSION_EXPIRED).
+      const touchesEncrypted =
+        fields.has('CONTENT') || fields.has('ABSTRACT') || fields.has('DATA');
+      const [srcEnc, tgtEnc] = await Promise.all([
+        getMemoryEncryptionInfo(ctx.db, source.memoryId),
+        getMemoryEncryptionInfo(ctx.db, target.memoryId),
+      ]);
+      if (touchesEncrypted && srcEnc.isEncrypted && !sessionKeyCache.getByMemoryId(srcEnc.id)) {
         throw new GraphQLError(
           `SESSION_EXPIRED: memory ${srcEnc.id} is encrypted but no active session key is available.`,
           { extensions: { code: 'SESSION_EXPIRED', memoryId: srcEnc.id } },
         );
       }
-      if (tgtEnc.isEncrypted && !sessionKeyCache.getByMemoryId(tgtEnc.id)) {
+      if (touchesEncrypted && tgtEnc.isEncrypted && !sessionKeyCache.getByMemoryId(tgtEnc.id)) {
         throw new GraphQLError(
           `SESSION_EXPIRED: memory ${tgtEnc.id} is encrypted but no active session key is available.`,
           { extensions: { code: 'SESSION_EXPIRED', memoryId: tgtEnc.id } },
         );
       }
       const srcPt = { ...source };
-      if (srcEnc.isEncrypted) decryptNodeFields(srcPt, srcEnc);
+      if (touchesEncrypted && srcEnc.isEncrypted) decryptNodeFields(srcPt, srcEnc);
       const tgtPt = { ...target };
-      if (tgtEnc.isEncrypted) decryptNodeFields(tgtPt, tgtEnc);
+      if (touchesEncrypted && tgtEnc.isEncrypted) decryptNodeFields(tgtPt, tgtEnc);
 
       // ── Field merge (on plaintext) ──────────────────────────────────────
       // Text: target first, source appended with a blank line, skipping
@@ -5162,12 +5190,15 @@ export const resolvers = {
         src: unknown,
         tgt: unknown,
       ): Record<string, unknown> | undefined => {
-        if (src == null) return undefined;
+        // Source must be a plain object to contribute keys; an array/scalar
+        // source never merges (checked BEFORE the tgt==null branch so a
+        // non-object source can't slip through as the result and write an
+        // unexpected shape into data/properties).
+        if (src == null || typeof src !== 'object' || Array.isArray(src)) {
+          return undefined;
+        }
         if (tgt == null) return src as Record<string, unknown>;
-        if (
-          typeof src !== 'object' || Array.isArray(src) ||
-          typeof tgt !== 'object' || Array.isArray(tgt)
-        ) {
+        if (typeof tgt !== 'object' || Array.isArray(tgt)) {
           return undefined;
         }
         const merged = { ...(src as Record<string, unknown>), ...(tgt as Record<string, unknown>) };
@@ -5302,26 +5333,49 @@ export const resolvers = {
               .filter((e) => !movingIds.has(e.id))
               .map((e) => e.loc),
           );
+          // Partition in memory, then issue one deleteMany + up to two
+          // updateMany — instead of an update/delete per edge — so a node with
+          // many relationships doesn't N+1 the merge transaction. Outgoing
+          // edges all become (sourceId=target, memoryId=target.memory);
+          // incoming edges all become (targetId=target). A self-loop
+          // (source↔target) or a loc already taken in the target's memory is
+          // dropped rather than failing the merge.
+          const toDrop: string[] = [];
+          const outgoingIds: string[] = [];
+          const incomingIds: string[] = [];
           for (const e of srcEdges) {
             const newSourceId = e.sourceId === source.id ? target.id : e.sourceId;
             const newTargetId = e.targetId === source.id ? target.id : e.targetId;
             if (newSourceId === newTargetId) {
-              await tx.edge.delete({ where: { id: e.id } });
+              toDrop.push(e.id);
               continue;
             }
+            const isOutgoing = e.sourceId === source.id;
             // An outgoing edge follows its source into the target's memory;
             // an incoming edge keeps its own (foreign) memory.
-            const newMemoryId = e.sourceId === source.id ? target.memoryId : e.memoryId;
+            const newMemoryId = isOutgoing ? target.memoryId : e.memoryId;
             if (newMemoryId === target.memoryId) {
               if (occupied.has(e.loc)) {
-                await tx.edge.delete({ where: { id: e.id } });
+                toDrop.push(e.id);
                 continue;
               }
               occupied.add(e.loc);
             }
-            await tx.edge.update({
-              where: { id: e.id },
-              data: { sourceId: newSourceId, targetId: newTargetId, memoryId: newMemoryId },
+            (isOutgoing ? outgoingIds : incomingIds).push(e.id);
+          }
+          if (toDrop.length > 0) {
+            await tx.edge.deleteMany({ where: { id: { in: toDrop } } });
+          }
+          if (outgoingIds.length > 0) {
+            await tx.edge.updateMany({
+              where: { id: { in: outgoingIds } },
+              data: { sourceId: target.id, memoryId: target.memoryId },
+            });
+          }
+          if (incomingIds.length > 0) {
+            await tx.edge.updateMany({
+              where: { id: { in: incomingIds } },
+              data: { targetId: target.id },
             });
           }
         }
@@ -5334,7 +5388,11 @@ export const resolvers = {
       });
 
       // Re-fetch the merged target with edges, decrypt for the response +
-      // side effects.
+      // side effects. Only decrypt when a session key is actually available:
+      // an edge-only/plaintext-field merge on an encrypted memory legitimately
+      // runs without one, in which case the encrypted fields stay ciphertext
+      // in the response (the same posture as any keyless read) rather than
+      // throwing.
       const finalNode = (await ctx.db.node.findUnique({
         where: { id: target.id },
         include: {
@@ -5342,7 +5400,9 @@ export const resolvers = {
           incomingEdges: { include: { source: true } },
         },
       }))!;
-      if (tgtEnc.isEncrypted) decryptNodeFields(finalNode, tgtEnc);
+      if (tgtEnc.isEncrypted && sessionKeyCache.getByMemoryId(tgtEnc.id)) {
+        decryptNodeFields(finalNode, tgtEnc);
+      }
 
       // Mirror to git so a later (repo-wins) sync can't revert the merge.
       writeNodeToGit(
