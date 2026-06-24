@@ -10,6 +10,18 @@
 # Homebrew `postgresql@17` keg is preferred over the default PATH entry (which
 # may still be 14). The local DB is dropped and recreated, so any existing
 # contents are destroyed.
+#
+# ── Migration-safety ─────────────────────────────────────────────────────────
+# Local dev DBs are `prisma db push`-managed with NO migration history (see
+# CLAUDE.md "Local Postgres setup"). So this script must NOT import prod's
+# migration ledger or pin the local schema to prod's (usually-behind) state:
+#   1. The remote dump excludes `_prisma_migrations` → prod's ledger never lands.
+#   2. After the restore we run scripts/dev-setup.sh, which applies the working
+#      schema.prisma onto the restored data (`db push --accept-data-loss`) and
+#      rebuilds the pgvector HNSW index that a bare push drops.
+# NOTE: columns encrypted under the prod HADRON_ENCRYPTION_KEY (is_encrypted
+# memory content/assets, source tokens, AI API keys, GitHub App keys) come back
+# as opaque bytes and will NOT decrypt locally. Do NOT copy the prod key here.
 
 set -euo pipefail
 
@@ -36,7 +48,8 @@ LOCAL_PATH="${DUMP_DIR}/${DUMP_NAME}"
 mkdir -p "$DUMP_DIR"
 
 echo "→ Dumping ${REMOTE_DB} on ${SSH_HOST} → ${REMOTE_PATH}"
-ssh "root@${SSH_HOST}" "mkdir -p /root/backup && sudo -u postgres pg_dump -Fc --clean --if-exists -d ${REMOTE_DB} > '${REMOTE_PATH}' && ls -la '${REMOTE_PATH}'"
+echo "  (excluding _prisma_migrations — local dev is db-push-managed)"
+ssh "root@${SSH_HOST}" "mkdir -p /root/backup && sudo -u postgres pg_dump -Fc --clean --if-exists --exclude-table=_prisma_migrations -d ${REMOTE_DB} > '${REMOTE_PATH}' && ls -la '${REMOTE_PATH}'"
 
 echo
 echo "→ Copying dump → ${LOCAL_PATH}"
@@ -47,9 +60,22 @@ echo "→ Dropping and recreating local DB: ${LOCAL_DB}"
 psql -U "$LOCAL_USER" -h "$LOCAL_HOST" -d postgres -c "DROP DATABASE IF EXISTS ${LOCAL_DB};"
 psql -U "$LOCAL_USER" -h "$LOCAL_HOST" -d postgres -c "CREATE DATABASE ${LOCAL_DB} OWNER ${LOCAL_USER};"
 
+# pgvector must exist before the HNSW index restores; create it up front so the
+# dump's own (idempotent) CREATE EXTENSION is a harmless no-op.
+psql -U "$LOCAL_USER" -h "$LOCAL_HOST" -d "$LOCAL_DB" -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
 echo
 echo "→ Restoring with $($PG_RESTORE --version)"
 "$PG_RESTORE" -d "$LOCAL_DB" -U "$LOCAL_USER" -h "$LOCAL_HOST" --no-owner --no-privileges "$LOCAL_PATH"
 
+# Reconcile the restored (prod-state) schema with the working schema.prisma and
+# rebuild the pgvector HNSW index that a bare `db push` drops. dev-setup.sh runs
+# `prisma db push --accept-data-loss` + post-push.sql against the given DB.
 echo
-echo "Done. Local '${LOCAL_DB}' restored from ${SSH_HOST}."
+echo "→ Syncing restored DB to working schema.prisma (scripts/dev-setup.sh ${LOCAL_DB})"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+"${SCRIPT_DIR}/dev-setup.sh" "$LOCAL_DB"
+
+echo
+echo "Done. Local '${LOCAL_DB}' restored from ${SSH_HOST} and synced to schema.prisma."
+echo "Note: prod-encrypted columns won't decrypt locally (by design — see header)."
