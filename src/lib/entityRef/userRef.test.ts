@@ -63,4 +63,21 @@ describe('resolveUserRef', () => {
     });
     expect(await resolveUserRef(db, 'userref-test-bare')).toEqual({ id: u.id });
   });
+
+  it('resolves case-insensitively (handles are lowercase-canonical)', async () => {
+    const u = await db.user.create({
+      data: { githubId: gid++, handle: 'userref-test-ci' },
+    });
+    expect(await resolveUserRef(db, 'hrn:user:USERREF-TEST-CI')).toEqual({ id: u.id });
+    expect(await resolveUserRef(db, 'UserRef-Test-CI')).toEqual({ id: u.id });
+  });
+
+  it('DB enforces case-insensitive handle uniqueness (users_handle_lower_uniq)', async () => {
+    await db.user.create({ data: { githubId: gid++, handle: 'userref-test-dup' } });
+    // A different-case handle has the same lower(handle) → the functional unique
+    // index must reject it even though Prisma's plain @unique is case-sensitive.
+    await expect(
+      db.user.create({ data: { githubId: gid++, handle: 'userref-test-DUP' } }),
+    ).rejects.toThrow();
+  });
 });

@@ -150,6 +150,7 @@ import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { UserNotFoundError } from '../../../lib/entityRef/errors.js';
+import { normalizeHandle, normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import {
@@ -1911,12 +1912,15 @@ export const resolvers = {
     // until it lands we must not emit an invalid "canonical" URN here.
     urn: (u: { handle?: string | null }) => {
       if (!u.handle) return null;
+      // Canonical form is lowercase (#325); guard legality so an unvalidated
+      // legacy handle can't surface as an invalid "canonical" URN.
+      const handle = u.handle.toLowerCase();
       try {
-        validateUserSlug(u.handle);
+        validateUserSlug(handle);
       } catch {
         return null;
       }
-      return formatUrn('user', u.handle);
+      return formatUrn('user', handle);
     },
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
     // list only when the queried User is the authenticated user (mirrors
@@ -5167,15 +5171,22 @@ export const resolvers = {
 
     updateMyProfile: async (
       _: unknown,
-      { name, handle, email }: { name?: string; handle?: string; email?: string },
+      { name, handle, email }: { name?: string; handle?: string | null; email?: string },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
+      // A handle is the hrn:user:<handle> slug — normalize to lowercase-canonical
+      // and validate (#325). `undefined` leaves it unchanged; `null`/empty clears
+      // it (clients pass explicit null to clear); an illegal handle throws.
+      const handleData =
+        handle === undefined
+          ? {}
+          : { handle: !handle || handle.trim() === '' ? null : normalizeHandle(handle) };
       return ctx.db.user.update({
         where: { id: ctx.userId },
         data: {
           ...(name !== undefined ? { name } : {}),
-          ...(handle !== undefined ? { handle } : {}),
+          ...handleData,
           ...(email !== undefined ? { email } : {}),
         },
       });
@@ -9284,7 +9295,9 @@ export const resolvers = {
           externalAppId: ctx.appId,
           externalId,
           identityProvider: 'APP',
-          handle: handle ?? null,
+          // Lenient: an illegal app-supplied handle drops to null rather than
+          // blocking user creation (#325).
+          handle: normalizeHandleOrNull(handle),
           name: name ?? null,
           email: email ?? null,
           createdBy: ctx.appId,

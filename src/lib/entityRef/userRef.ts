@@ -32,7 +32,9 @@ export async function resolveUserRef(
   }
   const value = normalizeUrnForLookup(parseUrnInput(ref).value);
   // Users have no `urn` column — the non-ID lookup key is the unique handle.
-  const where = isId(value) ? { id: value } : { handle: value };
+  // Handles are lowercase-canonical (#325), so lowercase the input for
+  // case-insensitive resolution (hrn:user:Holger → the `holger` row).
+  const where = isId(value) ? { id: value } : { handle: value.toLowerCase() };
   const user = await db.user.findUnique({
     where,
     select: { id: true, deletedAt: true },
