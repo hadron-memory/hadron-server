@@ -163,7 +163,7 @@ export class UrnParseError extends Error {
  *
  * Spec: 022 / contracts/urn-qualification.md.
  */
-export type ExpectedUrnType = 'org' | 'memory' | 'agent' | 'app' | 'node';
+export type ExpectedUrnType = 'org' | 'memory' | 'agent' | 'app' | 'node' | 'user';
 
 const MIN_HIERARCHY_SEGMENTS: Record<ExpectedUrnType, number> = {
   org: 1,
@@ -171,6 +171,10 @@ const MIN_HIERARCHY_SEGMENTS: Record<ExpectedUrnType, number> = {
   agent: 2,
   app: 2,
   node: 3,
+  // A user URN is `hrn:user:<handle>` — a single hierarchy segment (the
+  // handle), like an org. Users are keyed by their unique handle, not an
+  // org-scoped slug; a handle-less user has no URN.
+  user: 1,
 };
 
 const MIN_SEGMENTS_HINT: Record<ExpectedUrnType, string> = {
@@ -179,6 +183,7 @@ const MIN_SEGMENTS_HINT: Record<ExpectedUrnType, string> = {
   agent: '2 hierarchy segments (org::agent-slug, e.g., "acme.com::coding-agent")',
   app: '2 hierarchy segments (org::app-slug, e.g., "acme.com::dev-app")',
   node: '3 hierarchy segments (org::memory::loc, e.g., "acme.com::mmdata::review:sort-imports")',
+  user: '1 hierarchy segment (the handle, e.g., "holger")',
 };
 
 /**
@@ -1108,8 +1113,8 @@ export function parseFor(row: UrnRow): { canonical: string; isLegacy: boolean } 
 // Legacy parser surface (preserved for backward-compat callers)
 // ============================================================================
 
-/** Legacy types accepted by `parseUrnInput`. Pre-021. */
-const LEGACY_URN_TYPES = ['org', 'memory', 'agent', 'app', 'node'] as const;
+/** Legacy types accepted by `parseUrnInput`. Pre-021 (+ `user`, spec cor:urn:010:01). */
+const LEGACY_URN_TYPES = ['org', 'memory', 'agent', 'app', 'node', 'user'] as const;
 type LegacyUrnType = (typeof LEGACY_URN_TYPES)[number] | 'loc' | 'unknown';
 
 /**
@@ -1131,7 +1136,7 @@ export interface LegacyParsedUrn {
  * predate spec 021; new code SHOULD use `parseUrn` instead.
  */
 export function parseUrnInput(input: string): LegacyParsedUrn {
-  const match = input.match(/^(?:hrn|urn):(org|memory|agent|app|node):(.+)$/);
+  const match = input.match(/^(?:hrn|urn):(org|memory|agent|app|node|user):(.+)$/);
   if (match) return { type: match[1] as LegacyUrnType, value: match[2] };
   const locMatch = input.match(/^loc:(.+)$/);
   if (locMatch) return { type: 'loc', value: locMatch[1] };

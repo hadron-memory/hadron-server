@@ -1425,7 +1425,7 @@ export const typeDefs = `#graphql
   the resource's canonical page. Powers the portal's /app/u/<urn> redirect
   route (hadron-portal#262).
 
-  \`kind\` is the URN's type segment: memory | node | agent | org | app.
+  \`kind\` is the URN's type segment: memory | node | agent | org | app | user.
   \`id\` is the resolved entity's primary id. \`memoryId\` is set only for
   nodes (their owning memory), \`organizationId\` only for apps (their owning
   org) — both are the extra ids those resources' canonical routes require.
