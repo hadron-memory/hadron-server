@@ -342,6 +342,62 @@ describe('organization', () => {
   });
 });
 
+describe('user (hrn:user:<handle>)', () => {
+  // `member` etc. are created without a handle; give the subjects one to address.
+  async function withHandle(userId: string, handle: string) {
+    await db.user.update({ where: { id: userId }, data: { handle } });
+    return handle;
+  }
+
+  it('the user themselves has manage on their own account, but not delete', async () => {
+    const h = await withHandle(member.id, 'mem-handle');
+    const res = await call(member.id, `hrn:user:${h}`, asAdmin());
+    expect(res.resourceKind).toBe('user');
+    expect(res.resourceUrn).toBe(`hrn:user:${h}`);
+    expect(res.canManage).toBe(true);
+    expect(res.canDelete).toBe(false);
+    expect(res.role).toBe('self');
+    expect(res.grants.some((g) => g.source === 'USER_SELF')).toBe(true);
+  });
+
+  it('a platform admin has full access (incl. delete) to any user', async () => {
+    const h = await withHandle(member.id, 'mem-handle2');
+    const res = await call(admin.id, `hrn:user:${h}`, asAdmin());
+    expect(res.canDelete).toBe(true);
+    expect(res.grants.some((g) => g.source === 'PLATFORM_ROLE')).toBe(true);
+  });
+
+  it('a different non-admin user has no standing access', async () => {
+    const h = await withHandle(member.id, 'mem-handle3');
+    const res = await call(stranger.id, `hrn:user:${h}`, asAdmin());
+    expect(res.canRead).toBe(false);
+    expect(res.grants).toEqual([]);
+  });
+
+  it('a non-admin caller may NOT audit another user (FORBIDDEN)', async () => {
+    const h = await withHandle(member.id, 'mem-handle4');
+    await expect(
+      call(stranger.id, `hrn:user:${h}`, ctx({ userId: stranger.id, roles: ['READER'] })),
+    ).rejects.toThrow(/forbidden/i);
+  });
+
+  it('a user may audit their own access', async () => {
+    const h = await withHandle(member.id, 'mem-handle5');
+    const res = await call(member.id, `hrn:user:${h}`, ctx({ userId: member.id, roles: ['READER'] }));
+    expect(res.canManage).toBe(true);
+  });
+
+  it('an unknown handle is NOT_FOUND', async () => {
+    await expect(call(member.id, 'hrn:user:nobody-here', asAdmin())).rejects.toThrow(/not found/i);
+  });
+
+  it('a soft-deleted user is NOT_FOUND (handle resolves but row is gone)', async () => {
+    const h = await withHandle(member.id, 'gone-handle');
+    await db.user.update({ where: { id: member.id }, data: { deletedAt: new Date() } });
+    await expect(call(member.id, `hrn:user:${h}`, asAdmin())).rejects.toThrow(/not found/i);
+  });
+});
+
 describe('not-found / unknown refs', () => {
   it('an unknown subject user is NOT_FOUND', async () => {
     await expect(call(generateId(), `hrn:memory:${graph.urn}`, asAdmin())).rejects.toThrow(/not found/i);

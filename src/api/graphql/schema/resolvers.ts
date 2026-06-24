@@ -2231,13 +2231,28 @@ export const resolvers = {
       // Resolve the resource ref (id or fully-qualified URN). Dispatches on
       // URN type exactly like resolveUrn; a bare id falls through to
       // AiServiceConfig (the only URN-less kind). Unresolvable → NOT_FOUND.
+      // `hrn:user:<handle>` is recognized for the audit surface only — the core
+      // URN parser does not address users (no entity shape), so detect it here
+      // and resolve the user by their unique handle.
+      const USER_URN_PREFIX = /^(?:hrn|urn):user:/i;
       const resolved = await resolveAccessResource(ctx.db, resource, {
-        parseType: (ref) => parseUrnInput(ref).type,
+        parseType: (ref) => (USER_URN_PREFIX.test(ref) ? 'user' : parseUrnInput(ref).type),
         resolveMemoryRef,
         resolveNodeRef,
         resolveAppRef,
         resolveAgentRef,
         resolveOrgRef,
+        resolveUserRef: async (database, ref) => {
+          // handle is @unique → findUnique; soft-deleted / handle-less users are
+          // collapsed to NOT_FOUND in resolveResource's `user` case.
+          const handle = ref.replace(USER_URN_PREFIX, '');
+          const u = await database.user.findUnique({
+            where: { handle },
+            select: { id: true },
+          });
+          if (!u) throw new Error('user not found'); // caught in resolveResource → null → NOT_FOUND
+          return { id: u.id };
+        },
       });
       if (!resolved) {
         throw new GraphQLError('Resource not found', { extensions: { code: 'NOT_FOUND' } });
