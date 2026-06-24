@@ -34,6 +34,13 @@ export class OrganizationNotFoundError extends Error {
   }
 }
 
+export class UserNotFoundError extends Error {
+  constructor(public ref: string) {
+    super(`USER_NOT_FOUND: ${ref}`);
+    this.name = 'UserNotFoundError';
+  }
+}
+
 /**
  * Surfaced by `resolveNodeRef` when the inbound reference (ID, URN,
  * full memory-prefixed loc, or short loc) does not name a live node.

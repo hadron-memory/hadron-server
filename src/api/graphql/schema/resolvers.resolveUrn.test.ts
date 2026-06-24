@@ -108,6 +108,46 @@ describe('Query.resolveUrn — resolves each kind for an authorized caller', () 
   });
 });
 
+describe('Query.resolveUrn — user (hrn:user:<handle>)', () => {
+  it('resolves the caller themselves', async () => {
+    await db.user.update({ where: { id: member.id }, data: { handle: 'urnres-self-h' } });
+    const r = await resolvers.Query.resolveUrn({}, { urn: 'hrn:user:urnres-self-h' }, memberCtx());
+    expect(r).toEqual({ kind: 'user', id: member.id });
+  });
+
+  it('resolves a user who shares an org with the caller', async () => {
+    const peer = await db.user.create({
+      data: { id: generateId(), githubId: 7303, githubUsername: 'urnres-peer', handle: 'urnres-peer-h', roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: peer.id, role: 'READER' },
+    });
+    const r = await resolvers.Query.resolveUrn({}, { urn: 'hrn:user:urnres-peer-h' }, memberCtx());
+    expect(r).toEqual({ kind: 'user', id: peer.id });
+  });
+
+  it('returns null for a user who shares no org with the caller', async () => {
+    await db.user.update({ where: { id: member.id }, data: { handle: 'urnres-noshare-h' } });
+    const r = await resolvers.Query.resolveUrn({}, { urn: 'hrn:user:urnres-noshare-h' }, outsiderCtx());
+    expect(r).toBeNull();
+  });
+
+  it('a platform admin resolves any user', async () => {
+    await db.user.update({ where: { id: outsider.id }, data: { handle: 'urnres-outsider-h' } });
+    const r = await resolvers.Query.resolveUrn(
+      {},
+      { urn: 'hrn:user:urnres-outsider-h' },
+      { db, userId: member.id, roles: ['ADMIN'] },
+    );
+    expect(r).toEqual({ kind: 'user', id: outsider.id });
+  });
+
+  it('returns null for an unknown handle', async () => {
+    const r = await resolvers.Query.resolveUrn({}, { urn: 'hrn:user:nobody-urnres' }, memberCtx());
+    expect(r).toBeNull();
+  });
+});
+
 describe('Query.resolveUrn — access control collapses to null', () => {
   it('returns null for a memory the caller cannot access', async () => {
     const r = await resolvers.Query.resolveUrn({}, { urn: `urn:memory:${MEM_URN}` }, outsiderCtx());

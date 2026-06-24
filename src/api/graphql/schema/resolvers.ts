@@ -147,6 +147,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import {
@@ -2211,6 +2212,37 @@ export const resolvers = {
           }
           return { kind: 'app', id, organizationId: app.organizationId };
         }
+        case 'user': {
+          let id: string;
+          try {
+            ({ id } = await resolveUserRef(ctx.db, urn));
+          } catch {
+            return null;
+          }
+          // A user reference resolves for the user themselves, a platform admin,
+          // or a caller who shares at least one organization with the target —
+          // mirroring the org-membership gate the other kinds use. (Returns only
+          // a {kind,id} ref, no PII; the user's own pages enforce data access.)
+          if (!isGlobalAdmin && ctx.userId !== id) {
+            if (!ctx.userId) return null;
+            const targetOrgs = await ctx.db.orgMember.findMany({
+              where: { userId: id, deletedAt: null },
+              select: { organizationId: true },
+            });
+            const shared =
+              targetOrgs.length > 0 &&
+              (await ctx.db.orgMember.findFirst({
+                where: {
+                  userId: ctx.userId,
+                  deletedAt: null,
+                  organizationId: { in: targetOrgs.map((o) => o.organizationId) },
+                },
+                select: { organizationId: true },
+              }));
+            if (!shared) return null;
+          }
+          return { kind: 'user', id };
+        }
         default:
           return null;
       }
@@ -2221,8 +2253,10 @@ export const resolvers = {
       { user, resource }: { user: string; resource: string },
       ctx: Context,
     ) => {
-      // Subject — the user whose access we are auditing. Users have no URN
-      // today, so this is a User id. Unknown subject → NOT_FOUND.
+      // Subject — the user whose access we are auditing. The GraphQL signature
+      // takes a User id here (distinct from `resource`, which accepts a
+      // `hrn:user:<handle>` URN per spec cor:urn:010:01). Unknown subject →
+      // NOT_FOUND.
       const subjectUser = await ctx.db.user.findUnique({ where: { id: user } });
       if (!subjectUser) {
         throw new GraphQLError('User not found', { extensions: { code: 'NOT_FOUND' } });
@@ -2231,28 +2265,14 @@ export const resolvers = {
       // Resolve the resource ref (id or fully-qualified URN). Dispatches on
       // URN type exactly like resolveUrn; a bare id falls through to
       // AiServiceConfig (the only URN-less kind). Unresolvable → NOT_FOUND.
-      // `hrn:user:<handle>` is recognized for the audit surface only — the core
-      // URN parser does not address users (no entity shape), so detect it here
-      // and resolve the user by their unique handle.
-      const USER_URN_PREFIX = /^(?:hrn|urn):user:/i;
       const resolved = await resolveAccessResource(ctx.db, resource, {
-        parseType: (ref) => (USER_URN_PREFIX.test(ref) ? 'user' : parseUrnInput(ref).type),
+        parseType: (ref) => parseUrnInput(ref).type,
         resolveMemoryRef,
         resolveNodeRef,
         resolveAppRef,
         resolveAgentRef,
         resolveOrgRef,
-        resolveUserRef: async (database, ref) => {
-          // handle is @unique → findUnique; soft-deleted / handle-less users are
-          // collapsed to NOT_FOUND in resolveResource's `user` case.
-          const handle = ref.replace(USER_URN_PREFIX, '');
-          const u = await database.user.findUnique({
-            where: { handle },
-            select: { id: true },
-          });
-          if (!u) throw new Error('user not found'); // caught in resolveResource → null → NOT_FOUND
-          return { id: u.id };
-        },
+        resolveUserRef,
       });
       if (!resolved) {
         throw new GraphQLError('Resource not found', { extensions: { code: 'NOT_FOUND' } });
