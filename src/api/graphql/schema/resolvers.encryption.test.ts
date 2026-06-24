@@ -308,6 +308,31 @@ describe('upsertNode with encryption', () => {
       ),
     ).rejects.toThrow(/SESSION_EXPIRED/);
   });
+
+  it('issue #366 — updateNodeData throws SESSION_EXPIRED on an encrypted memory with no active session', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const session = await resolvers.Mutation.startAgentSession(
+      {},
+      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      appCtx(secretApp.id),
+    );
+    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const node = await resolvers.Mutation.upsertNode(
+      {},
+      { input: { memoryId: session.memoryId!, loc: 'profile', name: 'profile', data: { a: 1 } } },
+      sessionCtx,
+    );
+    // End the session — key evicted.
+    await resolvers.Mutation.endAgentSession({}, { sessionId: session.id }, appCtx(secretApp.id));
+
+    await expect(
+      resolvers.Mutation.updateNodeData(
+        {},
+        { nodeId: node.id, data: { b: 2 } },
+        appCtx(secretApp.id, { roles: ['ADMIN'] }),
+      ),
+    ).rejects.toThrow(/SESSION_EXPIRED/);
+  });
 });
 
 // ---------------------------------------------------------------------------

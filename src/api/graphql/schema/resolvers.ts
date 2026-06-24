@@ -4417,28 +4417,58 @@ export const resolvers = {
         }
         throw e;
       }
-      const node = await ctx.db.node.findUnique({ where: { id: resolvedId } });
-      if (!node || node.deletedAt) {
+      // Pre-auth, read ONLY the columns needed to authorize + the soft-delete
+      // flag — NOT the (possibly sensitive / encrypted) `data` column. The
+      // sensitive payload is read only AFTER write access is confirmed, so an
+      // unauthorized caller can't force this surface to load a node's data.
+      const meta = await ctx.db.node.findUnique({
+        where: { id: resolvedId },
+        select: { id: true, memoryId: true, deletedAt: true },
+      });
+      if (!meta || meta.deletedAt) {
         throw new GraphQLError(`Node not found: "${nodeId}"`, {
           extensions: { code: 'NODE_NOT_FOUND', ref: nodeId },
         });
       }
+      await requireMemoryWriteAccess(ctx, meta.memoryId);
 
-      // Write access BEFORE reading/decrypting the (possibly encrypted) data,
-      // so a non-writer can't use this surface as a data/existence oracle.
-      await requireMemoryWriteAccess(ctx, node.memoryId);
+      // Encrypted memory: require an active session key up front (mirrors
+      // mergeNodes / upsertNode) so a missing key fails with a typed
+      // SESSION_EXPIRED rather than the bare throw from decryptNodeFields, and
+      // the decrypt below is guarded.
+      const memEnc = await getMemoryEncryptionInfo(ctx.db, meta.memoryId);
+      if (memEnc.isEncrypted && !sessionKeyCache.getByMemoryId(memEnc.id)) {
+        throw new GraphQLError(
+          `SESSION_EXPIRED: memory ${memEnc.id} is encrypted but no active session key is available.`,
+          { extensions: { code: 'SESSION_EXPIRED', memoryId: memEnc.id } },
+        );
+      }
 
-      // Decrypt the existing `data` to plaintext so the merge folds the real
-      // object; upsertNode re-encrypts on write. decryptNodeFields mutates the
-      // row in place — node.data is PLAINTEXT past this point.
-      const memEnc = await getMemoryEncryptionInfo(ctx.db, node.memoryId);
+      // Post-auth: read the addressing fields + the `data` payload, then
+      // decrypt to plaintext so the merge folds the real object (upsertNode
+      // re-encrypts on write).
+      const row = await ctx.db.node.findUnique({
+        where: { id: meta.id },
+        select: { loc: true, name: true, ownerRepo: true, data: true },
+      });
+      if (!row) {
+        // Lost a race with a concurrent delete between the two reads.
+        throw new GraphQLError(`Node not found: "${nodeId}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: nodeId },
+        });
+      }
+      const fields: { abstract: null; content: null; data: unknown } = {
+        abstract: null,
+        content: null,
+        data: row.data,
+      };
       if (memEnc.isEncrypted) {
-        decryptNodeFields(node, memEnc);
+        decryptNodeFields(fields, memEnc);
       }
 
       // Shallow merge: the patch wins on key collision; absent keys preserved.
       // A node with no object data yet takes the patch as-is.
-      const existing = node.data;
+      const existing = fields.data;
       const merged =
         existing != null && typeof existing === 'object' && !Array.isArray(existing)
           ? { ...(existing as Record<string, unknown>), ...(data as Record<string, unknown>) }
@@ -4450,12 +4480,12 @@ export const resolvers = {
         _,
         {
           input: {
-            id: node.id,
-            memoryId: node.memoryId,
-            loc: node.loc,
-            name: node.name,
+            id: meta.id,
+            memoryId: meta.memoryId,
+            loc: row.loc,
+            name: row.name,
             data: merged,
-            ...(node.ownerRepo != null ? { ownerRepo: node.ownerRepo } : {}),
+            ...(row.ownerRepo != null ? { ownerRepo: row.ownerRepo } : {}),
           },
         },
         ctx,
