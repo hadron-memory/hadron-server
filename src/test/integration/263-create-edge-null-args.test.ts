@@ -25,7 +25,10 @@ let nodeB: { id: string };
 let memUrn: string;
 
 function adminCtx(): Context {
-  return { db, roles: ['ADMIN'] };
+  // userId is required for the PR-348 createEdge write gate's JWT path; the
+  // global ADMIN role then bypasses per-org membership for non-personal
+  // memories (requireMemoryWriteAccess) and read (canReadMemory).
+  return { db, roles: ['ADMIN'], userId: 'admin-263' };
 }
 
 beforeEach(async () => {
@@ -84,6 +87,21 @@ describe('createEdge endpoint refs accept PK or URN (#322)', () => {
         adminCtx(),
       ),
     ).rejects.toThrow(/Source node not found/);
+  });
+
+  it('rejects a caller without write access to the source memory (PR-348 gate)', async () => {
+    // A CONTRIBUTOR-role user who is NOT a member of the memory's org has no
+    // write access. Pre-PR-348 createEdge only checked the global role and
+    // would have created the edge anyway.
+    const outsider: Context = { db, roles: ['CONTRIBUTOR'], userId: 'outsider-263' };
+    await expect(
+      resolvers.Mutation.createEdge(
+        {},
+        { sourceNodeId: nodeA.id, targetNodeId: nodeB.id, name: 'nope' },
+        outsider,
+      ),
+    ).rejects.toThrow(/no write access/);
+    expect(await db.edge.count({ where: { sourceId: nodeA.id } })).toBe(0);
   });
 });
 

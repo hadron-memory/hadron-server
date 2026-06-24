@@ -425,6 +425,8 @@ describe('#180 Bug 2 — hadron_get_next_node skips soft-deleted siblings', () =
     });
     expect(text).toContain('walk:c');
     expect(text).not.toContain('walk:b-dead');
+    // #322: get_next_node surfaces the stable PK meta line too.
+    expect(text).toMatch(/^ID: [a-z0-9]+$/m);
   });
 });
 

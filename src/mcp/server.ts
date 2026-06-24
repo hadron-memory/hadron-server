@@ -325,8 +325,9 @@ export async function addEdge(args: {
   // A URN must be fully qualified (we recover the memory from it for the
   // write check); a bare PK is unambiguous, needs no qualification, and
   // can't reintroduce the spec-022 silent-routing hazard (that only
-  // applies to context-relative locs, never to a PK lookup). Target
-  // accepts ID-shape per spec-007 dispatch.
+  // applies to context-relative locs, never to a PK lookup). The target
+  // likewise accepts a PK or a fully-qualified URN — the gate below
+  // enforces qualification for any non-ID target (no short-loc dispatch).
   try {
     if (!isId(rawTarget)) {
       assertFullyQualifiedUrn(rawTarget, 'node');
@@ -2275,12 +2276,15 @@ export function createMcpServerInstance(
       const urn = await nodeUrn(node.loc, node.memoryId);
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
         const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
-        return `  - ${targetUrn} (${e.target.name}) — ${e.name ?? e.loc}`;
+        // #322: surface the target's stable PK alongside the URN.
+        return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
       }));
       // #186: nodeType in the meta block, mirroring hadron_get_node's format.
       const meta = [
         `**${node.name}**`,
         urn,
+        // #322: stable PK (immutable across move/rename) — see hadron_get_node.
+        `ID: ${node.id}`,
         node.description ? `> ${node.description}` : '',
         `Type: ${node.nodeType}`,
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',

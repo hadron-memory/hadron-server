@@ -31,6 +31,18 @@ function mockDb() {
         memoryId: 'mem-1',
       })),
     },
+    // #322/PR-348: createEdge now gates on requireMemoryWriteAccess(src) +
+    // canReadMemory(tgt). The ADMIN+appId ctx short-circuits the write check
+    // before any DB call; canReadMemory still reads the memory row to learn
+    // its class, so stub a non-personal memory (ADMIN bypass → read allowed).
+    memory: {
+      findUnique: vi.fn().mockResolvedValue({
+        class: 'knowledge',
+        userId: null,
+        userMemoryOfAgentId: null,
+        appId: 'app-1',
+      }),
+    },
     edge: {
       create: vi.fn().mockImplementation(async ({ data }: { data: unknown }) => ({
         id: 'edge-1',
@@ -47,7 +59,13 @@ function mockDb() {
 function ctx(over: Partial<Context> = {}): Context {
   return {
     db: mockDb() as unknown as Context['db'],
-    roles: ['CONTRIBUTOR'],
+    // ADMIN + appId so the PR-348 memory-write gate short-circuits without
+    // needing a full org-membership fixture (these tests target condition
+    // validation, not access control — that's covered in access-control.test.ts
+    // and the real-DB createEdge tests).
+    roles: ['ADMIN'],
+    appId: 'app-1',
+    userId: 'u1',
     ...over,
   };
 }
