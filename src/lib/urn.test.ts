@@ -47,7 +47,7 @@ describe('parseUrnInput', () => {
     });
   });
 
-  it('parses hrn:user: / urn:user: prefix (spec cor:urn:020)', () => {
+  it('parses hrn:user: / urn:user: prefix (spec cor:urn:010:01)', () => {
     expect(parseUrnInput('hrn:user:holger')).toEqual({ type: 'user', value: 'holger' });
     expect(parseUrnInput('urn:user:holger')).toEqual({ type: 'user', value: 'holger' });
   });

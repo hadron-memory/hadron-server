@@ -4,8 +4,14 @@
  *
  * A user is addressed as `hrn:user:<handle>` (spec cor:urn:010:01): a single
  * hierarchy segment, the user's unique `handle`. A bare ID is also accepted for
- * uniformity with the other entity-ref resolvers. Per spec 022, a non-ID input
- * MUST be a fully-qualified URN (`UrnNotQualifiedError` before the DB lookup).
+ * uniformity with the other entity-ref resolvers.
+ *
+ * Accepted shapes: a bare ID, the `hrn:user:<handle>` (or legacy `urn:user:`)
+ * URN, and — because a user URN is a single segment, like an org — a **bare
+ * handle** with no scheme prefix (`assertFullyQualifiedUrn(ref, 'user')` is
+ * satisfied by one segment, so the spec-022 qualification gate accepts it).
+ * Non-ID, multi-segment, or `loc:`-prefixed inputs are rejected with
+ * `UrnNotQualifiedError` before the DB lookup.
  *
  * A user with no `handle` has no `hrn:user:` address, so the only way to reach
  * such a row here is by bare ID.

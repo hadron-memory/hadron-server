@@ -2225,20 +2225,16 @@ export const resolvers = {
           // a {kind,id} ref, no PII; the user's own pages enforce data access.)
           if (!isGlobalAdmin && ctx.userId !== id) {
             if (!ctx.userId) return null;
-            const targetOrgs = await ctx.db.orgMember.findMany({
-              where: { userId: id, deletedAt: null },
+            // Caller shares ≥1 org with the target — a single query via the
+            // org-membership relation (no extra round-trip / in-memory mapping).
+            const shared = await ctx.db.orgMember.findFirst({
+              where: {
+                userId: ctx.userId,
+                deletedAt: null,
+                organization: { members: { some: { userId: id, deletedAt: null } } },
+              },
               select: { organizationId: true },
             });
-            const shared =
-              targetOrgs.length > 0 &&
-              (await ctx.db.orgMember.findFirst({
-                where: {
-                  userId: ctx.userId,
-                  deletedAt: null,
-                  organizationId: { in: targetOrgs.map((o) => o.organizationId) },
-                },
-                select: { organizationId: true },
-              }));
             if (!shared) return null;
           }
           return { kind: 'user', id };
