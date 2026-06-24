@@ -689,3 +689,83 @@ describe('spec 031 US2 — hadron_find_nodes preview includes the abstract', () 
     expect(text).toContain('No nodes found');
   });
 });
+
+// ---------------------------------------------------------------------------
+// cor:api:060 — isRunnable filter on hadron_find_nodes / hadron_list_nodes
+// ---------------------------------------------------------------------------
+
+describe('cor:api:060 — isRunnable filter (find/list)', () => {
+  let runnableLoc: string;
+  let notRunnableLoc: string;
+
+  beforeEach(async () => {
+    // A runnable task node and an explicitly-non-runnable node alongside the
+    // fixture's isRunnable=NULL majority.
+    const task = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: fx.memory.id,
+        loc: 'runnable-task',
+        name: 'Runnable task',
+        isRunnable: true,
+      },
+    });
+    const notTask = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: fx.memory.id,
+        loc: 'explicitly-not-runnable',
+        name: 'Not runnable',
+        isRunnable: false,
+      },
+    });
+    runnableLoc = task.loc;
+    notRunnableLoc = notTask.loc;
+  });
+
+  it('hadron_find_nodes isRunnable=true returns only the runnable node', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: '*',
+      memoryUrn: fx.memory.urn,
+      isRunnable: true,
+    });
+    expect(text).toContain(runnableLoc);
+    expect(text).not.toContain(notRunnableLoc);
+    // NULL-runnable fixture node must not surface under isRunnable=true.
+    expect(text).not.toContain(fx.nodes.archive.loc);
+  });
+
+  it('hadron_find_nodes without the filter still surfaces NULL-runnable nodes', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: '*',
+      memoryUrn: fx.memory.urn,
+    });
+    expect(text).toContain(runnableLoc);
+    expect(text).toContain(fx.nodes.archive.loc);
+  });
+
+  it('hadron_list_nodes isRunnable=true prunes the tree to task nodes', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_list_nodes', {
+      memoryUrn: fx.memory.urn,
+      depth: 2,
+      isRunnable: true,
+    });
+    expect(text).toContain(runnableLoc);
+    expect(text).not.toContain(notRunnableLoc);
+    expect(text).not.toContain(fx.nodes.archive.loc);
+  });
+
+  it('hadron_list_nodes isRunnable=false returns only the explicitly-non-runnable node', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_list_nodes', {
+      memoryUrn: fx.memory.urn,
+      depth: 2,
+      isRunnable: false,
+    });
+    expect(text).toContain(notRunnableLoc);
+    expect(text).not.toContain(runnableLoc);
+  });
+});

@@ -140,4 +140,56 @@ describe('Query.nodes memoryIds (plural) filter — issue #355', () => {
     const nodes = await resolvers.Query.nodes(null, { memoryIds: [] }, userActx());
     expect(nodes).toHaveLength(2);
   });
+
+  it('accepts fully-qualified URNs as well as IDs', async () => {
+    const nodes = await resolvers.Query.nodes(
+      null, { memoryIds: [memA1.urn, memA2.id] }, userActx(),
+    );
+    expect(nodes.map((n) => n.loc).sort()).toEqual(['one', 'two']);
+  });
+
+  it('silently drops unresolvable refs instead of throwing', async () => {
+    const nodes = await resolvers.Query.nodes(
+      null, { memoryIds: [memA1.id, 'org-a:does-not-exist'] }, userActx(),
+    );
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].loc).toBe('one');
+  });
+});
+
+describe('Query.nodes isRunnable filter — cor:api:060', () => {
+  beforeEach(async () => {
+    await createDbNode(db, { loc: 'task-one', memoryId: memA1.id, isRunnable: true });
+    await createDbNode(db, { loc: 'not-runnable', memoryId: memA1.id, isRunnable: false });
+  });
+
+  it('isRunnable=true returns only runnable task nodes', async () => {
+    const nodes = await resolvers.Query.nodes(
+      null, { memory: memA1.id, isRunnable: true }, userActx(),
+    );
+    expect(nodes.map((n) => n.loc).sort()).toEqual(['task-one']);
+  });
+
+  it('isRunnable=false returns only strictly-false nodes (not the NULL majority)', async () => {
+    const nodes = await resolvers.Query.nodes(
+      null, { memory: memA1.id, isRunnable: false }, userActx(),
+    );
+    expect(nodes.map((n) => n.loc).sort()).toEqual(['not-runnable']);
+  });
+
+  it('omitting the filter returns nodes regardless of runnable status', async () => {
+    const nodes = await resolvers.Query.nodes(
+      null, { memory: memA1.id }, userActx(),
+    );
+    // 'one' (from the outer beforeEach, isRunnable NULL) + the two added here.
+    expect(nodes.map((n) => n.loc).sort()).toEqual(['not-runnable', 'one', 'task-one']);
+  });
+
+  it('composes with memoryIds scope', async () => {
+    await createDbNode(db, { loc: 'task-two', memoryId: memA2.id, isRunnable: true });
+    const nodes = await resolvers.Query.nodes(
+      null, { memoryIds: [memA1.id, memA2.id], isRunnable: true }, userActx(),
+    );
+    expect(nodes.map((n) => n.loc).sort()).toEqual(['task-one', 'task-two']);
+  });
 });

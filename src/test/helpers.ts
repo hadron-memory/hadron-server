@@ -97,6 +97,7 @@ export async function createDbNode(
     memoryId: string;
     tags?: string[];
     content?: string;
+    isRunnable?: boolean;
   },
 ) {
   const loc = fields.loc;
@@ -109,6 +110,7 @@ export async function createDbNode(
       ownerRepo: fields.ownerRepo ?? 'test/repo',
       tags: fields.tags ?? [],
       content: fields.content ?? null,
+      ...(fields.isRunnable != null ? { isRunnable: fields.isRunnable } : {}),
     },
   });
 }
