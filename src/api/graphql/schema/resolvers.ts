@@ -2243,9 +2243,11 @@ export const resolvers = {
         resolveAgentRef,
         resolveOrgRef,
         resolveUserRef: async (database, ref) => {
+          // handle is @unique → findUnique; soft-deleted / handle-less users are
+          // collapsed to NOT_FOUND in resolveResource's `user` case.
           const handle = ref.replace(USER_URN_PREFIX, '');
-          const u = await database.user.findFirst({
-            where: { handle, deletedAt: null },
+          const u = await database.user.findUnique({
+            where: { handle },
             select: { id: true },
           });
           if (!u) throw new Error('user not found'); // caught in resolveResource → null → NOT_FOUND

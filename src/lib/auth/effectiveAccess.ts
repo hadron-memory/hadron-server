@@ -157,7 +157,7 @@ export type ResolvedResource =
   | { kind: 'agent'; agent: { id: string; urn: string; organizationId: string } }
   | { kind: 'aiServiceConfig'; config: ConfigForAccess }
   | { kind: 'organization'; org: { id: string; urn: string } }
-  | { kind: 'user'; user: { id: string; handle: string | null } };
+  | { kind: 'user'; user: { id: string; handle: string } };
 
 // ─── Org-role helper ────────────────────────────────────────────────────────
 
@@ -708,8 +708,8 @@ export async function computeEffectiveAccess(
     }
     case 'user': {
       const grants = userGrants(subject, resolved.user);
-      const resourceUrn = `hrn:user:${resolved.user.handle ?? resolved.user.id}`;
-      return assemble(subject.id, resourceUrn, 'user', grants);
+      // The form is handle-only; resolveResource guarantees a non-null handle.
+      return assemble(subject.id, `hrn:user:${resolved.user.handle}`, 'user', grants);
     }
   }
 }
@@ -868,7 +868,9 @@ export async function resolveResource(
           where: { id },
           select: { id: true, handle: true, deletedAt: true },
         });
-        return user && !user.deletedAt
+        // The form is handle-only, so a soft-deleted OR handle-less user has no
+        // `hrn:user:` address → NOT_FOUND (never emit a non-resolvable id-URN).
+        return user && !user.deletedAt && user.handle !== null
           ? { kind: 'user', user: { id: user.id, handle: user.handle } }
           : null;
       }

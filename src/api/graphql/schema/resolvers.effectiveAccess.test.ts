@@ -390,6 +390,12 @@ describe('user (hrn:user:<handle>)', () => {
   it('an unknown handle is NOT_FOUND', async () => {
     await expect(call(member.id, 'hrn:user:nobody-here', asAdmin())).rejects.toThrow(/not found/i);
   });
+
+  it('a soft-deleted user is NOT_FOUND (handle resolves but row is gone)', async () => {
+    const h = await withHandle(member.id, 'gone-handle');
+    await db.user.update({ where: { id: member.id }, data: { deletedAt: new Date() } });
+    await expect(call(member.id, `hrn:user:${h}`, asAdmin())).rejects.toThrow(/not found/i);
+  });
 });
 
 describe('not-found / unknown refs', () => {
