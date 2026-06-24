@@ -103,6 +103,39 @@ describe('provisionPersonalWorkspace', () => {
     expect(agent!.name).toBe('My Agent');
     expect(agent!.organizationId).toBe(orgId);
   });
+
+  // issue #360 — personal-org slug derives from the user's handle.
+  it('uses `<handle>-org` for the org URN when the user has a handle', async () => {
+    const user = await db.user.create({
+      data: { id: generateId(), githubId: 5560, githubUsername: 'alice', handle: 'alice', roles: ['READER'] },
+    });
+    const { orgId, agentId } = await provisionPersonalWorkspace(db, user.id, 'Alice');
+    const org = await db.organization.findUnique({ where: { id: orgId } });
+    expect(org!.urn).toBe('alice-org');
+    // Dependent URNs derive from the org slug.
+    const agent = await db.agent.findUnique({ where: { id: agentId } });
+    expect(agent!.urn).toBe('alice-org:my-agent');
+  });
+
+  it('falls back to `personal-<userId>` when the user has no handle', async () => {
+    // The default fixture user (above) has no handle.
+    const { orgId } = await provisionPersonalWorkspace(db, userId, 'Test User');
+    const org = await db.organization.findUnique({ where: { id: orgId } });
+    expect(org!.urn).toBe(`personal-${userId}`);
+  });
+
+  it('falls back to `personal-<userId>` when `<handle>-org` is already taken', async () => {
+    // Pre-existing org squats the handle-based slug.
+    await db.organization.create({
+      data: { id: generateId(), name: 'Squatter', urn: 'bob-org' },
+    });
+    const user = await db.user.create({
+      data: { id: generateId(), githubId: 5561, githubUsername: 'bob', handle: 'bob', roles: ['READER'] },
+    });
+    const { orgId } = await provisionPersonalWorkspace(db, user.id, 'Bob');
+    const org = await db.organization.findUnique({ where: { id: orgId } });
+    expect(org!.urn).toBe(`personal-${user.id}`);
+  });
 });
 
 describe('hasPersonalWorkspace', () => {
