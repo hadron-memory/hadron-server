@@ -5143,27 +5143,23 @@ export const resolvers = {
       // The org URN is denormalized into the `urn` column of every Memory,
       // Agent and App it owns (baked in at creation as `<orgUrn>::…`). Renaming
       // the org URN must rewrite those child copies too, or they dangle (issue
-      // #337) — `propagateOrgUrnRename`. Do the rename and the child rewrite in
-      // one transaction so they commit (or roll back) together.
-      const current = await ctx.db.organization.findUniqueOrThrow({
-        where: { id: resolvedId },
-        select: { urn: true },
-      });
-      if (current.urn === urn) {
-        return ctx.db.organization.update({
-          where: { id: resolvedId },
-          data,
-          include: ORG_INCLUDE,
-        });
-      }
-
+      // #337) — `propagateOrgUrnRename`. Lock the org row and read its current
+      // urn INSIDE the transaction (FOR UPDATE) so a concurrent rename can't make
+      // the rewrite source stale, then rewrite the children in the same tx so
+      // they commit (or roll back) together.
       return ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
+        const [locked] = await tx.$queryRaw<{ urn: string }[]>`
+          SELECT urn FROM organizations WHERE id = ${resolvedId} FOR UPDATE
+        `;
+        const oldUrn = locked?.urn;
         const updated = await tx.organization.update({
           where: { id: resolvedId },
           data,
           include: ORG_INCLUDE,
         });
-        await propagateOrgUrnRename(tx, resolvedId, current.urn, urn);
+        if (oldUrn && oldUrn !== urn) {
+          await propagateOrgUrnRename(tx, resolvedId, oldUrn, urn);
+        }
         return updated;
       });
     },

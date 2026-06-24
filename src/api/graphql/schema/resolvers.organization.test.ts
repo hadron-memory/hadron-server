@@ -179,6 +179,28 @@ describe('Mutation.updateOrganization — URN rename propagation (#337)', () => 
     expect((await db.app.findUnique({ where: { id: app.id } }))?.urn).toBe(`${newUrn}::ops`);
   });
 
+  it('rewrites legacy single-colon child URNs too (<org>:<slug>)', async () => {
+    // Pre-021 rows store the single-colon form; the rewrite must catch both.
+    const oldUrn = org.urn;
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${oldUrn}:gear`, // single colon
+        name: 'gear',
+        class: 'knowledge',
+      },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${oldUrn}:juno`, name: 'juno' },
+    });
+
+    await resolvers.Mutation.updateOrganization({}, { id: org.id, urn: newUrn }, adminCtx());
+
+    expect((await db.memory.findUnique({ where: { id: mem.id } }))?.urn).toBe(`${newUrn}:gear`);
+    expect((await db.agent.findUnique({ where: { id: agent.id } }))?.urn).toBe(`${newUrn}:juno`);
+  });
+
   it('does not touch children of OTHER orgs', async () => {
     const other = await db.organization.create({
       data: { id: generateId(), name: 'other', urn: `other-org-${Date.now()}` },

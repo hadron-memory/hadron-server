@@ -4,22 +4,21 @@ import type { Prisma } from '../../generated/prisma/index.js';
  * Rewrite the denormalized org-slug prefix on every Memory, Agent and App URN
  * owned by an organization after its own URN is renamed (issue #337).
  *
- * An org's URN is baked into each child's `urn` column at creation as
- * `<orgUrn>::<rest>`; the org's own `urn` column is the only thing
- * `updateOrganization` rewrites, so without this the children keep the old
- * slug forever. Only these three tables store a URN string:
+ * An org's URN is baked into each child's `urn` column at creation. The
+ * canonical form is `<orgUrn>::<slug>`, but legacy rows may store the pre-021
+ * single-colon form `<orgUrn>:<slug>` (`normalizeUrnForLookup` collapses
+ * `::`→`:`). An org URN never itself contains a colon, so **`<orgUrn>:` (single
+ * colon) is an unambiguous boundary that matches BOTH forms** — replacing it
+ * with `<newOrgUrn>:` preserves whatever follows verbatim (`:slug` stays
+ * `::slug`, `slug` stays `:slug`), so canonical and legacy URNs both rewrite
+ * correctly.
  *
- *   - `Node` / `Edge` URNs are COMPUTED on read from the parent memory's URN
- *     (never stored), so they self-heal once the memory URN is fixed.
- *   - An installed agent's URN is likewise COMPOSED on read
- *     (`composeInstalledAgentUrn`), not stored, so it self-heals once the app
- *     and agent URNs are fixed.
- *
- * Only the leading `<oldUrn>::` segment changes; the rest of each child URN is
- * preserved verbatim. Must run inside the caller's transaction so the org
- * rename and the child rewrite commit (or roll back) together. A rewritten URN
- * that would collide with an existing `@unique` row makes the transaction throw
- * and the whole rename roll back — the safe outcome.
+ * Only these three tables store a URN string — Node/Edge URNs and installed-agent
+ * URNs are composed on read and self-heal once the parents are fixed. Each table
+ * is one bulk `UPDATE` (O(1) round-trips, not O(N) per child) inside the caller's
+ * transaction, so the org rename and the child rewrite commit (or roll back)
+ * together; a rewritten URN colliding with a `@unique` row aborts the whole
+ * rename.
  */
 export async function propagateOrgUrnRename(
   tx: Prisma.TransactionClient,
@@ -28,34 +27,29 @@ export async function propagateOrgUrnRename(
   newOrgUrn: string,
 ): Promise<void> {
   if (oldOrgUrn === newOrgUrn) return;
-  const oldPrefix = `${oldOrgUrn}::`;
-  const rewrite = (urn: string): string =>
-    urn.startsWith(oldPrefix) ? `${newOrgUrn}::${urn.slice(oldPrefix.length)}` : urn;
 
-  const memories = await tx.memory.findMany({
-    where: { organizationId },
-    select: { id: true, urn: true },
-  });
-  for (const m of memories) {
-    const next = rewrite(m.urn);
-    if (next !== m.urn) await tx.memory.update({ where: { id: m.id }, data: { urn: next } });
-  }
+  const oldBoundary = `${oldOrgUrn}:`; // single colon — matches `::` and legacy `:`
+  const newBoundary = `${newOrgUrn}:`;
+  const fromPos = oldBoundary.length + 1; // 1-based SUBSTRING start, just past the boundary
 
-  const agents = await tx.agent.findMany({
-    where: { organizationId },
-    select: { id: true, urn: true },
-  });
-  for (const a of agents) {
-    const next = rewrite(a.urn);
-    if (next !== a.urn) await tx.agent.update({ where: { id: a.id }, data: { urn: next } });
-  }
-
-  const apps = await tx.app.findMany({
-    where: { organizationId },
-    select: { id: true, urn: true },
-  });
-  for (const ap of apps) {
-    const next = rewrite(ap.urn);
-    if (next !== ap.urn) await tx.app.update({ where: { id: ap.id }, data: { urn: next } });
-  }
+  // One bulk UPDATE per table. `starts_with(urn, boundary)` is an exact prefix
+  // match (no LIKE wildcard escaping, no integer length arg); `organization_id`
+  // scopes to this org's own rows. The substring position is cast to int because
+  // the driver binds JS numbers as bigint, which `substring(text, int)` rejects.
+  // Table/column names are the Prisma @@map targets.
+  await tx.$executeRaw`
+    UPDATE memories
+    SET urn = ${newBoundary} || SUBSTRING(urn, ${fromPos}::int)
+    WHERE organization_id = ${organizationId} AND starts_with(urn, ${oldBoundary})
+  `;
+  await tx.$executeRaw`
+    UPDATE agents
+    SET urn = ${newBoundary} || SUBSTRING(urn, ${fromPos}::int)
+    WHERE organization_id = ${organizationId} AND starts_with(urn, ${oldBoundary})
+  `;
+  await tx.$executeRaw`
+    UPDATE apps
+    SET urn = ${newBoundary} || SUBSTRING(urn, ${fromPos}::int)
+    WHERE organization_id = ${organizationId} AND starts_with(urn, ${oldBoundary})
+  `;
 }
