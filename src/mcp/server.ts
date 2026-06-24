@@ -2510,7 +2510,7 @@ export function createMcpServerInstance(
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports" or "hrn:node:acme.com::mmdata::review:sort-imports". Both bare and prefixed forms accepted. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
-      nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Orthogonal to runnability — running is gated by isRunnable, never by nodeType (#118, #333).'),
+      nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
       isRunnable: z.boolean().optional().describe('Whether this node can be run as a task by hadron_run_task (cor:api:060). Defaults to not-runnable. Independent of nodeType — a runnable node may carry any nodeType.'),
       description: z.string().optional().describe('Short description'),
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
@@ -2766,7 +2766,7 @@ export function createMcpServerInstance(
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports"'),
       name: z.string().optional().describe('New node name'),
-      nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Orthogonal to runnability: changing nodeType does NOT touch isRunnable or properties (e.g. claudeSkill) — retyping a runnable node leaves it runnable, so clear isRunnable / stale task/skill/runnable tags yourself if that is what you intend. Running is gated by isRunnable, never by nodeType (#118, #333).'),
+      nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
       isRunnable: z.boolean().optional().describe('Set whether this node can be run as a task by hadron_run_task. Pass true/false; omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. Spec 031.'),
