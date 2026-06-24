@@ -204,6 +204,41 @@ describe('upsertNode with encryption', () => {
     expect(raw?.data).toMatchObject({ __enc: expect.any(String) });
   });
 
+  it('issue #366 — updateNodeData decrypts, merges, and re-encrypts `data` at rest', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const session = await resolvers.Mutation.startAgentSession(
+      {},
+      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      appCtx(secretApp.id),
+    );
+    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+
+    const node = await resolvers.Mutation.upsertNode(
+      {},
+      {
+        input: {
+          memoryId: session.memoryId!,
+          loc: 'profile',
+          name: 'profile',
+          data: { age: 42, city: 'Portland' },
+        },
+      },
+      sessionCtx,
+    );
+
+    // Merge a patch: overwrites `city`, adds `zip`, preserves `age`.
+    const merged = await resolvers.Mutation.updateNodeData(
+      {},
+      { nodeId: node.id, data: { city: 'Seattle', zip: '98101' } },
+      sessionCtx,
+    );
+    expect(merged.data).toEqual({ age: 42, city: 'Seattle', zip: '98101' });
+
+    // The DB row is ciphertext, not the plaintext merged object.
+    const raw = await db.node.findUnique({ where: { id: node.id } });
+    expect(raw?.data).toMatchObject({ __enc: expect.any(String) });
+  });
+
   it('spec 031 — abstract is encrypted at rest and returned plaintext to the caller', async () => {
     const key = generateDataKey().raw.toString('base64');
     const session = await resolvers.Mutation.startAgentSession(

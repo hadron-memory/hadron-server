@@ -1961,6 +1961,16 @@ export const typeDefs = `#graphql
     # Create or update a single node
     upsertNode(input: NodeInput!): Node!
 
+    # Shallow-merge a JSON patch into a node's 'data' bag. The supplied JSON's
+    # top-level keys are written over the node's existing 'data' (the patch
+    # wins on key collision); keys the patch doesn't mention are preserved.
+    # If the node has no 'data' yet, the supplied JSON becomes its 'data'
+    # verbatim. 'data' must be a JSON object (not an array or scalar). 'nodeId'
+    # is a node ID or fully-qualified URN. Honors the same single-write
+    # invariants as upsertNode (per-memory write auth, encryption, version
+    # history, git mirror). Returns the updated node.
+    updateNodeData(nodeId: ID!, data: JSON!): Node!
+
     # Bulk search-and-replace text across selected nodes (literal or regex).
     # Honors per-memory write auth, encryption, version history, abstract
     # staleness, and re-embedding. Supports dryRun preview.

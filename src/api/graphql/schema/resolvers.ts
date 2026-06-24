@@ -4382,6 +4382,86 @@ export const resolvers = {
       return finalNode;
     },
 
+    // Shallow-merge a JSON patch into a node's `data` bag (issue #366).
+    // The supplied object's top-level keys overwrite the node's existing
+    // `data` (the patch wins on collision); untouched keys are preserved; a
+    // node with no prior data takes the patch verbatim. Delegates the write to
+    // upsertNode so every single-write invariant (write auth, re-encryption,
+    // NodeVersion snapshot, git mirror) is applied once and stays in sync —
+    // this resolver only resolves the node and computes the merged plaintext.
+    updateNodeData: async (
+      _: unknown,
+      { nodeId, data }: { nodeId: string; data: unknown },
+      ctx: Context,
+    ) => {
+      // The patch must be a JSON object — the operation merges keys, so an
+      // array / scalar / null has no sensible "apply onto existing data"
+      // meaning (matches the mergeJson contract used by mergeNodes).
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) {
+        throw new GraphQLError('updateNodeData: `data` must be a JSON object.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+
+      // Resolve the node (ID or fully-qualified URN — same dispatch as
+      // mergeNodes / createEdge). A genuine miss → NODE_NOT_FOUND; a malformed
+      // relative URN propagates as UrnNotQualifiedError (spec 022).
+      let resolvedId: string;
+      try {
+        ({ id: resolvedId } = await resolveNodeRef(ctx.db, nodeId));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) {
+          throw new GraphQLError(`Node not found: "${nodeId}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: nodeId },
+          });
+        }
+        throw e;
+      }
+      const node = await ctx.db.node.findUnique({ where: { id: resolvedId } });
+      if (!node || node.deletedAt) {
+        throw new GraphQLError(`Node not found: "${nodeId}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: nodeId },
+        });
+      }
+
+      // Write access BEFORE reading/decrypting the (possibly encrypted) data,
+      // so a non-writer can't use this surface as a data/existence oracle.
+      await requireMemoryWriteAccess(ctx, node.memoryId);
+
+      // Decrypt the existing `data` to plaintext so the merge folds the real
+      // object; upsertNode re-encrypts on write. decryptNodeFields mutates the
+      // row in place — node.data is PLAINTEXT past this point.
+      const memEnc = await getMemoryEncryptionInfo(ctx.db, node.memoryId);
+      if (memEnc.isEncrypted) {
+        decryptNodeFields(node, memEnc);
+      }
+
+      // Shallow merge: the patch wins on key collision; absent keys preserved.
+      // A node with no object data yet takes the patch as-is.
+      const existing = node.data;
+      const merged =
+        existing != null && typeof existing === 'object' && !Array.isArray(existing)
+          ? { ...(existing as Record<string, unknown>), ...(data as Record<string, unknown>) }
+          : (data as Record<string, unknown>);
+
+      // Delegate the write. Pass the existing loc/name/ownerRepo so upsertNode
+      // targets the same row and preserves them (omitted fields = preserve).
+      return resolvers.Mutation.upsertNode(
+        _,
+        {
+          input: {
+            id: node.id,
+            memoryId: node.memoryId,
+            loc: node.loc,
+            name: node.name,
+            data: merged,
+            ...(node.ownerRepo != null ? { ownerRepo: node.ownerRepo } : {}),
+          },
+        },
+        ctx,
+      );
+    },
+
     // Bulk literal/regex search-and-replace across selected nodes. Reuses the
     // single-write invariants from upsertNode (per-memory write auth,
     // decrypt→replace→re-encrypt, NodeVersion snapshot, abstractOriginHash
