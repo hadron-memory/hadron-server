@@ -1316,12 +1316,13 @@ export function createMcpServerInstance(
       mode: z.enum(['keyword', 'vector', 'hybrid']).optional().describe('keyword (default): substring match — output is byte-identical to today\'s no-mode behavior. vector: semantic search over the memory\'s vector index (requires vectorIndexEnabled). hybrid: keyword + vector fused by reciprocal-rank fusion (RRF, k=60). On a non-indexed memory, mode:hybrid degrades to keyword-only and emits a [degraded:no_vector_index] note. Spec 033.'),
       parentRel: z.string().optional().describe('Scope search to this subtree (keyword mode)'),
       memoryUrn: z.string().optional().describe('Scope search to this memory'),
+      isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
       limit: z.number().optional().describe('Max results (default 50)'),
       expand: z.number().int().min(0).max(3).optional().describe('Append undirected graph neighbors (all edge types) within depth N AFTER the ranked hits, unscored. Default 0 (no expansion). Max 3. Useful for context-stuffing — the ranked nodes plus their immediate graph context in one tool call. Spec 033 FR-020.'),
       granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),
     },
-    async ({ query, mode, parentRel, memoryUrn, brief, limit, expand, granularity }) => {
+    async ({ query, mode, parentRel, memoryUrn, isRunnable, brief, limit, expand, granularity }) => {
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -1353,6 +1354,10 @@ export function createMcpServerInstance(
       // short of hard-deleting the row.
       const where: Record<string, unknown> = { deletedAt: null };
       if (memoryIds) where.memoryId = { in: memoryIds };
+      // Runnable filter (cor:api:060). Applied to the shared `where` so it
+      // covers keyword mode and hybrid's keyword half; the vector/chunk/hybrid
+      // render fetches below apply the same predicate so it holds in every mode.
+      if (isRunnable != null) where.isRunnable = isRunnable;
 
       // Scope to memory URN if provided. Spec 022 (FR-003): no fallback to
       // `activeMemoryUrn` — the caller must supply a fully-qualified memory
@@ -1518,7 +1523,11 @@ export function createMcpServerInstance(
           // multiple chunk hits).
           const uniqueNodeIds = Array.from(new Set(chunkHits.map((h) => h.nodeId)));
           const hitNodes = await db.node.findMany({
-            where: { id: { in: uniqueNodeIds }, deletedAt: null },
+            where: {
+              id: { in: uniqueNodeIds },
+              deletedAt: null,
+              ...(isRunnable != null ? { isRunnable } : {}),
+            },
             select: { id: true, loc: true, memoryId: true, name: true },
           });
           const nodeById = new Map(hitNodes.map((n) => [n.id, n]));
@@ -1552,7 +1561,11 @@ export function createMcpServerInstance(
         // include outgoing-edge index info. The vector path was previously
         // omitting it — bring it in line with the keyword path.
         const hitNodes = await db.node.findMany({
-          where: { id: { in: allRenderIds }, deletedAt: null },
+          where: {
+            id: { in: allRenderIds },
+            deletedAt: null,
+            ...(isRunnable != null ? { isRunnable } : {}),
+          },
           include: brief
             ? {
                 outgoingEdges: {
@@ -1699,7 +1712,11 @@ export function createMcpServerInstance(
           // PR-223 review (Gemini): include outgoing edges in brief mode,
           // matching keyword path coverage.
           const renderNodes = await db.node.findMany({
-            where: { id: { in: allRenderIds }, deletedAt: null },
+            where: {
+              id: { in: allRenderIds },
+              deletedAt: null,
+              ...(isRunnable != null ? { isRunnable } : {}),
+            },
             include: brief
               ? {
                   outgoingEdges: {
@@ -2307,8 +2324,9 @@ export function createMcpServerInstance(
       parentRel: z.string().optional().describe('Parent node rel path; omit to list from memory root'),
       memoryUrn: z.string().optional().describe('Memory URN; uses active memory if not provided'),
       depth: z.number().optional().describe('Max depth to traverse (default: 1)'),
+      isRunnable: z.boolean().optional().describe('Filter the tree to runnable status. true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to list every node. Spec cor:api:060.'),
     },
-    async ({ parentRel, memoryUrn, depth }) => {
+    async ({ parentRel, memoryUrn, depth, isRunnable }) => {
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -2380,6 +2398,11 @@ export function createMcpServerInstance(
       if (prefix) where.loc = { startsWith: prefix + ':' };
       if (memoryId) where.memoryId = memoryId;
       else if (memoryIds) where.memoryId = { in: memoryIds };
+      // NB: the runnable filter (cor:api:060) is applied IN-MEMORY below, not
+      // here — see the realByKey/nodes split. Filtering it into this DB query
+      // would hide real-but-non-runnable ancestors (parent nodes are usually
+      // isRunnable=null), so the synthesize-parent walk would mislabel them as
+      // "(missing — materialize)" even though they exist.
 
       const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
 
@@ -2394,7 +2417,20 @@ export function createMcpServerInstance(
         const existing = byKey.get(k);
         if (!existing || (existing.isLink && !n.isLink)) byKey.set(k, n);
       }
-      const nodes = Array.from(byKey.values());
+      const allDeduped = Array.from(byKey.values());
+      // Runnable filter (cor:api:060) — prune the VISIBLE rows + child counts
+      // to (non-)task nodes. `realByKey` is intentionally built from the
+      // UNFILTERED set so the synthesize-parent walk renders a real-but-non-
+      // runnable ancestor (typical parent node: isRunnable=null) as the node it
+      // is, rather than a misleading "(missing — materialize)" gap. An implicit
+      // parent still surfaces only when a matching descendant keeps it in view.
+      const realByKey = new Map(
+        allDeduped.map((n) => [dedupKey(n.memoryId, n.loc), n] as const),
+      );
+      const nodes =
+        isRunnable != null
+          ? allDeduped.filter((n) => n.isRunnable === isRunnable)
+          : allDeduped;
 
       // Depth math: prefix has `prefixDepth` segments; a node's depth-
       // relative-to-prefix is the number of segments BEYOND the prefix
@@ -2421,7 +2457,6 @@ export function createMcpServerInstance(
         node: typeof allNodes[0] | null; // null = synthesized intermediate
         memoryId: string;
       }
-      const realByKey = new Map(nodes.map((n) => [dedupKey(n.memoryId, n.loc), n] as const));
       const visibleByKey = new Map<string, TreeRow>();
 
       for (const n of nodes) {

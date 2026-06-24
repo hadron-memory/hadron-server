@@ -1617,15 +1617,26 @@ export const typeDefs = `#graphql
       """
       memory: ID
       """
-      Scope to a SET of memories by ID (issue #355 — node content search
-      across an agent's / app's memories in one round-trip). Each id is
-      intersected with the caller's access filter; inaccessible ids are
-      silently dropped (a multi-select UI shouldn't fail the whole search
-      because one id isn't readable). Takes precedence over \`memory\` when
-      both are supplied; omit both to search every accessible memory.
+      Scope to a SET of memories (issue #355 — node content search
+      across an agent's / app's memories in one round-trip). Each entry
+      is a memory ID or a fully-qualified URN (007-entity-id-or-urn dispatch
+      via resolveMemoryRef), resolved then intersected with the caller's
+      access filter; unresolvable refs and inaccessible ids are silently
+      dropped (a multi-select UI shouldn't fail the whole search because one
+      ref isn't readable). Takes precedence over \`memory\` when both are
+      supplied; omit both to search every accessible memory.
       """
       memoryIds: [ID!]
       nodeType: String
+      """
+      Filter by runnable status. \`true\` returns only task nodes
+      (Node.isRunnable = true) — the canonical "tasks I can run" predicate
+      that hadron_run_task gates on. \`false\` returns only nodes explicitly
+      marked non-runnable; note most nodes leave isRunnable NULL, so
+      \`false\` does NOT include them. Omit to return nodes regardless of
+      runnable status.
+      """
+      isRunnable: Boolean
       tags: [String!]
       search: String
       prefix: String

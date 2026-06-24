@@ -2403,7 +2403,7 @@ export const resolvers = {
 
     nodes: async (
       _: unknown,
-      { memory, memoryIds, nodeType, tags, search, prefix: rawPrefix, limit, offset }: { memory?: string; memoryIds?: string[]; nodeType?: string; tags?: string[]; search?: string; prefix?: string; limit?: number; offset?: number },
+      { memory, memoryIds, nodeType, isRunnable, tags, search, prefix: rawPrefix, limit, offset }: { memory?: string; memoryIds?: string[]; nodeType?: string; isRunnable?: boolean; tags?: string[]; search?: string; prefix?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       const prefix = rawPrefix ? parseUrnInput(rawPrefix).value : undefined;
@@ -2416,16 +2416,30 @@ export const resolvers = {
       // overwrite class as #253/#255).
       if (memoryIds && memoryIds.length > 0) {
         // Plural memory-set scope (issue #355 — content search across an
-        // agent's / app's memories). Intersect the requested set with the
-        // access filter in-place, same composition discipline as the singular
-        // `memory` branch. Inaccessible ids are silently dropped (a
-        // multi-select search shouldn't fail wholesale over one unreadable
-        // id). Takes precedence over `memory` when both are supplied.
+        // agent's / app's memories). Each entry is an ID or a fully-qualified
+        // URN (007-entity-id-or-urn); resolve to IDs first, dropping
+        // unresolvable refs rather than throwing — the singular `memory`
+        // branch throws on a bad ref, but a multi-select set shouldn't fail
+        // wholesale over one bad entry (same forgiving posture as the
+        // inaccessible-id drop below). Then intersect the requested set with
+        // the access filter in-place, same composition discipline as the
+        // singular `memory` branch. Takes precedence over `memory` when both
+        // are supplied.
+        const resolved = await Promise.all(
+          memoryIds.map((ref) =>
+            // An ID-shaped ref needs no lookup — pass it straight through; the
+            // access-filter intersection below is the real gate (a bogus or
+            // inaccessible id matches nothing). Only URN refs hit the DB.
+            isId(ref)
+              ? Promise.resolve(ref)
+              : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
+        );
+        const resolvedIds = resolved.filter((id): id is string => id !== null);
         if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
           const allowed = new Set((access.memoryId as { in: string[] }).in);
-          access.memoryId = { in: memoryIds.filter((id) => allowed.has(id)) };
+          access.memoryId = { in: resolvedIds.filter((id) => allowed.has(id)) };
         } else {
-          access.memoryId = { in: memoryIds };
+          access.memoryId = { in: resolvedIds };
         }
       } else if (memory) {
         const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memory);
@@ -2443,6 +2457,10 @@ export const resolvers = {
           ...access,
           // Exclude system nodes from search by default (unless explicitly requested)
           ...(nodeType ? { nodeType } : search ? { nodeType: { not: 'system' } } : {}),
+          // Runnable filter (cor:api:060): isRunnable=true is the canonical
+          // "tasks I can run" predicate. Map the boolean straight through —
+          // `false` matches strictly-false rows, NOT the NULL majority.
+          ...(isRunnable != null ? { isRunnable } : {}),
           ...(tags?.length ? tagsFilter(tags) : {}),
           ...(prefix ? { loc: { startsWith: prefix } } : {}),
           ...(search

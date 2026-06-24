@@ -689,3 +689,116 @@ describe('spec 031 US2 — hadron_find_nodes preview includes the abstract', () 
     expect(text).toContain('No nodes found');
   });
 });
+
+// ---------------------------------------------------------------------------
+// cor:api:060 — isRunnable filter on hadron_find_nodes / hadron_list_nodes
+// ---------------------------------------------------------------------------
+
+describe('cor:api:060 — isRunnable filter (find/list)', () => {
+  let runnableLoc: string;
+  let notRunnableLoc: string;
+
+  beforeEach(async () => {
+    // A runnable task node and an explicitly-non-runnable node alongside the
+    // fixture's isRunnable=NULL majority.
+    const task = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: fx.memory.id,
+        loc: 'runnable-task',
+        name: 'Runnable task',
+        isRunnable: true,
+      },
+    });
+    const notTask = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: fx.memory.id,
+        loc: 'explicitly-not-runnable',
+        name: 'Not runnable',
+        isRunnable: false,
+      },
+    });
+    runnableLoc = task.loc;
+    notRunnableLoc = notTask.loc;
+  });
+
+  it('hadron_find_nodes isRunnable=true returns only the runnable node', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: '*',
+      memoryUrn: fx.memory.urn,
+      isRunnable: true,
+    });
+    expect(text).toContain(runnableLoc);
+    expect(text).not.toContain(notRunnableLoc);
+    // NULL-runnable fixture node must not surface under isRunnable=true.
+    expect(text).not.toContain(fx.nodes.archive.loc);
+  });
+
+  it('hadron_find_nodes without the filter still surfaces NULL-runnable nodes', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: '*',
+      memoryUrn: fx.memory.urn,
+    });
+    expect(text).toContain(runnableLoc);
+    expect(text).toContain(fx.nodes.archive.loc);
+  });
+
+  it('hadron_list_nodes isRunnable=true prunes the tree to task nodes', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_list_nodes', {
+      memoryUrn: fx.memory.urn,
+      depth: 2,
+      isRunnable: true,
+    });
+    expect(text).toContain(runnableLoc);
+    expect(text).not.toContain(notRunnableLoc);
+    expect(text).not.toContain(fx.nodes.archive.loc);
+  });
+
+  it('hadron_list_nodes isRunnable=false returns only the explicitly-non-runnable node', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_list_nodes', {
+      memoryUrn: fx.memory.urn,
+      depth: 2,
+      isRunnable: false,
+    });
+    expect(text).toContain(notRunnableLoc);
+    expect(text).not.toContain(runnableLoc);
+  });
+
+  it('hadron_list_nodes renders a real non-runnable PARENT of a runnable child, not "(missing)"', async () => {
+    // Regression (PR #359 review): the runnable filter must not be pushed into
+    // the DB query — a real parent node (typically isRunnable=NULL) would then
+    // be absent from the result set and the synthesize-parent walk would label
+    // it "(missing — use hadron_create_parent_node to materialize)" even though
+    // it exists. The filter is applied to the VISIBLE set, with realByKey kept
+    // over the full set so genuine ancestors still resolve.
+    await db.node.create({
+      data: { id: generateId(), memoryId: fx.memory.id, loc: 'taskgroup', name: 'Task group' },
+    }); // isRunnable = NULL
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: fx.memory.id,
+        loc: 'taskgroup:deploy',
+        name: 'Deploy',
+        isRunnable: true,
+      },
+    });
+
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_list_nodes', {
+      memoryUrn: fx.memory.urn,
+      depth: 2,
+      isRunnable: true,
+    });
+    // The runnable child surfaces, and its real parent renders by name — never
+    // as a synthesized "(missing)" gap.
+    expect(text).toContain('taskgroup:deploy');
+    expect(text).toContain('Task group');
+    expect(text).not.toContain('(missing');
+  });
+});
