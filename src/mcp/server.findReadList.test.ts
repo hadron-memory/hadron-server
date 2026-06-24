@@ -463,6 +463,38 @@ describe('#180 Bug 2 — edge includes filter tombstoned target/source', () => {
 });
 
 // ---------------------------------------------------------------------------
+// #322 — surface the stable PK so callers can reference nodes by id
+// ---------------------------------------------------------------------------
+
+describe('#322 — read tools surface the node PK', () => {
+  it('hadron_get_node emits an `ID: <pk>` meta line', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_get_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.nodes.witness.loc}`,
+    });
+    expect(text).toMatch(new RegExp(`^ID: ${fx.nodes.witness.id}$`, 'm'));
+  });
+
+  it('hadron_get_node surfaces the target PK on Related edge lines', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_get_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.nodes.edgeSource.loc}`,
+    });
+    // The live target's id appears so a caller can reference it by PK.
+    expect(text).toContain(`id: ${fx.nodes.liveTarget.id}`);
+  });
+
+  it('hadron_find_nodes surfaces the PK on each result line', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: 'edge source',
+      memoryUrn: fx.memory.urn,
+    });
+    expect(text).toContain(`(id: ${fx.nodes.edgeSource.id})`);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // #186 — Type: meta line in read tools
 // ---------------------------------------------------------------------------
 

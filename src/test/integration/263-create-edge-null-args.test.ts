@@ -22,6 +22,7 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 
 let nodeA: { id: string };
 let nodeB: { id: string };
+let memUrn: string;
 
 function adminCtx(): Context {
   return { db, roles: ['ADMIN'] };
@@ -41,11 +42,48 @@ beforeEach(async () => {
       class: 'knowledge',
     },
   });
+  memUrn = memory.urn;
   nodeA = await db.node.create({
     data: { id: generateId(), memoryId: memory.id, loc: 'a', name: 'A' },
   });
   nodeB = await db.node.create({
     data: { id: generateId(), memoryId: memory.id, loc: 'b', name: 'B' },
+  });
+});
+
+describe('createEdge endpoint refs accept PK or URN (#322)', () => {
+  it('resolves a fully-qualified URN for either endpoint (no longer PK-only)', async () => {
+    const edge = await resolvers.Mutation.createEdge(
+      {},
+      {
+        sourceNodeId: `urn:node:${memUrn}:a`,
+        targetNodeId: `urn:node:${memUrn}:b`,
+        name: 'routes-to',
+      },
+      adminCtx(),
+    );
+    expect(edge.sourceId).toBe(nodeA.id);
+    expect(edge.targetId).toBe(nodeB.id);
+  });
+
+  it('accepts a mix of PK source + URN target', async () => {
+    const edge = await resolvers.Mutation.createEdge(
+      {},
+      { sourceNodeId: nodeA.id, targetNodeId: `urn:node:${memUrn}:b`, name: 'mixed' },
+      adminCtx(),
+    );
+    expect(edge.sourceId).toBe(nodeA.id);
+    expect(edge.targetId).toBe(nodeB.id);
+  });
+
+  it('throws NODE_NOT_FOUND with the source wording for an unresolvable source', async () => {
+    await expect(
+      resolvers.Mutation.createEdge(
+        {},
+        { sourceNodeId: `urn:node:${memUrn}:nope`, targetNodeId: nodeB.id, name: 'x' },
+        adminCtx(),
+      ),
+    ).rejects.toThrow(/Source node not found/);
   });
 });
 

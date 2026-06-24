@@ -4689,12 +4689,34 @@ export const resolvers = {
       if (condition !== undefined && condition !== null) {
         throwOnInvalidCondition(condition);
       }
+      // #322: each endpoint may be an ID-shape PK (preferred — immutable
+      // across move/rename, so the edge survives a later URN change) OR a
+      // fully-qualified node URN. resolveNodeRef dispatches on shape; a URN
+      // must be fully qualified (spec 022 — no contextMemoryId at the API
+      // boundary). Previously this path was PK-only (a bare findUnique by
+      // id), so a URN caller got a spurious not-found.
+      let resolvedSourceId: string;
+      let resolvedTargetId: string;
+      try {
+        ({ id: resolvedSourceId } = await resolveNodeRef(ctx.db, sourceNodeId));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError || e instanceof UrnNotQualifiedError)
+          throw new GraphQLError(`Source node not found: "${sourceNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        throw e;
+      }
+      try {
+        ({ id: resolvedTargetId } = await resolveNodeRef(ctx.db, targetNodeId));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError || e instanceof UrnNotQualifiedError)
+          throw new GraphQLError(`Target node not found: "${targetNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        throw e;
+      }
       // Spec 037: an edge carries a memory-unique `loc` (its identity + URN
       // suffix), with `memoryId` denormalized from the source node. Fetch
       // both endpoints to compose/derive the loc.
       const [src, tgt] = await Promise.all([
-        ctx.db.node.findUnique({ where: { id: sourceNodeId }, select: { loc: true, memoryId: true } }),
-        ctx.db.node.findUnique({ where: { id: targetNodeId }, select: { loc: true } }),
+        ctx.db.node.findUnique({ where: { id: resolvedSourceId }, select: { loc: true, memoryId: true } }),
+        ctx.db.node.findUnique({ where: { id: resolvedTargetId }, select: { loc: true } }),
       ]);
       if (!src) throw new GraphQLError(`Source node not found: "${sourceNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
       if (!tgt) throw new GraphQLError(`Target node not found: "${targetNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
@@ -4711,8 +4733,8 @@ export const resolvers = {
         data: {
           id: generateId(),
           memoryId: src.memoryId,
-          sourceId: sourceNodeId,
-          targetId: targetNodeId,
+          sourceId: resolvedSourceId,
+          targetId: resolvedTargetId,
           loc: edgeLoc,
           name: name ?? null,
           description: description ?? null,

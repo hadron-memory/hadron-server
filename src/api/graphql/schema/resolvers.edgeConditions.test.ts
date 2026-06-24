@@ -8,14 +8,28 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { resolvers, type Context } from './resolvers.js';
 
+// #322: createEdge resolves each endpoint through resolveNodeRef (accepts an
+// ID-shape PK or a fully-qualified URN). These pure-mock tests use ID-shape
+// refs so resolution takes the bare-PK lookup path.
+const SRC_ID = 'a'.repeat(32);
+const TGT_ID = 'b'.repeat(32);
+
 // Build a minimal mock that mirrors the parts of PrismaClient the
 // createEdge / updateEdge resolvers touch.
 function mockDb() {
   return {
     // Spec 037: createEdge fetches both endpoints to compose/derive the edge
-    // loc + denormalize memoryId. A single stub serves source and target.
+    // loc + denormalize memoryId. #322: resolveNodeRef first does a
+    // select:{id,deletedAt} PK lookup, then the resolver re-fetches
+    // loc/memoryId — one impl returning a superset row serves both, and
+    // echoes back the requested id so source/target stay distinct.
     node: {
-      findUnique: vi.fn().mockResolvedValue({ loc: 'l', memoryId: 'mem-1' }),
+      findUnique: vi.fn().mockImplementation(async ({ where }: { where: { id?: string } }) => ({
+        id: where?.id ?? SRC_ID,
+        deletedAt: null,
+        loc: 'l',
+        memoryId: 'mem-1',
+      })),
     },
     edge: {
       create: vi.fn().mockImplementation(async ({ data }: { data: unknown }) => ({
@@ -56,8 +70,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: 'node-source',
-        targetNodeId: 'node-target',
+        sourceNodeId: SRC_ID,
+        targetNodeId: TGT_ID,
         name: 'force-profile',
         condition,
       },
@@ -72,8 +86,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: 'node-source',
-        targetNodeId: 'node-target',
+        sourceNodeId: SRC_ID,
+        targetNodeId: TGT_ID,
         name: 'urgent',
         condition: null,
         priority: 5,
@@ -92,8 +106,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: 'node-source',
-        targetNodeId: 'node-target',
+        sourceNodeId: SRC_ID,
+        targetNodeId: TGT_ID,
         name: 'routes-to',
         condition: null,
         priority: null,
@@ -127,8 +141,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       mutations.createEdge(
         null,
         {
-          sourceNodeId: 'a',
-          targetNodeId: 'b',
+          sourceNodeId: SRC_ID,
+          targetNodeId: TGT_ID,
           name: 'l',
           condition: { cat: ['x', 'y'] },
         },
@@ -149,8 +163,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       mutations.createEdge(
         null,
         {
-          sourceNodeId: 'a',
-          targetNodeId: 'b',
+          sourceNodeId: SRC_ID,
+          targetNodeId: TGT_ID,
           name: 'l',
           condition: { var: 'session.foo' },
         },
@@ -170,8 +184,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       mutations.createEdge(
         null,
         {
-          sourceNodeId: 'a',
-          targetNodeId: 'b',
+          sourceNodeId: SRC_ID,
+          targetNodeId: TGT_ID,
           name: 'l',
           condition: { var: 'message.data.exception' },
         },
@@ -191,7 +205,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await expect(
       mutations.createEdge(
         null,
-        { sourceNodeId: 'a', targetNodeId: 'b', name: 'l', condition: huge },
+        { sourceNodeId: SRC_ID, targetNodeId: TGT_ID, name: 'l', condition: huge },
         testCtx,
       ),
     ).rejects.toMatchObject({
@@ -208,7 +222,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await expect(
       mutations.createEdge(
         null,
-        { sourceNodeId: 'a', targetNodeId: 'b', name: 'l', condition: nested },
+        { sourceNodeId: SRC_ID, targetNodeId: TGT_ID, name: 'l', condition: nested },
         testCtx,
       ),
     ).rejects.toMatchObject({
@@ -223,8 +237,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: 'a',
-        targetNodeId: 'b',
+        sourceNodeId: SRC_ID,
+        targetNodeId: TGT_ID,
         name: 'unconditional',
         condition: null,
       },
