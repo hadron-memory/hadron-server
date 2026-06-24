@@ -3693,18 +3693,34 @@ export const resolvers = {
         if (!ctx.userId || memory.userId !== ctx.userId) throw new Error('Forbidden');
         return memory;
       }
-      // Authorization: platform ADMIN or member of the memory's org
+      // Authorization: platform ADMIN/OWNER, a member of the memory's org, OR
+      // any caller the shared read gate already admits — PUBLIC visibility,
+      // a cross-org subscription, or an App session scoped to this memory.
+      // The node queries (nodeById/nodes) authorize through that same set via
+      // memoryAccessFilter → getAccessibleMemoryIds, so without the fallback a
+      // public-visibility reader could read the memory's NODES but not the
+      // memory record itself; the portal's uncaught MEMORY_BY_ID_QUERY then
+      // turned that Forbidden into an HTTP 500 (issue #362). The org-member
+      // fast-path is kept because getAccessibleMemoryIds (via
+      // getOrgReadableMemoryIds) intentionally omits app/system-class org
+      // memories, which members can still open here as they do today.
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
-        if (!ctx.userId) throw new Error('Forbidden');
-        const member = await ctx.db.orgMember.findUnique({
-          where: {
-            organizationId_userId: {
-              organizationId: memory.organizationId,
-              userId: ctx.userId,
-            },
-          },
-        });
-        if (!member) throw new Error('Forbidden');
+        const member = ctx.userId
+          ? await ctx.db.orgMember.findUnique({
+              where: {
+                organizationId_userId: {
+                  organizationId: memory.organizationId,
+                  userId: ctx.userId,
+                },
+              },
+            })
+          : null;
+        if (!member) {
+          const accessibleIds = await getAccessibleMemoryIds(ctx);
+          if (accessibleIds !== null && !accessibleIds.includes(memory.id)) {
+            throw new Error('Forbidden');
+          }
+        }
       }
       return memory;
     },
