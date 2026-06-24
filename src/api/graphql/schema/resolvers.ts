@@ -2378,7 +2378,12 @@ export const resolvers = {
         // are supplied.
         const resolved = await Promise.all(
           memoryIds.map((ref) =>
-            resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
+            // An ID-shaped ref needs no lookup — pass it straight through; the
+            // access-filter intersection below is the real gate (a bogus or
+            // inaccessible id matches nothing). Only URN refs hit the DB.
+            isId(ref)
+              ? Promise.resolve(ref)
+              : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
         );
         const resolvedIds = resolved.filter((id): id is string => id !== null);
         if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {

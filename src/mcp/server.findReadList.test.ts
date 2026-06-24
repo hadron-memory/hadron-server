@@ -768,4 +768,37 @@ describe('cor:api:060 — isRunnable filter (find/list)', () => {
     expect(text).toContain(notRunnableLoc);
     expect(text).not.toContain(runnableLoc);
   });
+
+  it('hadron_list_nodes renders a real non-runnable PARENT of a runnable child, not "(missing)"', async () => {
+    // Regression (PR #359 review): the runnable filter must not be pushed into
+    // the DB query — a real parent node (typically isRunnable=NULL) would then
+    // be absent from the result set and the synthesize-parent walk would label
+    // it "(missing — use hadron_create_parent_node to materialize)" even though
+    // it exists. The filter is applied to the VISIBLE set, with realByKey kept
+    // over the full set so genuine ancestors still resolve.
+    await db.node.create({
+      data: { id: generateId(), memoryId: fx.memory.id, loc: 'taskgroup', name: 'Task group' },
+    }); // isRunnable = NULL
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: fx.memory.id,
+        loc: 'taskgroup:deploy',
+        name: 'Deploy',
+        isRunnable: true,
+      },
+    });
+
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_list_nodes', {
+      memoryUrn: fx.memory.urn,
+      depth: 2,
+      isRunnable: true,
+    });
+    // The runnable child surfaces, and its real parent renders by name — never
+    // as a synthesized "(missing)" gap.
+    expect(text).toContain('taskgroup:deploy');
+    expect(text).toContain('Task group');
+    expect(text).not.toContain('(missing');
+  });
 });

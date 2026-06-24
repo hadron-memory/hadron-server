@@ -2398,10 +2398,11 @@ export function createMcpServerInstance(
       if (prefix) where.loc = { startsWith: prefix + ':' };
       if (memoryId) where.memoryId = memoryId;
       else if (memoryIds) where.memoryId = { in: memoryIds };
-      // Runnable filter (cor:api:060) — prune the browse tree to (non-)task
-      // nodes. Note this filters the synthesize-parent pass's input set too:
-      // an implicit parent surfaces only if a runnable descendant remains.
-      if (isRunnable != null) where.isRunnable = isRunnable;
+      // NB: the runnable filter (cor:api:060) is applied IN-MEMORY below, not
+      // here — see the realByKey/nodes split. Filtering it into this DB query
+      // would hide real-but-non-runnable ancestors (parent nodes are usually
+      // isRunnable=null), so the synthesize-parent walk would mislabel them as
+      // "(missing — materialize)" even though they exist.
 
       const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
 
@@ -2416,7 +2417,20 @@ export function createMcpServerInstance(
         const existing = byKey.get(k);
         if (!existing || (existing.isLink && !n.isLink)) byKey.set(k, n);
       }
-      const nodes = Array.from(byKey.values());
+      const allDeduped = Array.from(byKey.values());
+      // Runnable filter (cor:api:060) — prune the VISIBLE rows + child counts
+      // to (non-)task nodes. `realByKey` is intentionally built from the
+      // UNFILTERED set so the synthesize-parent walk renders a real-but-non-
+      // runnable ancestor (typical parent node: isRunnable=null) as the node it
+      // is, rather than a misleading "(missing — materialize)" gap. An implicit
+      // parent still surfaces only when a matching descendant keeps it in view.
+      const realByKey = new Map(
+        allDeduped.map((n) => [dedupKey(n.memoryId, n.loc), n] as const),
+      );
+      const nodes =
+        isRunnable != null
+          ? allDeduped.filter((n) => n.isRunnable === isRunnable)
+          : allDeduped;
 
       // Depth math: prefix has `prefixDepth` segments; a node's depth-
       // relative-to-prefix is the number of segments BEYOND the prefix
@@ -2443,7 +2457,6 @@ export function createMcpServerInstance(
         node: typeof allNodes[0] | null; // null = synthesized intermediate
         memoryId: string;
       }
-      const realByKey = new Map(nodes.map((n) => [dedupKey(n.memoryId, n.loc), n] as const));
       const visibleByKey = new Map<string, TreeRow>();
 
       for (const n of nodes) {
