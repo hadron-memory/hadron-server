@@ -937,12 +937,29 @@ export function createMcpServerInstance(
         select: { id: true, urn: true, name: true, data: true, class: true },
       });
 
+      // #339: the displayed level MUST equal what mutating ops enforce.
+      // canWriteToMemory grants global ADMIN/OWNER an unconditional write
+      // bypass on every NON-personal memory (access-control.ts), but
+      // getMemoryAccess — which `levels` is built from — never encodes that
+      // bypass (it tops out at READ_ONLY for org-readable knowledge/group/
+      // public rows). Without folding the bypass in here, an admin sees their
+      // org's memories labeled read-only while hadron_create_node into them
+      // succeeds — the exact list-vs-enforce divergence #339 reported. The
+      // bypass is non-personal only; personal/private rows keep the strict-
+      // ownership level the owned fold above already computed via
+      // canWriteToMemory, so this can't wrongly upgrade another user's
+      // (unreachable) personal memory.
+      const isSuperWriter = !!auth.roles?.includes('ADMIN') || !!auth.roles?.includes('OWNER');
+
       const lines = memories.map((m) => {
-        const level = levels.get(m.id) === 'READ_WRITE' ? 'read-write' : 'read-only';
+        const isPersonal = m.class === 'personal' || m.class === 'private';
+        const writable =
+          levels.get(m.id) === 'READ_WRITE' || (isSuperWriter && !isPersonal);
+        const level = writable ? 'read-write' : 'read-only';
         // Tag personal/private rows so it's clear *why* an otherwise-private
         // memory shows up (it's the caller's own); knowledge/app/group rows
         // keep the bare `(level)` form they've always had.
-        const cls = m.class === 'personal' || m.class === 'private' ? `${m.class}, ` : '';
+        const cls = isPersonal ? `${m.class}, ` : '';
         const head = `- **${formatCanonicalUrn('memory', m.urn)}** — ${m.name} (${cls}${level})`;
         // Free-form metadata bag (no server-side semantics). Surfaced
         // read-only on its own indented line, only when non-null so the
