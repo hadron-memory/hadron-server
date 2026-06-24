@@ -949,7 +949,7 @@ export function createMcpServerInstance(
       // ownership level the owned fold above already computed via
       // canWriteToMemory, so this can't wrongly upgrade another user's
       // (unreachable) personal memory.
-      const isSuperWriter = auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER');
+      const isSuperWriter = !!auth.roles?.includes('ADMIN') || !!auth.roles?.includes('OWNER');
 
       const lines = memories.map((m) => {
         const isPersonal = m.class === 'personal' || m.class === 'private';
