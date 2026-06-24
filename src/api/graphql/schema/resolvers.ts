@@ -5177,6 +5177,7 @@ export const resolvers = {
       };
 
       // Accumulated plaintext changes to the target.
+      // Spec: cor:api:070:01 (field merge strategy).
       const changed: Record<string, unknown> = {};
       let abstractChanged = false;
       let contentChanged = false;
@@ -5276,6 +5277,7 @@ export const resolvers = {
         }
 
         if (fields.has('EDGES')) {
+          // Spec: cor:api:070:02 (edge transfer + source disposition).
           // Edges reference nodes by id, so transferring the source's
           // relationships means re-pointing its edge endpoints onto the
           // target. Collisions on the (loc, memoryId) unique index — an edge
