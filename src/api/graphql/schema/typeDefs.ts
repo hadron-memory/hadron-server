@@ -1934,6 +1934,9 @@ export const typeDefs = `#graphql
     #   non-nullable Int, so null is never a meaningful value for it.
     # Clients that serialize unset args as explicit nulls must omit them
     # instead, or they will clear stored conditions/data on update.
+    # #322: sourceNodeId/targetNodeId each accept an ID-shape PK (preferred —
+    # immutable, so the edge survives a later move/rename) OR a fully-qualified
+    # node URN. Resolved via resolveNodeRef.
     createEdge(sourceNodeId: ID!, targetNodeId: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     updateEdge(edgeId: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeId: ID!): Boolean!

@@ -8,14 +8,40 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { resolvers, type Context } from './resolvers.js';
 
+// #322: createEdge resolves each endpoint through resolveNodeRef (accepts an
+// ID-shape PK or a fully-qualified URN). These pure-mock tests use ID-shape
+// refs so resolution takes the bare-PK lookup path.
+const SRC_ID = 'a'.repeat(32);
+const TGT_ID = 'b'.repeat(32);
+
 // Build a minimal mock that mirrors the parts of PrismaClient the
 // createEdge / updateEdge resolvers touch.
 function mockDb() {
   return {
     // Spec 037: createEdge fetches both endpoints to compose/derive the edge
-    // loc + denormalize memoryId. A single stub serves source and target.
+    // loc + denormalize memoryId. #322: resolveNodeRef first does a
+    // select:{id,deletedAt} PK lookup, then the resolver re-fetches
+    // loc/memoryId — one impl returning a superset row serves both, and
+    // echoes back the requested id so source/target stay distinct.
     node: {
-      findUnique: vi.fn().mockResolvedValue({ loc: 'l', memoryId: 'mem-1' }),
+      findUnique: vi.fn().mockImplementation(async ({ where }: { where: { id?: string } }) => ({
+        id: where?.id ?? SRC_ID,
+        deletedAt: null,
+        loc: 'l',
+        memoryId: 'mem-1',
+      })),
+    },
+    // #322/PR-348: createEdge now gates on requireMemoryWriteAccess(src) +
+    // canReadMemory(tgt). The ADMIN+appId ctx short-circuits the write check
+    // before any DB call; canReadMemory still reads the memory row to learn
+    // its class, so stub a non-personal memory (ADMIN bypass → read allowed).
+    memory: {
+      findUnique: vi.fn().mockResolvedValue({
+        class: 'knowledge',
+        userId: null,
+        userMemoryOfAgentId: null,
+        appId: 'app-1',
+      }),
     },
     edge: {
       create: vi.fn().mockImplementation(async ({ data }: { data: unknown }) => ({
@@ -33,7 +59,13 @@ function mockDb() {
 function ctx(over: Partial<Context> = {}): Context {
   return {
     db: mockDb() as unknown as Context['db'],
-    roles: ['CONTRIBUTOR'],
+    // ADMIN + appId so the PR-348 memory-write gate short-circuits without
+    // needing a full org-membership fixture (these tests target condition
+    // validation, not access control — that's covered in access-control.test.ts
+    // and the real-DB createEdge tests).
+    roles: ['ADMIN'],
+    appId: 'app-1',
+    userId: 'u1',
     ...over,
   };
 }
@@ -56,8 +88,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: 'node-source',
-        targetNodeId: 'node-target',
+        sourceNodeId: SRC_ID,
+        targetNodeId: TGT_ID,
         name: 'force-profile',
         condition,
       },
@@ -72,8 +104,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: 'node-source',
-        targetNodeId: 'node-target',
+        sourceNodeId: SRC_ID,
+        targetNodeId: TGT_ID,
         name: 'urgent',
         condition: null,
         priority: 5,
@@ -92,8 +124,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: 'node-source',
-        targetNodeId: 'node-target',
+        sourceNodeId: SRC_ID,
+        targetNodeId: TGT_ID,
         name: 'routes-to',
         condition: null,
         priority: null,
@@ -127,8 +159,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       mutations.createEdge(
         null,
         {
-          sourceNodeId: 'a',
-          targetNodeId: 'b',
+          sourceNodeId: SRC_ID,
+          targetNodeId: TGT_ID,
           name: 'l',
           condition: { cat: ['x', 'y'] },
         },
@@ -149,8 +181,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       mutations.createEdge(
         null,
         {
-          sourceNodeId: 'a',
-          targetNodeId: 'b',
+          sourceNodeId: SRC_ID,
+          targetNodeId: TGT_ID,
           name: 'l',
           condition: { var: 'session.foo' },
         },
@@ -170,8 +202,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       mutations.createEdge(
         null,
         {
-          sourceNodeId: 'a',
-          targetNodeId: 'b',
+          sourceNodeId: SRC_ID,
+          targetNodeId: TGT_ID,
           name: 'l',
           condition: { var: 'message.data.exception' },
         },
@@ -191,7 +223,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await expect(
       mutations.createEdge(
         null,
-        { sourceNodeId: 'a', targetNodeId: 'b', name: 'l', condition: huge },
+        { sourceNodeId: SRC_ID, targetNodeId: TGT_ID, name: 'l', condition: huge },
         testCtx,
       ),
     ).rejects.toMatchObject({
@@ -208,7 +240,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await expect(
       mutations.createEdge(
         null,
-        { sourceNodeId: 'a', targetNodeId: 'b', name: 'l', condition: nested },
+        { sourceNodeId: SRC_ID, targetNodeId: TGT_ID, name: 'l', condition: nested },
         testCtx,
       ),
     ).rejects.toMatchObject({
@@ -223,8 +255,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: 'a',
-        targetNodeId: 'b',
+        sourceNodeId: SRC_ID,
+        targetNodeId: TGT_ID,
         name: 'unconditional',
         condition: null,
       },

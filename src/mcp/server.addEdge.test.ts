@@ -256,11 +256,11 @@ describe('addEdge — canonical-stored Memory.urn (migration window)', () => {
   });
 });
 
-describe('addEdge — input validation', () => {
-  it('rejects a bare-ID source (the source must be a fully-qualified URN)', async () => {
-    // The docstring is explicit about this asymmetry — the source's
-    // memory must be derivable from the URN for the write-permission
-    // check, so ID-shape sources can't be accepted.
+describe('addEdge — source by PK (#322)', () => {
+  it('accepts a bare-ID (PK) source and persists the edge', async () => {
+    // #322: the source may now be an ID-shape PK. PKs are immutable, so an
+    // edge created against one survives a later move/rename of the source —
+    // the failure mode reported in #322 (a changed URN broke a new edge).
     const result = await addEdge({
       sourceUrn: source.id,
       targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
@@ -268,13 +268,48 @@ describe('addEdge — input validation', () => {
       auth: adminAuth(),
     });
 
-    expect(result).toHaveProperty('error');
-    if ('error' in result) {
-      expect(result.error).toMatch(/^Source:/);
-    }
-    expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(0);
+    expect(result).not.toHaveProperty('error');
+    expect(await db.edge.count({
+      where: { sourceId: source.id, targetId: topLevel.id, name: 'cites' },
+    })).toBe(1);
   });
 
+  it('PK source still resolves after the node loc/URN has changed', async () => {
+    // The crux of #322: move the source (its loc — hence URN — changes),
+    // then reference it by PK. A URN caller holding the old URN would fail;
+    // the PK is stable.
+    await db.node.update({ where: { id: source.id }, data: { loc: 'review:renamed-after-move' } });
+
+    const result = await addEdge({
+      sourceUrn: source.id, // unchanged across the move
+      targetUrn: topLevel.id,
+      name: 'reply',
+      auth: adminAuth(),
+    });
+
+    expect(result).not.toHaveProperty('error');
+    if ('error' in result) throw new Error(result.error);
+    // Success URN reflects the NEW loc, proving the PK resolved to the moved node.
+    expect(result.sourceUrn).toMatch(/review:renamed-after-move$/);
+    expect(await db.edge.count({
+      where: { sourceId: source.id, targetId: topLevel.id, name: 'reply' },
+    })).toBe(1);
+  });
+
+  it('returns a clear error for a non-existent PK source', async () => {
+    const result = await addEdge({
+      sourceUrn: generateId(), // ID-shape but no such node
+      targetUrn: `urn:node:${memory.urn}:${topLevel.loc}`,
+      name: 'cites',
+      auth: adminAuth(),
+    });
+
+    expect(result).toEqual({ error: expect.stringMatching(/^Source node not found:/) });
+    expect(await db.edge.count({ where: { targetId: topLevel.id } })).toBe(0);
+  });
+});
+
+describe('addEdge — input validation', () => {
   it('rejects a non-fully-qualified source URN', async () => {
     const result = await addEdge({
       sourceUrn: source.loc, // bare loc — missing org+memory

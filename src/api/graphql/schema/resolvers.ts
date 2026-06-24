@@ -4730,15 +4730,53 @@ export const resolvers = {
       if (condition !== undefined && condition !== null) {
         throwOnInvalidCondition(condition);
       }
+      // #322: each endpoint may be an ID-shape PK (preferred — immutable
+      // across move/rename, so the edge survives a later URN change) OR a
+      // fully-qualified node URN. resolveNodeRef dispatches on shape; a URN
+      // must be fully qualified (spec 022 — no contextMemoryId at the API
+      // boundary). Previously this path was PK-only (a bare findUnique by
+      // id), so a URN caller got a spurious not-found.
+      // Only map a genuine miss (NodeNotFoundError) to NODE_NOT_FOUND. Let
+      // UrnNotQualifiedError propagate so server.ts formatError surfaces the
+      // spec-022 URN_NOT_QUALIFIED code/message GraphQL callers rely on
+      // (PR-348 review: previously both were collapsed into NODE_NOT_FOUND).
+      let resolvedSourceId: string;
+      let resolvedTargetId: string;
+      try {
+        ({ id: resolvedSourceId } = await resolveNodeRef(ctx.db, sourceNodeId));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError)
+          throw new GraphQLError(`Source node not found: "${sourceNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        throw e;
+      }
+      try {
+        ({ id: resolvedTargetId } = await resolveNodeRef(ctx.db, targetNodeId));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError)
+          throw new GraphQLError(`Target node not found: "${targetNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        throw e;
+      }
       // Spec 037: an edge carries a memory-unique `loc` (its identity + URN
       // suffix), with `memoryId` denormalized from the source node. Fetch
-      // both endpoints to compose/derive the loc.
+      // both endpoints to compose/derive the loc + gate access.
       const [src, tgt] = await Promise.all([
-        ctx.db.node.findUnique({ where: { id: sourceNodeId }, select: { loc: true, memoryId: true } }),
-        ctx.db.node.findUnique({ where: { id: targetNodeId }, select: { loc: true } }),
+        ctx.db.node.findUnique({ where: { id: resolvedSourceId }, select: { loc: true, memoryId: true } }),
+        ctx.db.node.findUnique({ where: { id: resolvedTargetId }, select: { loc: true, memoryId: true } }),
       ]);
       if (!src) throw new GraphQLError(`Source node not found: "${sourceNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
       if (!tgt) throw new GraphQLError(`Target node not found: "${targetNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+
+      // PR-348 review (Gemini, critical): the global CONTRIBUTOR role gate
+      // above is not memory-scoped. Mirror the MCP addEdge posture (and the
+      // sibling upsertNode/moveNode mutations): require write access to the
+      // SOURCE memory, and at least read on the TARGET. Without this any
+      // CONTRIBUTOR could write an edge into a memory they can't touch. The
+      // target denial returns the same NODE_NOT_FOUND wording as a genuine
+      // miss so it can't be used as a cross-memory existence oracle.
+      await requireMemoryWriteAccess(ctx, src.memoryId);
+      if (!(await canReadMemory(ctx.db, ctx, tgt.memoryId))) {
+        throw new GraphQLError(`Target node not found: "${targetNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+      }
       const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
       try {
         validateLoc(edgeLoc);
@@ -4752,8 +4790,8 @@ export const resolvers = {
         data: {
           id: generateId(),
           memoryId: src.memoryId,
-          sourceId: sourceNodeId,
-          targetId: targetNodeId,
+          sourceId: resolvedSourceId,
+          targetId: resolvedTargetId,
           loc: edgeLoc,
           name: name ?? null,
           description: description ?? null,

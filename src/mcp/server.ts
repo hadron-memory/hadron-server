@@ -319,16 +319,15 @@ export async function addEdge(args: {
     auth,
   } = args;
 
-  // Spec 022: qualification at the API boundary. Source MUST be a
-  // fully-qualified URN — we need to recover the memory URN from it
-  // for the write-permission check, so an ID-shape source isn't
-  // accepted. Target accepts ID-shape per spec-007 dispatch.
-  try {
-    assertFullyQualifiedUrn(rawSource, 'node');
-  } catch (e) {
-    if (e instanceof UrnNotQualifiedError) return { error: `Source: ${e.message}` };
-    throw e;
-  }
+  // #322: the source may be an ID-shape PK *or* a fully-qualified URN.
+  // PKs are immutable across move/rename, so referencing the source by id
+  // survives a URN change (the incident in #322); a URN is the fallback.
+  // A URN must be fully qualified (we recover the memory from it for the
+  // write check); a bare PK is unambiguous, needs no qualification, and
+  // can't reintroduce the spec-022 silent-routing hazard (that only
+  // applies to context-relative locs, never to a PK lookup). The target
+  // likewise accepts a PK or a fully-qualified URN — the gate below
+  // enforces qualification for any non-ID target (no short-loc dispatch).
   try {
     if (!isId(rawTarget)) {
       assertFullyQualifiedUrn(rawTarget, 'node');
@@ -339,27 +338,47 @@ export async function addEdge(args: {
   }
 
   // Resolve source strictly — hadron_create_edge never auto-creates the
-  // source (use hadron_create_node for that).
-  const { memoryUrn: sourceMemoryUrn, loc: sourceLoc } = splitNodeUrn(rawSource);
-  const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
-  if (!sourceMem) {
-    return { error: `Source memory not found: "${sourceMemoryUrn}".` };
-  }
-  const sourceNode = await db.node.findUnique({
-    where: { loc_memoryId: { loc: sourceLoc, memoryId: sourceMem.id } },
-    select: { id: true, deletedAt: true },
-  });
-  if (!sourceNode || sourceNode.deletedAt) {
-    return { error: `Source node not found: "${rawSource}".` };
+  // source (use hadron_create_node for that). Both branches yield the
+  // node's id + loc + memoryId; downstream is identifier-agnostic.
+  let sourceNode: { id: string; loc: string; memoryId: string };
+  if (isId(rawSource)) {
+    const found = await db.node.findUnique({
+      where: { id: rawSource },
+      select: { id: true, loc: true, memoryId: true, deletedAt: true },
+    });
+    if (!found || found.deletedAt) {
+      return { error: `Source node not found: "${rawSource}".` };
+    }
+    sourceNode = { id: found.id, loc: found.loc, memoryId: found.memoryId };
+  } else {
+    try {
+      assertFullyQualifiedUrn(rawSource, 'node');
+    } catch (e) {
+      if (e instanceof UrnNotQualifiedError) return { error: `Source: ${e.message}` };
+      throw e;
+    }
+    const { memoryUrn: sourceMemoryUrn, loc: sourceLoc } = splitNodeUrn(rawSource);
+    const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
+    if (!sourceMem) {
+      return { error: `Source memory not found: "${sourceMemoryUrn}".` };
+    }
+    const found = await db.node.findUnique({
+      where: { loc_memoryId: { loc: sourceLoc, memoryId: sourceMem.id } },
+      select: { id: true, loc: true, memoryId: true, deletedAt: true },
+    });
+    if (!found || found.deletedAt) {
+      return { error: `Source node not found: "${rawSource}".` };
+    }
+    sourceNode = { id: found.id, loc: found.loc, memoryId: found.memoryId };
   }
 
-  if (!(await canWriteToMemory(db, auth, sourceMem.id))) {
+  if (!(await canWriteToMemory(db, auth, sourceNode.memoryId))) {
     return { error: 'Write access denied for source memory.' };
   }
 
   let targetNodeId: string;
   try {
-    ({ id: targetNodeId } = await resolveNodeRef(db, rawTarget, sourceMem.id));
+    ({ id: targetNodeId } = await resolveNodeRef(db, rawTarget, sourceNode.memoryId));
   } catch (e) {
     if (e instanceof NodeNotFoundError) {
       return { error: `Edge target not found: "${e.ref}"` };
@@ -381,7 +400,7 @@ export async function addEdge(args: {
   // Author-supplied loc is validated; otherwise derive it deterministically
   // so re-running with the same endpoints + name stays idempotent.
   const edgeLoc =
-    authoredLoc != null && authoredLoc !== '' ? authoredLoc : deriveEdgeLoc(sourceLoc, name, target.loc);
+    authoredLoc != null && authoredLoc !== '' ? authoredLoc : deriveEdgeLoc(sourceNode.loc, name, target.loc);
   try {
     validateLoc(edgeLoc);
   } catch (e) {
@@ -390,10 +409,10 @@ export async function addEdge(args: {
   }
 
   await db.edge.upsert({
-    where: { loc_memoryId: { loc: edgeLoc, memoryId: sourceMem.id } },
+    where: { loc_memoryId: { loc: edgeLoc, memoryId: sourceNode.memoryId } },
     create: {
       id: generateId(),
-      memoryId: sourceMem.id,
+      memoryId: sourceNode.memoryId,
       sourceId: sourceNode.id,
       targetId: targetNodeId,
       loc: edgeLoc,
@@ -405,9 +424,9 @@ export async function addEdge(args: {
     update: {},
   });
 
-  const savedSourceUrn = await nodeUrn(sourceLoc, sourceMem.id);
+  const savedSourceUrn = await nodeUrn(sourceNode.loc, sourceNode.memoryId);
   const savedTargetUrn = await nodeUrn(target.loc, target.memoryId);
-  const savedEdgeUrn = await edgeUrn(edgeLoc, sourceMem.id);
+  const savedEdgeUrn = await edgeUrn(edgeLoc, sourceNode.memoryId);
   return { sourceUrn: savedSourceUrn, targetUrn: savedTargetUrn, edgeUrn: savedEdgeUrn, name, loc: edgeLoc };
 }
 
@@ -608,6 +627,7 @@ async function resolveMemoryByUrn(
  * matrix: specs/031-node-abstract-field/contracts/hadron_get_node.md (spec 031 + 032).
  */
 type ReadProjectionNode = {
+  id: string;
   name: string;
   loc: string;
   memoryId: string;
@@ -621,8 +641,8 @@ type ReadProjectionNode = {
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
-  outgoingEdges: Array<{ name: string | null; loc: string; target: { loc: string; memoryId: string; name: string } }>;
-  incomingEdges: Array<{ name: string | null; loc: string; source: { loc: string; memoryId: string; name: string } }>;
+  outgoingEdges: Array<{ name: string | null; loc: string; target: { id: string; loc: string; memoryId: string; name: string } }>;
+  incomingEdges: Array<{ name: string | null; loc: string; source: { id: string; loc: string; memoryId: string; name: string } }>;
 };
 
 async function renderNodeReadProjection(
@@ -633,13 +653,15 @@ async function renderNodeReadProjection(
   const outgoingLines = await Promise.all(
     node.outgoingEdges.map(async (e) => {
       const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
-      return `  - ${targetUrn} (${e.target.name}) — ${e.name ?? e.loc}`;
+      // #322: surface the target's stable PK alongside the URN so callers can
+      // reference it by id (immutable across move/rename) instead of the URN.
+      return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
     }),
   );
   const incomingLines = await Promise.all(
     node.incomingEdges.map(async (e) => {
       const sourceUrn = await nodeUrn(e.source.loc, e.source.memoryId);
-      return `  - ${sourceUrn} (${e.source.name}) — ${e.name ?? e.loc}`;
+      return `  - ${sourceUrn} (id: ${e.source.id}) (${e.source.name}) — ${e.name ?? e.loc}`;
     }),
   );
 
@@ -673,6 +695,10 @@ async function renderNodeReadProjection(
   const meta = [
     `**${node.name}**`,
     urn,
+    // #322: the node's stable PK. URNs are mutable (move/rename changes the
+    // loc), so edges/replies created against a URN break when it changes;
+    // the id never does. Surfaced so callers can prefer it as the reference.
+    `ID: ${node.id}`,
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
     isFallback ? 'Source: abstract-fallback' : '',
@@ -1700,8 +1726,8 @@ export function createMcpServerInstance(
               n.abstractOriginHash !== computeContentHash(n.content);
             const parts = [
               score !== undefined
-                ? `- **${urn}** — ${n.name}  (score ${score.toFixed(3)})`
-                : `- **${urn}** — ${n.name}`,
+                ? `- **${urn}** (id: ${n.id}) — ${n.name}  (score ${score.toFixed(3)})`
+                : `- **${urn}** (id: ${n.id}) — ${n.name}`,
             ];
             if (isStale) parts.push('  Source: abstract-stale');
             if (n.description) parts.push(`  ${n.description}`);
@@ -1819,7 +1845,8 @@ export function createMcpServerInstance(
       const renderInOrder = [...limited, ...expandedNodes];
       const lines = await Promise.all(renderInOrder.map(async (n: any) => {
         const urn = await nodeUrn(n.loc, n.memoryId);
-        const parts = [`- **${urn}** — ${n.name}`];
+        // #322: surface the stable PK so callers can reference this node by id.
+        const parts = [`- **${urn}** (id: ${n.id}) — ${n.name}`];
         if (n.description) parts.push(`  ${n.description}`);
         // Spec 031 US2 — surface the abstract as a two-space-indented block
         // beneath the description (no `>` prefix; matches the existing
@@ -2249,12 +2276,15 @@ export function createMcpServerInstance(
       const urn = await nodeUrn(node.loc, node.memoryId);
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
         const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
-        return `  - ${targetUrn} (${e.target.name}) — ${e.name ?? e.loc}`;
+        // #322: surface the target's stable PK alongside the URN.
+        return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
       }));
       // #186: nodeType in the meta block, mirroring hadron_get_node's format.
       const meta = [
         `**${node.name}**`,
         urn,
+        // #322: stable PK (immutable across move/rename) — see hadron_get_node.
+        `ID: ${node.id}`,
         node.description ? `> ${node.description}` : '',
         `Type: ${node.nodeType}`,
         node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
@@ -2754,7 +2784,9 @@ export function createMcpServerInstance(
       });
 
       const savedUrn = await nodeUrn(loc, memoryId);
-      return textResult(`Node saved: ${savedUrn}`);
+      // #322: return the stable PK too — edges/replies created against the URN
+      // break if the node is later moved/renamed; the id never changes.
+      return textResult(`Node saved: ${savedUrn} (id: ${upserted.id})`);
     },
   );
 
@@ -2978,7 +3010,8 @@ export function createMcpServerInstance(
       }
 
       const updatedUrn = await nodeUrn(loc, existing.memoryId);
-      return textResult(`Node updated: ${updatedUrn}`);
+      // #322: surface the stable PK (immutable across move/rename).
+      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})`);
     },
   );
 
@@ -3073,10 +3106,10 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_edge',
-    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike hadron_update_node, which replaces the full edge set). Idempotent: re-running with the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). The source URN MUST be a fully-qualified node URN (org::memory::loc) — ID-shape sources are rejected because the write-permission check needs the source memory, which is derived from the URN. The target URN may be fully-qualified OR an ID-shape value. Both endpoints must already exist — use hadron_create_node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
+    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike hadron_update_node, which replaces the full edge set). Idempotent: re-running with the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). Both endpoints may be given as an ID-shape PK OR a fully-qualified node URN (org::memory::loc). Prefer the PK: it is immutable, so an edge created against it survives a later move/rename of the node, whereas a URN does not (#322). Both endpoints must already exist — use hadron_create_node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
     {
-      sourceUrn: z.string().describe('Fully-qualified source node URN, e.g. "acme.com::mmdata::services:db-helper". ID-shape sources are not accepted (the source\'s memory must be recoverable from the URN for the permission check). The source node must already exist; this tool will not create it.'),
-      targetUrn: z.string().describe('Fully-qualified target node URN OR an ID-shape value. The target must already exist; use hadron_create_node first if it does not.'),
+      sourceUrn: z.string().describe('Source node, as an ID-shape PK (preferred — immutable across move/rename) OR a fully-qualified URN, e.g. "acme.com::mmdata::services:db-helper". The source node must already exist; this tool will not create it.'),
+      targetUrn: z.string().describe('Target node, as an ID-shape PK (preferred) OR a fully-qualified URN. The target must already exist; use hadron_create_node first if it does not.'),
       name: z.string().optional().describe('Relationship name (was "label"), e.g. "depends-on", "documents", "supersedes". Optional — loc is the identity.'),
       loc: z.string().optional().describe('Explicit edge loc (its identity + URN suffix hrn:edge:<org>::<memory>::<loc>). Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
       description: z.string().optional().describe('Human-readable description of the edge.'),
