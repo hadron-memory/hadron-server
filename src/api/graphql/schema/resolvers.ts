@@ -5044,6 +5044,404 @@ export const resolvers = {
       }
     },
 
+    // Fold a source node into a target node, returning the updated target.
+    // Reuses upsertNode's single-write invariants (per-memory write auth,
+    // decrypt→merge→re-encrypt, NodeVersion snapshot, abstractOriginHash
+    // recompute, re-embed, git mirror) but combines two existing rows rather
+    // than applying a NodeInput. See MergeNodesInput / NodeMergeField.
+    mergeNodes: async (
+      _: unknown,
+      { input }: { input: MergeNodesInput },
+      ctx: Context,
+    ) => {
+      const { source: rawSource, target: rawTarget } = input;
+      const deleteSource = input.deleteSource ?? false;
+      // Omitted/null `include` = merge every mergeable field.
+      const fields = new Set<NodeMergeField>(
+        input.include ?? ['CONTENT', 'ABSTRACT', 'DESCRIPTION', 'TAGS', 'DATA', 'PROPERTIES', 'EDGES'],
+      );
+
+      // Resolve both endpoints (ID or fully-qualified URN — same dispatch as
+      // createEdge). A genuine miss maps to NODE_NOT_FOUND; a malformed
+      // relative URN propagates as UrnNotQualifiedError (spec 022).
+      let sourceId: string;
+      let targetId: string;
+      try {
+        ({ id: sourceId } = await resolveNodeRef(ctx.db, rawSource));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError)
+          throw new GraphQLError(`Source node not found: "${rawSource}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
+          });
+        throw e;
+      }
+      try {
+        ({ id: targetId } = await resolveNodeRef(ctx.db, rawTarget));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError)
+          throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
+          });
+        throw e;
+      }
+      if (sourceId === targetId) {
+        throw new GraphQLError('mergeNodes: source and target are the same node.', {
+          extensions: { code: 'MERGE_SOURCE_EQUALS_TARGET', nodeId: sourceId },
+        });
+      }
+
+      const [source, target] = await Promise.all([
+        ctx.db.node.findUnique({ where: { id: sourceId } }),
+        ctx.db.node.findUnique({ where: { id: targetId } }),
+      ]);
+      if (!source || source.deletedAt)
+        throw new GraphQLError(`Source node not found: "${rawSource}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
+        });
+      if (!target || target.deletedAt)
+        throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
+        });
+
+      // Auth. The target is mutated → write access always. The source is
+      // read to fold its fields; it's mutated only when we delete it or
+      // re-point its edges (EDGES) → write access then, else read suffices.
+      // A source read-denial returns the same NODE_NOT_FOUND wording as a
+      // genuine miss so it can't be used as a cross-memory existence oracle
+      // (mirrors createEdge's target-denial posture).
+      await requireMemoryWriteAccess(ctx, target.memoryId);
+      // Same-memory merge (the common case): write access to the target's
+      // memory already covers the source. Only run a separate source check
+      // when the nodes live in different memories.
+      const authedMemories = new Set<string>([target.memoryId]);
+      if (source.memoryId !== target.memoryId) {
+        const touchesSource = deleteSource || fields.has('EDGES');
+        if (touchesSource) {
+          await requireMemoryWriteAccess(ctx, source.memoryId);
+        } else if (!(await canReadMemory(ctx.db, ctx, source.memoryId))) {
+          throw new GraphQLError(`Source node not found: "${rawSource}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
+          });
+        }
+      }
+      authedMemories.add(source.memoryId);
+
+      // Edge transfer can mutate edges whose denormalized memory is NEITHER
+      // the source's nor the target's: an INCOMING edge from a third memory
+      // gets its endpoint re-pointed (or dropped) here. Require write access
+      // to every such memory before touching it, so a merge can't re-point or
+      // delete edges in a memory the caller can't write. Cheap pre-pass: pull
+      // just the distinct memoryIds of edges touching the source.
+      if (fields.has('EDGES')) {
+        const edgeMems = await ctx.db.edge.findMany({
+          where: { OR: [{ sourceId: source.id }, { targetId: source.id }] },
+          select: { memoryId: true },
+          distinct: ['memoryId'],
+        });
+        for (const { memoryId } of edgeMems) {
+          if (authedMemories.has(memoryId)) continue;
+          await requireMemoryWriteAccess(ctx, memoryId);
+          authedMemories.add(memoryId);
+        }
+      }
+
+      // Only content/abstract/data are encrypted at rest, so an edge-only or
+      // tags/description/properties-only merge needs no session key. Gate the
+      // key requirement + decrypt on whether an encrypted field actually
+      // participates, so those merges work on an encrypted memory without a
+      // live session (and don't fail with a spurious SESSION_EXPIRED).
+      const touchesEncrypted =
+        fields.has('CONTENT') || fields.has('ABSTRACT') || fields.has('DATA');
+      const [srcEnc, tgtEnc] = await Promise.all([
+        getMemoryEncryptionInfo(ctx.db, source.memoryId),
+        getMemoryEncryptionInfo(ctx.db, target.memoryId),
+      ]);
+      if (touchesEncrypted && srcEnc.isEncrypted && !sessionKeyCache.getByMemoryId(srcEnc.id)) {
+        throw new GraphQLError(
+          `SESSION_EXPIRED: memory ${srcEnc.id} is encrypted but no active session key is available.`,
+          { extensions: { code: 'SESSION_EXPIRED', memoryId: srcEnc.id } },
+        );
+      }
+      if (touchesEncrypted && tgtEnc.isEncrypted && !sessionKeyCache.getByMemoryId(tgtEnc.id)) {
+        throw new GraphQLError(
+          `SESSION_EXPIRED: memory ${tgtEnc.id} is encrypted but no active session key is available.`,
+          { extensions: { code: 'SESSION_EXPIRED', memoryId: tgtEnc.id } },
+        );
+      }
+      const srcPt = { ...source };
+      if (touchesEncrypted && srcEnc.isEncrypted) decryptNodeFields(srcPt, srcEnc);
+      const tgtPt = { ...target };
+      if (touchesEncrypted && tgtEnc.isEncrypted) decryptNodeFields(tgtPt, tgtEnc);
+
+      // ── Field merge (on plaintext) ──────────────────────────────────────
+      // Text: target first, source appended with a blank line, skipping
+      // empty operands so a one-sided value passes through unchanged.
+      const combineText = (a: string | null | undefined, b: string | null | undefined): string | null => {
+        const at = a ?? '';
+        const bt = b ?? '';
+        if (at === '') return bt === '' ? null : bt;
+        if (bt === '') return at;
+        return `${at}\n\n${bt}`;
+      };
+      // JSON: target wins on key collision; source fills gaps. Returns the
+      // new value only when source actually contributes a key (else undefined
+      // = no change). Non-object operands leave the target untouched.
+      const mergeJson = (
+        src: unknown,
+        tgt: unknown,
+      ): Record<string, unknown> | undefined => {
+        // Source must be a plain object to contribute keys; an array/scalar
+        // source never merges (checked BEFORE the tgt==null branch so a
+        // non-object source can't slip through as the result and write an
+        // unexpected shape into data/properties).
+        if (src == null || typeof src !== 'object' || Array.isArray(src)) {
+          return undefined;
+        }
+        if (tgt == null) return src as Record<string, unknown>;
+        if (typeof tgt !== 'object' || Array.isArray(tgt)) {
+          return undefined;
+        }
+        const merged = { ...(src as Record<string, unknown>), ...(tgt as Record<string, unknown>) };
+        const tgtKeys = new Set(Object.keys(tgt as Record<string, unknown>));
+        const added = Object.keys(src as Record<string, unknown>).some((k) => !tgtKeys.has(k));
+        return added ? merged : undefined;
+      };
+
+      // Accumulated plaintext changes to the target.
+      // Spec: cor:api:070:01 (field merge strategy).
+      const changed: Record<string, unknown> = {};
+      let abstractChanged = false;
+      let contentChanged = false;
+
+      if (fields.has('CONTENT')) {
+        const v = combineText(tgtPt.content, srcPt.content);
+        if (v !== (tgtPt.content ?? null)) {
+          changed.content = v;
+          contentChanged = true;
+        }
+      }
+      if (fields.has('ABSTRACT')) {
+        const v = combineText(tgtPt.abstract, srcPt.abstract);
+        if (v !== (tgtPt.abstract ?? null)) {
+          if (v != null && v.length > 2000) {
+            const err = new NodeAbstractTooLongError(v.length);
+            throw new GraphQLError(err.message, {
+              extensions: { code: err.name, length: err.length, max: err.max },
+            });
+          }
+          changed.abstract = v;
+          abstractChanged = true;
+        }
+      }
+      if (fields.has('DESCRIPTION')) {
+        const v = combineText(tgtPt.description, srcPt.description);
+        if (v !== (tgtPt.description ?? null)) changed.description = v;
+      }
+      if (fields.has('TAGS')) {
+        const tt = deserializeTags(tgtPt.tags) as string[];
+        const st = deserializeTags(srcPt.tags) as string[];
+        const union = [...tt];
+        for (const t of st) if (!union.includes(t)) union.push(t);
+        if (union.length !== tt.length) changed.tags = serializeTags(union);
+      }
+      if (fields.has('DATA')) {
+        const v = mergeJson(srcPt.data, tgtPt.data);
+        if (v !== undefined) changed.data = v;
+      }
+      if (fields.has('PROPERTIES')) {
+        // properties is never encrypted — read from the raw rows.
+        const v = mergeJson(source.properties, target.properties);
+        if (v !== undefined) changed.properties = v;
+      }
+
+      // Post-merge plaintext content drives the spec-032 abstract hash.
+      const postMergeContent = contentChanged
+        ? (changed.content as string | null)
+        : tgtPt.content ?? null;
+
+      // Encrypt the encrypted-field subset with the TARGET's key before write.
+      const writeData: Record<string, unknown> = { ...changed };
+      if (tgtEnc.isEncrypted && ('content' in changed || 'abstract' in changed || 'data' in changed)) {
+        const key = sessionKeyCache.getByMemoryId(tgtEnc.id)!; // validated above
+        const enc = encryptNodeFieldsWithKey(
+          {
+            content: 'content' in changed ? (changed.content as string | null) : null,
+            abstract: 'abstract' in changed ? (changed.abstract as string | null) : null,
+            data: 'data' in changed ? (changed.data ?? null) : null,
+          },
+          key,
+        );
+        if ('content' in changed) writeData.content = enc.content;
+        if ('abstract' in changed) writeData.abstract = enc.abstract;
+        if ('data' in changed) writeData.data = enc.data;
+      }
+      // abstractOriginHash tracks "content when the abstract was authored".
+      // Recompute against post-merge plaintext content only when the abstract
+      // itself changed (a content-only merge intentionally leaves the hash so
+      // staleness detection fires — matches upsertNode / searchReplaceInNodes).
+      if (abstractChanged) {
+        writeData.abstractOriginHash = computeContentHash(postMergeContent);
+      }
+      writeData.updatedBy = ctx.userId ?? ctx.clientId ?? null;
+
+      // ── Atomic write: version snapshot → target update → edge re-point →
+      //    source delete ──────────────────────────────────────────────────
+      await ctx.db.$transaction(async (tx) => {
+        await tx.nodeVersion.create({
+          data: {
+            nodeId: target.id,
+            loc: target.loc,
+            name: target.name,
+            alias: target.alias,
+            description: target.description,
+            abstract: target.abstract,
+            abstractOriginHash: target.abstractOriginHash,
+            content: target.content,
+            tags: target.tags as string[],
+            editedBy: ctx.clientId ?? ctx.userId ?? null,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+        });
+
+        if (Object.keys(changed).length > 0) {
+          await tx.node.update({ where: { id: target.id }, data: writeData });
+        }
+
+        if (fields.has('EDGES')) {
+          // Spec: cor:api:070:02 (edge transfer + source disposition).
+          // Edges reference nodes by id, so transferring the source's
+          // relationships means re-pointing its edge endpoints onto the
+          // target. Collisions on the (loc, memoryId) unique index — an edge
+          // moving into the target's memory that lands on an already-occupied
+          // loc — and self-loops (source↔target collapsing onto target) are
+          // dropped rather than failing the merge. Pre-checked against a
+          // claimed-loc set so we never poison the transaction with a P2002.
+          const srcEdges = await tx.edge.findMany({
+            where: { OR: [{ sourceId: source.id }, { targetId: source.id }] },
+          });
+          // Locs already occupied in the target's memory by edges NOT being
+          // re-pointed here (incoming edges that stay in a foreign memory
+          // can't newly collide — their loc+memoryId are unchanged).
+          const movingIds = new Set(srcEdges.map((e) => e.id));
+          const occupied = new Set<string>(
+            (
+              await tx.edge.findMany({
+                where: { memoryId: target.memoryId },
+                select: { id: true, loc: true },
+              })
+            )
+              .filter((e) => !movingIds.has(e.id))
+              .map((e) => e.loc),
+          );
+          // Partition in memory, then issue one deleteMany + up to two
+          // updateMany — instead of an update/delete per edge — so a node with
+          // many relationships doesn't N+1 the merge transaction. Outgoing
+          // edges all become (sourceId=target, memoryId=target.memory);
+          // incoming edges all become (targetId=target). A self-loop
+          // (source↔target) or a loc already taken in the target's memory is
+          // dropped rather than failing the merge.
+          const toDrop: string[] = [];
+          const outgoingIds: string[] = [];
+          const incomingIds: string[] = [];
+          for (const e of srcEdges) {
+            const newSourceId = e.sourceId === source.id ? target.id : e.sourceId;
+            const newTargetId = e.targetId === source.id ? target.id : e.targetId;
+            if (newSourceId === newTargetId) {
+              toDrop.push(e.id);
+              continue;
+            }
+            const isOutgoing = e.sourceId === source.id;
+            // An outgoing edge follows its source into the target's memory;
+            // an incoming edge keeps its own (foreign) memory.
+            const newMemoryId = isOutgoing ? target.memoryId : e.memoryId;
+            if (newMemoryId === target.memoryId) {
+              if (occupied.has(e.loc)) {
+                toDrop.push(e.id);
+                continue;
+              }
+              occupied.add(e.loc);
+            }
+            (isOutgoing ? outgoingIds : incomingIds).push(e.id);
+          }
+          if (toDrop.length > 0) {
+            await tx.edge.deleteMany({ where: { id: { in: toDrop } } });
+          }
+          if (outgoingIds.length > 0) {
+            await tx.edge.updateMany({
+              where: { id: { in: outgoingIds } },
+              data: { sourceId: target.id, memoryId: target.memoryId },
+            });
+          }
+          if (incomingIds.length > 0) {
+            await tx.edge.updateMany({
+              where: { id: { in: incomingIds } },
+              data: { targetId: target.id },
+            });
+          }
+        }
+
+        if (deleteSource) {
+          // Hard delete (matches deleteNode). Edges re-pointed above survive;
+          // any the caller chose not to transfer cascade away with the row.
+          await tx.node.delete({ where: { id: source.id } });
+        }
+      });
+
+      // Re-fetch the merged target with edges, decrypt for the response +
+      // side effects. Only decrypt when a session key is actually available:
+      // an edge-only/plaintext-field merge on an encrypted memory legitimately
+      // runs without one, in which case the encrypted fields stay ciphertext
+      // in the response (the same posture as any keyless read) rather than
+      // throwing.
+      const finalNode = (await ctx.db.node.findUnique({
+        where: { id: target.id },
+        include: {
+          outgoingEdges: { include: { target: true } },
+          incomingEdges: { include: { source: true } },
+        },
+      }))!;
+      if (tgtEnc.isEncrypted && sessionKeyCache.getByMemoryId(tgtEnc.id)) {
+        decryptNodeFields(finalNode, tgtEnc);
+      }
+
+      // Mirror to git so a later (repo-wins) sync can't revert the merge.
+      writeNodeToGit(
+        {
+          id: finalNode.id,
+          loc: finalNode.loc,
+          name: finalNode.name,
+          nodeType: finalNode.nodeType,
+          alias: finalNode.alias,
+          description: finalNode.description,
+          abstract: finalNode.abstract,
+          abstractOriginHash: finalNode.abstractOriginHash,
+          contentHash: finalNode.contentHash,
+          content: finalNode.content,
+          tags: deserializeTags(finalNode.tags) as string[],
+          seq: finalNode.seq,
+          data: finalNode.data,
+          properties: finalNode.properties,
+          outgoingEdges: finalNode.outgoingEdges ?? [],
+        },
+        (finalNode as { ownerRepo?: string | null }).ownerRepo ?? '',
+        ctx.clientId,
+        target.memoryId,
+      ).catch((err) => {
+        console.error('[mergeNodes] git write error:', err);
+      });
+
+      // Re-embed when the embedded text (content/abstract) changed.
+      if (contentChanged || abstractChanged) {
+        void enqueueNodeEmbedding(ctx.db, {
+          nodeId: finalNode.id,
+          memoryId: target.memoryId,
+          plaintext: { content: finalNode.content, abstract: finalNode.abstract },
+        });
+      }
+
+      return finalNode;
+    },
+
     replaceSubtree: async (
       _: unknown,
       {
@@ -10002,6 +10400,33 @@ interface EdgeInput {
   loc?: string | null;
   description?: string | null;
   isRunnable?: boolean | null;
+}
+
+/**
+ * Fields mergeNodes can fold from the source node into the target node.
+ * Text fields concatenate (target first), TAGS unions, DATA/PROPERTIES
+ * shallow-merge with the target winning on key collisions, and EDGES
+ * re-points the source's relationships onto the target. See the
+ * `mergeNodes` resolver for the per-field merge strategy.
+ */
+type NodeMergeField =
+  | 'CONTENT'
+  | 'ABSTRACT'
+  | 'DESCRIPTION'
+  | 'TAGS'
+  | 'DATA'
+  | 'PROPERTIES'
+  | 'EDGES';
+
+interface MergeNodesInput {
+  /** Source node — ID or fully-qualified URN. Folded into `target`. */
+  source: string;
+  /** Target node — ID or fully-qualified URN. The surviving node. */
+  target: string;
+  /** Which fields to merge. Omitted/null = every mergeable field. */
+  include?: NodeMergeField[] | null;
+  /** Hard-delete the source node after a successful merge. */
+  deleteSource?: boolean | null;
 }
 
 interface SessionInput {
