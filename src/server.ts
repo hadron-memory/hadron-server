@@ -24,6 +24,7 @@ import { mountOAuthRoutes } from './auth/oauth.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError } from './lib/urn.js';
+import { normalizeHandleOrNull } from './lib/userHandle.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
@@ -190,7 +191,9 @@ export async function createServer(): Promise<Express> {
             create: {
               githubId: ghUser.id,
               githubUsername: ghUser.login,
-              handle: ghUser.login,
+              // Lowercase-canonical, URN-legal handle (#325); a GitHub login that
+              // isn't URN-legal drops to null rather than blocking signup.
+              handle: normalizeHandleOrNull(ghUser.login),
               identityProvider: 'GITHUB',
               name: ghUser.name,
               avatarUrl: ghUser.avatar_url,

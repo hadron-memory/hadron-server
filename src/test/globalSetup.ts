@@ -100,5 +100,13 @@ export async function setup() {
       ON ai_service_configs (agent_id, name) WHERE agent_id IS NOT NULL;
   `);
 
+  // 325-user-urn: case-insensitive handle uniqueness (handle is the
+  // hrn:user:<handle> slug; lowercase-canonical). Functional index — Prisma's
+  // plain @unique is case-sensitive and can't express this.
+  await client.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS users_handle_lower_uniq
+      ON users (lower(handle));
+  `);
+
   await client.end();
 }
