@@ -8,7 +8,24 @@
  * handles go through here on write; legacy rows are grandfathered (see #325).
  */
 
-import { validateUserSlug } from './urn.js';
+import { validateUserSlug, formatUrn } from './urn.js';
+
+/**
+ * The canonical `hrn:user:<handle>` URN for a handle, or `null` when the handle
+ * is absent OR not URN-legal (a grandfathered legacy row). Lowercase-canonical.
+ * Single source of truth for "compute a user's URN from its handle" — used by
+ * the `User.urn` GraphQL field and global search.
+ */
+export function userUrn(handle: string | null | undefined): string | null {
+  if (!handle) return null;
+  const h = handle.toLowerCase();
+  try {
+    validateUserSlug(h);
+  } catch {
+    return null;
+  }
+  return formatUrn('user', h);
+}
 
 /**
  * Normalize a user-supplied handle to its canonical lowercase form and validate
