@@ -51,7 +51,21 @@ export async function provisionPersonalWorkspace(
     if (!taken) urn = candidate;
   }
 
-  // 1. Create personal org
+  // 1. Create personal org.
+  //
+  // The findUnique-then-create above has a TOCTOU window, but we deliberately
+  // let a P2002 on `urn` propagate rather than catching it here. Two cases:
+  //   - Concurrent provisioning of the SAME user (double signup): both compute
+  //     the same slug, one create wins, the other throws P2002. The caller's
+  //     idempotency guard absorbs it (GitHub callback: `P2002 → isNew=false`),
+  //     same as the pre-existing `personal-<userId>` path (also unique-per-
+  //     user). Swallowing it here and retrying would create a SECOND personal
+  //     workspace for the user — worse than the abort.
+  //   - A different user racing for the same `<handle>-org` is impossible:
+  //     `User.handle` is unique, so no two users derive the same candidate.
+  // The only unhandled case is a non-personal org squatting `<handle>-org` in
+  // the sub-millisecond window after the check — negligible, and it surfaces
+  // as the same clean P2002 the caller already tolerates.
   const org = await db.organization.create({
     data: {
       id: generateId(),
