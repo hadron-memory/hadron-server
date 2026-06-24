@@ -277,6 +277,48 @@ describe('mergeMemories — batched / resumable (#363)', () => {
     expect(await db.edge.count({ where: { memoryId: srcMem.id } })).toBe(0);
   });
 
+  it('classifies and relocates correctly across multiple keyset pages', async () => {
+    // classifyPageSize=2 forces the classify+relocate scan to page several
+    // times. Movers leave the source set as they relocate; the colliding rows
+    // left behind must not be re-read (keyset), and a collision sitting in a
+    // later page must still be detected.
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) ids.push((await makeNode(srcMem.id, `n${i}`, { content: `s${i}` })).id);
+    // Give two of them target counterparts (collisions); the other two move.
+    await makeNode(tgtMem.id, 'n1', { content: 't1' });
+    await makeNode(tgtMem.id, 'n3', { content: 't3' });
+
+    const res = await mergeMemoryGraph(db, {
+      sourceMemoryId: srcMem.id,
+      targetMemoryId: tgtMem.id,
+      fields: new Set(['CONTENT', 'EDGES']),
+      deleteSourceMem: false,
+      actorId: actorId(),
+      batchSize: 1,
+      classifyPageSize: 2,
+    });
+    // 2 collisions folded, the rest (n0, n2 + the source root) relocated.
+    expect(res.foldedCount).toBe(2);
+    expect(res.relocatedCount).toBe(3);
+
+    const tgt = await nodesByLoc(tgtMem.id);
+    expect(tgt.get('n1')?.content).toBe('t1\n\ns1');
+    expect(tgt.get('n3')?.content).toBe('t3\n\ns3');
+    expect(tgt.get('n0')?.content).toBe('s0');
+    expect(tgt.get('n2')?.content).toBe('s2');
+    expect(await db.node.count({ where: { memoryId: srcMem.id, deletedAt: null } })).toBe(0);
+  });
+
+  it('clamps a non-positive batchSize instead of spinning forever', async () => {
+    await makeNode(srcMem.id, 'shared', { content: 'sc' });
+    await makeNode(tgtMem.id, 'shared', { content: 'tc' });
+    // batchSize=0 would never advance the fold loop without the >= 1 clamp.
+    const res = await mergeBatched({ batchSize: 0 });
+    expect(res.foldedCount).toBe(1);
+    const tgt = await nodesByLoc(tgtMem.id);
+    expect(tgt.get('shared')?.content).toBe('tc\n\nsc');
+  });
+
   it('is idempotent: re-running completes an interrupted (partial) merge', async () => {
     await makeNode(srcMem.id, 'shared', { content: 'sc' });
     await makeNode(srcMem.id, 'srconly', { content: 'so' });
