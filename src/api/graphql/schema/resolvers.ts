@@ -147,6 +147,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import {
   resolveResource as resolveAccessResource,
@@ -2236,6 +2237,7 @@ export const resolvers = {
         resolveNodeRef,
         resolveAppRef,
         resolveAgentRef,
+        resolveOrgRef,
       });
       if (!resolved) {
         throw new GraphQLError('Resource not found', { extensions: { code: 'NOT_FOUND' } });
@@ -5122,14 +5124,43 @@ export const resolvers = {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
       await requireOrgRole(ctx, resolvedId, 'ADMIN');
-      return ctx.db.organization.update({
-        where: { id: resolvedId },
-        data: {
-          ...(name ? { name } : {}),
-          ...(urn ? { urn } : {}),
-          ...(isVisible !== undefined ? { isVisible } : {}),
-        },
-        include: ORG_INCLUDE,
+
+      const data = {
+        ...(name ? { name } : {}),
+        ...(urn ? { urn } : {}),
+        ...(isVisible !== undefined ? { isVisible } : {}),
+      };
+
+      // Fast path: no URN change requested → a plain update.
+      if (!urn) {
+        return ctx.db.organization.update({
+          where: { id: resolvedId },
+          data,
+          include: ORG_INCLUDE,
+        });
+      }
+
+      // The org URN is denormalized into the `urn` column of every Memory,
+      // Agent and App it owns (baked in at creation as `<orgUrn>::…`). Renaming
+      // the org URN must rewrite those child copies too, or they dangle (issue
+      // #337) — `propagateOrgUrnRename`. Lock the org row and read its current
+      // urn INSIDE the transaction (FOR UPDATE) so a concurrent rename can't make
+      // the rewrite source stale, then rewrite the children in the same tx so
+      // they commit (or roll back) together.
+      return ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
+        const [locked] = await tx.$queryRaw<{ urn: string }[]>`
+          SELECT urn FROM organizations WHERE id = ${resolvedId} FOR UPDATE
+        `;
+        const oldUrn = locked?.urn;
+        const updated = await tx.organization.update({
+          where: { id: resolvedId },
+          data,
+          include: ORG_INCLUDE,
+        });
+        if (oldUrn && oldUrn !== urn) {
+          await propagateOrgUrnRename(tx, resolvedId, oldUrn, urn);
+        }
+        return updated;
       });
     },
 

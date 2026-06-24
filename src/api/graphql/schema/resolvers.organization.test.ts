@@ -146,6 +146,109 @@ describe('Mutation.updateOrganization (007-entity-id-or-urn)', () => {
   });
 });
 
+describe('Mutation.updateOrganization — URN rename propagation (#337)', () => {
+  const newUrn = 'holger-pers-renamed';
+
+  it('rewrites the org-slug prefix on every owned Memory/Agent/App urn', async () => {
+    const oldUrn = org.urn;
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${oldUrn}::gear`,
+        name: 'gear',
+        class: 'knowledge',
+      },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${oldUrn}::juno`, name: 'juno' },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${oldUrn}::ops`, name: 'ops' },
+    });
+
+    const updated = await resolvers.Mutation.updateOrganization(
+      {},
+      { id: org.id, urn: newUrn },
+      adminCtx(),
+    );
+    expect(updated.urn).toBe(newUrn);
+
+    expect((await db.memory.findUnique({ where: { id: mem.id } }))?.urn).toBe(`${newUrn}::gear`);
+    expect((await db.agent.findUnique({ where: { id: agent.id } }))?.urn).toBe(`${newUrn}::juno`);
+    expect((await db.app.findUnique({ where: { id: app.id } }))?.urn).toBe(`${newUrn}::ops`);
+  });
+
+  it('rewrites legacy single-colon child URNs too (<org>:<slug>)', async () => {
+    // Pre-021 rows store the single-colon form; the rewrite must catch both.
+    const oldUrn = org.urn;
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${oldUrn}:gear`, // single colon
+        name: 'gear',
+        class: 'knowledge',
+      },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${oldUrn}:juno`, name: 'juno' },
+    });
+
+    await resolvers.Mutation.updateOrganization({}, { id: org.id, urn: newUrn }, adminCtx());
+
+    expect((await db.memory.findUnique({ where: { id: mem.id } }))?.urn).toBe(`${newUrn}:gear`);
+    expect((await db.agent.findUnique({ where: { id: agent.id } }))?.urn).toBe(`${newUrn}:juno`);
+  });
+
+  it('does not touch children of OTHER orgs', async () => {
+    const other = await db.organization.create({
+      data: { id: generateId(), name: 'other', urn: `other-org-${Date.now()}` },
+    });
+    const otherMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: other.id,
+        urn: `${other.urn}::keep`,
+        name: 'keep',
+        class: 'knowledge',
+      },
+    });
+
+    await resolvers.Mutation.updateOrganization({}, { id: org.id, urn: newUrn }, adminCtx());
+
+    expect((await db.memory.findUnique({ where: { id: otherMem.id } }))?.urn).toBe(`${other.urn}::keep`);
+  });
+
+  it('a name-only update leaves child urns untouched (no rename path)', async () => {
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}::gear`,
+        name: 'gear',
+        class: 'knowledge',
+      },
+    });
+    await resolvers.Mutation.updateOrganization({}, { id: org.id, name: 'just-a-name' }, adminCtx());
+    expect((await db.memory.findUnique({ where: { id: mem.id } }))?.urn).toBe(`${org.urn}::gear`);
+  });
+
+  it('renaming the org URN to its current value is a no-op for children', async () => {
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}::gear`,
+        name: 'gear',
+        class: 'knowledge',
+      },
+    });
+    await resolvers.Mutation.updateOrganization({}, { id: org.id, urn: org.urn }, adminCtx());
+    expect((await db.memory.findUnique({ where: { id: mem.id } }))?.urn).toBe(`${org.urn}::gear`);
+  });
+});
+
 describe('Mutation.deleteOrganization (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const ok = await resolvers.Mutation.deleteOrganization({}, { id: org.urn }, adminCtx());

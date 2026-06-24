@@ -307,6 +307,41 @@ describe('aiServiceConfig (bare id, no URN)', () => {
   });
 });
 
+describe('organization', () => {
+  it('an org ADMIN administers the org (manage) but cannot delete it', async () => {
+    const res = await call(orgAdmin.id, `hrn:org:${org.urn}`, asAdmin());
+    expect(res.resourceKind).toBe('organization');
+    expect(res.resourceUrn).toBe(org.urn);
+    expect(res.canManage).toBe(true);
+    expect(res.canDelete).toBe(false);
+    expect(res.grants.some((g) => g.source === 'ORG_ROLE')).toBe(true);
+  });
+
+  it('a plain org member reads the org, no manage', async () => {
+    const res = await call(member.id, `hrn:org:${org.urn}`, asAdmin());
+    expect(res.canRead).toBe(true);
+    expect(res.canManage).toBe(false);
+    expect(res.grants[0].source).toBe('ORG_ROLE');
+  });
+
+  it('a platform admin has full access incl. delete', async () => {
+    const res = await call(admin.id, `hrn:org:${org.urn}`, asAdmin());
+    expect(res.canManage).toBe(true);
+    expect(res.canDelete).toBe(true);
+    expect(res.grants.some((g) => g.source === 'PLATFORM_ROLE')).toBe(true);
+  });
+
+  it('a stranger has no access — empty grants, not an error', async () => {
+    const res = await call(stranger.id, `hrn:org:${org.urn}`, asAdmin());
+    expect(res.canRead).toBe(false);
+    expect(res.grants).toEqual([]);
+  });
+
+  it('an unknown org URN is NOT_FOUND (not a misleading bare-id miss)', async () => {
+    await expect(call(member.id, 'hrn:org:no-such-org', asAdmin())).rejects.toThrow(/not found/i);
+  });
+});
+
 describe('not-found / unknown refs', () => {
   it('an unknown subject user is NOT_FOUND', async () => {
     await expect(call(generateId(), `hrn:memory:${graph.urn}`, asAdmin())).rejects.toThrow(/not found/i);
