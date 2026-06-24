@@ -189,6 +189,11 @@ import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromG
 import { createNode } from '../../../controller/operations/createNode.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import {
+  mergeNodeFields,
+  ALL_NODE_MERGE_FIELDS,
+  type NodeMergeField,
+} from '../../../lib/nodeMerge.js';
+import {
   listInboxMessages,
   replyToMessage,
   moveMessage,
@@ -5057,9 +5062,7 @@ export const resolvers = {
       const { source: rawSource, target: rawTarget } = input;
       const deleteSource = input.deleteSource ?? false;
       // Omitted/null `include` = merge every mergeable field.
-      const fields = new Set<NodeMergeField>(
-        input.include ?? ['CONTENT', 'ABSTRACT', 'DESCRIPTION', 'TAGS', 'DATA', 'PROPERTIES', 'EDGES'],
-      );
+      const fields = new Set<NodeMergeField>(input.include ?? ALL_NODE_MERGE_FIELDS);
 
       // Resolve both endpoints (ID or fully-qualified URN — same dispatch as
       // createEdge). A genuine miss maps to NODE_NOT_FOUND; a malformed
@@ -5174,84 +5177,40 @@ export const resolvers = {
       if (touchesEncrypted && tgtEnc.isEncrypted) decryptNodeFields(tgtPt, tgtEnc);
 
       // ── Field merge (on plaintext) ──────────────────────────────────────
-      // Text: target first, source appended with a blank line, skipping
-      // empty operands so a one-sided value passes through unchanged.
-      const combineText = (a: string | null | undefined, b: string | null | undefined): string | null => {
-        const at = a ?? '';
-        const bt = b ?? '';
-        if (at === '') return bt === '' ? null : bt;
-        if (bt === '') return at;
-        return `${at}\n\n${bt}`;
-      };
-      // JSON: target wins on key collision; source fills gaps. Returns the
-      // new value only when source actually contributes a key (else undefined
-      // = no change). Non-object operands leave the target untouched.
-      const mergeJson = (
-        src: unknown,
-        tgt: unknown,
-      ): Record<string, unknown> | undefined => {
-        // Source must be a plain object to contribute keys; an array/scalar
-        // source never merges (checked BEFORE the tgt==null branch so a
-        // non-object source can't slip through as the result and write an
-        // unexpected shape into data/properties).
-        if (src == null || typeof src !== 'object' || Array.isArray(src)) {
-          return undefined;
+      // Spec: cor:api:070:01 (field merge strategy). The per-field strategy is
+      // shared with mergeMemories via src/lib/nodeMerge.ts. `properties` is
+      // never encrypted, so it's read from the raw rows; data/content/abstract
+      // come from the decrypted plaintext views above.
+      let changed: Record<string, unknown>;
+      let abstractChanged: boolean;
+      let contentChanged: boolean;
+      try {
+        ({ changed, abstractChanged, contentChanged } = mergeNodeFields(
+          {
+            content: srcPt.content,
+            abstract: srcPt.abstract,
+            description: srcPt.description,
+            tags: srcPt.tags,
+            data: srcPt.data,
+            properties: source.properties,
+          },
+          {
+            content: tgtPt.content,
+            abstract: tgtPt.abstract,
+            description: tgtPt.description,
+            tags: tgtPt.tags,
+            data: tgtPt.data,
+            properties: target.properties,
+          },
+          fields,
+        ));
+      } catch (e) {
+        if (e instanceof NodeAbstractTooLongError) {
+          throw new GraphQLError(e.message, {
+            extensions: { code: e.name, length: e.length, max: e.max },
+          });
         }
-        if (tgt == null) return src as Record<string, unknown>;
-        if (typeof tgt !== 'object' || Array.isArray(tgt)) {
-          return undefined;
-        }
-        const merged = { ...(src as Record<string, unknown>), ...(tgt as Record<string, unknown>) };
-        const tgtKeys = new Set(Object.keys(tgt as Record<string, unknown>));
-        const added = Object.keys(src as Record<string, unknown>).some((k) => !tgtKeys.has(k));
-        return added ? merged : undefined;
-      };
-
-      // Accumulated plaintext changes to the target.
-      // Spec: cor:api:070:01 (field merge strategy).
-      const changed: Record<string, unknown> = {};
-      let abstractChanged = false;
-      let contentChanged = false;
-
-      if (fields.has('CONTENT')) {
-        const v = combineText(tgtPt.content, srcPt.content);
-        if (v !== (tgtPt.content ?? null)) {
-          changed.content = v;
-          contentChanged = true;
-        }
-      }
-      if (fields.has('ABSTRACT')) {
-        const v = combineText(tgtPt.abstract, srcPt.abstract);
-        if (v !== (tgtPt.abstract ?? null)) {
-          if (v != null && v.length > 2000) {
-            const err = new NodeAbstractTooLongError(v.length);
-            throw new GraphQLError(err.message, {
-              extensions: { code: err.name, length: err.length, max: err.max },
-            });
-          }
-          changed.abstract = v;
-          abstractChanged = true;
-        }
-      }
-      if (fields.has('DESCRIPTION')) {
-        const v = combineText(tgtPt.description, srcPt.description);
-        if (v !== (tgtPt.description ?? null)) changed.description = v;
-      }
-      if (fields.has('TAGS')) {
-        const tt = deserializeTags(tgtPt.tags) as string[];
-        const st = deserializeTags(srcPt.tags) as string[];
-        const union = [...tt];
-        for (const t of st) if (!union.includes(t)) union.push(t);
-        if (union.length !== tt.length) changed.tags = serializeTags(union);
-      }
-      if (fields.has('DATA')) {
-        const v = mergeJson(srcPt.data, tgtPt.data);
-        if (v !== undefined) changed.data = v;
-      }
-      if (fields.has('PROPERTIES')) {
-        // properties is never encrypted — read from the raw rows.
-        const v = mergeJson(source.properties, target.properties);
-        if (v !== undefined) changed.properties = v;
+        throw e;
       }
 
       // Post-merge plaintext content drives the spec-032 abstract hash.
@@ -5440,6 +5399,287 @@ export const resolvers = {
       }
 
       return finalNode;
+    },
+
+    // Merge one memory (source) into another (target), returning the updated
+    // target. Spec: cor:api:080. Source nodes whose loc collides with a target
+    // node are folded into the counterpart via the shared mergeNodeFields
+    // strategy (cor:api:070:01); the rest relocate with their loc unchanged.
+    // Edges follow. v1 rejects encrypted memories and system/app classes
+    // (mirrors cloneMemory's constraints).
+    mergeMemories: async (
+      _: unknown,
+      { input }: { input: MergeMemoriesInput },
+      ctx: Context,
+    ) => {
+      const { source: rawSource, target: rawTarget } = input;
+      const deleteSourceMem = input.deleteSourceMem ?? false;
+      const fields = new Set<NodeMergeField>(input.include ?? ALL_NODE_MERGE_FIELDS);
+
+      const { id: sourceId } = await resolveMemoryRef(ctx.db, rawSource);
+      const { id: targetId } = await resolveMemoryRef(ctx.db, rawTarget);
+      if (sourceId === targetId) {
+        throw new GraphQLError('mergeMemories: source and target are the same memory.', {
+          extensions: { code: 'MERGE_SOURCE_EQUALS_TARGET', memoryId: sourceId },
+        });
+      }
+      const [sourceMem, targetMem] = await Promise.all([
+        ctx.db.memory.findUniqueOrThrow({ where: { id: sourceId } }),
+        ctx.db.memory.findUniqueOrThrow({ where: { id: targetId } }),
+      ]);
+
+      // v1 class guard: system/app memories auto-provision and carry pivot
+      // invariants (chk_memory_class_app_id) a free-form merge would violate
+      // (same rationale as cloneMemory rejecting these classes).
+      for (const m of [sourceMem, targetMem]) {
+        if (m.class === 'system' || m.class === 'app') {
+          throw new GraphQLError(
+            `mergeMemories does not accept a class='${m.class}' memory. ` +
+              `Only 'knowledge', 'group', 'personal', and 'private' memories can be merged.`,
+            { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryId: m.id, memoryClass: m.class } },
+          );
+        }
+      }
+      // v1: encrypted memories rejected — a cross-key re-encrypt of the whole
+      // graph (moved nodes included) is a separate follow-up (mirrors cloneMemory).
+      for (const m of [sourceMem, targetMem]) {
+        if (m.isEncrypted) {
+          throw new GraphQLError(
+            'mergeMemories does not support encrypted memories yet.',
+            { extensions: { code: 'ENCRYPTED_MEMORY_MERGE_UNSUPPORTED', memoryId: m.id } },
+          );
+        }
+      }
+
+      // Auth (cross-org allowed → each memory authorized against its own org).
+      // Spec: cor:api:080:02 (source disposition + constraints).
+      // Target gains nodes → write access. Source is emptied → write access (a
+      // writer could already delete its nodes one by one). Deleting the source
+      // memory ROW is the stricter, delete-level action → owner for personal/
+      // private, org ADMIN otherwise (mirrors deleteMemory).
+      await requireMemoryWriteAccess(ctx, targetMem.id);
+      await requireMemoryWriteAccess(ctx, sourceMem.id);
+      if (deleteSourceMem) {
+        if (sourceMem.class === 'personal' || sourceMem.class === 'private') {
+          if (!ctx.userId || sourceMem.userId !== ctx.userId) {
+            throw new GraphQLError(
+              `Forbidden: only the owner can delete a ${sourceMem.class} memory`,
+              { extensions: { code: 'FORBIDDEN' } },
+            );
+          }
+        } else {
+          await requireOrgRole(ctx, sourceMem.organizationId, 'ADMIN');
+        }
+      }
+
+      const actorId = ctx.userId ?? ctx.clientId ?? null;
+      type NodeRow = NonNullable<Awaited<ReturnType<typeof ctx.db.node.findUnique>>>;
+      const [sourceNodes, targetNodes] = await Promise.all([
+        ctx.db.node.findMany({ where: { memoryId: sourceMem.id, deletedAt: null } }),
+        ctx.db.node.findMany({ where: { memoryId: targetMem.id, deletedAt: null } }),
+      ]);
+      const targetByLoc = new Map(targetNodes.map((n) => [n.loc, n as NodeRow]));
+
+      // Partition: a source node whose loc already exists in the target folds
+      // into that counterpart; the rest relocate.
+      // Spec: cor:api:080:01 (collide vs relocate).
+      const colliding: Array<{ src: NodeRow; tgt: NodeRow }> = [];
+      const moving: NodeRow[] = [];
+      for (const s of sourceNodes) {
+        const t = targetByLoc.get(s.loc);
+        if (t) colliding.push({ src: s as NodeRow, tgt: t });
+        else moving.push(s as NodeRow);
+      }
+      const sourceNodeIds = new Set(sourceNodes.map((n) => n.id));
+      const survivor = new Map<string, string>(); // colliding src id → target counterpart id
+      for (const c of colliding) survivor.set(c.src.id, c.tgt.id);
+
+      // Every edge incident to a source node, in BOTH directions, across
+      // memories (an incoming edge from a third memory is re-pointed too).
+      const edgeWhere: Prisma.EdgeWhereInput = {
+        OR: [{ sourceId: { in: [...sourceNodeIds] } }, { targetId: { in: [...sourceNodeIds] } }],
+      };
+      // EDGES transfer can mutate edges whose denormalized memory is neither
+      // source nor target (incoming cross-memory edges). Require write access
+      // to every such memory first — same posture as mergeNodes.
+      if (fields.has('EDGES')) {
+        const edgeMems = await ctx.db.edge.findMany({
+          where: edgeWhere,
+          select: { memoryId: true },
+          distinct: ['memoryId'],
+        });
+        const authed = new Set<string>([sourceMem.id, targetMem.id]);
+        for (const { memoryId } of edgeMems) {
+          if (authed.has(memoryId)) continue;
+          await requireMemoryWriteAccess(ctx, memoryId);
+          authed.add(memoryId);
+        }
+      }
+
+      await ctx.db.$transaction(async (tx) => {
+        // 1) Relocate non-colliding nodes (loc unchanged → no node-loc
+        //    collision is possible, the target has nothing at these locs).
+        //    Expressed as "all live source nodes EXCEPT the colliding ones"
+        //    so a large source memory doesn't blow past the DB bind-parameter
+        //    limit with a giant `id IN (...)` list (the colliding set is the
+        //    small one). `notIn: []` matches everything, so an all-relocate
+        //    merge still moves every node.
+        if (moving.length > 0) {
+          await tx.node.updateMany({
+            where: {
+              memoryId: sourceMem.id,
+              deletedAt: null,
+              id: { notIn: colliding.map((c) => c.src.id) },
+            },
+            data: { memoryId: targetMem.id },
+          });
+        }
+
+        // 2) Fold colliding nodes into their counterparts. Raw rows are
+        //    plaintext here (encrypted memories were rejected above). A
+        //    NodeVersion snapshot of the target precedes each change (undo);
+        //    abstractOriginHash recomputes only when the abstract changed.
+        for (const { src, tgt } of colliding) {
+          let changed: Record<string, unknown>;
+          let abstractChanged: boolean;
+          let contentChanged: boolean;
+          try {
+            ({ changed, abstractChanged, contentChanged } = mergeNodeFields(
+              { content: src.content, abstract: src.abstract, description: src.description, tags: src.tags, data: src.data, properties: src.properties },
+              { content: tgt.content, abstract: tgt.abstract, description: tgt.description, tags: tgt.tags, data: tgt.data, properties: tgt.properties },
+              fields,
+            ));
+          } catch (e) {
+            // Surface the same typed error mergeNodes does (the tx rolls back).
+            if (e instanceof NodeAbstractTooLongError) {
+              throw new GraphQLError(e.message, {
+                extensions: { code: e.name, length: e.length, max: e.max, loc: tgt.loc },
+              });
+            }
+            throw e;
+          }
+          await tx.nodeVersion.create({
+            data: {
+              nodeId: tgt.id,
+              loc: tgt.loc,
+              name: tgt.name,
+              alias: tgt.alias,
+              description: tgt.description,
+              abstract: tgt.abstract,
+              abstractOriginHash: tgt.abstractOriginHash,
+              content: tgt.content,
+              tags: tgt.tags as string[],
+              editedBy: actorId,
+              createdBy: actorId,
+            },
+          });
+          if (Object.keys(changed).length > 0) {
+            const writeData: Record<string, unknown> = { ...changed, updatedBy: actorId };
+            if (abstractChanged) {
+              writeData.abstractOriginHash = computeContentHash(
+                contentChanged ? (changed.content as string | null) : tgt.content,
+              );
+            }
+            await tx.node.update({ where: { id: tgt.id }, data: writeData });
+          }
+        }
+
+        // 3) Edges. Re-point every edge incident to a source node onto the
+        //    survivors BEFORE deleting the colliding rows (else the re-points
+        //    cascade away). An edge touching a colliding node transfers only
+        //    when EDGES is selected — otherwise it is left to cascade with the
+        //    deleted colliding row (matches mergeNodes deleteSource-sans-EDGES).
+        //    Edges among relocated nodes always follow. Self-loops and
+        //    (loc, memory) collisions drop. Pre-checked against a claimed-loc
+        //    set so a P2002 never poisons the transaction.
+        const edges = await tx.edge.findMany({ where: edgeWhere });
+        // Locs already taken in the target's memory that an incoming edge
+        // could collide with. Two refinements over a naive "all target locs":
+        //   - restrict to the locs we're actually moving in (`candidateLocs`),
+        //     so a large target's edge set isn't fully materialized;
+        //   - EXCLUDE the in-flight edges themselves (`edgeIds`) — an edge
+        //     already in the target memory that is also incident to a source
+        //     node (e.g. target-node → source-node) appears in `edges`, and
+        //     must not be treated as colliding with its own loc and dropped.
+        const edgeIds = new Set(edges.map((e) => e.id));
+        const candidateLocs = edges.map((e) => e.loc);
+        const occupied = new Set<string>(
+          (
+            await tx.edge.findMany({
+              where: { memoryId: targetMem.id, loc: { in: candidateLocs } },
+              select: { id: true, loc: true },
+            })
+          )
+            .filter((e) => !edgeIds.has(e.id))
+            .map((e) => e.loc),
+        );
+        const toDrop: string[] = [];
+        const memoryOnlyIds: string[] = [];
+        const remaps: Array<{ id: string; sourceId: string; targetId: string; memoryId: string }> = [];
+        for (const e of edges) {
+          const touchesColliding = survivor.has(e.sourceId) || survivor.has(e.targetId);
+          if (touchesColliding && !fields.has('EDGES')) continue; // cascade with the deleted row
+          const newSourceId = survivor.get(e.sourceId) ?? e.sourceId;
+          const newTargetId = survivor.get(e.targetId) ?? e.targetId;
+          if (newSourceId === newTargetId) {
+            toDrop.push(e.id);
+            continue;
+          }
+          // An edge sourced from a (now-relocated) source node follows it into
+          // the target's memory; an incoming edge from a foreign memory keeps
+          // its own denormalized memory.
+          const newMemoryId = sourceNodeIds.has(e.sourceId) ? targetMem.id : e.memoryId;
+          if (newMemoryId === targetMem.id) {
+            if (occupied.has(e.loc)) {
+              toDrop.push(e.id);
+              continue;
+            }
+            occupied.add(e.loc);
+          }
+          const endpointChanged = newSourceId !== e.sourceId || newTargetId !== e.targetId;
+          if (endpointChanged) {
+            remaps.push({ id: e.id, sourceId: newSourceId, targetId: newTargetId, memoryId: newMemoryId });
+          } else if (newMemoryId !== e.memoryId) {
+            memoryOnlyIds.push(e.id);
+          }
+        }
+        if (toDrop.length > 0) {
+          await tx.edge.deleteMany({ where: { id: { in: toDrop } } });
+        }
+        if (memoryOnlyIds.length > 0) {
+          await tx.edge.updateMany({ where: { id: { in: memoryOnlyIds } }, data: { memoryId: targetMem.id } });
+        }
+        for (const r of remaps) {
+          await tx.edge.update({
+            where: { id: r.id },
+            data: { sourceId: r.sourceId, targetId: r.targetId, memoryId: r.memoryId },
+          });
+        }
+
+        // 4) Delete the now-emptied colliding source rows (any edge not
+        //    transferred above cascades away with the row).
+        if (colliding.length > 0) {
+          await tx.node.deleteMany({ where: { id: { in: colliding.map((c) => c.src.id) } } });
+        }
+
+        // 5) The source memory is now empty. Soft-delete it when asked
+        //    (matches deleteMemory's soft-delete).
+        if (deleteSourceMem) {
+          await tx.memory.update({ where: { id: sourceMem.id }, data: { deletedAt: new Date() } });
+        }
+      });
+
+      // Re-embed: the target gained/changed nodes. If it indexes vectors,
+      // re-stamp every node pending so the sweep embeds the relocated + merged
+      // content (mirrors cloneMemory's backfill). No-op otherwise.
+      if (targetMem.vectorIndexEnabled) {
+        await backfillMemoryEmbeddings(ctx.db, targetMem.id);
+      }
+
+      return ctx.db.memory.findUniqueOrThrow({
+        where: { id: targetMem.id },
+        include: MEMORY_INCLUDE,
+      });
     },
 
     replaceSubtree: async (
@@ -10409,15 +10649,6 @@ interface EdgeInput {
  * re-points the source's relationships onto the target. See the
  * `mergeNodes` resolver for the per-field merge strategy.
  */
-type NodeMergeField =
-  | 'CONTENT'
-  | 'ABSTRACT'
-  | 'DESCRIPTION'
-  | 'TAGS'
-  | 'DATA'
-  | 'PROPERTIES'
-  | 'EDGES';
-
 interface MergeNodesInput {
   /** Source node — ID or fully-qualified URN. Folded into `target`. */
   source: string;
@@ -10427,6 +10658,17 @@ interface MergeNodesInput {
   include?: NodeMergeField[] | null;
   /** Hard-delete the source node after a successful merge. */
   deleteSource?: boolean | null;
+}
+
+interface MergeMemoriesInput {
+  /** Source memory — ID or fully-qualified URN. Emptied into `target`. */
+  source: string;
+  /** Target memory — ID or fully-qualified URN. The surviving memory. */
+  target: string;
+  /** Field strategy for source nodes that collide (same loc) in the target. Omitted/null = every mergeable field. */
+  include?: NodeMergeField[] | null;
+  /** Delete the (now-empty) source memory after a successful merge. */
+  deleteSourceMem?: boolean | null;
 }
 
 interface SessionInput {
