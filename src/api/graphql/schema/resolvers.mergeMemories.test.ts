@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
 import { generateId } from '../../../lib/id.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -195,6 +196,147 @@ describe('mergeMemories — input resolution', () => {
     expect(out.id).toBe(tgtMem.id);
     const tgt = await nodesByLoc(tgtMem.id);
     expect(tgt.get('n')?.content).toBe('x');
+  });
+});
+
+describe('mergeMemories — batched / resumable (#363)', () => {
+  // Drive the operation directly with batchSize=1 so the colliding-fold and
+  // edge-drain loops run across MANY inner transactions — the same code path a
+  // very large source memory exercises, without seeding hundreds of rows.
+  const actorId = () => admin.id;
+  function mergeBatched(extra: Record<string, unknown> = {}) {
+    return mergeMemoryGraph(db, {
+      sourceMemoryId: srcMem.id,
+      targetMemoryId: tgtMem.id,
+      fields: new Set(['CONTENT', 'ABSTRACT', 'DESCRIPTION', 'TAGS', 'DATA', 'PROPERTIES', 'EDGES']),
+      deleteSourceMem: false,
+      actorId: actorId(),
+      batchSize: 1,
+      ...extra,
+    });
+  }
+
+  it('folds every colliding node and relocates the rest across many batches', async () => {
+    // Several collisions + several relocations, each landing in its own batch.
+    for (let i = 0; i < 5; i++) {
+      await makeNode(srcMem.id, `shared${i}`, { content: `s${i}` });
+      await makeNode(tgtMem.id, `shared${i}`, { content: `t${i}` });
+      await makeNode(srcMem.id, `move${i}`, { content: `m${i}` });
+    }
+
+    const res = await mergeBatched();
+    expect(res.foldedCount).toBe(5);
+    expect(res.relocatedCount).toBe(6); // 5 move* + the source root node
+
+    const tgt = await nodesByLoc(tgtMem.id);
+    for (let i = 0; i < 5; i++) {
+      expect(tgt.get(`shared${i}`)?.content).toBe(`t${i}\n\ns${i}`);
+      expect(tgt.get(`move${i}`)?.content).toBe(`m${i}`);
+    }
+    expect(await db.node.count({ where: { memoryId: srcMem.id, deletedAt: null } })).toBe(0);
+  });
+
+  it('re-points an edge spanning two colliding nodes folded in different batches', async () => {
+    const c1 = await makeNode(srcMem.id, 'c1');
+    const c2 = await makeNode(srcMem.id, 'c2');
+    const t1 = await makeNode(tgtMem.id, 'c1');
+    const t2 = await makeNode(tgtMem.id, 'c2');
+    await db.edge.create({
+      data: { id: generateId(), memoryId: srcMem.id, sourceId: c1.id, targetId: c2.id, loc: 'c1:rel:c2' },
+    });
+
+    await mergeBatched();
+
+    // Both colliding source nodes gone; the edge now connects the two target
+    // counterparts even though they were folded in separate transactions.
+    expect(await db.node.findUnique({ where: { id: c1.id } })).toBeNull();
+    expect(await db.node.findUnique({ where: { id: c2.id } })).toBeNull();
+    const edge = await db.edge.findFirst({ where: { sourceId: t1.id, targetId: t2.id } });
+    expect(edge).not.toBeNull();
+    expect(edge?.memoryId).toBe(tgtMem.id);
+  });
+
+  it('drops an edge whose loc is already taken in the target', async () => {
+    // A relocating-node edge whose loc collides with a pre-existing target edge
+    // must drop (the (loc, memory) unique index would otherwise be violated).
+    const a = await makeNode(srcMem.id, 'a');
+    const b = await makeNode(srcMem.id, 'b');
+    await db.edge.create({
+      data: { id: generateId(), memoryId: srcMem.id, sourceId: a.id, targetId: b.id, loc: 'dup' },
+    });
+    const ta = await makeNode(tgtMem.id, 'ta');
+    const tb = await makeNode(tgtMem.id, 'tb');
+    await db.edge.create({
+      data: { id: generateId(), memoryId: tgtMem.id, sourceId: ta.id, targetId: tb.id, loc: 'dup' },
+    });
+
+    const res = await mergeBatched();
+    expect(res.edgesDroppedCount).toBe(1);
+    // The pre-existing target edge survives; only one edge at loc 'dup' remains.
+    expect(await db.edge.count({ where: { memoryId: tgtMem.id, loc: 'dup' } })).toBe(1);
+    expect(await db.edge.count({ where: { memoryId: srcMem.id } })).toBe(0);
+  });
+
+  it('classifies and relocates correctly across multiple keyset pages', async () => {
+    // classifyPageSize=2 forces the classify+relocate scan to page several
+    // times. Movers leave the source set as they relocate; the colliding rows
+    // left behind must not be re-read (keyset), and a collision sitting in a
+    // later page must still be detected.
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) ids.push((await makeNode(srcMem.id, `n${i}`, { content: `s${i}` })).id);
+    // Give two of them target counterparts (collisions); the other two move.
+    await makeNode(tgtMem.id, 'n1', { content: 't1' });
+    await makeNode(tgtMem.id, 'n3', { content: 't3' });
+
+    const res = await mergeMemoryGraph(db, {
+      sourceMemoryId: srcMem.id,
+      targetMemoryId: tgtMem.id,
+      fields: new Set(['CONTENT', 'EDGES']),
+      deleteSourceMem: false,
+      actorId: actorId(),
+      batchSize: 1,
+      classifyPageSize: 2,
+    });
+    // 2 collisions folded, the rest (n0, n2 + the source root) relocated.
+    expect(res.foldedCount).toBe(2);
+    expect(res.relocatedCount).toBe(3);
+
+    const tgt = await nodesByLoc(tgtMem.id);
+    expect(tgt.get('n1')?.content).toBe('t1\n\ns1');
+    expect(tgt.get('n3')?.content).toBe('t3\n\ns3');
+    expect(tgt.get('n0')?.content).toBe('s0');
+    expect(tgt.get('n2')?.content).toBe('s2');
+    expect(await db.node.count({ where: { memoryId: srcMem.id, deletedAt: null } })).toBe(0);
+  });
+
+  it('clamps a non-positive batchSize instead of spinning forever', async () => {
+    await makeNode(srcMem.id, 'shared', { content: 'sc' });
+    await makeNode(tgtMem.id, 'shared', { content: 'tc' });
+    // batchSize=0 would never advance the fold loop without the >= 1 clamp.
+    const res = await mergeBatched({ batchSize: 0 });
+    expect(res.foldedCount).toBe(1);
+    const tgt = await nodesByLoc(tgtMem.id);
+    expect(tgt.get('shared')?.content).toBe('tc\n\nsc');
+  });
+
+  it('is idempotent: re-running completes an interrupted (partial) merge', async () => {
+    await makeNode(srcMem.id, 'shared', { content: 'sc' });
+    await makeNode(srcMem.id, 'srconly', { content: 'so' });
+    await makeNode(tgtMem.id, 'shared', { content: 'tc' });
+
+    // First pass folds + relocates everything.
+    await mergeBatched();
+    const afterFirst = await nodesByLoc(tgtMem.id);
+    expect(afterFirst.get('shared')?.content).toBe('tc\n\nsc');
+
+    // Re-running on the now-empty source is a no-op — crucially it does NOT
+    // double-concatenate the folded text (the folded source row is gone).
+    const res = await mergeBatched();
+    expect(res.foldedCount).toBe(0);
+    expect(res.relocatedCount).toBe(0);
+    const afterSecond = await nodesByLoc(tgtMem.id);
+    expect(afterSecond.get('shared')?.content).toBe('tc\n\nsc');
+    expect(afterSecond.get('srconly')?.content).toBe('so');
   });
 });
 
