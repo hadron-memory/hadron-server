@@ -113,6 +113,43 @@ describe('hadron_list_memories — own personal memories + scope (#282)', () => 
     expect(text).not.toContain('should-not-appear');
   });
 
+  // #339: an org member with the global ADMIN/OWNER role can write any
+  // non-personal memory (canWriteToMemory bypass), so the listing MUST label
+  // it read-write — not the read-only that org-membership alone confers. The
+  // bug: hadron_list_memories read the level straight from getMemoryAccess,
+  // which never encodes the ADMIN/OWNER bypass, so admins saw their org's
+  // knowledge memories as read-only while hadron_create_node into them
+  // succeeded.
+  it('labels an org knowledge memory read-write for a global ADMIN (matches enforced write access)', async () => {
+    const admin = await createUser('admin-writer');
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgId, userId: admin.id, role: 'READER' },
+    });
+    await db.memory.create({
+      data: { class: 'knowledge', id: generateId(), name: 'admin-kn', urn: `${orgId}:admin-kn`, organizationId: orgId },
+    });
+
+    const auth: AuthContext = { userId: admin.id, roles: ['ADMIN'], clientId: `user:${admin.id}` };
+    const text = await createTestableMcpServer(auth).callToolText('hadron_list_memories', {});
+
+    expect(text).toContain('admin-kn');
+    expect(text).toMatch(/admin-kn \(read-write\)/);
+  });
+
+  it('still labels the same org knowledge memory read-only for a non-admin org member', async () => {
+    const member = await createUser('plain-member');
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgId, userId: member.id, role: 'READER' },
+    });
+    await db.memory.create({
+      data: { class: 'knowledge', id: generateId(), name: 'member-kn', urn: `${orgId}:member-kn`, organizationId: orgId },
+    });
+
+    const text = await createTestableMcpServer(userAuth(member.id)).callToolText('hadron_list_memories', {});
+
+    expect(text).toMatch(/member-kn \(read-only\)/);
+  });
+
   it('surfaces the no-active-App user scope line', async () => {
     const owner = await createUser('scopey');
     await createFreeStanding(owner.id, 'personal', 'mine');
