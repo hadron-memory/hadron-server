@@ -2300,8 +2300,8 @@ export const resolvers = {
       //
       // Self-audit is always allowed (issue #364): a user auditing their OWN
       // effective access learns nothing they couldn't already infer by trying
-      // the operation, so there's no info-leak. Cross-subject auditing stays
-      // gated to platform admin / org admin-owner / strict-owner principal.
+      // the operation, so there's no info-leak. Every other (cross-subject)
+      // case stays gated by callerCanAudit exactly as before.
       const isSelfAudit = !!ctx.userId && subjectUser.id === ctx.userId;
       if (
         !isSelfAudit &&
