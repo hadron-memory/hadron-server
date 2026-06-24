@@ -1288,6 +1288,35 @@ export const typeDefs = `#graphql
     isRunnable: Boolean
   }
 
+  "A node field mergeNodes can fold from source into target."
+  enum NodeMergeField {
+    "Concatenate source content after target content (blank-line separated)."
+    CONTENT
+    "Concatenate source abstract after target abstract (2000-char cap enforced)."
+    ABSTRACT
+    "Concatenate source description after target description."
+    DESCRIPTION
+    "Union the tag sets (target order first, then new source tags)."
+    TAGS
+    "Shallow-merge the encrypted 'data' JSON; target wins on key collisions."
+    DATA
+    "Shallow-merge the 'properties' JSON; target wins on key collisions."
+    PROPERTIES
+    "Re-point the source's incoming and outgoing edges onto the target."
+    EDGES
+  }
+
+  input MergeNodesInput {
+    "Source node — ID or fully-qualified URN. Folded into 'target'."
+    source: String!
+    "Target node — ID or fully-qualified URN. The surviving node."
+    target: String!
+    "Fields to merge. Omit (or null) to merge every mergeable field."
+    include: [NodeMergeField!]
+    "Hard-delete the source node after a successful merge."
+    deleteSource: Boolean = false
+  }
+
   input SessionInput {
     id: String!
     type: String
@@ -1934,6 +1963,16 @@ export const typeDefs = `#graphql
 
     # Move a node to a new loc, optionally across memories (keeps same id and all incoming edge references)
     moveNode(from: String!, to: String!, memoryId: String!, targetMemoryId: String): Node!
+
+    # Fold one node (source) into another (target), returning the updated
+    # target. Per-field strategy: text fields (CONTENT/ABSTRACT/DESCRIPTION)
+    # concatenate target-first; TAGS unions; DATA/PROPERTIES shallow-merge
+    # with the target winning on key collisions; EDGES re-points the source's
+    # relationships onto the target. 'include' selects which fields fold in
+    # (omitted = all). 'deleteSource: true' hard-deletes the source afterward.
+    # Honors per-memory write auth, encryption, version history, abstract
+    # staleness, and re-embedding (same invariants as upsertNode).
+    mergeNodes(input: MergeNodesInput!): Node!
 
     # Replace all nodes owned by a repo within a memory (collection tool)
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
