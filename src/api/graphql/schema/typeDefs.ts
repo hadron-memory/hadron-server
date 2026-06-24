@@ -1317,6 +1317,17 @@ export const typeDefs = `#graphql
     deleteSource: Boolean = false
   }
 
+  input MergeMemoriesInput {
+    "Source memory — ID or fully-qualified URN. Emptied into 'target'."
+    source: String!
+    "Target memory — ID or fully-qualified URN. The surviving memory."
+    target: String!
+    "Field strategy for source nodes whose loc collides with an existing target node (folded via the mergeNodes rules). Omit (or null) = every mergeable field. Nodes with no target counterpart move over unchanged (loc preserved)."
+    include: [NodeMergeField!]
+    "Delete the (now-empty) source memory after a successful merge."
+    deleteSourceMem: Boolean = false
+  }
+
   input SessionInput {
     id: String!
     type: String
@@ -1973,6 +1984,15 @@ export const typeDefs = `#graphql
     # Honors per-memory write auth, encryption, version history, abstract
     # staleness, and re-embedding (same invariants as upsertNode).
     mergeNodes(input: MergeNodesInput!): Node!
+
+    # Merge one memory (source) into another (target), returning the updated
+    # target. Source nodes whose loc already exists in the target are folded
+    # into their counterpart via the mergeNodes field strategy ('include'
+    # selects which fields); source nodes with no counterpart move over with
+    # their loc unchanged. Edges follow. The source memory ends up empty;
+    # 'deleteSourceMem: true' then deletes it. v1 rejects encrypted source or
+    # target memories and system/app classes.
+    mergeMemories(input: MergeMemoriesInput!): Memory!
 
     # Replace all nodes owned by a repo within a memory (collection tool)
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
