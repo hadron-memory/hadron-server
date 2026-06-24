@@ -447,7 +447,16 @@ function defaultAiConfigOf(
  * - Users: memories from org memberships + cross-org subscriptions + public memories
  * - Unauthenticated: public memories only
  */
-async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
+async function getAccessibleMemoryIds(
+  ctx: Context,
+  // Single-memory authorization (e.g. Query.memory(id:)) passes the target id
+  // so every branch scopes its lookup to that one row — the result is `[id]`
+  // or `[]`, with no enumeration of the whole accessible set (e.g. every PUBLIC
+  // memory). The canonical predicates are unchanged, just narrowed, so a
+  // scoped check stays in lockstep with the full-set node gate by construction.
+  onlyMemoryId?: string,
+): Promise<string[] | null> {
+  const scope = onlyMemoryId ? { id: onlyMemoryId } : {};
   // App Key with an active session — hard-isolate to the session's memory
   // plus the agent's system memory. Even if an LLM asks to read a different
   // memory by ID, this filter denies it. This is THE security boundary for
@@ -464,7 +473,7 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
     const ids: string[] = [];
     if (session?.memoryId) ids.push(session.memoryId);
     if (session?.agent?.systemMemoryId) ids.push(session.agent.systemMemoryId);
-    return ids;
+    return onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
   }
 
   // Platform ADMIN/OWNER: broad access EXCEPT another user's owner-owned
@@ -475,6 +484,7 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
     const all = await ctx.db.memory.findMany({
       where: {
+        ...scope,
         deletedAt: null,
         NOT: {
           class: { in: ['personal', 'private'] as any },
@@ -503,7 +513,7 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
     // 035-visibility-enum-cleanup rationale for `class IN (knowledge, group)`
     // (app/system reached via AppMember/the agent surface, not this node
     // query) now lives in that helper's header.
-    const orgPublicIds = await getOrgReadableMemoryIds(ctx.db, ctx.userId);
+    const orgPublicIds = await getOrgReadableMemoryIds(ctx.db, ctx.userId, onlyMemoryId);
     // Identity-scoped clauses stay local — owner-only, not org-wide:
     //   - 034: owner-owned personal/private memories (only the owner).
     //   - the caller's own per-user "holding" memories (userMemoryOfAgentId
@@ -512,6 +522,7 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
     //     finding).
     const ownAndHoldings = await ctx.db.memory.findMany({
       where: {
+        ...scope,
         deletedAt: null,
         OR: [
           { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
@@ -527,7 +538,7 @@ async function getAccessibleMemoryIds(ctx: Context): Promise<string[] | null> {
 
   // Unauthenticated — public memories only
   const publicMemories = await ctx.db.memory.findMany({
-    where: { visibility: 'PUBLIC', deletedAt: null },
+    where: { ...scope, visibility: 'PUBLIC', deletedAt: null },
     select: { id: true },
   });
   return publicMemories.map((g) => g.id);
@@ -3705,18 +3716,22 @@ export const resolvers = {
       // getOrgReadableMemoryIds) intentionally omits app/system-class org
       // memories, which members can still open here as they do today.
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
+        // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no
+        // longer grants access — matches getOrgReadableMemoryIds' own
+        // `deletedAt: null` membership filter.
         const member = ctx.userId
-          ? await ctx.db.orgMember.findUnique({
+          ? await ctx.db.orgMember.findFirst({
               where: {
-                organizationId_userId: {
-                  organizationId: memory.organizationId,
-                  userId: ctx.userId,
-                },
+                organizationId: memory.organizationId,
+                userId: ctx.userId,
+                deletedAt: null,
               },
             })
           : null;
         if (!member) {
-          const accessibleIds = await getAccessibleMemoryIds(ctx);
+          // Scope the shared gate to THIS memory so it's an indexed point-read,
+          // not an enumeration of the whole accessible set.
+          const accessibleIds = await getAccessibleMemoryIds(ctx, memory.id);
           if (accessibleIds !== null && !accessibleIds.includes(memory.id)) {
             throw new Error('Forbidden');
           }

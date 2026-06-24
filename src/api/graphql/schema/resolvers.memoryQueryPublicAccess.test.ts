@@ -75,9 +75,23 @@ describe('Query.memory(id:) — PUBLIC visibility (issue #362)', () => {
     expect(out?.id).toBe(orgMem.id);
   });
 
-  it('an unauthenticated caller can read a PUBLIC memory but not a private one', async () => {
+  it('an unauthenticated caller can read a PUBLIC memory but not an ORGANIZATION one', async () => {
     expect((await resolvers.Query.memory(null, { id: publicMem.id }, ctx()))?.id).toBe(publicMem.id);
     await expect(resolvers.Query.memory(null, { id: orgMem.id }, ctx())).rejects.toThrow('Forbidden');
+  });
+
+  it('a REVOKED (soft-deleted) member is denied on an ORGANIZATION memory', async () => {
+    // Soft-delete the membership; the fast-path must treat it as revoked and
+    // fall through to the shared gate (no public/subscription grant → denied).
+    await db.orgMember.updateMany({
+      where: { organizationId: orgA.id, userId: member.id },
+      data: { deletedAt: new Date() },
+    });
+    await expect(
+      resolvers.Query.memory(null, { id: orgMem.id }, asMember()),
+    ).rejects.toThrow('Forbidden');
+    // The same revoked member can still read a PUBLIC memory (shared gate).
+    expect((await resolvers.Query.memory(null, { id: publicMem.id }, asMember()))?.id).toBe(publicMem.id);
   });
 });
 
