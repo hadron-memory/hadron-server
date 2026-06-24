@@ -114,6 +114,7 @@ import {
   formatUrn,
   composeInstalledAgentUrn,
   formatCanonicalUrn,
+  validateUserSlug,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
@@ -148,6 +149,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
+import { UserNotFoundError } from '../../../lib/entityRef/errors.js';
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import {
@@ -1903,6 +1905,19 @@ export const resolvers = {
   },
   User: {
     linkedAt: (u: { linkedAt?: Date | string | null }) => toISO(u.linkedAt ?? null),
+    // Canonical hrn:user:<handle> URN, computed from the handle (spec
+    // cor:urn:010:01). Null for a handle-less user, OR a handle that isn't
+    // URN-legal — handle-charset validation on write is a #325 follow-up, so
+    // until it lands we must not emit an invalid "canonical" URN here.
+    urn: (u: { handle?: string | null }) => {
+      if (!u.handle) return null;
+      try {
+        validateUserSlug(u.handle);
+      } catch {
+        return null;
+      }
+      return formatUrn('user', u.handle);
+    },
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
     // list only when the queried User is the authenticated user (mirrors
     // 005's User.agentSubscriptions resolver-side gate).
@@ -2249,11 +2264,21 @@ export const resolvers = {
       { user, resource }: { user: string; resource: string },
       ctx: Context,
     ) => {
-      // Subject — the user whose access we are auditing. The GraphQL signature
-      // takes a User id here (distinct from `resource`, which accepts a
-      // `hrn:user:<handle>` URN per spec cor:urn:010:01). Unknown subject →
-      // NOT_FOUND.
-      const subjectUser = await ctx.db.user.findUnique({ where: { id: user } });
+      // Subject — the user whose access we are auditing. Accepts a User id OR a
+      // `hrn:user:<handle>` URN (spec cor:urn:010:01), resolved via the same
+      // resolveUserRef the `resource` side uses. Unknown / soft-deleted subject
+      // → NOT_FOUND.
+      let subjectUser: Awaited<ReturnType<typeof ctx.db.user.findUnique>> = null;
+      try {
+        const { id: subjectId } = await resolveUserRef(ctx.db, user);
+        subjectUser = await ctx.db.user.findUnique({ where: { id: subjectId } });
+      } catch (e) {
+        // Only a genuine miss collapses to NOT_FOUND. A malformed URN
+        // (UrnNotQualifiedError → URN_NOT_QUALIFIED) and unexpected DB/runtime
+        // errors must propagate, not be masked as a misleading NOT_FOUND.
+        if (!(e instanceof UserNotFoundError)) throw e;
+        subjectUser = null;
+      }
       if (!subjectUser) {
         throw new GraphQLError('User not found', { extensions: { code: 'NOT_FOUND' } });
       }
