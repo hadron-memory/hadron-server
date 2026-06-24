@@ -105,7 +105,7 @@ function textResult(text: string) {
  * server expose?", not "what release of the hadron-server repo am I
  * talking to?"
  */
-export const HADRON_SERVER_VERSION = '0.6.0';
+export const HADRON_SERVER_VERSION = '0.7.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"
@@ -2806,7 +2806,7 @@ export function createMcpServerInstance(
       seq: z.number().optional().describe('New sort order among siblings'),
       tags: tagsInputSchema.optional().describe('Replace tags'),
       properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
-      data: z.record(z.string(), z.unknown()).optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config)'),
+      data: z.record(z.string(), z.unknown()).optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config). REPLACES the whole data bag — to merge in a few keys while preserving the rest, use hadron_update_node_data instead.'),
       llmModel: z.string().optional().describe('LLM model used'),
       aiAgent: z.string().optional().describe('AI agent tool used'),
       edges: z.array(z.object({
@@ -3012,6 +3012,51 @@ export function createMcpServerInstance(
       const updatedUrn = await nodeUrn(loc, existing.memoryId);
       // #322: surface the stable PK (immutable across move/rename).
       return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})`);
+    },
+  );
+
+  // ── hadron_update_node_data ───────────────────────────────────────────
+  //
+  // Shallow-MERGE a JSON patch into a node's `data` bag (issue #366).
+  // Distinct from hadron_update_node's `data` arg, which REPLACES the whole
+  // bag — use this when you want to set/overwrite a few keys and keep the
+  // rest. Delegates to the GraphQL updateNodeData resolver so the single-write
+  // invariants (per-memory auth, encryption, version history, git mirror) have
+  // ONE implementation; like hadron_replace_text (and unlike the inline write
+  // tools, #206) the delegated path encrypts/decrypts correctly.
+
+  server.tool(
+    'hadron_update_node_data',
+    "Merge a JSON object into a node's `data` bag, preserving keys you don't mention. The patch's top-level keys are written over the node's existing data (the patch wins on collision); other keys stay as they were; a node with no data yet takes the patch as-is. The merge is SHALLOW — a nested object value is replaced wholesale, not deep-merged. Use this for partial data edits; to REPLACE the whole `data` bag instead, use hadron_update_node's `data` argument. Honors write permissions, version history, and encryption.",
+    {
+      nodeUrn: z.string().describe('Node to update — a fully-qualified node URN (org::memory::loc) or an ID-shape PK.'),
+      data: z.record(z.string(), z.unknown()).describe('JSON object to merge into the node\'s `data`. Must be an object (not an array or scalar). Its top-level keys overwrite existing ones; unmentioned keys are preserved.'),
+    },
+    async ({ nodeUrn: rawNodeUrn, data }) => {
+      // Build a GraphQL Context from the MCP auth, including appId + sessionId
+      // so app-keyed write authorization resolves the same way it does for
+      // hadron_update_node (the gqlCtx helper omits those — #206 finding).
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+
+      try {
+        const node = await resolvers.Mutation.updateNodeData(
+          {},
+          { nodeId: rawNodeUrn, data },
+          ctx,
+        );
+        const urn = await nodeUrn(node.loc, node.memoryId);
+        return textResult(`Node data merged: ${urn} (id: ${node.id})`);
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'update failed'}`);
+      }
     },
   );
 
