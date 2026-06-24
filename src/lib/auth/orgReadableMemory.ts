@@ -34,6 +34,11 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 export async function getOrgReadableMemoryIds(
   db: PrismaClient,
   userId: string,
+  // When set, scope the memory lookup to this single id (a single-memory
+  // authorization check) so it stays an indexed point-read instead of
+  // enumerating the whole org-readable set. The predicate is unchanged, just
+  // narrowed — the result is `[onlyMemoryId]` or `[]`.
+  onlyMemoryId?: string,
 ): Promise<string[]> {
   // Defensive: Prisma silently DROPS an `undefined` where-filter, so a
   // `userId === undefined` slipping through (upstream widening, a bad call
@@ -49,6 +54,7 @@ export async function getOrgReadableMemoryIds(
 
   const memories = await db.memory.findMany({
     where: {
+      ...(onlyMemoryId ? { id: onlyMemoryId } : {}),
       deletedAt: null,
       OR: [
         // Org-visible memories: knowledge (PUBLIC/ORGANIZATION) + group
