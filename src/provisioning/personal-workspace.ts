@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'crypto';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { APP_KEY_PREFIX } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { normalizeHandleOrNull } from '../lib/userHandle.js';
 
 interface ProvisionResult {
   orgId: string;
@@ -28,10 +29,43 @@ export async function provisionPersonalWorkspace(
   userId: string,
   displayName: string,
 ): Promise<ProvisionResult> {
-  // Generate a unique URN for the personal org
-  const urn = `personal-${userId}`;
+  // Slug for the personal org. Prefer the user's handle (issue #360) so the
+  // org reads as `<handle>-org`; fall back to the guaranteed-unique
+  // `personal-<userId>` when the user has no URN-legal handle (email signups,
+  // or a GitHub login that wasn't a legal URN atom) OR when `<handle>-org` is
+  // already taken — the latter avoids a unique-constraint abort on the signup
+  // path. normalizeHandleOrNull re-checks legality so a grandfathered legacy
+  // handle can't yield an invalid org URN.
+  const userRow = await db.user.findUnique({
+    where: { id: userId },
+    select: { handle: true },
+  });
+  const handle = normalizeHandleOrNull(userRow?.handle);
+  let urn = `personal-${userId}`;
+  if (handle) {
+    const candidate = `${handle}-org`;
+    const taken = await db.organization.findUnique({
+      where: { urn: candidate },
+      select: { id: true },
+    });
+    if (!taken) urn = candidate;
+  }
 
-  // 1. Create personal org
+  // 1. Create personal org.
+  //
+  // The findUnique-then-create above has a TOCTOU window, but we deliberately
+  // let a P2002 on `urn` propagate rather than catching it here. Two cases:
+  //   - Concurrent provisioning of the SAME user (double signup): both compute
+  //     the same slug, one create wins, the other throws P2002. The caller's
+  //     idempotency guard absorbs it (GitHub callback: `P2002 → isNew=false`),
+  //     same as the pre-existing `personal-<userId>` path (also unique-per-
+  //     user). Swallowing it here and retrying would create a SECOND personal
+  //     workspace for the user — worse than the abort.
+  //   - A different user racing for the same `<handle>-org` is impossible:
+  //     `User.handle` is unique, so no two users derive the same candidate.
+  // The only unhandled case is a non-personal org squatting `<handle>-org` in
+  // the sub-millisecond window after the check — negligible, and it surfaces
+  // as the same clean P2002 the caller already tolerates.
   const org = await db.organization.create({
     data: {
       id: generateId(),
