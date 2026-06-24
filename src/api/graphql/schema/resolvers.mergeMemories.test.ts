@@ -132,6 +132,25 @@ describe('mergeMemories — edges', () => {
     expect(edge?.memoryId).toBe(tgtMem.id);
   });
 
+  it('keeps an existing target edge that points into a relocating source node', async () => {
+    // Regression: an edge already in the target memory (target-node → source-
+    // node) is incident to a source node, so it's in the fetched set. It must
+    // NOT be dropped as a false self-collision when its source node relocates.
+    const tnode = await makeNode(tgtMem.id, 'tnode');
+    const snode = await makeNode(srcMem.id, 'snode'); // moves (no target counterpart)
+    const edge = await db.edge.create({
+      data: { id: generateId(), memoryId: tgtMem.id, sourceId: tnode.id, targetId: snode.id, loc: 'tnode:rel:snode' },
+    });
+
+    await merge({ source: srcMem.id, target: tgtMem.id });
+
+    const survived = await db.edge.findUnique({ where: { id: edge.id } });
+    expect(survived).not.toBeNull();
+    expect(survived?.sourceId).toBe(tnode.id);
+    expect(survived?.targetId).toBe(snode.id);
+    expect(survived?.memoryId).toBe(tgtMem.id);
+  });
+
   it('does not transfer a colliding node\'s edge when EDGES is excluded', async () => {
     const srcShared = await makeNode(srcMem.id, 'shared');
     const srcChild = await makeNode(srcMem.id, 'child');

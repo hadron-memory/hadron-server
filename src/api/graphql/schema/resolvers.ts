@@ -5519,9 +5519,18 @@ export const resolvers = {
       await ctx.db.$transaction(async (tx) => {
         // 1) Relocate non-colliding nodes (loc unchanged → no node-loc
         //    collision is possible, the target has nothing at these locs).
+        //    Expressed as "all live source nodes EXCEPT the colliding ones"
+        //    so a large source memory doesn't blow past the DB bind-parameter
+        //    limit with a giant `id IN (...)` list (the colliding set is the
+        //    small one). `notIn: []` matches everything, so an all-relocate
+        //    merge still moves every node.
         if (moving.length > 0) {
           await tx.node.updateMany({
-            where: { id: { in: moving.map((n) => n.id) } },
+            where: {
+              memoryId: sourceMem.id,
+              deletedAt: null,
+              id: { notIn: colliding.map((c) => c.src.id) },
+            },
             data: { memoryId: targetMem.id },
           });
         }
@@ -5531,11 +5540,24 @@ export const resolvers = {
         //    NodeVersion snapshot of the target precedes each change (undo);
         //    abstractOriginHash recomputes only when the abstract changed.
         for (const { src, tgt } of colliding) {
-          const { changed, abstractChanged, contentChanged } = mergeNodeFields(
-            { content: src.content, abstract: src.abstract, description: src.description, tags: src.tags, data: src.data, properties: src.properties },
-            { content: tgt.content, abstract: tgt.abstract, description: tgt.description, tags: tgt.tags, data: tgt.data, properties: tgt.properties },
-            fields,
-          );
+          let changed: Record<string, unknown>;
+          let abstractChanged: boolean;
+          let contentChanged: boolean;
+          try {
+            ({ changed, abstractChanged, contentChanged } = mergeNodeFields(
+              { content: src.content, abstract: src.abstract, description: src.description, tags: src.tags, data: src.data, properties: src.properties },
+              { content: tgt.content, abstract: tgt.abstract, description: tgt.description, tags: tgt.tags, data: tgt.data, properties: tgt.properties },
+              fields,
+            ));
+          } catch (e) {
+            // Surface the same typed error mergeNodes does (the tx rolls back).
+            if (e instanceof NodeAbstractTooLongError) {
+              throw new GraphQLError(e.message, {
+                extensions: { code: e.name, length: e.length, max: e.max, loc: tgt.loc },
+              });
+            }
+            throw e;
+          }
           await tx.nodeVersion.create({
             data: {
               nodeId: tgt.id,
@@ -5571,10 +5593,25 @@ export const resolvers = {
         //    (loc, memory) collisions drop. Pre-checked against a claimed-loc
         //    set so a P2002 never poisons the transaction.
         const edges = await tx.edge.findMany({ where: edgeWhere });
+        // Locs already taken in the target's memory that an incoming edge
+        // could collide with. Two refinements over a naive "all target locs":
+        //   - restrict to the locs we're actually moving in (`candidateLocs`),
+        //     so a large target's edge set isn't fully materialized;
+        //   - EXCLUDE the in-flight edges themselves (`edgeIds`) — an edge
+        //     already in the target memory that is also incident to a source
+        //     node (e.g. target-node → source-node) appears in `edges`, and
+        //     must not be treated as colliding with its own loc and dropped.
+        const edgeIds = new Set(edges.map((e) => e.id));
+        const candidateLocs = edges.map((e) => e.loc);
         const occupied = new Set<string>(
-          (await tx.edge.findMany({ where: { memoryId: targetMem.id }, select: { loc: true } })).map(
-            (e) => e.loc,
-          ),
+          (
+            await tx.edge.findMany({
+              where: { memoryId: targetMem.id, loc: { in: candidateLocs } },
+              select: { id: true, loc: true },
+            })
+          )
+            .filter((e) => !edgeIds.has(e.id))
+            .map((e) => e.loc),
         );
         const toDrop: string[] = [];
         const memoryOnlyIds: string[] = [];
