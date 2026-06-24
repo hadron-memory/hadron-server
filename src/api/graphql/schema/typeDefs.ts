@@ -1528,11 +1528,12 @@ export const typeDefs = `#graphql
     that reuses the server's authorization rules instead of re-deriving them
     client-side.
 
-    'user' accepts a User ID (Users have no URN today). 'resource' is
-    dispatched on URN type the same way resolveUrn dispatches: a memory, node,
-    app, or agent MUST be a fully-qualified hrn:<type>: URN (a bare id is
-    ambiguous across those kinds). A bare id with no scheme prefix is treated
-    as an AiServiceConfig id — the only URN-less resource kind.
+    'user' (the subject) accepts a User ID or a hrn:user:<handle> URN (spec
+    cor:urn:010:01). 'resource' is dispatched on URN type the same way
+    resolveUrn dispatches: a memory, node, app, agent, org, or user MUST be a
+    fully-qualified hrn:<type>: URN (a bare id is ambiguous across those kinds).
+    A bare id with no scheme prefix is treated as an AiServiceConfig id — the
+    only URN-less resource kind.
 
     Authorization (who may CALL this): the same visibility bar already
     enforced on the underlying grant tables — a platform ADMIN/OWNER, an

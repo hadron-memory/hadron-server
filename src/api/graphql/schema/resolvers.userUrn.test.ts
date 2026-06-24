@@ -16,4 +16,12 @@ describe('User.urn', () => {
     expect(userUrn({ handle: null })).toBeNull();
     expect(userUrn({})).toBeNull();
   });
+
+  it('is null for a handle that is not URN-legal (no invalid "canonical" URN)', () => {
+    // handle-charset validation on write is a #325 follow-up; until then the
+    // field must not emit an atom/LOC-illegal URN.
+    expect(userUrn({ handle: 'has spaces' })).toBeNull();
+    expect(userUrn({ handle: 'has:colon' })).toBeNull();
+    expect(userUrn({ handle: '-leading-hyphen' })).toBeNull();
+  });
 });
