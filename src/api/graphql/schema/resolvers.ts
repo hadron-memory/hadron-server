@@ -2305,21 +2305,55 @@ export const resolvers = {
       return { ...result, user: subjectUser };
     },
 
-    node: async (_: unknown, { loc: rawLoc, raw }: { loc: string; raw?: boolean }, ctx: Context) => {
+    node: async (_: unknown, { loc: rawLoc, memory: memoryRef, raw }: { loc: string; memory?: string; raw?: boolean }, ctx: Context) => {
       const parsed = parseUrnInput(rawLoc);
       const typeErr = validateUrnType(parsed, 'node');
       if (typeErr) throw new Error(typeErr);
       const loc = parsed.value;
 
       const access = await memoryAccessFilter(ctx);
+
+      // #335: optional `memory` scope (ID or URN per 007-entity-id-or-urn).
+      // Without it, node(loc:) resolves across EVERY readable memory; since
+      // `loc` is unique only per (loc, memoryId), the same loc can live in
+      // many memories, and the old code silently returned one — a false read
+      // from the wrong memory. Scoping pins the lookup; the access filter is
+      // still intersected so `memory` can never widen visibility.
+      let where: Record<string, unknown>;
+      if (memoryRef != null && memoryRef !== '') {
+        const { id: scopedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+        if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
+          if (!(access.memoryId.in as string[]).includes(scopedMemoryId)) return null;
+        }
+        where = { loc, memoryId: scopedMemoryId };
+      } else {
+        where = { loc, ...access };
+      }
+
       const candidates = await ctx.db.node.findMany({
-        where: { loc, ...access },
+        where,
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
       if (candidates.length === 0) return null;
+
+      // #335: fail loud on a cross-memory loc collision instead of silently
+      // picking one. The (loc, memoryId) unique guarantees >1 candidate ⇒
+      // distinct memories, so this only fires for a genuinely ambiguous
+      // unscoped read. Callers disambiguate with `memory:` (above) or
+      // nodeById(id:) for a single-node read.
+      if (candidates.length > 1) {
+        const memoryIds = candidates.map((n) => n.memoryId);
+        throw new GraphQLError(
+          `loc "${loc}" matches ${candidates.length} readable memories ` +
+            `(${memoryIds.join(', ')}). Pass \`memory:\` to scope the lookup, ` +
+            `or use nodeById(id:) for an unambiguous single-node read.`,
+          { extensions: { code: 'AMBIGUOUS_NODE_LOC', loc, memoryIds } },
+        );
+      }
+
       // Decrypt any nodes that come from encrypted memories (in place).
       await decryptNodesBatch(ctx.db, candidates);
-      const node = candidates.find((n) => !n.isLink) ?? candidates[0];
+      const node = candidates[0];
 
       // Compile Mustache templates unless raw: true
       if (!raw && node.content?.includes('{{')) {

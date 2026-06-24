@@ -1548,10 +1548,21 @@ export const typeDefs = `#graphql
     """
     effectiveAccess(user: ID!, resource: ID!): EffectiveAccess!
 
-    # Get a single node by its loc path (raw: true to skip template compilation)
-    node(loc: String!, raw: Boolean): Node
+    # Get a single node by its loc path (raw: true to skip template compilation).
+    #
+    # loc is unique only WITHIN a memory, so pass "memory" (an ID or URN) to
+    # scope the lookup whenever the same loc may exist in more than one memory
+    # you can read. Without "memory", an unscoped read that matches the same
+    # loc in multiple readable memories is REJECTED with extensions.code
+    # AMBIGUOUS_NODE_LOC (listing the candidate memoryIds) rather than silently
+    # returning one — a cross-memory collision used to return a node from the
+    # wrong memory (#335). For an unambiguous single-node read by primary key,
+    # use nodeById(id:).
+    node(loc: String!, memory: ID, raw: Boolean): Node
 
-    # Get a single node by its ID (raw: true to skip template compilation)
+    # Get a single node by its ID (raw: true to skip template compilation).
+    # The unambiguous single-node read — prefer this (or node with memory:)
+    # over a bare node(loc:) when a loc may collide across memories (#335).
     nodeById(id: ID!, raw: Boolean): Node
 
     # List or search nodes; optionally filter by tags and nodeType.
