@@ -396,6 +396,14 @@ describe('user (hrn:user:<handle>)', () => {
     await db.user.update({ where: { id: member.id }, data: { deletedAt: new Date() } });
     await expect(call(member.id, `hrn:user:${h}`, asAdmin())).rejects.toThrow(/not found/i);
   });
+
+  it('accepts a hrn:user:<handle> URN as the SUBJECT (#325)', async () => {
+    // The subject (whose access we audit) may be addressed by URN, not just id.
+    const h = await withHandle(member.id, 'subject-handle');
+    const res = await call(`hrn:user:${h}`, `hrn:memory:${graph.urn}`, asAdmin());
+    expect(res.resourceKind).toBe('memory');
+    expect((res as { user: { id: string } }).user.id).toBe(member.id);
+  });
 });
 
 describe('not-found / unknown refs', () => {

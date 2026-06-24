@@ -351,6 +351,9 @@ export const typeDefs = `#graphql
   type User {
     id: ID!
     handle: String
+    # Canonical \`hrn:user:<handle>\` URN (spec cor:urn:010:01). Computed from the
+    # handle; null for a handle-less user (who has no URN).
+    urn: String
     githubId: Int
     githubUsername: String
     identityProvider: String

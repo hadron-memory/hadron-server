@@ -1903,6 +1903,9 @@ export const resolvers = {
   },
   User: {
     linkedAt: (u: { linkedAt?: Date | string | null }) => toISO(u.linkedAt ?? null),
+    // Canonical hrn:user:<handle> URN, computed from the handle (spec
+    // cor:urn:010:01). A handle-less user has no URN → null.
+    urn: (u: { handle?: string | null }) => (u.handle ? formatUrn('user', u.handle) : null),
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
     // list only when the queried User is the authenticated user (mirrors
     // 005's User.agentSubscriptions resolver-side gate).
@@ -2249,11 +2252,17 @@ export const resolvers = {
       { user, resource }: { user: string; resource: string },
       ctx: Context,
     ) => {
-      // Subject — the user whose access we are auditing. The GraphQL signature
-      // takes a User id here (distinct from `resource`, which accepts a
-      // `hrn:user:<handle>` URN per spec cor:urn:010:01). Unknown subject →
-      // NOT_FOUND.
-      const subjectUser = await ctx.db.user.findUnique({ where: { id: user } });
+      // Subject — the user whose access we are auditing. Accepts a User id OR a
+      // `hrn:user:<handle>` URN (spec cor:urn:010:01), resolved via the same
+      // resolveUserRef the `resource` side uses. Unknown / soft-deleted subject
+      // → NOT_FOUND.
+      let subjectUser: Awaited<ReturnType<typeof ctx.db.user.findUnique>> = null;
+      try {
+        const { id: subjectId } = await resolveUserRef(ctx.db, user);
+        subjectUser = await ctx.db.user.findUnique({ where: { id: subjectId } });
+      } catch {
+        subjectUser = null;
+      }
       if (!subjectUser) {
         throw new GraphQLError('User not found', { extensions: { code: 'NOT_FOUND' } });
       }
