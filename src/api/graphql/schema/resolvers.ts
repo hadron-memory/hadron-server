@@ -4221,7 +4221,10 @@ export const resolvers = {
             abstractOriginHash: existing.abstractOriginHash,
             content: existing.content,
             tags: existing.tags as string[],
-            editedBy: ctx.clientId ?? ctx.userId ?? null,
+            // #88: an explicit `reason` carries the edit rationale into history
+            // (same column hadron_update_node's `reason` populates); fall back
+            // to the caller identity when none is given.
+            editedBy: input.reason ?? ctx.clientId ?? ctx.userId ?? null,
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           },
         });
@@ -4244,7 +4247,15 @@ export const resolvers = {
       // re-applied per-branch below (serialized, and update-gated) — leaving
       // the raw array in `nodeFields` would write the wrong shape on SQLite
       // and clobber the preserve-on-omit gating above.
-      const { edges: _edges, createOnly: _createOnly, tags: _tags, ...nodeFields } = input;
+      // `reason` is version-history metadata (consumed into editedBy above), not
+      // a Node column — strip it so it never reaches the node upsert payload.
+      const {
+        edges: _edges,
+        createOnly: _createOnly,
+        tags: _tags,
+        reason: _reason,
+        ...nodeFields
+      } = input;
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
 
       // If the target memory is encrypted, encrypt content and data before
@@ -4441,7 +4452,7 @@ export const resolvers = {
     // this resolver only resolves the node and computes the merged plaintext.
     updateNodeData: async (
       _: unknown,
-      { nodeId, data }: { nodeId: string; data: unknown },
+      { nodeId, data, reason }: { nodeId: string; data: unknown; reason?: string | null },
       ctx: Context,
     ) => {
       // The patch must be a JSON object — the operation merges keys, so an
@@ -4536,6 +4547,8 @@ export const resolvers = {
             name: row.name,
             data: merged,
             ...(row.ownerRepo != null ? { ownerRepo: row.ownerRepo } : {}),
+            // #88: thread the edit rationale through to the version snapshot.
+            ...(reason != null ? { reason } : {}),
           },
         },
         ctx,
@@ -4806,7 +4819,8 @@ export const resolvers = {
               abstractOriginHash: raw.abstractOriginHash,
               content: raw.content,
               tags: raw.tags as string[],
-              editedBy: ctx.clientId ?? ctx.userId ?? null,
+              // #88: carry the bulk-edit rationale into each node's history.
+              editedBy: input.reason ?? ctx.clientId ?? ctx.userId ?? null,
               createdBy: ctx.userId ?? ctx.clientId ?? null,
             },
           });
@@ -10642,6 +10656,8 @@ interface NodeInput {
   ownerRepo?: string;
   edges?: NodeEdgeInput[];
   createOnly?: boolean;
+  /** Why this change was made — stored in version history (editedBy). Issue #88. */
+  reason?: string | null;
 }
 
 type NodeTextField = 'content' | 'name' | 'alias' | 'description' | 'abstract' | 'tags';
@@ -10656,6 +10672,8 @@ interface SearchReplaceInNodesInput {
   caseInsensitive?: boolean;
   regex?: boolean;
   dryRun?: boolean;
+  /** Why this change was made — stored in version history (editedBy). Issue #88. */
+  reason?: string | null;
 }
 
 interface EdgeInput {

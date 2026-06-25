@@ -123,4 +123,26 @@ describe('updateNodeData — auth + versioning', () => {
     const versions = await db.nodeVersion.findMany({ where: { nodeId: node.id } });
     expect(versions.length).toBeGreaterThanOrEqual(1);
   });
+
+  // #88: an explicit reason lands in the version snapshot's editedBy, the same
+  // column hadron_update_node's `reason` populates — so CLI edits via
+  // updateNodeData carry rationale into history. Without one it falls back to
+  // the caller identity.
+  it('records an explicit reason in the version snapshot (editedBy)', async () => {
+    const node = await makeNode('n10', { a: 1 });
+    await resolvers.Mutation.updateNodeData(
+      {},
+      { nodeId: node.id, data: { b: 2 }, reason: 'restore data' } as never,
+      ctx(),
+    );
+    const versions = await db.nodeVersion.findMany({ where: { nodeId: node.id } });
+    expect(versions[0]!.editedBy).toBe('restore data');
+  });
+
+  it('falls back to the caller identity when no reason is given', async () => {
+    const node = await makeNode('n11', { a: 1 });
+    await call(node.id, { b: 2 });
+    const versions = await db.nodeVersion.findMany({ where: { nodeId: node.id } });
+    expect(versions[0]!.editedBy).toBe(admin.id);
+  });
 });
