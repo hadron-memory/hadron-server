@@ -145,6 +145,12 @@ export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<
       entry.rel = e.name ?? '';
       if (e.loc) entry.edgeLoc = e.loc;
       if (e.description) entry.description = e.description;
+      // `runnable` only when true (CLI omit-when-false). For an EDGE, false and
+      // null are the same "not runnable" state — nothing distinguishes them (only
+      // Node.isRunnable filtering treats false specially), and the CLI's edge
+      // model has no null. So an explicit-false edge collapsing to null on a sync
+      // round-trip is inert; emitting `runnable: false` would instead break the
+      // byte-for-byte parity with `hadron node export` that this builder exists for.
       if (e.isRunnable) entry.runnable = true;
       if (e.condition != null) entry.condition = e.condition;
       if (typeof e.priority === 'number' && e.priority !== 0) entry.priority = e.priority;
