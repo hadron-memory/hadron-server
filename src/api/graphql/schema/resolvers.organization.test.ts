@@ -249,6 +249,64 @@ describe('Mutation.updateOrganization — URN rename propagation (#337)', () => 
   });
 });
 
+describe('Mutation.updateOrganization — rejects a malformed org URN (#376)', () => {
+  // The portal pre-filled its edit form from the canonical `Organization.urn`
+  // (`hrn:org:<slug>`) and resubmitted it; the server stored it verbatim and
+  // cascaded the corrupt prefix into every child (hadron-portal#394). The
+  // server must reject any non-bare-slug value before storing/cascading.
+  for (const bad of ['hrn:org:acme', 'urn:org:acme', 'acme:foo', 'acme::foo']) {
+    it(`rejects "${bad}" without storing or cascading`, async () => {
+      const mem = await db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: org.id,
+          urn: `${org.urn}::gear`,
+          name: 'gear',
+          class: 'knowledge',
+        },
+      });
+
+      await expect(
+        resolvers.Mutation.updateOrganization({}, { id: org.id, urn: bad }, adminCtx()),
+      ).rejects.toThrow();
+
+      // Org urn unchanged, and no child URN was rewritten.
+      expect((await db.organization.findUnique({ where: { id: org.id } }))?.urn).toBe(org.urn);
+      expect((await db.memory.findUnique({ where: { id: mem.id } }))?.urn).toBe(`${org.urn}::gear`);
+    });
+  }
+
+  it('still allows a valid bare-slug rename', async () => {
+    const updated = await resolvers.Mutation.updateOrganization(
+      {},
+      { id: org.id, urn: 'acme.com' },
+      adminCtx(),
+    );
+    expect(updated.urn).toBe('acme.com');
+  });
+});
+
+describe('Mutation.createOrganization — rejects a malformed org URN (#376)', () => {
+  it('rejects a scheme-prefixed urn', async () => {
+    await expect(
+      resolvers.Mutation.createOrganization(
+        {},
+        { name: 'Acme', urn: 'hrn:org:acme' },
+        adminCtx(),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('accepts a valid bare slug', async () => {
+    const created = await resolvers.Mutation.createOrganization(
+      {},
+      { name: 'Acme', urn: `acme-${Date.now()}.com` },
+      adminCtx(),
+    );
+    expect(created.urn).toContain('acme-');
+  });
+});
+
 describe('Mutation.deleteOrganization (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const ok = await resolvers.Mutation.deleteOrganization({}, { id: org.urn }, adminCtx());

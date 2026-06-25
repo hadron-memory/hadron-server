@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import {
   parseUrnInput, formatUrn, formatCanonicalUrn, validateUrnType,
   parseUrn, toParserCanonical, isParserCanonical,
-  validateUserSlug, parseFor, UrnParseError,
+  validateUserSlug, validateOrgSlug, parseFor, UrnParseError,
   composeInstalledAgentUrn,
   assertFullyQualifiedUrn, UrnNotQualifiedError,
   splitNodeUrn,
@@ -601,6 +601,37 @@ describe('validateUserSlug', () => {
     for (const word of MEMORY_ROLE_MARKERS) {
       expect(() => validateUserSlug(word)).toThrow(UrnParseError);
     }
+  });
+});
+
+// #376: org slugs are stored BARE; a scheme-prefixed or colon-bearing value
+// would cascade a corrupt `<orgUrn>:` prefix into every child URN.
+describe('validateOrgSlug', () => {
+  it('accepts a bare org slug (incl. dotted domain form)', () => {
+    expect(() => validateOrgSlug('acme.com')).not.toThrow();
+    expect(() => validateOrgSlug('personal-holger')).not.toThrow();
+  });
+
+  it('rejects a scheme prefix with the org-specific message', () => {
+    for (const bad of ['hrn:org:acme', 'urn:org:acme']) {
+      expect(() => validateOrgSlug(bad)).toThrow(UrnParseError);
+      try {
+        validateOrgSlug(bad);
+      } catch (e) {
+        expect((e as UrnParseError).reason).toBe('org-urn-not-bare');
+        expect((e as UrnParseError).message).toMatch(/must be a bare slug/i);
+      }
+    }
+  });
+
+  it('rejects single- and double-colon values', () => {
+    expect(() => validateOrgSlug('acme:foo')).toThrow(UrnParseError);
+    expect(() => validateOrgSlug('acme::foo')).toThrow(UrnParseError);
+  });
+
+  it('still enforces charset and reserved-word rules from validateUserSlug', () => {
+    expect(() => validateOrgSlug('bad space')).toThrow(UrnParseError);
+    expect(() => validateOrgSlug('agent')).toThrow(UrnParseError); // reserved
   });
 });
 
