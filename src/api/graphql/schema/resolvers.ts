@@ -1436,6 +1436,21 @@ export const resolvers = {
     embeddingFailedAt: (n: { embeddingFailedAt?: Date | string | null }) =>
       toISO(n.embeddingFailedAt),
   },
+  Edge: {
+    // `Edge.source` / `Edge.target` are non-null (`Node!`) in the schema, but
+    // callers preload only the relevant endpoint per direction (e.g. nodeById
+    // does `outgoingEdges: { include: { target: true } }` — source is NOT
+    // loaded — and the mirror for incomingEdges). A client selecting the
+    // unloaded side would otherwise resolve to null, violate the non-null
+    // field, and bubble up to error the WHOLE query (e.g. the portal edge
+    // detail page selecting `source` on an outgoing edge → 500). Lazily load
+    // the endpoint by FK when it wasn't preloaded — same pattern as
+    // Node.memory. The fast path (preloaded) returns the relation unchanged.
+    source: async (e: { sourceId: string; source?: unknown }, _: unknown, ctx: Context) =>
+      e.source ?? ctx.db.node.findUnique({ where: { id: e.sourceId } }),
+    target: async (e: { targetId: string; target?: unknown }, _: unknown, ctx: Context) =>
+      e.target ?? ctx.db.node.findUnique({ where: { id: e.targetId } }),
+  },
   NodeVersion: {
     createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
   },
