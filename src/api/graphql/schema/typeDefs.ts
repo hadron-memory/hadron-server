@@ -1556,6 +1556,41 @@ export const typeDefs = `#graphql
     grants: [AccessGrant!]!
   }
 
+  # Single-node export (#386). Phase 1 ships MD/JSON; HTML and PDF are reserved
+  # for a later phase (added here only when implemented).
+  enum NodeExportFormat {
+    MD
+    JSON
+  }
+
+  "Selectable sections for a presentation (full: false) export."
+  enum NodeExportSection {
+    METADATA
+    CONTENT
+    ABSTRACT
+    DATA
+    PROPERTIES
+    EDGES
+  }
+
+  "How the rendered payload is encoded. TEXT today; BASE64 arrives with PDF."
+  enum NodeExportEncoding {
+    TEXT
+  }
+
+  type NodeExportResult {
+    format: NodeExportFormat!
+    "MIME type, e.g. text/markdown or application/json."
+    mimeType: String!
+    "Suggested download filename, e.g. <loc-leaf>.md."
+    filename: String!
+    encoding: NodeExportEncoding!
+    "The rendered file contents (TEXT)."
+    data: String!
+    "Byte length of the rendered payload (UTF-8)."
+    bytes: Int!
+  }
+
   type Query {
     """
     Resolve a fully-qualified, \`hrn:<type>:\`-prefixed Hadron URN (legacy \`urn:\` scheme also accepted) to the ids
@@ -1617,6 +1652,21 @@ export const typeDefs = `#graphql
     # The unambiguous single-node read — prefer this (or node with memory:)
     # over a bare node(loc:) when a loc may collide across memories (#335).
     nodeById(id: ID!, raw: Boolean): Node
+
+    # Render one node to a portable, self-contained file (spec cor:api).
+    # full: true (default) returns the CANONICAL form — byte-identical to
+    #   "hadron node export <urn>", all sections, round-trippable via
+    #   "hadron node import". Requires MD or JSON; sections is ignored.
+    # full: false returns a PRESENTATION render of the selected sections
+    #   (default: all); not guaranteed round-trippable.
+    # Auth: same node-read gate as nodeById. (HTML/PDF + asUrl delivery land
+    # later; the result shape is forward-compatible.)
+    nodeExport(
+      id: ID!
+      format: NodeExportFormat = MD
+      full: Boolean = true
+      sections: [NodeExportSection!]
+    ): NodeExportResult!
 
     # List or search nodes; optionally filter by tags and nodeType.
     nodes(
