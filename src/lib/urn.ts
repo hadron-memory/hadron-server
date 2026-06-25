@@ -204,7 +204,8 @@ export type UrnParseErrorReason =
   | 'loc-segment-rejected'     // URN contains a `loc:` segment per FR-021
   | 'invalid-segment-shape'    // a path-segment violates FR-020's internal-`:` count rules
   | 'empty-bare-value'         // formatCanonicalUrn called with empty bareValue (spec 027 FR-005)
-  | 'already-prefixed-bare-value'; // formatCanonicalUrn bareValue starts with `urn:` (spec 027)
+  | 'already-prefixed-bare-value' // formatCanonicalUrn bareValue starts with `urn:` (spec 027)
+  | 'org-urn-not-bare';        // an org slug carried a scheme prefix or `:` separator (#376)
 
 export class UrnParseError extends Error {
   constructor(
@@ -487,6 +488,8 @@ function messageFor(
       return `formatCanonicalUrn called with empty bareValue. A bare URN value MUST contain at least one slug atom.`;
     case 'already-prefixed-bare-value':
       return `formatCanonicalUrn bareValue${cite} starts with a scheme prefix ("hrn:" or "urn:"). Pass the bare value (no "hrn:<type>:" prefix); the wrapper composes the prefix itself.`;
+    case 'org-urn-not-bare':
+      return `Organization URN "${input}" must be a bare slug — no scheme prefix ("hrn:"/"urn:") and no ":" separator. The Organization.urn field returns the canonical "hrn:org:<slug>" form on read; submit only the bare "<slug>" (e.g. "acme.com").`;
   }
 }
 
@@ -718,6 +721,30 @@ export function validateUserSlug(slug: string): void {
   if (RESERVED_SLUGS.has(slug.toLowerCase())) {
     throw new UrnParseError(slug, 'reserved-word-slug', slug);
   }
+}
+
+/**
+ * Validate an organization slug at create / rename boundaries (#376).
+ *
+ * `Organization.urn` stores the BARE slug (`acme.com`, `personal-holger`).
+ * `propagateOrgUrnRename` relies on the invariant that an org URN never itself
+ * contains a `:`, so `<orgUrn>:` is an unambiguous prefix boundary on every
+ * denormalized child Memory/Agent/App URN. A scheme-prefixed or
+ * colon-containing value — e.g. the canonical `hrn:org:<slug>` that the
+ * `Organization.urn` field resolver EMITS on read — would cascade a corrupt
+ * prefix into every child URN. Reject it up front (with a precise message
+ * pointing at the read/write asymmetry that caused hadron-portal#394) rather
+ * than 500 from downstream URN composition.
+ *
+ * Layered on `validateUserSlug`: a leading `:` / scheme prefix is reported
+ * with the org-specific `org-urn-not-bare` message; everything else
+ * (charset, length, reserved words) reuses the shared slug rules.
+ */
+export function validateOrgSlug(slug: string): void {
+  if (hasSchemePrefix(slug) || slug.includes(':')) {
+    throw new UrnParseError(slug, 'org-urn-not-bare', slug);
+  }
+  validateUserSlug(slug);
 }
 
 /** URN types that identify a node (vs a memory / agent / app / org / etc.). */

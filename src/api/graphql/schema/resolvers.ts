@@ -165,7 +165,7 @@ import type {
   SearchPrincipal,
 } from '../../../lib/global-search/index.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
-import { assertFullyQualifiedUrn, hasSchemePrefix, UrnNotQualifiedError, splitNodeUrn, composeNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical, agentSlugFromUrn } from '../../../lib/urn.js';
+import { assertFullyQualifiedUrn, hasSchemePrefix, UrnNotQualifiedError, splitNodeUrn, composeNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical, agentSlugFromUrn, validateOrgSlug } from '../../../lib/urn.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
@@ -5875,6 +5875,9 @@ export const resolvers = {
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
+      // #376: store only a bare org slug — a scheme-prefixed / colon-bearing
+      // value would later cascade a corrupt `<orgUrn>:` prefix into children.
+      validateOrgSlug(urn);
       const org = await ctx.db.organization.create({
         data: { name, urn, isVisible: true, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: ORG_INCLUDE,
@@ -5895,6 +5898,13 @@ export const resolvers = {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
       await requireOrgRole(ctx, resolvedId, 'ADMIN');
+
+      // #376: reject a malformed org URN BEFORE storing or cascading it.
+      // `propagateOrgUrnRename` treats `<orgUrn>:` as an unambiguous prefix
+      // boundary on every child URN; a scheme-prefixed / colon-bearing value
+      // (e.g. the canonical `hrn:org:<slug>` the read resolver emits) would
+      // corrupt every child in the one bulk rewrite. Fail loud here instead.
+      if (urn) validateOrgSlug(urn);
 
       const data = {
         ...(name ? { name } : {}),
