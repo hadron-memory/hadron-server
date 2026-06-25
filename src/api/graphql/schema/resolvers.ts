@@ -18,6 +18,12 @@ import {
 } from '../../../lib/aiConfig.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
+  renderNodeExport,
+  type NodeExportFormat,
+  type NodeExportSection,
+} from '../../../lib/nodeExport.js';
+import type { EdgeForGit } from '../../../integrations/github/nodeFrontmatter.js';
+import {
   buildReplacer,
   replaceInTags,
   SearchReplaceInvalidPatternError,
@@ -2444,6 +2450,66 @@ export const resolvers = {
         return { ...node, content: compiled };
       }
       return node;
+    },
+
+    // #386: render one node to its portable single-node file. Same node-read
+    // gate as nodeById; uses RAW content (the export must round-trip, so it
+    // never template-compiles) and the same unordered edge include the CLI's
+    // nodeBatch uses, so edge order agrees.
+    nodeExport: async (
+      _: unknown,
+      { id, format, full, sections }: { id: string; format?: NodeExportFormat | null; full?: boolean | null; sections?: NodeExportSection[] | null },
+      ctx: Context,
+    ) => {
+      const access = await memoryAccessFilter(ctx);
+      const node = await ctx.db.node.findUnique({
+        where: { id },
+        include: { outgoingEdges: { include: { target: true } } },
+      });
+      if (!node) throw new GraphQLError('Node not found', { extensions: { code: 'NOT_FOUND' } });
+      if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
+        // Denied and not-found are indistinguishable on purpose (same as nodeById).
+        if (!(access.memoryId.in as string[]).includes(node.memoryId)) {
+          throw new GraphQLError('Node not found', { extensions: { code: 'NOT_FOUND' } });
+        }
+      }
+      await decryptNodesBatch(ctx.db, [node]);
+      const memory = await ctx.db.memory.findUnique({
+        where: { id: node.memoryId },
+        select: { urn: true },
+      });
+
+      const fmt: NodeExportFormat = format ?? 'MD';
+      const { mimeType, data } = renderNodeExport(
+        {
+          id: node.id,
+          memoryUrn: memory?.urn ?? '',
+          loc: node.loc,
+          name: node.name,
+          nodeType: node.nodeType,
+          alias: node.alias,
+          description: node.description,
+          abstract: node.abstract,
+          abstractOriginHash: node.abstractOriginHash,
+          content: node.content,
+          tags: deserializeTags(node.tags) as string[],
+          seq: node.seq,
+          data: node.data,
+          properties: node.properties,
+          edges: node.outgoingEdges as unknown as EdgeForGit[],
+        },
+        { format: fmt, full: full !== false, sections: sections ?? null },
+      );
+
+      const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
+      return {
+        format: fmt,
+        mimeType,
+        filename: `${leaf}.${fmt === 'JSON' ? 'json' : 'md'}`,
+        encoding: 'TEXT',
+        data,
+        bytes: Buffer.byteLength(data, 'utf8'),
+      };
     },
 
     nodes: async (
