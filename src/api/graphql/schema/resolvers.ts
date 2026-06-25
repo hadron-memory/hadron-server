@@ -3580,7 +3580,8 @@ export const resolvers = {
       const q = query.trim();
       // #384: name/email are PII gated to co-members (enforced on output by the
       // User.name/email field resolvers). To stop searchUsers from also being a
-      // name/email enumeration oracle for non-co-members, MATCHING is scoped:
+      // name/email enumeration oracle for non-co-members, MATCHING is scoped
+      // (Spec: cor:acl:070:02):
       // public identifiers (handle, githubUsername) match by substring, email
       // matches by EXACT equality only, and `name` matches are kept only for
       // viewers allowed to see that user's name. So a stranger can locate a

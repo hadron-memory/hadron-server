@@ -2,6 +2,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 
 /**
  * Field-level user-visibility rules — hadron-server#384.
+ * Spec: cor:acl:070:01 (field-visibility matrix), cor:acl:070:02 (discovery).
  *
  * What fields of a *target* user a *viewer* may see depends on their
  * relationship:
