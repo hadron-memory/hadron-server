@@ -10,6 +10,8 @@ import {
   assertFullyQualifiedUrn, UrnNotQualifiedError,
   splitNodeUrn,
   normalizeUrnForLookup,
+  legacyMemoryUrnToCanonical,
+  MEMORY_ROLE_MARKERS,
   type AliasCategory,
 } from './urn.js';
 
@@ -592,10 +594,53 @@ describe('validateUserSlug', () => {
   });
 
   it('rejects every D4 role-marker prefix as reserved', () => {
-    const roleMarkers = ['system', 'app-mem', 'app-user', 'group-mem', 'priv'];
-    for (const word of roleMarkers) {
+    // #352 added `anon` as a first-class role marker — assert against the
+    // exported registry so this test can never drift behind the source list.
+    expect(MEMORY_ROLE_MARKERS).toContain('anon');
+    for (const word of MEMORY_ROLE_MARKERS) {
       expect(() => validateUserSlug(word)).toThrow(UrnParseError);
     }
+  });
+});
+
+// #352: every shape stored in Memory.urn must canonicalize to a form that
+// round-trips through the strict spec-021 parser. The per-user (`user`) and
+// anonymous (`anon`) runtime markers used to bypass the canonical-marker set,
+// serving non-canonical URNs (PR #318 shipped without this coverage). Storage
+// is now aligned to `app-user`/`anon`; these assert the read-side helper +
+// parser agree.
+describe('legacyMemoryUrnToCanonical — Memory.urn round-trip (#352)', () => {
+  // [stored legacy form, expected bare canonical form]
+  const STORED_SHAPES: ReadonlyArray<readonly [string, string]> = [
+    ['hadronmemory.com:specs', 'hadronmemory.com::specs'],
+    ['micromentor.org:coding-agent:system', 'micromentor.org::coding-agent::system'],
+    ['micromentor.org:coding-agent:app-user:abc123', 'micromentor.org::coding-agent::app-user:abc123'],
+    ['micromentor.org:coding-agent:priv:abc123', 'micromentor.org::coding-agent::priv:abc123'],
+    // The runtime per-user form AFTER the storage alignment (was `:user:`).
+    ['micromentor.org:coding-agent:app-user:019dd', 'micromentor.org::coding-agent::app-user:019dd'],
+    // Anonymous session — `anon` keeps its marker:id boundary (was severed to
+    // `…::anon::id` before `anon` joined the marker registry).
+    ['micromentor.org:coding-agent:anon:019dd', 'micromentor.org::coding-agent::anon:019dd'],
+  ];
+
+  for (const [stored, expectedBare] of STORED_SHAPES) {
+    it(`canonicalizes + round-trips: ${stored}`, () => {
+      const bare = legacyMemoryUrnToCanonical(stored);
+      expect(bare).toBe(expectedBare);
+
+      // The bare canonical wraps to a valid prefixed URN…
+      const prefixed = formatCanonicalUrn('memory', bare);
+      expect(prefixed).toBe(`hrn:memory:${expectedBare}`);
+
+      // …and the prefixed URN parses cleanly (the acceptance criterion).
+      expect(() => parseUrn(prefixed)).not.toThrow();
+      expect(parseUrn(prefixed).parserCanonical).toBe(prefixed);
+    });
+  }
+
+  it('preserves the marker:id boundary (does not sever marker from id)', () => {
+    expect(legacyMemoryUrnToCanonical('org:agent:anon:id')).toBe('org::agent::anon:id');
+    expect(legacyMemoryUrnToCanonical('org:agent:anon:id')).not.toContain('anon::id');
   });
 });
 

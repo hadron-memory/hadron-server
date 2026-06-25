@@ -525,7 +525,8 @@ describe('linkMemoryToUser with encryption', () => {
     mem = await db.memory.findUnique({ where: { id: anonSession.memoryId! } });
     expect(mem?.isEncrypted).toBe(true);
     expect(mem?.anonymousExpiresAt).toBeNull();
-    expect(mem?.urn).toContain(':user:');
+    // #352: anon→user promotion writes the canonical `app-user` marker.
+    expect(mem?.urn).toContain(':app-user:');
 
     // The node content is now ciphertext
     const note = await db.node.findFirst({

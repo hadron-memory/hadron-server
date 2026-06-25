@@ -165,7 +165,7 @@ import type {
   SearchPrincipal,
 } from '../../../lib/global-search/index.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
-import { assertFullyQualifiedUrn, hasSchemePrefix, UrnNotQualifiedError, splitNodeUrn, composeNodeUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
+import { assertFullyQualifiedUrn, hasSchemePrefix, UrnNotQualifiedError, splitNodeUrn, composeNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../../../lib/urn.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
@@ -1608,11 +1608,16 @@ export const resolvers = {
         orderBy: { createdAt: 'asc' },
       });
     },
-    // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
-    // (e.g. `org:slug`) to canonical spec-021 double-colon form (`org::slug`)
-    // for both legacy and migrated rows. For install-shape memories with
-    // role markers, preserves the marker:id boundary to avoid breaking the
-    // canonical form (e.g. `org:agent:app-user:id` → `org::agent::app-user:id`).
+    // 298/318/352: Canonicalize URN on read. Converts legacy single-colon
+    // hierarchy (e.g. `org:slug`) to canonical spec-021 double-colon form
+    // (`org::slug`) for both legacy and migrated rows. For install-shape
+    // memories with role markers (system, app-mem, app-user, group-mem, priv,
+    // anon), `legacyMemoryUrnToCanonical` preserves the marker:id boundary so
+    // the canonical form round-trips through `parseUrn`
+    // (e.g. `org:agent:app-user:id` → `org::agent::app-user:id`, NOT
+    // `…::app-user::id`). #352: the marker set is now the single source of
+    // truth in urn.ts — `user` (a reserved type word) and `anon` used to
+    // bypass the inline list here and serve non-canonical.
     urn: (g: { urn?: string | null }) => {
       const urn = g.urn;
       if (!urn) throw new Error('Memory URN is required but not found (partial query?)');
@@ -1620,45 +1625,9 @@ export const resolvers = {
       // Already canonical (contains `::`) — pass through
       if (urn.includes('::')) return safeCanonicalUrn('memory', urn);
 
-      // Check for install-shape pattern with role markers. The canonical role
-      // markers are: system, app-mem, app-user, group-mem, priv. A role marker
-      // is always followed by either `:` (if parameterized, e.g., app-user:id)
-      // or `::` (hierarchy separator in canonical form).
-      // Pattern: `org:agent:role-marker[:id]` where role-marker is one of the
-      // canonical markers. We need to detect this and preserve marker:id boundary.
-      const roleMarkerPattern = /:(?:system|app-mem|app-user|group-mem|priv)(?::|$)/;
-      if (roleMarkerPattern.test(urn)) {
-        // Install-shape memory — carefully convert to canonical form while
-        // preserving the role-marker:id boundary. Split on `:`, but rejoin
-        // hierarchy levels with `::` and single-colon-attached role markers
-        // with `:`. This is tricky: `org:agent:app-user:id` should become
-        // `org::agent::app-user:id`, not `org::agent::app-user::id`.
-        const parts = urn.split(':');
-        // Try to detect the role marker position (it's typically after the
-        // agent slug in install-shape URNs). Walk backwards from the end to
-        // find the role marker.
-        let roleMarkerIdx = -1;
-        for (let i = parts.length - 1; i >= 0; i--) {
-          const part = parts[i];
-          if (['system', 'app-mem', 'app-user', 'group-mem', 'priv'].includes(part)) {
-            roleMarkerIdx = i;
-            break;
-          }
-        }
-
-        if (roleMarkerIdx >= 0) {
-          // Found the role marker. Reconstruct: join everything before the
-          // marker with `::`, keep marker, then `:` + id(s) if present.
-          const beforeMarker = parts.slice(0, roleMarkerIdx).join('::');
-          const marker = parts[roleMarkerIdx];
-          const afterMarker = parts.slice(roleMarkerIdx + 1).join(':');
-          const normalized = afterMarker ? `${beforeMarker}::${marker}:${afterMarker}` : `${beforeMarker}::${marker}`;
-          return safeCanonicalUrn('memory', normalized);
-        }
-      }
-
-      // Standard memory (no role markers) — use default canonicalization
-      return safeCanonicalUrn('memory', urn);
+      // Legacy single-colon form — promote hierarchy to `::` while preserving
+      // any role-marker:id boundary.
+      return safeCanonicalUrn('memory', legacyMemoryUrnToCanonical(urn));
     },
   },
   App: {
@@ -7552,7 +7521,10 @@ export const resolvers = {
           });
           const opaqueId = generateId();
           const agentSlug = agent.urn.split(':').slice(1).join(':');
-          const memoryUrn = `${org.urn}:${agentSlug}:user:${opaqueId}`;
+          // #352: `app-user` is the canonical spec-021 per-user role marker.
+          // (The legacy `user` marker is a reserved type word and serves
+          // non-canonical on read.)
+          const memoryUrn = `${org.urn}:${agentSlug}:app-user:${opaqueId}`;
 
           const ownerOrgIds = (
             await ctx.db.orgMember.findMany({
@@ -10066,7 +10038,8 @@ export const resolvers = {
             where: { id: agent.organizationId }, select: { urn: true },
           });
           const opaqueId = generateId();
-          const memoryUrn = `${org.urn}:${agent.urn.split(':').slice(1).join(':')}:user:${opaqueId}`;
+          // #352: canonical `app-user` per-user role marker (was `user`).
+          const memoryUrn = `${org.urn}:${agent.urn.split(':').slice(1).join(':')}:app-user:${opaqueId}`;
           const created = await ctx.db.memory.create({
             data: {
               organizationId: agent.organizationId,
@@ -10226,7 +10199,9 @@ export const resolvers = {
       });
       const opaqueId = generateId();
       const agentSlug = agent.urn.split(':').slice(1).join(':');
-      const newUrn = `${org.urn}:${agentSlug}:user:${opaqueId}`;
+      // #352: anon→registered promotion now writes the canonical `app-user`
+      // per-user role marker (was `user`).
+      const newUrn = `${org.urn}:${agentSlug}:app-user:${opaqueId}`;
 
       // If a dataKey is provided and the memory isn't already encrypted,
       // encrypt every node in a single transaction, then flip isEncrypted.
@@ -10380,18 +10355,10 @@ export const resolvers = {
         // Find the memory by URN using case-insensitive matching (legacy `:` and canonical `::` forms).
         const parsedMemUrn = parseUrnInput(resolvedMemoryUrn.trim());
         const normalizedMemUrn = normalizeUrnForLookup(parsedMemUrn.value);
-        // Build the canonical form from the normalized (legacy) form.
-        const partsMemUrn = normalizedMemUrn.split(':');
-        let roleMarkerIdxMem = -1;
-        for (let i = partsMemUrn.length - 1; i >= 0; i--) {
-          if (['system', 'app-mem', 'app-user', 'group-mem', 'priv'].includes(partsMemUrn[i])) {
-            roleMarkerIdxMem = i;
-            break;
-          }
-        }
-        const canonicalMemUrn = roleMarkerIdxMem >= 0
-          ? partsMemUrn.slice(0, roleMarkerIdxMem).join('::') + '::' + partsMemUrn[roleMarkerIdxMem] + (partsMemUrn.slice(roleMarkerIdxMem + 1).length ? ':' + partsMemUrn.slice(roleMarkerIdxMem + 1).join(':') : '')
-          : partsMemUrn.join('::');
+        // Build the canonical form from the normalized (legacy) form. #352:
+        // shared marker-aware helper so `app-user`/`anon` ids keep their
+        // `marker:id` boundary instead of being severed.
+        const canonicalMemUrn = legacyMemoryUrnToCanonical(normalizedMemUrn);
 
         const memory = await ctx.db.memory.findFirst({
           where: {
@@ -10494,17 +10461,8 @@ export const resolvers = {
       if (m) {
         // Memory hint supplied — resolve by name/urn.
         const normalizedM = normalizeUrnForLookup(m);
-        const partsM = normalizedM.split(':');
-        let roleMarkerIdxM = -1;
-        for (let i = partsM.length - 1; i >= 0; i--) {
-          if (['system', 'app-mem', 'app-user', 'group-mem', 'priv'].includes(partsM[i])) {
-            roleMarkerIdxM = i;
-            break;
-          }
-        }
-        const canonicalM = roleMarkerIdxM >= 0
-          ? partsM.slice(0, roleMarkerIdxM).join('::') + '::' + partsM[roleMarkerIdxM] + (partsM.slice(roleMarkerIdxM + 1).length ? ':' + partsM.slice(roleMarkerIdxM + 1).join(':') : '')
-          : partsM.join('::');
+        // #352: shared marker-aware helper (see the URN-lookup site above).
+        const canonicalM = legacyMemoryUrnToCanonical(normalizedM);
 
         const candidates = await ctx.db.memory.findMany({
           where: {
