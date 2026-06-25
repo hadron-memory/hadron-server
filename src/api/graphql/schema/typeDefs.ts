@@ -1197,6 +1197,13 @@ export const typeDefs = `#graphql
     # loc surfaces as a clean error instead of silently overwriting the
     # existing node.
     createOnly: Boolean
+    """
+    Why this change was made — recorded on the version-history snapshot
+    (NodeVersion.editedBy), mirroring hadron_update_node's reason arg so CLI
+    and MCP edits leave equally-traceable history. Only an update snapshots a
+    prior version, so reason has no effect on a pure create.
+    """
+    reason: String
   }
 
   """
@@ -1249,6 +1256,11 @@ export const typeDefs = `#graphql
     regex: Boolean = false
     "When true, report matches without writing anything."
     dryRun: Boolean = false
+    """
+    Why this change was made — recorded on each changed node's version-history
+    snapshot (NodeVersion.editedBy), mirroring hadron_update_node's reason arg.
+    """
+    reason: String
   }
 
   type SearchReplaceFieldResult {
@@ -1980,7 +1992,7 @@ export const typeDefs = `#graphql
     # is a node ID or fully-qualified URN. Honors the same single-write
     # invariants as upsertNode (per-memory write auth, encryption, version
     # history, git mirror). Returns the updated node.
-    updateNodeData(nodeId: ID!, data: JSON!): Node!
+    updateNodeData(nodeId: ID!, data: JSON!, reason: String): Node!
 
     # Bulk search-and-replace text across selected nodes (literal or regex).
     # Honors per-memory write auth, encryption, version history, abstract
