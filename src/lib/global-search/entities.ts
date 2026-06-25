@@ -516,9 +516,14 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     roles: principal.isPlatformAdmin ? ['ADMIN'] : undefined,
   };
 
+  // Resolve visibility for all candidate rows concurrently (each may hit the DB
+  // for a co-membership check); the helper memoizes the viewer's orgs per visCtx.
+  const visById = new Map<string, boolean>();
+  await Promise.all(rows.map(async (r) => visById.set(r.id, await canSeeUserPersonalFields(visCtx, r.id))));
+
   const hits: GlobalSearchHit[] = [];
   for (const r of rows) {
-    const canSee = await canSeeUserPersonalFields(visCtx, r.id);
+    const canSee = visById.get(r.id) ?? false;
     const name = canSee ? r.name : null;
     const email = canSee ? r.email : null;
     const candidates: FieldCandidate[] = [

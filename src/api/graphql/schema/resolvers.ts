@@ -3578,42 +3578,44 @@ export const resolvers = {
     searchUsers: async (_: unknown, { query }: { query: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
       const q = query.trim();
+      // A blank query would make `contains: ''` match every row, re-opening the
+      // enumeration path #384 closes — return nothing instead.
+      if (q === '') return [];
+
       // #384: name/email are PII gated to co-members (enforced on output by the
       // User.name/email field resolvers). To stop searchUsers from also being a
       // name/email enumeration oracle for non-co-members, MATCHING is scoped
-      // (Spec: cor:acl:070:02):
-      // public identifiers (handle, githubUsername) match by substring, email
-      // matches by EXACT equality only, and `name` matches are kept only for
-      // viewers allowed to see that user's name. So a stranger can locate a
-      // user to add by handle/githubUsername or a known full email, but cannot
-      // fish for them by partial name or partial email.
-      const rows = await ctx.db.user.findMany({
+      // (Spec: cor:acl:070:02): public identifiers (handle, githubUsername)
+      // match by substring, email by EXACT equality, and a `name` match counts
+      // only for a viewer allowed to see that name (self/admin via platform
+      // role, or a co-member). The co-member restriction is pushed INTO the
+      // query — not a post-filter — so the `take` cap can't drop a legitimately
+      // visible co-member behind a wall of name-only stranger matches.
+      const isPlatformAdmin = !!ctx.roles?.some((r) => r === 'ADMIN' || r === 'OWNER');
+      const viewerOrgIds = isPlatformAdmin ? [] : await getMemberOrgIds(ctx.db, ctx.userId);
+      const nameMatch = isPlatformAdmin
+        ? searchContains('name', q)
+        : {
+            AND: [
+              searchContains('name', q),
+              // target shares an org with the viewer (so the viewer may see the name)
+              { memberships: { some: { organizationId: { in: viewerOrgIds }, deletedAt: null } } },
+            ],
+          };
+
+      return ctx.db.user.findMany({
         where: {
           deletedAt: null,
           OR: [
-            searchContains('name', q),
             searchContains('handle', q),
             searchContains('githubUsername', q),
             { email: { equals: q, mode: 'insensitive' } },
+            nameMatch,
           ],
         },
         take: 20,
         orderBy: { name: 'asc' },
       });
-
-      // Drop rows a non-co-member matched ONLY via the now-hidden `name`: keep a
-      // row for such a viewer only when it also matches a public identifier.
-      const ql = q.toLowerCase();
-      const publicMatch = (u: { handle?: string | null; githubUsername?: string | null; email?: string | null }) =>
-        (!!u.handle && u.handle.toLowerCase().includes(ql)) ||
-        (!!u.githubUsername && u.githubUsername.toLowerCase().includes(ql)) ||
-        (!!u.email && u.email.toLowerCase() === ql);
-
-      const visible: typeof rows = [];
-      for (const u of rows) {
-        if (publicMatch(u) || (await canSeeUserPersonalFields(ctx, u.id))) visible.push(u);
-      }
-      return visible;
     },
 
     globalSearch: async (

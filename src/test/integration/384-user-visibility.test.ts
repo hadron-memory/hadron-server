@@ -206,5 +206,10 @@ describe('#384 field-level user visibility', () => {
       }>;
       expect(rows.find((r) => r.id === zachId)).toBeTruthy();
     });
+
+    it('a blank / whitespace-only query returns nothing (no match-all)', async () => {
+      expect((await searchUsers(null, { query: '   ' }, ctx(fx.alice.id))) as unknown[]).toHaveLength(0);
+      expect((await searchUsers(null, { query: '' }, ctx(generateId(), ['ADMIN']))) as unknown[]).toHaveLength(0);
+    });
   });
 });
