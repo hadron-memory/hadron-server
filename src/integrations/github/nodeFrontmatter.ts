@@ -40,9 +40,14 @@ export interface EdgeForGit {
   target: { id: string; loc?: string | null };
   /** Relationship name (was `label`); emitted on the `rel` key for back-compat. */
   name: string | null;
+  /** The edge's OWN loc (its identity, spec 037) — emitted as `edgeLoc`, distinct
+   *  from `target.loc`. Carried so a standalone export round-trips the edge's
+   *  identity; emitted only when set. */
+  loc?: string | null;
   /** Edge description (spec 037); emitted only when set. */
   description?: string | null;
-  /** Whether the edge is runnable (spec 037); emitted only when set. */
+  /** Whether the edge is runnable (spec 037); emitted (as `runnable: true`) only
+   *  when true — false is the DB default and is omitted. */
   isRunnable?: boolean | null;
   /** JSONLogic gating expression; null/undefined when the edge always fires.
    *  Emitted only when set, so an always-fires edge stays uncluttered. */
@@ -107,20 +112,25 @@ export function buildNodeFrontmatter(
 }
 
 /**
- * Build the inline `nodes:` edge array for a node's frontmatter. Emits
- * `{ id, loc?, rel }`: the importer keys off `id` (`e.id ?? e.target`) and
- * reads `rel` into the edge name; `loc` (the target's human-readable citation)
- * is carried purely for readability and is the key the frontmatter `nodes:`
- * shape declares (`NodeYaml.nodes`). A null name renders as an empty `rel`.
+ * Build the inline `nodes:` edge array for a node's frontmatter.
  *
- * Supersedes the old `.<seg>/edges.yaml` sidecar (which emitted `target`
- * instead of `loc`) — edges now live inline in the node's own `.md`.
+ * Field order and keys match the CLI's `nodedoc` edgeEntry (the codec behind
+ * `hadron node export` / `hadron node import`) so an exported file is
+ * byte-identical to the CLI and the two never drift:
  *
- * `condition` (JSONLogic gating) and `priority` (resolution order) are emitted
- * for a faithful mirror so a conditional/ordered edge round-trips through the
- * repo — the importer reads both back (`normalizeEdgeEntry`). They follow the
- * omit-on-default convention: `condition` only when non-null, `priority` only
- * when non-zero (the DB default).
+ *   `id, loc, rel, edgeLoc, description, runnable, condition, priority`
+ *
+ * `id` is the target node (the importer keys off `e.id ?? e.target`); `loc` is
+ * the target's human-readable citation (readability); `rel` is the edge name
+ * (empty string for a null name, never omitted); `edgeLoc` is the edge's OWN
+ * loc. The omit-on-default rules mirror the CLI's `omitempty`: `loc`/`edgeLoc`/
+ * `description` only when set, `runnable` only when true (false is the DB
+ * default), `condition` only when non-null, `priority` only when non-zero.
+ *
+ * Historical note: the server previously emitted `isRunnable` and no `edgeLoc`,
+ * which silently diverged from the CLI export — this builder is now the single
+ * shared shape (the importer reads `runnable` with an `isRunnable` fallback for
+ * already-pushed mirrors). Supersedes the old `.<seg>/edges.yaml` sidecar.
  *
  * Defensive: `target` is a required FK, so a loaded edge always has one — but
  * an edge with a missing target can't be serialized (no id to write), so it's
@@ -133,8 +143,9 @@ export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<
       const entry: Record<string, unknown> = { id: e.target.id };
       if (e.target.loc) entry.loc = e.target.loc;
       entry.rel = e.name ?? '';
+      if (e.loc) entry.edgeLoc = e.loc;
       if (e.description) entry.description = e.description;
-      if (e.isRunnable != null) entry.isRunnable = e.isRunnable;
+      if (e.isRunnable) entry.runnable = true;
       if (e.condition != null) entry.condition = e.condition;
       if (typeof e.priority === 'number' && e.priority !== 0) entry.priority = e.priority;
       return entry;
