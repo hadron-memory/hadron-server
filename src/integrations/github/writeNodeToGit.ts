@@ -46,6 +46,10 @@ export interface NodeForGit {
   outgoingEdges: Array<{
     target: { id: string; loc?: string | null };
     name: string | null;
+    /** The edge's own loc (spec 037), emitted as `edgeLoc`. A scalar column on
+     *  the Prisma edge row, so it's returned by default wherever the edge is
+     *  loaded — no explicit select needed on either git path. */
+    loc?: string | null;
     description?: string | null;
     isRunnable?: boolean | null;
     /** JSONLogic gating expression; null when the edge always fires. */

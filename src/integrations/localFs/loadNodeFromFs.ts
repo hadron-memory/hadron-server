@@ -138,8 +138,14 @@ interface EdgeEntry {
   id?: string;
   /** Edge description (spec 037). */
   description?: string;
-  /** Whether the edge is runnable (spec 037). */
+  /** Whether the edge is runnable (spec 037). The CLI export (and the server's
+   *  current writer) emit `runnable`; `isRunnable` is the legacy key still on
+   *  already-pushed mirrors — `normalizeEdgeEntry` reads `runnable` first. */
+  runnable?: boolean;
   isRunnable?: boolean;
+  /** The edge's own loc (spec 037), written by the export as `edgeLoc`. Carried
+   *  for readability; not consumed on git-import today. */
+  edgeLoc?: string;
   /**
    * JSONLogic gating expression. Null/undefined means the edge always
    * fires. The server validates the shape on import (no separate
@@ -349,7 +355,11 @@ function normalizeEdgeEntry(e: EdgeEntry): LoadedEdge {
   if (typeof e.description === 'string') {
     out.description = e.description;
   }
-  if (typeof e.isRunnable === 'boolean') {
+  // `runnable` is the canonical key (matches the CLI export); fall back to the
+  // legacy `isRunnable` for edges in already-pushed git mirrors.
+  if (typeof e.runnable === 'boolean') {
+    out.isRunnable = e.runnable;
+  } else if (typeof e.isRunnable === 'boolean') {
     out.isRunnable = e.isRunnable;
   }
   if (e.condition !== undefined && e.condition !== null) {

@@ -108,6 +108,33 @@ describe('buildEdgeFrontmatter', () => {
     expect(plain).toEqual({ id: 't1', rel: 'r' });
   });
 
+  it('emits edgeLoc and runnable in the CLI key order, omitting runnable when false', () => {
+    // Full shape, exercising the CLI-aligned order: id, loc, rel, edgeLoc,
+    // description, runnable, condition, priority.
+    const condition = { '==': [1, 1] };
+    const [full] = buildEdgeFrontmatter([
+      {
+        target: { id: 't1', loc: 'a:b' },
+        name: 'gated',
+        loc: 'src:edge:01',
+        description: 'why',
+        isRunnable: true,
+        condition,
+        priority: 3,
+      },
+    ]);
+    expect(Object.keys(full)).toEqual(['id', 'loc', 'rel', 'edgeLoc', 'description', 'runnable', 'condition', 'priority']);
+    expect(full).toEqual({
+      id: 't1', loc: 'a:b', rel: 'gated', edgeLoc: 'src:edge:01',
+      description: 'why', runnable: true, condition, priority: 3,
+    });
+
+    // runnable:false is the DB default → omitted entirely (matches the CLI's
+    // `omitempty` bool); edgeLoc omitted when the edge has no own loc.
+    const [plain] = buildEdgeFrontmatter([{ target: { id: 't1' }, name: 'r', isRunnable: false }]);
+    expect(plain).toEqual({ id: 't1', rel: 'r' });
+  });
+
   it('skips an edge with a missing target instead of throwing the whole push', () => {
     // target is a required FK (type-impossible to be null), but the runtime
     // guard must not crash the sync if a partial edge ever appears.
@@ -303,6 +330,35 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
         condition,
         priority: 7,
       }),
+    );
+  });
+
+  it('round-trips a runnable edge via the `runnable` key written by the builder', async () => {
+    const fm = buildNodeFrontmatter({ id: 'src1', name: 'Source', tags: [] }, [
+      { target: { id: 'tgt1', loc: 'a:b' }, name: 'runs', isRunnable: true },
+    ]);
+    // The exported file uses `runnable:` (CLI parity), not the legacy `isRunnable:`.
+    const fmYaml = stringify(fm, { lineWidth: 0 });
+    expect(fmYaml).toContain('runnable: true');
+    expect(fmYaml).not.toContain('isRunnable');
+
+    const mdPath = nodeFilePath(graphRoot, 'a');
+    writeFileSync(mdPath, `---\n${fmYaml.trim()}\n---\n\nbody\n`, 'utf-8');
+    const { edges } = await loadGraphFromFs(graphRoot, 'specs', 'org/repo');
+    expect(edges).toContainEqual(
+      expect.objectContaining({ sourceId: 'src1', targetId: 'tgt1', name: 'runs', isRunnable: true }),
+    );
+  });
+
+  it('still imports the legacy `isRunnable` key from already-pushed mirrors', async () => {
+    // A hand-written file in the OLD format (server used to emit `isRunnable`).
+    const legacy =
+      '---\nname: Source\nid: src1\nnodes:\n  - id: tgt1\n    loc: a:b\n    rel: runs\n    isRunnable: true\n---\n\nbody\n';
+    const mdPath = nodeFilePath(graphRoot, 'a');
+    writeFileSync(mdPath, legacy, 'utf-8');
+    const { edges } = await loadGraphFromFs(graphRoot, 'specs', 'org/repo');
+    expect(edges).toContainEqual(
+      expect.objectContaining({ sourceId: 'src1', targetId: 'tgt1', name: 'runs', isRunnable: true }),
     );
   });
 });
