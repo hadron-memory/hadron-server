@@ -2029,6 +2029,32 @@ export const typeDefs = `#graphql
     # Mint a short-TTL presigned GET URL for an asset. Default TTL
     # 5 minutes; ceiling 1 hour. Gated on scan_status = CLEAN.
     assetDownloadUrl(assetId: ID!, ttlSeconds: Int = 300): AssetDownloadUrl!
+
+    """
+    Identity of the hadron-server this GraphQL endpoint is bound to: the
+    server-identity version and the deployment's canonical base URL. The
+    GraphQL counterpart to the hadron_server_info MCP tool — both read the
+    same getDeploymentInfo() helper, so MCP and GraphQL callers get one
+    consistent answer to "which server/API am I talking to?".
+
+    'version' is HADRON_SERVER_VERSION — the MCP/API-surface contract
+    version, bumped when the tool/query surface changes in a caller-visible
+    way. It is intentionally NOT the repo's package.json release version.
+
+    Public — no authentication required. Does NOT expose the DATABASE_URL
+    (it may carry credentials).
+    """
+    serverInfo: ServerInfo!
+  }
+
+  """
+  Identity of the running hadron-server (see Query.serverInfo).
+  """
+  type ServerInfo {
+    # HADRON_SERVER_VERSION — the MCP/API-surface contract version.
+    version: String!
+    # The deployment's canonical base URL (BASE_URL, else the local default).
+    baseUrl: String!
   }
 
   type Mutation {

@@ -40,6 +40,7 @@ import {
   vectorSearchChunks,
 } from '../../../services/embedding/vectors.js';
 import { getEmbeddingClient, isEmbeddingConfigured } from '../../../lib/embedding/index.js';
+import { getDeploymentInfo } from '../../../mcp/server.js';
 import { reciprocalRankFusion } from '../../../lib/rrf.js';
 import {
   matchesQuery,
@@ -2162,6 +2163,13 @@ export const resolvers = {
   },
 
   Query: {
+    // Identity of the running hadron-server: the server-identity version
+    // (HADRON_SERVER_VERSION) + canonical base URL. Public (no auth) — the
+    // GraphQL counterpart to the hadron_server_info MCP tool, reading the
+    // same getDeploymentInfo() helper so both surfaces agree on "which
+    // server/API am I talking to?". Never exposes the DATABASE_URL.
+    serverInfo: async (_: unknown, __: unknown, ___: Context) => getDeploymentInfo(),
+
     // hadron-portal#262: resolve a `urn:<type>:`-prefixed URN to the ids the
     // portal needs to redirect to the resource's canonical page. Dispatches
     // on the URN type segment; reuses the same entity-ref resolvers and
