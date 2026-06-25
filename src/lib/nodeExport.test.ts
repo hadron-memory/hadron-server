@@ -13,6 +13,7 @@ import {
   renderCanonicalJson,
   renderSectionedMarkdown,
   renderSectionedJson,
+  renderNodeExport,
   type ExportNode,
   type NodeExportSection,
 } from './nodeExport.js';
@@ -176,5 +177,27 @@ describe('section selection (full: false)', () => {
   it('JSON CONTENT + EDGES → only those fields', () => {
     const json = JSON.parse(renderSectionedJson(RICH, sec('CONTENT', 'EDGES')));
     expect(Object.keys(json).sort()).toEqual(['content', 'edges'].sort());
+  });
+});
+
+describe('renderNodeExport section default', () => {
+  it('omitted sections (null) defaults to all', () => {
+    const md = renderNodeExport(RICH, { format: 'MD', full: false, sections: null }).data;
+    expect(md).toContain('abstract:');
+    expect(md).toContain('nodes:');
+    expect(md).toContain('# Intro');
+  });
+
+  it('an explicit empty [] means none, not all', () => {
+    const json = renderNodeExport(RICH, { format: 'JSON', full: false, sections: [] }).data;
+    expect(json).toBe('{}\n');
+    const md = renderNodeExport(RICH, { format: 'MD', full: false, sections: [] }).data;
+    expect(md).toBe(''); // no frontmatter, no body
+  });
+
+  it('full:true ignores sections entirely (canonical)', () => {
+    const a = renderNodeExport(RICH, { format: 'JSON', full: true, sections: [] }).data;
+    const b = renderCanonicalJson(RICH);
+    expect(a).toBe(b);
   });
 });

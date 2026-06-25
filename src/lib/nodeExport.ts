@@ -199,7 +199,9 @@ export function renderNodeExport(
   n: ExportNode,
   opts: { format: NodeExportFormat; full: boolean; sections?: NodeExportSection[] | null },
 ): RenderedExport {
-  const sections = new Set(opts.sections && opts.sections.length ? opts.sections : ALL_SECTIONS);
+  // Omitted (null/undefined) → all sections; an explicit [] means "none"
+  // (a caller can deliberately request an empty presentation export).
+  const sections = new Set(opts.sections ?? ALL_SECTIONS);
   if (opts.format === 'JSON') {
     const data = opts.full ? renderCanonicalJson(n) : renderSectionedJson(n, sections);
     return { mimeType: 'application/json', data };
