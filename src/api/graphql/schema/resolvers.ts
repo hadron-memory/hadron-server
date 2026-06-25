@@ -216,6 +216,28 @@ export interface Context {
   sessionId?: string;      // Session.id — set when operating inside an active session
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
+  // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
+  // identical node.findUnique calls when many edges in one response share an
+  // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.
+  edgeEndpointNodeCache?: Map<string, Promise<unknown>>;
+}
+
+/**
+ * Fetch an edge endpoint node by id, memoized per request (#381). Edges in a
+ * single response frequently share an endpoint (e.g. every outgoing edge's
+ * source is the parent node), so without memoization the Edge.source/target
+ * lazy-load path would issue one identical findUnique per edge. The cache is
+ * lazily attached to the (request-scoped) Context, so contexts that never hit
+ * the lazy path pay nothing.
+ */
+function loadEdgeEndpointNode(ctx: Context, id: string): Promise<unknown> {
+  const cache = (ctx.edgeEndpointNodeCache ??= new Map<string, Promise<unknown>>());
+  let pending = cache.get(id);
+  if (!pending) {
+    pending = ctx.db.node.findUnique({ where: { id } });
+    cache.set(id, pending);
+  }
+  return pending;
 }
 
 const ROLE_ORDER: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2, OWNER: 3 };
@@ -1446,10 +1468,16 @@ export const resolvers = {
     // detail page selecting `source` on an outgoing edge → 500). Lazily load
     // the endpoint by FK when it wasn't preloaded — same pattern as
     // Node.memory. The fast path (preloaded) returns the relation unchanged.
-    source: async (e: { sourceId: string; source?: unknown }, _: unknown, ctx: Context) =>
-      e.source ?? ctx.db.node.findUnique({ where: { id: e.sourceId } }),
-    target: async (e: { targetId: string; target?: unknown }, _: unknown, ctx: Context) =>
-      e.target ?? ctx.db.node.findUnique({ where: { id: e.targetId } }),
+    //
+    // The lazy path runs once per Edge in a list, and edges commonly SHARE an
+    // endpoint — e.g. `nodeById { outgoingEdges { source } }`, where every
+    // edge's source is the same parent node. `loadEdgeEndpointNode` memoizes
+    // the fetch in a request-scoped cache on the Context so each node is read
+    // at most once per request (no N+1 of identical findUnique). PR #381 review.
+    source: (e: { sourceId: string; source?: unknown }, _: unknown, ctx: Context) =>
+      e.source ?? loadEdgeEndpointNode(ctx, e.sourceId),
+    target: (e: { targetId: string; target?: unknown }, _: unknown, ctx: Context) =>
+      e.target ?? loadEdgeEndpointNode(ctx, e.targetId),
   },
   NodeVersion: {
     createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,

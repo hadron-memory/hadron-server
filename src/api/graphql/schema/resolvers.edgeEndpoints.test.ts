@@ -57,4 +57,21 @@ describe('Edge.source / Edge.target resolvers', () => {
     expect(out).toEqual(loaded);
     expect(findUnique).toHaveBeenCalledWith({ where: { id: 'tgt-9' } });
   });
+
+  it('memoizes per request: edges sharing an endpoint fetch it once (no N+1)', async () => {
+    // The shape that motivated this: nodeById { outgoingEdges { source } } —
+    // every outgoing edge's source is the same parent node.
+    const parent = { id: 'parent-1', loc: 'parent' };
+    const findUnique = vi.fn().mockResolvedValue(parent);
+    const ctx = ctxWith(findUnique); // one Context = one request
+
+    const results = await Promise.all([
+      edge.source({ sourceId: 'parent-1' }, null, ctx),
+      edge.source({ sourceId: 'parent-1' }, null, ctx),
+      edge.source({ sourceId: 'parent-1' }, null, ctx),
+    ]);
+
+    expect(results).toEqual([parent, parent, parent]);
+    expect(findUnique).toHaveBeenCalledTimes(1);
+  });
 });
