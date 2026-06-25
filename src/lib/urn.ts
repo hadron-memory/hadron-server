@@ -147,6 +147,24 @@ export function legacyMemoryUrnToCanonical(bareLegacyUrn: string): string {
 }
 
 /**
+ * Extract an agent's slug path from its URN, stripping the leading org
+ * segment. Robust to BOTH the legacy single-colon (`org:slug`) and the
+ * canonical double-colon (`org::slug`) agent-URN forms — an agent whose URN
+ * has been normalized (`urnNormalizedAt`) is stored canonical, and a bare
+ * `agentUrn.split(':').slice(1)` would emit a leading colon (`:slug`) and
+ * mangle any URN composed from it.
+ *
+ * Used when composing runtime memory URNs as
+ * `${org.urn}:${agentSlug}:<role-marker>:<id>` (#352 review). Reuses
+ * `normalizeUrnForLookup` to collapse `::`→`:` first, so the same
+ * single-colon split works for either form (and for multi-segment install
+ * shapes, matching the prior legacy behavior).
+ */
+export function agentSlugFromUrn(agentUrn: string): string {
+  return normalizeUrnForLookup(agentUrn).split(':').slice(1).join(':');
+}
+
+/**
  * Slug-reserved-word list per FR-019 — a SUPERSET of UrnType. Includes:
  *   - the D1 type registry (including `loc`, which is deprecated as a URN
  *     type per FR-021 but still reserved as a slug to future-proof the

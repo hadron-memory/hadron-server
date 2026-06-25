@@ -11,6 +11,7 @@ import {
   splitNodeUrn,
   normalizeUrnForLookup,
   legacyMemoryUrnToCanonical,
+  agentSlugFromUrn,
   MEMORY_ROLE_MARKERS,
   type AliasCategory,
 } from './urn.js';
@@ -641,6 +642,27 @@ describe('legacyMemoryUrnToCanonical — Memory.urn round-trip (#352)', () => {
   it('preserves the marker:id boundary (does not sever marker from id)', () => {
     expect(legacyMemoryUrnToCanonical('org:agent:anon:id')).toBe('org::agent::anon:id');
     expect(legacyMemoryUrnToCanonical('org:agent:anon:id')).not.toContain('anon::id');
+  });
+});
+
+// #352 review (gemini): runtime memory URNs are composed as
+// `${org.urn}:${agentSlugFromUrn(agent.urn)}:<marker>:<id>`. The slug
+// extraction must survive a normalized (canonical `::`) agent URN — a bare
+// `split(':')` would emit a leading colon and mangle the memory URN.
+describe('agentSlugFromUrn — robust to legacy + canonical agent URNs (#352)', () => {
+  it('strips the org from a legacy single-colon agent URN', () => {
+    expect(agentSlugFromUrn('micromentor.org:coding-agent')).toBe('coding-agent');
+  });
+  it('strips the org from a canonical double-colon agent URN (no leading colon)', () => {
+    expect(agentSlugFromUrn('micromentor.org::coding-agent')).toBe('coding-agent');
+    expect(agentSlugFromUrn('micromentor.org::coding-agent')).not.toContain(':coding-agent');
+  });
+  it('produces a memory URN that round-trips for a normalized agent URN', () => {
+    const agentSlug = agentSlugFromUrn('micromentor.org::coding-agent');
+    const memoryUrn = `micromentor.org:${agentSlug}:app-user:abc123`;
+    expect(legacyMemoryUrnToCanonical(memoryUrn)).toBe(
+      'micromentor.org::coding-agent::app-user:abc123',
+    );
   });
 });
 

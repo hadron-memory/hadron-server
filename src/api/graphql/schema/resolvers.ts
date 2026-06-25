@@ -165,7 +165,7 @@ import type {
   SearchPrincipal,
 } from '../../../lib/global-search/index.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
-import { assertFullyQualifiedUrn, hasSchemePrefix, UrnNotQualifiedError, splitNodeUrn, composeNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../../../lib/urn.js';
+import { assertFullyQualifiedUrn, hasSchemePrefix, UrnNotQualifiedError, splitNodeUrn, composeNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical, agentSlugFromUrn } from '../../../lib/urn.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
@@ -7520,7 +7520,7 @@ export const resolvers = {
             where: { id: agent.organizationId }, select: { urn: true },
           });
           const opaqueId = generateId();
-          const agentSlug = agent.urn.split(':').slice(1).join(':');
+          const agentSlug = agentSlugFromUrn(agent.urn);
           // #352: `app-user` is the canonical spec-021 per-user role marker.
           // (The legacy `user` marker is a reserved type word and serves
           // non-canonical on read.)
@@ -10039,7 +10039,7 @@ export const resolvers = {
           });
           const opaqueId = generateId();
           // #352: canonical `app-user` per-user role marker (was `user`).
-          const memoryUrn = `${org.urn}:${agent.urn.split(':').slice(1).join(':')}:app-user:${opaqueId}`;
+          const memoryUrn = `${org.urn}:${agentSlugFromUrn(agent.urn)}:app-user:${opaqueId}`;
           const created = await ctx.db.memory.create({
             data: {
               organizationId: agent.organizationId,
@@ -10073,7 +10073,7 @@ export const resolvers = {
           where: { id: agent.organizationId }, select: { urn: true },
         });
         const opaqueId = generateId();
-        const agentSlug = agent.urn.split(':').slice(1).join(':');
+        const agentSlug = agentSlugFromUrn(agent.urn);
         const memoryUrn = `${org.urn}:${agentSlug}:anon:${opaqueId}`;
         const expires = new Date(Date.now() + app.anonymousTtlDays * 24 * 60 * 60 * 1000);
         const created = await ctx.db.memory.create({
@@ -10198,7 +10198,7 @@ export const resolvers = {
         where: { id: agent.organizationId }, select: { urn: true },
       });
       const opaqueId = generateId();
-      const agentSlug = agent.urn.split(':').slice(1).join(':');
+      const agentSlug = agentSlugFromUrn(agent.urn);
       // #352: anon→registered promotion now writes the canonical `app-user`
       // per-user role marker (was `user`).
       const newUrn = `${org.urn}:${agentSlug}:app-user:${opaqueId}`;
@@ -10459,8 +10459,14 @@ export const resolvers = {
         null;
 
       if (m) {
-        // Memory hint supplied — resolve by name/urn.
-        const normalizedM = normalizeUrnForLookup(m);
+        // Memory hint supplied — resolve by name/urn. #352 review: strip any
+        // `hrn:`/`urn:` scheme prefix via parseUrnInput BEFORE normalizing so
+        // `legacyMemoryUrnToCanonical` receives a bare value (its precondition)
+        // — mirrors the runTask URN-lookup site above. parseUrnInput passes a
+        // plain name through untouched (type 'unknown'), so name-hint lookups
+        // still fall through to the `name contains` branch below. Without this,
+        // a prefixed URN yields a malformed candidate that matches no row.
+        const normalizedM = normalizeUrnForLookup(parseUrnInput(m.trim()).value);
         // #352: shared marker-aware helper (see the URN-lookup site above).
         const canonicalM = legacyMemoryUrnToCanonical(normalizedM);
 
