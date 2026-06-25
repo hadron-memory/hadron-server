@@ -254,7 +254,10 @@ describe('Mutation.updateOrganization — rejects a malformed org URN (#376)', (
   // (`hrn:org:<slug>`) and resubmitted it; the server stored it verbatim and
   // cascaded the corrupt prefix into every child (hadron-portal#394). The
   // server must reject any non-bare-slug value before storing/cascading.
-  for (const bad of ['hrn:org:acme', 'urn:org:acme', 'acme:foo', 'acme::foo']) {
+  // '' is included: a `String` GraphQL arg permits an empty string, and it
+  // must be rejected loudly rather than silently treated as "no change" by the
+  // `if (!urn)` fast-path.
+  for (const bad of ['hrn:org:acme', 'urn:org:acme', 'acme:foo', 'acme::foo', '']) {
     it(`rejects "${bad}" without storing or cascading`, async () => {
       const mem = await db.memory.create({
         data: {

@@ -5904,7 +5904,11 @@ export const resolvers = {
       // boundary on every child URN; a scheme-prefixed / colon-bearing value
       // (e.g. the canonical `hrn:org:<slug>` the read resolver emits) would
       // corrupt every child in the one bulk rewrite. Fail loud here instead.
-      if (urn) validateOrgSlug(urn);
+      // Validate whenever a urn is PROVIDED (incl. an empty string — which a
+      // `String` GraphQL arg permits) so malformed input is rejected loudly
+      // rather than silently dropped by the `if (!urn)` no-change fast-path;
+      // only an omitted / explicit-null urn skips validation.
+      if (urn != null) validateOrgSlug(urn);
 
       const data = {
         ...(name ? { name } : {}),
