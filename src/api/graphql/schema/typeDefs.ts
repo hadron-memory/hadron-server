@@ -807,7 +807,8 @@ export const typeDefs = `#graphql
   type OrgMember {
     id: ID!
     user: User!
-    role: Role!
+    "Target member's role in this org. Null when the viewer isn't an ADMIN/OWNER of the org (#384 field-level visibility); always visible for one's own membership."
+    role: Role
     canInvite: Boolean!
     createdAt: String!
   }

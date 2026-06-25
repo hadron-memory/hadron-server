@@ -165,6 +165,7 @@ import type {
   SearchPrincipal,
 } from '../../../lib/global-search/index.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
+import { canSeeUserPersonalFields, canSeeOrgMemberRole } from '../../../lib/auth/userVisibility.js';
 import { assertFullyQualifiedUrn, hasSchemePrefix, UrnNotQualifiedError, splitNodeUrn, composeNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical, agentSlugFromUrn, validateOrgSlug } from '../../../lib/urn.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
@@ -1889,11 +1890,32 @@ export const resolvers = {
     lastUsedAt: (k: { lastUsedAt?: Date | string | null }) => toISO(k.lastUsedAt ?? null),
     revokedAt: (k: { revokedAt?: Date | string | null }) => toISO(k.revokedAt ?? null),
   },
+  // #384: a member's org role is itself gated. Visible only to the member
+  // themselves, platform admins, and co-members whose own role in that org is
+  // ADMIN/OWNER. Withheld (null) otherwise — so a READER/CONTRIBUTOR member
+  // can't read everyone else's role off the member list. Other OrgMember
+  // fields keep default resolution.
+  OrgMember: {
+    role: async (
+      m: { userId: string; organizationId: string; role: string },
+      _: unknown,
+      ctx: Context,
+    ) => ((await canSeeOrgMemberRole(ctx, m)) ? m.role : null),
+  },
   User: {
     linkedAt: (u: { linkedAt?: Date | string | null }) => toISO(u.linkedAt ?? null),
     // Canonical hrn:user:<handle> URN (spec cor:urn:010:01) — lowercase, and
     // null for a handle-less or not-URN-legal (grandfathered) handle.
     urn: (u: { handle?: string | null }) => userUrn(u.handle),
+    // #384: field-level visibility. name/email are PII — withheld (null)
+    // from any viewer who isn't the user themselves, a platform admin, or a
+    // co-member of one of the user's orgs. Applied here so EVERY surface that
+    // returns a User (searchUsers, me, OrgMember.user, MemoryShare.*, the
+    // public invitation.sender, …) gets the same guarantee server-side.
+    name: async (u: { id: string; name?: string | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.name ?? null) : null,
+    email: async (u: { id: string; email?: string | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.email ?? null) : null,
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
     // list only when the queried User is the authenticated user (mirrors
     // 005's User.agentSubscriptions resolver-side gate).
@@ -3555,18 +3577,42 @@ export const resolvers = {
 
     searchUsers: async (_: unknown, { query }: { query: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
-      return ctx.db.user.findMany({
+      const q = query.trim();
+      // #384: name/email are PII gated to co-members (enforced on output by the
+      // User.name/email field resolvers). To stop searchUsers from also being a
+      // name/email enumeration oracle for non-co-members, MATCHING is scoped:
+      // public identifiers (handle, githubUsername) match by substring, email
+      // matches by EXACT equality only, and `name` matches are kept only for
+      // viewers allowed to see that user's name. So a stranger can locate a
+      // user to add by handle/githubUsername or a known full email, but cannot
+      // fish for them by partial name or partial email.
+      const rows = await ctx.db.user.findMany({
         where: {
           deletedAt: null,
           OR: [
-            searchContains('name', query),
-            searchContains('email', query),
-            searchContains('githubUsername', query),
+            searchContains('name', q),
+            searchContains('handle', q),
+            searchContains('githubUsername', q),
+            { email: { equals: q, mode: 'insensitive' } },
           ],
         },
         take: 20,
         orderBy: { name: 'asc' },
       });
+
+      // Drop rows a non-co-member matched ONLY via the now-hidden `name`: keep a
+      // row for such a viewer only when it also matches a public identifier.
+      const ql = q.toLowerCase();
+      const publicMatch = (u: { handle?: string | null; githubUsername?: string | null; email?: string | null }) =>
+        (!!u.handle && u.handle.toLowerCase().includes(ql)) ||
+        (!!u.githubUsername && u.githubUsername.toLowerCase().includes(ql)) ||
+        (!!u.email && u.email.toLowerCase() === ql);
+
+      const visible: typeof rows = [];
+      for (const u of rows) {
+        if (publicMatch(u) || (await canSeeUserPersonalFields(ctx, u.id))) visible.push(u);
+      }
+      return visible;
     },
 
     globalSearch: async (

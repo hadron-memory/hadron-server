@@ -30,6 +30,7 @@ import {
 } from './match.js';
 import type { GlobalSearchHit, SearchEntityType, SearchField, SearchPrincipal } from './types.js';
 import { userUrn } from '../userHandle.js';
+import { canSeeUserPersonalFields, type UserVisibilityCtx } from '../auth/userVisibility.js';
 
 type AnyWhere = Record<string, unknown>;
 
@@ -504,15 +505,29 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     take: Math.min(ctx.cap, 20),
   });
 
+  // #384: name/email are PII. For rows the viewer can't fully see (not a
+  // co-member), drop name/email from BOTH the match candidates and the display
+  // fallback — so a stranger can locate a user by handle/urn/githubUsername but
+  // can't discover them by, or read back, their real name or email. handle and
+  // githubUsername are public-ish identifiers and stay visible.
+  const visCtx: UserVisibilityCtx = {
+    db: ctx.db,
+    userId: principal.viewerUserId ?? undefined,
+    roles: principal.isPlatformAdmin ? ['ADMIN'] : undefined,
+  };
+
   const hits: GlobalSearchHit[] = [];
   for (const r of rows) {
+    const canSee = await canSeeUserPersonalFields(visCtx, r.id);
+    const name = canSee ? r.name : null;
+    const email = canSee ? r.email : null;
     const candidates: FieldCandidate[] = [
       // URN match tiers the handle against the urnTerm (the handle IS the slug).
       { field: 'urn', value: r.handle ?? '', tier: urnMatchTier(r.handle, urnTerm) },
-      { field: 'name', value: r.name },
+      { field: 'name', value: name },
       { field: 'name', value: r.handle },
       { field: 'name', value: r.githubUsername },
-      { field: 'name', value: r.email },
+      { field: 'name', value: email },
       { field: 'pk', value: r.id, tier: r.id === q ? 3 : 0 },
     ];
     const m = bestMatch(candidates, q, fields);
@@ -521,7 +536,8 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
       entityType: 'user',
       id: r.id,
       urn: userUrn(r.handle),
-      name: r.name ?? r.handle ?? r.githubUsername ?? r.email ?? null,
+      // `email` is already null for non-visible rows, so this fallback can't leak.
+      name: name ?? r.handle ?? r.githubUsername ?? email ?? null,
       description: null,
       matchedField: m.field,
       score: m.score,
