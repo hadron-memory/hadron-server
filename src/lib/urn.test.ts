@@ -10,6 +10,9 @@ import {
   assertFullyQualifiedUrn, UrnNotQualifiedError,
   splitNodeUrn,
   normalizeUrnForLookup,
+  legacyMemoryUrnToCanonical,
+  agentSlugFromUrn,
+  MEMORY_ROLE_MARKERS,
   type AliasCategory,
 } from './urn.js';
 
@@ -592,10 +595,74 @@ describe('validateUserSlug', () => {
   });
 
   it('rejects every D4 role-marker prefix as reserved', () => {
-    const roleMarkers = ['system', 'app-mem', 'app-user', 'group-mem', 'priv'];
-    for (const word of roleMarkers) {
+    // #352 added `anon` as a first-class role marker — assert against the
+    // exported registry so this test can never drift behind the source list.
+    expect(MEMORY_ROLE_MARKERS).toContain('anon');
+    for (const word of MEMORY_ROLE_MARKERS) {
       expect(() => validateUserSlug(word)).toThrow(UrnParseError);
     }
+  });
+});
+
+// #352: every shape stored in Memory.urn must canonicalize to a form that
+// round-trips through the strict spec-021 parser. The per-user (`user`) and
+// anonymous (`anon`) runtime markers used to bypass the canonical-marker set,
+// serving non-canonical URNs (PR #318 shipped without this coverage). Storage
+// is now aligned to `app-user`/`anon`; these assert the read-side helper +
+// parser agree.
+describe('legacyMemoryUrnToCanonical — Memory.urn round-trip (#352)', () => {
+  // [stored legacy form, expected bare canonical form]
+  const STORED_SHAPES: ReadonlyArray<readonly [string, string]> = [
+    ['hadronmemory.com:specs', 'hadronmemory.com::specs'],
+    ['micromentor.org:coding-agent:system', 'micromentor.org::coding-agent::system'],
+    ['micromentor.org:coding-agent:app-user:abc123', 'micromentor.org::coding-agent::app-user:abc123'],
+    ['micromentor.org:coding-agent:priv:abc123', 'micromentor.org::coding-agent::priv:abc123'],
+    // The runtime per-user form AFTER the storage alignment (was `:user:`).
+    ['micromentor.org:coding-agent:app-user:019dd', 'micromentor.org::coding-agent::app-user:019dd'],
+    // Anonymous session — `anon` keeps its marker:id boundary (was severed to
+    // `…::anon::id` before `anon` joined the marker registry).
+    ['micromentor.org:coding-agent:anon:019dd', 'micromentor.org::coding-agent::anon:019dd'],
+  ];
+
+  for (const [stored, expectedBare] of STORED_SHAPES) {
+    it(`canonicalizes + round-trips: ${stored}`, () => {
+      const bare = legacyMemoryUrnToCanonical(stored);
+      expect(bare).toBe(expectedBare);
+
+      // The bare canonical wraps to a valid prefixed URN…
+      const prefixed = formatCanonicalUrn('memory', bare);
+      expect(prefixed).toBe(`hrn:memory:${expectedBare}`);
+
+      // …and the prefixed URN parses cleanly (the acceptance criterion).
+      expect(() => parseUrn(prefixed)).not.toThrow();
+      expect(parseUrn(prefixed).parserCanonical).toBe(prefixed);
+    });
+  }
+
+  it('preserves the marker:id boundary (does not sever marker from id)', () => {
+    expect(legacyMemoryUrnToCanonical('org:agent:anon:id')).toBe('org::agent::anon:id');
+    expect(legacyMemoryUrnToCanonical('org:agent:anon:id')).not.toContain('anon::id');
+  });
+});
+
+// #352 review (gemini): runtime memory URNs are composed as
+// `${org.urn}:${agentSlugFromUrn(agent.urn)}:<marker>:<id>`. The slug
+// extraction must survive a normalized (canonical `::`) agent URN — a bare
+// `split(':')` would emit a leading colon and mangle the memory URN.
+describe('agentSlugFromUrn — robust to legacy + canonical agent URNs (#352)', () => {
+  it('strips the org from a legacy single-colon agent URN', () => {
+    expect(agentSlugFromUrn('micromentor.org:coding-agent')).toBe('coding-agent');
+  });
+  it('strips the org from a canonical double-colon agent URN (no leading colon)', () => {
+    expect(agentSlugFromUrn('micromentor.org::coding-agent')).toBe('coding-agent');
+    expect(agentSlugFromUrn('micromentor.org::coding-agent')).not.toContain(':coding-agent');
+  });
+  it('produces a memory URN that round-trips for a normalized agent URN', () => {
+    const agentSlug = agentSlugFromUrn('micromentor.org::coding-agent');
+    const memoryUrn = `micromentor.org:${agentSlug}:app-user:abc123`;
+    expect(legacyMemoryUrnToCanonical(memoryUrn)).toBe(
+      'micromentor.org::coding-agent::app-user:abc123',
+    );
   });
 });
 

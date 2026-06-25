@@ -95,8 +95,74 @@ const URN_TYPE_SET = new Set<string>(URN_TYPES);
  */
 export type CanonicalUrnType = (typeof URN_TYPES)[number];
 
-/** Memory-role markers per D4 (slug-validation reserves their prefixes). */
-const ROLE_MARKERS = ['system', 'app-mem', 'app-user', 'group-mem', 'priv'] as const;
+/**
+ * Memory-role markers per D4 (slug-validation reserves their prefixes).
+ *
+ * `anon` (issue #352) marks an anonymous, pre-signup session memory — the
+ * ephemeral `class='app'` bucket created before `linkMemoryToUser` promotes
+ * it to a registered per-user (`app-user`) memory. Spec-021 had no equivalent;
+ * it is a first-class marker because anonymous sessions are a first-class
+ * concept (`Memory.anonymousExpiresAt`, the anon→user promotion path).
+ */
+const ROLE_MARKERS = ['system', 'app-mem', 'app-user', 'group-mem', 'priv', 'anon'] as const;
+
+/**
+ * Memory-role markers that may appear as the FINAL hierarchy segment of a
+ * memory URN (parameterized variants — `app-user`, `priv`, `group-mem`, `anon`
+ * — carry a trailing `:<id>`). Exported so the GraphQL resolver layer shares a
+ * single source of truth instead of re-listing the markers inline (the
+ * re-listing is how #318 silently missed `user`/`anon`).
+ */
+export const MEMORY_ROLE_MARKERS: readonly string[] = ROLE_MARKERS;
+
+/**
+ * Convert a **bare legacy** single-colon memory URN to canonical `::`
+ * hierarchy, preserving the `marker:id` boundary for role-marker memories.
+ *
+ *   `org:agent:app-user:id` → `org::agent::app-user:id`  (NOT `…::app-user::id`)
+ *   `org:agent:anon:id`     → `org::agent::anon:id`
+ *   `org:specs`             → `org::specs`               (no marker)
+ *
+ * Input MUST be the bare legacy form (no `hrn:`/`urn:` prefix, single-colon
+ * separators — e.g. the output of `normalizeUrnForLookup`). Returns the bare
+ * canonical path; callers wrap with the scheme/type prefix (via
+ * `formatCanonicalUrn`) as needed.
+ */
+export function legacyMemoryUrnToCanonical(bareLegacyUrn: string): string {
+  const parts = bareLegacyUrn.split(':');
+  let markerIdx = -1;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (MEMORY_ROLE_MARKERS.includes(parts[i])) {
+      markerIdx = i;
+      break;
+    }
+  }
+  if (markerIdx < 0) return parts.join('::');
+  const beforeMarker = parts.slice(0, markerIdx).join('::');
+  const marker = parts[markerIdx];
+  const afterMarker = parts.slice(markerIdx + 1).join(':');
+  return afterMarker
+    ? `${beforeMarker}::${marker}:${afterMarker}`
+    : `${beforeMarker}::${marker}`;
+}
+
+/**
+ * Extract an agent's slug path from its URN, stripping the leading org
+ * segment. Robust to BOTH the legacy single-colon (`org:slug`) and the
+ * canonical double-colon (`org::slug`) agent-URN forms — an agent whose URN
+ * has been normalized (`urnNormalizedAt`) is stored canonical, and a bare
+ * `agentUrn.split(':').slice(1)` would emit a leading colon (`:slug`) and
+ * mangle any URN composed from it.
+ *
+ * Used when composing runtime memory URNs as
+ * `${org.urn}:${agentSlug}:<role-marker>:<id>` (#352 review). Reuses
+ * `normalizeUrnForLookup` to collapse `::`→`:` first, so the same
+ * single-colon split works for either form (and for multi-segment install
+ * shapes, matching the prior legacy behavior).
+ */
+export function agentSlugFromUrn(agentUrn: string): string {
+  return normalizeUrnForLookup(agentUrn).split(':').slice(1).join(':');
+}
 
 /**
  * Slug-reserved-word list per FR-019 — a SUPERSET of UrnType. Includes:

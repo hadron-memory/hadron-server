@@ -23,6 +23,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { parseUrn } from '../../../lib/urn.js';
 
 let org: { id: string; urn: string };
 let user: { id: string };
@@ -198,4 +199,31 @@ describe('urn field resolvers — corrupted URN falls back to raw, never throws'
     expect(resolvers.App.urn({ urn: corrupted })).toBe(corrupted);
     expect(resolvers.Organization.urn({ urn: corrupted })).toBe(corrupted);
   });
+});
+
+// #352 regression: the per-user (`:user:`) and anonymous (`:anon:`) runtime
+// memory markers used to bypass the canonical role-marker set, so `Memory.urn`
+// served non-canonical values (`user` threw → raw single-colon fallback;
+// `anon` had its marker:id boundary severed to `…::anon::id`). Storage is now
+// aligned to `app-user`, and `anon` is a first-class marker. Assert
+// `Memory.urn` is canonical AND round-trips through strict `parseUrn` for every
+// stored shape — the coverage PR #318 omitted.
+describe('Memory.urn — canonical + parseUrn round-trip for every stored shape (#352)', () => {
+  const STORED: ReadonlyArray<readonly [string, string]> = [
+    ['hadronmemory.com:specs', 'hrn:memory:hadronmemory.com::specs'],
+    ['micromentor.org:coding-agent:system', 'hrn:memory:micromentor.org::coding-agent::system'],
+    // Per-user, post storage-alignment (was the non-canonical `:user:`).
+    ['micromentor.org:coding-agent:app-user:abc123', 'hrn:memory:micromentor.org::coding-agent::app-user:abc123'],
+    ['micromentor.org:coding-agent:priv:abc123', 'hrn:memory:micromentor.org::coding-agent::priv:abc123'],
+    // Anonymous session — boundary preserved now that `anon` is a marker.
+    ['micromentor.org:coding-agent:anon:abc123', 'hrn:memory:micromentor.org::coding-agent::anon:abc123'],
+  ];
+
+  for (const [stored, expected] of STORED) {
+    it(`serves canonical + round-trips: ${stored}`, () => {
+      const served = resolvers.Memory.urn({ urn: stored });
+      expect(served).toBe(expected);
+      expect(() => parseUrn(served)).not.toThrow();
+    });
+  }
 });

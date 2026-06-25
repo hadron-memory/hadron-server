@@ -279,7 +279,8 @@ describe('startAgentSession', () => {
     const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
     expect(mem?.userMemoryOfAgentId).toBe(agent.id);
     expect(mem?.visibility).toBeNull();
-    expect(mem?.urn).toContain(':user:');
+    // #352: per-user memories store the canonical `app-user` marker (was `user`).
+    expect(mem?.urn).toContain(':app-user:');
   });
 
   it('reuses the same memory on subsequent sessions', async () => {
@@ -458,7 +459,8 @@ describe('linkMemoryToUser', () => {
       appCtx(app.id),
     );
     expect(linked.anonymousExpiresAt).toBeNull();
-    expect(linked.urn).toContain(':user:');
+    // #352: anon→user promotion writes the canonical `app-user` marker.
+    expect(linked.urn).toContain(':app-user:');
     expect(linked.urn).not.toContain(':anon:');
     const user = await db.user.findFirst({
       where: { externalAppId: app.id, externalId: 'mm-new' },
@@ -510,7 +512,8 @@ describe('linkMemoryToUser', () => {
     );
     expect(linked.id).toBe(session.memoryId);
     expect(linked.anonymousExpiresAt).toBeNull();
-    expect(linked.urn).toContain(':user:');
+    // #352: canonical `app-user` marker post-promotion.
+    expect(linked.urn).toContain(':app-user:');
   });
 });
 
@@ -694,7 +697,7 @@ describe('Organization memory listing', () => {
       adminCtx(),
     );
     expect(org?.memories.map((m: { urn: string }) => m.urn)).toContain('org-a:knowledge');
-    expect(org?.memories.find((m: { urn: string }) => m.urn.includes(':user:'))).toBeUndefined();
+    expect(org?.memories.find((m: { urn: string }) => m.urn.includes(':app-user:'))).toBeUndefined();
   });
 });
 
