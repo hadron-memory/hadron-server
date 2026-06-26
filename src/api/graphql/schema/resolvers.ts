@@ -40,7 +40,7 @@ import {
   vectorSearchChunks,
 } from '../../../services/embedding/vectors.js';
 import { getEmbeddingClient, isEmbeddingConfigured } from '../../../lib/embedding/index.js';
-import { getDeploymentInfo } from '../../../mcp/server.js';
+import { getDeploymentInfo } from '../../../mcp/deploymentInfo.js';
 import { reciprocalRankFusion } from '../../../lib/rrf.js';
 import {
   matchesQuery,

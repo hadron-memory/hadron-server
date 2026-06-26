@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { resolvers } from './resolvers.js';
-import { HADRON_SERVER_VERSION } from '../../../mcp/server.js';
+import { HADRON_SERVER_VERSION } from '../../../mcp/deploymentInfo.js';
 import type { Context } from './resolvers.js';
 
 const serverInfo = resolvers.Query.serverInfo as (
