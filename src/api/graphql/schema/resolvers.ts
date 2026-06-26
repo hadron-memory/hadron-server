@@ -2395,6 +2395,9 @@ export const resolvers = {
       } else {
         where = { loc, ...access };
       }
+      // #391: exclude soft-deleted nodes so node(loc:) matches resolveUrn — a
+      // leaked deleted row is what makes a node list/open but 404 by URN.
+      where.deletedAt = null;
 
       const candidates = await ctx.db.node.findMany({
         where,
@@ -2437,7 +2440,10 @@ export const resolvers = {
         where: { id },
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
       });
-      if (!node) return null;
+      // #391: a soft-deleted node must not resolve by PK either (findUnique
+      // can't carry deletedAt in its where, so guard post-fetch) — matches
+      // resolveUrn and keeps the by-PK page from opening a deleted node.
+      if (!node || node.deletedAt) return null;
       if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
         if (!(access.memoryId.in as string[]).includes(node.memoryId)) return null;
       }
@@ -2466,7 +2472,8 @@ export const resolvers = {
         where: { id },
         include: { outgoingEdges: { include: { target: true } } },
       });
-      if (!node) throw new GraphQLError('Node not found', { extensions: { code: 'NOT_FOUND' } });
+      // #391: don't export a soft-deleted node (denied ≡ not-found).
+      if (!node || node.deletedAt) throw new GraphQLError('Node not found', { extensions: { code: 'NOT_FOUND' } });
       if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
         // Denied and not-found are indistinguishable on purpose (same as nodeById).
         if (!(access.memoryId.in as string[]).includes(node.memoryId)) {
@@ -2566,6 +2573,10 @@ export const resolvers = {
       const results = await ctx.db.node.findMany({
         where: {
           ...access,
+          // #391: never surface soft-deleted nodes (MCP delete soft-deletes by
+          // default). resolveUrn already excludes them, so a leak here is what
+          // makes a node show in lists but 404 by URN.
+          deletedAt: null,
           // Exclude system nodes from search by default (unless explicitly requested)
           ...(nodeType ? { nodeType } : search ? { nodeType: { not: 'system' } } : {}),
           // Runnable filter (cor:api:060): isRunnable=true is the canonical
