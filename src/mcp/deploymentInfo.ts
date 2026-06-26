@@ -4,8 +4,8 @@
  *
  * Extracted into its own dependency-free module so both the MCP server
  * (src/mcp/server.ts) and the GraphQL resolvers (which mcp/server.ts itself
- * imports) can read it without a circular import. mcp/server.ts re-exports
- * these symbols for backward-compat.
+ * imports) can read it without a circular import. Both import these symbols
+ * directly from here — this module is the single source of truth.
  */
 
 /**

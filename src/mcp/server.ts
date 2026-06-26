@@ -74,11 +74,7 @@ import {
   InvalidContentScopeError,
 } from '../lib/entityRef/errors.js';
 import { isId } from '../lib/entityRef/shape.js';
-import {
-  HADRON_SERVER_VERSION,
-  getDeploymentInfo,
-  type DeploymentInfo,
-} from './deploymentInfo.js';
+import { HADRON_SERVER_VERSION, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
@@ -91,11 +87,10 @@ function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
 
-// Server-identity / deployment-info surface moved to ./deploymentInfo.js so
+// Server-identity / deployment-info surface lives in ./deploymentInfo.js so
 // the GraphQL resolvers (which this module imports, line ~77) can read it
-// without a circular import. Re-exported here for backward-compat — existing
-// importers of these symbols from './mcp/server.js' keep working.
-export { HADRON_SERVER_VERSION, getDeploymentInfo, type DeploymentInfo };
+// without a circular import. Imported above for the internal MCP uses below;
+// other modules import the symbols straight from ./deploymentInfo.js.
 
 /**
  * Test-only harness — invoke a registered MCP tool by name without
