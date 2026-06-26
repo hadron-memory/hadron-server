@@ -22,6 +22,7 @@ import {
   type NodeExportFormat,
   type NodeExportSection,
 } from '../../../lib/nodeExport.js';
+import { renderMarkdownToPdf } from '../../../lib/pdfClient.js';
 import type { EdgeForGit } from '../../../integrations/github/nodeFrontmatter.js';
 import {
   buildReplacer,
@@ -2495,6 +2496,26 @@ export const resolvers = {
       });
 
       const fmt: NodeExportFormat = format ?? 'MD';
+
+      // PDF is a presentation render produced by the external hadrontool-pdf
+      // service from the node's (already-decrypted) Markdown content. Unlike
+      // MD/JSON it is not the canonical round-trippable file, so `full` /
+      // `sections` do not apply. Delivered BASE64.
+      if (fmt === 'PDF') {
+        const markdown =
+          node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
+        const { base64, bytes } = await renderMarkdownToPdf(markdown, { title: node.name });
+        const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
+        return {
+          format: 'PDF',
+          mimeType: 'application/pdf',
+          filename: `${leaf}.pdf`,
+          encoding: 'BASE64',
+          data: base64,
+          bytes,
+        };
+      }
+
       const { mimeType, data } = renderNodeExport(
         {
           id: node.id,

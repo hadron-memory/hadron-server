@@ -1556,11 +1556,13 @@ export const typeDefs = `#graphql
     grants: [AccessGrant!]!
   }
 
-  # Single-node export (#386). Phase 1 ships MD/JSON; HTML and PDF are reserved
-  # for a later phase (added here only when implemented).
+  # Single-node export (#386). MD/JSON are the canonical, round-trippable files;
+  # PDF is a presentation render (content only) produced by the internal
+  # hadrontool-pdf service and delivered BASE64. HTML remains reserved.
   enum NodeExportFormat {
     MD
     JSON
+    PDF
   }
 
   "Selectable sections for a presentation (full: false) export."
@@ -1573,9 +1575,10 @@ export const typeDefs = `#graphql
     EDGES
   }
 
-  "How the rendered payload is encoded. TEXT today; BASE64 arrives with PDF."
+  "How the rendered payload is encoded. TEXT for MD/JSON; BASE64 for PDF."
   enum NodeExportEncoding {
     TEXT
+    BASE64
   }
 
   type NodeExportResult {

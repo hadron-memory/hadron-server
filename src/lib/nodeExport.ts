@@ -18,7 +18,11 @@ import { computeContentHash } from './contentHash.js';
  * delivery are deferred (the result shape is forward-compatible).
  */
 
-export type NodeExportFormat = 'MD' | 'JSON';
+// PDF is a valid export format at the API boundary, but it is NOT rendered
+// here — it is produced by the external hadrontool-pdf service from the node's
+// Markdown content (see renderMarkdownToPdf). renderNodeExport below handles
+// only the text formats (MD/JSON) and rejects PDF defensively.
+export type NodeExportFormat = 'MD' | 'JSON' | 'PDF';
 export type NodeExportSection =
   | 'METADATA'
   | 'CONTENT'
@@ -199,6 +203,11 @@ export function renderNodeExport(
   n: ExportNode,
   opts: { format: NodeExportFormat; full: boolean; sections?: NodeExportSection[] | null },
 ): RenderedExport {
+  // PDF is produced out-of-process by hadrontool-pdf, not here. Reaching this
+  // with PDF is a caller bug (the resolver branches on PDF before calling).
+  if (opts.format === 'PDF') {
+    throw new Error('renderNodeExport handles MD/JSON only; render PDF via renderMarkdownToPdf');
+  }
   // Omitted (null/undefined) → all sections; an explicit [] means "none"
   // (a caller can deliberately request an empty presentation export).
   const sections = new Set(opts.sections ?? ALL_SECTIONS);
