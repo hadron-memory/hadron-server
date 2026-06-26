@@ -19,11 +19,8 @@ import { readFileSync } from 'fs';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import {
-  createTestableMcpServer,
-  getDeploymentInfo,
-  HADRON_SERVER_VERSION,
-} from './server.js';
+import { createTestableMcpServer } from './server.js';
+import { getDeploymentInfo, HADRON_SERVER_VERSION } from './deploymentInfo.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 
@@ -105,29 +102,35 @@ describe('source audit — no hardcoded version literal in createMcpServerInstan
     // constant but the McpServer constructor (or some other emission
     // site) keeps its own copy. With this audit any new hardcode is
     // loud at PR time.
-    const src = readFileSync(
-      new URL('./server.ts', import.meta.url),
-      'utf8',
-    );
-    // Allowed: the const declaration itself.
-    // Disallowed: any other `version: '...'` literal in the file.
-    const lines = src.split('\n');
-    const offenders: Array<{ line: number; text: string }> = [];
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      // Match `version: '<digits.digits.digits>'` (the McpServer / package
-      // version shape). Comments are tolerant: the audit lives in the
-      // test file so callers reading the source can see why.
-      if (/version:\s*['"`]\d+\.\d+\.\d+['"`]/.test(line)) {
-        // Allow only the constant declaration site.
-        if (/HADRON_SERVER_VERSION\s*=\s*['"`]/.test(line)) continue;
-        offenders.push({ line: i + 1, text: line.trim() });
+    //
+    // Scans both files in the deployment-info surface: deploymentInfo.ts
+    // (where HADRON_SERVER_VERSION is declared) and server.ts (the
+    // McpServer constructor that consumes it) — the version moved to its
+    // own module to break a GraphQL-resolver import cycle, but the audit
+    // must still cover the constructor's emission site.
+    const files = ['./deploymentInfo.ts', './server.ts'] as const;
+    const offenders: Array<{ file: string; line: number; text: string }> = [];
+    for (const file of files) {
+      const src = readFileSync(new URL(file, import.meta.url), 'utf8');
+      // Allowed: the const declaration itself.
+      // Disallowed: any other `version: '...'` literal in the file.
+      const lines = src.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // Match `version: '<digits.digits.digits>'` (the McpServer / package
+        // version shape). Comments are tolerant: the audit lives in the
+        // test file so callers reading the source can see why.
+        if (/version:\s*['"`]\d+\.\d+\.\d+['"`]/.test(line)) {
+          // Allow only the constant declaration site.
+          if (/HADRON_SERVER_VERSION\s*=\s*['"`]/.test(line)) continue;
+          offenders.push({ file: `src/mcp/${file.slice(2)}`, line: i + 1, text: line.trim() });
+        }
       }
     }
     expect(
       offenders,
       `Found hardcoded version literal(s) outside HADRON_SERVER_VERSION: ` +
-        offenders.map((o) => `\n  src/mcp/server.ts:${o.line}: ${o.text}`).join(''),
+        offenders.map((o) => `\n  ${o.file}:${o.line}: ${o.text}`).join(''),
     ).toEqual([]);
   });
 });
