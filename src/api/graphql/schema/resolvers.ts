@@ -5067,17 +5067,30 @@ export const resolvers = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       await requireMemoryWriteAccess(ctx, resolvedMemoryId);
       const where = { loc_memoryId: { loc, memoryId: resolvedMemoryId } };
-      if (hard) {
-        // Irreversible row delete; edges + NodeVersion cascade via FK.
-        await ctx.db.node.delete({ where });
-      } else {
-        // #391: soft-delete by default, mirroring the hadron_delete_node MCP
-        // tool — set deletedAt/deletedBy so the node drops out of every read
-        // (nodes/nodeById/node/resolveUrn) but stays recoverable.
-        await ctx.db.node.update({
-          where,
-          data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
-        });
+      try {
+        if (hard) {
+          // Irreversible row delete; edges + NodeVersion cascade via FK.
+          await ctx.db.node.delete({ where });
+        } else {
+          // #391: soft-delete by default, mirroring the hadron_delete_node MCP
+          // tool — set deletedAt/deletedBy so the node drops out of every read
+          // (nodes/nodeById/node/resolveUrn) but stays recoverable. Attribute to
+          // the app for app-key callers (userId/clientId unset), then clientId.
+          await ctx.db.node.update({
+            where,
+            data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null },
+          });
+        }
+      } catch (e) {
+        // Prisma P2025 = record not found — wrap so a missing node surfaces a
+        // typed NODE_NOT_FOUND instead of leaking as INTERNAL_SERVER_ERROR
+        // (mirrors moveNode; issue #100).
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+          throw new GraphQLError(`Node "${loc}" not found in this memory`, {
+            extensions: { code: 'NODE_NOT_FOUND', loc, memoryId: resolvedMemoryId },
+          });
+        }
+        throw e;
       }
       return true;
     },

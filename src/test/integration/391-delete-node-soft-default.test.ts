@@ -54,4 +54,10 @@ describe('#391 deleteNode soft-by-default / hard opt-in', () => {
     expect(ok).toBe(true);
     expect(await db.node.findUnique({ where: { id: fx.nodeId } })).toBeNull();
   });
+
+  it('a missing node surfaces NODE_NOT_FOUND, not a raw 500', async () => {
+    await expect(
+      deleteNode(null, { loc: 'does-not-exist', memoryId: fx.memoryId }, adminCtx()),
+    ).rejects.toThrow(/not found/i);
+  });
 });
