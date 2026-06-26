@@ -2076,8 +2076,11 @@ export const typeDefs = `#graphql
     # staleness, and re-embedding. Supports dryRun preview.
     searchReplaceInNodes(input: SearchReplaceInNodesInput!): SearchReplaceResult!
 
-    # Delete a node by loc within a specific memory
-    deleteNode(loc: String!, memoryId: String!): Boolean!
+    # Delete a node by loc within a specific memory. Soft-delete by default
+    # (sets deletedAt; the node disappears from reads, matching the
+    # hadron_delete_node MCP tool). Pass hard: true to remove the row entirely
+    # (cascades edges + NodeVersion via FK) — irreversible. #391.
+    deleteNode(loc: String!, memoryId: String!, hard: Boolean): Boolean!
 
     # Restore a node to a previous version (creates a new version snapshot first)
     restoreNodeVersion(versionId: ID!): Node!
