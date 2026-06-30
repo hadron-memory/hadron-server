@@ -57,7 +57,11 @@ scp "root@${SSH_HOST}:${REMOTE_PATH}" "${LOCAL_PATH}"
 
 echo
 echo "→ Dropping and recreating local DB: ${LOCAL_DB}"
-psql -U "$LOCAL_USER" -h "$LOCAL_HOST" -d postgres -c "DROP DATABASE IF EXISTS ${LOCAL_DB};"
+# WITH (FORCE) terminates any lingering connections first. A stopped HTTP
+# server is NOT enough: `pnpm dev` runs under `tsx watch`, which keeps the Node
+# process — and its ~28-conn Prisma pool — alive, and a bare DROP DATABASE then
+# fails with "database … is being accessed by other users". FORCE evicts them.
+psql -U "$LOCAL_USER" -h "$LOCAL_HOST" -d postgres -c "DROP DATABASE IF EXISTS ${LOCAL_DB} WITH (FORCE);"
 psql -U "$LOCAL_USER" -h "$LOCAL_HOST" -d postgres -c "CREATE DATABASE ${LOCAL_DB} OWNER ${LOCAL_USER};"
 
 # pgvector must exist before the HNSW index restores; create it up front so the
@@ -67,6 +71,22 @@ psql -U "$LOCAL_USER" -h "$LOCAL_HOST" -d "$LOCAL_DB" -c "CREATE EXTENSION IF NO
 echo
 echo "→ Restoring with $($PG_RESTORE --version)"
 "$PG_RESTORE" -d "$LOCAL_DB" -U "$LOCAL_USER" -h "$LOCAL_HOST" --no-owner --no-privileges "$LOCAL_PATH"
+
+# Prod creates a few PARTIAL indexes (`… WHERE …`) via hand-edited migrations
+# that schema.prisma declares as PLAIN (Prisma's schema language can't express a
+# WHERE clause on @@index/@@unique). The `prisma db push` inside dev-setup.sh
+# below can't see the partial index as matching its desired plain one, so it
+# tries to CREATE a same-named index and dies with "relation … already exists".
+# Only the indexes whose names match Prisma's auto-naming collide; the rest are
+# custom-named raw-SQL indexes db push never touches. Drop the colliding ones
+# here so db push recreates them as the plain versions the dev DB normally has
+# (functionally equivalent locally — Postgres treats NULLs as distinct). If a
+# future schema adds another Prisma-named partial index, append it to this list.
+echo
+echo "→ Dropping prod partial indexes that collide with db push (recreated plain below)"
+psql -U "$LOCAL_USER" -h "$LOCAL_HOST" -d "$LOCAL_DB" -v ON_ERROR_STOP=1 \
+  -c "DROP INDEX IF EXISTS memories_user_id_idx;" \
+  -c "DROP INDEX IF EXISTS users_external_app_id_external_id_key;"
 
 # Reconcile the restored (prod-state) schema with the working schema.prisma and
 # rebuild the pgvector HNSW index that a bare `db push` drops. dev-setup.sh runs
