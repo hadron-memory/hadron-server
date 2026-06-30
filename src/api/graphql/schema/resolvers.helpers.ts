@@ -3,6 +3,7 @@
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
 import { decryptToken } from '../../../lib/tokenCrypto.js';
+import type { NodeMergeField } from '../../../lib/nodeMerge.js';
 import {
   AiServiceConfigNotFoundError,
   AiConfigValidationError,
@@ -1268,4 +1269,115 @@ export function rankByHint<
   }
   scored.sort((a, b) => b.score - a.score);
   return scored.map((s) => s.item);
+}
+
+// ── Shared GraphQL input types (moved from resolvers.ts, split step 2) ──
+export interface NodeEdgeInput {
+  targetId: string;
+  name?: string | null;
+  loc?: string | null;
+  description?: string | null;
+  isRunnable?: boolean | null;
+}
+
+export interface NodeInput {
+  id?: string;
+  memoryId: string;
+  nodeType?: string;
+  isRunnable?: boolean | null;
+  loc: string;
+  name: string;
+  alias?: string;
+  description?: string;
+  /** Paragraph-length summary. Spec 031. Optional; `null` clears, omitted preserves. */
+  abstract?: string | null;
+  content?: string;
+  data?: Record<string, unknown>;
+  seq?: number;
+  tags?: string[];
+  properties?: Record<string, unknown>;
+  llmModel?: string;
+  aiAgent?: string;
+  ownerRepo?: string;
+  edges?: NodeEdgeInput[];
+  createOnly?: boolean;
+  /** Why this change was made — stored in version history (editedBy). Issue #88. */
+  reason?: string | null;
+}
+
+export type NodeTextField = 'content' | 'name' | 'alias' | 'description' | 'abstract' | 'tags';
+
+export interface SearchReplaceInNodesInput {
+  oldText: string;
+  newText: string;
+  nodeIds?: string[];
+  memoryIds?: string[];
+  prefix?: string;
+  fields: NodeTextField[];
+  caseInsensitive?: boolean;
+  regex?: boolean;
+  dryRun?: boolean;
+  /** Why this change was made — stored in version history (editedBy). Issue #88. */
+  reason?: string | null;
+}
+
+export interface EdgeInput {
+  sourceLoc: string;
+  targetLoc: string;
+  name?: string | null;
+  loc?: string | null;
+  description?: string | null;
+  isRunnable?: boolean | null;
+}
+
+/**
+ * Fields mergeNodes can fold from the source node into the target node.
+ * Text fields concatenate (target first), TAGS unions, DATA/PROPERTIES
+ * shallow-merge with the target winning on key collisions, and EDGES
+ * re-points the source's relationships onto the target. See the
+ * `mergeNodes` resolver for the per-field merge strategy.
+ */
+export interface MergeNodesInput {
+  /** Source node — ID or fully-qualified URN. Folded into `target`. */
+  source: string;
+  /** Target node — ID or fully-qualified URN. The surviving node. */
+  target: string;
+  /** Which fields to merge. Omitted/null = every mergeable field. */
+  include?: NodeMergeField[] | null;
+  /** Hard-delete the source node after a successful merge. */
+  deleteSource?: boolean | null;
+}
+
+export interface MergeMemoriesInput {
+  /** Source memory — ID or fully-qualified URN. Emptied into `target`. */
+  source: string;
+  /** Target memory — ID or fully-qualified URN. The surviving memory. */
+  target: string;
+  /** Field strategy for source nodes that collide (same loc) in the target. Omitted/null = every mergeable field. */
+  include?: NodeMergeField[] | null;
+  /** Delete the (now-empty) source memory after a successful merge. */
+  deleteSourceMem?: boolean | null;
+}
+
+export interface SessionInput {
+  id: string;
+  type?: string;
+  repo?: string;
+  branch?: string;
+  prNumber?: number;
+  customerId?: string;
+  language?: string;
+  llmModel?: string;
+  parentSessionId?: string;
+  prevSessionId?: string;
+}
+
+export interface UsageEventInput {
+  type: string;
+  nodeLoc?: string;
+  actionArgs?: Record<string, unknown>;
+  sessionId?: string;
+  model?: string;
+  tokensIn?: number;
+  tokensOut?: number;
 }
