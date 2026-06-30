@@ -2,9 +2,7 @@
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
-import { createHash, randomBytes } from 'crypto';
-import { generateId } from '../../../lib/id.js';
-import { encryptToken, decryptToken } from '../../../lib/tokenCrypto.js';
+import { decryptToken } from '../../../lib/tokenCrypto.js';
 import {
   AiServiceConfigNotFoundError,
   AiConfigValidationError,
@@ -12,215 +10,34 @@ import {
   NoAiConfigAvailableError,
   UnknownAiProviderError,
   DEFAULT_AI_CONFIG_NAME,
-  apiKeyWriteFields,
-  apiKeyPreviewOf,
-  resolveAiConfigWithFallback,
-  resolveAiConfigs,
-  validateAiConfigName,
-  validateProviderAndParams,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
-import { computeContentHash } from '../../../lib/contentHash.js';
-import {
-  renderNodeExport,
-  type NodeExportFormat,
-  type NodeExportSection,
-} from '../../../lib/nodeExport.js';
-import { renderMarkdownToPdf } from '../../../lib/pdfClient.js';
-import type { EdgeForGit } from '../../../integrations/github/nodeFrontmatter.js';
-import {
-  buildReplacer,
-  replaceInTags,
-  SearchReplaceInvalidPatternError,
-  type Replacer,
-} from '../../../lib/searchReplace.js';
-import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
-import {
-  enqueueNodeEmbedding,
-  backfillMemoryEmbeddings,
-} from '../../../services/embedding/enqueue.js';
-import {
-  deleteMemoryVectors,
-  vectorSearchNodes,
-  vectorSearchChunks,
-} from '../../../services/embedding/vectors.js';
-import { getEmbeddingClient, isEmbeddingConfigured } from '../../../lib/embedding/index.js';
-import { getDeploymentInfo } from '../../../mcp/deploymentInfo.js';
-import { reciprocalRankFusion } from '../../../lib/rrf.js';
-import {
-  matchesQuery,
-  keywordRelevanceRank,
-  expandWithNeighbors,
-} from '../../../lib/search.js';
-import {
-  APP_KEY_PREFIX,
-  USER_API_KEY_LABEL_MAX_LEN,
-  hashAppKey,
-  mintUserApiKey,
-} from '../../../middleware/auth.js';
-import { canWriteToMemory, canReadMemory } from '../../../mcp/access-control.js';
-import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
+import { expandWithNeighbors } from '../../../lib/search.js';
+import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import {
-  ensureAppMember,
-  InvalidRoleError,
-  MaxMembersExceededError,
-  OrphanAppError,
-} from '../../../controller/operations/ensureAppMember.js';
-import {
-  publishAgentImport,
-  SelfImportError,
-  MultiLevelImportError,
-  MissingGrantError,
-  PositionConflictError,
-} from '../../../controller/operations/publishAgentImport.js';
-import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
-import { isLifecycleActive } from '../../../lib/lifecycle.js';
-import { getPrimaryAgent, getPrimaryAgentId, isAgentInstalled } from '../../../lib/appAgent.js';
-import { isOrgExternalAppMember } from '../../../lib/auth/isOrgExternalAppMember.js';
-import { joinApp, NoMemberRolesError, AppUninstalledError } from '../../../controller/operations/joinApp.js';
+  getPrimaryAgent,
+  isAgentInstalled,
+} from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import {
-  createMemoryShare,
-  InvalidMemoryClassForShareError,
-  MemoryNotFoundForShareError,
-  MemoryShareGranteeMissingError,
-} from '../../../controller/operations/createMemoryShare.js';
-import { cloneMemoryGraph } from '../../../controller/operations/cloneMemory.js';
-import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
-import { revokeMemoryShare } from '../../../controller/operations/revokeMemoryShare.js';
-import {
-  updateMemoryShareRole,
-  MemoryShareNotFoundError,
-} from '../../../controller/operations/updateMemoryShareRole.js';
-import {
-  addMemoryMember,
-  InvalidMemoryClassForMemberError,
-  MemoryNotFoundForMemberError,
-  MemoryMemberUserMissingError,
-} from '../../../controller/operations/addMemoryMember.js';
-import {
-  updateMemoryMemberRole,
-  MemoryMemberNotFoundError,
-  LastOwnerProtectedError,
-} from '../../../controller/operations/updateMemoryMemberRole.js';
-import { removeMemoryMember } from '../../../controller/operations/removeMemoryMember.js';
-import type {
-  MemoryShareRole as MemoryShareRoleType,
-  MemoryMemberRole as MemoryMemberRoleType,
-} from '../../../generated/prisma/index.js';
-import { leaveApp } from '../../../controller/operations/leaveApp.js';
-import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
-import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
-import {
-  encryptNodeFields,
-  encryptNodeFieldsWithKey,
-  decryptNodeFields,
-  decryptNodesBatch,
-  getMemoryEncryptionInfo,
-  type MemoryEncryptionInfo,
-} from '../../../lib/nodeCrypto.js';
-import {
-  parseUrnInput,
-  validateUrnType,
-  formatUrn,
-  composeInstalledAgentUrn,
   formatCanonicalUrn,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
-import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
-import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
-import {
-  NodeLocConflictError,
-  NodeNotFoundError,
-  NodeAbstractTooLongError,
-  EncryptedVectorIndexNotAcknowledgedError,
-  InvalidChunkConfigError,
-} from '../../../lib/entityRef/errors.js';
-import { compileTemplate } from '../../../lib/template.js';
 import {
   validateEdgeCondition,
-  evaluateEdgeCondition,
   validateNodeDataExtractionSpecs,
-  userMessageFor,
   type EvaluationError,
-  type MemoryLayerHandle,
 } from '../../../lib/edge-conditions/index.js';
-import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
-import {
-  beginAssetUpload,
-  beginAssetUploadV2,
-  type BeginAssetUploadInput as AssetUploadInput,
-  type BeginAssetUploadV2Input,
-} from '../../../controller/operations/beginAssetUpload.js';
-import { listMemoryAssets } from '../../../controller/operations/listMemoryAssets.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
-import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
-import { UserNotFoundError } from '../../../lib/entityRef/errors.js';
-import { normalizeHandle, normalizeHandleOrNull, userUrn } from '../../../lib/userHandle.js';
-import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
-import { isId } from '../../../lib/entityRef/shape.js';
-import {
-  resolveResource as resolveAccessResource,
-  callerCanAudit,
-  computeEffectiveAccess,
-} from '../../../lib/auth/effectiveAccess.js';
-import { globalSearch as runGlobalSearch } from '../../../lib/global-search/index.js';
-import type {
-  SearchEntityType,
-  SearchField,
-  SearchPrincipal,
-} from '../../../lib/global-search/index.js';
-import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
-import { canSeeUserPersonalFields, canSeeOrgMemberRole } from '../../../lib/auth/userVisibility.js';
-import { assertFullyQualifiedUrn, hasSchemePrefix, UrnNotQualifiedError, splitNodeUrn, composeNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical, agentSlugFromUrn, validateOrgSlug } from '../../../lib/urn.js';
-import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
-import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
-import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
-import { mintAssetDownloadUrl } from '../../../controller/operations/mintAssetDownloadUrl.js';
-import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.js';
-import { restoreAsset } from '../../../controller/operations/restoreAsset.js';
 import { GraphQLError } from 'graphql';
-import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
-import { Prisma } from '../../../generated/prisma/index.js';
-import type {
-  PrismaClient,
-  Role,
-  AppType,
-  AppMembershipRole,
-  SubscriptionType,
-  MemoryVisibility,
-  AgentVisibility,
+import {
+  Prisma,
+  type PrismaClient,
 } from '../../../generated/prisma/index.js';
-import { deserializeTags, serializeTags, serializeJson, deserializeJson, searchContains, tagsFilter } from '../../../integrations/db/provider.js';
-import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
-import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
-import { createNode } from '../../../controller/operations/createNode.js';
-import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
-import {
-  mergeNodeFields,
-  ALL_NODE_MERGE_FIELDS,
-  type NodeMergeField,
-} from '../../../lib/nodeMerge.js';
-import {
-  listInboxMessages,
-  replyToMessage,
-  moveMessage,
-  listFolders,
-  extractErrorMessage,
-} from '../../../integrations/exchange/exchange.js';
-import {
-  validateChatScopeInvariants,
-  findOrCreateAppClassMemory,
-  chatScopeAccessFilter,
-  ChatScopeError,
-} from './chat-scope.js';
-
 
 export interface Context {
   db: PrismaClient;
