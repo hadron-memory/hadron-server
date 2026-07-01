@@ -228,8 +228,5 @@ export const chatQueries = {
         };
       });
     },
-
-    // ── Asset queries (spec 004-asset-upload) ─────────────────────────
-
 };
 

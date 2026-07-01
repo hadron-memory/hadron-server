@@ -228,7 +228,5 @@ export const sessionQueries = {
       const result = await listFolders(refreshToken);
       return result.data;
     },
-
-    // ── Apps (multi-user agent callers) ─────────────────────────────
 };
 

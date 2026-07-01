@@ -205,8 +205,5 @@ export const memoryQueries = {
       }
       throw new Error('Unauthenticated');
     },
-
-    // ── Exchange integration queries ────────────────────────────────────
-
 };
 

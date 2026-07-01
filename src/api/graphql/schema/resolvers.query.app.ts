@@ -14,14 +14,6 @@ import {
 export const appQueries = {
     serverInfo: async (_: unknown, __: unknown, ___: Context) => getDeploymentInfo(),
 
-    // hadron-portal#262: resolve a `urn:<type>:`-prefixed URN to the ids the
-    // portal needs to redirect to the resource's canonical page. Dispatches
-    // on the URN type segment; reuses the same entity-ref resolvers and
-    // per-kind authorization as the dedicated memory/node/org/agent/app
-    // queries. No-access and not-found both collapse to null (→ the portal
-    // route turns it into a 404), so this never discloses existence of a
-    // resource the caller can't reach. Bare URNs without a type prefix are
-    // ambiguous across kinds and return null.
     apps: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
@@ -75,8 +67,6 @@ export const appQueries = {
       });
     },
 
-    // 005-agent-subscription FR-005: AgentSubscriptions held by the
-    // authenticated user.
     appAIConfig: async (_: unknown, { appId }: { appId: string }, ctx: Context) => {
       // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
