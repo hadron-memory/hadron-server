@@ -1,0 +1,880 @@
+// sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { generateId } from '../../../lib/id.js';
+import { canReadMemory } from '../../../mcp/access-control.js';
+import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
+import { isAgentInstalled } from '../../../lib/appAgent.js';
+import {
+  parseDataKey,
+  type EncryptionKey,
+} from '../../../lib/crypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import {
+  parseUrnInput,
+  assertFullyQualifiedUrn,
+  UrnNotQualifiedError,
+  splitNodeUrn,
+  composeNodeUrn,
+  normalizeUrnForLookup,
+  legacyMemoryUrnToCanonical,
+  agentSlugFromUrn,
+} from '../../../lib/urn.js';
+import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { compileTemplate } from '../../../lib/template.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { GraphQLError } from 'graphql';
+import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
+import { serializeJson } from '../../../integrations/db/provider.js';
+import {
+  listInboxMessages,
+  replyToMessage,
+  moveMessage,
+  extractErrorMessage,
+} from '../../../integrations/exchange/exchange.js';
+import {
+  type Context,
+  requireOrgRole,
+  getAccessibleMemoryIds,
+  SESSION_INCLUDE,
+  getExchangeRefreshToken,
+  rankByHint,
+  type SessionInput,
+  type UsageEventInput,
+} from './resolvers.helpers.js';
+
+export const sessionMutations = {
+    startSession: async (_: unknown, { input }: { input: SessionInput }, ctx: Context) => {
+      return ctx.db.session.create({
+        data: {
+          id: input.id,
+          type: (input.type as any) ?? 'DEVELOPER',
+          appId: ctx.appId,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+          repo: input.repo,
+          branch: input.branch,
+          prNumber: input.prNumber,
+          customerId: input.customerId,
+          language: input.language,
+          llmModel: input.llmModel,
+          parentSessionId: input.parentSessionId,
+          prevSessionId: input.prevSessionId,
+        },
+        include: SESSION_INCLUDE,
+      });
+    },
+
+    endSession: async (
+      _: unknown,
+      {
+        id,
+        summary,
+        inputTokens,
+        outputTokens,
+        turnCount,
+        errorCount,
+      }: { id: string; summary?: string; inputTokens?: number; outputTokens?: number; turnCount?: number; errorCount?: number },
+      ctx: Context,
+    ) => {
+      return ctx.db.session.update({
+        where: { id },
+        data: { endedAt: new Date(), summary, inputTokens, outputTokens, turnCount, errorCount },
+        include: SESSION_INCLUDE,
+      });
+    },
+
+    recordUsage: async (_: unknown, { event }: { event: UsageEventInput }, ctx: Context) => {
+      const node = event.nodeLoc
+        ? await ctx.db.node.findFirst({ where: { loc: event.nodeLoc, isLink: false } })
+          ?? await ctx.db.node.findFirst({ where: { loc: event.nodeLoc } })
+        : null;
+
+      await ctx.db.usageEvent.create({
+        data: {
+          type: event.type,
+          nodeLoc: event.nodeLoc,
+          nodeId: node?.id,
+          actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
+          appId: ctx.appId,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+          sessionId: event.sessionId,
+          model: event.model,
+          tokensIn: event.tokensIn,
+          tokensOut: event.tokensOut,
+        },
+      });
+      return true;
+    },
+
+    startAgentSession: async (
+      _: unknown,
+      { agentId, externalUserId, sessionTimeoutSeconds, dataKey }: {
+        agentId: string;
+        externalUserId?: string;
+        sessionTimeoutSeconds?: number;
+        dataKey?: string;
+      },
+      ctx: Context,
+    ) => {
+      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
+
+      // 008: App→Agent is a direct FK; the App can operate exactly the Agent
+      // referenced by App.agent_id (no AppAgent join). Orphan Apps (agent_id
+      // IS NULL) cannot operate any agent.
+      // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
+      // that the requested Agent is installed in the calling App.
+      if (!(await isAgentInstalled(ctx.db, app.id, agentId))) {
+        throw new Error('Forbidden: App is not allowed to operate this agent');
+      }
+
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      if (agent.deletedAt) throw new Error('Agent not found');
+
+      // SECRET mode requires a data key; USER_ID mode rejects it.
+      if (app.identifyUserMethod === 'SECRET' && !dataKey) {
+        throw new Error('dataKey is required when the app uses identifyUserMethod: SECRET');
+      }
+      if (app.identifyUserMethod === 'USER_ID' && dataKey) {
+        throw new Error('dataKey is only accepted when the app uses identifyUserMethod: SECRET');
+      }
+
+      const parsedKey: EncryptionKey | null = dataKey ? parseDataKey(dataKey) : null;
+
+      // Resolve user (optional — null means anonymous session)
+      let userId: string | null = null;
+      if (externalUserId) {
+        let user = await ctx.db.user.findFirst({
+          where: { externalAppId: ctx.appId, externalId: externalUserId, deletedAt: null },
+        });
+        if (!user) {
+          if (app.createUserPermission !== 'IMPLICIT') {
+            throw new Error('User not found. Call createAppUser first or set createUserPermission=IMPLICIT.');
+          }
+          user = await ctx.db.user.create({
+            data: {
+              externalAppId: ctx.appId,
+              externalId: externalUserId,
+              identityProvider: 'APP',
+              createdBy: ctx.appId,
+            },
+          });
+        }
+        userId = user.id;
+      }
+
+      // 005-agent-subscription FR-002: auto-provision an AgentSubscription
+      // on the first user-attributed contact for (user, agent). Idempotent.
+      if (userId) {
+        await ensureAgentSubscription(ctx.db, userId, agentId);
+      }
+
+      // Find or lazily provision the user memory for (agent, user)
+      let memoryId: string;
+      let memoryIsEncrypted = false;
+      if (userId) {
+        const existing = await ctx.db.memory.findFirst({
+          where: { userMemoryOfAgentId: agentId, createdBy: userId, deletedAt: null },
+        });
+        if (existing) {
+          memoryId = existing.id;
+          memoryIsEncrypted = existing.isEncrypted;
+        } else {
+          const org = await ctx.db.organization.findUniqueOrThrow({
+            where: { id: agent.organizationId }, select: { urn: true },
+          });
+          const opaqueId = generateId();
+          // #352: canonical `app-user` per-user role marker (was `user`).
+          const memoryUrn = `${org.urn}:${agentSlugFromUrn(agent.urn)}:app-user:${opaqueId}`;
+          const created = await ctx.db.memory.create({
+            data: {
+              organizationId: agent.organizationId,
+              urn: memoryUrn,
+              name: `User memory (${agent.name})`,
+              // 005-agent-subscription: per-user memory keyed on userId.
+              // Bidirectional CHECK constraint requires class IN
+              // (personal,private) ⇔ userId IS NOT NULL.
+              userId,
+              class: 'personal',
+              // 035-visibility-enum-cleanup: personal privacy is class-driven;
+              // visibility is NULL (was PERSONAL).
+              visibility: null,
+              userMemoryOfAgentId: agentId,
+              // 008-agent-installation: personal memories pivot on
+              // (app_id, user_id). The chk_memory_class_app_id constraint
+              // requires app_id when class IN ('app', 'personal').
+              appId: ctx.appId,
+              // New user memories in SECRET mode are encrypted from creation.
+              isEncrypted: parsedKey !== null,
+              createdBy: userId,
+            },
+          });
+          memoryId = created.id;
+          memoryIsEncrypted = parsedKey !== null;
+        }
+      } else {
+        // Anonymous session — create a scratch memory with expiry. Anonymous
+        // memories are always plaintext until linkMemoryToUser promotes them.
+        const org = await ctx.db.organization.findUniqueOrThrow({
+          where: { id: agent.organizationId }, select: { urn: true },
+        });
+        const opaqueId = generateId();
+        const agentSlug = agentSlugFromUrn(agent.urn);
+        const memoryUrn = `${org.urn}:${agentSlug}:anon:${opaqueId}`;
+        const expires = new Date(Date.now() + app.anonymousTtlDays * 24 * 60 * 60 * 1000);
+        const created = await ctx.db.memory.create({
+          data: {
+            organizationId: agent.organizationId,
+            urn: memoryUrn,
+            name: `Anonymous session (${agent.name})`,
+            // Anonymous: no userId yet (linkMemoryToUser later may set
+            // it); class is 'app' since the data belongs to the App's
+            // bucket of records-through-this-agent until promoted.
+            class: 'app',
+            // 035-visibility-enum-cleanup: app-class visibility is NULL.
+            visibility: null,
+            userMemoryOfAgentId: agentId,
+            // 008-agent-installation: app-class memories require app_id
+            // (chk_memory_class_app_id).
+            appId: ctx.appId,
+            anonymousExpiresAt: expires,
+            createdBy: ctx.appId,
+          },
+        });
+        memoryId = created.id;
+        memoryIsEncrypted = false;
+      }
+
+      // If the memory is encrypted, the caller must provide a matching key.
+      // (In SECRET mode we already required a dataKey above; this check also
+      // handles a later call with USER_ID mode on an already-encrypted mem.)
+      if (memoryIsEncrypted && !parsedKey) {
+        throw new Error('Memory is encrypted; dataKey is required');
+      }
+
+      // Clamp session timeout to the app's configured maximum (ceiling)
+      const ttl = Math.min(
+        sessionTimeoutSeconds ?? app.sessionTimeoutSeconds,
+        app.sessionTimeoutSeconds,
+      );
+      const expiresAt = new Date(Date.now() + ttl * 1000);
+
+      const session = await ctx.db.session.create({
+        data: {
+          id: generateId(),
+          type: 'CHATBOT',
+          appId: ctx.appId,
+          userId: userId ?? null,
+          agentId,
+          memoryId,
+          expiresAt,
+          createdBy: ctx.appId,
+        },
+      });
+
+      // Register the key in the session key cache so this session (and any
+      // concurrent one for the same memory) can decrypt content.
+      if (parsedKey) {
+        sessionKeyCache.set(session.id, memoryId, parsedKey);
+      }
+
+      return session;
+    },
+
+    endAgentSession: async (_: unknown, { sessionId }: { sessionId: string }, ctx: Context) => {
+      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      const session = await ctx.db.session.findUnique({ where: { id: sessionId } });
+      if (!session || session.appId !== ctx.appId) {
+        throw new Error('Session not found');
+      }
+      if (session.endedAt) {
+        sessionKeyCache.evict(sessionId); // defensive — idempotent
+        return true;
+      }
+      await ctx.db.session.update({
+        where: { id: sessionId },
+        data: { endedAt: new Date() },
+      });
+      // Evict the data key from the in-memory cache. Ref counting means the
+      // key stays available to any other active session on the same memory.
+      sessionKeyCache.evict(sessionId);
+      return true;
+    },
+
+    createRevision: async (
+      _: unknown,
+      { agentId, description }: { agentId: string; description?: string },
+      ctx: Context,
+    ) => {
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      const sysMemId = (agent as any).systemMemoryId as string;
+      if (!sysMemId) throw new Error('Agent has no system memory');
+
+      // Snapshot all non-revision nodes + edges in the system memory
+      const nodes = await ctx.db.node.findMany({
+        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+        select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true, tags: true },
+      });
+      const nodeIds = (await ctx.db.node.findMany({
+        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+        select: { id: true },
+      })).map((n) => n.id);
+      const edges = await ctx.db.edge.findMany({
+        where: { sourceId: { in: nodeIds }, deletedAt: null },
+        include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+      });
+      const edgeSnapshots = edges.map((e) => ({
+        sourceLoc: e.source.loc,
+        targetLoc: e.target.loc,
+        loc: e.loc,
+        name: e.name,
+        description: e.description,
+        isRunnable: e.isRunnable,
+        data: e.data,
+      }));
+
+      // Count existing revisions to auto-increment
+      const existingRevisions = await ctx.db.node.count({
+        where: { memoryId: sysMemId, loc: { startsWith: 'revisions:' }, deletedAt: null },
+      });
+      const revNum = existingRevisions + 1;
+      const label = `rev-${revNum}`;
+      const revLoc = `revisions:${label}`;
+
+      // Ensure revisions parent exists
+      try {
+        await ctx.db.node.upsert({
+          where: { loc_memoryId: { loc: 'revisions', memoryId: sysMemId } },
+          create: { id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' },
+          update: {},
+        });
+      } catch { /* exists */ }
+
+      await ctx.db.node.create({
+        data: {
+          id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
+          nodeType: 'system',
+          description: description ?? `Revision ${revNum}`,
+          data: {
+            revision: revNum,
+            label,
+            published: false,
+            createdBy: ctx.userId ?? null,
+            snapshot: { nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
+          } as InputJsonValue,
+        },
+      });
+
+      return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
+    },
+
+    publishRevision: async (
+      _: unknown,
+      { agentId, revisionLoc, versionLabel }: { agentId: string; revisionLoc: string; versionLabel?: string },
+      ctx: Context,
+    ) => {
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      const sysMemId = (agent as any).systemMemoryId as string;
+      if (!sysMemId) throw new Error('Agent has no system memory');
+
+      const revNode = await ctx.db.node.findFirst({
+        where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
+      });
+      if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
+
+      const revData = (revNode.data as Record<string, unknown>) ?? {};
+      const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
+
+      // Mark as published
+      await ctx.db.node.update({
+        where: { id: revNode.id },
+        data: { data: { ...revData, published: true, publishedAt: new Date().toISOString(), versionLabel: label } as InputJsonValue },
+      });
+
+      // Update agent to point to this revision
+      await ctx.db.agent.update({
+        where: { id: resolvedAgentId },
+        data: { publishedRevisionLoc: revisionLoc },
+      });
+
+      return { revisionLoc, label, published: true, createdAt: new Date().toISOString() };
+    },
+
+    restoreRevision: async (
+      _: unknown,
+      { agentId, revisionLoc }: { agentId: string; revisionLoc: string },
+      ctx: Context,
+    ) => {
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      const sysMemId = (agent as any).systemMemoryId as string;
+      if (!sysMemId) throw new Error('Agent has no system memory');
+
+      const revNode = await ctx.db.node.findFirst({
+        where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
+      });
+      if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
+
+      const revData = (revNode.data as Record<string, unknown>) ?? {};
+      const snapshot = revData.snapshot as { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | undefined;
+      if (!snapshot) throw new Error('Revision has no snapshot data');
+
+      // Auto-save current state before restoring
+      await sessionMutations.createRevision({}, { agentId: resolvedAgentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
+
+      // Delete all current non-revision nodes in the system memory
+      await ctx.db.node.updateMany({
+        where: {
+          memoryId: sysMemId,
+          deletedAt: null,
+          NOT: { loc: { startsWith: 'revisions' } },
+        },
+        data: { deletedAt: new Date() },
+      });
+
+      // Delete all edges in the system memory
+      const currentNodeIds = (await ctx.db.node.findMany({
+        where: { memoryId: sysMemId },
+        select: { id: true },
+      })).map((n) => n.id);
+      await ctx.db.edge.updateMany({
+        where: { sourceId: { in: currentNodeIds }, deletedAt: null },
+        data: { deletedAt: new Date() },
+      });
+
+      // Restore nodes from snapshot (upsert to handle soft-deleted rows
+      // that still hold the unique (loc, memoryId) constraint)
+      const locToId = new Map<string, string>();
+      for (const n of snapshot.nodes) {
+        const loc = n.loc as string;
+        const nodeData = {
+          name: n.name as string,
+          nodeType: (n.nodeType as string) ?? 'system',
+          description: (n.description as string) ?? null,
+          content: (n.content as string) ?? null,
+          data: (n.data ?? null) as InputJsonValue,
+          tags: (n.tags as string[]) ?? [],
+          deletedAt: null,
+        };
+        const upserted = await ctx.db.node.upsert({
+          where: { loc_memoryId: { loc, memoryId: sysMemId } },
+          create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData },
+          update: nodeData,
+        });
+        locToId.set(loc, upserted.id);
+      }
+
+      // Restore edges from snapshot. Spec 037: derive loc when an older
+      // snapshot predates the edge `loc`/`name` fields (it would carry the
+      // legacy `label`); memoryId is the system memory being restored into.
+      for (const e of snapshot.edges) {
+        const sourceId = locToId.get(e.sourceLoc as string);
+        const targetId = locToId.get(e.targetLoc as string);
+        if (sourceId && targetId) {
+          const edgeName = ((e.name ?? e.label) as string | null) ?? null;
+          const edgeLoc = (e.loc as string | undefined)
+            ?? deriveEdgeLoc(e.sourceLoc as string, edgeName, e.targetLoc as string);
+          await ctx.db.edge.create({
+            data: {
+              id: generateId(),
+              memoryId: sysMemId,
+              sourceId,
+              targetId,
+              loc: edgeLoc,
+              name: edgeName,
+              description: (e.description as string | null) ?? null,
+              isRunnable: (e.isRunnable as boolean | null) ?? null,
+              data: (e.data ?? null) as InputJsonValue,
+            },
+          });
+        }
+      }
+
+      return { revisionLoc, label: (revData.label as string) ?? revisionLoc, published: false, createdAt: new Date().toISOString() };
+    },
+
+    // ── Editor lock ────────────────────────────────────────────────────
+
+    acquireEditorLock: async (
+      _: unknown,
+      { agentId }: { agentId: string },
+      ctx: Context,
+    ) => {
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+
+      const now = new Date();
+      const lockExpiry = (agent as any).editorLockExpiresAt as Date | null;
+      const lockUser = (agent as any).editorLockUserId as string | null;
+
+      // If locked by someone else and not expired, reject
+      if (lockUser && lockUser !== ctx.userId && lockExpiry && lockExpiry > now) {
+        return { locked: false, lockedBy: lockUser, expiresAt: lockExpiry.toISOString() };
+      }
+
+      // Acquire or renew lock (5 minutes)
+      const expiresAt = new Date(now.getTime() + 5 * 60 * 1000);
+      await ctx.db.agent.update({
+        where: { id: resolvedAgentId },
+        data: { editorLockUserId: ctx.userId, editorLockExpiresAt: expiresAt },
+      });
+
+      return { locked: true, lockedBy: ctx.userId, expiresAt: expiresAt.toISOString() };
+    },
+
+    releaseEditorLock: async (
+      _: unknown,
+      { agentId }: { agentId: string },
+      ctx: Context,
+    ) => {
+      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+
+      await ctx.db.agent.update({
+        where: { id: resolvedAgentId },
+        data: { editorLockUserId: null, editorLockExpiresAt: null },
+      });
+      return true;
+    },
+
+    // ── Chat ownership mutations ────────────────────────────────────
+
+    deleteExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id } });
+      await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
+      await ctx.db.exchangeConnection.update({
+        where: { id },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+      });
+      return true;
+    },
+
+    testExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const { refreshToken } = await getExchangeRefreshToken(ctx, id);
+      try {
+        await listInboxMessages(refreshToken, { top: 1 });
+        await ctx.db.exchangeConnection.update({
+          where: { id },
+          data: { syncStatus: 'OK', lastError: null, lastSyncAt: new Date() },
+        });
+        return true;
+      } catch (err: unknown) {
+        const errMsg = extractErrorMessage(err);
+        await ctx.db.exchangeConnection.update({
+          where: { id },
+          data: { syncStatus: 'ERROR', lastError: errMsg },
+        });
+        throw new Error(`Exchange connection test failed: ${errMsg}`);
+      }
+    },
+
+    exchangeReply: async (
+      _: unknown,
+      { connectionId, messageId, body }: { connectionId: string; messageId: string; body: string },
+      ctx: Context,
+    ) => {
+      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
+      await replyToMessage(refreshToken, messageId, body);
+      return true;
+    },
+
+    exchangeMoveMessage: async (
+      _: unknown,
+      { connectionId, messageId, folderId }: { connectionId: string; messageId: string; folderId: string },
+      ctx: Context,
+    ) => {
+      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
+      await moveMessage(refreshToken, messageId, folderId);
+      return true;
+    },
+
+    runTask: async (
+      _: unknown,
+      {
+        task: taskHint,
+        memory: memoryHint,
+        urn: directUrn,
+        args: argsInput,
+      }: {
+        task?: string | null;
+        memory?: string | null;
+        urn?: string | null;
+        args?: unknown;
+      },
+      ctx: Context,
+    ) => {
+      // Normalize inputs defensively.
+      const t = typeof taskHint === 'string' ? taskHint.trim() : '';
+      const m = typeof memoryHint === 'string' ? memoryHint.trim() : '';
+      const u = typeof directUrn === 'string' ? directUrn.trim() : '';
+      const args =
+        argsInput && typeof argsInput === 'object' && !Array.isArray(argsInput)
+          ? (argsInput as Record<string, unknown>)
+          : undefined;
+
+      // Normalize args to string values ({{key}} substitution requires strings).
+      const stringArgs = args
+        ? Object.fromEntries(
+            Object.entries(args).map(([k, v]) => [k, String(v ?? '')]),
+          )
+        : undefined;
+
+      // Helper to load a node by URN and render it.
+      const auth = {
+        clientId: ctx.clientId,
+        userId: ctx.userId,
+        appId: ctx.appId,
+        sessionId: ctx.sessionId,
+        roles: ctx.roles,
+        organizationId: ctx.organizationId,
+      };
+
+      const loadAndRender = async (targetNodeUrn: string) => {
+        try {
+          assertFullyQualifiedUrn(targetNodeUrn, 'node');
+        } catch (e) {
+          if (e instanceof UrnNotQualifiedError) {
+            throw new GraphQLError(e.message, {
+              extensions: { code: e.name },
+            });
+          }
+          throw e;
+        }
+
+        const { memoryUrn: resolvedMemoryUrn, loc } = splitNodeUrn(targetNodeUrn);
+
+        // Find the memory by URN using case-insensitive matching (legacy `:` and canonical `::` forms).
+        const parsedMemUrn = parseUrnInput(resolvedMemoryUrn.trim());
+        const normalizedMemUrn = normalizeUrnForLookup(parsedMemUrn.value);
+        // Build the canonical form from the normalized (legacy) form. #352:
+        // shared marker-aware helper so `app-user`/`anon` ids keep their
+        // `marker:id` boundary instead of being severed.
+        const canonicalMemUrn = legacyMemoryUrnToCanonical(normalizedMemUrn);
+
+        const memory = await ctx.db.memory.findFirst({
+          where: {
+            OR: [
+              { urn: normalizedMemUrn },
+              { urn: canonicalMemUrn },
+            ],
+            deletedAt: null,
+          },
+          select: { id: true, urn: true },
+        });
+
+        if (!memory || !(await canReadMemory(ctx.db, auth, memory.id))) {
+          throw new GraphQLError(`Memory not found: "${resolvedMemoryUrn}".`, {
+            extensions: { code: 'NOT_FOUND' },
+          });
+        }
+
+        const node = await ctx.db.node.findUnique({
+          where: { loc_memoryId: { loc, memoryId: memory.id } },
+          include: { outgoingEdges: { include: { target: true } } },
+        });
+        if (!node) {
+          throw new GraphQLError(`Node "${targetNodeUrn}" not found.`, {
+            extensions: { code: 'NOT_FOUND' },
+          });
+        }
+
+        // Decrypt the node and its outgoing edge targets if the memory is encrypted.
+        const nodesToDecrypt = [node, ...node.outgoingEdges.map(e => e.target)];
+        await decryptNodesBatch(ctx.db, nodesToDecrypt);
+
+        // Render the node with Mustache template compilation and inlined edges.
+        let actionContent = node.content || '';
+        if (actionContent.includes('{{')) {
+          // Use compileTemplate for proper Mustache template handling.
+          // Pass stringArgs as the node data for variable substitution.
+          actionContent = await compileTemplate(actionContent, stringArgs ?? null, memory.id, ctx.db, {});
+        }
+
+        const topicSections: string[] = [];
+        for (const edge of node.outgoingEdges) {
+          const target = edge.target;
+          if (target.content) {
+            // Compose the target node URN directly.
+            const targetMemory = await ctx.db.memory.findUniqueOrThrow({
+              where: { id: target.memoryId },
+              select: { urn: true },
+            });
+            const targetUrn = composeNodeUrn(targetMemory.urn, target.loc);
+            topicSections.push(
+              `## Node: ${target.name} (${targetUrn})\n\n${target.content}`,
+            );
+          }
+        }
+
+        // Record usage event (fire-and-forget).
+        ctx.db.usageEvent
+          .create({
+            data: {
+              id: generateId(),
+              type: 'action-run',
+              nodeLoc: loc,
+              nodeId: node.id,
+              appId: ctx.appId ?? null,
+              createdBy: ctx.userId ?? null,
+              sessionId: ctx.sessionId ?? null,
+              actionArgs: stringArgs,
+            },
+          })
+          .catch(() => {});
+
+        const parts = [`# Node: ${node.name}\n\n${actionContent}`];
+        if (topicSections.length > 0) {
+          parts.push(
+            '---\n\n# Referenced Nodes\n\n' +
+              topicSections.join('\n\n---\n\n'),
+          );
+        }
+        return parts.join('\n\n');
+      };
+
+      // URN bypass — run directly, no resolution.
+      if (u) {
+        return loadAndRender(u);
+      }
+
+      // Resolve memory (required for non-URN path).
+      const accessibleMemoryIdsList = await getAccessibleMemoryIds(ctx);
+      const accessibleMemoryIds = accessibleMemoryIdsList ?? [];
+      if (accessibleMemoryIds.length === 0) {
+        throw new GraphQLError('No memories you can read.', {
+          extensions: { code: 'FORBIDDEN' },
+        });
+      }
+
+      let resolvedMemory: { id: string; urn: string; name: string } | null =
+        null;
+
+      if (m) {
+        // Memory hint supplied — resolve by name/urn. #352 review: strip any
+        // `hrn:`/`urn:` scheme prefix via parseUrnInput BEFORE normalizing so
+        // `legacyMemoryUrnToCanonical` receives a bare value (its precondition)
+        // — mirrors the runTask URN-lookup site above. parseUrnInput passes a
+        // plain name through untouched (type 'unknown'), so name-hint lookups
+        // still fall through to the `name contains` branch below. Without this,
+        // a prefixed URN yields a malformed candidate that matches no row.
+        const normalizedM = normalizeUrnForLookup(parseUrnInput(m.trim()).value);
+        // #352: shared marker-aware helper (see the URN-lookup site above).
+        const canonicalM = legacyMemoryUrnToCanonical(normalizedM);
+
+        const candidates = await ctx.db.memory.findMany({
+          where: {
+            id: { in: accessibleMemoryIds },
+            deletedAt: null,
+            OR: [
+              { name: { contains: m, mode: 'insensitive' } },
+              { urn: normalizedM },
+              { urn: canonicalM },
+            ],
+          },
+          select: { id: true, urn: true, name: true },
+        });
+
+        if (candidates.length === 0) {
+          throw new GraphQLError(`No memory matching "${m}".`, {
+            extensions: { code: 'NOT_FOUND' },
+          });
+        }
+
+        if (candidates.length > 1) {
+          throw new GraphQLError(
+            `Multiple memories match "${m}": ${candidates.map((c) => c.name).join(', ')}. Narrow the hint.`,
+            { extensions: { code: 'AMBIGUOUS' } },
+          );
+        }
+
+        resolvedMemory = candidates[0];
+      } else {
+        // No memory hint — use the first accessible memory (the resolver does not have
+        // access to "active memory" from the MCP session, so we use a default).
+        // For better UX, the caller should provide a memory hint or use the MCP tool.
+        const mem = await ctx.db.memory.findFirst({
+          where: { id: { in: accessibleMemoryIds }, deletedAt: null },
+          select: { id: true, urn: true, name: true },
+        });
+
+        if (!mem) {
+          throw new GraphQLError('No accessible memory found.', {
+            extensions: { code: 'NOT_FOUND' },
+          });
+        }
+
+        resolvedMemory = mem;
+      }
+
+      // Load runnable nodes in the resolved memory.
+      const runnableNodes = await ctx.db.node.findMany({
+        where: { memoryId: resolvedMemory.id, isRunnable: true, deletedAt: null },
+        select: {
+          id: true,
+          loc: true,
+          name: true,
+          alias: true,
+          description: true,
+        },
+      });
+
+      if (runnableNodes.length === 0) {
+        throw new GraphQLError(`No runnable tasks in ${resolvedMemory.name}.`, {
+          extensions: { code: 'NOT_FOUND' },
+        });
+      }
+
+      if (t) {
+        // Task hint supplied — rank and resolve.
+        const matches = rankByHint(runnableNodes, t);
+
+        if (matches.length === 0) {
+          throw new GraphQLError(
+            `No runnable task matching "${t}" in ${resolvedMemory.name}.`,
+            { extensions: { code: 'NOT_FOUND' } },
+          );
+        }
+
+        if (matches.length > 1) {
+          throw new GraphQLError(
+            `Multiple tasks match "${t}" in ${resolvedMemory.name}: ${matches.map((n) => n.name).join(', ')}. Narrow the hint.`,
+            { extensions: { code: 'AMBIGUOUS' } },
+          );
+        }
+
+        // Unique match — run it.
+        const nodeUrn = composeNodeUrn(resolvedMemory.urn, matches[0].loc);
+        return loadAndRender(nodeUrn);
+      } else {
+        // No task hint — require explicit choice (GraphQL cannot offer a picker,
+        // so we error and list the options).
+        if (runnableNodes.length === 1) {
+          // Exactly one option — run it.
+          const nodeUrn = composeNodeUrn(resolvedMemory.urn, runnableNodes[0].loc);
+          return loadAndRender(nodeUrn);
+        }
+
+        // Multiple options — error with candidates.
+        const candidates = runnableNodes
+          .slice(0, 25)
+          .map((n) => `- ${n.name}${n.description ? ` (${n.description})` : ''}`)
+          .join('\n');
+        throw new GraphQLError(
+          `Multiple runnable tasks in ${resolvedMemory.name}. Specify a task hint or use MCP tool for interactive selection:\n${candidates}`,
+          { extensions: { code: 'AMBIGUOUS' } },
+        );
+      }
+    },
+};
+
