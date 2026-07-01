@@ -1519,10 +1519,21 @@ export const nodeMutations = {
         await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
 
         for (const input of nodes) {
+          // Strip non-column NodeInput fields (edges/createOnly/reason) that
+          // Prisma would reject, and pull out id/tags so they're set explicitly
+          // (spreading input.id would otherwise override the generated id).
+          const {
+            id: _id,
+            edges: _edges,
+            createOnly: _createOnly,
+            reason: _reason,
+            tags: _tags,
+            ...nodeFields
+          } = input;
           await tx.node.create({
             data: {
               id: input.id ?? generateId(),
-              ...input,
+              ...nodeFields,
               tags: serializeTags(input.tags ?? []) as string[],
             } as Prisma.NodeUncheckedCreateInput,
           });
@@ -1530,7 +1541,9 @@ export const nodeMutations = {
 
         for (const edge of edges) {
           const source = await tx.node.findUnique({ where: { loc_memoryId: { loc: edge.sourceLoc, memoryId: resolvedMemoryId } } });
-          const target = await tx.node.findFirst({ where: { loc: edge.targetLoc } });
+          // loc is unique only within a memory — scope to resolvedMemoryId so a
+          // loc collision in another memory can't be resolved as the target.
+          const target = await tx.node.findUnique({ where: { loc_memoryId: { loc: edge.targetLoc, memoryId: resolvedMemoryId } } });
           if (source && target) {
             const edgeLoc = edge.loc ?? deriveEdgeLoc(source.loc, edge.name ?? null, target.loc);
             await tx.edge.upsert({

@@ -690,7 +690,14 @@ export const sessionMutations = {
         }
 
         // Decrypt the node and its outgoing edge targets if the memory is encrypted.
-        const nodesToDecrypt = [node, ...node.outgoingEdges.map(e => e.target)];
+        // An edge whose target was deleted can surface a null `target`; filter
+        // those out so decryptNodesBatch never dereferences null.
+        const nodesToDecrypt = [
+          node,
+          ...node.outgoingEdges
+            .map((e) => e.target)
+            .filter((t): t is NonNullable<typeof t> => t != null),
+        ];
         await decryptNodesBatch(ctx.db, nodesToDecrypt);
 
         // Render the node with Mustache template compilation and inlined edges.
