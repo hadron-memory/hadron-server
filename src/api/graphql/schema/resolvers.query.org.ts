@@ -202,8 +202,8 @@ export const orgQueries = {
       const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
         if (!ctx.userId) throw new Error('Forbidden');
-        const member = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: resolvedId, userId: ctx.userId } },
+        const member = await ctx.db.orgMember.findFirst({
+          where: { organizationId: resolvedId, userId: ctx.userId, deletedAt: null },
         });
         if (!member) throw new Error('Forbidden');
       }

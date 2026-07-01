@@ -1,6 +1,8 @@
 // memoryQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { isId } from '../../../lib/entityRef/shape.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import {
   type Context,
   requireRole,
@@ -60,8 +62,22 @@ export const memoryQueries = {
     },
 
     memory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: id may be an ID or a URN. A raw ID needs no
+      // resolution (skip the extra lookup); a URN is resolved to its id. Only a
+      // genuine miss (MemoryNotFoundError) collapses to null — malformed URNs
+      // and unexpected DB/runtime errors propagate rather than masking as a
+      // misleading not-found (mirrors the effectiveAccess resolver).
+      let resolvedId = id;
+      if (!isId(id)) {
+        try {
+          ({ id: resolvedId } = await resolveMemoryRef(ctx.db, id));
+        } catch (e) {
+          if (!(e instanceof MemoryNotFoundError)) throw e;
+          return null;
+        }
+      }
       const memory = await ctx.db.memory.findUnique({
-        where: { id },
+        where: { id: resolvedId },
         include: MEMORY_INCLUDE,
       });
       if (!memory || memory.deletedAt) return null;
@@ -117,8 +133,8 @@ export const memoryQueries = {
       // Authorization: platform ADMIN or member of the org
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
         if (!ctx.userId) throw new Error('Forbidden');
-        const member = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: ctx.userId } },
+        const member = await ctx.db.orgMember.findFirst({
+          where: { organizationId: resolvedOrgId, userId: ctx.userId, deletedAt: null },
         });
         if (!member) throw new Error('Forbidden');
       }

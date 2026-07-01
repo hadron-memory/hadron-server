@@ -61,8 +61,8 @@ export const nodeQueries = {
       const isOrgMember = async (orgId: string): Promise<boolean> => {
         if (isGlobalAdmin) return true;
         if (!ctx.userId) return false;
-        const member = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+        const member = await ctx.db.orgMember.findFirst({
+          where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
         });
         return !!member;
       };
