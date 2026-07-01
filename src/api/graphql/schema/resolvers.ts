@@ -60,6 +60,7 @@ import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { UserNotFoundError } from '../../../lib/entityRef/errors.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import {
   resolveResource as resolveAccessResource,
   callerCanAudit,
@@ -258,6 +259,9 @@ export const resolvers = {
       _: unknown,
       ctx: Context,
     ) => {
+      // Fast path: a loaded, non-personal class has no shares and needs no
+      // scoping fields — skip the fallback fetch entirely.
+      if (g.class !== undefined && g.class !== 'personal') return [];
       // Partial-select-safe: some query paths select Memory with only a subset
       // of fields. Fetch the missing scoping fields rather than silently
       // returning `[]` for a real personal memory (mirrors `members` above).
@@ -2571,14 +2575,19 @@ export const resolvers = {
     },
 
     memory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: id may be an ID or a URN — resolve first so a URN
-      // arg doesn't silently miss. resolveMemoryRef throws on missing/deleted,
-      // so a bad ref collapses to null (existing not-found semantics).
-      let resolvedId: string;
-      try {
-        ({ id: resolvedId } = await resolveMemoryRef(ctx.db, id));
-      } catch {
-        return null;
+      // 007-entity-id-or-urn: id may be an ID or a URN. A raw ID needs no
+      // resolution (skip the extra lookup); a URN is resolved to its id. Only a
+      // genuine miss (MemoryNotFoundError) collapses to null — malformed URNs
+      // and unexpected DB/runtime errors propagate rather than masking as a
+      // misleading not-found (mirrors the effectiveAccess resolver).
+      let resolvedId = id;
+      if (!isId(id)) {
+        try {
+          ({ id: resolvedId } = await resolveMemoryRef(ctx.db, id));
+        } catch (e) {
+          if (!(e instanceof MemoryNotFoundError)) throw e;
+          return null;
+        }
       }
       const memory = await ctx.db.memory.findUnique({
         where: { id: resolvedId },
