@@ -434,6 +434,62 @@ describe('Mutation.replaceSubtree access control', () => {
       ),
     ).rejects.toThrow('Forbidden');
   });
+
+  // Regression: edge target resolution must be scoped to the memory. `loc` is
+  // unique only within a memory, so a same-loc node in another memory must not
+  // be picked up as the target.
+  it('does not resolve an edge target from a different memory on a loc collision', async () => {
+    // A node with this loc exists only in graph B.
+    await createDbNode(db, { memoryId: graphB.id, loc: 'collision.loc', name: 'in-b' });
+
+    await resolvers.Mutation.replaceSubtree(
+      null,
+      {
+        ownerRepo: 'org-a/repo',
+        memoryId: graphA.id,
+        nodes: [{ memoryId: graphA.id, loc: 'collision.src', name: 'src' }],
+        // Target loc exists only in graph B — must NOT resolve cross-memory.
+        edges: [{ sourceLoc: 'collision.src', targetLoc: 'collision.loc', name: 'rel' }],
+      },
+      ctx({ appId: appContributor.id }),
+    );
+
+    const edges = await db.edge.findMany({ where: { memoryId: graphA.id } });
+    expect(edges).toHaveLength(0);
+    // And graph B's node must not have gained an incoming edge either.
+    const bEdges = await db.edge.findMany({ where: { memoryId: graphB.id } });
+    expect(bEdges).toHaveLength(0);
+  });
+
+  // Regression: NodeInput carries non-column fields (edges/createOnly/reason)
+  // that Prisma would reject if spread into node.create.
+  it('strips non-column NodeInput fields before creating nodes', async () => {
+    const count = await resolvers.Mutation.replaceSubtree(
+      null,
+      {
+        ownerRepo: 'org-a/repo',
+        memoryId: graphA.id,
+        nodes: [
+          {
+            memoryId: graphA.id,
+            loc: 'org-a.repo.with-extras',
+            name: 'with-extras',
+            tags: ['alpha', 'beta'],
+            edges: [{ targetId: 'ignored', name: 'x' }],
+            createOnly: true,
+            reason: 'import',
+          },
+        ],
+        edges: [],
+      },
+      ctx({ appId: appContributor.id }),
+    );
+    expect(count).toBe(1);
+    const created = await db.node.findFirstOrThrow({
+      where: { memoryId: graphA.id, loc: 'org-a.repo.with-extras' },
+    });
+    expect(created.tags).toEqual(['alpha', 'beta']);
+  });
 });
 
 // ---------------------------------------------------------------------------

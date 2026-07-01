@@ -320,16 +320,18 @@ export const appMutations = {
       // ['principal', 'guide']); in that case the install still succeeds
       // but no auto-membership is granted — the installer can add
       // themselves explicitly via ensureAppMember with a role from the
-      // policy. ctx.userId is guaranteed by the upstream requireOrgRole
-      // check.
+      // policy. ctx.userId may be absent for a platform-admin caller —
+      // requireOrgRole short-circuits on ADMIN/OWNER before its userId
+      // check — and there's no user to grant owner membership to in that
+      // case, so guard on it rather than asserting.
       const installerAgent = await ctx.db.agent.findUniqueOrThrow({
         where: { id: resolvedAgentId },
         select: { installationPolicy: true },
       });
       const allowedRoles = (installerAgent.installationPolicy as { memberRoles?: string[] })
         ?.memberRoles ?? ['owner'];
-      if (allowedRoles.includes('owner')) {
-        await ensureAppMember(ctx.db, createdApp.id, ctx.userId!, 'owner', {
+      if (allowedRoles.includes('owner') && ctx.userId) {
+        await ensureAppMember(ctx.db, createdApp.id, ctx.userId, 'owner', {
           actorId: ctx.userId,
         });
       }
