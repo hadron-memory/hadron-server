@@ -80,6 +80,15 @@ describe('Query.memory(id:) — PUBLIC visibility (issue #362)', () => {
     await expect(resolvers.Query.memory(null, { id: orgMem.id }, ctx())).rejects.toThrow('Forbidden');
   });
 
+  it('resolves the memory when given a URN, not just an id', async () => {
+    const { urn } = await db.memory.findUniqueOrThrow({
+      where: { id: publicMem.id },
+      select: { urn: true },
+    });
+    const out = await resolvers.Query.memory(null, { id: urn }, asOutsider());
+    expect(out?.id).toBe(publicMem.id);
+  });
+
   it('a REVOKED (soft-deleted) member is denied on an ORGANIZATION memory', async () => {
     // Soft-delete the membership; the fast-path must treat it as revoked and
     // fall through to the shared gate (no public/subscription grant → denied).
