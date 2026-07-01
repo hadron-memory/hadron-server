@@ -149,3 +149,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_agent_name_uniq
 -- Partial (WHERE handle IS NOT NULL): handle-less users don't bloat the index.
 CREATE UNIQUE INDEX IF NOT EXISTS users_handle_lower_uniq
   ON users (lower(handle)) WHERE handle IS NOT NULL;
+
+-- ─── cor:api:090 (findNodes) + cor:rag:010:02: lexical FTS substrate ─────
+-- STORED generated tsvector (weighted A/B/C/D = name/alias > loc/tags >
+-- description/abstract > content/data) + GIN index. Prisma models neither.
+-- Synced with the 20260701120000_findnodes_fts migration + globalSetup.ts.
+-- The weight expression lives in an IMMUTABLE wrapper fn: to_tsvector's named
+-- config coerces 'english'→regconfig via a catalog lookup (non-immutable),
+-- which a generated column rejects; the wrapper is the standard workaround.
+-- IF NOT EXISTS (structural, like the HNSW index); changing the expression or
+-- weights needs a dedicated DROP+ADD migration — this won't update it in place.
+CREATE OR REPLACE FUNCTION hadron_nodes_tsv(
+  p_name text, p_alias text, p_loc text, p_tags text[],
+  p_description text, p_abstract text, p_content text, p_properties text, p_data text
+) RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  SELECT
+    setweight(to_tsvector('english', coalesce(p_name, '') || ' ' || coalesce(p_alias, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(p_loc, '') || ' ' || array_to_string(coalesce(p_tags, ARRAY[]::text[]), ' ')), 'B') ||
+    setweight(to_tsvector('english', coalesce(p_description, '') || ' ' || coalesce(p_abstract, '')), 'C') ||
+    setweight(to_tsvector('english', left(coalesce(p_content, '') || ' ' || coalesce(p_properties, '') || ' ' || coalesce(p_data, ''), 1000000)), 'D')
+$$;
+
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
+  hadron_nodes_tsv(name, alias, loc, tags, description, abstract, content, properties::text, data::text)
+) STORED;
+
+CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);

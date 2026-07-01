@@ -1,0 +1,86 @@
+/**
+ * Node retrieval seam (D14 / cor:rag:010:02). Callers (the findNodes resolver,
+ * the MCP find-nodes tool) depend on this interface, not on Postgres directly,
+ * so the engine can be swapped for another database later. The interface is the
+ * portability guarantee — NOT feature parity: the Postgres impl leans on native
+ * FTS (ts_rank_cd) and pgvector, which another backend would reimplement,
+ * possibly at lower fidelity.
+ */
+import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
+
+export type { VectorHit, ChunkHit };
+
+/** Node fields carried in the weighted tsvector (lexical search). Ordered by weight class. */
+export type LexicalField =
+  | 'name' | 'alias'            // class A
+  | 'loc' | 'tags'             // class B
+  | 'description' | 'abstract' // class C
+  | 'content' | 'properties' | 'data'; // class D
+
+export interface LexicalHit {
+  nodeId: string;
+  score: number;
+}
+
+/** Ordering for a lexical query. `relevance` = by score; the rest suppress scoring. */
+export type LexicalSort = 'relevance' | 'loc' | 'seq' | 'updatedAt';
+
+/**
+ * Structured node-attribute filters applied IN the lexical SQL (so filter +
+ * sort + pagination are exact — no relevance-truncation-then-filter artifacts).
+ */
+export interface NodeSqlFilter {
+  nodeType?: string | null;
+  isRunnable?: boolean | null;
+  tags?: string[] | null;
+  locPrefix?: string | null;
+  createdBy?: string | null;
+  updatedAfter?: string | null;
+  updatedBefore?: string | null;
+}
+
+export interface LexicalSearchOpts {
+  db: PrismaClient;
+  /** Boolean surface grammar (see tsquery.ts). */
+  query: string;
+  memoryIds: string[];
+  /** Weight-mask: only these fields' weight classes contribute to the score. Omit = all. */
+  fields?: LexicalField[];
+  /** Structured filters, applied in-SQL. */
+  filter?: NodeSqlFilter;
+  /** Include soft-deleted nodes (default false). */
+  includeDeleted?: boolean;
+  /** Ordering (default relevance). */
+  sort?: LexicalSort;
+  offset?: number;
+  limit: number;
+}
+
+export interface RegexSearchOpts {
+  db: PrismaClient;
+  /** POSIX regex (case-insensitive `~*`). */
+  pattern: string;
+  memoryIds: string[];
+  /** Score weight-mask (matching still spans all text fields; cor:api:090:03). */
+  fields?: LexicalField[];
+  filter?: NodeSqlFilter;
+  includeDeleted?: boolean;
+  sort?: LexicalSort;
+  offset?: number;
+  limit: number;
+}
+
+export interface VectorSearchOpts {
+  db: PrismaClient;
+  queryEmbedding: number[];
+  memoryIds: string[];
+  limit: number;
+}
+
+export interface NodeRetrievalProvider {
+  lexicalSearch(opts: LexicalSearchOpts): Promise<LexicalHit[]>;
+  regexSearch(opts: RegexSearchOpts): Promise<LexicalHit[]>;
+  vectorSearch(opts: VectorSearchOpts): Promise<VectorHit[]>;
+  vectorSearchChunks(opts: VectorSearchOpts): Promise<ChunkHit[]>;
+}

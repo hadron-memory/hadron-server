@@ -121,6 +121,12 @@ jobs:
           #     index, which Prisma can't express, so the diff wants to
           #     DROP it. It must live in the migration (prod needs it and
           #     prod doesn't run post-push.sql), so it's whitelisted here.
+          #   - cor:api:090 (findNodes): `nodes.tsv` is a STORED generated
+          #     tsvector column and `nodes_tsv_gin` its GIN index — Prisma
+          #     models neither, so the diff wants to DROP the column + index.
+          #     Same rationale as the HNSW index (prod needs them, prod doesn't
+          #     run post-push.sql); both are whitelisted, incl. the -- AlterTable
+          #     comment that accompanies the column drop.
           # Any OTHER line in the diff is real drift and must fail CI.
           # Invoke the prisma bin directly (not `pnpm prisma`): pnpm 11's
           # verify-deps-before-run preamble ("Already up to date" / "Done
@@ -131,10 +137,12 @@ jobs:
             --script 2>&1 \
             | grep -vE "^Loaded|^Prisma config|^$" \
             | grep -vE '^(Already up to date|Done in .*)$' \
-            | grep -vE '^-- (CreateIndex|DropIndex)$' \
+            | grep -vE '^-- (CreateIndex|DropIndex|AlterTable)$' \
             | grep -vE '^CREATE INDEX "memories_user_id_idx" ON "memories"\("user_id"\);$' \
             | grep -vE '^CREATE UNIQUE INDEX "users_external_app_id_external_id_key" ON "users"\("external_app_id", "external_id"\);$' \
             | grep -vE '^DROP INDEX "node_embeddings_embedding_hnsw";$' \
+            | grep -vE '^DROP INDEX "nodes_tsv_gin";$' \
+            | grep -vE '^ALTER TABLE "nodes" DROP COLUMN "tsv";$' \
             || true)
           # `|| true`: when every diff line is whitelisted the final grep matches
           # nothing and exits 1, which under `bash -e` would fail the job. An empty
