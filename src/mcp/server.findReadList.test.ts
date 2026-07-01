@@ -670,7 +670,7 @@ describe('spec 031 US2 — hadron_find_nodes preview includes the abstract', () 
     expect(text).not.toContain(SHORT_ABSTRACT);
   });
 
-  it('US2 — search haystack is unchanged: a term appearing only in the abstract does NOT match (US3 deferred to RAG)', async () => {
+  it('US2 (PR2 #403) — a term appearing only in the abstract NOW matches (FTS indexes name/loc/tags/description/abstract/body)', async () => {
     const UNIQUE_TERM = 'flibbertigibbet'; // appears nowhere else
     await db.node.update({
       where: { id: fx.nodes.witness.id },
@@ -683,10 +683,11 @@ describe('spec 031 US2 — hadron_find_nodes preview includes the abstract', () 
       memoryUrn: fx.memory.urn,
     });
 
-    // Per PR-196 US3 deferral: abstract is NOT part of the substring
-    // haystack. Searching for an abstract-only term must return zero
-    // hits — same behavior as pre-spec.
-    expect(text).toContain('No nodes found');
+    // #403 delegated hadron_find_nodes to the findNodes FTS engine, which
+    // indexes the abstract (weight C). The old substring haystack excluded
+    // it; this is the intended, user-visible semantics change.
+    expect(text).toContain(fx.nodes.witness.loc);
+    expect(text).toContain(UNIQUE_TERM);
   });
 });
 

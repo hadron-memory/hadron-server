@@ -1,13 +1,16 @@
 /**
- * Issue #170 — `matchesQuery` wildcard / match-all semantics for hadron_find_nodes.
+ * `matchesQuery` — the legacy substring matcher (issue #170 wildcard /
+ * match-all semantics).
  *
- * Pre-fix, `query: "*"` was treated as a literal substring and returned
- * "No nodes found matching '*'." even against a populated memory. An
- * agent surveying a memory would reasonably try "*" first, get zero
- * hits, and proceed to write — overlooking the existing tree.
+ * NOTE (PR2 #403): `hadron_find_nodes` no longer uses `matchesQuery` — it now
+ * delegates to the findNodes Postgres-FTS engine (stemmed, relevance-ranked,
+ * body + abstract indexed). This file has been repurposed to pin the
+ * `matchesQuery` LIB FUNCTION itself, which is still consumed by the legacy
+ * GraphQL `nodeSearch` resolver until PR3 hard-deletes `nodes`/`nodeSearch`.
+ * The MCP end-to-end survey contract now lives in server.findReadList.test.ts.
  *
- * This file pins the survey-mode contract: `*` and trimmed-empty query
- * strings always match. Keyword behavior is otherwise unchanged.
+ * What this pins: `*` and trimmed-empty query strings always match; keyword
+ * substring behavior is otherwise unchanged.
  */
 
 import { describe, it, expect } from 'vitest';
