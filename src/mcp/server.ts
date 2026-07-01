@@ -63,10 +63,7 @@ import { computeContentHash } from '../lib/contentHash.js';
 import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
-import { reciprocalRankFusion } from '../lib/rrf.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
-import { vectorSearchNodes, vectorSearchChunks } from '../services/embedding/vectors.js';
-import { getEmbeddingClient, isEmbeddingConfigured } from '../lib/embedding/index.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import {
   NodeNotFoundError,
@@ -1252,11 +1249,11 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_find_nodes',
-    'Substring/keyword search across node name, loc, description, and tags. ALL whitespace-separated terms must appear (case-insensitive) somewhere in those fields — no semantic / vector search, no fuzzy matching, no stemming, and node BODY content is NOT indexed. Multi-word natural-language queries that don\'t share literal substrings with the corpus will return zero hits; pick discriminating keywords. Pass `query: "*"` (or `""`) to match every node — useful as a first survey before adding to a memory. To browse the tree structure, use `hadron_list_nodes` instead. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory. Soft-deleted nodes are excluded.',
+    'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term`. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory. Soft-deleted nodes are excluded.',
     {
-      query: z.string().describe('For mode:keyword (default) — whitespace-separated keywords; each must literally appear (case-insensitive) in name/loc/description/tags. For mode:vector / mode:hybrid — a natural-language query embedded and matched semantically against the memory\'s vector index (spec 033). Use "*" or "" to match all nodes (keyword survey mode; rejected for mode:vector).'),
-      mode: z.enum(['keyword', 'vector', 'hybrid']).optional().describe('keyword (default): substring match — output is byte-identical to today\'s no-mode behavior. vector: semantic search over the memory\'s vector index (requires vectorIndexEnabled). hybrid: keyword + vector fused by reciprocal-rank fusion (RRF, k=60). On a non-indexed memory, mode:hybrid degrades to keyword-only and emits a [degraded:no_vector_index] note. Spec 033.'),
-      parentRel: z.string().optional().describe('Scope search to this subtree (keyword mode)'),
+      query: z.string().describe('For mode:keyword (default) / mode:hybrid — a full-text query: stemmed terms ranked by relevance, with boolean operators `(a OR b) AND c`, quoted phrases, and `-term` / `NOT`. For mode:vector / mode:hybrid — also embedded and matched semantically against the memory\'s vector index. For mode:regex — a POSIX regular expression. Use "*" or "" to list all nodes (survey mode; rejected for mode:vector / mode:hybrid).'),
+      mode: z.enum(['keyword', 'vector', 'hybrid', 'regex']).optional().describe('keyword (default): full-text search — stemmed, relevance-ranked, boolean operators, body + abstract indexed. vector: semantic search over the memory\'s vector index (requires vectorIndexEnabled). hybrid: keyword + vector fused by reciprocal-rank fusion (RRF, k=60). regex: POSIX regular-expression match over node text. On a non-indexed memory, mode:hybrid degrades to keyword-only and emits a [degraded:no_vector_index] note. Spec 033 + cor:api:090.'),
+      parentRel: z.string().optional().describe('Scope search to this subtree'),
       memoryUrn: z.string().optional().describe('Scope search to this memory'),
       isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
@@ -1271,43 +1268,53 @@ export function createMcpServerInstance(
         if (e instanceof InvalidParentRelError) return textResult(e.message);
         throw e;
       }
-      // Spec 033 US2 — chunk granularity requires explicit mode:vector
-      // (PR-225 review, Gemini high). MCP's default mode is keyword,
-      // which has no chunks. Hybrid's RRF produces node-level scores not
-      // passage-level. Explicit rejection matches the GraphQL nodeSearch
-      // surface and avoids silently dropping the chunk arg.
-      if (granularity === 'chunk' && mode !== 'vector') {
-        const effective = mode ?? 'keyword';
+
+      // PR2 (#403): delegate retrieval to resolvers.Query.findNodes (the unified
+      // cor:api:090 engine) instead of re-implementing keyword/vector/hybrid
+      // inline. This is what adopts the Postgres FTS keyword semantics (stemmed,
+      // relevance-ranked, boolean operators, body + abstract indexed) on the MCP
+      // surface. Scope resolution + the BOLA gates below stay HERE (the MCP
+      // surface's memoryUrn / parentRel resolution, canReadMemory checks, and the
+      // exact "not found" strings are its contract); the resolved scope is handed
+      // to findNodes as filter.memoryIds / filter.locPrefix, and the envelope is
+      // re-rendered into the tool's text output.
+      const effectiveMode = mode ?? 'keyword';
+
+      // Spec 033 US2 — chunk granularity requires explicit mode:vector. MCP's
+      // default mode is keyword (no chunks); hybrid's RRF is node-level.
+      if (granularity === 'chunk' && effectiveMode !== 'vector') {
         return textResult(
-          `granularity:chunk requires mode:vector (got mode:${effective}). Hybrid + chunk passages is out of v1.`,
+          `granularity:chunk requires mode:vector (got mode:${effectiveMode}). Hybrid + chunk passages is out of v1.`,
         );
       }
 
-      // Normalize parentRel once so validation, resolution, and scoping all
-      // operate on the same string. Without this, ' review ' passes
-      // validation (which trims internally) but then resolveLocFromUrn /
-      // findFirst-by-loc see the whitespace-padded version and miss.
+      // Survey mode: "*" / "" lists every node in the lexical modes, but is
+      // meaningless to a vector embedder — reject it up front for vector/hybrid
+      // (preserves the pre-delegation [empty_vector_query] contract). For the
+      // lexical modes it maps to a query-omitted findNodes call (filtered list).
+      const trimmedQuery = query.trim();
+      const isSurvey = trimmedQuery === '' || trimmedQuery === '*';
+      if (isSurvey && (effectiveMode === 'vector' || effectiveMode === 'hybrid')) {
+        return textResult(
+          `Note: empty or "*" queries are keyword-only (survey mode); supply a natural-language query for mode:${effectiveMode}. [empty_vector_query]\n\nFound 0 node(s).`,
+        );
+      }
+
       const trimmedParentRel = parentRel?.trim();
+      const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
 
-      const memoryIds = await getAccessibleMemoryIds(db, auth);
-      // Issue #180 Bug 2: exclude tombstoned nodes from the search index.
-      // Before this filter, soft-deleted nodes continued to surface through
-      // find/read, so callers had no reliable way to "make a node go away"
-      // short of hard-deleting the row.
-      const where: Record<string, unknown> = { deletedAt: null };
-      if (memoryIds) where.memoryId = { in: memoryIds };
-      // Runnable filter (cor:api:060). Applied to the shared `where` so it
-      // covers keyword mode and hybrid's keyword half; the vector/chunk/hybrid
-      // render fetches below apply the same predicate so it holds in every mode.
-      if (isRunnable != null) where.isRunnable = isRunnable;
+      // Resolved scope handed to findNodes. When neither memoryUrn nor a
+      // memory-resolvable parentRel is supplied, both stay undefined and
+      // findNodes falls back to its own accessible-set scoping.
+      let filterMemoryIds: string[] | undefined;
+      let filterLocPrefix: string | undefined;
 
-      // Scope to memory URN if provided. Spec 022 (FR-003): no fallback to
-      // `activeMemoryUrn` — the caller must supply a fully-qualified memory
-      // URN when scoping a search, otherwise the search runs across all
-      // accessible memories (set in `where.memoryId` above). #100 #3:
-      // route through resolveMemoryByUrn so a canonical 'urn:memory:' input
-      // from the caller doesn't silently miss against a bare-stored
-      // Memory.urn.
+      // Scope to memory URN if provided. Spec 022 (FR-003): no fallback to the
+      // active memory — the caller supplies a fully-qualified URN. #188: route
+      // through canReadMemory so personal/private memories (FR-016 strict
+      // ownership; ADMIN/OWNER do NOT bypass) and non-admin scope gating both
+      // apply. Match hadron_get_node's "not found" phrasing so absence and
+      // denial are indistinguishable.
       if (memoryUrn) {
         try {
           assertFullyQualifiedUrn(memoryUrn, 'memory');
@@ -1316,527 +1323,195 @@ export function createMcpServerInstance(
           throw e;
         }
         const mem = await resolveMemoryByUrn(memoryUrn);
-        if (!mem) {
+        if (!mem || !(await canReadMemory(db, auth, mem.id))) {
           return textResult(
             `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
           );
         }
-        // #188 (Gemini): the prior `where.memoryId = mem.id` override
-        // bypassed the access-scoped filter set above — any authenticated
-        // caller could search any memory by URN. Route through
-        // canReadMemory so personal/private memories (FR-016 strict
-        // ownership; ADMIN/OWNER do NOT bypass) and non-admin scope-map
-        // gating both apply. Match hadron_get_node's "not found" phrasing
-        // so the response doesn't distinguish absence from denial.
-        if (!(await canReadMemory(db, auth, mem.id))) {
-          return textResult(
-            `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
-          );
-        }
-        where.memoryId = mem.id;
+        filterMemoryIds = [mem.id];
       }
 
-      // Scope to subtree if parentRel provided
+      // Scope to subtree if parentRel provided. #188: same BOLA shape as the
+      // memoryUrn branch — resolveLocFromUrn already gates the URN-typed path on
+      // the accessible set, but ADMIN/OWNER pass null there, so canReadMemory
+      // enforces the personal/private gate uniformly.
       if (trimmedParentRel) {
-        const resolvedParent = await resolveLocFromUrn(trimmedParentRel, memoryIds);
-        where.loc = { startsWith: resolvedParent.loc };
-        // #188 (Gemini): same BOLA shape as the memoryUrn branch.
-        // resolveLocFromUrn already gates the URN-typed path on
-        // accessibleMemoryIds, but ADMIN/OWNER pass accessibleMemoryIds
-        // as null (= "see all"), which still leaks personal/private
-        // memories. canReadMemory enforces both gates uniformly.
+        const resolvedParent = await resolveLocFromUrn(trimmedParentRel, accessibleMemoryIds);
+        filterLocPrefix = resolvedParent.loc;
         if (resolvedParent.memoryId) {
           if (!(await canReadMemory(db, auth, resolvedParent.memoryId))) {
-            return textResult(
-              `Node "${trimmedParentRel}" not found.`,
-            );
+            return textResult(`Node "${trimmedParentRel}" not found.`);
           }
-          where.memoryId = resolvedParent.memoryId;
+          filterMemoryIds = [resolvedParent.memoryId];
         }
       }
 
-      // 033 — vector (semantic) search and 033 US3 hybrid mode. Shared
-      // setup: resolve the in-scope memory set to those with the index
-      // enabled. Diagnostic states are surfaced as text lines (FR-021).
-      //
-      // Hybrid degradation: when the caller asks for mode:hybrid but no
-      // in-scope memory has the index, we fall through to the keyword
-      // branch below and prepend a [degraded:no_vector_index] note. This
-      // variable carries the note through the fall-through.
-      let hybridDegradedNote: string | null = null;
-      let indexedIds: string[] | null = null;
-      if (mode === 'vector' || mode === 'hybrid') {
-        let targetIds: string[];
-        const scoped = where.memoryId as unknown;
-        if (typeof scoped === 'string') {
-          targetIds = [scoped];
-        } else if (
-          scoped &&
-          typeof scoped === 'object' &&
-          Array.isArray((scoped as { in?: unknown }).in)
-        ) {
-          targetIds = (scoped as { in: string[] }).in;
-        } else {
-          // Admin/all scope: restrict to vector-indexed memories explicitly.
-          const all = await db.memory.findMany({
-            where: { vectorIndexEnabled: true, deletedAt: null },
-            select: { id: true },
-          });
-          targetIds = all.map((m) => m.id);
-        }
-        const indexed = await db.memory.findMany({
-          where: { id: { in: targetIds }, vectorIndexEnabled: true, deletedAt: null },
-          select: { id: true },
-        });
-        indexedIds = indexed.map((m) => m.id);
-        if (indexedIds.length === 0) {
-          if (mode === 'vector') {
-            return textResult(
-              'Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).',
-            );
-          }
-          // Hybrid + no indexed memory → degrade to keyword-only per
-          // contracts/hadron_find_nodes.md "Result envelope" section.
-          hybridDegradedNote =
-            'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]';
-        }
-      }
-      if (mode === 'vector') {
-        if (!isEmbeddingConfigured()) {
-          return textResult(
-            'Note: vector search is unavailable — no embedding endpoint is configured. [embedding_unavailable]\n\nFound 0 node(s).',
-          );
-        }
-        // The `query` arg's describe documents `"*"`/`""` as keyword survey
-        // mode — those values are meaningless to a vector embedder (and
-        // some backends reject empty input outright). Reject explicitly so
-        // callers get a clear message instead of a 400/garbage-vector
-        // (PR-219 review, Copilot).
-        const trimmed = query.trim();
-        if (trimmed === '' || trimmed === '*') {
-          return textResult(
-            'Note: empty or "*" queries are keyword-only (survey mode); supply a natural-language query for mode:vector. [empty_vector_query]\n\nFound 0 node(s).',
-          );
-        }
-        // #234 — wrap the embed() call so any failure at query time
-        // (endpoint unreachable, HTTP 5xx, malformed response, dimension
-        // mismatch) degrades to the same [embedding_unavailable]
-        // envelope instead of letting the raw error out of the tool
-        // handler. Vector mode has no keyword fallback (caller
-        // explicitly asked for vector); the empty envelope IS the
-        // documented degrade.
-        let qvec: number[] | undefined;
-        try {
-          [qvec] = await getEmbeddingClient().embed([query], 'query');
-        } catch (err) {
-          // Log the full error object so the typed cause survives —
-          // EmbeddingRequestError / EmbeddingDimensionMismatchError
-          // each tell the operator something different about what to
-          // fix.
-          console.warn(
-            '[hadron_find_nodes vector] embed() failed; returning empty envelope.',
-            err,
-          );
-          return textResult(
-            'Note: vector search is unavailable — embed() failed. [embedding_unavailable]\n\nFound 0 node(s).',
-          );
-        }
-        if (!qvec) {
-          // Same defensive guard as the GraphQL nodeSearch path: a
-          // malformed/empty embed response would TypeError downstream.
-          return textResult(
-            'Note: vector search is unavailable — embedding generation returned no vector. [embedding_unavailable]\n\nFound 0 node(s).',
-          );
-        }
-        // Spec 033 US2 (T042) — chunk-level granularity returns passages
-        // (span text + char offsets + chunk index + parent URN) rather
-        // than node URNs. Renders as a flat list of `- **<urn>** [chunk N
-        // @ chars a-b] (score …)\n  <span text>` entries, one per
-        // passage. Skips expand entirely (chunk-level retrieval is for
-        // RAG context-stuffing; graph expansion is a node-level concept).
-        if (granularity === 'chunk') {
-          const chunkHits = await vectorSearchChunks(db, {
-            memoryIds: indexedIds!,
-            queryEmbedding: qvec,
+      // Build a GraphQL Context from the MCP auth, including appId + sessionId so
+      // access scoping resolves the same way it does for the other delegating
+      // tools (the gqlCtx helper omits those — #206 finding).
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+
+      let result: Awaited<ReturnType<typeof resolvers.Query.findNodes>>;
+      try {
+        result = await resolvers.Query.findNodes(
+          {},
+          {
+            // Survey mode → omit query so findNodes returns the filtered list
+            // (subsumes the old matchesQuery "*" / "" path).
+            query: isSurvey ? undefined : query,
+            mode: effectiveMode,
+            filter: {
+              memoryIds: filterMemoryIds,
+              isRunnable: isRunnable ?? undefined,
+              locPrefix: filterLocPrefix,
+            },
+            expand: expand ?? undefined,
+            granularity: granularity ?? undefined,
             limit: limit ?? 50,
-          });
-          if (chunkHits.length === 0) return textResult('Found 0 passage(s).');
-          // Pre-resolve URNs for hit nodes (dedupe — one node may have
-          // multiple chunk hits).
-          const uniqueNodeIds = Array.from(new Set(chunkHits.map((h) => h.nodeId)));
-          const hitNodes = await db.node.findMany({
-            where: {
-              id: { in: uniqueNodeIds },
-              deletedAt: null,
-              ...(isRunnable != null ? { isRunnable } : {}),
-            },
-            select: { id: true, loc: true, memoryId: true, name: true },
-          });
-          const nodeById = new Map(hitNodes.map((n) => [n.id, n]));
-          const lines: string[] = [];
-          for (const hit of chunkHits) {
-            const n = nodeById.get(hit.nodeId);
-            if (!n) continue;
-            const urn = await nodeUrn(n.loc, n.memoryId);
-            const header = `- **${urn}** [chunk ${hit.chunkIndex} @ chars ${hit.charStart}-${hit.charEnd}] — ${n.name}  (score ${hit.score.toFixed(3)})`;
-            // Chunk text body — prefix each line two spaces for parity
-            // with the abstract-render format used in node-level mode.
-            const bodyLines = hit.chunkText.split(/\r?\n/).map((l) => `  ${l}`);
-            lines.push([header, ...bodyLines].join('\n'));
-          }
-          return textResult(`Found ${lines.length} passage(s):\n\n${lines.join('\n')}`);
-        }
-        const hits = await vectorSearchNodes(db, {
-          memoryIds: indexedIds!,
-          queryEmbedding: qvec,
-          limit: limit ?? 50,
-        });
-        const rankedIds = hits.map((h) => h.nodeId);
-        // Spec 033 US3 (T049) — append undirected graph neighbors after
-        // the ranked hits, unscored.
-        const neighborIds = expand && expand > 0
-          ? await expandWithNeighbors(db, rankedIds, expand, { memoryIds: indexedIds })
-          : [];
-        const allRenderIds = [...rankedIds, ...neighborIds];
-        if (allRenderIds.length === 0) return textResult('Found 0 node(s).');
-        // PR-223 review (Gemini): the `brief` parameter is documented to
-        // include outgoing-edge index info. The vector path was previously
-        // omitting it — bring it in line with the keyword path.
-        const hitNodes = await db.node.findMany({
-          where: {
-            id: { in: allRenderIds },
-            deletedAt: null,
-            ...(isRunnable != null ? { isRunnable } : {}),
           },
-          include: brief
-            ? {
-                outgoingEdges: {
-                  include: { target: true },
-                  where: { target: { deletedAt: null } },
-                },
-              }
-            : undefined,
-        });
-        const nodeById = new Map(hitNodes.map((n) => [n.id, n]));
-        const scoreById = new Map(hits.map((h) => [h.nodeId, h.score]));
-        const vlines: string[] = [];
-        for (const id of allRenderIds) {
-          const n = nodeById.get(id);
-          if (!n) continue;
-          const urn = await nodeUrn(n.loc, n.memoryId);
-          const score = scoreById.get(id);
-          // Spec 033 FR-023 — `Source: abstract-stale` marker on stale
-          // abstract-vector hits. Every v1 hit is an abstract-kind hit
-          // (chunks ship in US2; once they do, this needs to gate on
-          // `hit.kind === 'abstract'` once vectorSearchNodes surfaces it).
-          // Expanded (unscored) neighbors don't get the marker — they
-          // weren't matched via an abstract vector at all.
-          const isStale =
-            score !== undefined &&
-            n.abstract != null && n.abstract.length > 0 &&
-            n.content != null && n.content.length > 0 &&
-            !isCiphertext(n.content) &&
-            n.abstractOriginHash != null &&
-            n.abstractOriginHash !== computeContentHash(n.content);
-          const parts = [
-            score !== undefined
-              ? `- **${urn}** — ${n.name}  (score ${score.toFixed(3)})`
-              : `- **${urn}** — ${n.name}`,
-          ];
-          if (isStale) parts.push('  Source: abstract-stale');
-          if (n.description) parts.push(`  ${n.description}`);
-          if (!brief && n.abstract) {
-            for (const absLine of (n.abstract as string).split(/\r?\n/)) parts.push(`  ${absLine}`);
-          }
-          if (n.tags?.length) parts.push(`  Tags: ${(n.tags as string[]).join(', ')}`);
-          // Brief edge rendering — matches the keyword path's format.
-          const briefEdges = (n as { outgoingEdges?: Array<{ target: { loc: string; memoryId: string }; name: string | null; loc: string }> }).outgoingEdges;
-          if (brief && briefEdges?.length) {
-            const edgeStrs = await Promise.all(briefEdges.map(async (e) => {
-              const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
-              return `→ ${targetUrn} (${e.name ?? e.loc})`;
-            }));
-            parts.push(`  Edges: ${edgeStrs.join(', ')}`);
-          }
-          vlines.push(parts.join('\n'));
-        }
-        return textResult(`Found ${vlines.length} node(s):\n\n${vlines.join('\n')}`);
-      }
-
-      // Spec 033 US3 (T050) — hybrid mode (when vector half is available).
-      // Runs keyword + vector, re-ranks keyword by relevance for RRF input,
-      // fuses with reciprocal-rank fusion (k=60), then renders. The
-      // !hybridDegradedNote guard skips this block when no indexed memory
-      // exists in scope — that flow falls through to the keyword branch
-      // below with the degraded note prepended.
-      if (mode === 'hybrid' && !hybridDegradedNote) {
-        if (!isEmbeddingConfigured()) {
-          return textResult(
-            'Note: vector search is unavailable — no embedding endpoint is configured. [embedding_unavailable]\n\nFound 0 node(s).',
-          );
-        }
-        const trimmed = query.trim();
-        if (trimmed === '' || trimmed === '*') {
-          return textResult(
-            'Note: empty or "*" queries are keyword-only (survey mode); supply a natural-language query for mode:hybrid. [empty_vector_query]\n\nFound 0 node(s).',
-          );
-        }
-        // #234 — wrap embed() so any failure at query time (endpoint
-        // unreachable, HTTP 5xx, malformed response, dimension
-        // mismatch) falls back to keyword-only with a degraded note,
-        // mirroring the existing no-indexed-memory degrade above.
-        let qvec: number[] | undefined;
-        try {
-          [qvec] = await getEmbeddingClient().embed([query], 'query');
-        } catch (err) {
-          // Log the full error object so the typed cause survives in
-          // operator-readable form.
-          console.warn(
-            '[hadron_find_nodes hybrid] embed() failed; falling back to keyword-only.',
-            err,
-          );
-          hybridDegradedNote =
-            'Note: vector half unavailable (embed() failed); showing keyword results only. [degraded:embedding_unavailable]';
-          // Fall through to the keyword path below; the note will be
-          // prepended to the response.
-        }
-        if (!qvec && !hybridDegradedNote) {
-          // Embed resolved to an empty array — distinct from "threw,"
-          // covered by the existing defensive guard. Surface the same
-          // envelope as the vector branch.
-          return textResult(
-            'Note: vector search is unavailable — embedding generation returned no vector. [embedding_unavailable]\n\nFound 0 node(s).',
-          );
-        }
-        // #234 — when the embed threw, qvec is undefined and the
-        // catch above set hybridDegradedNote. Skip the fusion path and
-        // fall through to the keyword block below; the note will be
-        // prepended to that response. The fusion path is indented
-        // inside this guard so the brace structure stays readable.
-        if (qvec) {
-          // Run keyword half (over the SAME scoping as the keyword branch
-          // below — same `where`) and vector half in parallel.
-          const finalLimit = limit ?? 50;
-          // PR-223 review (Gemini): hybrid pulls a DEEPER candidate pool from
-          // the vector half than the final output limit. RRF benefits from
-          // candidates ranked slightly outside the top finalLimit on the
-          // vector side that ALSO appear high on the keyword side — capping
-          // at finalLimit would discard those before fusion. Keyword half
-          // already over-fetches (`take: 1000`) for the same reason.
-          const candidateLimit = Math.max(100, finalLimit);
-          const [kwNodes, vecHits] = await Promise.all([
-            db.node.findMany({ where, take: 1000 }),
-            vectorSearchNodes(db, {
-              memoryIds: indexedIds!,
-              queryEmbedding: qvec,
-              limit: candidateLimit,
-            }),
-          ]);
-          // Filter by matchesQuery, then re-rank by relevance for RRF.
-          // No (memoryId, loc) dedup needed — the Node model's
-          // @@unique([loc, memoryId]) makes that a structural no-op
-          // (PR-227 review). Cross-memory same-loc preservation is pinned
-          // by src/test/integration/dedup-cross-memory-loc.test.ts.
-          const kwMatches = kwNodes.filter((n) => matchesQuery(n, query));
-          const kwRanked = keywordRelevanceRank(kwMatches, query);
-          // RRF the two lists by node ID. The fused list is the union of
-          // both inputs ordered by reciprocal-rank score.
-          const fusedIds = reciprocalRankFusion(
-            [kwRanked.map((n) => n.id), vecHits.map((h) => h.nodeId)],
-            (id) => id,
-          ).slice(0, finalLimit);
-          // Spec 033 US3 (T049) — append undirected neighbors.
-          const neighborIds = expand && expand > 0
-            ? await expandWithNeighbors(db, fusedIds, expand, { memoryIds: indexedIds })
-            : [];
-          const allRenderIds = [...fusedIds, ...neighborIds];
-          if (allRenderIds.length === 0) return textResult('Found 0 node(s).');
-          // PR-223 review (Gemini): include outgoing edges in brief mode,
-          // matching keyword path coverage.
-          const renderNodes = await db.node.findMany({
-            where: {
-              id: { in: allRenderIds },
-              deletedAt: null,
-              ...(isRunnable != null ? { isRunnable } : {}),
-            },
-            include: brief
-              ? {
-                  outgoingEdges: {
-                    include: { target: true },
-                    where: { target: { deletedAt: null } },
-                  },
-                }
-              : undefined,
-          });
-          const renderById = new Map(renderNodes.map((n) => [n.id, n]));
-          const scoreById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
-          const hlines: string[] = [];
-          for (const id of allRenderIds) {
-            const n = renderById.get(id);
-            if (!n) continue;
-            const urn = await nodeUrn(n.loc, n.memoryId);
-            const score = scoreById.get(id);
-            const isStale =
-              score !== undefined &&
-              n.abstract != null && n.abstract.length > 0 &&
-              n.content != null && n.content.length > 0 &&
-              !isCiphertext(n.content) &&
-              n.abstractOriginHash != null &&
-              n.abstractOriginHash !== computeContentHash(n.content);
-            const parts = [
-              score !== undefined
-                ? `- **${urn}** (id: ${n.id}) — ${n.name}  (score ${score.toFixed(3)})`
-                : `- **${urn}** (id: ${n.id}) — ${n.name}`,
-            ];
-            if (isStale) parts.push('  Source: abstract-stale');
-            if (n.description) parts.push(`  ${n.description}`);
-            if (!brief && n.abstract) {
-              for (const absLine of (n.abstract as string).split(/\r?\n/)) parts.push(`  ${absLine}`);
-            }
-            if (n.tags?.length) parts.push(`  Tags: ${(n.tags as string[]).join(', ')}`);
-            const briefEdges = (n as { outgoingEdges?: Array<{ target: { loc: string; memoryId: string }; name: string | null; loc: string }> }).outgoingEdges;
-            if (brief && briefEdges?.length) {
-              const edgeStrs = await Promise.all(briefEdges.map(async (e) => {
-                const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
-                return `→ ${targetUrn} (${e.name ?? e.loc})`;
-              }));
-              parts.push(`  Edges: ${edgeStrs.join(', ')}`);
-            }
-            hlines.push(parts.join('\n'));
-          }
-          return textResult(`Found ${hlines.length} node(s):\n\n${hlines.join('\n')}`);
-        }
-      }
-
-      const allNodes = await db.node.findMany({
-        where,
-        take: 1000,
-        // #180 Bug 2: when `brief` includes edges, hide edges whose
-        // target/source is soft-deleted. The edge itself isn't soft-
-        // deleted on its own column; the gate is whether the node on
-        // the other end is alive.
-        include: brief
-          ? {
-              outgoingEdges: {
-                include: { target: true },
-                where: { target: { deletedAt: null } },
-              },
-              incomingEdges: {
-                include: { source: true },
-                where: { source: { deletedAt: null } },
-              },
-            }
-          : undefined,
-      });
-      // No (memoryId, loc) dedup needed — the Node model's
-      // @@unique([loc, memoryId]) makes that a structural no-op
-      // (PR-227 review). Cross-memory same-loc preservation is pinned
-      // by src/test/integration/dedup-cross-memory-loc.test.ts.
-      const matches = allNodes.filter((n) => matchesQuery(n, query));
-      const limited = matches.slice(0, limit ?? 50);
-
-      // Spec 033 US3 (T049) — append undirected neighbors after the
-      // ranked keyword hits when `expand` is set. Scope the BFS to the
-      // SAME memory set the keyword query saw — when memoryUrn narrowed
-      // `where.memoryId` to a single ID, use that single-memory scope
-      // (PR-223 review: without this, cross-memory edges from the seed
-      // node could pull in neighbors from memories outside the caller's
-      // explicit scope).
-      let expandedNodes: typeof allNodes = [];
-      if (expand && expand > 0 && limited.length > 0) {
-        const scopedMemoryId = where.memoryId as unknown;
-        let expandScope: { memoryIds: string[] | null };
-        if (typeof scopedMemoryId === 'string') {
-          expandScope = { memoryIds: [scopedMemoryId] };
-        } else if (
-          scopedMemoryId &&
-          typeof scopedMemoryId === 'object' &&
-          Array.isArray((scopedMemoryId as { in?: unknown }).in)
-        ) {
-          expandScope = { memoryIds: (scopedMemoryId as { in: string[] }).in };
-        } else {
-          // memoryIds === null means admin/all (no further filter).
-          expandScope = { memoryIds: memoryIds };
-        }
-        const extraIds = await expandWithNeighbors(
-          db,
-          limited.map((n) => n.id),
-          expand,
-          expandScope,
+          ctx,
         );
-        if (extraIds.length > 0) {
-          expandedNodes = await db.node.findMany({
-            where: {
-              id: { in: extraIds },
-              deletedAt: null,
-              ...(expandScope.memoryIds ? { memoryId: { in: expandScope.memoryIds } } : {}),
-            },
-            include: brief
-              ? {
-                  outgoingEdges: {
-                    include: { target: true },
-                    where: { target: { deletedAt: null } },
-                  },
-                  incomingEdges: {
-                    include: { source: true },
-                    where: { source: { deletedAt: null } },
-                  },
-                }
-              : undefined,
-          });
-          // Preserve BFS traversal order returned by expandWithNeighbors.
-          const expandedById = new Map(expandedNodes.map((n) => [n.id, n]));
-          expandedNodes = extraIds
-            .map((id) => expandedById.get(id))
-            .filter((n): n is NonNullable<typeof n> => n !== undefined);
+      } catch (e) {
+        // findNodes throws BAD_USER_INPUT for a malformed boolean query, an
+        // invalid regex, etc. The MCP contract surfaces tool errors as text.
+        return textResult(e instanceof Error ? e.message : 'Search failed.');
+      }
+
+      // ── Chunk (passage) rendering ──────────────────────────────────────────
+      // findNodes passages carry parentNodeId + parentNodeUrn; re-fetch the
+      // parent so the URN is emitted in canonical form (nodeUrn) and the node
+      // name is shown, matching the pre-delegation output.
+      if (granularity === 'chunk') {
+        const passages = result.passages ?? [];
+        if (passages.length === 0) return textResult('Found 0 passage(s).');
+        const parentIds = [...new Set(passages.map((p) => p.parentNodeId))];
+        const parentNodes = await db.node.findMany({
+          where: { id: { in: parentIds } },
+          select: { id: true, name: true, loc: true, memoryId: true },
+        });
+        const parentById = new Map(parentNodes.map((n) => [n.id, n]));
+        const lines: string[] = [];
+        for (const p of passages) {
+          const parent = parentById.get(p.parentNodeId);
+          const urn = parent ? await nodeUrn(parent.loc, parent.memoryId) : p.parentNodeUrn;
+          const name = parent?.name ?? '';
+          const header = `- **${urn}** [chunk ${p.chunkIndex} @ chars ${p.charStart}-${p.charEnd}] — ${name}  (score ${p.score.toFixed(3)})`;
+          const bodyLines = p.text.split(/\r?\n/).map((l) => `  ${l}`);
+          lines.push([header, ...bodyLines].join('\n'));
         }
+        return textResult(`Found ${lines.length} passage(s):\n\n${lines.join('\n')}`);
       }
 
-      if (limited.length === 0 && expandedNodes.length === 0) {
-        // Preserve the byte-identical "no match" output for the default
-        // keyword path — but when hybrid degraded to keyword AND found
-        // nothing, prepend the degraded note so the caller isn't left
-        // wondering why no fusion happened.
-        const baseMsg = `No nodes found matching "${query}".`;
-        return textResult(hybridDegradedNote ? `${hybridDegradedNote}\n\n${baseMsg}` : baseMsg);
+      // ── Diagnostic states → text notes (FR-021) ────────────────────────────
+      // Map findNodes's reason/degraded codes back to the tool's note lines.
+      // A vector-mode `reason` is terminal (empty envelope); a hybrid `degraded`
+      // note is prepended to the keyword-only results.
+      if (result.reason === 'no_vector_index') {
+        return textResult(
+          'Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).',
+        );
+      }
+      if (result.reason === 'embedding_unavailable') {
+        // findNodes collapses "no endpoint configured" and "embed() failed" into
+        // one code, so the note names both causes (the pre-delegation surface
+        // had separate messages).
+        return textResult(
+          'Note: vector search is unavailable — no embedding endpoint is configured or embed() failed. [embedding_unavailable]\n\nFound 0 node(s).',
+        );
+      }
+      let note: string | null = null;
+      if (result.degraded === 'no_vector_index') {
+        note =
+          'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]';
+      } else if (result.degraded === 'embedding_unavailable') {
+        note =
+          'Note: vector half unavailable (embed() failed); showing keyword results only. [degraded:embedding_unavailable]';
       }
 
-      const renderInOrder = [...limited, ...expandedNodes];
-      const lines = await Promise.all(renderInOrder.map(async (n: any) => {
+      // ── Node rendering ─────────────────────────────────────────────────────
+      const renderHit = async (hit: {
+        node: {
+          id: string;
+          loc: string;
+          memoryId: string;
+          name: string;
+          description: string | null;
+          abstract: string | null;
+          abstractOriginHash: string | null;
+          content: string | null;
+          tags: string[] | null;
+          outgoingEdges?: Array<{
+            target: { loc: string; memoryId: string; deletedAt: Date | null } | null;
+            name: string | null;
+            loc: string;
+          }>;
+        };
+        score: number | null;
+      }): Promise<string> => {
+        const n = hit.node;
         const urn = await nodeUrn(n.loc, n.memoryId);
+        const score = hit.score;
         // #322: surface the stable PK so callers can reference this node by id.
-        const parts = [`- **${urn}** (id: ${n.id}) — ${n.name}`];
+        const parts = [
+          score != null
+            ? `- **${urn}** (id: ${n.id}) — ${n.name}  (score ${score.toFixed(3)})`
+            : `- **${urn}** (id: ${n.id}) — ${n.name}`,
+        ];
+        // Spec 033 FR-023 — `Source: abstract-stale` on a ranked hit whose stored
+        // abstract no longer matches the current (plaintext) content. Unscored
+        // expand-neighbours are skipped (they weren't matched via an abstract).
+        const isStale =
+          score != null &&
+          n.abstract != null && n.abstract.length > 0 &&
+          n.content != null && n.content.length > 0 &&
+          !isCiphertext(n.content) &&
+          n.abstractOriginHash != null &&
+          n.abstractOriginHash !== computeContentHash(n.content);
+        if (isStale) parts.push('  Source: abstract-stale');
         if (n.description) parts.push(`  ${n.description}`);
         // Spec 031 US2 — surface the abstract as a two-space-indented block
-        // beneath the description (no `>` prefix; matches the existing
-        // description-line format in this tool — hadron_get_node uses `>` but
-        // hadron_find_nodes never has). Multi-paragraph abstracts get the
-        // prefix on each line. Excluded from brief mode (preserves the
-        // existing brief contract; index-info-only). Per PR-196 US3
-        // deferral, the matchesQuery haystack is NOT extended — abstract
-        // is preview-only, not searchable, until the RAG follow-up.
+        // beneath the description (excluded from brief mode). `/\r?\n/` so
+        // CRLF-terminated lines don't leave a trailing `\r` mid-output.
         if (!brief && n.abstract) {
-          // `/\r?\n/` rather than `'\n'` so CRLF-terminated lines (common
-          // from Windows clients / certain text areas) don't leave a
-          // trailing `\r` embedded mid-output. PR-202 review.
-          for (const absLine of (n.abstract as string).split(/\r?\n/)) {
-            parts.push(`  ${absLine}`);
-          }
+          for (const absLine of n.abstract.split(/\r?\n/)) parts.push(`  ${absLine}`);
         }
         if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
-        if (brief && n.outgoingEdges?.length) {
-          const edgeStrs = await Promise.all(n.outgoingEdges.map(async (e: any) => {
-            const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
-            return `→ ${targetUrn} (${e.name ?? e.loc})`;
-          }));
-          parts.push(`  Edges: ${edgeStrs.join(', ')}`);
+        // Brief edge rendering — hide edges whose target is soft-deleted
+        // (#180 Bug 2); findNodes includes them, so filter here.
+        if (brief) {
+          const edges = (n.outgoingEdges ?? []).filter(
+            (e) => e.target && e.target.deletedAt == null,
+          );
+          if (edges.length) {
+            const edgeStrs = await Promise.all(
+              edges.map(async (e) => {
+                const targetUrn = await nodeUrn(e.target!.loc, e.target!.memoryId);
+                return `→ ${targetUrn} (${e.name ?? e.loc})`;
+              }),
+            );
+            parts.push(`  Edges: ${edgeStrs.join(', ')}`);
+          }
         }
         return parts.join('\n');
-      }));
+      };
 
-      const renderCount = renderInOrder.length;
-      const body = `Found ${renderCount} node(s):\n\n${lines.join('\n')}`;
-      return textResult(hybridDegradedNote ? `${hybridDegradedNote}\n\n${body}` : body);
+      const lines = await Promise.all((result.hits ?? []).map(renderHit));
+      if (lines.length === 0) {
+        // Preserve the byte-identical "no match" output for the lexical path —
+        // when hybrid degraded to keyword AND found nothing, prepend the note.
+        const baseMsg = `No nodes found matching "${query}".`;
+        return textResult(note ? `${note}\n\n${baseMsg}` : baseMsg);
+      }
+      const body = `Found ${lines.length} node(s):\n\n${lines.join('\n')}`;
+      return textResult(note ? `${note}\n\n${body}` : body);
     },
   );
 
