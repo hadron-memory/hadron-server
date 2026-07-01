@@ -111,6 +111,25 @@ describe('findNodes — filtered list (query omitted, subsumes `nodes`)', () => 
   });
 });
 
+describe('findNodes — structured filters apply to query results, not just lists', () => {
+  it('respects isRunnable on a keyword query', async () => {
+    await mkNode(graph.id, { loc: 'q.run1', name: 'runnable banana', isRunnable: true });
+    await mkNode(graph.id, { loc: 'q.run2', name: 'another banana task', isRunnable: true });
+    await mkNode(graph.id, { loc: 'q.note', name: 'banana note', isRunnable: false });
+    const res = await findNodes({ query: 'banana', mode: 'keyword', filter: { memoryIds: [graph.id], isRunnable: true } });
+    expect(res.hits.map((h: any) => h.node.loc).sort()).toEqual(['q.run1', 'q.run2']);
+  });
+
+  it('excludes soft-deleted matches by default and includes them with includeDeleted', async () => {
+    await mkNode(graph.id, { loc: 'd.live', name: 'live banana' });
+    await mkNode(graph.id, { loc: 'd.dead', name: 'dead banana', deletedAt: new Date() });
+    const def = await findNodes({ query: 'banana', mode: 'keyword', filter: { memoryIds: [graph.id] } });
+    expect(def.hits.map((h: any) => h.node.loc)).toEqual(['d.live']);
+    const inc = await findNodes({ query: 'banana', mode: 'keyword', filter: { memoryIds: [graph.id], includeDeleted: true } });
+    expect(inc.hits.map((h: any) => h.node.loc).sort()).toEqual(['d.dead', 'd.live']);
+  });
+});
+
 describe('findNodes — memoryClasses (cor:api:090:02)', () => {
   beforeEach(async () => {
     await mkNode(graph.id, { loc: 'k.node', name: 'knowledge banana' });

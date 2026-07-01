@@ -25,6 +25,7 @@ import type { LexicalField } from '../../../lib/retrieval/provider.js';
 import {
   matchesQuery,
   keywordRelevanceRank,
+  expandWithNeighbors,
 } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import {
@@ -782,12 +783,23 @@ export const nodeQueries = {
       if (expand != null && (expand < 0 || expand > 3 || !Number.isInteger(expand))) {
         throw badInput('findNodes `expand` must be an integer in [0, 3].');
       }
-      const expandDepth = expand ?? undefined;
+      const expandDepth = expand ?? 0;
+      if (f.updatedAfter && Number.isNaN(Date.parse(f.updatedAfter))) {
+        throw badInput('findNodes filter.updatedAfter must be a valid date string.');
+      }
+      if (f.updatedBefore && Number.isNaN(Date.parse(f.updatedBefore))) {
+        throw badInput('findNodes filter.updatedBefore must be a valid date string.');
+      }
 
       // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
       const accessible = await getAccessibleMemoryIds(ctx);
-      let scopeIds: string[];
       const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
+      const memClassClause: unknown =
+        f.memoryClasses && f.memoryClasses.length > 0
+          ? { in: f.memoryClasses }
+          : (!explicitIds ? { not: 'system' } : undefined); // broad search hides system-class; explicit ids win
+
+      let scopeIds: string[];
       if (explicitIds) {
         const resolved = await Promise.all(
           f.memoryIds!.map((ref) =>
@@ -796,70 +808,72 @@ export const nodeQueries = {
               : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
         );
         const requested = resolved.filter((id): id is string => id !== null);
-        scopeIds = accessible === null
-          ? requested
-          : requested.filter((id) => new Set(accessible).has(id));
+        const allowed = accessible === null ? null : new Set(accessible);
+        scopeIds = allowed === null ? requested : requested.filter((id) => allowed.has(id));
+        if (memClassClause && scopeIds.length > 0) {
+          const rows = await ctx.db.memory.findMany({
+            where: { id: { in: scopeIds }, class: memClassClause as never },
+            select: { id: true },
+          });
+          scopeIds = rows.map((m) => m.id);
+        }
       } else if (accessible === null) {
-        const all = await ctx.db.memory.findMany({ where: { deletedAt: null }, select: { id: true } });
-        scopeIds = all.map((m) => m.id);
-      } else {
-        scopeIds = accessible;
-      }
-
-      // ── Memory-class filter: SYSTEM excluded by default; explicit wins ──
-      const narrowByClass = async (ids: string[], clause: unknown): Promise<string[]> => {
-        if (ids.length === 0) return ids;
+        // Admin/broad — resolve scope + class filter in one query (not two).
         const rows = await ctx.db.memory.findMany({
-          where: { id: { in: ids }, class: clause as never },
+          where: { deletedAt: null, ...(memClassClause ? { class: memClassClause as never } : {}) },
           select: { id: true },
         });
-        return rows.map((m) => m.id);
-      };
-      if (f.memoryClasses && f.memoryClasses.length > 0) {
-        scopeIds = await narrowByClass(scopeIds, { in: f.memoryClasses });
-      } else if (!explicitIds) {
-        // Broad search with no explicit ids/classes → hide system-class memories.
-        scopeIds = await narrowByClass(scopeIds, { not: 'system' });
+        scopeIds = rows.map((m) => m.id);
+      } else {
+        const rows = await ctx.db.memory.findMany({
+          where: { id: { in: accessible }, ...(memClassClause ? { class: memClassClause as never } : {}) },
+          select: { id: true },
+        });
+        scopeIds = rows.map((m) => m.id);
       }
       if (scopeIds.length === 0) {
         return { hits: [], passages: [], total: 0, reason: null, degraded: null };
       }
 
+      // Structured node-attribute filters (cor:api:090:02), AND-combined. Applied
+      // to BOTH the no-query list path and the ranked-query path (via re-fetch),
+      // so query results respect them exactly like the list does.
+      const structuredWhere: Record<string, unknown> = {
+        ...(f.includeDeleted ? {} : { deletedAt: null }),
+        // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
+        // to the memory-class exclusion above).
+        ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
+        ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+        ...(f.tags?.length ? tagsFilter(f.tags) : {}),
+        ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
+        ...(f.createdBy ? { createdBy: f.createdBy } : {}),
+        ...((f.updatedAfter || f.updatedBefore)
+          ? { updatedAt: {
+              ...(f.updatedAfter ? { gte: new Date(f.updatedAfter) } : {}),
+              ...(f.updatedBefore ? { lte: new Date(f.updatedBefore) } : {}),
+            } }
+          : {}),
+      };
+      const nodeInclude = {
+        memory: true,
+        outgoingEdges: { include: { target: true } },
+        incomingEdges: { include: { source: true } },
+      } as const;
+
       const hasQuery = typeof query === 'string' && query.trim() !== '';
 
       // ── No query → filtered list (subsumes `nodes`) ──
       if (!hasQuery) {
-        const where: Record<string, unknown> = {
-          memoryId: { in: scopeIds },
-          ...(f.includeDeleted ? {} : { deletedAt: null }),
-          // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
-          // to the memory-class exclusion above).
-          ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
-          ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
-          ...(f.tags?.length ? tagsFilter(f.tags) : {}),
-          ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
-          ...(f.createdBy ? { createdBy: f.createdBy } : {}),
-          ...((f.updatedAfter || f.updatedBefore)
-            ? { updatedAt: {
-                ...(f.updatedAfter ? { gte: new Date(f.updatedAfter) } : {}),
-                ...(f.updatedBefore ? { lte: new Date(f.updatedBefore) } : {}),
-              } }
-            : {}),
-        };
         const orderBy =
           sort === 'seq' ? { seq: 'asc' as const }
           : sort === 'updatedAt' ? { updatedAt: 'desc' as const }
-          : { loc: 'asc' as const }; // relevance has no meaning without a query → deterministic browse order
+          : { loc: 'asc' as const }; // relevance is meaningless without a query → deterministic browse order
         const rows = await ctx.db.node.findMany({
-          where,
+          where: { memoryId: { in: scopeIds }, ...structuredWhere },
           orderBy,
           skip: off,
           take: finalLimit,
-          include: {
-            memory: true,
-            outgoingEdges: { include: { target: true } },
-            incomingEdges: { include: { source: true } },
-          },
+          include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
         return {
@@ -875,9 +889,18 @@ export const nodeQueries = {
       const effectiveMode = mode ?? 'hybrid';
       const lexFields = (fields ?? undefined) as LexicalField[] | undefined;
       const model = isEmbeddingConfigured() ? getEmbeddingClient().model : null;
+      // A selective structured filter can drop many ranked candidates, so over-fetch
+      // from the retrieval layer to keep the page full after post-filtering + offset.
+      const hasStructuredFilters = !!(
+        f.nodeType || f.isRunnable != null || f.tags?.length || f.locPrefix ||
+        f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted
+      );
+      const page = off + finalLimit;
+      const fetchN = hasStructuredFilters ? Math.min(page * 5, 2000) : page;
 
-      // Build hits from a ranked (nodeId, score) list, reusing the shared
-      // hydrate+expand+decrypt path; attach per-hit score + vector metadata.
+      // Hydrate a ranked (nodeId, score) list into hits: enforce the structured
+      // filters via a Prisma re-fetch, order (by rank, or by an explicit sort),
+      // page with offset/limit, then optionally append expand-neighbours.
       const buildResult = async (
         ranked: { nodeId: string; score: number }[],
         simById: Map<string, number> | null,
@@ -885,29 +908,58 @@ export const nodeQueries = {
         degraded: string | null,
       ) => {
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
-        const rendered = await renderNodeSearchResult(
-          ctx, ranked.map((r) => r.nodeId), expandDepth, scopeIds, reason, degraded,
-        );
-        const hits = (rendered.nodes as { id: string }[]).map((n) => ({
+        const rankOrder = new Map(ranked.map((r, i) => [r.nodeId, i]));
+        const rows = await ctx.db.node.findMany({
+          where: { id: { in: ranked.map((r) => r.nodeId) }, ...structuredWhere },
+          include: nodeInclude,
+        });
+        await decryptNodesBatch(ctx.db, rows);
+        const ordered = rows.slice().sort((a, b) => {
+          if (sort === 'loc') return a.loc.localeCompare(b.loc);
+          if (sort === 'seq') return (a.seq ?? 0) - (b.seq ?? 0);
+          if (sort === 'updatedAt') return b.updatedAt.getTime() - a.updatedAt.getTime();
+          return (rankOrder.get(a.id) ?? 0) - (rankOrder.get(b.id) ?? 0); // relevance (default)
+        });
+        const pageRows = ordered.slice(off, off + finalLimit);
+        const hits = pageRows.map((n) => ({
           node: n,
           score: scoreById.get(n.id) ?? null,
           vector: simById?.has(n.id)
             ? { similarity: simById.get(n.id)!, model, chunkIndex: null, offsets: null, abstractStale: null, source: null }
             : null,
         }));
-        return { hits, passages: rendered.passages, total: null, reason: rendered.reason, degraded: rendered.degraded };
+        // Graph-neighbour expansion (context; not re-filtered). Appended after the page.
+        if (expandDepth > 0 && pageRows.length > 0) {
+          const shown = new Set(pageRows.map((n) => n.id));
+          const neighbourIds = (await expandWithNeighbors(
+            ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
+          )).filter((id) => !shown.has(id));
+          if (neighbourIds.length > 0) {
+            const nRows = await ctx.db.node.findMany({
+              where: { id: { in: neighbourIds }, deletedAt: null },
+              include: nodeInclude,
+            });
+            await decryptNodesBatch(ctx.db, nRows);
+            const nById = new Map(nRows.map((n) => [n.id, n]));
+            for (const id of neighbourIds) {
+              const n = nById.get(id);
+              if (n) hits.push({ node: n, score: null, vector: null });
+            }
+          }
+        }
+        return { hits, passages: [], total: null, reason, degraded };
       };
 
       // ── LEXICAL modes: keyword (FTS) / regex ──
       if (effectiveMode === 'keyword' || effectiveMode === 'regex') {
         try {
           const ranked = effectiveMode === 'regex'
-            ? await provider.regexSearch({ db: ctx.db, pattern: q, memoryIds: scopeIds, fields: lexFields, limit: finalLimit })
-            : await provider.lexicalSearch({ db: ctx.db, query: q, memoryIds: scopeIds, fields: lexFields, limit: finalLimit });
+            ? await provider.regexSearch({ db: ctx.db, pattern: q, memoryIds: scopeIds, fields: lexFields, includeDeleted: !!f.includeDeleted, limit: fetchN })
+            : await provider.lexicalSearch({ db: ctx.db, query: q, memoryIds: scopeIds, fields: lexFields, includeDeleted: !!f.includeDeleted, limit: fetchN });
           return await buildResult(ranked, null, null, null);
         } catch (e) {
           if (e instanceof BooleanQueryError) throw badInput(e.message);
-          if (e instanceof Error && /invalid regular expression/i.test(e.message)) {
+          if (e instanceof Error && (/invalid regular expression/i.test(e.message) || (e as { code?: string }).code === '2201B')) {
             throw badInput(`Invalid regex: ${e.message}`);
           }
           throw e;
@@ -923,7 +975,7 @@ export const nodeQueries = {
 
       const runKeywordRanked = async () => {
         try {
-          return await provider.lexicalSearch({ db: ctx.db, query: q, memoryIds: scopeIds, fields: lexFields, limit: finalLimit });
+          return await provider.lexicalSearch({ db: ctx.db, query: q, memoryIds: scopeIds, fields: lexFields, includeDeleted: !!f.includeDeleted, limit: fetchN });
         } catch (e) {
           if (e instanceof BooleanQueryError) throw badInput(e.message);
           throw e;
@@ -957,7 +1009,8 @@ export const nodeQueries = {
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
 
-      // Chunk granularity (vector only) → passages, mirroring nodeSearch.
+      // Chunk granularity (vector only) → passages, mirroring nodeSearch. Structured
+      // node filters are not applied to passage results in v1 (chunk-level, not node-level).
       if (granularity === 'chunk') {
         if (effectiveMode !== 'vector') {
           throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
@@ -985,7 +1038,7 @@ export const nodeQueries = {
         return { hits: [], passages, total: null, reason: null, degraded: null };
       }
 
-      const vecHits = await provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: finalLimit });
+      const vecHits = await provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: fetchN });
 
       if (effectiveMode === 'vector') {
         const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
@@ -997,7 +1050,7 @@ export const nodeQueries = {
       const fusedIds = reciprocalRankFusion(
         [kwRanked.map((r) => r.nodeId), vecHits.map((h) => h.nodeId)],
         (id) => id,
-      ).slice(0, finalLimit);
+      ).slice(0, fetchN);
       const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
       const kwScore = new Map(kwRanked.map((r) => [r.nodeId, r.score]));
       return await buildResult(

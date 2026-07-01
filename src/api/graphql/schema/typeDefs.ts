@@ -73,6 +73,13 @@ export const typeDefs = `#graphql
     keyword
     vector
     hybrid
+  }
+
+  "Retrieval modes for findNodes (cor:api:090:01). Superset of SearchMode with regex; kept separate so nodeSearch's contract stays stable."
+  enum FindNodesMode {
+    keyword
+    vector
+    hybrid
     regex
   }
 
@@ -1830,7 +1837,7 @@ export const typeDefs = `#graphql
     """
     findNodes(
       query: String
-      mode: SearchMode
+      mode: FindNodesMode
       filter: NodeFilter
       fields: [NodeField!]
       sort: NodeSort

@@ -71,12 +71,13 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     const memPh = opts.memoryIds.map((_, i) => `$${t + 1 + i}`).join(', ');
     const limitPh = `$${t + 1 + opts.memoryIds.length}`;
     const weightsLit = `ARRAY[${weights.join(', ')}]::float4[]`;
+    const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
     const sql = `
       SELECT id, ts_rank_cd(${weightsLit}, tsv, ${tsq.sql}) AS score
       FROM nodes
       WHERE tsv @@ ${tsq.sql}
         AND memory_id IN (${memPh})
-        AND deleted_at IS NULL
+        ${deletedClause}
       ORDER BY score DESC, loc ASC
       LIMIT ${limitPh}
     `;
@@ -101,11 +102,12 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       .map((f) => `CASE WHEN ${REGEX_FIELD_SQL[f]} ~* $1 THEN ${classWeight[FIELD_CLASS[f]]} ELSE 0 END`)
       .join(', ');
     const memPh = opts.memoryIds.map((_, i) => `$${3 + i}`).join(', ');
+    const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
     const sql = `
       SELECT id, GREATEST(${scoreExpr}) AS score
       FROM nodes
       WHERE memory_id IN (${memPh})
-        AND deleted_at IS NULL
+        ${deletedClause}
         AND (${matchExpr})
       ORDER BY score DESC, loc ASC
       LIMIT $2

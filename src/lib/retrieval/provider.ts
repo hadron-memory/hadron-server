@@ -30,6 +30,8 @@ export interface LexicalSearchOpts {
   memoryIds: string[];
   /** Weight-mask: only these fields' weight classes contribute to the score. Omit = all. */
   fields?: LexicalField[];
+  /** Include soft-deleted nodes in candidates (default false). */
+  includeDeleted?: boolean;
   limit: number;
 }
 
@@ -39,6 +41,8 @@ export interface RegexSearchOpts {
   pattern: string;
   memoryIds: string[];
   fields?: LexicalField[];
+  /** Include soft-deleted nodes in candidates (default false). */
+  includeDeleted?: boolean;
   limit: number;
 }
 
