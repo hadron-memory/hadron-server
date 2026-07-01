@@ -13,10 +13,44 @@ import type {
   LexicalSearchOpts,
   RegexSearchOpts,
   VectorSearchOpts,
+  NodeSqlFilter,
+  LexicalSort,
 } from './provider.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
 import { vectorSearchNodes, vectorSearchChunks } from '../../services/embedding/vectors.js';
 import { compileBooleanQuery } from './tsquery.js';
+
+/** Ordered parameter accumulator — appends a value and returns its `$n` placeholder. */
+function paramBuilder(seed: unknown[] = []) {
+  const params = [...seed];
+  return { params, bind: (v: unknown) => `$${params.push(v)}` };
+}
+
+/** Structured-filter SQL (cor:api:090:02), AND-combined; applied in-query so filter + sort + paging are exact. */
+function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string): string {
+  const parts: string[] = [];
+  const flt = f ?? {};
+  // Explicit nodeType wins; otherwise exclude system-type nodes (node_type is NOT NULL, default 'info').
+  if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
+  else parts.push(`node_type <> 'system'`);
+  if (flt.isRunnable != null) parts.push(`is_runnable = ${bind(flt.isRunnable)}`);
+  if (flt.tags && flt.tags.length) parts.push(`tags @> ARRAY[${flt.tags.map((t) => bind(t)).join(', ')}]::text[]`);
+  if (flt.locPrefix) parts.push(`starts_with(loc, ${bind(flt.locPrefix)})`);
+  if (flt.createdBy) parts.push(`created_by = ${bind(flt.createdBy)}`);
+  if (flt.updatedAfter) parts.push(`updated_at >= ${bind(flt.updatedAfter)}::timestamptz`);
+  if (flt.updatedBefore) parts.push(`updated_at <= ${bind(flt.updatedBefore)}::timestamptz`);
+  return parts.length ? ' AND ' + parts.join(' AND ') : '';
+}
+
+/** ORDER BY for a lexical query. relevance → score; the rest suppress scoring. */
+function orderByClause(sort: LexicalSort | undefined): string {
+  switch (sort) {
+    case 'loc': return 'loc ASC';
+    case 'seq': return 'seq ASC NULLS LAST, loc ASC';
+    case 'updatedAt': return 'updated_at DESC';
+    default: return 'score DESC, loc ASC';
+  }
+}
 
 // Weight-class defaults, ts_rank_cd order {D, C, B, A} (Postgres convention).
 const CLASS_D = 0.1, CLASS_C = 0.2, CLASS_B = 0.4, CLASS_A = 1.0;
@@ -62,59 +96,62 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
   async lexicalSearch(opts: LexicalSearchOpts): Promise<LexicalHit[]> {
     if (opts.memoryIds.length === 0) return [];
     const weights = weightMask(opts.fields);
-    // Prisma's $queryRawUnsafe doesn't bind JS arrays to float4[]/text[] params,
-    // so inline the server-controlled weight floats as a literal and expand
-    // memoryIds into scalar placeholders. Params: $1..$T leaf terms, then the
-    // memoryIds, then the limit.
+    // Params, in append order: $1..$T leaf terms (compiled first so the tsquery
+    // expression's placeholders are stable), then the filter/memory/limit/offset
+    // params via the builder. Weights are server-controlled floats → inlined as
+    // a literal ($queryRawUnsafe can't bind a float4[] param).
     const tsq = compileBooleanQuery(opts.query, 1);
-    const t = tsq.params.length;
-    const memPh = opts.memoryIds.map((_, i) => `$${t + 1 + i}`).join(', ');
-    const limitPh = `$${t + 1 + opts.memoryIds.length}`;
+    const { params, bind } = paramBuilder([...tsq.params]);
     const weightsLit = `ARRAY[${weights.join(', ')}]::float4[]`;
+    const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
     const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
+    const filterSql = filterClause(opts.filter, bind);
+    const orderBy = orderByClause(opts.sort);
+    const limitPh = bind(opts.limit);
+    const offsetPh = bind(opts.offset ?? 0);
     const sql = `
       SELECT id, ts_rank_cd(${weightsLit}, tsv, ${tsq.sql}) AS score
       FROM nodes
       WHERE tsv @@ ${tsq.sql}
         AND memory_id IN (${memPh})
-        ${deletedClause}
-      ORDER BY score DESC, loc ASC
-      LIMIT ${limitPh}
+        ${deletedClause}${filterSql}
+      ORDER BY ${orderBy}
+      LIMIT ${limitPh} OFFSET ${offsetPh}
     `;
-    const rows = await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(
-      sql, ...tsq.params, ...opts.memoryIds, opts.limit,
-    );
+    const rows = await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params);
     return rows.map((r) => ({ nodeId: r.id, score: Number(r.score) }));
   },
 
   async regexSearch(opts: RegexSearchOpts): Promise<LexicalHit[]> {
     if (opts.memoryIds.length === 0) return [];
-    const fields = (opts.fields && opts.fields.length > 0 ? opts.fields : REGEX_DEFAULT_FIELDS)
+    // Matching spans ALL text fields (weight-mask semantics — fields is not a
+    // hard filter; cor:api:090:03); `fields` only masks the SCORE, so a match in
+    // a non-selected field is still returned, just scored 0.
+    const scoreFields = (opts.fields && opts.fields.length > 0 ? opts.fields : REGEX_DEFAULT_FIELDS)
       .filter((f) => REGEX_FIELD_SQL[f]);
-    if (fields.length === 0) return [];
-    // $1 memoryIds, $2 pattern, $3 limit. Match if any selected field matches;
-    // score = highest matched field's weight class (a coarse relevance signal).
-    // Params: $1 pattern, $2 limit, then $3.. memoryIds (see lexicalSearch note
-    // on why memoryIds are scalar placeholders, not an array param).
     const classWeight = { A: CLASS_A, B: CLASS_B, C: CLASS_C, D: CLASS_D } as const;
-    const matchExpr = fields.map((f) => `${REGEX_FIELD_SQL[f]} ~* $1`).join(' OR ');
-    const scoreExpr = fields
-      .map((f) => `CASE WHEN ${REGEX_FIELD_SQL[f]} ~* $1 THEN ${classWeight[FIELD_CLASS[f]]} ELSE 0 END`)
+    const { params, bind } = paramBuilder();
+    const patPh = bind(opts.pattern);
+    const matchExpr = REGEX_DEFAULT_FIELDS.map((f) => `${REGEX_FIELD_SQL[f]} ~* ${patPh}`).join(' OR ');
+    const scoreExpr = scoreFields
+      .map((f) => `CASE WHEN ${REGEX_FIELD_SQL[f]} ~* ${patPh} THEN ${classWeight[FIELD_CLASS[f]]} ELSE 0 END`)
       .join(', ');
-    const memPh = opts.memoryIds.map((_, i) => `$${3 + i}`).join(', ');
+    const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
     const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
+    const filterSql = filterClause(opts.filter, bind);
+    const orderBy = orderByClause(opts.sort);
+    const limitPh = bind(opts.limit);
+    const offsetPh = bind(opts.offset ?? 0);
     const sql = `
       SELECT id, GREATEST(${scoreExpr}) AS score
       FROM nodes
       WHERE memory_id IN (${memPh})
-        ${deletedClause}
+        ${deletedClause}${filterSql}
         AND (${matchExpr})
-      ORDER BY score DESC, loc ASC
-      LIMIT $2
+      ORDER BY ${orderBy}
+      LIMIT ${limitPh} OFFSET ${offsetPh}
     `;
-    const rows = await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(
-      sql, opts.pattern, opts.limit, ...opts.memoryIds,
-    );
+    const rows = await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params);
     return rows.map((r) => ({ nodeId: r.id, score: Number(r.score) }));
   },
 

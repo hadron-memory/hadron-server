@@ -91,6 +91,30 @@ describe('findNodes — regex mode', () => {
   });
 });
 
+describe('findNodes — regex fields are a score-mask, not a hard filter (cor:api:090:03)', () => {
+  it('still returns a body-only regex match when fields=[name], just unscored', async () => {
+    await mkNode(graph.id, { loc: 'rx.name', name: 'banana', content: 'x' });
+    await mkNode(graph.id, { loc: 'rx.body', name: 'grocery', content: 'banana here' });
+    const res = await findNodes({ query: 'banana', mode: 'regex', fields: ['name'] });
+    const locs = res.hits.map((h: any) => h.node.loc).sort();
+    expect(locs).toEqual(['rx.body', 'rx.name']); // both returned; fields only masks scoring
+  });
+});
+
+describe('findNodes — sort + pagination on a query (applied in SQL, not after truncation)', () => {
+  beforeEach(async () => {
+    await mkNode(graph.id, { loc: 'srt.c', name: 'zeta gamma' });
+    await mkNode(graph.id, { loc: 'srt.a', name: 'zeta alpha' });
+    await mkNode(graph.id, { loc: 'srt.b', name: 'zeta beta' });
+  });
+  it('orders a keyword query by loc and pages correctly', async () => {
+    const p1 = await findNodes({ query: 'zeta', mode: 'keyword', sort: 'loc', filter: { memoryIds: [graph.id] }, limit: 2, offset: 0 });
+    expect(p1.hits.map((h: any) => h.node.loc)).toEqual(['srt.a', 'srt.b']);
+    const p2 = await findNodes({ query: 'zeta', mode: 'keyword', sort: 'loc', filter: { memoryIds: [graph.id] }, limit: 2, offset: 2 });
+    expect(p2.hits.map((h: any) => h.node.loc)).toEqual(['srt.c']);
+  });
+});
+
 describe('findNodes — filtered list (query omitted, subsumes `nodes`)', () => {
   it('returns a deterministic list and excludes system-type nodes by default', async () => {
     await mkNode(graph.id, { loc: 'a.two', name: 'Two' });

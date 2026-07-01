@@ -950,13 +950,70 @@ export const nodeQueries = {
         return { hits, passages: [], total: null, reason, degraded };
       };
 
-      // ── LEXICAL modes: keyword (FTS) / regex ──
+      // Structured filters passed to the lexical SQL so keyword/regex results are
+      // filtered + sorted + paged exactly (no relevance-truncate-then-filter).
+      const sqlFilter = {
+        nodeType: f.nodeType ?? null,
+        isRunnable: f.isRunnable ?? null,
+        tags: f.tags ?? null,
+        locPrefix: f.locPrefix ?? null,
+        createdBy: f.createdBy ?? null,
+        updatedAfter: f.updatedAfter ?? null,
+        updatedBefore: f.updatedBefore ?? null,
+      };
+      const lexSort = (sort ?? 'relevance') as 'relevance' | 'loc' | 'seq' | 'updatedAt';
+
+      // Hydrate a ranked list the provider has ALREADY filtered/sorted/paged:
+      // fetch by id (order preserved), decrypt, attach scores, append neighbours.
+      const hydrateInOrder = async (
+        ranked: { nodeId: string; score: number }[],
+        simById: Map<string, number> | null,
+        reason: string | null,
+        degraded: string | null,
+      ) => {
+        const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
+        const rows = await ctx.db.node.findMany({
+          where: { id: { in: ranked.map((r) => r.nodeId) } },
+          include: nodeInclude,
+        });
+        await decryptNodesBatch(ctx.db, rows);
+        const byId = new Map(rows.map((n) => [n.id, n]));
+        const pageRows = ranked
+          .map((r) => byId.get(r.nodeId))
+          .filter((n): n is NonNullable<typeof n> => !!n);
+        const hits = pageRows.map((n) => ({
+          node: n,
+          score: scoreById.get(n.id) ?? null,
+          vector: simById?.has(n.id)
+            ? { similarity: simById.get(n.id)!, model, chunkIndex: null, offsets: null, abstractStale: null, source: null }
+            : null,
+        }));
+        if (expandDepth > 0 && pageRows.length > 0) {
+          const shown = new Set(pageRows.map((n) => n.id));
+          const neighbourIds = (await expandWithNeighbors(
+            ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
+          )).filter((id) => !shown.has(id));
+          if (neighbourIds.length > 0) {
+            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, deletedAt: null }, include: nodeInclude });
+            await decryptNodesBatch(ctx.db, nRows);
+            const nById = new Map(nRows.map((n) => [n.id, n]));
+            for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
+          }
+        }
+        return { hits, passages: [], total: null, reason, degraded };
+      };
+
+      // ── LEXICAL modes: keyword (FTS) / regex — filter + sort + page in SQL ──
       if (effectiveMode === 'keyword' || effectiveMode === 'regex') {
         try {
+          const common = {
+            db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
+            includeDeleted: !!f.includeDeleted, sort: lexSort, offset: off, limit: finalLimit,
+          };
           const ranked = effectiveMode === 'regex'
-            ? await provider.regexSearch({ db: ctx.db, pattern: q, memoryIds: scopeIds, fields: lexFields, includeDeleted: !!f.includeDeleted, limit: fetchN })
-            : await provider.lexicalSearch({ db: ctx.db, query: q, memoryIds: scopeIds, fields: lexFields, includeDeleted: !!f.includeDeleted, limit: fetchN });
-          return await buildResult(ranked, null, null, null);
+            ? await provider.regexSearch({ ...common, pattern: q })
+            : await provider.lexicalSearch({ ...common, query: q });
+          return await hydrateInOrder(ranked, null, null, null);
         } catch (e) {
           if (e instanceof BooleanQueryError) throw badInput(e.message);
           if (e instanceof Error && (/invalid regular expression/i.test(e.message) || (e as { code?: string }).code === '2201B')) {
@@ -973,9 +1030,11 @@ export const nodeQueries = {
       });
       const indexedIds = indexed.map((m) => m.id);
 
+      // Keyword candidate source for hybrid RRF: relevance-ranked, filter applied
+      // (buildResult re-filters the fused set too, so this is just less waste).
       const runKeywordRanked = async () => {
         try {
-          return await provider.lexicalSearch({ db: ctx.db, query: q, memoryIds: scopeIds, fields: lexFields, includeDeleted: !!f.includeDeleted, limit: fetchN });
+          return await provider.lexicalSearch({ db: ctx.db, query: q, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter, includeDeleted: !!f.includeDeleted, sort: 'relevance', offset: 0, limit: fetchN });
         } catch (e) {
           if (e instanceof BooleanQueryError) throw badInput(e.message);
           throw e;
@@ -1015,7 +1074,9 @@ export const nodeQueries = {
         if (effectiveMode !== 'vector') {
           throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
         }
-        const chunkHits = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: finalLimit });
+        // Fetch through the offset so paging works (vectorSearchChunks has no offset).
+        const chunkHits = (await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit }))
+          .slice(off, off + finalLimit);
         const parents = await ctx.db.node.findMany({
           where: { id: { in: [...new Set(chunkHits.map((c) => c.nodeId))] }, deletedAt: null },
           include: { memory: { select: { urn: true } } },

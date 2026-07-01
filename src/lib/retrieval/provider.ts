@@ -23,6 +23,23 @@ export interface LexicalHit {
   score: number;
 }
 
+/** Ordering for a lexical query. `relevance` = by score; the rest suppress scoring. */
+export type LexicalSort = 'relevance' | 'loc' | 'seq' | 'updatedAt';
+
+/**
+ * Structured node-attribute filters applied IN the lexical SQL (so filter +
+ * sort + pagination are exact — no relevance-truncation-then-filter artifacts).
+ */
+export interface NodeSqlFilter {
+  nodeType?: string | null;
+  isRunnable?: boolean | null;
+  tags?: string[] | null;
+  locPrefix?: string | null;
+  createdBy?: string | null;
+  updatedAfter?: string | null;
+  updatedBefore?: string | null;
+}
+
 export interface LexicalSearchOpts {
   db: PrismaClient;
   /** Boolean surface grammar (see tsquery.ts). */
@@ -30,8 +47,13 @@ export interface LexicalSearchOpts {
   memoryIds: string[];
   /** Weight-mask: only these fields' weight classes contribute to the score. Omit = all. */
   fields?: LexicalField[];
-  /** Include soft-deleted nodes in candidates (default false). */
+  /** Structured filters, applied in-SQL. */
+  filter?: NodeSqlFilter;
+  /** Include soft-deleted nodes (default false). */
   includeDeleted?: boolean;
+  /** Ordering (default relevance). */
+  sort?: LexicalSort;
+  offset?: number;
   limit: number;
 }
 
@@ -40,9 +62,12 @@ export interface RegexSearchOpts {
   /** POSIX regex (case-insensitive `~*`). */
   pattern: string;
   memoryIds: string[];
+  /** Score weight-mask (matching still spans all text fields; cor:api:090:03). */
   fields?: LexicalField[];
-  /** Include soft-deleted nodes in candidates (default false). */
+  filter?: NodeSqlFilter;
   includeDeleted?: boolean;
+  sort?: LexicalSort;
+  offset?: number;
   limit: number;
 }
 
