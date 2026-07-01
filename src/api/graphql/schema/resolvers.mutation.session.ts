@@ -710,8 +710,9 @@ export const sessionMutations = {
 
         const topicSections: string[] = [];
         for (const edge of node.outgoingEdges) {
+          // target can be null for a dangling edge (deleted target row) — skip.
           const target = edge.target;
-          if (target.content) {
+          if (target?.content) {
             // Compose the target node URN directly.
             const targetMemory = await ctx.db.memory.findUniqueOrThrow({
               where: { id: target.memoryId },
