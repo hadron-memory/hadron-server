@@ -435,18 +435,9 @@ async function edgeUrn(loc: string, memoryId: string): Promise<string> {
   return composeEdgeUrn(memUrn, loc);
 }
 
-// Spec 033 US3 — search helpers moved to src/lib/search.ts to break the
-// circular dependency that was forming once GraphQL nodeSearch started
-// importing them (mcp/server.ts already imports from resolvers.ts via the
-// chat tools). Imported here for the hadron_find_nodes dispatch + re-exported
-// for backwards compatibility with callers that still import these from
-// `mcp/server.ts` (hadron_find_nodes tests).
-import {
-  matchesQuery,
-  keywordRelevanceRank,
-  expandWithNeighbors,
-} from '../lib/search.js';
-export { matchesQuery, keywordRelevanceRank, expandWithNeighbors };
+// The `hadron_find_nodes` tool delegates retrieval to resolvers.Query.findNodes
+// (PR2 #403), so the keyword/expand search helpers are no longer imported here;
+// they live in src/lib/search.ts, consumed by the findNodes resolver.
 
 // Loc validation moved to src/lib/validateLoc.ts so the GraphQL
 // upsertNode resolver and the MCP tool surface share the same rule

@@ -191,23 +191,23 @@ describe('US3 — `expand:N` appends undirected neighbors after ranked hits', ()
   });
 });
 
-describe('US3 — GraphQL nodeSearch carries the degraded flag in the envelope', () => {
+describe('US3 — GraphQL findNodes carries the degraded flag in the envelope', () => {
   it('mode:hybrid on a memory without a vector index → keyword results + degraded:no_vector_index', async () => {
     // Memory was created with vectorIndexEnabled: false above. Seed two
     // keyword hits.
     await seedNode({ loc: 'a-kw-only', description: 'matches gamma' });
     await seedNode({ loc: 'b-kw-only', description: 'matches gamma' });
 
-    const result = await resolvers.Query.nodeSearch(
+    const result = await resolvers.Query.findNodes(
       {},
-      { query: 'gamma', memoryUrn: memUrn, mode: 'hybrid' },
+      { query: 'gamma', filter: { memoryIds: [memUrn] }, mode: 'hybrid' },
       adminCtx(),
     );
 
     expect(result.degraded).toBe('no_vector_index');
     expect(result.reason).toBeNull();
-    expect(result.nodes.length).toBeGreaterThanOrEqual(2);
-    const locs = (result.nodes as Array<{ loc: string }>).map((n) => n.loc);
+    expect(result.hits.length).toBeGreaterThanOrEqual(2);
+    const locs = result.hits.map((h) => h.node.loc);
     expect(locs).toContain('a-kw-only');
     expect(locs).toContain('b-kw-only');
   });
@@ -215,27 +215,27 @@ describe('US3 — GraphQL nodeSearch carries the degraded flag in the envelope',
   it('mode:vector on a memory without a vector index → empty + reason:no_vector_index', async () => {
     await seedNode({ loc: 'noise', description: 'matches gamma' });
 
-    const result = await resolvers.Query.nodeSearch(
+    const result = await resolvers.Query.findNodes(
       {},
-      { query: 'gamma', memoryUrn: memUrn, mode: 'vector' },
+      { query: 'gamma', filter: { memoryIds: [memUrn] }, mode: 'vector' },
       adminCtx(),
     );
 
     expect(result.reason).toBe('no_vector_index');
     expect(result.degraded).toBeNull();
-    expect(result.nodes).toEqual([]);
+    expect(result.hits).toEqual([]);
   });
 
-  it('mode:keyword via GraphQL nodeSearch returns hits with no degraded flag', async () => {
+  it('mode:keyword via GraphQL findNodes returns hits with no degraded flag', async () => {
     await seedNode({ loc: 'kw-x', description: 'matches delta' });
-    const result = await resolvers.Query.nodeSearch(
+    const result = await resolvers.Query.findNodes(
       {},
-      { query: 'delta', memoryUrn: memUrn, mode: 'keyword' },
+      { query: 'delta', filter: { memoryIds: [memUrn] }, mode: 'keyword' },
       adminCtx(),
     );
     expect(result.reason).toBeNull();
     expect(result.degraded).toBeNull();
-    expect(result.nodes.length).toBe(1);
-    expect((result.nodes[0] as { loc: string }).loc).toBe('kw-x');
+    expect(result.hits.length).toBe(1);
+    expect(result.hits[0].node.loc).toBe('kw-x');
   });
 });

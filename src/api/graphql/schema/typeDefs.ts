@@ -60,22 +60,7 @@ export const typeDefs = `#graphql
     CHATBOT
   }
 
-  """
-  Search dispatch for nodeSearch. Spec 033.
-
-  - keyword: substring match across name/loc/description/tags (the legacy
-    nodes-query semantic, exposed as a nodeSearch mode for parity).
-  - vector: semantic search via the memory's vector index. Requires
-    vectorIndexEnabled on the memory.
-  - hybrid: reciprocal-rank fusion of keyword + vector (k=60).
-  """
-  enum SearchMode {
-    keyword
-    vector
-    hybrid
-  }
-
-  "Retrieval modes for findNodes (cor:api:090:01). Superset of SearchMode with regex; kept separate so nodeSearch's contract stays stable."
+  "Retrieval modes for findNodes (cor:api:090:01). keyword is stemmed FTS; vector/hybrid need the memory's vector index; regex is a POSIX pattern match."
   enum FindNodesMode {
     keyword
     vector
@@ -84,42 +69,16 @@ export const typeDefs = `#graphql
   }
 
   """
-  Result granularity for nodeSearch. Spec 033.
+  Result granularity for findNodes (cor:api:090). Spec 033.
 
-  - node: one entry per matching node (US1 default).
+  - node: one entry per matching node (default).
   - chunk: passage-level entries with offsets into the parent node's
-    content (US2; chunk hits collapse to node-level when granularity is
-    node).
+    content (vector mode only; chunk hits collapse to node-level when
+    granularity is node).
   """
   enum SearchGranularity {
     node
     chunk
-  }
-
-  """
-  Envelope for nodeSearch — carries the ranked nodes plus structured
-  flags surfacing degraded / no-index outcomes that the MCP path emits
-  inline. Spec 033.
-
-  reason: set when the query could not run as requested (e.g.
-    'no_vector_index' on a non-indexed memory with mode:vector); nodes
-    is empty in that case.
-  degraded: set when the query ran but at reduced fidelity (e.g.
-    'no_vector_index' on a hybrid query that fell back to keyword-only);
-    nodes still carries usable hits.
-  """
-  type NodeSearchResult {
-    nodes: [Node!]!
-    """
-    Spec 033 US2 — populated when the query specified granularity:chunk on a
-    content-chunk-bearing memory. Each entry is a passage (chunk text +
-    character offsets + chunk index + parent node URN), ranked by best
-    similarity. Empty list when granularity:node (default) — the ranked
-    nodes are in \`nodes\`.
-    """
-    passages: [Passage!]!
-    reason: String
-    degraded: String
   }
 
   """
@@ -185,8 +144,8 @@ export const typeDefs = `#graphql
   }
 
   """
-  Envelope for findNodes (cor:api:090) — the unified node-search field that
-  supersedes nodes + nodeSearch. hits carry per-hit score + vector metadata;
+  Envelope for findNodes (cor:api:090) — the unified node list + search field
+  (it replaced the removed nodes + nodeSearch queries). hits carry per-hit score + vector metadata;
   passages carry chunk-granularity results; reason/degraded surface no-index /
   reduced-fidelity outcomes.
   """
@@ -1755,79 +1714,10 @@ export const typeDefs = `#graphql
       sections: [NodeExportSection!]
     ): NodeExportResult!
 
-    # List or search nodes; optionally filter by tags and nodeType.
-    nodes(
-      """
-      Scope to a single memory, addressed by ID or fully-qualified URN
-      (007-entity-id-or-urn dispatch via resolveMemoryRef). Intersected
-      with the caller's access filter — scoping to an inaccessible
-      memory yields [], and an unknown ref throws NOT_FOUND. Added for
-      the hadron-cli \`node ls --memory\` surface; mirrors the
-      usageEvents(memoryId:) filter (#249).
-      """
-      memory: ID
-      """
-      Scope to a SET of memories (issue #355 — node content search
-      across an agent's / app's memories in one round-trip). Each entry
-      is a memory ID or a fully-qualified URN (007-entity-id-or-urn dispatch
-      via resolveMemoryRef), resolved then intersected with the caller's
-      access filter; unresolvable refs and inaccessible ids are silently
-      dropped (a multi-select UI shouldn't fail the whole search because one
-      ref isn't readable). Takes precedence over \`memory\` when both are
-      supplied; omit both to search every accessible memory.
-      """
-      memoryIds: [ID!]
-      nodeType: String
-      """
-      Filter by runnable status. \`true\` returns only task nodes
-      (Node.isRunnable = true) — the canonical "tasks I can run" predicate
-      that hadron_run_task gates on. \`false\` returns only nodes explicitly
-      marked non-runnable; note most nodes leave isRunnable NULL, so
-      \`false\` does NOT include them. Omit to return nodes regardless of
-      runnable status.
-      """
-      isRunnable: Boolean
-      tags: [String!]
-      search: String
-      prefix: String
-      limit: Int
-      offset: Int
-    ): [Node!]!
-
     """
-    Vector/hybrid-aware search over a memory. Keyword-only callers should
-    keep using the legacy 'nodes' query — nodeSearch is the
-    vector-aware entrypoint per spec 033 contract.
-
-    mode defaults to vector (the vector-aware entrypoint design — the
-    MCP hadron_find_nodes tool defaults to keyword for backward-compat,
-    a deliberate divergence between the two surfaces). expand (graph
-    neighbor depth 0..3, default 0) and granularity:chunk (passage
-    retrieval, vector-mode only) are both fully live.
-
-    Access control: same memory-read gate as the keyword nodes query —
-    the raw-SQL similarity query is scoped to memories the caller can
-    read, never cross-memory.
-    """
-    nodeSearch(
-      query: String!
-      memoryUrn: String
-      """
-      Scope to a SET of memories by ID (issue #355). Intersected with the
-      caller's access filter; inaccessible ids are silently dropped — unlike
-      the singular \`memoryUrn\`, which throws FORBIDDEN. Takes precedence over
-      \`memoryUrn\`; omit both to search every accessible memory.
-      """
-      memoryIds: [ID!]
-      mode: SearchMode
-      expand: Int
-      granularity: SearchGranularity
-      limit: Int
-    ): NodeSearchResult!
-
-    """
-    Unified node search (cor:api:090) — supersedes \`nodes\` (filter/list) and
-    \`nodeSearch\` (rank). Omit \`query\` for a filtered list in deterministic
+    Unified node search (cor:api:090) — the single node list + retrieval
+    surface (it replaced the removed \`nodes\` filter/list and \`nodeSearch\`
+    rank queries in PR3). Omit \`query\` for a filtered list in deterministic
     order (subsumes \`nodes\`); pass \`query\` to rank by \`mode\`
     (keyword | vector | hybrid | regex). Lexical modes honor boolean operators
     (\`(a OR b) AND c\`, quoted phrases, NOT/-) and \`fields\` as a ranking
@@ -1855,8 +1745,8 @@ export const typeDefs = `#graphql
     id lookup, a URN-shaped input matches URNs, anything else matches name + URN.
     Pass \`fields\` to force specific fields (overrides the sniff) and
     \`entityTypes\` to restrict the kinds searched. Every hit is access-scoped to
-    the caller exactly as the per-kind queries are. Distinct from \`nodeSearch\`,
-    which is the node-only, vector-aware surface.
+    the caller exactly as the per-kind queries are. Distinct from \`findNodes\`,
+    which is the node-only, vector-aware retrieval surface.
     """
     globalSearch(
       query: String!

@@ -46,9 +46,13 @@ describe('#391 soft-deleted nodes excluded from read resolvers', () => {
     fx = await build();
   });
 
-  it('nodes() lists the live node but not the soft-deleted one', async () => {
-    const rows = (await Q.nodes(null, { memory: fx.memoryId }, adminCtx())) as Array<{ id: string }>;
-    const ids = rows.map((n) => n.id);
+  it('findNodes lists the live node but not the soft-deleted one', async () => {
+    const res = (await Q.findNodes(
+      null,
+      { filter: { memoryIds: [fx.memoryId] } },
+      adminCtx(),
+    )) as { hits: Array<{ node: { id: string } }> };
+    const ids = res.hits.map((h) => h.node.id);
     expect(ids).toContain(fx.liveId);
     expect(ids).not.toContain(fx.deletedId);
   });

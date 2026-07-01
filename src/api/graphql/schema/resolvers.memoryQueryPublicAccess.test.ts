@@ -21,6 +21,13 @@ function ctx(overrides: Partial<Context> = {}): Context {
   return { db, ...overrides };
 }
 
+// findNodes replaced the deleted Query.nodes. Access-scoping is identical
+// (getAccessibleMemoryIds), so this adapts the hit envelope back to Node[].
+async function listNodes(args: any, ctx: any) {
+  const res = await resolvers.Query.findNodes(null, args, ctx);
+  return res.hits.map((h) => h.node);
+}
+
 let orgA: { id: string };
 let publicMem: { id: string };
 let orgMem: { id: string };
@@ -60,7 +67,7 @@ describe('Query.memory(id:) — PUBLIC visibility (issue #362)', () => {
 
   it('lockstep check: the same outsider can also read the PUBLIC memory\'s nodes', async () => {
     await db.node.create({ data: { id: generateId(), memoryId: publicMem.id, loc: 'pub-node', name: 'Pub' } });
-    const nodes = await resolvers.Query.nodes(null, { memoryIds: [publicMem.id] }, asOutsider());
+    const nodes = await listNodes({ filter: { memoryIds: [publicMem.id] } }, asOutsider());
     expect(nodes.map((n: any) => n.loc)).toContain('pub-node');
   });
 

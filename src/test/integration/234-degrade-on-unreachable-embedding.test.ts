@@ -127,18 +127,18 @@ afterAll(() => {
 });
 
 // ---------------------------------------------------------------------------
-// GraphQL — Query.nodeSearch
+// GraphQL — Query.findNodes
 // ---------------------------------------------------------------------------
 
-describe('#234 — GraphQL nodeSearch degrades when embed() throws', () => {
+describe('#234 — GraphQL findNodes degrades when embed() throws', () => {
   it('mode:hybrid → falls back to keyword hits with degraded:embedding_unavailable', async () => {
     await seedNode({ loc: 'a-kw-only', description: 'matches alpha' });
     await seedNode({ loc: 'b-kw-only', description: 'matches alpha' });
     await seedNode({ loc: 'noise', description: 'unrelated' });
 
-    const result = await resolvers.Query.nodeSearch(
+    const result = await resolvers.Query.findNodes(
       {},
-      { query: 'alpha', memoryUrn: memUrn, mode: 'hybrid' },
+      { query: 'alpha', filter: { memoryIds: [memUrn] }, mode: 'hybrid' },
       adminCtx(),
     );
 
@@ -146,7 +146,7 @@ describe('#234 — GraphQL nodeSearch degrades when embed() throws', () => {
     // Post-fix: keyword hits are surfaced with the degraded flag set.
     expect(result.degraded).toBe('embedding_unavailable');
     expect(result.reason).toBeNull();
-    const locs = (result.nodes as Array<{ loc: string }>).map((n) => n.loc);
+    const locs = result.hits.map((h) => h.node.loc);
     expect(locs).toContain('a-kw-only');
     expect(locs).toContain('b-kw-only');
     expect(locs).not.toContain('noise');
@@ -155,15 +155,15 @@ describe('#234 — GraphQL nodeSearch degrades when embed() throws', () => {
   it('mode:vector → empty envelope with reason:embedding_unavailable', async () => {
     await seedNode({ loc: 'kw-hit', description: 'matches beta' });
 
-    const result = await resolvers.Query.nodeSearch(
+    const result = await resolvers.Query.findNodes(
       {},
-      { query: 'beta', memoryUrn: memUrn, mode: 'vector' },
+      { query: 'beta', filter: { memoryIds: [memUrn] }, mode: 'vector' },
       adminCtx(),
     );
 
     expect(result.reason).toBe('embedding_unavailable');
     expect(result.degraded).toBeNull();
-    expect(result.nodes).toEqual([]);
+    expect(result.hits).toEqual([]);
     // Vector mode is explicit; the caller asked for vector. No
     // silent fall-back to keyword (would surprise a caller that
     // wired their UI around vector-only).
@@ -172,15 +172,15 @@ describe('#234 — GraphQL nodeSearch degrades when embed() throws', () => {
   it('mode:keyword is unaffected (never reaches the embed() call)', async () => {
     await seedNode({ loc: 'kw-direct', description: 'matches gamma' });
 
-    const result = await resolvers.Query.nodeSearch(
+    const result = await resolvers.Query.findNodes(
       {},
-      { query: 'gamma', memoryUrn: memUrn, mode: 'keyword' },
+      { query: 'gamma', filter: { memoryIds: [memUrn] }, mode: 'keyword' },
       adminCtx(),
     );
 
     expect(result.reason).toBeNull();
     expect(result.degraded).toBeNull();
-    const locs = (result.nodes as Array<{ loc: string }>).map((n) => n.loc);
+    const locs = result.hits.map((h) => h.node.loc);
     expect(locs).toContain('kw-direct');
   });
 });

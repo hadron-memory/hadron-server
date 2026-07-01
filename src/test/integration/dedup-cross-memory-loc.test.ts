@@ -2,10 +2,10 @@
  * Regression test — cross-memory same-loc nodes must NOT be collapsed.
  *
  * Latent bug surfaced 2026-06-02: `deduplicateNodes` (and the inline
- * loc-keyed dedup blocks in hadron_find_nodes and the nodeSearch keyword
- * helper) keyed solely by `loc`, so multiple memories each owning a node
- * called `start-here` ended up collapsed to ONE entry in the portal's
- * `Query.nodes` view. MCP and GraphQL both affected.
+ * loc-keyed dedup blocks in the node-search paths) keyed solely by `loc`,
+ * so multiple memories each owning a node called `start-here` ended up
+ * collapsed to ONE entry in the portal's node list. MCP and GraphQL both
+ * affected. (Migrated in PR3 from the removed `Query.nodes` to `findNodes`.)
  *
  * The fix: key by `(memoryId, loc)`. Within-memory canonical-vs-link
  * dedup still works (the original intent the doc-comment described);
@@ -93,12 +93,12 @@ async function seedThreeMemoriesEachWithStartHere(): Promise<SeededMemories> {
 }
 
 describe('Cross-memory same-loc nodes survive deduplication', () => {
-  it('GraphQL Query.nodes returns all three start-here nodes (no collapse)', async () => {
+  it('GraphQL findNodes returns all three start-here nodes (no collapse)', async () => {
     const seeded = await seedThreeMemoriesEachWithStartHere();
-    const result = await resolvers.Query.nodes({}, {}, adminCtx());
-    const starts = (result as Array<{ loc: string; memoryId: string }>).filter(
-      (n) => n.loc === 'start-here',
-    );
+    const result = await resolvers.Query.findNodes({}, {}, adminCtx());
+    const starts = result.hits
+      .map((h) => h.node as { loc: string; memoryId: string })
+      .filter((n) => n.loc === 'start-here');
     expect(starts.length).toBe(3);
     const memIds = new Set(starts.map((n) => n.memoryId));
     expect(memIds).toEqual(new Set([seeded.alphaId, seeded.betaId, seeded.gammaId]));
@@ -141,11 +141,11 @@ describe('Cross-memory same-loc nodes survive deduplication', () => {
     // a link points to the same loc — which the DB unique blocks. The
     // cross-memory case is the load-bearing one this fix unblocks.
     //
-    // Sanity: Query.nodes returns the one canonical row.
-    const result = await resolvers.Query.nodes({}, {}, adminCtx());
-    const matches = (result as Array<{ loc: string; memoryId: string; name: string }>).filter(
-      (n) => n.loc === 'shared' && n.memoryId === memId,
-    );
+    // Sanity: findNodes returns the one canonical row.
+    const result = await resolvers.Query.findNodes({}, {}, adminCtx());
+    const matches = result.hits
+      .map((h) => h.node as { loc: string; memoryId: string; name: string })
+      .filter((n) => n.loc === 'shared' && n.memoryId === memId);
     expect(matches.length).toBe(1);
     expect(matches[0].name).toBe('canonical');
   });

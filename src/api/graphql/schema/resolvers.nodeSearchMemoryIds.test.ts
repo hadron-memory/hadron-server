@@ -1,10 +1,14 @@
 /**
- * Issue #355 — `nodeSearch(memoryIds:)` plural memory-set scope.
+ * Issue #355 — `findNodes(filter: { memoryIds })` plural memory-set scope.
  *
  * Lets the portal run one node-content search across an agent's / app's
  * SET of memories in a single round-trip, instead of one-memory-or-all.
  * Keyword mode is exercised here (no embedding backend required); the
  * scope-resolution branch under test is shared by vector/hybrid.
+ *
+ * (Migrated in PR3 from the removed `nodeSearch` query to `findNodes`. The
+ * `memoryIds`-takes-precedence-over-`memoryUrn` case was dropped: findNodes has
+ * no singular `memoryUrn` param — memory scope is only `filter.memoryIds`.)
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -59,8 +63,8 @@ async function seedThreeMemoriesEachWithMatch(): Promise<Seeded> {
 }
 
 function memIdsOf(res: unknown): Set<string> {
-  const nodes = (res as { nodes: Array<{ memoryId: string }> }).nodes;
-  return new Set(nodes.map((n) => n.memoryId));
+  const hits = (res as { hits: Array<{ node: { memoryId: string } }> }).hits;
+  return new Set(hits.map((h) => h.node.memoryId));
 }
 
 beforeEach(async () => {
@@ -79,12 +83,12 @@ beforeEach(async () => {
   adminId = admin.id;
 });
 
-describe('Query.nodeSearch memoryIds (plural) scope — issue #355', () => {
+describe('findNodes filter.memoryIds (plural) scope — issue #355', () => {
   it('scopes keyword search to a subset of memories', async () => {
     const s = await seedThreeMemoriesEachWithMatch();
-    const res = await resolvers.Query.nodeSearch(
+    const res = await resolvers.Query.findNodes(
       {},
-      { query: 'start-here', mode: 'keyword', memoryIds: [s.alphaId, s.betaId] },
+      { query: 'start-here', mode: 'keyword', filter: { memoryIds: [s.alphaId, s.betaId] } },
       adminCtx(),
     );
     expect(memIdsOf(res)).toEqual(new Set([s.alphaId, s.betaId]));
@@ -92,19 +96,9 @@ describe('Query.nodeSearch memoryIds (plural) scope — issue #355', () => {
 
   it('drops ids outside the accessible set (no throw)', async () => {
     const s = await seedThreeMemoriesEachWithMatch();
-    const res = await resolvers.Query.nodeSearch(
+    const res = await resolvers.Query.findNodes(
       {},
-      { query: 'start-here', mode: 'keyword', memoryIds: [s.alphaId, generateId()] },
-      adminCtx(),
-    );
-    expect(memIdsOf(res)).toEqual(new Set([s.alphaId]));
-  });
-
-  it('takes precedence over the singular memoryUrn when both are supplied', async () => {
-    const s = await seedThreeMemoriesEachWithMatch();
-    const res = await resolvers.Query.nodeSearch(
-      {},
-      { query: 'start-here', mode: 'keyword', memoryUrn: s.gammaUrn, memoryIds: [s.alphaId] },
+      { query: 'start-here', mode: 'keyword', filter: { memoryIds: [s.alphaId, generateId()] } },
       adminCtx(),
     );
     expect(memIdsOf(res)).toEqual(new Set([s.alphaId]));
@@ -112,9 +106,9 @@ describe('Query.nodeSearch memoryIds (plural) scope — issue #355', () => {
 
   it('an empty memoryIds array falls through to all accessible memories', async () => {
     const s = await seedThreeMemoriesEachWithMatch();
-    const res = await resolvers.Query.nodeSearch(
+    const res = await resolvers.Query.findNodes(
       {},
-      { query: 'start-here', mode: 'keyword', memoryIds: [] },
+      { query: 'start-here', mode: 'keyword', filter: { memoryIds: [] } },
       adminCtx(),
     );
     expect(memIdsOf(res)).toEqual(new Set([s.alphaId, s.betaId, s.gammaId]));

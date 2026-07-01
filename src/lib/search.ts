@@ -1,83 +1,15 @@
 /**
- * Spec 033 US3 — shared search helpers used by both the MCP hadron_find_nodes
- * surface (`src/mcp/server.ts`) and the GraphQL nodeSearch resolver
- * (`src/api/graphql/schema/resolvers.ts`).
+ * Graph-neighbour expansion for node search — the `expand` (BFS) helper shared
+ * by the GraphQL `findNodes` resolver and the MCP `hadron_find_nodes` surface.
  *
  * Lives in `src/lib/` (no MCP / GraphQL deps) so both consumers can import
  * from a leaf module — extracted in PR-223 review to break the circular
- * dependency that was forming once GraphQL started consuming the helpers
- * (mcp/server.ts already imports from resolvers.ts via the chat tools).
+ * dependency that was forming once GraphQL started consuming the helpers.
+ * (The legacy `matchesQuery` / `keywordRelevanceRank` keyword helpers lived
+ * here too until PR3 removed the `nodes` / `nodeSearch` queries.)
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
-
-/**
- * Substring match across name + loc + description + tags. The keyword
- * search predicate for hadron_find_nodes.
- *
- * Issue #170: `*` and trimmed-empty are "match all" — without this an
- * agent surveying a memory will reasonably try `query: "*"` first, get
- * "No nodes found", and proceed to write over an existing tree.
- */
-export function matchesQuery(
-  node: { name: string; loc: string; description: string | null; tags: string[] },
-  query: string,
-): boolean {
-  const trimmed = query.trim();
-  if (trimmed === '' || trimmed === '*') return true;
-  const terms = trimmed.toLowerCase().split(/\s+/);
-  const haystack = [node.name, node.loc, node.description || '', ...node.tags]
-    .join(' ')
-    .toLowerCase();
-  return terms.every((t) => haystack.includes(t));
-}
-
-/**
- * Spec 033 US3 (T048) — re-rank keyword hits by relevance signal so RRF
- * fusion isn't biased by the default alphabetical-by-loc order from
- * `db.node.findMany`. Today's `mode:keyword` (default) path renders
- * results in DB order for stability; this helper feeds the RRF input
- * only on the hybrid path.
- *
- * Signal ordering per contracts/hadron_find_nodes.md:
- *   1. Distinct query terms matched (desc) — does the node hit MORE of
- *      the query? Strong indicator.
- *   2. Total term frequency across the haystack (desc) — secondary
- *      relevance signal for ties on (1).
- *   3. `loc` ascending — deterministic tiebreak so the same input
- *      always produces the same output.
- *
- * The haystack mirrors `matchesQuery` (name + loc + description + tags).
- * Query is lowercased + split on whitespace; empty/`*` query maps to no
- * terms and the function returns the input unchanged.
- */
-export function keywordRelevanceRank<
-  T extends { name: string; loc: string; description: string | null; tags: string[] },
->(nodes: T[], query: string): T[] {
-  const trimmed = query.trim();
-  if (trimmed === '' || trimmed === '*') return [...nodes];
-  const terms = trimmed.toLowerCase().split(/\s+/).filter(Boolean);
-  return [...nodes]
-    .map((node) => {
-      const haystack = [node.name, node.loc, node.description || '', ...node.tags]
-        .join(' ')
-        .toLowerCase();
-      let distinctMatches = 0;
-      let totalFreq = 0;
-      for (const term of terms) {
-        const occurrences = haystack.split(term).length - 1;
-        if (occurrences > 0) distinctMatches += 1;
-        totalFreq += occurrences;
-      }
-      return { node, distinctMatches, totalFreq };
-    })
-    .sort((a, b) => {
-      if (a.distinctMatches !== b.distinctMatches) return b.distinctMatches - a.distinctMatches;
-      if (a.totalFreq !== b.totalFreq) return b.totalFreq - a.totalFreq;
-      return a.node.loc.localeCompare(b.node.loc);
-    })
-    .map((entry) => entry.node);
-}
 
 /**
  * Spec 033 US3 (T049) — append undirected graph neighbors after the
