@@ -60,6 +60,7 @@ import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { UserNotFoundError } from '../../../lib/entityRef/errors.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import {
   resolveResource as resolveAccessResource,
   callerCanAudit,
@@ -254,12 +255,31 @@ export const resolvers = {
     // Grantees can read their own shares via User.memorySharesGranted
     // (out of scope here; can be added if a portal page needs it).
     shares: async (
-      g: { id: string; class: string; userId?: string | null; organizationId: string },
+      g: { id: string; class?: string; userId?: string | null; organizationId?: string },
       _: unknown,
       ctx: Context,
     ) => {
-      if (g.class !== 'personal') return [];
-      const isPrincipal = ctx.userId !== undefined && ctx.userId === g.userId;
+      // Fast path: a loaded, non-personal class has no shares and needs no
+      // scoping fields — skip the fallback fetch entirely.
+      if (g.class !== undefined && g.class !== 'personal') return [];
+      // Partial-select-safe: some query paths select Memory with only a subset
+      // of fields. Fetch the missing scoping fields rather than silently
+      // returning `[]` for a real personal memory (mirrors `members` above).
+      let cls = g.class;
+      let uId = g.userId;
+      let orgId = g.organizationId;
+      if (cls === undefined || uId === undefined || orgId === undefined) {
+        const m = await ctx.db.memory.findUnique({
+          where: { id: g.id },
+          select: { class: true, userId: true, organizationId: true },
+        });
+        if (!m) return [];
+        cls = m.class;
+        uId = m.userId;
+        orgId = m.organizationId;
+      }
+      if (cls !== 'personal') return [];
+      const isPrincipal = ctx.userId !== undefined && ctx.userId === uId;
       const isPlatformAdmin =
         ctx.roles?.includes('ADMIN') === true || ctx.roles?.includes('OWNER') === true;
       if (!isPrincipal && !isPlatformAdmin) {
@@ -272,7 +292,7 @@ export const resolvers = {
         const member = await ctx.db.orgMember.findUnique({
           where: {
             organizationId_userId: {
-              organizationId: g.organizationId,
+              organizationId: orgId,
               userId: ctx.userId,
             },
           },
@@ -698,6 +718,10 @@ export const resolvers = {
           { visibility: { not: 'PERSONAL' as AgentVisibility } },
           { visibility: 'PERSONAL' as AgentVisibility, createdBy: ctx.userId },
         ];
+      } else {
+        // No user (App Key / unauthenticated): never expose PERSONAL
+        // (creator-only draft) agents.
+        where.visibility = { not: 'PERSONAL' as AgentVisibility };
       }
       return ctx.db.agent.findMany({
         where,
@@ -879,8 +903,8 @@ export const resolvers = {
       const isOrgMember = async (orgId: string): Promise<boolean> => {
         if (isGlobalAdmin) return true;
         if (!ctx.userId) return false;
-        const member = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+        const member = await ctx.db.orgMember.findFirst({
+          where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
         });
         return !!member;
       };
@@ -2518,8 +2542,8 @@ export const resolvers = {
       const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
         if (!ctx.userId) throw new Error('Forbidden');
-        const member = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: resolvedId, userId: ctx.userId } },
+        const member = await ctx.db.orgMember.findFirst({
+          where: { organizationId: resolvedId, userId: ctx.userId, deletedAt: null },
         });
         if (!member) throw new Error('Forbidden');
       }
@@ -2551,8 +2575,22 @@ export const resolvers = {
     },
 
     memory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: id may be an ID or a URN. A raw ID needs no
+      // resolution (skip the extra lookup); a URN is resolved to its id. Only a
+      // genuine miss (MemoryNotFoundError) collapses to null — malformed URNs
+      // and unexpected DB/runtime errors propagate rather than masking as a
+      // misleading not-found (mirrors the effectiveAccess resolver).
+      let resolvedId = id;
+      if (!isId(id)) {
+        try {
+          ({ id: resolvedId } = await resolveMemoryRef(ctx.db, id));
+        } catch (e) {
+          if (!(e instanceof MemoryNotFoundError)) throw e;
+          return null;
+        }
+      }
       const memory = await ctx.db.memory.findUnique({
-        where: { id },
+        where: { id: resolvedId },
         include: MEMORY_INCLUDE,
       });
       if (!memory || memory.deletedAt) return null;
@@ -2608,8 +2646,8 @@ export const resolvers = {
       // Authorization: platform ADMIN or member of the org
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
         if (!ctx.userId) throw new Error('Forbidden');
-        const member = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: ctx.userId } },
+        const member = await ctx.db.orgMember.findFirst({
+          where: { organizationId: resolvedOrgId, userId: ctx.userId, deletedAt: null },
         });
         if (!member) throw new Error('Forbidden');
       }
