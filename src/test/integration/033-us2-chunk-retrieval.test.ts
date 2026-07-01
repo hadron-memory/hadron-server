@@ -282,14 +282,14 @@ describe('US2 — granularity:chunk rejection (PR-225 review)', () => {
     expect(out).toContain('mode:keyword');
   });
 
-  it('GraphQL nodeSearch: granularity:chunk with mode:hybrid → GraphQLError(BAD_USER_INPUT)', async () => {
+  it('GraphQL findNodes: granularity:chunk with mode:hybrid → GraphQLError(BAD_USER_INPUT)', async () => {
     setEmbeddingClientForTests(stubClient({}));
     await expect(
-      resolvers.Query.nodeSearch(
+      resolvers.Query.findNodes(
         {},
         {
           query: 'anything',
-          memoryUrn: memUrn,
+          filter: { memoryIds: [memUrn] },
           mode: 'hybrid',
           granularity: 'chunk',
         },
@@ -301,21 +301,21 @@ describe('US2 — granularity:chunk rejection (PR-225 review)', () => {
     });
   });
 
-  it('GraphQL nodeSearch: granularity:chunk + mode:vector still works (positive control)', async () => {
+  it('GraphQL findNodes: granularity:chunk + mode:vector still works (positive control)', async () => {
     setEmbeddingClientForTests(stubClient({}));
     // Seed at least one chunked node so the path returns something.
     await seedNodeWithChunks('positive-control', '# A\nbody.\n\n## B\nmore.');
-    const result = await resolvers.Query.nodeSearch(
+    const result = await resolvers.Query.findNodes(
       {},
       {
         query: 'anything',
-        memoryUrn: memUrn,
+        filter: { memoryIds: [memUrn] },
         mode: 'vector',
         granularity: 'chunk',
       },
       adminCtx(),
     );
-    expect(result.nodes).toEqual([]);
+    expect(result.hits).toEqual([]);
     expect(Array.isArray(result.passages)).toBe(true);
     expect((result.passages as unknown[]).length).toBeGreaterThan(0);
   });

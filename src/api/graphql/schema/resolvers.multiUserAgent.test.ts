@@ -29,6 +29,13 @@ function ctx(overrides: Partial<Context> = {}): Context {
   return { db, ...overrides };
 }
 
+// PR3: Query.nodes was replaced by Query.findNodes. This helper preserves the
+// old list-of-nodes shape so the access-scoping assertions below are unchanged.
+async function listNodes(args: any, ctx: any) {
+  const res = await resolvers.Query.findNodes(null, args, ctx);
+  return res.hits.map((h) => h.node);
+}
+
 // Admin context for ADMIN-only mutations
 function adminCtx(overrides: Partial<Context> = {}): Context {
   return { db, roles: ['ADMIN'], userId: adminUser.id, ...overrides };
@@ -574,11 +581,7 @@ describe('memoryAccessFilter (App Key session scoping)', () => {
 
     // Nodes query — the security-critical path
     const sessionCtx = appCtx(app.id, { sessionId: session.id });
-    const nodes = await resolvers.Query.nodes(
-      {},
-      { limit: 1000 },
-      sessionCtx,
-    );
+    const nodes = await listNodes({ limit: 1000 }, sessionCtx);
 
     // No nodes should leak from foreignMem
     for (const n of nodes) {
@@ -607,7 +610,7 @@ describe('memoryAccessFilter (App Key session scoping)', () => {
         name: 'x',
       },
     });
-    const nodes = await resolvers.Query.nodes({}, { limit: 1000 }, appCtx(app.id));
+    const nodes = await listNodes({ limit: 1000 }, appCtx(app.id));
     expect(nodes.length).toBe(0);
   });
 });

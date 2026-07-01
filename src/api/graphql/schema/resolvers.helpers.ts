@@ -13,7 +13,6 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
-import { expandWithNeighbors } from '../../../lib/search.js';
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import {
@@ -21,7 +20,6 @@ import {
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
-import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import {
   formatCanonicalUrn,
   type CanonicalUrnType,
@@ -442,53 +440,6 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
     console.warn(`[safeCanonicalUrn] failed to canonicalize ${type} URN "${raw}"; serving raw value:`, err);
     return raw;
   }
-}
-
-/**
- * Spec 033 US3 — shared rendering pass for `nodeSearch`. Takes the
- * ranked node IDs from any of the three modes (keyword/vector/hybrid),
- * optionally appends BFS-expanded neighbors, fetches the full node rows
- * (with edges + decryption applied), and re-orders them to match the
- * input ranking. Returns the GraphQL NodeSearchResult envelope.
- *
- * The expand-scope here is the memory set the ranked path searched —
- * for vector/hybrid that's the indexed memories; for keyword that's
- * the broader accessible set.
- */
-export async function renderNodeSearchResult(
-  ctx: Context,
-  rankedIds: string[],
-  expand: number | undefined,
-  expandScope: string[],
-  reason: string | null,
-  degraded: string | null,
-): Promise<{
-  nodes: unknown[];
-  passages: unknown[];
-  reason: string | null;
-  degraded: string | null;
-}> {
-  const neighborIds =
-    expand && expand > 0
-      ? await expandWithNeighbors(ctx.db, rankedIds, expand, { memoryIds: expandScope })
-      : [];
-  const allIds = [...rankedIds, ...neighborIds];
-  if (allIds.length === 0) {
-    return { nodes: [], passages: [], reason, degraded };
-  }
-  const fetched = await ctx.db.node.findMany({
-    where: { id: { in: allIds }, deletedAt: null },
-    include: {
-      outgoingEdges: { include: { target: true } },
-      incomingEdges: { include: { source: true } },
-    },
-  });
-  await decryptNodesBatch(ctx.db, fetched);
-  const byId = new Map(fetched.map((n) => [n.id, n]));
-  const ordered = allIds
-    .map((id) => byId.get(id))
-    .filter((n): n is NonNullable<typeof n> => n !== undefined);
-  return { nodes: ordered, passages: [], reason, degraded };
 }
 
 // Note (PR-227 review, Gemini): a `deduplicateNodes` helper lived here

@@ -34,6 +34,14 @@ function ctx(overrides: Partial<Context> = {}): Context {
   return { db, ...overrides };
 }
 
+// findNodes replaced the deleted Query.nodes. It returns a hit envelope; the
+// access-scoping (getAccessibleMemoryIds) is identical, so this helper adapts
+// the result shape back to a plain Node[] for the assertions below.
+async function listNodes(args: any, ctx: any) {
+  const res = await resolvers.Query.findNodes(null, args, ctx);
+  return res.hits.map((h) => h.node);
+}
+
 beforeEach(async () => {
   await cleanDb(db);
 
@@ -101,40 +109,40 @@ beforeEach(async () => {
 // Query: nodes
 // ---------------------------------------------------------------------------
 
-describe('Query.nodes access control', () => {
+describe('findNodes access control', () => {
   it('global ADMIN sees all nodes', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, {}, ctx({ clientId: 'github:admin', userId: 'x', roles: ['ADMIN'] }),
+    const nodes = await listNodes(
+      {}, ctx({ clientId: 'github:admin', userId: 'x', roles: ['ADMIN'] }),
     );
     expect(nodes).toHaveLength(2);
   });
 
   it('user A sees only org A nodes', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, {}, ctx({ clientId: `github:${userA.id}`, userId: userA.id, roles: ['READER'] }),
+    const nodes = await listNodes(
+      {}, ctx({ clientId: `github:${userA.id}`, userId: userA.id, roles: ['READER'] }),
     );
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('org-a.repo.nodeA');
   });
 
   it('user B sees only org B nodes', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, {}, ctx({ clientId: `github:${userB.id}`, userId: userB.id, roles: ['READER'] }),
+    const nodes = await listNodes(
+      {}, ctx({ clientId: `github:${userB.id}`, userId: userB.id, roles: ['READER'] }),
     );
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('org-b.repo.nodeB');
   });
 
-  it('App-keyed caller (no session) sees no nodes via GraphQL — Query.nodes is a management-only path; App memory reads go through MCP', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, {}, ctx({ appId: appReader.id }),
+  it('App-keyed caller (no session) sees no nodes via GraphQL — findNodes is a management-only path; App memory reads go through MCP', async () => {
+    const nodes = await listNodes(
+      {}, ctx({ appId: appReader.id }),
     );
     expect(nodes).toHaveLength(0);
   });
 
   it('unauthenticated sees only public memory nodes', async () => {
     await db.memory.update({ where: { id: graphB.id }, data: { visibility: 'PUBLIC' } });
-    const nodes = await resolvers.Query.nodes(null, {}, ctx());
+    const nodes = await listNodes({}, ctx());
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('org-b.repo.nodeB');
   });
@@ -189,8 +197,8 @@ describe('cross-org memory subscription access', () => {
     await db.memorySubscription.create({
       data: { memoryId: graphA.id, organizationId: orgB.id, role: 'READER' },
     });
-    const nodes = await resolvers.Query.nodes(
-      null, {}, ctx({ clientId: `github:${userB.id}`, userId: userB.id, roles: ['READER'] }),
+    const nodes = await listNodes(
+      {}, ctx({ clientId: `github:${userB.id}`, userId: userB.id, roles: ['READER'] }),
     );
     // User B sees org B nodes + subscribed graph A nodes
     expect(nodes).toHaveLength(2);
@@ -498,8 +506,8 @@ describe('Mutation.replaceSubtree access control', () => {
 
 describe('global ADMIN bypass', () => {
   it('ADMIN can read all nodes', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, {}, ctx({ roles: ['ADMIN'] }),
+    const nodes = await listNodes(
+      {}, ctx({ roles: ['ADMIN'] }),
     );
     expect(nodes).toHaveLength(2);
   });

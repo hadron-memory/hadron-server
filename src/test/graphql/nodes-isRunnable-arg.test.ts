@@ -1,19 +1,14 @@
 /**
- * Schema-surface regression for issue #372 — the `isRunnable` filter on
- * `Query.nodes`.
+ * Schema-surface regression for issue #372 — the `isRunnable` filter on node
+ * search.
  *
- * The resolver applied `isRunnable` (added in #359, cor:api:060), but a
- * matching test executed the resolver DIRECTLY, which bypasses GraphQL
- * validation. So a missing arg declaration in the SDL went uncaught: every
- * real client request `nodes(isRunnable: ...)` failed with
- * `Unknown argument "isRunnable" on field "Query.nodes"`
- * (GRAPHQL_VALIDATION_FAILED) before reaching the resolver.
- *
- * This guards the SCHEMA surface itself: build the schema from the SDL and
- * `parse + validate` — exactly the layer that produced the live failure. Keep
- * it here (resolver behavior is covered by resolvers.nodesMemoryFilter.test.ts)
- * so removing the arg from typeDefs trips a test even though the resolver still
- * compiles.
+ * Originally this guarded `Query.nodes(isRunnable:)`. PR3 removed the `nodes`
+ * query; the runnable filter now lives on `findNodes` as `NodeFilter.isRunnable`
+ * (cor:api:060 / cor:api:090:02). This still guards the SCHEMA surface itself —
+ * build the schema from the SDL and `parse + validate`, the layer that produced
+ * the original live `Unknown argument` failure — so dropping the field from
+ * `NodeFilter` in typeDefs trips a test even though the resolver still compiles.
+ * (Resolver behavior is covered by resolvers.findNodes.test.ts.)
  */
 
 import { describe, it, expect } from 'vitest';
@@ -26,26 +21,32 @@ function validationErrorMessages(query: string): string[] {
   return validate(schema, parse(query)).map((e) => e.message);
 }
 
-describe('issue #372 — Query.nodes declares the isRunnable filter arg', () => {
-  it('accepts nodes(isRunnable: true) without a validation error', () => {
-    expect(validationErrorMessages(`query { nodes(isRunnable: true) { loc } }`)).toEqual([]);
+describe('issue #372 (PR3) — findNodes NodeFilter declares the isRunnable field', () => {
+  it('accepts findNodes(filter: { isRunnable: true }) without a validation error', () => {
+    expect(
+      validationErrorMessages(`query { findNodes(filter: { isRunnable: true }) { total } }`),
+    ).toEqual([]);
   });
 
-  it('accepts nodes(isRunnable: false)', () => {
-    expect(validationErrorMessages(`query { nodes(isRunnable: false) { loc } }`)).toEqual([]);
+  it('accepts findNodes(filter: { isRunnable: false })', () => {
+    expect(
+      validationErrorMessages(`query { findNodes(filter: { isRunnable: false }) { total } }`),
+    ).toEqual([]);
   });
 
-  it('composes isRunnable with the existing memory-scope args', () => {
+  it('composes isRunnable with the other filter + query args', () => {
     expect(
       validationErrorMessages(
-        `query { nodes(memoryIds: ["m1"], isRunnable: true, limit: 50) { loc name } }`,
+        `query { findNodes(query: "x", filter: { memoryIds: ["m1"], isRunnable: true }, limit: 50) { hits { node { loc name } } } }`,
       ),
     ).toEqual([]);
   });
 
   it('is typed Boolean — a non-Boolean literal is rejected', () => {
-    // Confirms the arg is genuinely declared (and typed), not silently ignored.
-    const errors = validationErrorMessages(`query { nodes(isRunnable: "yes") { loc } }`);
+    // Confirms the field is genuinely declared (and typed), not silently ignored.
+    const errors = validationErrorMessages(
+      `query { findNodes(filter: { isRunnable: "yes" }) { total } }`,
+    );
     expect(errors.some((m) => m.includes('Boolean cannot represent'))).toBe(true);
   });
 });

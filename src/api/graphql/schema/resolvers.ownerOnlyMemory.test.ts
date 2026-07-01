@@ -24,6 +24,13 @@ function ctx(overrides: Partial<Context> = {}): Context {
   return { db, ...overrides };
 }
 
+// PR3: Query.nodes was replaced by Query.findNodes. This helper preserves the
+// old list-of-nodes shape so the owner-only access assertions are unchanged.
+async function listNodes(args: any, c: any) {
+  const res = await resolvers.Query.findNodes(null, args, c);
+  return res.hits.map((h) => h.node);
+}
+
 let org: { id: string };
 let owner: { id: string }; // org READER who creates + owns the memory
 let other: { id: string }; // another org READER
@@ -92,7 +99,7 @@ describe('private/personal access is owner-only', () => {
     const node = await resolvers.Mutation.upsertNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.note', name: 'note' } } as any, asOwner());
     expect(node.loc).toBe('micromentor.repo.note');
     // owner sees its nodes
-    const nodes = await resolvers.Query.nodes(null, {}, asOwner());
+    const nodes = await listNodes({}, asOwner());
     expect(nodes.some((n: any) => n.memoryId === mem.id)).toBe(true);
   });
 
@@ -101,7 +108,7 @@ describe('private/personal access is owner-only', () => {
     await expect(resolvers.Query.memory(null, { id: mem.id }, asOther())).rejects.toThrow('Forbidden');
     const mine = await resolvers.Query.myMemories(null, {}, asOther());
     expect(mine.map((m: any) => m.id)).not.toContain(mem.id);
-    const nodes = await resolvers.Query.nodes(null, {}, asOther());
+    const nodes = await listNodes({}, asOther());
     expect(nodes.some((n: any) => n.memoryId === mem.id)).toBe(false);
     await expect(
       resolvers.Mutation.upsertNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.hack', name: 'h' } } as any, asOther()),

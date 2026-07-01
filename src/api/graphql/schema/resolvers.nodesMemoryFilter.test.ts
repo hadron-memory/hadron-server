@@ -27,6 +27,16 @@ function userActx(): Context {
   return ctx({ clientId: 'github:user-a', userId: userA.id, roles: ['READER'] });
 }
 
+// findNodes returns { hits: [{ node, score, vector }], ... }; these tests only
+// care about the node list, so unwrap to Node[] at the call site.
+async function listNodes(
+  args: Parameters<typeof resolvers.Query.findNodes>[1],
+  context: Context,
+) {
+  const res = await resolvers.Query.findNodes(null, args, context);
+  return res.hits.map((h) => h.node);
+}
+
 beforeEach(async () => {
   await cleanDb(db);
 
@@ -60,26 +70,26 @@ beforeEach(async () => {
   await createDbNode(db, { loc: 'other-org', memoryId: memB.id });
 });
 
-describe('Query.nodes memory filter', () => {
+describe('findNodes (node list) memory filter', () => {
   it('scopes to a single memory by ID', async () => {
-    const nodes = await resolvers.Query.nodes(null, { memory: memA1.id }, userActx());
+    const nodes = await listNodes({ filter: { memoryIds: [memA1.id] } }, userActx());
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('one');
   });
 
   it('scopes to a single memory by URN', async () => {
-    const nodes = await resolvers.Query.nodes(null, { memory: memA1.urn }, userActx());
+    const nodes = await listNodes({ filter: { memoryIds: [memA1.urn] } }, userActx());
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('one');
   });
 
   it('without the filter returns nodes from all accessible memories', async () => {
-    const nodes = await resolvers.Query.nodes(null, {}, userActx());
+    const nodes = await listNodes({}, userActx());
     expect(nodes).toHaveLength(2);
   });
 
   it('intersects with the access filter: scoping to an inaccessible memory yields []', async () => {
-    const nodes = await resolvers.Query.nodes(null, { memory: memB.id }, userActx());
+    const nodes = await listNodes({ filter: { memoryIds: [memB.id] } }, userActx());
     expect(nodes).toHaveLength(0);
   });
 
@@ -90,30 +100,37 @@ describe('Query.nodes memory filter', () => {
     // result set back to every accessible memory.
     await createDbNode(db, { loc: 'tagged-one', memoryId: memA1.id, tags: ['t1'] });
     await createDbNode(db, { loc: 'tagged-two', memoryId: memA2.id, tags: ['t1'] });
-    const nodes = await resolvers.Query.nodes(
-      null, { memory: memA1.id, tags: ['t1'] }, userActx(),
+    const nodes = await listNodes(
+      { filter: { memoryIds: [memA1.id], tags: ['t1'] } }, userActx(),
     );
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('tagged-one');
   });
 
-  it('unknown memory ref throws', async () => {
-    await expect(
-      resolvers.Query.nodes(null, { memory: 'org-a:does-not-exist' }, userActx()),
-    ).rejects.toThrow();
+  it('unknown memory ref is dropped (empty result, no throw)', async () => {
+    // Divergence from the old `nodes` resolver, which THREW on an unresolvable
+    // ref. findNodes silently drops unresolvable memoryIds; a lone bad ref
+    // therefore yields an empty scope → [] with no error.
+    const nodes = await listNodes(
+      { filter: { memoryIds: ['org-a:does-not-exist'] } }, userActx(),
+    );
+    expect(nodes).toHaveLength(0);
   });
 });
 
-describe('Query.nodes memoryIds (plural) filter — issue #355', () => {
+// NOTE: the old `nodes` case "memoryIds takes precedence over the singular
+// `memory` arg" was removed here — findNodes has no singular `memory` param;
+// both id-forms unify into filter.memoryIds, so the precedence question is moot.
+describe('findNodes (node list) memoryIds filter — issue #355', () => {
   it('scopes to a SET of memories by id', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, { memoryIds: [memA1.id, memA2.id] }, userActx(),
+    const nodes = await listNodes(
+      { filter: { memoryIds: [memA1.id, memA2.id] } }, userActx(),
     );
     expect(nodes.map((n) => n.loc).sort()).toEqual(['one', 'two']);
   });
 
   it('scopes to a subset of the accessible memories', async () => {
-    const nodes = await resolvers.Query.nodes(null, { memoryIds: [memA2.id] }, userActx());
+    const nodes = await listNodes({ filter: { memoryIds: [memA2.id] } }, userActx());
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('two');
   });
@@ -121,65 +138,57 @@ describe('Query.nodes memoryIds (plural) filter — issue #355', () => {
   it('intersects with the access filter: inaccessible ids are silently dropped', async () => {
     // memB belongs to org-b, which userA cannot read. The whole search must
     // not fail — the inaccessible id is simply dropped from the set.
-    const nodes = await resolvers.Query.nodes(
-      null, { memoryIds: [memA1.id, memB.id] }, userActx(),
+    const nodes = await listNodes(
+      { filter: { memoryIds: [memA1.id, memB.id] } }, userActx(),
     );
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('one');
   });
 
-  it('takes precedence over the singular `memory` arg when both are supplied', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, { memory: memA1.id, memoryIds: [memA2.id] }, userActx(),
-    );
-    expect(nodes).toHaveLength(1);
-    expect(nodes[0].loc).toBe('two');
-  });
-
   it('an empty memoryIds array falls through to all accessible memories', async () => {
-    const nodes = await resolvers.Query.nodes(null, { memoryIds: [] }, userActx());
+    const nodes = await listNodes({ filter: { memoryIds: [] } }, userActx());
     expect(nodes).toHaveLength(2);
   });
 
   it('accepts fully-qualified URNs as well as IDs', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, { memoryIds: [memA1.urn, memA2.id] }, userActx(),
+    const nodes = await listNodes(
+      { filter: { memoryIds: [memA1.urn, memA2.id] } }, userActx(),
     );
     expect(nodes.map((n) => n.loc).sort()).toEqual(['one', 'two']);
   });
 
   it('silently drops unresolvable refs instead of throwing', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, { memoryIds: [memA1.id, 'org-a:does-not-exist'] }, userActx(),
+    const nodes = await listNodes(
+      { filter: { memoryIds: [memA1.id, 'org-a:does-not-exist'] } }, userActx(),
     );
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('one');
   });
 });
 
-describe('Query.nodes isRunnable filter — cor:api:060', () => {
+describe('findNodes (node list) isRunnable filter — cor:api:060', () => {
   beforeEach(async () => {
     await createDbNode(db, { loc: 'task-one', memoryId: memA1.id, isRunnable: true });
     await createDbNode(db, { loc: 'not-runnable', memoryId: memA1.id, isRunnable: false });
   });
 
   it('isRunnable=true returns only runnable task nodes', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, { memory: memA1.id, isRunnable: true }, userActx(),
+    const nodes = await listNodes(
+      { filter: { memoryIds: [memA1.id], isRunnable: true } }, userActx(),
     );
     expect(nodes.map((n) => n.loc).sort()).toEqual(['task-one']);
   });
 
   it('isRunnable=false returns only strictly-false nodes (not the NULL majority)', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, { memory: memA1.id, isRunnable: false }, userActx(),
+    const nodes = await listNodes(
+      { filter: { memoryIds: [memA1.id], isRunnable: false } }, userActx(),
     );
     expect(nodes.map((n) => n.loc).sort()).toEqual(['not-runnable']);
   });
 
   it('omitting the filter returns nodes regardless of runnable status', async () => {
-    const nodes = await resolvers.Query.nodes(
-      null, { memory: memA1.id }, userActx(),
+    const nodes = await listNodes(
+      { filter: { memoryIds: [memA1.id] } }, userActx(),
     );
     // 'one' (from the outer beforeEach, isRunnable NULL) + the two added here.
     expect(nodes.map((n) => n.loc).sort()).toEqual(['not-runnable', 'one', 'task-one']);
@@ -187,8 +196,8 @@ describe('Query.nodes isRunnable filter — cor:api:060', () => {
 
   it('composes with memoryIds scope', async () => {
     await createDbNode(db, { loc: 'task-two', memoryId: memA2.id, isRunnable: true });
-    const nodes = await resolvers.Query.nodes(
-      null, { memoryIds: [memA1.id, memA2.id], isRunnable: true }, userActx(),
+    const nodes = await listNodes(
+      { filter: { memoryIds: [memA1.id, memA2.id], isRunnable: true } }, userActx(),
     );
     expect(nodes.map((n) => n.loc).sort()).toEqual(['task-one', 'task-two']);
   });
