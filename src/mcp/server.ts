@@ -1292,7 +1292,10 @@ export function createMcpServerInstance(
       // meaningless to a vector embedder — reject it up front for vector/hybrid
       // (preserves the pre-delegation [empty_vector_query] contract). For the
       // lexical modes it maps to a query-omitted findNodes call (filtered list).
-      const trimmedQuery = query.trim();
+      // createTestableMcpServer bypasses zod validation (the test-parity gap),
+      // so coerce a non-string query before .trim() rather than crash.
+      const safeQuery = typeof query === 'string' ? query : '';
+      const trimmedQuery = safeQuery.trim();
       const isSurvey = trimmedQuery === '' || trimmedQuery === '*';
       if (isSurvey && (effectiveMode === 'vector' || effectiveMode === 'hybrid')) {
         return textResult(
@@ -1302,6 +1305,25 @@ export function createMcpServerInstance(
 
       const trimmedParentRel = parentRel?.trim();
       const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
+
+      // App Key + active session hard-isolates reads to the session's memory
+      // (+ the agent's system memory) — findNodes enforces this downstream
+      // (getAccessibleMemoryIds, checked first, ahead of any role). The
+      // pre-scope memoryUrn / parentRel gates must enforce the SAME boundary,
+      // or an out-of-session ref would pass canReadMemory here and then
+      // silently yield "No nodes found" instead of the contract "not found"
+      // (a session-boundary access oracle). Mirrors the resolver's
+      // getAccessibleMemoryIds app+session branch.
+      let sessionMemoryIds: Set<string> | null = null;
+      if (auth.appId && auth.sessionId) {
+        const session = await db.session.findUnique({
+          where: { id: auth.sessionId },
+          select: { memoryId: true, agent: { select: { systemMemoryId: true } } },
+        });
+        sessionMemoryIds = new Set<string>();
+        if (session?.memoryId) sessionMemoryIds.add(session.memoryId);
+        if (session?.agent?.systemMemoryId) sessionMemoryIds.add(session.agent.systemMemoryId);
+      }
 
       // Resolved scope handed to findNodes. When neither memoryUrn nor a
       // memory-resolvable parentRel is supplied, both stay undefined and
@@ -1323,7 +1345,11 @@ export function createMcpServerInstance(
           throw e;
         }
         const mem = await resolveMemoryByUrn(memoryUrn);
-        if (!mem || !(await canReadMemory(db, auth, mem.id))) {
+        if (
+          !mem ||
+          !(await canReadMemory(db, auth, mem.id)) ||
+          (sessionMemoryIds && !sessionMemoryIds.has(mem.id))
+        ) {
           return textResult(
             `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
           );
@@ -1339,7 +1365,10 @@ export function createMcpServerInstance(
         const resolvedParent = await resolveLocFromUrn(trimmedParentRel, accessibleMemoryIds);
         filterLocPrefix = resolvedParent.loc;
         if (resolvedParent.memoryId) {
-          if (!(await canReadMemory(db, auth, resolvedParent.memoryId))) {
+          if (
+            !(await canReadMemory(db, auth, resolvedParent.memoryId)) ||
+            (sessionMemoryIds && !sessionMemoryIds.has(resolvedParent.memoryId))
+          ) {
             return textResult(`Node "${trimmedParentRel}" not found.`);
           }
           filterMemoryIds = [resolvedParent.memoryId];
@@ -1366,7 +1395,7 @@ export function createMcpServerInstance(
           {
             // Survey mode → omit query so findNodes returns the filtered list
             // (subsumes the old matchesQuery "*" / "" path).
-            query: isSurvey ? undefined : query,
+            query: isSurvey ? undefined : safeQuery,
             mode: effectiveMode,
             filter: {
               memoryIds: filterMemoryIds,
@@ -1403,7 +1432,10 @@ export function createMcpServerInstance(
           const parent = parentById.get(p.parentNodeId);
           const urn = parent ? await nodeUrn(parent.loc, parent.memoryId) : p.parentNodeUrn;
           const name = parent?.name ?? '';
-          const header = `- **${urn}** [chunk ${p.chunkIndex} @ chars ${p.charStart}-${p.charEnd}] — ${name}  (score ${p.score.toFixed(3)})`;
+          // Guard the score like renderHit does — a passage without a numeric
+          // score renders without the trailing marker rather than crashing.
+          const scoreStr = p.score != null ? `  (score ${p.score.toFixed(3)})` : '';
+          const header = `- **${urn}** [chunk ${p.chunkIndex} @ chars ${p.charStart}-${p.charEnd}] — ${name}${scoreStr}`;
           const bodyLines = p.text.split(/\r?\n/).map((l) => `  ${l}`);
           lines.push([header, ...bodyLines].join('\n'));
         }
@@ -1432,8 +1464,10 @@ export function createMcpServerInstance(
         note =
           'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]';
       } else if (result.degraded === 'embedding_unavailable') {
+        // findNodes sets this code both when no endpoint is configured AND when
+        // embed() throws — name both causes rather than assert one.
         note =
-          'Note: vector half unavailable (embed() failed); showing keyword results only. [degraded:embedding_unavailable]';
+          'Note: vector half unavailable — no embedding endpoint is configured or embed() failed; showing keyword results only. [degraded:embedding_unavailable]';
       }
 
       // ── Node rendering ─────────────────────────────────────────────────────
@@ -1507,7 +1541,7 @@ export function createMcpServerInstance(
       if (lines.length === 0) {
         // Preserve the byte-identical "no match" output for the lexical path —
         // when hybrid degraded to keyword AND found nothing, prepend the note.
-        const baseMsg = `No nodes found matching "${query}".`;
+        const baseMsg = `No nodes found matching "${safeQuery}".`;
         return textResult(note ? `${note}\n\n${baseMsg}` : baseMsg);
       }
       const body = `Found ${lines.length} node(s):\n\n${lines.join('\n')}`;
