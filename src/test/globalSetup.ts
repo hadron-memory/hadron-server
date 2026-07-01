@@ -108,5 +108,28 @@ export async function setup() {
       ON users (lower(handle)) WHERE handle IS NOT NULL;
   `);
 
+  // cor:api:090 (findNodes) + cor:rag:010:02: lexical FTS substrate — a STORED
+  // generated tsvector (weighted A/B/C/D) + GIN index. Prisma models neither, so
+  // `db push` doesn't create them; mirror post-push.sql here. Source of truth is
+  // prisma/post-push.sql; the two MUST stay in sync.
+  await client.query(`
+    CREATE OR REPLACE FUNCTION hadron_nodes_tsv(
+      p_name text, p_alias text, p_loc text, p_tags text[],
+      p_description text, p_abstract text, p_content text, p_properties text, p_data text
+    ) RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+      SELECT
+        setweight(to_tsvector('english', coalesce(p_name, '') || ' ' || coalesce(p_alias, '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(p_loc, '') || ' ' || array_to_string(coalesce(p_tags, ARRAY[]::text[]), ' ')), 'B') ||
+        setweight(to_tsvector('english', coalesce(p_description, '') || ' ' || coalesce(p_abstract, '')), 'C') ||
+        setweight(to_tsvector('english', left(coalesce(p_content, '') || ' ' || coalesce(p_properties, '') || ' ' || coalesce(p_data, ''), 1000000)), 'D')
+    $$;
+
+    ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
+      hadron_nodes_tsv(name, alias, loc, tags, description, abstract, content, properties::text, data::text)
+    ) STORED;
+
+    CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
+  `);
+
   await client.end();
 }

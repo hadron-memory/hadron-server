@@ -19,6 +19,9 @@ import {
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
 import { reciprocalRankFusion } from '../../../lib/rrf.js';
+import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
+import { BooleanQueryError } from '../../../lib/retrieval/tsquery.js';
+import type { LexicalField } from '../../../lib/retrieval/provider.js';
 import {
   matchesQuery,
   keywordRelevanceRank,
@@ -734,6 +737,275 @@ export const nodeQueries = {
         (id) => id,
       ).slice(0, finalLimit);
       return await renderNodeSearchResult(ctx, fusedIds, expand, indexedIds, null, null);
+    },
+
+    // cor:api:090 — unified node search. Supersedes `nodes` (filter/list) +
+    // `nodeSearch` (rank): omit `query` for a filtered list; pass it to rank by
+    // `mode` (keyword | vector | hybrid | regex). Lexical modes go through the
+    // Postgres FTS engine behind the retrieval seam (field-weighted ranking +
+    // boolean operators). Access-scoped exactly like the per-kind node queries.
+    findNodes: async (
+      _: unknown,
+      {
+        query, mode, filter, fields, sort, expand, granularity, limit, offset,
+      }: {
+        query?: string | null;
+        mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
+        filter?: {
+          memoryIds?: string[] | null;
+          memoryClasses?: string[] | null;
+          nodeType?: string | null;
+          tags?: string[] | null;
+          isRunnable?: boolean | null;
+          locPrefix?: string | null;
+          createdBy?: string | null;
+          updatedAfter?: string | null;
+          updatedBefore?: string | null;
+          includeDeleted?: boolean | null;
+        } | null;
+        fields?: string[] | null;
+        sort?: 'relevance' | 'loc' | 'seq' | 'updatedAt' | null;
+        expand?: number | null;
+        granularity?: 'node' | 'chunk' | null;
+        limit?: number | null;
+        offset?: number | null;
+      },
+      ctx: Context,
+    ) => {
+      const f = filter ?? {};
+      const finalLimit = limit ?? 50;
+      const off = offset ?? 0;
+      const provider = getRetrievalProvider();
+      const badInput = (msg: string) =>
+        new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
+
+      if (expand != null && (expand < 0 || expand > 3 || !Number.isInteger(expand))) {
+        throw badInput('findNodes `expand` must be an integer in [0, 3].');
+      }
+      const expandDepth = expand ?? undefined;
+
+      // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
+      const accessible = await getAccessibleMemoryIds(ctx);
+      let scopeIds: string[];
+      const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
+      if (explicitIds) {
+        const resolved = await Promise.all(
+          f.memoryIds!.map((ref) =>
+            isId(ref)
+              ? Promise.resolve(ref)
+              : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
+        );
+        const requested = resolved.filter((id): id is string => id !== null);
+        scopeIds = accessible === null
+          ? requested
+          : requested.filter((id) => new Set(accessible).has(id));
+      } else if (accessible === null) {
+        const all = await ctx.db.memory.findMany({ where: { deletedAt: null }, select: { id: true } });
+        scopeIds = all.map((m) => m.id);
+      } else {
+        scopeIds = accessible;
+      }
+
+      // ── Memory-class filter: SYSTEM excluded by default; explicit wins ──
+      const narrowByClass = async (ids: string[], clause: unknown): Promise<string[]> => {
+        if (ids.length === 0) return ids;
+        const rows = await ctx.db.memory.findMany({
+          where: { id: { in: ids }, class: clause as never },
+          select: { id: true },
+        });
+        return rows.map((m) => m.id);
+      };
+      if (f.memoryClasses && f.memoryClasses.length > 0) {
+        scopeIds = await narrowByClass(scopeIds, { in: f.memoryClasses });
+      } else if (!explicitIds) {
+        // Broad search with no explicit ids/classes → hide system-class memories.
+        scopeIds = await narrowByClass(scopeIds, { not: 'system' });
+      }
+      if (scopeIds.length === 0) {
+        return { hits: [], passages: [], total: 0, reason: null, degraded: null };
+      }
+
+      const hasQuery = typeof query === 'string' && query.trim() !== '';
+
+      // ── No query → filtered list (subsumes `nodes`) ──
+      if (!hasQuery) {
+        const where: Record<string, unknown> = {
+          memoryId: { in: scopeIds },
+          ...(f.includeDeleted ? {} : { deletedAt: null }),
+          // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
+          // to the memory-class exclusion above).
+          ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
+          ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+          ...(f.tags?.length ? tagsFilter(f.tags) : {}),
+          ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
+          ...(f.createdBy ? { createdBy: f.createdBy } : {}),
+          ...((f.updatedAfter || f.updatedBefore)
+            ? { updatedAt: {
+                ...(f.updatedAfter ? { gte: new Date(f.updatedAfter) } : {}),
+                ...(f.updatedBefore ? { lte: new Date(f.updatedBefore) } : {}),
+              } }
+            : {}),
+        };
+        const orderBy =
+          sort === 'seq' ? { seq: 'asc' as const }
+          : sort === 'updatedAt' ? { updatedAt: 'desc' as const }
+          : { loc: 'asc' as const }; // relevance has no meaning without a query → deterministic browse order
+        const rows = await ctx.db.node.findMany({
+          where,
+          orderBy,
+          skip: off,
+          take: finalLimit,
+          include: {
+            memory: true,
+            outgoingEdges: { include: { target: true } },
+            incomingEdges: { include: { source: true } },
+          },
+        });
+        await decryptNodesBatch(ctx.db, rows);
+        return {
+          hits: rows.map((n) => ({ node: n, score: null, vector: null })),
+          passages: [],
+          total: null,
+          reason: null,
+          degraded: null,
+        };
+      }
+
+      const q = query!.trim();
+      const effectiveMode = mode ?? 'hybrid';
+      const lexFields = (fields ?? undefined) as LexicalField[] | undefined;
+      const model = isEmbeddingConfigured() ? getEmbeddingClient().model : null;
+
+      // Build hits from a ranked (nodeId, score) list, reusing the shared
+      // hydrate+expand+decrypt path; attach per-hit score + vector metadata.
+      const buildResult = async (
+        ranked: { nodeId: string; score: number }[],
+        simById: Map<string, number> | null,
+        reason: string | null,
+        degraded: string | null,
+      ) => {
+        const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
+        const rendered = await renderNodeSearchResult(
+          ctx, ranked.map((r) => r.nodeId), expandDepth, scopeIds, reason, degraded,
+        );
+        const hits = (rendered.nodes as { id: string }[]).map((n) => ({
+          node: n,
+          score: scoreById.get(n.id) ?? null,
+          vector: simById?.has(n.id)
+            ? { similarity: simById.get(n.id)!, model, chunkIndex: null, offsets: null, abstractStale: null, source: null }
+            : null,
+        }));
+        return { hits, passages: rendered.passages, total: null, reason: rendered.reason, degraded: rendered.degraded };
+      };
+
+      // ── LEXICAL modes: keyword (FTS) / regex ──
+      if (effectiveMode === 'keyword' || effectiveMode === 'regex') {
+        try {
+          const ranked = effectiveMode === 'regex'
+            ? await provider.regexSearch({ db: ctx.db, pattern: q, memoryIds: scopeIds, fields: lexFields, limit: finalLimit })
+            : await provider.lexicalSearch({ db: ctx.db, query: q, memoryIds: scopeIds, fields: lexFields, limit: finalLimit });
+          return await buildResult(ranked, null, null, null);
+        } catch (e) {
+          if (e instanceof BooleanQueryError) throw badInput(e.message);
+          if (e instanceof Error && /invalid regular expression/i.test(e.message)) {
+            throw badInput(`Invalid regex: ${e.message}`);
+          }
+          throw e;
+        }
+      }
+
+      // ── VECTOR / HYBRID: narrow to vector-indexed memories ──
+      const indexed = await ctx.db.memory.findMany({
+        where: { id: { in: scopeIds }, vectorIndexEnabled: true, deletedAt: null },
+        select: { id: true },
+      });
+      const indexedIds = indexed.map((m) => m.id);
+
+      const runKeywordRanked = async () => {
+        try {
+          return await provider.lexicalSearch({ db: ctx.db, query: q, memoryIds: scopeIds, fields: lexFields, limit: finalLimit });
+        } catch (e) {
+          if (e instanceof BooleanQueryError) throw badInput(e.message);
+          throw e;
+        }
+      };
+
+      if (indexedIds.length === 0) {
+        if (effectiveMode === 'hybrid') {
+          return await buildResult(await runKeywordRanked(), null, null, 'no_vector_index');
+        }
+        return { hits: [], passages: [], total: 0, reason: 'no_vector_index', degraded: null };
+      }
+      if (!isEmbeddingConfigured()) {
+        if (effectiveMode === 'hybrid') {
+          return await buildResult(await runKeywordRanked(), null, null, 'embedding_unavailable');
+        }
+        return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
+      }
+
+      let qvec: number[] | undefined;
+      try {
+        [qvec] = await getEmbeddingClient().embed([q], 'query');
+      } catch (err) {
+        console.warn(`[findNodes] embed() failed in mode:${effectiveMode}; degrading.`, err);
+        if (effectiveMode === 'hybrid') {
+          return await buildResult(await runKeywordRanked(), null, null, 'embedding_unavailable');
+        }
+        return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
+      }
+      if (!qvec) {
+        return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
+      }
+
+      // Chunk granularity (vector only) → passages, mirroring nodeSearch.
+      if (granularity === 'chunk') {
+        if (effectiveMode !== 'vector') {
+          throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
+        }
+        const chunkHits = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: finalLimit });
+        const parents = await ctx.db.node.findMany({
+          where: { id: { in: [...new Set(chunkHits.map((c) => c.nodeId))] }, deletedAt: null },
+          include: { memory: { select: { urn: true } } },
+        });
+        const parentById = new Map(parents.map((p) => [p.id, p]));
+        const passages = chunkHits
+          .filter((c) => parentById.has(c.nodeId))
+          .map((c) => {
+            const p = parentById.get(c.nodeId)! as { loc: string; memory: { urn: string } };
+            return {
+              parentNodeId: c.nodeId,
+              parentNodeUrn: `${p.memory.urn}::${p.loc}`,
+              chunkIndex: c.chunkIndex,
+              charStart: c.charStart,
+              charEnd: c.charEnd,
+              text: c.chunkText,
+              score: c.score,
+            };
+          });
+        return { hits: [], passages, total: null, reason: null, degraded: null };
+      }
+
+      const vecHits = await provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: finalLimit });
+
+      if (effectiveMode === 'vector') {
+        const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
+        return await buildResult(vecHits.map((h) => ({ nodeId: h.nodeId, score: h.score })), simById, null, null);
+      }
+
+      // hybrid — fuse keyword + vector by RRF (keyword already relevance-ranked by FTS).
+      const kwRanked = await runKeywordRanked();
+      const fusedIds = reciprocalRankFusion(
+        [kwRanked.map((r) => r.nodeId), vecHits.map((h) => h.nodeId)],
+        (id) => id,
+      ).slice(0, finalLimit);
+      const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
+      const kwScore = new Map(kwRanked.map((r) => [r.nodeId, r.score]));
+      return await buildResult(
+        fusedIds.map((id) => ({ nodeId: id, score: simById.get(id) ?? kwScore.get(id) ?? 0 })),
+        simById,
+        null,
+        null,
+      );
     },
 
     subtree: async (_: unknown, { prefix: rawPrefix }: { prefix: string }, ctx: Context) => {

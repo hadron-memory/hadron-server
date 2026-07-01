@@ -73,6 +73,7 @@ export const typeDefs = `#graphql
     keyword
     vector
     hybrid
+    regex
   }
 
   """
@@ -110,6 +111,82 @@ export const typeDefs = `#graphql
     nodes are in \`nodes\`.
     """
     passages: [Passage!]!
+    reason: String
+    degraded: String
+  }
+
+  """
+  Node fields a lexical (keyword/regex) query matches and weights. Weight-mask,
+  NOT a hard filter: naming a subset zeroes the excluded fields in scoring but
+  does not strictly exclude them from matching (cor:api:090:03). Ignored by
+  mode:vector (the index source is a per-memory config, not a query param).
+  """
+  enum NodeField {
+    name
+    alias
+    loc
+    tags
+    description
+    abstract
+    content
+    properties
+    data
+  }
+
+  "Result ordering for findNodes. Default relevance; the rest suppress scoring (browse order)."
+  enum NodeSort {
+    relevance
+    loc
+    seq
+    updatedAt
+  }
+
+  """
+  Structured, unscored, AND-combined filter context for findNodes (cor:api:090:02).
+  """
+  input NodeFilter {
+    "Memory scope — a mix of memory IDs and fully-qualified URNs; intersected with the caller's access."
+    memoryIds: [ID!]
+    "Restrict by memory class. SYSTEM is excluded by default; passing this (or naming a system memory in memoryIds) overrides that."
+    memoryClasses: [MemoryClass!]
+    nodeType: String
+    tags: [String!]
+    isRunnable: Boolean
+    locPrefix: String
+    createdBy: String
+    updatedAfter: String
+    updatedBefore: String
+    "Include soft-deleted nodes (default false)."
+    includeDeleted: Boolean
+  }
+
+  "Per-hit vector-retrieval lineage (cor:api:090:04), present when a hit came from the vector index."
+  type NodeVectorMeta {
+    similarity: Float
+    model: String
+    chunkIndex: Int
+    offsets: [Int!]
+    abstractStale: Boolean
+    source: String
+  }
+
+  "A scored node hit (cor:api:090:04). score is null for an unscored filtered list (no query)."
+  type NodeHit {
+    node: Node!
+    score: Float
+    vector: NodeVectorMeta
+  }
+
+  """
+  Envelope for findNodes (cor:api:090) — the unified node-search field that
+  supersedes nodes + nodeSearch. hits carry per-hit score + vector metadata;
+  passages carry chunk-granularity results; reason/degraded surface no-index /
+  reduced-fidelity outcomes.
+  """
+  type FindNodesResult {
+    hits: [NodeHit!]!
+    passages: [Passage!]!
+    total: Int
     reason: String
     degraded: String
   }
@@ -1740,6 +1817,28 @@ export const typeDefs = `#graphql
       granularity: SearchGranularity
       limit: Int
     ): NodeSearchResult!
+
+    """
+    Unified node search (cor:api:090) — supersedes \`nodes\` (filter/list) and
+    \`nodeSearch\` (rank). Omit \`query\` for a filtered list in deterministic
+    order (subsumes \`nodes\`); pass \`query\` to rank by \`mode\`
+    (keyword | vector | hybrid | regex). Lexical modes honor boolean operators
+    (\`(a OR b) AND c\`, quoted phrases, NOT/-) and \`fields\` as a ranking
+    weight-mask. \`filter\` is the structured, AND-combined filter context
+    (SYSTEM memory class excluded by default; explicit wins). Returns a
+    scored-hit envelope. Access-scoped identically to the per-kind node queries.
+    """
+    findNodes(
+      query: String
+      mode: SearchMode
+      filter: NodeFilter
+      fields: [NodeField!]
+      sort: NodeSort
+      expand: Int
+      granularity: SearchGranularity
+      limit: Int
+      offset: Int
+    ): FindNodesResult!
 
     """
     Cross-entity global search across organizations, memories, nodes, agents,
