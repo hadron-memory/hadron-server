@@ -166,10 +166,10 @@ describe('startAgentSession with encryption', () => {
 });
 
 // ---------------------------------------------------------------------------
-// upsertNode encryption
+// createNode encryption
 // ---------------------------------------------------------------------------
 
-describe('upsertNode with encryption', () => {
+describe('createNode with encryption', () => {
   it('stores ciphertext in the DB and returns plaintext to the caller', async () => {
     const key = generateDataKey().raw.toString('base64');
     const session = await resolvers.Mutation.startAgentSession(

@@ -208,10 +208,10 @@ describe('cross-org memory subscription access', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Mutation: upsertNode
+// Mutation: createNode
 // ---------------------------------------------------------------------------
 
-describe('Mutation.upsertNode access control', () => {
+describe('Mutation.createNode access control', () => {
   it('App with READ_WRITE AppAgent can write', async () => {
     const node = await resolvers.Mutation.createNode(
       null,

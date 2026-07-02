@@ -1,5 +1,5 @@
 /**
- * Issue #105 regression: `upsertNode` must accept any reference shape
+ * Issue #105 regression: `createNode` must accept any reference shape
  * for `edges[].targetId` (ID, prefixed URN, full memory-prefixed loc,
  * short loc) and persist a real edge — and surface a typed error,
  * not silently swallow the call into `pending_edges`, when the ref
@@ -79,7 +79,7 @@ async function pendingEdgeCount(sourceId: string) {
   return db.pendingEdge.count({ where: { sourceId } });
 }
 
-describe('upsertNode — edge target resolution (issue #105)', () => {
+describe('createNode — edge target resolution (issue #105)', () => {
   it('persists a real edge when targetId is the bare node ID', async () => {
     const node = await upsertSourceWithTarget(target.id);
     expect(await edgeCount(node.id)).toBe(1);

@@ -272,7 +272,7 @@ describe('hadron_run_task — URN bypass + shared run core', () => {
   });
 });
 
-describe('isRunnable write path (hadron_create_node / hadron_update_node / GraphQL upsertNode)', () => {
+describe('isRunnable write path (hadron_create_node / hadron_update_node / GraphQL createNode)', () => {
   it('hadron_create_node creates a runnable node that hadron_run_task then finds and runs', async () => {
     const srv = createTestableMcpServer(adminAuth());
     await srv.callToolText('hadron_create_node', {
@@ -323,7 +323,7 @@ describe('isRunnable write path (hadron_create_node / hadron_update_node / Graph
     expect(row?.description).toBe('touched');
   });
 
-  it('GraphQL upsertNode threads isRunnable into the node', async () => {
+  it('GraphQL createNode threads isRunnable into the node', async () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
     await resolvers.Mutation.createNode(
       {},

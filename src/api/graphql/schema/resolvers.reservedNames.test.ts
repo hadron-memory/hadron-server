@@ -1,5 +1,5 @@
 /**
- * Integration test (US2 / spec FR-013): the upsertNode resolver rejects
+ * Integration test (US2 / spec FR-013): the createNode resolver rejects
  * extraction-spec arrays whose entries write into the reserved
  * `message.data.exception(s)` namespace. Runs against the real DB.
  */
@@ -43,7 +43,7 @@ beforeEach(async () => {
   );
 });
 
-describe('upsertNode — reserved extraction-spec names', () => {
+describe('createNode — reserved extraction-spec names', () => {
   it('rejects agentExtractionSpec with field "exception"', async () => {
     await expect(
       resolvers.Mutation.createNode(

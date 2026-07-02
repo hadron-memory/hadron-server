@@ -73,6 +73,12 @@ export async function writeNodeCore(
   rawInput: NodeWriteInput,
   ctx: Context,
   mode: NodeWriteMode,
+  // Update-by-PK anchor (updateNode's `id` selector path). When set, the
+  // existence check and the UPDATE's `where` key on this immutable PK
+  // instead of (loc, memoryId) — a concurrent move that frees the old loc
+  // for another node can otherwise make the loc-keyed write hit the wrong
+  // row (PR-460 review).
+  opts?: { targetNodeId?: string },
 ) {
       // Keep the historical `input` name so the body below stays a
       // minimal-diff move from the upsertNode resolver it used to be.
@@ -138,9 +144,13 @@ export async function writeNodeCore(
       // reserved exception namespace (spec 001-edge-condition-spec FR-013).
       throwOnReservedExtractionSpec(input.data);
 
-      // Snapshot current state before update (for version history)
+      // Snapshot current state before update (for version history). The
+      // update-by-PK path anchors on the immutable id; everything else keys
+      // on (loc, memoryId).
       const existing = await ctx.db.node.findUnique({
-        where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+        where: opts?.targetNodeId
+          ? { id: opts.targetNodeId }
+          : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
       });
 
       // Mode gate (spec 039 Phase 0 D1). Create: reject if a **live** node
@@ -150,10 +160,10 @@ export async function writeNodeCore(
       // treated as not-existing for collision purposes — the create
       // resurrects them (the UPDATE branch below clears `deletedAt`/
       // `deletedBy` when this resurrection path runs). Update: the target
-      // must exist — updateNode never creates (a concurrent delete between
-      // this check and the write falls into the upsert's create branch; the
-      // same TOCTOU window the pre-split resolver had). Upsert (internal
-      // callers only): legacy either-way behavior.
+      // must exist — updateNode never creates; a concurrent delete between
+      // this gate and the write surfaces as Prisma P2025, mapped to
+      // NODE_NOT_FOUND at the write below. Upsert (internal callers only):
+      // legacy either-way behavior.
       const isResurrect = mode === 'create' && !!existing?.deletedAt;
       if (mode === 'create' && existing && !existing.deletedAt) {
         const err = new NodeLocConflictError(input.loc, input.memoryId);
@@ -376,34 +386,67 @@ export async function writeNodeCore(
       // the upsert's create payload could lack the required `name` column —
       // Prisma validates that payload eagerly even when the update branch
       // would run. A concurrent delete between the gate and this write
-      // surfaces as Prisma P2025 (genuinely "not found") rather than a
-      // silent create. Create/upsert modes keep the historical upsert call;
-      // their callers always supply `name`.
-      const writeArgs = {
-        where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-        include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+      // surfaces as Prisma P2025, mapped to the typed NODE_NOT_FOUND below
+      // (issue #100: no raw ORM errors past the resolver boundary) rather
+      // than a silent create. Create/upsert modes keep the historical upsert
+      // call; their callers always supply `name`.
+      //
+      // The update payload never carries `loc`/`memoryId` — updateNode never
+      // moves (D3), and on the update-by-PK path writing the caller-supplied
+      // loc back could undo a concurrent move.
+      const include = {
+        outgoingEdges: { include: { target: true } },
+        incomingEdges: { include: { source: true } },
       };
+      const {
+        loc: _updLoc,
+        memoryId: _updMemoryId,
+        ...updateFields
+      } = nodeFieldsClean as { loc?: string; memoryId?: string } & Record<string, unknown>;
       const updatePayload = {
-        ...nodeFieldsClean,
+        ...updateFields,
         ...updateTagsPayload,
         ...updateExtras,
         ...hashPayload,
       } as Prisma.NodeUncheckedUpdateInput;
-      const node =
-        mode === 'update'
-          ? await ctx.db.node.update({ ...writeArgs, data: updatePayload })
-          : await ctx.db.node.upsert({
-              ...writeArgs,
-              create: {
-                ...nodeFieldsClean,
-                id,
-                tags,
-                createdBy,
-                ...hashPayload,
-                ...(seqForCreate != null ? { seq: seqForCreate } : {}),
-              } as Prisma.NodeUncheckedCreateInput,
-              update: updatePayload,
-            });
+      let node;
+      try {
+        node =
+          mode === 'update'
+            ? await ctx.db.node.update({
+                where: opts?.targetNodeId
+                  ? { id: opts.targetNodeId }
+                  : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+                data: updatePayload,
+                include,
+              })
+            : await ctx.db.node.upsert({
+                where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+                create: {
+                  ...nodeFieldsClean,
+                  id,
+                  tags,
+                  createdBy,
+                  ...hashPayload,
+                  ...(seqForCreate != null ? { seq: seqForCreate } : {}),
+                } as Prisma.NodeUncheckedCreateInput,
+                update: updatePayload,
+                include,
+              });
+      } catch (e) {
+        if (
+          e instanceof Prisma.PrismaClientKnownRequestError &&
+          e.code === 'P2025'
+        ) {
+          // Lost the race with a concurrent delete (or move, on the
+          // loc-keyed path) between the mode gate and the write.
+          throw new GraphQLError(
+            `Node not found at loc "${input.loc}" in memory "${input.memoryId}".`,
+            { extensions: { code: 'NODE_NOT_FOUND', loc: input.loc, memoryId: input.memoryId } },
+          );
+        }
+        throw e;
+      }
 
       // For the return value, decrypt the result back so callers see plaintext.
       if (memEncInfo.isEncrypted) {
@@ -504,12 +547,12 @@ export const nodeMutations = {
 
       let targetMemoryId: string;
       let targetLoc: string;
+      let targetNodeId: string | undefined;
       if (hasId) {
         // ID-or-URN dispatch (spec 007/022). A genuine miss → NODE_NOT_FOUND;
         // a relative-form URN propagates as UrnNotQualifiedError.
-        let resolvedNodeId: string;
         try {
-          ({ id: resolvedNodeId } = await resolveNodeRef(ctx.db, id));
+          ({ id: targetNodeId } = await resolveNodeRef(ctx.db, id));
         } catch (e) {
           if (e instanceof NodeNotFoundError) {
             throw new GraphQLError(`Node not found: "${id}"`, {
@@ -519,7 +562,7 @@ export const nodeMutations = {
           throw e;
         }
         const row = await ctx.db.node.findUnique({
-          where: { id: resolvedNodeId },
+          where: { id: targetNodeId },
           select: { memoryId: true, loc: true },
         });
         if (!row) {
@@ -530,14 +573,20 @@ export const nodeMutations = {
         targetMemoryId = row.memoryId;
         targetLoc = row.loc;
       } else {
-        ({ id: targetMemoryId } = await resolveMemoryRef(ctx.db, memoryId as string));
+        // Pass the raw ref through — writeNodeCore's own resolveMemoryRef
+        // handles ID-or-URN dispatch (no need to resolve twice).
+        targetMemoryId = memoryId as string;
         targetLoc = loc as string;
       }
 
+      // The PK anchors the write on the id-selector path so a concurrent
+      // move (which frees the loc for reuse) can't make the loc-keyed
+      // write hit a different node.
       return writeNodeCore(
         { ...fields, memoryId: targetMemoryId, loc: targetLoc },
         ctx,
         'update',
+        targetNodeId ? { targetNodeId } : undefined,
       );
     },
 
