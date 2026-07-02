@@ -1231,6 +1231,11 @@ export interface NodeEdgeInput {
   isRunnable?: boolean | null;
 }
 
+/**
+ * Bulk-import node shape — used only by replaceSubtree (git-sync) since the
+ * spec-039 Phase 0 split retired upsertNode. Single-node writes use
+ * CreateNodeInput / UpdateNodeInput below.
+ */
 export interface NodeInput {
   id?: string;
   memoryId: string;
@@ -1251,9 +1256,27 @@ export interface NodeInput {
   aiAgent?: string;
   ownerRepo?: string;
   edges?: NodeEdgeInput[];
-  createOnly?: boolean;
   /** Why this change was made — stored in version history (editedBy). Issue #88. */
   reason?: string | null;
+}
+
+/**
+ * createNode input (spec 039 Phase 0 D1/D4): memoryId/loc/name required;
+ * `id` is only ever a forced create-PK (importer/sync), never a selector.
+ */
+export type CreateNodeInput = NodeInput;
+
+/**
+ * updateNode input (spec 039 Phase 0 D2–D4): the target is `id` (PK or
+ * fully-qualified node URN) XOR (`memoryId` + `loc`); every content field
+ * (name included) is optional = preserve-on-omit. Never creates, never moves.
+ */
+export interface UpdateNodeInput
+  extends Omit<NodeInput, 'id' | 'memoryId' | 'loc' | 'name'> {
+  id?: string;
+  memoryId?: string;
+  loc?: string;
+  name?: string;
 }
 
 export type NodeTextField = 'content' | 'name' | 'alias' | 'description' | 'abstract' | 'tags';

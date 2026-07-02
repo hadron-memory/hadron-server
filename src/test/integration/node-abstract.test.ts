@@ -1,11 +1,11 @@
 /**
  * Spec 031 — Node.abstract GraphQL integration coverage. Drives the
- * `upsertNode` mutation + `node(loc)` query directly through the resolver
+ * shared write core + `node(loc)` query directly through the resolver
  * layer (mirrors src/api/graphql/schema/resolvers.encryption.test.ts).
  *
  * What this file pins:
  *
- *   - `upsertNode(input: { abstract })` create-mode persists; subsequent
+ *   - a create with `abstract` persists; subsequent
  *     update-mode replaces / null-clears / omit-preserves per spec
  *     FR-004 partial-update semantics.
  *
@@ -14,7 +14,7 @@
  *     `NodeAbstractTooLongError` with `extensions.code` set per
  *     constitution S2.
  *
- *   - `createOnly: true` on `NodeInput` interacts as expected — the new
+ *   - `createNode` (create-only, spec 039 Phase 0) interacts as expected — the new
  *     abstract field is written on resurrected nodes, rejected on
  *     non-resurrect collisions, persisted on fresh creates.
  *
@@ -33,9 +33,10 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { writeNodeCore } from '../../api/graphql/schema/resolvers.mutation.node.js';
 import { generateId } from '../../lib/id.js';
 
-// The upsertNode resolver fires writeNodeToGit asynchronously; pin to a
+// The write core fires writeNodeToGit asynchronously; pin to a
 // no-op so the test doesn't try to push to a real remote.
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -81,11 +82,14 @@ beforeEach(async () => {
 
 // ───── helpers ────────────────────────────────────────────────────────────
 
+// The FR-004 partial-update matrix pins the shared write core's upsert
+// semantics (spec 039 Phase 0: internal-only mode — the public surface is
+// createNode/updateNode, which route through the same core).
 async function upsertNode(input: Record<string, unknown>) {
-  return resolvers.Mutation.upsertNode(
-    {},
-    { input: { memoryId: fx.memory.id, ...input } as never },
+  return writeNodeCore(
+    { memoryId: fx.memory.id, ...input } as never,
     fx.ctx,
+    'upsert',
   );
 }
 
@@ -99,7 +103,7 @@ async function persistedAbstract(loc: string): Promise<string | null> {
 
 // ───── create-mode + abstract round-trip ──────────────────────────────────
 
-describe('upsertNode — create mode with abstract', () => {
+describe('write core — create mode with abstract', () => {
   it('persists the abstract on create and returns it on the result object', async () => {
     const node = await upsertNode({
       loc: 'gq1',
@@ -119,7 +123,7 @@ describe('upsertNode — create mode with abstract', () => {
 
 // ───── update-mode partial-update semantics ───────────────────────────────
 
-describe('upsertNode — update mode partial-update semantics', () => {
+describe('write core — update mode partial-update semantics', () => {
   it('replaces an existing abstract when a new string is supplied', async () => {
     await upsertNode({ loc: 'pu1', name: 'pu1', abstract: SHORT_ABSTRACT });
     await upsertNode({ loc: 'pu1', name: 'pu1', abstract: REVISED_ABSTRACT });
@@ -206,21 +210,27 @@ describe('upsertNode — FR-009 trim-then-check normalization', () => {
   });
 });
 
-// ───── createOnly interaction ─────────────────────────────────────────────
+// ───── createNode (create-only) interaction ───────────────────────────────
 
-describe('upsertNode — createOnly + abstract', () => {
-  it('createOnly: true with abstract creates the node and persists the abstract', async () => {
-    const node = await upsertNode({
-      loc: 'co1',
-      name: 'co1',
-      abstract: SHORT_ABSTRACT,
-      createOnly: true,
-    });
+describe('createNode — create-only + abstract', () => {
+  it('createNode with abstract creates the node and persists the abstract', async () => {
+    const node = await resolvers.Mutation.createNode(
+      {},
+      {
+        input: {
+          memoryId: fx.memory.id,
+          loc: 'co1',
+          name: 'co1',
+          abstract: SHORT_ABSTRACT,
+        } as never,
+      },
+      fx.ctx,
+    );
     expect(node.abstract).toBe(SHORT_ABSTRACT);
     expect(await persistedAbstract('co1')).toBe(SHORT_ABSTRACT);
   });
 
-  it('createOnly: true on a colliding (live) loc rejects with NodeLocConflictError — abstract not persisted', async () => {
+  it('createNode on a colliding (live) loc rejects with NodeLocConflictError — abstract not persisted', async () => {
     await upsertNode({
       loc: 'co2',
       name: 'co2',
@@ -228,12 +238,18 @@ describe('upsertNode — createOnly + abstract', () => {
     });
     let caught: unknown;
     try {
-      await upsertNode({
-        loc: 'co2',
-        name: 'co2',
-        abstract: 'Should not land.',
-        createOnly: true,
-      });
+      await resolvers.Mutation.createNode(
+        {},
+        {
+          input: {
+            memoryId: fx.memory.id,
+            loc: 'co2',
+            name: 'co2',
+            abstract: 'Should not land.',
+          } as never,
+        },
+        fx.ctx,
+      );
     } catch (e) {
       caught = e;
     }
@@ -241,7 +257,7 @@ describe('upsertNode — createOnly + abstract', () => {
     expect((caught as GraphQLError).extensions?.code).toBe(
       'NodeLocConflictError',
     );
-    // Original abstract preserved — the rejected upsert did not mutate.
+    // Original abstract preserved — the rejected create did not mutate.
     expect(await persistedAbstract('co2')).toBe('Original.');
   });
 });

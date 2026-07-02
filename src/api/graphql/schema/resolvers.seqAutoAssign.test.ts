@@ -1,7 +1,7 @@
 /**
  * Task — a new node added to an already-ordered sibling list gets the next
  * `seq` (lands at the end). Covered on BOTH single-node create surfaces that
- * carry a seq: the GraphQL `upsertNode` resolver and the MCP `hadron_create_node`
+ * carry a seq: the GraphQL `createNode` resolver and the MCP `hadron_create_node`
  * tool, which share `nextSiblingSeq` (src/lib/nodeSeq.ts).
  */
 
@@ -55,11 +55,11 @@ beforeEach(async () => {
   memoryUrn = 'seqa-org::seqmem';
 });
 
-describe('upsertNode — auto-assign seq into an ordered sibling list', () => {
+describe('createNode — auto-assign seq into an ordered sibling list', () => {
   it('assigns max(sibling seq)+1 when the list is ordered and no seq is given', async () => {
     await seedSibling('parent:a', 1);
     await seedSibling('parent:b', 2);
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       null,
       { input: { memoryId, loc: 'parent:c', name: 'c' } },
       gqlCtx(),
@@ -69,7 +69,7 @@ describe('upsertNode — auto-assign seq into an ordered sibling list', () => {
 
   it('leaves seq null when the sibling list is unordered', async () => {
     await seedSibling('parent:a', null);
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       null,
       { input: { memoryId, loc: 'parent:c', name: 'c' } },
       gqlCtx(),
@@ -79,7 +79,7 @@ describe('upsertNode — auto-assign seq into an ordered sibling list', () => {
 
   it('respects an explicit seq even when the list is ordered', async () => {
     await seedSibling('parent:a', 1);
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       null,
       { input: { memoryId, loc: 'parent:c', name: 'c', seq: 99 } },
       gqlCtx(),
@@ -90,9 +90,9 @@ describe('upsertNode — auto-assign seq into an ordered sibling list', () => {
   it('does not re-assign seq when updating an existing node', async () => {
     await seedSibling('parent:a', 1);
     await seedSibling('parent:b', 2);
-    // Upsert over an existing seq-bearing node with no seq → preserve it,
+    // Update an existing seq-bearing node with no seq → preserve it,
     // don't treat it as a fresh insert at the end.
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.updateNode(
       null,
       { input: { memoryId, loc: 'parent:a', name: 'renamed' } },
       gqlCtx(),

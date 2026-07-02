@@ -28,10 +28,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { writeNodeCore } from '../../api/graphql/schema/resolvers.mutation.node.js';
 import { generateId } from '../../lib/id.js';
 import { deserializeTags } from '../../integrations/db/provider.js';
 
-// upsertNode fires writeNodeToGit asynchronously; pin to a no-op so the
+// The write core fires writeNodeToGit asynchronously; pin to a no-op so the
 // test doesn't try to push to a real remote.
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -74,11 +75,13 @@ beforeEach(async () => {
 
 // ───── helpers ────────────────────────────────────────────────────────────
 
+// Pins the shared write core's upsert semantics (spec 039 Phase 0:
+// internal-only mode — the public createNode/updateNode route through it).
 async function upsertNode(input: Record<string, unknown>) {
-  return resolvers.Mutation.upsertNode(
-    {},
-    { input: { memoryId: fx.memory.id, ...input } as never },
+  return writeNodeCore(
+    { memoryId: fx.memory.id, ...input } as never,
     fx.ctx,
+    'upsert',
   );
 }
 
@@ -95,7 +98,7 @@ async function persistedTags(loc: string): Promise<string[]> {
 
 // ───── create mode ─────────────────────────────────────────────────────────
 
-describe('upsertNode — create mode tags', () => {
+describe('write core — create mode tags', () => {
   it('persists tags supplied on create', async () => {
     await upsertNode({ loc: 'c1', name: 'c1', tags: ['spec', 'p1'] });
     expect(await persistedTags('c1')).toEqual(['spec', 'p1']);
@@ -109,7 +112,7 @@ describe('upsertNode — create mode tags', () => {
 
 // ───── update mode partial-update semantics ─────────────────────────────────
 
-describe('upsertNode — update mode tags partial-update semantics', () => {
+describe('write core — update mode tags partial-update semantics', () => {
   it('a content-only update PRESERVES existing tags (hadron-cli#37)', async () => {
     await upsertNode({ loc: 'u1', name: 'u1', tags: ['spec', 'p1'], content: 'orig' });
     // The exact reproduction: update content, no `tags` key.
@@ -144,7 +147,7 @@ describe('upsertNode — update mode tags partial-update semantics', () => {
 
 // ───── sibling preserve guarantees on a content-only update ─────────────────
 
-describe('upsertNode — content-only update preserves siblings (hadron-cli#37)', () => {
+describe('write core — content-only update preserves siblings (hadron-cli#37)', () => {
   it('leaves tags, nodeType, and data untouched when only content changes', async () => {
     await upsertNode({
       loc: 'sib1',

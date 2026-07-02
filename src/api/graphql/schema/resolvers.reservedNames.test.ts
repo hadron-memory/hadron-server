@@ -1,5 +1,5 @@
 /**
- * Integration test (US2 / spec FR-013): the upsertNode resolver rejects
+ * Integration test (US2 / spec FR-013): the createNode resolver rejects
  * extraction-spec arrays whose entries write into the reserved
  * `message.data.exception(s)` namespace. Runs against the real DB.
  */
@@ -43,10 +43,10 @@ beforeEach(async () => {
   );
 });
 
-describe('upsertNode — reserved extraction-spec names', () => {
+describe('createNode — reserved extraction-spec names', () => {
   it('rejects agentExtractionSpec with field "exception"', async () => {
     await expect(
-      resolvers.Mutation.upsertNode(
+      resolvers.Mutation.createNode(
         {},
         {
           input: {
@@ -74,7 +74,7 @@ describe('upsertNode — reserved extraction-spec names', () => {
 
   it('rejects extractionSpec on a stage node with field "exceptions"', async () => {
     await expect(
-      resolvers.Mutation.upsertNode(
+      resolvers.Mutation.createNode(
         {},
         {
           input: {
@@ -97,7 +97,7 @@ describe('upsertNode — reserved extraction-spec names', () => {
   });
 
   it('accepts a clean extraction-spec save', async () => {
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       {},
       {
         input: {
@@ -118,7 +118,7 @@ describe('upsertNode — reserved extraction-spec names', () => {
   });
 
   it('accepts lookalike fields like "exception_count"', async () => {
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       {},
       {
         input: {

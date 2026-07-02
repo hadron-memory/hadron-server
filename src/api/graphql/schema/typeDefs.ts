@@ -1206,7 +1206,12 @@ export const typeDefs = `#graphql
     isRunnable: Boolean
   }
 
+  """
+  Bulk-import node shape, used only by replaceSubtree (git-sync). Single-node
+  writes use CreateNodeInput / UpdateNodeInput (spec 039 Phase 0 D1).
+  """
   input NodeInput {
+    "Forced PK (importer-supplied UUIDv7 from node.yaml, stable across moves). Omit to mint."
     id: String
     """
     Memory reference. Accepts the entity's ID (CUID / 32-char hex) or its
@@ -1216,7 +1221,7 @@ export const typeDefs = `#graphql
     """
     memoryId: String!
     nodeType: String
-    "Whether this node can be run as a task by hadron_run_task (cor:api:060). Omit to preserve on update."
+    "Whether this node can be run as a task by hadron_run_task (cor:api:060)."
     isRunnable: Boolean
     loc: String!
     name: String!
@@ -1234,18 +1239,90 @@ export const typeDefs = `#graphql
     aiAgent: String
     # Replace all outgoing edges when provided (omit to leave edges unchanged)
     edges: [NodeEdgeInput!]
-    # When true, reject the mutation with NodeLocConflictError if a node
-    # already exists at (loc, memoryId). Default false preserves the
-    # legacy upsert-on-collision behavior. Set true from create-only
-    # callers (e.g., the portal new-node form per spec 011) so a colliding
-    # loc surfaces as a clean error instead of silently overwriting the
-    # existing node.
-    createOnly: Boolean
     """
     Why this change was made — recorded on the version-history snapshot
     (NodeVersion.editedBy), mirroring hadron_update_node's reason arg so CLI
     and MCP edits leave equally-traceable history. Only an update snapshots a
     prior version, so reason has no effect on a pure create.
+    """
+    reason: String
+  }
+
+  """
+  Input for createNode. 'memoryId', 'loc', and 'name' are required; creating
+  is create-only — a live node at (memoryId, loc) rejects with
+  NodeLocConflictError (spec 039 Phase 0 D1/D4).
+  """
+  input CreateNodeInput {
+    "Forced PK (importer/sync use case, e.g. a stable UUIDv7). Only ever a create-id here — never a selector (D2). Omit to mint."
+    id: String
+    """
+    Memory reference. Accepts the entity's ID (CUID / 32-char hex) or its
+    URN (per spec 007 ID-or-URN dispatch). URN inputs MUST be fully
+    qualified (org:memory) per spec 022 — relative-form URNs are
+    rejected as GraphQL errors with extensions.code "URN_NOT_QUALIFIED".
+    """
+    memoryId: String!
+    loc: String!
+    name: String!
+    nodeType: String
+    "Whether this node can be run as a task by hadron_run_task (cor:api:060)."
+    isRunnable: Boolean
+    alias: String
+    description: String
+    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Optional. Empty + whitespace-only normalize to null. Cap is 2000 characters."
+    abstract: String
+    content: String
+    seq: Int
+    tags: [String!]
+    properties: JSON
+    data: JSON
+    ownerRepo: String
+    llmModel: String
+    aiAgent: String
+    "Outgoing edges to create with the node."
+    edges: [NodeEdgeInput!]
+    "Recorded on version history only when a soft-deleted node is resurrected (a pure create snapshots nothing)."
+    reason: String
+  }
+
+  """
+  Input for updateNode. Identify the target by 'id' (PK or fully-qualified
+  node URN) XOR ('memoryId' + 'loc') — both selectors, or neither, is an
+  error (spec 039 Phase 0 D2). updateNode never creates and never moves (D3).
+  Every content field is optional: omitted = preserved (D4).
+  """
+  input UpdateNodeInput {
+    "The node to change: PK (CUID / 32-char hex) or fully-qualified node URN (org::memory::loc). XOR with memoryId+loc."
+    id: String
+    "Selector, with 'loc': the target's memory (ID or fully-qualified URN). XOR with 'id'."
+    memoryId: String
+    "Selector, with 'memoryId': the target's current loc. Not writable here — moveNode relocates."
+    loc: String
+    "Omit to preserve (D4)."
+    name: String
+    nodeType: String
+    "Whether this node can be run as a task by hadron_run_task (cor:api:060). Omit to preserve."
+    isRunnable: Boolean
+    alias: String
+    description: String
+    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."
+    abstract: String
+    content: String
+    seq: Int
+    "Omit to preserve existing tags (issue #235); supply to replace the set."
+    tags: [String!]
+    properties: JSON
+    data: JSON
+    ownerRepo: String
+    llmModel: String
+    aiAgent: String
+    # Replace all outgoing edges when provided (omit to leave edges unchanged)
+    edges: [NodeEdgeInput!]
+    """
+    Why this change was made — recorded on the version-history snapshot
+    (NodeVersion.editedBy), mirroring hadron_update_node's reason arg so CLI
+    and MCP edits leave equally-traceable history.
     """
     reason: String
   }
@@ -2057,8 +2134,24 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
-    # Create or update a single node
-    upsertNode(input: NodeInput!): Node!
+    """
+    Create a single node. Rejects with NodeLocConflictError when a live node
+    already exists at (memoryId, loc) — creating is create-only (spec 039
+    Phase 0 D1); a soft-deleted node at the target loc is resurrected.
+    'name' is required here and only here (D4).
+    """
+    createNode(input: CreateNodeInput!): Node!
+
+    """
+    Update an existing node. Identify it by 'id' (PK or fully-qualified node
+    URN) XOR the ('memoryId', 'loc') combo — supplying both selectors, or
+    neither, is an error (D2). Rejects with NODE_NOT_FOUND when the target
+    does not exist; updateNode never creates and never moves (relocation is
+    moveNode's job, D3). Every content field is optional — omitted fields are
+    preserved ('name' included, D4; 'abstract' keeps its omit/null/string
+    contract; omitted 'tags' are preserved, issue #235).
+    """
+    updateNode(input: UpdateNodeInput!): Node!
 
     # Shallow-merge a JSON patch into a node's 'data' bag. The supplied JSON's
     # top-level keys are written over the node's existing 'data' (the patch
@@ -2066,7 +2159,7 @@ export const typeDefs = `#graphql
     # If the node has no 'data' yet, the supplied JSON becomes its 'data'
     # verbatim. 'data' must be a JSON object (not an array or scalar). 'nodeId'
     # is a node ID or fully-qualified URN. Honors the same single-write
-    # invariants as upsertNode (per-memory write auth, encryption, version
+    # invariants as updateNode (per-memory write auth, encryption, version
     # history, git mirror). Returns the updated node.
     updateNodeData(nodeId: ID!, data: JSON!, reason: String): Node!
 
@@ -2094,7 +2187,7 @@ export const typeDefs = `#graphql
     # relationships onto the target. 'include' selects which fields fold in
     # (omitted = all). 'deleteSource: true' hard-deletes the source afterward.
     # Honors per-memory write auth, encryption, version history, abstract
-    # staleness, and re-embedding (same invariants as upsertNode).
+    # staleness, and re-embedding (same invariants as createNode/updateNode).
     mergeNodes(input: MergeNodesInput!): Node!
 
     # Merge one memory (source) into another (target), returning the updated

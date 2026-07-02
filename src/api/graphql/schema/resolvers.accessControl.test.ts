@@ -208,12 +208,12 @@ describe('cross-org memory subscription access', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Mutation: upsertNode
+// Mutation: createNode
 // ---------------------------------------------------------------------------
 
-describe('Mutation.upsertNode access control', () => {
+describe('Mutation.createNode access control', () => {
   it('App with READ_WRITE AppAgent can write', async () => {
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       null,
       { input: { memoryId: graphA.id, loc: 'org-a.repo.new', name: 'new' } },
       ctx({ appId: appContributor.id }),
@@ -223,7 +223,7 @@ describe('Mutation.upsertNode access control', () => {
 
   it('App with READ_ONLY AppAgent is rejected', async () => {
     await expect(
-      resolvers.Mutation.upsertNode(
+      resolvers.Mutation.createNode(
         null,
         { input: { memoryId: graphA.id, loc: 'org-a.repo.new2', name: 'new2' } },
         ctx({ appId: appReader.id }),
@@ -233,7 +233,7 @@ describe('Mutation.upsertNode access control', () => {
 
   it('App cannot write to memory outside its AppAgent rows', async () => {
     await expect(
-      resolvers.Mutation.upsertNode(
+      resolvers.Mutation.createNode(
         null,
         { input: { memoryId: graphB.id, loc: 'org-b.repo.hack', name: 'hack' } },
         ctx({ appId: appContributor.id }),
@@ -242,7 +242,7 @@ describe('Mutation.upsertNode access control', () => {
   });
 
   it('user with CONTRIBUTOR org role can write', async () => {
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       null,
       { input: { memoryId: graphA.id, loc: 'org-a.repo.user-node', name: 'un' } },
       ctx({ clientId: `github:user-a`, userId: userA.id, roles: ['READER'] }),
@@ -252,7 +252,7 @@ describe('Mutation.upsertNode access control', () => {
 
   it('user with READER org role is rejected', async () => {
     await expect(
-      resolvers.Mutation.upsertNode(
+      resolvers.Mutation.createNode(
         null,
         { input: { memoryId: graphB.id, loc: 'org-b.repo.nope', name: 'nope' } },
         ctx({ clientId: `github:user-b`, userId: userB.id, roles: ['READER'] }),
@@ -469,7 +469,7 @@ describe('Mutation.replaceSubtree access control', () => {
     expect(bEdges).toHaveLength(0);
   });
 
-  // Regression: NodeInput carries non-column fields (edges/createOnly/reason)
+  // Regression: NodeInput carries non-column fields (edges/reason)
   // that Prisma would reject if spread into node.create.
   it('strips non-column NodeInput fields before creating nodes', async () => {
     const count = await resolvers.Mutation.replaceSubtree(
@@ -484,7 +484,6 @@ describe('Mutation.replaceSubtree access control', () => {
             name: 'with-extras',
             tags: ['alpha', 'beta'],
             edges: [{ targetId: 'ignored', name: 'x' }],
-            createOnly: true,
             reason: 'import',
           },
         ],
@@ -513,7 +512,7 @@ describe('global ADMIN bypass', () => {
   });
 
   it('ADMIN can write to any memory', async () => {
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       null,
       { input: { memoryId: graphB.id, loc: 'org-b.repo.admin-node', name: 'admin' } },
       ctx({ clientId: 'github:admin', userId: 'admin-id', roles: ['ADMIN'] }),
