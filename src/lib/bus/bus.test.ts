@@ -4,16 +4,18 @@
  * Unit layer (always runs, no broker): the null fallback (D-2026-06-17-004),
  * stream-name derivation, and the reserved-verb NotImplementedError.
  *
- * Integration layer (gated on BUS_TEST_NATS_URL): an echo publish/subscribe
- * round-trip against a real broker — start one with
- * `docker compose up -d nats` and run
+ * Integration layer (gated on BUS_TEST_NATS_URL): echo round-trip, dedup
+ * window, and malformed-payload termination against a real broker — start
+ * one with `docker compose up -d nats` and run
  * `BUS_TEST_NATS_URL=nats://localhost:4222 pnpm vitest run src/lib/bus`.
  * CI doesn't set the var, so the suite skips there (plan §6: no broker
- * needed in CI).
+ * needed in CI). Instead of fixed sleeps, the tests wait on the consumer's
+ * actual pending/ack state (PR-462 review).
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { connect } from 'nats';
+import { connect, type NatsConnection } from '@nats-io/transport-node';
+import { jetstream, jetstreamManager } from '@nats-io/jetstream';
 import { getBusClient, closeBusClient, NotImplementedError } from './index.js';
 import { NatsBusClient, streamNameForSubject } from './natsBusClient.js';
 
@@ -67,7 +69,40 @@ describe('streamNameForSubject (D-2026-06-17-003 layout)', () => {
   });
 });
 
-describe.runIf(!!BROKER)('NATS integration (echo round-trip)', () => {
+describe.runIf(!!BROKER)('NATS integration', () => {
+  let raw: NatsConnection;
+
+  beforeEach(async () => {
+    raw = await connect({ servers: BROKER as string, token: process.env.BUS_TEST_NATS_TOKEN });
+  });
+
+  afterEach(async () => {
+    await raw.drain();
+  });
+
+  /**
+   * Wait until the consumer has fully settled: nothing left to deliver and
+   * nothing awaiting ack. This is the real "the broker is done with this
+   * consumer" signal — no fixed sleeps (PR-462 review). Polls every 50ms.
+   */
+  async function waitForConsumerQuiet(stream: string, durable: string, timeoutMs = 5000) {
+    const jsm = await jetstreamManager(raw);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const info = await jsm.consumers.info(stream, durable);
+      if (info.num_pending === 0 && info.num_ack_pending === 0 && info.num_redelivered === 0) {
+        return;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(
+          `consumer ${stream}/${durable} not quiet after ${timeoutMs}ms: ` +
+            `pending=${info.num_pending} ackPending=${info.num_ack_pending} redelivered=${info.num_redelivered}`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
   it('publishes and receives on a queue subscription, then acks', async () => {
     const client = await NatsBusClient.connect(BROKER as string, process.env.BUS_TEST_NATS_TOKEN);
     try {
@@ -95,6 +130,30 @@ describe.runIf(!!BROKER)('NATS integration (echo round-trip)', () => {
     }
   });
 
+  it('reconciles a pre-existing stream whose subject set drifted', async () => {
+    // Simulate an earlier release having provisioned ECHO with a narrower
+    // subject filter: ensureStream must widen it to `echo.>` instead of
+    // trusting whatever exists (PR-462 review). Uses a marker consumer on a
+    // NEW subject under the token to prove delivery works post-heal.
+    const jsm = await jetstreamManager(raw);
+    const drifted = `echo.drift-probe.${Date.now()}`;
+    try {
+      const info = await jsm.streams.info('ECHO');
+      // Narrow the stream to only the classic test subject.
+      await jsm.streams.update('ECHO', { ...info.config, subjects: ['echo.test.v1'] });
+    } catch {
+      await jsm.streams.add({ name: 'ECHO', subjects: ['echo.test.v1'] });
+    }
+    const client = await NatsBusClient.connect(BROKER as string, process.env.BUS_TEST_NATS_TOKEN);
+    try {
+      await client.publish(drifted, { ok: true });
+      const post = await jsm.streams.info('ECHO');
+      expect(post.config.subjects).toContain('echo.>');
+    } finally {
+      await client.close();
+    }
+  });
+
   it('dedups a re-publish with the same idempotency key (broker msgID window)', async () => {
     const client = await NatsBusClient.connect(BROKER as string, process.env.BUS_TEST_NATS_TOKEN);
     try {
@@ -106,8 +165,7 @@ describe.runIf(!!BROKER)('NATS integration (echo round-trip)', () => {
       });
       await client.publish('echo.dedup.v1', { marker }, { idempotencyKey: marker });
       await client.publish('echo.dedup.v1', { marker }, { idempotencyKey: marker });
-      // Give the consumer a moment to drain both would-be deliveries.
-      await new Promise((r) => setTimeout(r, 1500));
+      await waitForConsumerQuiet('ECHO', 'echo-dedup-worker');
       expect(seen).toHaveLength(1);
     } finally {
       await client.close();
@@ -116,21 +174,19 @@ describe.runIf(!!BROKER)('NATS integration (echo round-trip)', () => {
 
   it('terminates (no redelivery) on a malformed JSON payload', async () => {
     const client = await NatsBusClient.connect(BROKER as string, process.env.BUS_TEST_NATS_TOKEN);
-    const raw = await connect({ servers: BROKER as string, token: process.env.BUS_TEST_NATS_TOKEN });
     try {
       let handled = 0;
       await client.subscribeQueue('echo.badjson.v1', 'echo-badjson-worker', async () => {
         handled += 1;
       });
       // Bypass publish()'s JSON encoding — raw bytes that aren't JSON.
-      await raw.jetstream().publish('echo.badjson.v1', new TextEncoder().encode('{not json'));
-      // term() means: never delivered to the handler, and NOT redelivered
-      // (a nak-with-delay would land a redelivery long after this window —
-      // 15s — so a zero handled-count here plus no crash is the contract).
-      await new Promise((r) => setTimeout(r, 1500));
+      await jetstream(raw).publish('echo.badjson.v1', new TextEncoder().encode('{not json'));
+      // term() = the broker is done with the message without a handler
+      // delivery; quiet-state (no pending, no ack-pending, no redelivered)
+      // is the positive signal that it was terminated, not parked.
+      await waitForConsumerQuiet('ECHO', 'echo-badjson-worker');
       expect(handled).toBe(0);
     } finally {
-      await raw.drain();
       await client.close();
     }
   });
