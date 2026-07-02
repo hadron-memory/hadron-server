@@ -73,6 +73,55 @@ describe('propagateOrgUrnRename', () => {
     expect(ag.urn).toBe('holger-pers2:my-agent'); // legacy single-colon preserved
   });
 
+  it('skips rows already at the target prefix (no needless write)', async () => {
+    // xmin is the inserting/updating txn id — it changes iff the row is
+    // physically rewritten, so it's a precise probe for "was this row touched".
+    const xmin = async (id: string) =>
+      (
+        await db.$queryRaw<{ xmin: string }[]>`
+          SELECT xmin::text AS xmin FROM memories WHERE id = ${id}
+        `
+      )[0]?.xmin;
+
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'x', urn: 'org-old' },
+    });
+    // Already at the target `org-new` prefix (e.g. a prior partial heal).
+    const alreadyCorrect = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: 'org-new::correct',
+        name: 'correct',
+        class: 'knowledge',
+      },
+    });
+    // Needs rewriting.
+    const stale = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: 'org-old::stale',
+        name: 'stale',
+        class: 'knowledge',
+      },
+    });
+
+    const correctBefore = await xmin(alreadyCorrect.id);
+    const staleBefore = await xmin(stale.id);
+
+    await db.$transaction((tx) => propagateOrgUrnRename(tx, org.id, 'org-old', 'org-new'));
+
+    // Already-correct row untouched (same xmin); stale row rewritten (new xmin).
+    expect(await xmin(alreadyCorrect.id)).toBe(correctBefore);
+    expect(await xmin(stale.id)).not.toBe(staleBefore);
+
+    const c = await db.memory.findUniqueOrThrow({ where: { id: alreadyCorrect.id } });
+    const s = await db.memory.findUniqueOrThrow({ where: { id: stale.id } });
+    expect(c.urn).toBe('org-new::correct');
+    expect(s.urn).toBe('org-new::stale');
+  });
+
   it('does not touch other orgs\' rows', async () => {
     const org = await db.organization.create({
       data: { id: generateId(), name: 'a', urn: 'org-a' },

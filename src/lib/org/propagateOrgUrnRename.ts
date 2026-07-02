@@ -41,22 +41,33 @@ export async function propagateOrgUrnRename(
   // org→slug boundary); `substr(urn, that)` keeps the colon and everything
   // after it verbatim (`::slug` stays `::slug`, legacy `:slug` stays `:slug`),
   // so prepending the new org URN rewrites ANY stale prefix — including one
-  // that no longer matches the org's live URN — and is idempotent for rows
-  // already correct. The `strpos > 0` guard skips any malformed colon-less URN.
+  // that no longer matches the org's live URN. The `strpos > 0` guard skips
+  // any malformed colon-less URN.
+  //
+  // `NOT starts_with(urn, ${newOrgUrn}:)` skips rows already at the target
+  // prefix (PR #456 review): the rewrite is idempotent for them, so touching
+  // them only burns a no-op write — MVCC dead tuple, WAL, and churn on the
+  // `@unique` urn index. An org URN never contains a colon, so the trailing
+  // `:` makes this an exact-boundary check: a row is skipped only when its
+  // prefix already equals newOrgUrn (i.e. genuinely correct), never a row
+  // that merely shares a leading substring.
   // Table/column names are the Prisma @@map targets.
   await tx.$executeRaw`
     UPDATE memories
     SET urn = ${newOrgUrn} || substr(urn, strpos(urn, ':'))
     WHERE organization_id = ${organizationId} AND strpos(urn, ':') > 0
+      AND NOT starts_with(urn, ${newOrgUrn} || ':')
   `;
   await tx.$executeRaw`
     UPDATE agents
     SET urn = ${newOrgUrn} || substr(urn, strpos(urn, ':'))
     WHERE organization_id = ${organizationId} AND strpos(urn, ':') > 0
+      AND NOT starts_with(urn, ${newOrgUrn} || ':')
   `;
   await tx.$executeRaw`
     UPDATE apps
     SET urn = ${newOrgUrn} || substr(urn, strpos(urn, ':'))
     WHERE organization_id = ${organizationId} AND strpos(urn, ':') > 0
+      AND NOT starts_with(urn, ${newOrgUrn} || ':')
   `;
 }
