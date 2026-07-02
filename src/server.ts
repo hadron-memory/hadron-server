@@ -72,7 +72,9 @@ export async function createServer(): Promise<Express> {
       credentials: true,
     }),
   );
-  app.use(express.json());
+  // Default express.json cap is 100kb, which rejects large payloads such as
+  // full-page HTML clips (e.g. from the Chrome extension) with 413. Raise it.
+  app.use(express.json({ limit: '25mb' }));
 
   // Spec 025-oauth-for-mcp FR-016: mount cookie-parser globally so
   // downstream handlers can READ cookies via `req.cookies` (notably
