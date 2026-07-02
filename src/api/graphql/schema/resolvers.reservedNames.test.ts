@@ -46,7 +46,7 @@ beforeEach(async () => {
 describe('upsertNode — reserved extraction-spec names', () => {
   it('rejects agentExtractionSpec with field "exception"', async () => {
     await expect(
-      resolvers.Mutation.upsertNode(
+      resolvers.Mutation.createNode(
         {},
         {
           input: {
@@ -74,7 +74,7 @@ describe('upsertNode — reserved extraction-spec names', () => {
 
   it('rejects extractionSpec on a stage node with field "exceptions"', async () => {
     await expect(
-      resolvers.Mutation.upsertNode(
+      resolvers.Mutation.createNode(
         {},
         {
           input: {
@@ -97,7 +97,7 @@ describe('upsertNode — reserved extraction-spec names', () => {
   });
 
   it('accepts a clean extraction-spec save', async () => {
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       {},
       {
         input: {
@@ -118,7 +118,7 @@ describe('upsertNode — reserved extraction-spec names', () => {
   });
 
   it('accepts lookalike fields like "exception_count"', async () => {
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       {},
       {
         input: {

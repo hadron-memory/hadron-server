@@ -179,7 +179,7 @@ describe('upsertNode with encryption', () => {
     );
     const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
 
-    const upserted = await resolvers.Mutation.upsertNode(
+    const upserted = await resolvers.Mutation.createNode(
       {},
       {
         input: {
@@ -213,7 +213,7 @@ describe('upsertNode with encryption', () => {
     );
     const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
 
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       {},
       {
         input: {
@@ -251,7 +251,7 @@ describe('upsertNode with encryption', () => {
     const ABSTRACT_PLAINTEXT =
       'Paragraph-length summary that would leak ~2000 chars of content if stored plaintext.';
 
-    const upserted = await resolvers.Mutation.upsertNode(
+    const upserted = await resolvers.Mutation.createNode(
       {},
       {
         input: {
@@ -294,7 +294,7 @@ describe('upsertNode with encryption', () => {
     await resolvers.Mutation.endAgentSession({}, { sessionId: session.id }, appCtx(secretApp.id));
 
     await expect(
-      resolvers.Mutation.upsertNode(
+      resolvers.Mutation.createNode(
         {},
         {
           input: {
@@ -317,7 +317,7 @@ describe('upsertNode with encryption', () => {
       appCtx(secretApp.id),
     );
     const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       {},
       { input: { memoryId: session.memoryId!, loc: 'profile', name: 'profile', data: { a: 1 } } },
       sessionCtx,
@@ -348,7 +348,7 @@ describe('read path decryption', () => {
       appCtx(secretApp.id),
     );
     const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
-    const written = await resolvers.Mutation.upsertNode(
+    const written = await resolvers.Mutation.createNode(
       {},
       {
         input: { memoryId: session.memoryId!, loc: 'n1', name: 'n1', content: 'plain' },
@@ -371,7 +371,7 @@ describe('read path decryption', () => {
       appCtx(secretApp.id),
     );
     const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
-    const written = await resolvers.Mutation.upsertNode(
+    const written = await resolvers.Mutation.createNode(
       {},
       {
         input: { memoryId: session.memoryId!, loc: 'n2', name: 'n2', content: 'secret' },
@@ -408,12 +408,12 @@ describe('encryptMemory', () => {
       appCtx(plaintextApp.id),
     );
     const sessionCtx = appCtx(plaintextApp.id, { sessionId: session.id, roles: ['ADMIN'] });
-    await resolvers.Mutation.upsertNode(
+    await resolvers.Mutation.createNode(
       {},
       { input: { memoryId: session.memoryId!, loc: 'a', name: 'a', content: 'alpha' } },
       sessionCtx,
     );
-    await resolvers.Mutation.upsertNode(
+    await resolvers.Mutation.createNode(
       {},
       { input: { memoryId: session.memoryId!, loc: 'b', name: 'b', content: 'beta', data: { n: 1 } } },
       sessionCtx,
@@ -461,7 +461,7 @@ describe('encryptMemory', () => {
       appCtx(plaintextApp.id),
     );
     const sessionCtx = appCtx(plaintextApp.id, { sessionId: session.id, roles: ['ADMIN'] });
-    await resolvers.Mutation.upsertNode(
+    await resolvers.Mutation.createNode(
       {},
       { input: { memoryId: session.memoryId!, loc: 'x', name: 'x', content: 'gamma' } },
       sessionCtx,
@@ -497,7 +497,7 @@ describe('linkMemoryToUser with encryption', () => {
       appCtx(plaintextApp.id),
     );
     const sessionCtx = appCtx(plaintextApp.id, { sessionId: anonSession.id, roles: ['ADMIN'] });
-    await resolvers.Mutation.upsertNode(
+    await resolvers.Mutation.createNode(
       {},
       {
         input: { memoryId: anonSession.memoryId!, loc: 'note', name: 'note', content: 'first draft' },

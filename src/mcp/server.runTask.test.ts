@@ -325,7 +325,7 @@ describe('isRunnable write path (hadron_create_node / hadron_update_node / Graph
 
   it('GraphQL upsertNode threads isRunnable into the node', async () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
-    await resolvers.Mutation.upsertNode(
+    await resolvers.Mutation.createNode(
       {},
       { input: { memoryId: fx.alpha.id, loc: 'tasks:via-gql', name: 'Via GQL', isRunnable: true } },
       ctx,

@@ -96,7 +96,7 @@ describe('private/personal access is owner-only', () => {
     const mine = await resolvers.Query.myMemories(null, {}, asOwner());
     expect(mine.map((m: any) => m.id)).toContain(mem.id);
     // owner can write a node (READER role notwithstanding — it's their memory)
-    const node = await resolvers.Mutation.upsertNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.note', name: 'note' } } as any, asOwner());
+    const node = await resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.note', name: 'note' } } as any, asOwner());
     expect(node.loc).toBe('micromentor.repo.note');
     // owner sees its nodes
     const nodes = await listNodes({}, asOwner());
@@ -111,7 +111,7 @@ describe('private/personal access is owner-only', () => {
     const nodes = await listNodes({}, asOther());
     expect(nodes.some((n: any) => n.memoryId === mem.id)).toBe(false);
     await expect(
-      resolvers.Mutation.upsertNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.hack', name: 'h' } } as any, asOther()),
+      resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.hack', name: 'h' } } as any, asOther()),
     ).rejects.toThrow('Forbidden');
   });
 
@@ -119,7 +119,7 @@ describe('private/personal access is owner-only', () => {
     const mem = await createPrivate();
     await expect(resolvers.Query.memory(null, { id: mem.id }, asAdmin())).rejects.toThrow('Forbidden');
     await expect(
-      resolvers.Mutation.upsertNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.adminedit', name: 'x' } } as any, asAdmin()),
+      resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.adminedit', name: 'x' } } as any, asAdmin()),
     ).rejects.toThrow('Forbidden');
   });
 });

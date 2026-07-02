@@ -49,13 +49,34 @@ import {
   throwOnReservedExtractionSpec,
   requireMemoryWriteAccess,
   type NodeInput,
+  type CreateNodeInput,
+  type UpdateNodeInput,
   type SearchReplaceInNodesInput,
   type EdgeInput,
   type MergeNodesInput,
 } from './resolvers.helpers.js';
 
-export const nodeMutations = {
-    upsertNode: async (_: unknown, { input }: { input: NodeInput }, ctx: Context) => {
+// ── Shared node-write core (spec 039 Phase 0 D1) ────────────────────────────
+//
+// The single canonical single-node write path — formerly the upsertNode
+// resolver. Public callers reach it through createNode / updateNode below;
+// server-internal callers (updateNodeData, and the spec-039 import worker)
+// call it directly and may use mode 'upsert', which is no longer exposed on
+// the GraphQL surface. Every single-write invariant lives here once:
+// per-memory write auth, encryption (decrypt→mutate→re-encrypt), NodeVersion
+// snapshot, abstractOriginHash recompute, re-embed enqueue, git mirror.
+type NodeWriteMode = 'create' | 'update' | 'upsert';
+/** NodeInput with `name` optional — update mode preserves it on omit (D4). */
+type NodeWriteInput = Omit<NodeInput, 'name'> & { name?: string };
+
+export async function writeNodeCore(
+  rawInput: NodeWriteInput,
+  ctx: Context,
+  mode: NodeWriteMode,
+) {
+      // Keep the historical `input` name so the body below stays a
+      // minimal-diff move from the upsertNode resolver it used to be.
+      let input = rawInput;
       // Spec 022: `memoryId` MUST be supplied (typeDefs marks it `String!`).
       // Route through `resolveMemoryRef` so:
       //   - ID-shape inputs (CUID / 32-char hex) dispatch via spec 007
@@ -122,20 +143,29 @@ export const nodeMutations = {
         where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
       });
 
-      // Spec 011 follow-up: callers that want pure CREATE semantics pass
-      // `createOnly: true`. Reject the mutation if a **live** node already
-      // lives at (loc, memoryId), so the portal's create form (and any
-      // other create-only caller) surfaces a NodeLocConflictError instead
-      // of silently overwriting the existing node. Soft-deleted nodes at
-      // the target loc are treated as not-existing for collision purposes
-      // — the create resurrects them (the upsert UPDATE branch below
-      // clears `deletedAt`/`deletedBy` when this resurrection path runs).
-      const isResurrect = !!(input.createOnly && existing?.deletedAt);
-      if (input.createOnly && existing && !existing.deletedAt) {
+      // Mode gate (spec 039 Phase 0 D1). Create: reject if a **live** node
+      // already lives at (loc, memoryId) — the portal's create form (and any
+      // other creating caller) surfaces a NodeLocConflictError instead of
+      // silently overwriting. Soft-deleted nodes at the target loc are
+      // treated as not-existing for collision purposes — the create
+      // resurrects them (the UPDATE branch below clears `deletedAt`/
+      // `deletedBy` when this resurrection path runs). Update: the target
+      // must exist — updateNode never creates (a concurrent delete between
+      // this check and the write falls into the upsert's create branch; the
+      // same TOCTOU window the pre-split resolver had). Upsert (internal
+      // callers only): legacy either-way behavior.
+      const isResurrect = mode === 'create' && !!existing?.deletedAt;
+      if (mode === 'create' && existing && !existing.deletedAt) {
         const err = new NodeLocConflictError(input.loc, input.memoryId);
         throw new GraphQLError(err.message, {
           extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
         });
+      }
+      if (mode === 'update' && (!existing || existing.deletedAt)) {
+        throw new GraphQLError(
+          `Node not found at loc "${input.loc}" in memory "${input.memoryId}".`,
+          { extensions: { code: 'NODE_NOT_FOUND', loc: input.loc, memoryId: input.memoryId } },
+        );
       }
 
       // Resolve edge targets BEFORE any write so an unresolvable
@@ -229,17 +259,15 @@ export const nodeMutations = {
       const tags = serializeTags(input.tags ?? []) as string[];
       const updateTagsPayload = input.tags === undefined ? {} : { tags };
       const id = input.id ?? generateId();
-      // Strip GraphQL-only flags + `tags` from the Prisma payload.
-      // `createOnly` is a control input, not a column. `edges` is consumed
-      // above (resolved into `resolvedEdges`) and applied below. `tags` is
-      // re-applied per-branch below (serialized, and update-gated) — leaving
-      // the raw array in `nodeFields` would write the wrong shape on SQLite
-      // and clobber the preserve-on-omit gating above.
+      // Strip GraphQL-only fields + `tags` from the Prisma payload.
+      // `edges` is consumed above (resolved into `resolvedEdges`) and applied
+      // below. `tags` is re-applied per-branch below (serialized, and
+      // update-gated) — leaving the raw array in `nodeFields` would write the
+      // wrong shape on SQLite and clobber the preserve-on-omit gating above.
       // `reason` is version-history metadata (consumed into editedBy above), not
       // a Node column — strip it so it never reaches the node upsert payload.
       const {
         edges: _edges,
-        createOnly: _createOnly,
         tags: _tags,
         reason: _reason,
         ...nodeFields
@@ -343,24 +371,39 @@ export const nodeMutations = {
           ? await nextSiblingSeq(ctx.db, input.memoryId, input.loc)
           : undefined;
 
-      const node = await ctx.db.node.upsert({
+      // Update mode writes via `update`, not `upsert`: existence was verified
+      // by the mode gate above, and with `name` now optional-on-update (D4)
+      // the upsert's create payload could lack the required `name` column —
+      // Prisma validates that payload eagerly even when the update branch
+      // would run. A concurrent delete between the gate and this write
+      // surfaces as Prisma P2025 (genuinely "not found") rather than a
+      // silent create. Create/upsert modes keep the historical upsert call;
+      // their callers always supply `name`.
+      const writeArgs = {
         where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-        create: {
-          ...nodeFieldsClean,
-          id,
-          tags,
-          createdBy,
-          ...hashPayload,
-          ...(seqForCreate != null ? { seq: seqForCreate } : {}),
-        } as Prisma.NodeUncheckedCreateInput,
-        update: {
-          ...nodeFieldsClean,
-          ...updateTagsPayload,
-          ...updateExtras,
-          ...hashPayload,
-        } as Prisma.NodeUncheckedUpdateInput,
         include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
-      });
+      };
+      const updatePayload = {
+        ...nodeFieldsClean,
+        ...updateTagsPayload,
+        ...updateExtras,
+        ...hashPayload,
+      } as Prisma.NodeUncheckedUpdateInput;
+      const node =
+        mode === 'update'
+          ? await ctx.db.node.update({ ...writeArgs, data: updatePayload })
+          : await ctx.db.node.upsert({
+              ...writeArgs,
+              create: {
+                ...nodeFieldsClean,
+                id,
+                tags,
+                createdBy,
+                ...hashPayload,
+                ...(seqForCreate != null ? { seq: seqForCreate } : {}),
+              } as Prisma.NodeUncheckedCreateInput,
+              update: updatePayload,
+            });
 
       // For the return value, decrypt the result back so callers see plaintext.
       if (memEncInfo.isEncrypted) {
@@ -417,7 +460,7 @@ export const nodeMutations = {
         properties: finalNode.properties,
         outgoingEdges: finalNode.outgoingEdges ?? [],
       }, input.ownerRepo ?? '', ctx.clientId, input.memoryId).catch((err) => {
-        console.error('[upsertNode] git write error:', err);
+        console.error('[writeNodeCore] git write error:', err);
       });
 
       // 033 — (re-)embed on write. finalNode is decrypted (plaintext) here, so
@@ -429,15 +472,83 @@ export const nodeMutations = {
       });
 
       return finalNode;
+}
+
+export const nodeMutations = {
+    // Create a single node (spec 039 Phase 0 D1/D4). Create-only: a live
+    // node at (memoryId, loc) rejects with NodeLocConflictError; a
+    // soft-deleted one is resurrected. `input.id` is a forced create-PK
+    // (importer/sync), never a selector.
+    createNode: async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
+      writeNodeCore(input, ctx, 'create'),
+
+    // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
+    // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
+    // never moves. All content fields preserve-on-omit.
+    updateNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) => {
+      const { id, memoryId, loc, ...fields } = input;
+      const hasId = id != null && id !== '';
+      if (hasId && (memoryId != null || loc != null)) {
+        throw new GraphQLError(
+          'updateNode: identify the node by `id` OR by `memoryId` + `loc`, not both. ' +
+            '(`loc`/`memoryId` are selectors, not writable fields — moveNode relocates.)',
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+      if (!hasId && (memoryId == null || loc == null)) {
+        throw new GraphQLError(
+          'updateNode: supply `id` (PK or fully-qualified node URN) or both `memoryId` and `loc`.',
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+
+      let targetMemoryId: string;
+      let targetLoc: string;
+      if (hasId) {
+        // ID-or-URN dispatch (spec 007/022). A genuine miss → NODE_NOT_FOUND;
+        // a relative-form URN propagates as UrnNotQualifiedError.
+        let resolvedNodeId: string;
+        try {
+          ({ id: resolvedNodeId } = await resolveNodeRef(ctx.db, id));
+        } catch (e) {
+          if (e instanceof NodeNotFoundError) {
+            throw new GraphQLError(`Node not found: "${id}"`, {
+              extensions: { code: 'NODE_NOT_FOUND', ref: id },
+            });
+          }
+          throw e;
+        }
+        const row = await ctx.db.node.findUnique({
+          where: { id: resolvedNodeId },
+          select: { memoryId: true, loc: true },
+        });
+        if (!row) {
+          throw new GraphQLError(`Node not found: "${id}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: id },
+          });
+        }
+        targetMemoryId = row.memoryId;
+        targetLoc = row.loc;
+      } else {
+        ({ id: targetMemoryId } = await resolveMemoryRef(ctx.db, memoryId as string));
+        targetLoc = loc as string;
+      }
+
+      return writeNodeCore(
+        { ...fields, memoryId: targetMemoryId, loc: targetLoc },
+        ctx,
+        'update',
+      );
     },
 
     // Shallow-merge a JSON patch into a node's `data` bag (issue #366).
     // The supplied object's top-level keys overwrite the node's existing
     // `data` (the patch wins on collision); untouched keys are preserved; a
     // node with no prior data takes the patch verbatim. Delegates the write to
-    // upsertNode so every single-write invariant (write auth, re-encryption,
-    // NodeVersion snapshot, git mirror) is applied once and stays in sync —
-    // this resolver only resolves the node and computes the merged plaintext.
+    // the shared write core so every single-write invariant (write auth,
+    // re-encryption, NodeVersion snapshot, git mirror) is applied once and
+    // stays in sync — this resolver only resolves the node and computes the
+    // merged plaintext.
     updateNodeData: async (
       _: unknown,
       { nodeId, data, reason }: { nodeId: string; data: unknown; reason?: string | null },
@@ -523,23 +634,19 @@ export const nodeMutations = {
           ? { ...(existing as Record<string, unknown>), ...(data as Record<string, unknown>) }
           : (data as Record<string, unknown>);
 
-      // Delegate the write. Pass the existing loc/name/ownerRepo so upsertNode
-      // targets the same row and preserves them (omitted fields = preserve).
-      return nodeMutations.upsertNode(
-        _,
+      // Delegate the write to the core in update mode. Addressing by the
+      // existing (memoryId, loc); omitted fields (name included) preserve.
+      return writeNodeCore(
         {
-          input: {
-            id: meta.id,
-            memoryId: meta.memoryId,
-            loc: row.loc,
-            name: row.name,
-            data: merged,
-            ...(row.ownerRepo != null ? { ownerRepo: row.ownerRepo } : {}),
-            // #88: thread the edit rationale through to the version snapshot.
-            ...(reason != null ? { reason } : {}),
-          },
+          memoryId: meta.memoryId,
+          loc: row.loc,
+          data: merged,
+          ...(row.ownerRepo != null ? { ownerRepo: row.ownerRepo } : {}),
+          // #88: thread the edit rationale through to the version snapshot.
+          ...(reason != null ? { reason } : {}),
         },
         ctx,
+        'update',
       );
     },
 
@@ -1519,13 +1626,12 @@ export const nodeMutations = {
         await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
 
         for (const input of nodes) {
-          // Strip non-column NodeInput fields (edges/createOnly/reason) that
-          // Prisma would reject, and pull out id/tags so they're set explicitly
+          // Strip non-column NodeInput fields (edges/reason) that Prisma
+          // would reject, and pull out id/tags so they're set explicitly
           // (spreading input.id would otherwise override the generated id).
           const {
             id: _id,
             edges: _edges,
-            createOnly: _createOnly,
             reason: _reason,
             tags: _tags,
             ...nodeFields

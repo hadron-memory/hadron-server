@@ -57,7 +57,7 @@ beforeEach(async () => {
 });
 
 async function upsertSourceWithTarget(targetRef: string) {
-  return resolvers.Mutation.upsertNode(
+  return resolvers.Mutation.createNode(
     {},
     {
       input: {
@@ -145,7 +145,7 @@ describe('upsertNode — edge target resolution (issue #105)', () => {
         name: 'other-helper',
       },
     });
-    const node = await resolvers.Mutation.upsertNode(
+    const node = await resolvers.Mutation.createNode(
       {},
       {
         input: {
