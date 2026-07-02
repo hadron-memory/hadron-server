@@ -58,6 +58,20 @@ services:
       mc cors set local/hadron-assets-dev /tmp/cors.json || true
       "
 
+  # 039 Phase 1 — platform message bus (NATS JetStream, `-js`). Dev-only
+  # convenience: the server runs standalone without it (NATS_URL unset →
+  # sweep-loop fallbacks, D-2026-06-17-004). Point the app at it with
+  # NATS_URL=nats://localhost:4222 (host) / nats://nats:4222 (compose).
+  # 8222 is the HTTP monitoring endpoint.
+  nats:
+    image: nats:2.10-alpine
+    container_name: hadron-nats
+    restart: unless-stopped
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
   app:
     container_name: hadron-controller
     build: .
