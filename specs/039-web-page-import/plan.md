@@ -170,7 +170,8 @@ model WebImportTask {
   nodeLoc         String                   // loc within the memory
   status          WebImportTaskStatus @default(PENDING)
   attempts        Int       @default(0)
-  error           String?
+  error           String?                  // last FAILED attempt of the task itself (syncError/embeddingError convention)
+  abstractError   String?                  // abstract-generation failure on an otherwise-COMPLETED import (§7 step 5)
   // captured principal — replayed into the execution Context (headless-runner D23 analogue)
   requestedByUserId String?
   appId           String?
@@ -259,15 +260,17 @@ input ImportNodeInput {
 
   name: String         # optional; defaults to converted <title> ?? url on create
 }
+enum ImportNodeStatus { STORED, FETCH_PENDING }   # enum, not raw String — matches SyncStatus / AssetScanStatus convention
 type ImportNodeResult {
-  status: String!      # "stored" (sync inline path) | "fetch_pending" (URL path)
-  node: Node           # set on the sync path
-  task: WebImportTask  # set on the URL path — poll webImportTask(id)
+  status: ImportNodeStatus!  # STORED (sync inline path) | FETCH_PENDING (URL path)
+  node: Node                 # set on the sync path
+  task: WebImportTask        # set on the URL path — poll webImportTask(id)
+  abstractError: String      # sync path: abstract-generation failure (content still stored — see §7 step 5)
 }
 type Query {
   webImportTask(id: ID!): WebImportTask
 }
-type WebImportTask { id, url, status, error, resultNodeId, createdAt, finishedAt … }
+type WebImportTask { id, url, status, error, abstractError, resultNodeId, createdAt, finishedAt … }
 ```
 
 Resolver behavior:
@@ -359,9 +362,13 @@ Per task, after the atomic claim:
    Output ≤ ~500 chars. Then an internal update with `{ id: resultNodeId, abstract }` —
    through the write core so `abstractOriginHash` is recomputed against the just-written
    content (D2/D4 make this two-field call legal; no `name`/`loc` re-send). On
-   `NoAiConfigAvailableError` or LLM failure: task still **COMPLETES** with a warning in
-   `error` (content is imported; abstract is enhancement, not requirement — matches the
-   "don't slow/block on AI" platform rule from D-2026-05-31-002).
+   `NoAiConfigAvailableError` or LLM failure: task still **COMPLETES**, with the failure
+   recorded in a dedicated **`abstractError`** field — NOT in `error`, which (like
+   `Memory.syncError` / `Node.embeddingError` / `ExchangeConnection.lastError`) is
+   reserved for the last *failed* attempt of the task itself. `COMPLETED` +
+   `abstractError` set = content imported, abstract missing (abstract is enhancement,
+   not requirement — matches the "don't slow/block on AI" platform rule from
+   D-2026-05-31-002 — and mirrors `embeddingError`'s per-sub-step semantics).
 6. **Finish**: status `COMPLETED` + `resultNodeId` + `finishedAt`; ack the JetStream
    message. On step 1–3 failure: record `error`; if `attempts < max` reset to `PENDING`
    (+ nak with delay), else `FAILED` (+ ack — poison-message terminal state, the DLQ-lite
