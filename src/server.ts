@@ -73,8 +73,18 @@ export async function createServer(): Promise<Express> {
     }),
   );
   // Default express.json cap is 100kb, which rejects large payloads such as
-  // full-page HTML clips (e.g. from the Chrome extension) with 413. Raise it.
-  app.use(express.json({ limit: '25mb' }));
+  // full-page HTML clips from the Web Clipper with 413. Raise it for
+  // /graphql only — every other JSON endpoint (auth, webhooks, usage, ...)
+  // keeps the default so oversized payloads can't tie up parsing there.
+  const jsonParser = express.json();
+  const jsonParserLarge = express.json({ limit: '25mb' });
+  app.use((req, res, next) => {
+    if (req.path === '/graphql' || req.path.startsWith('/graphql/')) {
+      jsonParserLarge(req, res, next);
+    } else {
+      jsonParser(req, res, next);
+    }
+  });
 
   // Spec 025-oauth-for-mcp FR-016: mount cookie-parser globally so
   // downstream handlers can READ cookies via `req.cookies` (notably
