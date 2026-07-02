@@ -35,6 +35,7 @@ import {
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startEmbeddingWorkerLoop } from './jobs/embedNodes.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
+import { getBusClient } from './lib/bus/index.js';
 
 export async function createServer(): Promise<Express> {
   const app = express();
@@ -907,6 +908,21 @@ export async function createServer(): Promise<Express> {
         }
       })
       .catch(() => {});
+  }
+
+  // 039 Phase 1 — platform message bus (NATS JetStream). Optional by design
+  // (D-2026-06-17-004): with NATS_URL unset getBusClient() resolves null and
+  // features fall back to their DB-backed sweep loops — absence of a broker
+  // never breaks boot or the API. Boot only establishes + logs the
+  // connection; consumers are started by their features (the spec-039
+  // webimport worker lands in Phase 4).
+  if (process.env.NODE_ENV !== 'test' && process.env.NATS_URL) {
+    void getBusClient().then((bus) => {
+      if (bus) {
+        console.log(`[bus] connected to NATS at ${process.env.NATS_URL}`);
+      }
+      // The unreachable-broker case already logged inside getBusClient().
+    });
   }
 
   return app;
