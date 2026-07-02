@@ -32,10 +32,16 @@ export function getBusClient(): Promise<BusClient | null> {
     return clientPromise;
   }
   clientPromise = NatsBusClient.connect(url, process.env.NATS_TOKEN).catch((err) => {
-    // A broker that's configured but unreachable at first touch: log, return
-    // null for THIS process lifetime (features fall back to their sweep
-    // loops), and let the next boot retry. Never throw past this boundary.
+    // Configured but unreachable: log, return null for THIS call (features
+    // fall back to their sweep loops) and CLEAR the cache so the next
+    // getBusClient() call retries — a broker that boots after us gets picked
+    // up without a process restart. Callers are periodic (boot + sweep
+    // loops), so retry frequency is naturally bounded; an established-then-
+    // lost connection is instead handled by the NATS client's own infinite
+    // reconnect. Never throw past this boundary. (PR-462 review: policy made
+    // explicit — retry-on-next-call, not fail-for-process-lifetime.)
     console.error(`[bus] failed to connect to NATS at ${url}:`, err);
+    clientPromise = null;
     return null;
   });
   return clientPromise;

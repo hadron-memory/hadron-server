@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { connect } from 'nats';
 import { getBusClient, closeBusClient, NotImplementedError } from './index.js';
 import { NatsBusClient, streamNameForSubject } from './natsBusClient.js';
 
@@ -57,6 +58,13 @@ describe('streamNameForSubject (D-2026-06-17-003 layout)', () => {
     expect(() => streamNameForSubject('.oops')).toThrow(/lowercase/);
     expect(() => streamNameForSubject('Webimport.requested.v1')).toThrow(/lowercase/);
   });
+
+  it('rejects a dotless subject (would never match its own stream filter)', () => {
+    // Stream WEBIMPORT filters `webimport.>`, which does NOT match the bare
+    // subject `webimport` — publishing it would fail at the broker with a
+    // confusing "no stream matches" (PR-462 review).
+    expect(() => streamNameForSubject('webimport')).toThrow(/dot-delimited/);
+  });
 });
 
 describe.runIf(!!BROKER)('NATS integration (echo round-trip)', () => {
@@ -83,6 +91,46 @@ describe.runIf(!!BROKER)('NATS integration (echo round-trip)', () => {
       ]);
       expect(received.some((p) => (p as { marker?: string })?.marker === marker)).toBe(true);
     } finally {
+      await client.close();
+    }
+  });
+
+  it('dedups a re-publish with the same idempotency key (broker msgID window)', async () => {
+    const client = await NatsBusClient.connect(BROKER as string, process.env.BUS_TEST_NATS_TOKEN);
+    try {
+      const marker = `dedup-${process.pid}-${Date.now()}`;
+      const seen: string[] = [];
+      await client.subscribeQueue('echo.dedup.v1', 'echo-dedup-worker', async (msg) => {
+        const m = (msg.payload as { marker?: string })?.marker;
+        if (m === marker) seen.push(m);
+      });
+      await client.publish('echo.dedup.v1', { marker }, { idempotencyKey: marker });
+      await client.publish('echo.dedup.v1', { marker }, { idempotencyKey: marker });
+      // Give the consumer a moment to drain both would-be deliveries.
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(seen).toHaveLength(1);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('terminates (no redelivery) on a malformed JSON payload', async () => {
+    const client = await NatsBusClient.connect(BROKER as string, process.env.BUS_TEST_NATS_TOKEN);
+    const raw = await connect({ servers: BROKER as string, token: process.env.BUS_TEST_NATS_TOKEN });
+    try {
+      let handled = 0;
+      await client.subscribeQueue('echo.badjson.v1', 'echo-badjson-worker', async () => {
+        handled += 1;
+      });
+      // Bypass publish()'s JSON encoding — raw bytes that aren't JSON.
+      await raw.jetstream().publish('echo.badjson.v1', new TextEncoder().encode('{not json'));
+      // term() means: never delivered to the handler, and NOT redelivered
+      // (a nak-with-delay would land a redelivery long after this window —
+      // 15s — so a zero handled-count here plus no crash is the contract).
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(handled).toBe(0);
+    } finally {
+      await raw.drain();
       await client.close();
     }
   });
