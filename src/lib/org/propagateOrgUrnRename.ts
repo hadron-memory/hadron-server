@@ -7,11 +7,19 @@ import type { Prisma } from '../../generated/prisma/index.js';
  * An org's URN is baked into each child's `urn` column at creation. The
  * canonical form is `<orgUrn>::<slug>`, but legacy rows may store the pre-021
  * single-colon form `<orgUrn>:<slug>` (`normalizeUrnForLookup` collapses
- * `::`→`:`). An org URN never itself contains a colon, so **`<orgUrn>:` (single
- * colon) is an unambiguous boundary that matches BOTH forms** — replacing it
- * with `<newOrgUrn>:` preserves whatever follows verbatim (`:slug` stays
- * `::slug`, `slug` stays `:slug`), so canonical and legacy URNs both rewrite
- * correctly.
+ * `::`→`:`).
+ *
+ * **Scope by foreign key, not by matching the current org URN.** Every row we
+ * rewrite is selected purely by `organization_id`, and the prefix we strip is
+ * "everything up to the first colon" — not `<currentOrgUrn>:`. This is the fix
+ * for a real drift bug: if a child row's prefix ever diverges from the org's
+ * live URN (e.g. a rename that predated this cascade, or a direct DB edit), a
+ * prefix-matched rewrite keyed on the *current* org URN would skip that row
+ * forever, and every subsequent rename would widen the gap. FK-scoping heals
+ * such rows instead of stranding them. `validateOrgSlug` guarantees an org URN
+ * never contains a colon, so the first colon is an unambiguous org→slug
+ * boundary; keeping everything from that colon onward preserves the `::` vs
+ * legacy `:` form verbatim.
  *
  * Only these three tables store a URN string — Node/Edge URNs and installed-agent
  * URNs are composed on read and self-heal once the parents are fixed. Each table
@@ -28,28 +36,27 @@ export async function propagateOrgUrnRename(
 ): Promise<void> {
   if (oldOrgUrn === newOrgUrn) return;
 
-  const oldBoundary = `${oldOrgUrn}:`; // single colon — matches `::` and legacy `:`
-  const newBoundary = `${newOrgUrn}:`;
-  const fromPos = oldBoundary.length + 1; // 1-based SUBSTRING start, just past the boundary
-
-  // One bulk UPDATE per table. `starts_with(urn, boundary)` is an exact prefix
-  // match (no LIKE wildcard escaping, no integer length arg); `organization_id`
-  // scopes to this org's own rows. The substring position is cast to int because
-  // the driver binds JS numbers as bigint, which `substring(text, int)` rejects.
+  // One bulk UPDATE per table, scoped to this org's rows by `organization_id`
+  // alone. `strpos(urn, ':')` is the 1-based index of the first colon (the
+  // org→slug boundary); `substr(urn, that)` keeps the colon and everything
+  // after it verbatim (`::slug` stays `::slug`, legacy `:slug` stays `:slug`),
+  // so prepending the new org URN rewrites ANY stale prefix — including one
+  // that no longer matches the org's live URN — and is idempotent for rows
+  // already correct. The `strpos > 0` guard skips any malformed colon-less URN.
   // Table/column names are the Prisma @@map targets.
   await tx.$executeRaw`
     UPDATE memories
-    SET urn = ${newBoundary} || SUBSTRING(urn, ${fromPos}::int)
-    WHERE organization_id = ${organizationId} AND starts_with(urn, ${oldBoundary})
+    SET urn = ${newOrgUrn} || substr(urn, strpos(urn, ':'))
+    WHERE organization_id = ${organizationId} AND strpos(urn, ':') > 0
   `;
   await tx.$executeRaw`
     UPDATE agents
-    SET urn = ${newBoundary} || SUBSTRING(urn, ${fromPos}::int)
-    WHERE organization_id = ${organizationId} AND starts_with(urn, ${oldBoundary})
+    SET urn = ${newOrgUrn} || substr(urn, strpos(urn, ':'))
+    WHERE organization_id = ${organizationId} AND strpos(urn, ':') > 0
   `;
   await tx.$executeRaw`
     UPDATE apps
-    SET urn = ${newBoundary} || SUBSTRING(urn, ${fromPos}::int)
-    WHERE organization_id = ${organizationId} AND starts_with(urn, ${oldBoundary})
+    SET urn = ${newOrgUrn} || substr(urn, strpos(urn, ':'))
+    WHERE organization_id = ${organizationId} AND strpos(urn, ':') > 0
   `;
 }
