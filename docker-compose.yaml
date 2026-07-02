@@ -64,7 +64,9 @@ services:
   # NATS_URL=nats://localhost:4222 (host) / nats://nats:4222 (compose).
   # 8222 is the HTTP monitoring endpoint.
   nats:
-    image: nats:2.10-alpine
+    # Pinned to the exact alpha version (bare-metal nats-server 2.10.27) so
+    # local behavior can't drift from what production runs.
+    image: nats:2.10.27-alpine
     container_name: hadron-nats
     restart: unless-stopped
     command: ["-js", "-m", "8222"]

@@ -191,11 +191,18 @@ export class NatsBusClient implements BusClient {
     };
   }
 
-  async subscribePubSub(): Promise<() => Promise<void>> {
+  async subscribePubSub(
+    _subjectPattern: string,
+    _handler: BusQueueHandler,
+  ): Promise<() => Promise<void>> {
     throw new NotImplementedError('subscribePubSub');
   }
 
-  async requestReply(): Promise<unknown> {
+  async requestReply(
+    _subject: string,
+    _payload: unknown,
+    _timeoutMs: number,
+  ): Promise<unknown> {
     throw new NotImplementedError('requestReply');
   }
 

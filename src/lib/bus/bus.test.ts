@@ -138,8 +138,12 @@ describe.runIf(!!BROKER)('NATS integration (echo round-trip)', () => {
   it('reserved verbs throw NotImplementedError', async () => {
     const client = await NatsBusClient.connect(BROKER as string, process.env.BUS_TEST_NATS_TOKEN);
     try {
-      await expect(client.subscribePubSub()).rejects.toBeInstanceOf(NotImplementedError);
-      await expect(client.requestReply()).rejects.toBeInstanceOf(NotImplementedError);
+      await expect(client.subscribePubSub('echo.>', async () => {})).rejects.toBeInstanceOf(
+        NotImplementedError,
+      );
+      await expect(client.requestReply('echo.rpc.v1', {}, 1000)).rejects.toBeInstanceOf(
+        NotImplementedError,
+      );
     } finally {
       await client.close();
     }
