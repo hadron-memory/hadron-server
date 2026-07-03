@@ -76,4 +76,12 @@ describe('resolveOrgRef', () => {
       UrnNotQualifiedError,
     );
   });
+
+  it('excludes a soft-deleted org by default; includeDeleted opts in', async () => {
+    const org = await db.organization.create({
+      data: { name: 'orgref-test-org-deleted', urn: `orgref-test-org-deleted-${Date.now()}:slug`, deletedAt: new Date() },
+    });
+    await expect(resolveOrgRef(db, org.id)).rejects.toBeInstanceOf(OrganizationNotFoundError);
+    await expect(resolveOrgRef(db, org.id, { includeDeleted: true })).resolves.toEqual({ id: org.id });
+  });
 });

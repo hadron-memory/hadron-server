@@ -14,6 +14,7 @@ import { AgentNotFoundError } from './errors.js';
 export async function resolveAgentRef(
   db: Pick<PrismaClient, 'agent'>,
   ref: string,
+  options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
   const idInput = isId(ref);
   if (!idInput) {
@@ -26,10 +27,10 @@ export async function resolveAgentRef(
     ? { id: ref }
     : { urn: normalizeUrnForLookup(parseUrnInput(ref).value) };
   // findFirst + `deletedAt: null` so the soft-delete exclusion lives in the
-  // query (the `{ id }` / `{ urn }` selector is still unique-backed). No
-  // includeDeleted opt-in on this resolver — soft-deleted is always excluded.
+  // query (the `{ id }` / `{ urn }` selector is still unique-backed). Excluded
+  // by default; `{ includeDeleted: true }` opts in (matches memoryRef).
   const agent = await db.agent.findFirst({
-    where: { ...where, deletedAt: null },
+    where: { ...where, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
     select: { id: true },
   });
   if (!agent) {

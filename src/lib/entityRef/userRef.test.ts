@@ -57,6 +57,16 @@ describe('resolveUserRef', () => {
     expect(u.deletedAt).not.toBeNull();
   });
 
+  it('resolves a soft-deleted user when includeDeleted is true', async () => {
+    const u = await db.user.create({
+      data: { githubId: gid++, handle: 'userref-test-gone-included', deletedAt: new Date() },
+    });
+    await expect(resolveUserRef(db, u.id, { includeDeleted: true })).resolves.toEqual({ id: u.id });
+    await expect(
+      resolveUserRef(db, 'hrn:user:userref-test-gone-included', { includeDeleted: true }),
+    ).resolves.toEqual({ id: u.id });
+  });
+
   it('accepts a bare handle (a user URN is a single segment, like an org)', async () => {
     const u = await db.user.create({
       data: { githubId: gid++, handle: 'userref-test-bare' },

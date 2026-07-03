@@ -14,6 +14,7 @@ import { AppNotFoundError } from './errors.js';
 export async function resolveAppRef(
   db: Pick<PrismaClient, 'app'>,
   ref: string,
+  options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
   const idInput = isId(ref);
   if (!idInput) {
@@ -23,17 +24,18 @@ export async function resolveAppRef(
   // Spec 021 FR-027 removed `App.urn`'s @unique constraint in favor of a
   // partial unique index restricted to `uninstalled_at IS NULL`, so the URN
   // path already uses `findFirst` with the active-row filter. Use `findFirst`
-  // for the ID path too so the `deletedAt: null` soft-delete exclusion lives in
-  // the query for both (the `{ id }` selector is still unique-backed).
-  // Normalization (prefix strip + `::`→`:`) is a no-op on an ID, so it runs
-  // only on the URN path. No includeDeleted opt-in on this resolver.
+  // for the ID path too so the soft-delete exclusion lives in the query for both
+  // (the `{ id }` selector is still unique-backed). Normalization (prefix strip
+  // + `::`→`:`) is a no-op on an ID, so it runs only on the URN path. Excluded
+  // by default; `{ includeDeleted: true }` opts in (matches memoryRef).
+  const deletedFilter = options?.includeDeleted ? {} : { deletedAt: null };
   const app = idInput
     ? await db.app.findFirst({
-        where: { id: ref, deletedAt: null },
+        where: { id: ref, ...deletedFilter },
         select: { id: true },
       })
     : await db.app.findFirst({
-        where: { urn: normalizeUrnForLookup(parseUrnInput(ref).value), uninstalledAt: null, deletedAt: null },
+        where: { urn: normalizeUrnForLookup(parseUrnInput(ref).value), uninstalledAt: null, ...deletedFilter },
         select: { id: true },
       });
   if (!app) {

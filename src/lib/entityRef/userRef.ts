@@ -25,6 +25,7 @@ import { UserNotFoundError } from './errors.js';
 export async function resolveUserRef(
   db: Pick<PrismaClient, 'user'>,
   ref: string,
+  options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
   const idInput = isId(ref);
   if (!idInput) {
@@ -39,10 +40,10 @@ export async function resolveUserRef(
     ? { id: ref }
     : { handle: normalizeUrnForLookup(parseUrnInput(ref).value).toLowerCase() };
   // findFirst + `deletedAt: null` so the soft-delete exclusion lives in the
-  // query (the `{ id }` / `{ handle }` selector is still unique-backed). No
-  // includeDeleted opt-in on this resolver — soft-deleted is always excluded.
+  // query (the `{ id }` / `{ handle }` selector is still unique-backed). Excluded
+  // by default; `{ includeDeleted: true }` opts in (matches memoryRef).
   const user = await db.user.findFirst({
-    where: { ...where, deletedAt: null },
+    where: { ...where, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
     select: { id: true },
   });
   if (!user) {
