@@ -7,26 +7,34 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isId } from './shape.js';
+import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { AgentNotFoundError } from './errors.js';
 
 export async function resolveAgentRef(
   db: Pick<PrismaClient, 'agent'>,
-  urn: string,
+  ref: string,
+  options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  if (!isId(urn)) {
+  const isId = isIdFunc(ref);
+  if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
-    assertFullyQualifiedUrn(urn, 'agent');
+    assertFullyQualifiedUrn(ref, 'agent');
   }
-  const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
-  const where = isId(normalized) ? { id: normalized } : { urn: normalized };
-  const agent = await db.agent.findUnique({
-    where,
-    select: { id: true, deletedAt: true },
+  // ID → PK lookup; URN → normalized (prefix stripped, `::` collapsed to `:`).
+  // Normalization is a no-op on an ID, so the ID path skips it.
+  const where = isId
+    ? { id: ref }
+    : { urn: normalizeUrnForLookup(parseUrnInput(ref).value) };
+  // findFirst + `deletedAt: null` so the soft-delete exclusion lives in the
+  // query (the `{ id }` / `{ urn }` selector is still unique-backed). Excluded
+  // by default; `{ includeDeleted: true }` opts in (matches memoryRef).
+  const agent = await db.agent.findFirst({
+    where: { ...where, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
+    select: { id: true },
   });
-  if (!agent || agent.deletedAt) {
-    throw new AgentNotFoundError(urn);
+  if (!agent) {
+    throw new AgentNotFoundError(ref);
   }
   return { id: agent.id };
 }

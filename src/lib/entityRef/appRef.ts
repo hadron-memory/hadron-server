@@ -7,35 +7,39 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isId } from './shape.js';
+import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { AppNotFoundError } from './errors.js';
 
 export async function resolveAppRef(
   db: Pick<PrismaClient, 'app'>,
-  urn: string,
+  ref: string,
+  options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  if (!isId(urn)) {
+  const isId = isIdFunc(ref);
+  if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
-    assertFullyQualifiedUrn(urn, 'app');
+    assertFullyQualifiedUrn(ref, 'app');
   }
-  const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
-  // Spec 021 FR-027 removed `App.urn`'s @unique constraint in favor of
-  // a partial unique index restricted to `uninstalled_at IS NULL`. So
-  // `findUnique({ where: { urn } })` is no longer well-typed — use
-  // `findFirst` with the active-row filter for URN lookups. ID lookups
-  // still use the PK.
-  const app = isId(normalized)
-    ? await db.app.findUnique({
-        where: { id: normalized },
-        select: { id: true, deletedAt: true },
+  // Spec 021 FR-027 removed `App.urn`'s @unique constraint in favor of a
+  // partial unique index restricted to `uninstalled_at IS NULL`, so the URN
+  // path already uses `findFirst` with the active-row filter. Use `findFirst`
+  // for the ID path too so the soft-delete exclusion lives in the query for both
+  // (the `{ id }` selector is still unique-backed). Normalization (prefix strip
+  // + `::`→`:`) is a no-op on an ID, so it runs only on the URN path. Excluded
+  // by default; `{ includeDeleted: true }` opts in (matches memoryRef).
+  const deletedFilter = options?.includeDeleted ? {} : { deletedAt: null };
+  const app = isId
+    ? await db.app.findFirst({
+        where: { id: ref, ...deletedFilter },
+        select: { id: true },
       })
     : await db.app.findFirst({
-        where: { urn: normalized, uninstalledAt: null },
-        select: { id: true, deletedAt: true },
+        where: { urn: normalizeUrnForLookup(parseUrnInput(ref).value), uninstalledAt: null, ...deletedFilter },
+        select: { id: true },
       });
-  if (!app || app.deletedAt) {
-    throw new AppNotFoundError(urn);
+  if (!app) {
+    throw new AppNotFoundError(ref);
   }
   return { id: app.id };
 }

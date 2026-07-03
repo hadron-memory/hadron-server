@@ -4,10 +4,13 @@
  *
  * Spec: 007-entity-id-or-urn / contracts/resolution-helpers.md.
  *
- * Three input forms all resolve to the same row:
- *   - "abc123…"                            (raw 32-hex-char ID)
- *   - "org-foo:family-recipes"             (bare URN, DB form)
- *   - "urn:memory:org-foo:family-recipes"  (prefixed URN, external form)
+ * Six input forms all resolve to the same row:
+ *   - "abc123…"                             (raw 32-hex-char ID)
+ *   - "org-foo:family-recipes"              (bare URN, DB form)
+ *   - "hrn:memory:org-foo::family-recipes"  (canonical fully qualified URN)
+ *   - "urn:memory:org-foo::family-recipes"  (legacy fully qualified URN)
+ *   - "hrn:memory:org-foo:family-recipes"   (like canonical fully qualified URN, but missing the double colon)
+ *   - "urn:memory:org-foo:family-recipes"   (legacy fully qualified URN)
  *
  * Soft-deleted memories return MemoryNotFoundError by default, matching
  * the existing convention. Pass `{ includeDeleted: true }` when the
@@ -16,32 +19,50 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isId } from './shape.js';
+import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { MemoryNotFoundError } from '../asset/gate.js';
 
+type WhereClause = {
+  id: string;
+  urn?: undefined;
+  deletedAt?: null;
+} | {
+  urn: string;
+  id?: undefined;
+  deletedAt?: null;
+}
+
 export async function resolveMemoryRef(
   db: Pick<PrismaClient, 'memory'>,
-  urn: string,
+  ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  if (!isId(urn)) {
+  const isId = isIdFunc(ref);
+  if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
-    assertFullyQualifiedUrn(urn, 'memory');
+    assertFullyQualifiedUrn(ref, 'memory');
   }
-  // Strip a `urn:<type>:` prefix if present. parseUrnInput returns
-  // the bare value; for already-bare input it returns the input
-  // unchanged. Then `normalizeUrnForLookup` collapses canonical `::`
-  // hierarchy separators to legacy `:` so the DB lookup matches
-  // pre-spec-021-migrated rows.
-  const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
-  const where = isId(normalized) ? { id: normalized } : { urn: normalized };
-  const memory = await db.memory.findUnique({
+  const where: WhereClause = isId
+    ? { id: ref }
+      // ID inputs look up by PK directly. For a URN, strip any `hrn/urn:<type>:`
+      // prefix (parseUrnInput) and collapse canonical `::` hierarchy separators to
+      // legacy `:` (normalizeUrnForLookup) so the DB lookup matches
+      // pre-spec-021-migrated rows. Normalization is a no-op on an ID (no colons to
+      // collapse), so the ID path skips it entirely.
+    : { urn: normalizeUrnForLookup(parseUrnInput(ref).value) };
+  // findFirst (not findUnique) so the soft-delete exclusion can live in the
+  // query: the `{ id }` / `{ urn }` selector is still unique-backed, and
+  // `deletedAt: null` filters out soft-deleted rows UNLESS the caller opts in.
+  if (!options?.includeDeleted) {
+    where.deletedAt = null;
+  }
+  const memory = await db.memory.findFirst({
     where,
-    select: { id: true, deletedAt: true },
+    select: { id: true },
   });
-  if (!memory || (!options?.includeDeleted && memory.deletedAt)) {
-    throw new MemoryNotFoundError(urn);
+  if (!memory) {
+    throw new MemoryNotFoundError(ref);
   }
   return { id: memory.id };
 }

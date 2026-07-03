@@ -18,28 +18,35 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isId } from './shape.js';
+import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { UserNotFoundError } from './errors.js';
 
 export async function resolveUserRef(
   db: Pick<PrismaClient, 'user'>,
   ref: string,
+  options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  if (!isId(ref)) {
+  const isId = isIdFunc(ref);
+  if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'user');
   }
-  const value = normalizeUrnForLookup(parseUrnInput(ref).value);
   // Users have no `urn` column — the non-ID lookup key is the unique handle.
   // Handles are lowercase-canonical (#325), so lowercase the input for
   // case-insensitive resolution (hrn:user:Holger → the `holger` row).
-  const where = isId(value) ? { id: value } : { handle: value.toLowerCase() };
-  const user = await db.user.findUnique({
-    where,
-    select: { id: true, deletedAt: true },
+  // Normalization is a no-op on an ID, so it runs only on the handle path.
+  const where = isId
+    ? { id: ref }
+    : { handle: normalizeUrnForLookup(parseUrnInput(ref).value).toLowerCase() };
+  // findFirst + `deletedAt: null` so the soft-delete exclusion lives in the
+  // query (the `{ id }` / `{ handle }` selector is still unique-backed). Excluded
+  // by default; `{ includeDeleted: true }` opts in (matches memoryRef).
+  const user = await db.user.findFirst({
+    where: { ...where, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
+    select: { id: true },
   });
-  if (!user || user.deletedAt) {
+  if (!user) {
     throw new UserNotFoundError(ref);
   }
   return { id: user.id };

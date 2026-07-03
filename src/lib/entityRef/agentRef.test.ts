@@ -104,4 +104,12 @@ describe('resolveAgentRef', () => {
       UrnNotQualifiedError,
     );
   });
+
+  it('excludes a soft-deleted agent by default; includeDeleted opts in', async () => {
+    const agent = await db.agent.create({
+      data: { organizationId: orgId, urn: `${orgId}:agentref-test-deleted`, name: 'agentref-test-deleted', deletedAt: new Date() },
+    });
+    await expect(resolveAgentRef(db, agent.id)).rejects.toBeInstanceOf(AgentNotFoundError);
+    await expect(resolveAgentRef(db, agent.id, { includeDeleted: true })).resolves.toEqual({ id: agent.id });
+  });
 });

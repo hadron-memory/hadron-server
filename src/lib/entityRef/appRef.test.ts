@@ -157,4 +157,12 @@ describe('resolveAppRef', () => {
     const resolved = await resolveAppRef(db, uninstalled.id);
     expect(resolved.id).toBe(uninstalled.id);
   });
+
+  it('excludes a soft-deleted app by default; includeDeleted opts in', async () => {
+    const app = await db.app.create({
+      data: { organizationId: orgId, urn: `${orgId}:appref-test-deleted`, name: 'appref-test-deleted', deletedAt: new Date() },
+    });
+    await expect(resolveAppRef(db, app.id)).rejects.toBeInstanceOf(AppNotFoundError);
+    await expect(resolveAppRef(db, app.id, { includeDeleted: true })).resolves.toEqual({ id: app.id });
+  });
 });
