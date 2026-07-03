@@ -292,6 +292,72 @@ describe('globalSearch — fields + entityTypes', () => {
   });
 });
 
+describe('globalSearch — pagination (issue #465)', () => {
+  // Admin sees every memory; 'Memory' matches all four memory names and no
+  // other entity, giving a clean, fully-ranked set to page over.
+  const allP = (): SearchPrincipal => ({
+    viewerUserId: fx.admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: null,
+  });
+
+  it('returns a bounded total and slices the ranked list by offset/limit', async () => {
+    const full = await globalSearch(db, { query: 'Memory', entityTypes: ['memory'] }, allP());
+    expect(full.total).toBe(4);
+    expect(full.hits).toHaveLength(4);
+
+    const page1 = await globalSearch(db, { query: 'Memory', entityTypes: ['memory'], limit: 2, offset: 0 }, allP());
+    const page2 = await globalSearch(db, { query: 'Memory', entityTypes: ['memory'], limit: 2, offset: 2 }, allP());
+    expect([page1.total, page2.total]).toEqual([4, 4]);
+    expect(page1.hits).toHaveLength(2);
+    expect(page2.hits).toHaveLength(2);
+    // Stable ordering: the two pages are disjoint and together cover the set.
+    const combined = new Set([...page1.hits, ...page2.hits].map((h) => h.id));
+    expect(combined).toEqual(new Set(full.hits.map((h) => h.id)));
+  });
+
+  it('offset past the end yields an empty page but the real total', async () => {
+    const r = await globalSearch(db, { query: 'Memory', entityTypes: ['memory'], offset: 999 }, allP());
+    expect(r.hits).toHaveLength(0);
+    expect(r.total).toBe(4);
+  });
+
+  it('pages stably when hits share score+name+type (unique-id tiebreak)', async () => {
+    // Two memories with the SAME name → equal score, name, and entityType. Only
+    // the final id tiebreak makes the order total, so offset paging can't drop
+    // or duplicate a row across separate requests.
+    const m1 = await db.memory.create({
+      data: { id: generateId(), organizationId: fx.orgA, urn: `org-a:dup1-${generateId()}`, name: 'Duplicate Name', class: 'knowledge' },
+    });
+    const m2 = await db.memory.create({
+      data: { id: generateId(), organizationId: fx.orgA, urn: `org-a:dup2-${generateId()}`, name: 'Duplicate Name', class: 'knowledge' },
+    });
+    const args = { query: 'Duplicate Name', entityTypes: ['memory'] as SearchEntityType[] };
+    const p1 = await globalSearch(db, { ...args, limit: 1, offset: 0 }, allP());
+    const p2 = await globalSearch(db, { ...args, limit: 1, offset: 1 }, allP());
+    // Disjoint pages that together cover both — no dup, no skip.
+    expect(new Set([...p1.hits, ...p2.hits].map((h) => h.id))).toEqual(new Set([m1.id, m2.id]));
+    // Deterministic across repeated calls (id order is stable).
+    const p1again = await globalSearch(db, { ...args, limit: 1, offset: 0 }, allP());
+    expect(p1again.hits[0].id).toBe(p1.hits[0].id);
+  });
+});
+
+describe('globalSearch — org scope (issue #463)', () => {
+  it('orgScopeId confines memory hits to that org', async () => {
+    const scoped: SearchPrincipal = {
+      viewerUserId: fx.admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: [fx.orgA], orgScopeId: fx.orgA,
+    };
+    const memIds = ids(byType((await globalSearch(db, { query: 'Memory', entityTypes: ['memory'] }, scoped)).hits, 'memory'));
+    expect(memIds).toContain(fx.memoryA);
+    expect(memIds).not.toContain(fx.memoryB); // orgB memory excluded
+  });
+
+  it('orgScopeId can only narrow — it never widens beyond the accessible set', async () => {
+    // Viewer can read only orgA memories; scoping to orgB (AND-ed) yields nothing.
+    const scoped: SearchPrincipal = { ...viewerP(), orgIds: [fx.orgB], orgScopeId: fx.orgB };
+    expect(byType((await globalSearch(db, { query: 'Memory', entityTypes: ['memory'] }, scoped)).hits, 'memory')).toHaveLength(0);
+  });
+});
+
 describe('globalSearch — GraphQL resolver wiring', () => {
   const ctxFor = (userId: string, admin = false): Context => ({ db, userId, roles: admin ? ['ADMIN'] : [] });
 
@@ -304,5 +370,32 @@ describe('globalSearch — GraphQL resolver wiring', () => {
 
     const asAdmin = await resolvers.Query.globalSearch({}, { query: 'Beta' }, ctxFor(fx.admin, true));
     expect(asAdmin.hits.some((h) => h.id === fx.memoryB)).toBe(true);
+  });
+
+  it('orgId narrows a member to that org (accepts id or URN)', async () => {
+    const byId = await resolvers.Query.globalSearch({}, { query: 'Alpha', orgId: fx.orgA }, ctxFor(fx.viewer));
+    expect(byId.hits.some((h) => h.id === fx.memoryA)).toBe(true);
+
+    const byUrn = await resolvers.Query.globalSearch({}, { query: 'Alpha', orgId: 'org-a' }, ctxFor(fx.viewer));
+    expect(byUrn.hits.some((h) => h.id === fx.memoryA)).toBe(true);
+  });
+
+  it('orgId the caller is not a member of returns an empty page (no disclosure)', async () => {
+    const r = await resolvers.Query.globalSearch({}, { query: 'Beta', orgId: fx.orgB }, ctxFor(fx.viewer));
+    expect(r.hits).toHaveLength(0);
+    expect(r.total).toBe(0);
+  });
+
+  it('is membership-gated even for a platform admin (no admin bypass)', async () => {
+    // fx.admin is a member of no org → scoping to orgB is empty despite the
+    // platform role (uniform member-only).
+    const denied = await resolvers.Query.globalSearch({}, { query: 'Beta', orgId: fx.orgB }, ctxFor(fx.admin, true));
+    expect(denied.hits).toHaveLength(0);
+    expect(denied.total).toBe(0);
+
+    // Once that admin joins orgB, the same scope resolves.
+    await db.orgMember.create({ data: { organizationId: fx.orgB, userId: fx.admin, role: 'READER' } });
+    const scoped = await resolvers.Query.globalSearch({}, { query: 'Beta', orgId: fx.orgB }, ctxFor(fx.admin, true));
+    expect(scoped.hits.some((h) => h.id === fx.memoryB)).toBe(true);
   });
 });

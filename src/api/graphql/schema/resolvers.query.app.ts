@@ -50,7 +50,7 @@ export const appQueries = {
       });
     },
 
-    myApps: async (_: unknown, __: unknown, ctx: Context) => {
+    myApps: async (_: unknown, { orgId }: { orgId?: string | null }, ctx: Context) => {
       // Apps where the current user is a member of the App's org. App doesn't
       // carry userId, so org membership is the routing.
       if (!ctx.userId) return [];
@@ -58,7 +58,19 @@ export const appQueries = {
         where: { userId: ctx.userId, deletedAt: null },
         select: { organizationId: true },
       });
-      const orgIds = memberships.map((m) => m.organizationId);
+      let orgIds = memberships.map((m) => m.organizationId);
+      // #463: optional single-org narrowing — scope to [orgId] iff the caller is
+      // a member (ID or URN); a non-member orgId returns [] (no existence leak).
+      if (orgId != null) {
+        let resolvedOrgId: string;
+        try {
+          ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+        } catch {
+          return [];
+        }
+        if (!orgIds.includes(resolvedOrgId)) return [];
+        orgIds = [resolvedOrgId];
+      }
       if (orgIds.length === 0) return [];
       return ctx.db.app.findMany({
         where: { organizationId: { in: orgIds }, deletedAt: null },

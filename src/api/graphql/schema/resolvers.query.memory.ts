@@ -152,14 +152,19 @@ export const memoryQueries = {
 
     myMemories: async (
       _: unknown,
-      { includeAgentSystem }: { includeAgentSystem?: boolean },
+      { memoryClasses, orgId }: { memoryClasses?: string[] | null; orgId?: string | null },
       ctx: Context,
     ) => {
-      // Agent system memories are hidden by default on listing pages. The
-      // portal passes includeAgentSystem: true only when the user toggles
-      // "Show system memories" at the top of /app/memories.
-      const typeFilter = includeAgentSystem
-        ? {}
+      // Class filter (mirrors findNodes NodeFilter.memoryClasses): when given,
+      // restrict to exactly the listed classes; when omitted, hide the noisy
+      // agent `system` class by default (the old includeAgentSystem: false
+      // behavior — the portal's list page relies on it). To surface system
+      // memories the caller passes them explicitly, e.g.
+      // memoryClasses: [system, knowledge, group, personal, private, app].
+      const classSet =
+        memoryClasses && memoryClasses.length > 0 ? new Set(memoryClasses) : null;
+      const typeFilter = classSet
+        ? { class: { in: [...classSet] as any } }
         : { class: { not: 'system' as const } };
 
       // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Surface
@@ -167,9 +172,23 @@ export const memoryQueries = {
       // not load-bearing here — the resolver returns the union). Apps
       // with no installed Agents see zero memories.
       if (ctx.appId) {
+        // #463: honor the optional org narrowing here too. An App-key's "active
+        // org" is its own App's org, so orgId is a match-or-empty gate on that
+        // org — NOT a per-memory ownership filter (which would wrongly drop
+        // memories the App's org merely SUBSCRIBES to, i.e. owned by another
+        // org). Unresolvable orgId → [].
+        let resolvedOrgId: string | null = null;
+        if (orgId != null) {
+          try {
+            ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+          } catch {
+            return [];
+          }
+        }
         const app = await ctx.db.app.findUnique({
           where: { id: ctx.appId },
           select: {
+            organizationId: true,
             appAgents: {
               select: {
                 agent: {
@@ -182,10 +201,15 @@ export const memoryQueries = {
           },
         });
         if (!app || app.appAgents.length === 0) return [];
+        // A scope to any org other than the App's own → empty (the App has no
+        // other active-org context); a match → its full memory view below.
+        if (resolvedOrgId != null && resolvedOrgId !== app.organizationId) return [];
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
           for (const item of aa.agent.memoryItems) {
-            if (!includeAgentSystem && item.memory.class === 'system') continue;
+            // Same class filter as the user branch: explicit list wins,
+            // otherwise hide `system` by default.
+            if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
             memoryMap.set(item.memory.id, item.memory);
           }
         }
@@ -197,7 +221,27 @@ export const memoryQueries = {
           where: { userId: ctx.userId, deletedAt: null },
           select: { organizationId: true },
         });
-        const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
+        let orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
+        // #463: optional single-org narrowing ("active organization"). Scope to
+        // [orgId] iff the caller is a member (ID or URN); a non-member orgId
+        // returns [] — no org-existence disclosure. The active-org view is:
+        //   (1) the caller's OWN personal/private memories — ALWAYS (they're
+        //       user-owned, not org-owned, so they show in every org context),
+        //   (2) memories the active org OWNS,
+        //   (3) memories the active org SUBSCRIBES to.
+        // Other member orgs' resources and public memories are out of scope
+        // here (reached via other surfaces). No platform-admin bypass — the
+        // active org is always one the caller is a member of.
+        if (orgId != null) {
+          let resolvedOrgId: string;
+          try {
+            ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+          } catch {
+            return [];
+          }
+          if (!orgIds.includes(resolvedOrgId)) return [];
+          orgIds = [resolvedOrgId];
+        }
         if (orgIds.length === 0) return [];
         return ctx.db.memory.findMany({
           where: {
@@ -211,7 +255,10 @@ export const memoryQueries = {
               // personal/private never come in via the org.
               { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
               { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
-              // 034: the user's own owner-owned personal/private memories.
+              // Category (1): the caller's own owner-owned personal/private
+              // memories — ALWAYS, independent of the active org (they're
+              // user-owned, not part of any org's collection). Deliberately NOT
+              // org-scoped: selecting an active org must not hide your own notes.
               { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
             ],
           },

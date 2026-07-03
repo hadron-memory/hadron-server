@@ -44,6 +44,7 @@ import {
   getAccessibleMemoryIds,
   memoryAccessFilter,
 } from './resolvers.helpers.js';
+import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 
 export const nodeQueries = {
     resolveUrn: async (_: unknown, { urn }: { urn: string }, ctx: Context) => {
@@ -358,7 +359,7 @@ export const nodeQueries = {
     findNodes: async (
       _: unknown,
       {
-        query, mode, filter, fields, sort, expand, granularity, limit, offset,
+        query, mode, filter, fields, sort, expand, granularity, orgId, limit, offset,
       }: {
         query?: string | null;
         mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
@@ -378,6 +379,7 @@ export const nodeQueries = {
         sort?: 'relevance' | 'loc' | 'seq' | 'updatedAt' | null;
         expand?: number | null;
         granularity?: 'node' | 'chunk' | null;
+        orgId?: string | null;
         limit?: number | null;
         offset?: number | null;
       },
@@ -401,6 +403,39 @@ export const nodeQueries = {
         throw badInput('findNodes filter.updatedBefore must be a valid date string.');
       }
 
+      // #463: optional single-org narrowing. Resolve + membership-gate up front
+      // (member → scope; non-member → empty envelope, no existence disclosure),
+      // then push the org filter into the scope queries below. Uniform
+      // member-only — NO platform-admin bypass; an App-key caller may scope to
+      // its own App's org. AND-narrowing only: it can never widen the caller's
+      // accessible set. Combined with filter.isRunnable: true this is the
+      // "runnable task nodes in one org" query (there is no separate myTasks).
+      const emptyResult = { hits: [], passages: [], total: 0, reason: null, degraded: null };
+      let orgScopeId: string | null = null;
+      if (orgId != null) {
+        let resolvedOrgId: string;
+        try {
+          ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+        } catch {
+          return emptyResult;
+        }
+        let authorized = false;
+        if (ctx.userId) {
+          const memberOrgIds = await getMemberOrgIds(ctx.db, ctx.userId);
+          authorized = memberOrgIds.includes(resolvedOrgId);
+        } else if (ctx.appId) {
+          // App-key: its access is already confined to its App's org via the
+          // session, so authorize scoping to that org (any other → empty).
+          const app = await ctx.db.app.findUnique({
+            where: { id: ctx.appId },
+            select: { organizationId: true },
+          });
+          authorized = app?.organizationId === resolvedOrgId;
+        }
+        if (!authorized) return emptyResult;
+        orgScopeId = resolvedOrgId;
+      }
+
       // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
       const accessible = await getAccessibleMemoryIds(ctx);
       const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
@@ -408,6 +443,11 @@ export const nodeQueries = {
         f.memoryClasses && f.memoryClasses.length > 0
           ? { in: f.memoryClasses }
           : (!explicitIds ? { not: 'system' } : undefined); // broad search hides system-class; explicit ids win
+
+      // #463: push the org narrowing straight into the scope queries (rather
+      // than selecting all ids then intersecting) so the admin/broad path never
+      // materializes every memory id just to filter it down.
+      const orgWhere = orgScopeId ? { organizationId: orgScopeId } : {};
 
       let scopeIds: string[];
       if (explicitIds) {
@@ -420,23 +460,25 @@ export const nodeQueries = {
         const requested = resolved.filter((id): id is string => id !== null);
         const allowed = accessible === null ? null : new Set(accessible);
         scopeIds = allowed === null ? requested : requested.filter((id) => allowed.has(id));
-        if (memClassClause && scopeIds.length > 0) {
+        // Query only when a class or org filter must be applied to the requested
+        // set; otherwise the requested ∩ accessible ids stand as-is.
+        if ((memClassClause || orgScopeId) && scopeIds.length > 0) {
           const rows = await ctx.db.memory.findMany({
-            where: { id: { in: scopeIds }, class: memClassClause as never },
+            where: { id: { in: scopeIds }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
             select: { id: true },
           });
           scopeIds = rows.map((m) => m.id);
         }
       } else if (accessible === null) {
-        // Admin/broad — resolve scope + class filter in one query (not two).
+        // Admin/broad — resolve scope + class + org filter in one query.
         const rows = await ctx.db.memory.findMany({
-          where: { deletedAt: null, ...(memClassClause ? { class: memClassClause as never } : {}) },
+          where: { deletedAt: null, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
           select: { id: true },
         });
         scopeIds = rows.map((m) => m.id);
       } else {
         const rows = await ctx.db.memory.findMany({
-          where: { id: { in: accessible }, ...(memClassClause ? { class: memClassClause as never } : {}) },
+          where: { id: { in: accessible }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
           select: { id: true },
         });
         scopeIds = rows.map((m) => m.id);

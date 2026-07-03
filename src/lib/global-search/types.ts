@@ -48,10 +48,18 @@ export interface GlobalSearchParams {
   /** Restrict to these fields; null/empty = smart-sniff the query shape. */
   fields?: SearchField[] | null;
   limit?: number | null;
+  /** Page offset into the fully-ranked (bounded) hit list. Default 0. */
+  offset?: number | null;
 }
 
 export interface GlobalSearchResult {
   hits: GlobalSearchHit[];
+  /**
+   * Total ranked matches for the pager. BOUNDED: the count within the
+   * per-entity candidate cap, not an unbounded COUNT (see index.ts
+   * PER_ENTITY_CAP). Page slicing operates over this bounded list.
+   */
+  total: number;
   /** Human-readable notes when the search ran at reduced fidelity. */
   degraded: string[];
 }
@@ -76,6 +84,16 @@ export interface SearchPrincipal {
   isPlatformAdmin: boolean;
   accessibleMemoryIds: string[] | null;
   orgIds: string[] | null;
+  /**
+   * When set, narrow the search to a single organization: the Memory + Node
+   * slices are additionally constrained to `memory.organizationId === orgScopeId`
+   * (AND-ed onto the access scope, so it never widens access), and the caller
+   * sets `orgIds: [orgScopeId]` to confine the org-rooted slices. Null/undefined
+   * ⇒ the default cross-org union. Set by the GraphQL `globalSearch(orgId:)`
+   * arg; the MCP surface leaves it unset. Membership is verified by the caller
+   * before this is set — the engine trusts it as an already-authorized scope.
+   */
+  orgScopeId?: string | null;
 }
 
 /** Keep only valid `SearchEntityType` values (defensive: MCP bypasses zod). */
