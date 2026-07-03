@@ -362,6 +362,29 @@ describe('resolveNodeRef', () => {
     expect(result).toEqual({ id: node.id });
   });
 
+  it('resolves a node in a multi-level memory URN (per-user app-user shape) — PR-475 review, Codex P2', async () => {
+    // A per-user memory URN spans MORE than two hierarchy levels:
+    // <org>:<agent>:app-user:<id>. Canonical `::` input must treat the FINAL
+    // leaf as the loc and everything before it as the memory URN — the old
+    // fixed two-segment prefix mis-split these into memory `<org>:<agent>`.
+    const org = await db.organization.create({
+      data: { name: 'noderef-test-ml-org', urn: `noderef-test-ml-${Date.now()}` },
+    });
+    const mlMem = await db.memory.create({
+      data: {
+        organizationId: org.id,
+        urn: `${org.urn}:agent-x:app-user:42`, // legacy-stored form
+        name: 'noderef-test-ml-mem',
+        class: 'knowledge',
+      },
+    });
+    const node = await db.node.create({
+      data: { memoryId: mlMem.id, loc: 'noderef-test-ml:leaf', name: 'ml' },
+    });
+    const ref = `hrn:node:${org.urn}::agent-x::app-user:42::${node.loc}`;
+    expect(await resolveNodeRef(db, ref)).toEqual({ id: node.id });
+  });
+
   it('mixed-grammar `<org>:<memory>::<loc>` input falls through cleanly (issue #183 review)', async () => {
     // Pin the behavior: when the split heuristic sees `::`, it commits
     // to canonical splitting — `'org:memory::loc'.split('::')` gives

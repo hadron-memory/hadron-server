@@ -151,6 +151,22 @@ describe('Query.agent(ref) — the uniform single-agent read', () => {
     await expect(Q.agent(null, { ref: agentA.id }, ctx(stranger.id))).rejects.toThrow('Forbidden');
     expect(await Q.agent(null, { ref: generateId() }, ctx(member.id))).toBeNull();
   });
+
+  it('a REVOKED (soft-deleted) membership no longer authorizes agent(ref) / app(ref) (PR-475 review, Codex P1)', async () => {
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:uni-app`, name: 'Uni App' },
+    });
+    // Sanity: while the membership is live, both reads succeed.
+    expect((await Q.agent(null, { ref: agentA.id }, ctx(member.id)))?.id).toBe(agentA.id);
+    expect((await Q.app(null, { ref: app.id }, ctx(member.id)))?.id).toBe(app.id);
+    // Revoke (soft-delete) the membership — requireOrgRole must now deny.
+    await db.orgMember.updateMany({
+      where: { organizationId: orgA.id, userId: member.id },
+      data: { deletedAt: new Date() },
+    });
+    await expect(Q.agent(null, { ref: agentA.id }, ctx(member.id))).rejects.toThrow('Forbidden');
+    await expect(Q.app(null, { ref: app.id }, ctx(member.id))).rejects.toThrow('Forbidden');
+  });
 });
 
 describe('Query.agents — the uniform paginated agent list', () => {

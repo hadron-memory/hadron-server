@@ -121,8 +121,12 @@ export async function requireOrgRole(
 ): Promise<void> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
   if (!ctx.userId) throw new Error('Forbidden');
-  const member = await ctx.db.orgMember.findUnique({
-    where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+  // findFirst (not findUnique on the composite PK) so a REVOKED (soft-deleted)
+  // membership no longer authorizes — matches getMemberOrgIds / resolveOrgScope
+  // and the memory(ref) resolver's own membership check (PR-475 review, Codex
+  // P1: a removed member who still knew an agent/app ref could read it).
+  const member = await ctx.db.orgMember.findFirst({
+    where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
   });
   if (!member || (ROLE_ORDER[member.role] ?? -1) < ROLE_ORDER[required]) {
     throw new Error('Forbidden');
@@ -1191,8 +1195,10 @@ export async function isOrgAdminFor(
   if (user && (user.roles.includes('ADMIN') || user.roles.includes('OWNER'))) {
     return true;
   }
-  const member = await db.orgMember.findUnique({
-    where: { organizationId_userId: { organizationId, userId } },
+  // Same soft-revocation rule as requireOrgRole: a deleted membership row
+  // must not keep granting org-admin authority.
+  const member = await db.orgMember.findFirst({
+    where: { organizationId, userId, deletedAt: null },
   });
   return !!member && (member.role === 'ADMIN' || member.role === 'OWNER');
 }

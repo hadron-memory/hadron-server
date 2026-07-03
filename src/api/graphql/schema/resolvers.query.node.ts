@@ -267,26 +267,28 @@ export const nodeQueries = {
         return node ? finish(node) : null;
       }
 
-      // Form 3b: unprefixed + unscoped. A 3+-segment ref whose 2-segment
-      // prefix names a live memory is a full URN (mirrors resolveNodeRef's
-      // fallthrough — canonical `::` split preferred, legacy `:` accepted);
-      // pass `memory:` to force loc interpretation of such a ref.
-      const parts = value.includes('::') ? value.split('::') : value.split(':');
+      // Form 3b: unprefixed + unscoped. A 3+-segment ref whose memory prefix
+      // names a live memory is a full URN (mirrors resolveNodeRef's
+      // fallthrough); pass `memory:` to force loc interpretation of such a
+      // ref. Canonical `::` input: loc is the FINAL leaf and the memory URN
+      // is everything before it (memory URNs may span >2 hierarchy levels,
+      // e.g. per-user `<org>::<agent>::app-user:<id>` — PR-475 review);
+      // legacy single-`:` input keeps the two-segment heuristic.
+      const isCanonical = value.includes('::');
+      const parts = isCanonical ? value.split('::') : value.split(':');
       if (parts.length >= 3) {
+        const urnLoc = isCanonical ? parts[parts.length - 1] : parts.slice(2).join(':');
+        const memoryUrnCandidates = isCanonical
+          ? [parts.slice(0, -1).join('::'), parts.slice(0, -1).join(':')]
+          : [`${parts[0]}:${parts[1]}`, `${parts[0]}::${parts[1]}`];
         const memory = await ctx.db.memory.findFirst({
-          where: {
-            OR: [
-              { urn: `${parts[0]}:${parts[1]}` },
-              { urn: `${parts[0]}::${parts[1]}` },
-            ],
-            deletedAt: null,
-          },
+          where: { urn: { in: memoryUrnCandidates }, deletedAt: null },
           select: { id: true },
         });
         if (memory) {
           if (!allowed(memory.id)) return null;
           const node = await ctx.db.node.findFirst({
-            where: { loc: parts.slice(2).join(':'), memoryId: memory.id, deletedAt: null },
+            where: { loc: urnLoc, memoryId: memory.id, deletedAt: null },
             include,
           });
           return node ? finish(node) : null;

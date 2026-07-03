@@ -62,30 +62,38 @@ export async function resolveEdgeRef(
   // org+memory+loc shape.
   assertFullyQualifiedUrn(ref, 'edge');
 
-  // Full URN `<memory-urn>::<loc>`. Prefer canonical `::` as the hierarchy
-  // separator so a multi-atom loc (e.g. `intro:next`) stays one leaf; fall
-  // back to single-`:` for legacy inputs (mirrors resolveNodeRef).
-  const parts = normalized.includes('::')
-    ? normalized.split('::')
-    : normalized.split(':');
-  if (parts.length < 3) throw new EdgeNotFoundError(ref);
+  // Full URN `<memory-urn>::<loc>`.
+  //
+  // Canonical (`::`) input: the LOC is always the FINAL `::`-leaf (locs never
+  // contain `::`; composeEdgeUrn attaches them that way) and the memory URN is
+  // everything before it — which may itself span more than two hierarchy
+  // levels (e.g. a per-user `<org>::<agent>::app-user:<id>` memory), so a
+  // fixed two-segment prefix would mis-split those (PR-475 review, Codex P2).
+  // Legacy single-`:` input can't be split unambiguously, so it keeps the
+  // historical two-segment memory heuristic (mirrors resolveNodeRef).
+  let loc: string;
+  let memoryUrnCandidates: string[];
+  if (normalized.includes('::')) {
+    const parts = normalized.split('::');
+    if (parts.length < 3) throw new EdgeNotFoundError(ref);
+    loc = parts[parts.length - 1];
+    const memParts = parts.slice(0, -1);
+    // The stored Memory.urn may be legacy (`:`) or canonical (`::`) form.
+    memoryUrnCandidates = [memParts.join('::'), memParts.join(':')];
+  } else {
+    const parts = normalized.split(':');
+    if (parts.length < 3) throw new EdgeNotFoundError(ref);
+    loc = parts.slice(2).join(':');
+    memoryUrnCandidates = [`${parts[0]}:${parts[1]}`, `${parts[0]}::${parts[1]}`];
+  }
 
-  // First two segments are <org>:<memorySlug>. Memory rows may be stored in
-  // legacy (`:`) or canonical (`::`) form — the OR matches whichever is on disk.
   const memory = await db.memory.findFirst({
-    where: {
-      OR: [
-        { urn: `${parts[0]}:${parts[1]}` },
-        { urn: `${parts[0]}::${parts[1]}` },
-      ],
-    },
+    where: { urn: { in: memoryUrnCandidates } },
     select: { id: true, deletedAt: true },
   });
   if (!memory || (!options?.includeDeleted && memory.deletedAt)) {
     throw new EdgeNotFoundError(ref);
   }
-  // Locs are stored with single-`:` atoms; `::` is only the memory/loc boundary.
-  const loc = parts.slice(2).join(':');
   const edge = await db.edge.findUnique({
     where: { loc_memoryId: { loc, memoryId: memory.id } },
     select: { id: true, deletedAt: true },

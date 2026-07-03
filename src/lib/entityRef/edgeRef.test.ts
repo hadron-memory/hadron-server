@@ -135,6 +135,32 @@ describe('resolveEdgeRef', () => {
     ).resolves.toEqual({ id: edge.id });
   });
 
+  it('resolves an edge in a multi-level memory URN (per-user app-user shape) — PR-475 review, Codex P2', async () => {
+    // A per-user memory URN spans MORE than two hierarchy levels:
+    // <org>:<agent>:app-user:<id> (canonical <org>::<agent>::app-user:<id>).
+    // A fixed two-segment memory prefix would mis-split its edge URNs.
+    const org = await db.organization.create({
+      data: { name: 'edgeref-test-ml-org', urn: `edgeref-test-ml-${Date.now()}` },
+    });
+    const mlMem = await db.memory.create({
+      data: {
+        organizationId: org.id,
+        urn: `${org.urn}:agent-x:app-user:42`, // legacy-stored form
+        name: 'edgeref-test-ml-mem',
+        class: 'knowledge',
+      },
+    });
+    const a = await db.node.create({ data: { memoryId: mlMem.id, loc: 'edgeref-test-ml-a', name: 'a' } });
+    const b = await db.node.create({ data: { memoryId: mlMem.id, loc: 'edgeref-test-ml-b', name: 'b' } });
+    const e = await db.edge.create({
+      data: { memoryId: mlMem.id, sourceId: a.id, targetId: b.id, loc: 'edgeref-test-ml-a:next' },
+    });
+    // Canonical ref: every memory hierarchy level `::`-separated, loc as the
+    // final leaf (with its own `:` atoms intact).
+    const ref = `hrn:edge:${org.urn}::agent-x::app-user:42::${e.loc}`;
+    expect(await resolveEdgeRef(db, ref)).toEqual({ id: e.id });
+  });
+
   it('treats an edge behind a soft-deleted memory as not-existing unless includeDeleted', async () => {
     const edge = await createEdge('edgeref-test-a:next');
     await db.memory.update({ where: { id: memoryId }, data: { deletedAt: new Date() } });
