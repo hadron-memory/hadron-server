@@ -34,9 +34,15 @@ export async function resolveEdgeRef(
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
   // Form 1: bare ID — PK lookup with the soft-delete exclusion in the query.
+  // The memory-liveness join keeps the PK path consistent with the URN path
+  // below (an edge behind a soft-deleted memory is not-found either way —
+  // PR-475 Copilot review).
   if (isIdFunc(ref)) {
     const edge = await db.edge.findFirst({
-      where: { id: ref, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
+      where: {
+        id: ref,
+        ...(options?.includeDeleted ? {} : { deletedAt: null, memory: { deletedAt: null } }),
+      },
       select: { id: true },
     });
     if (!edge) throw new EdgeNotFoundError(ref);

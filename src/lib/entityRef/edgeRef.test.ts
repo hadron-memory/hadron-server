@@ -169,5 +169,11 @@ describe('resolveEdgeRef', () => {
     await expect(resolveEdgeRef(db, ref, { includeDeleted: true })).resolves.toEqual({
       id: edge.id,
     });
+    // The bare-ID path enforces the same memory-liveness rule as the URN path
+    // (PR-475 Copilot review).
+    await expect(resolveEdgeRef(db, edge.id)).rejects.toBeInstanceOf(EdgeNotFoundError);
+    await expect(resolveEdgeRef(db, edge.id, { includeDeleted: true })).resolves.toEqual({
+      id: edge.id,
+    });
   });
 });

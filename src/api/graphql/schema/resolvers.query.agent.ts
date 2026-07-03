@@ -34,8 +34,10 @@ export const agentQueries = {
       try {
         ({ id: resolvedId } = await resolveAgentRef(ctx.db, ref));
       } catch (e) {
-        // Genuine miss → null; malformed URNs propagate (AgentNotFoundError
-        // covers both shapes today — mirror app(ref)'s soft not-found).
+        // Genuine miss (AgentNotFoundError) → null. A malformed /
+        // under-qualified URN throws UrnNotQualifiedError from
+        // resolveAgentRef's assertFullyQualifiedUrn and propagates — input
+        // errors surface, only not-found is masked to null.
         if (!(e instanceof AgentNotFoundError)) throw e;
         return null;
       }
