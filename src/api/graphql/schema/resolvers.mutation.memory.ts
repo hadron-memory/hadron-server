@@ -972,10 +972,13 @@ export const memoryMutations = {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       if (memory.visibility !== 'PUBLIC') throw new Error('Memory is not public');
 
-      // Find user's personal org
+      // Find user's personal org (deletedAt: null — a revoked personal-org
+      // membership must not route a subscription into a workspace the user
+      // can no longer read).
       const membership = await ctx.db.orgMember.findFirst({
         where: {
           userId: ctx.userId,
+          deletedAt: null,
           organization: { isVisible: { not: true } },
         },
         include: { organization: { include: { agents: true } } },

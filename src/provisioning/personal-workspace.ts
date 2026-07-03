@@ -165,9 +165,15 @@ export async function hasPersonalWorkspace(
   db: PrismaClient,
   userId: string,
 ): Promise<boolean> {
+  // deletedAt: null — a revoked personal-org membership (an invalid state;
+  // removeOrgMember's last-owner guard blocks creating it) must not count as
+  // "has a workspace": every read gate would deny it, so answering true here
+  // would strand the user with an inaccessible workspace. Answering false
+  // lets provisioning self-heal with a fresh personal org.
   const membership = await db.orgMember.findFirst({
     where: {
       userId,
+      deletedAt: null,
       organization: { isVisible: { not: true } },
     },
   });

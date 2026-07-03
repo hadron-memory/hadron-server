@@ -418,10 +418,12 @@ describe('Mutation.addOrgMember / updateOrgMember / removeOrgMember (007-entity-
       adminCtx(),
     );
     expect(ok).toBe(true);
+    // Revocation is a SOFT delete — the audit tombstone persists with
+    // deletedAt set (see resolvers.orgMemberLifecycle.test.ts).
     const after = await db.orgMember.findUnique({
       where: { organizationId_userId: { organizationId: org.id, userId: target.id } },
     });
-    expect(after).toBeNull();
+    expect(after?.deletedAt).not.toBeNull();
   });
 });
 

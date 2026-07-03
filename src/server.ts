@@ -437,9 +437,11 @@ export async function createServer(): Promise<Express> {
         return;
       }
 
-      // Find the personal org and bundle for context
+      // Find the personal org and bundle for context. deletedAt: null so a
+      // (theoretically impossible) revoked personal-org membership doesn't
+      // resolve a workspace its owner can no longer read.
       const membership = await db.orgMember.findFirst({
-        where: { userId: payload.sub, organization: { isVisible: { not: true } } },
+        where: { userId: payload.sub, deletedAt: null, organization: { isVisible: { not: true } } },
         include: {
           organization: {
             include: {
