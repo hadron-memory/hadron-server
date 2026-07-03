@@ -313,7 +313,20 @@ export const memoryQueries = {
 
       const take = clampGraphTake(limit);
       const skip = Math.max(0, offset ?? 0);
-      const where = { memoryId: resolvedId, deletedAt: null };
+      // Only edges whose BOTH endpoints are live nodes. deleteNode soft-deletes
+      // just the node row and leaves its edges live (only `hard` cascades), so
+      // an edge to/from a soft-deleted node would otherwise dangle — memoryNodes
+      // omits deleted nodes, so the client would draw a link to a node not in
+      // the set. Filtering the endpoints here (not edge.deletedAt alone) keeps
+      // the graph consistent and total accurate, without changing delete
+      // semantics. (A cross-memory edge's target may still fall outside this
+      // memory's node page — that legitimate dangling is dropped client-side.)
+      const where = {
+        memoryId: resolvedId,
+        deletedAt: null,
+        source: { deletedAt: null },
+        target: { deletedAt: null },
+      };
       const [total, edges] = await Promise.all([
         ctx.db.edge.count({ where }),
         ctx.db.edge.findMany({

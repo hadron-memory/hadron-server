@@ -101,6 +101,23 @@ describe('memoryEdges (#466)', () => {
     expect(countOnly.total).toBe(2);
   });
 
+  it('excludes edges dangling off a soft-deleted endpoint node', async () => {
+    // deleteNode soft-deletes only the node row; its edges stay live. memoryNodes
+    // omits the deleted node, so memoryEdges must drop edges touching it too, or
+    // the client draws a link to a node not in the set (and total is inflated).
+    const a = await mkNode('s.a');
+    const b = await mkNode('s.b');
+    const gone = await mkNode('s.gone');
+    await mkEdge('edge.live', a.id, b.id); // both endpoints live → kept
+    await mkEdge('edge.dead-target', a.id, gone.id); // target soft-deleted → dropped
+    await mkEdge('edge.dead-source', gone.id, b.id); // source soft-deleted → dropped
+    await db.node.update({ where: { id: gone.id }, data: { deletedAt: new Date() } });
+
+    const page = await memoryEdges({ memoryId: mem.id });
+    expect(page.edges.map((e: any) => e.loc)).toEqual(['edge.live']);
+    expect(page.total).toBe(1); // count matches the returned (live-endpoint) set
+  });
+
   it('returns an empty page for a memory the caller cannot read', async () => {
     const a = await mkNode('x.a');
     const b = await mkNode('x.b');
