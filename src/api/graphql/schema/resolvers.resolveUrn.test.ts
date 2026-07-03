@@ -73,7 +73,7 @@ beforeEach(async () => {
   });
 
   outsider = await db.user.create({
-    data: { id: generateId(), githubId: 7302, githubUsername: 'urnres-outsider', roles: ['READER'] },
+    data: { id: generateId(), githubId: 7302, githubUsername: `urnres-outsider-${generateId().slice(-8)}`, roles: ['READER'] },
   });
 });
 
@@ -173,20 +173,31 @@ describe('Query.resolveUrn — access control collapses to null', () => {
     expect(r).toBeNull();
   });
 
-  it('returns null for an app the caller is not org ADMIN of', async () => {
-    // A CONTRIBUTOR member can read the org but is below the app ADMIN gate.
+  it('resolves an app for ANY member of its org, and null for a non-member (#473 app-gate parity)', async () => {
+    // app(ref:) admits any org member since #473; resolveUrn mirrors it so a
+    // member's /app/u/<app-urn> share link resolves to a page they can open.
     const contributor = await db.user.create({
-      data: { id: generateId(), githubId: 7303, githubUsername: 'urnres-contrib', roles: ['READER'] },
+      data: { id: generateId(), githubId: 7303, githubUsername: `urnres-contrib-${generateId().slice(-8)}`, roles: ['READER'] },
     });
     await db.orgMember.create({
       data: { id: generateId(), organizationId: org.id, userId: contributor.id, role: 'CONTRIBUTOR' },
     });
-    const r = await resolvers.Query.resolveUrn(
+    const asMember = await resolvers.Query.resolveUrn(
       {},
       { urn: `urn:app:${APP_URN}` },
       { db, userId: contributor.id, roles: ['READER'] },
     );
-    expect(r).toBeNull();
+    expect(asMember).toMatchObject({ kind: 'app' });
+
+    const outsider = await db.user.create({
+      data: { id: generateId(), githubId: 7304, githubUsername: `urnres-outsider-${generateId().slice(-8)}`, roles: ['READER'] },
+    });
+    const asOutsider = await resolvers.Query.resolveUrn(
+      {},
+      { urn: `urn:app:${APP_URN}` },
+      { db, userId: outsider.id, roles: ['READER'] },
+    );
+    expect(asOutsider).toBeNull();
   });
 });
 
