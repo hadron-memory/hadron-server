@@ -18,7 +18,10 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { hasPersonalWorkspace } from '../../../provisioning/personal-workspace.js';
+import {
+  hasPersonalWorkspace,
+  provisionPersonalWorkspace,
+} from '../../../provisioning/personal-workspace.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const M = resolvers.Mutation as any;
@@ -122,6 +125,41 @@ describe('rejoin — reactivation of the tombstone', () => {
     expect(out.role).toBe('READER');
   });
 
+  it('reactivation clears a stale canInvite grant (both paths) — PR-480 review', async () => {
+    // Give the tombstone a leftover canInvite=true, as if the member had it
+    // before revocation.
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: org.id, userId: member.id } },
+      data: { canInvite: true },
+    });
+    const out = await M.addOrgMember(
+      null,
+      { orgId: org.id, userId: member.id, role: 'READER' },
+      ctx(owner.id),
+    );
+    expect(out.canInvite).toBe(false);
+
+    // Same via invitation acceptance: revoke again, re-set the stale grant.
+    await M.removeOrgMember(null, { orgId: org.id, userId: member.id }, ctx(owner.id));
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: org.id, userId: member.id } },
+      data: { canInvite: true },
+    });
+    const invite = await db.userInvitation.create({
+      data: {
+        id: generateId(),
+        slug: `lc-caninvite-${generateId().slice(-8)}`,
+        senderUserId: owner.id,
+        organizationId: org.id,
+        memberRole: 'READER',
+        maxActivations: 1,
+        createdBy: owner.id,
+      },
+    });
+    await M.acceptInvitation(null, { slug: invite.slug }, ctx(member.id));
+    expect((await membershipRow())!.canInvite).toBe(false);
+  });
+
   it('addOrgMember rejects a LIVE duplicate with a clean error', async () => {
     await M.addOrgMember(null, { orgId: org.id, userId: member.id, role: 'READER' }, ctx(owner.id));
     await expect(
@@ -133,6 +171,22 @@ describe('rejoin — reactivation of the tombstone', () => {
     await expect(
       M.updateOrgMember(null, { orgId: org.id, userId: member.id, role: 'ADMIN' }, ctx(owner.id)),
     ).rejects.toThrow('not a member');
+  });
+});
+
+describe('updateOrgMember — last-owner demotion guard (PR-480 Gemini review)', () => {
+  it('refuses to demote the last LIVE owner; allows it once a second owner exists', async () => {
+    await expect(
+      M.updateOrgMember(null, { orgId: org.id, userId: owner.id, role: 'ADMIN' }, ctx(owner.id)),
+    ).rejects.toThrow('last owner');
+    // Promote the member to OWNER — now demoting the original owner is fine.
+    await M.updateOrgMember(null, { orgId: org.id, userId: member.id, role: 'OWNER' }, ctx(owner.id));
+    const demoted = await M.updateOrgMember(
+      null,
+      { orgId: org.id, userId: owner.id, role: 'ADMIN' },
+      ctx(owner.id),
+    );
+    expect(demoted.role).toBe('ADMIN');
   });
 });
 
@@ -152,5 +206,42 @@ describe('personal-workspace lookups ignore revoked memberships', () => {
     expect(await hasPersonalWorkspace(db, member.id)).toBe(true);
     await db.orgMember.update({ where: { id: m.id }, data: { deletedAt: new Date() } });
     expect(await hasPersonalWorkspace(db, member.id)).toBe(false);
+  });
+
+  it('re-provisioning after a revoked personal membership REACTIVATES the workspace — no URN collision, no duplicate org (PR-480 Codex review)', async () => {
+    // Fresh provision (member has no URN-legal handle here, so this exercises
+    // the deterministic personal-<userId> fallback URN Codex flagged).
+    const first = await provisionPersonalWorkspace(db, member.id, 'LC Member');
+    // Corrupt: revoke the personal OWNER membership directly (the API can't).
+    await db.orgMember.updateMany({
+      where: { organizationId: first.orgId, userId: member.id },
+      data: { deletedAt: new Date() },
+    });
+    expect(await hasPersonalWorkspace(db, member.id)).toBe(false);
+
+    // The login flow would now re-provision — it must reactivate, not P2002.
+    const healed = await provisionPersonalWorkspace(db, member.id, 'LC Member');
+    expect(healed.orgId).toBe(first.orgId); // same workspace, no duplicate
+    expect(healed.agentId).toBe(first.agentId);
+    expect(healed.appId).toBe(first.appId);
+    expect(healed.rawKey).not.toBe(first.rawKey); // fresh key minted
+
+    const membership = await db.orgMember.findFirst({
+      where: { organizationId: first.orgId, userId: member.id },
+    });
+    expect(membership!.deletedAt).toBeNull();
+    expect(membership!.role).toBe('OWNER');
+    expect(membership!.canInvite).toBe(true);
+
+    // PendingSetup upserted for the setup page (userId is unique).
+    const setup = await db.pendingSetup.findUnique({ where: { userId: member.id } });
+    expect(setup!.consumed).toBe(false);
+    expect(setup!.appId).toBe(first.appId);
+
+    // Only ONE personal org exists for the user.
+    const personalOrgs = await db.organization.findMany({
+      where: { createdBy: member.id, isVisible: false, deletedAt: null },
+    });
+    expect(personalOrgs).toHaveLength(1);
   });
 });

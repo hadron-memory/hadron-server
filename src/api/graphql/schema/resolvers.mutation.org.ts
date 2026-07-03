@@ -337,6 +337,10 @@ export const orgMutations = {
               deletedAt: null,
               deletedBy: null,
               role: invite.memberRole as Role,
+              // Revocation clears ALL membership capabilities — a fresh row
+              // would default canInvite=false, so reactivation must not
+              // resurrect a stale invite grant (PR-480 review).
+              canInvite: false,
               updatedBy: ctx.userId ?? null,
             },
           });
@@ -375,6 +379,9 @@ export const orgMutations = {
             deletedAt: null,
             deletedBy: null,
             role: role as Role,
+            // Revocation clears ALL membership capabilities — reactivation
+            // must not resurrect a stale canInvite grant (PR-480 review).
+            canInvite: false,
             updatedBy: ctx.userId ?? ctx.clientId ?? null,
           },
           include: { user: true },
@@ -402,6 +409,17 @@ export const orgMutations = {
       });
       if (!existing) {
         throw new Error('User is not a member of this organization');
+      }
+      // Demoting the last LIVE owner would leave the org unmanageable — same
+      // invariant removeOrgMember enforces (PR-480 Gemini review; the gap
+      // predates the lifecycle change but this is its home).
+      if (existing.role === 'OWNER' && role !== 'OWNER') {
+        const owners = await ctx.db.orgMember.findMany({
+          where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
+        });
+        if (owners.length <= 1) {
+          throw new Error('Cannot demote the last owner of an organization');
+        }
       }
       return ctx.db.orgMember.update({
         where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
