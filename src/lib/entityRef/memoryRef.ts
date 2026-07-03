@@ -19,7 +19,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isId } from './shape.js';
+import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { MemoryNotFoundError } from '../asset/gate.js';
 
@@ -28,24 +28,30 @@ export async function resolveMemoryRef(
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  const idInput = isId(ref);
-  if (!idInput) {
+  const isId = isIdFunc(ref);
+  if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'memory');
   }
-  // ID inputs look up by PK directly. For a URN, strip any `hrn/urn:<type>:`
-  // prefix (parseUrnInput) and collapse canonical `::` hierarchy separators to
-  // legacy `:` (normalizeUrnForLookup) so the DB lookup matches
-  // pre-spec-021-migrated rows. Normalization is a no-op on an ID (no colons to
-  // collapse), so the ID path skips it entirely.
-  const where = idInput
+  const where = isId
     ? { id: ref }
+      // ID inputs look up by PK directly. For a URN, strip any `hrn/urn:<type>:`
+      // prefix (parseUrnInput) and collapse canonical `::` hierarchy separators to
+      // legacy `:` (normalizeUrnForLookup) so the DB lookup matches
+      // pre-spec-021-migrated rows. Normalization is a no-op on an ID (no colons to
+      // collapse), so the ID path skips it entirely.
     : { urn: normalizeUrnForLookup(parseUrnInput(ref).value) };
-  const memory = await db.memory.findUnique({
-    where,
-    select: { id: true, deletedAt: true },
+  // findFirst (not findUnique) so the soft-delete exclusion can live in the
+  // query: the `{ id }` / `{ urn }` selector is still unique-backed, and
+  // `deletedAt: null` filters out soft-deleted rows unless the caller opts in.
+  const memory = await db.memory.findFirst({
+    where: {
+      ...where,
+      ...(options?.includeDeleted ? {} : { deletedAt: null }),
+    },
+    select: { id: true },
   });
-  if (!memory || (!options?.includeDeleted && memory.deletedAt)) {
+  if (!memory) {
     throw new MemoryNotFoundError(ref);
   }
   return { id: memory.id };
