@@ -291,8 +291,10 @@ export const memoryQueries = {
       return {
         total,
         // GraphNode is a distinct slim type (not Node), so it has no Node.tags
-        // field resolver — deserialize the stored tags here.
-        nodes: rows.map((r: { id: string; loc: string; name: string | null; nodeType: string | null; tags: string[] | string }) => ({
+        // field resolver — deserialize the stored tags here. name/nodeType/tags
+        // are NOT NULL columns (nodeType defaults to 'info'), so they're typed
+        // non-null here to match GraphNode's String! / [String!]! — no null path.
+        nodes: rows.map((r: { id: string; loc: string; name: string; nodeType: string; tags: string[] | string }) => ({
           id: r.id,
           loc: r.loc,
           name: r.name,
