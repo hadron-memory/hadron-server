@@ -26,15 +26,18 @@ export async function resolveUserRef(
   db: Pick<PrismaClient, 'user'>,
   ref: string,
 ): Promise<{ id: string }> {
-  if (!isId(ref)) {
+  const idInput = isId(ref);
+  if (!idInput) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'user');
   }
-  const value = normalizeUrnForLookup(parseUrnInput(ref).value);
   // Users have no `urn` column — the non-ID lookup key is the unique handle.
   // Handles are lowercase-canonical (#325), so lowercase the input for
   // case-insensitive resolution (hrn:user:Holger → the `holger` row).
-  const where = isId(value) ? { id: value } : { handle: value.toLowerCase() };
+  // Normalization is a no-op on an ID, so it runs only on the handle path.
+  const where = idInput
+    ? { id: ref }
+    : { handle: normalizeUrnForLookup(parseUrnInput(ref).value).toLowerCase() };
   const user = await db.user.findUnique({
     where,
     select: { id: true, deletedAt: true },

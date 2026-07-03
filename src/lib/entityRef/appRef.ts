@@ -15,23 +15,24 @@ export async function resolveAppRef(
   db: Pick<PrismaClient, 'app'>,
   ref: string,
 ): Promise<{ id: string }> {
-  if (!isId(ref)) {
+  const idInput = isId(ref);
+  if (!idInput) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'app');
   }
-  const normalized = normalizeUrnForLookup(parseUrnInput(ref).value);
   // Spec 021 FR-027 removed `App.urn`'s @unique constraint in favor of
   // a partial unique index restricted to `uninstalled_at IS NULL`. So
   // `findUnique({ where: { urn } })` is no longer well-typed — use
   // `findFirst` with the active-row filter for URN lookups. ID lookups
-  // still use the PK.
-  const app = isId(normalized)
+  // still use the PK. Normalization (prefix strip + `::`→`:`) is a no-op on
+  // an ID, so it runs only on the URN path.
+  const app = idInput
     ? await db.app.findUnique({
-        where: { id: normalized },
+        where: { id: ref },
         select: { id: true, deletedAt: true },
       })
     : await db.app.findFirst({
-        where: { urn: normalized, uninstalledAt: null },
+        where: { urn: normalizeUrnForLookup(parseUrnInput(ref).value), uninstalledAt: null },
         select: { id: true, deletedAt: true },
       });
   if (!app || app.deletedAt) {

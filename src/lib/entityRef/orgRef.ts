@@ -19,12 +19,16 @@ export async function resolveOrgRef(
   db: Pick<PrismaClient, 'organization'>,
   ref: string,
 ): Promise<{ id: string }> {
-  if (!isId(ref)) {
+  const idInput = isId(ref);
+  if (!idInput) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'org');
   }
-  const normalized = normalizeUrnForLookup(parseUrnInput(ref).value);
-  const where = isId(normalized) ? { id: normalized } : { urn: normalized };
+  // ID → PK lookup; URN → normalized (prefix stripped, `::` collapsed to `:`).
+  // Normalization is a no-op on an ID, so the ID path skips it.
+  const where = idInput
+    ? { id: ref }
+    : { urn: normalizeUrnForLookup(parseUrnInput(ref).value) };
   const org = await db.organization.findUnique({
     where,
     select: { id: true, deletedAt: true },

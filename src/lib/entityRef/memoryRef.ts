@@ -4,11 +4,13 @@
  *
  * Spec: 007-entity-id-or-urn / contracts/resolution-helpers.md.
  *
- * Four input forms all resolve to the same row:
+ * Six input forms all resolve to the same row:
  *   - "abc123…"                             (raw 32-hex-char ID)
  *   - "org-foo:family-recipes"              (bare URN, DB form)
- *   - "hrn:memory:org-foo::family-recipes"  (canonical fully qualified URN, external form)
- *   - "urn:memory:org-foo::family-recipes"  (legacy fully qualified URN, external form)
+ *   - "hrn:memory:org-foo::family-recipes"  (canonical fully qualified URN)
+ *   - "urn:memory:org-foo::family-recipes"  (legacy fully qualified URN)
+ *   - "hrn:memory:org-foo:family-recipes"   (like canonical fully qualified URN, but missing the double colon)
+ *   - "urn:memory:org-foo:family-recipes"   (legacy fully qualified URN)
  *
  * Soft-deleted memories return MemoryNotFoundError by default, matching
  * the existing convention. Pass `{ includeDeleted: true }` when the
@@ -26,17 +28,19 @@ export async function resolveMemoryRef(
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  if (!isId(ref)) {
+  const idInput = isId(ref);
+  if (!idInput) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'memory');
   }
-  // Strip a `hrn/urn:<type>:` prefix if present. parseUrnInput returns
-  // the bare value; for already-bare input it returns the input
-  // unchanged. Then `normalizeUrnForLookup` collapses canonical `::`
-  // hierarchy separators to legacy `:` so the DB lookup matches
-  // pre-spec-021-migrated rows.
-  const normalized = normalizeUrnForLookup(parseUrnInput(ref).value);
-  const where = isId(normalized) ? { id: normalized } : { urn: normalized };
+  // ID inputs look up by PK directly. For a URN, strip any `hrn/urn:<type>:`
+  // prefix (parseUrnInput) and collapse canonical `::` hierarchy separators to
+  // legacy `:` (normalizeUrnForLookup) so the DB lookup matches
+  // pre-spec-021-migrated rows. Normalization is a no-op on an ID (no colons to
+  // collapse), so the ID path skips it entirely.
+  const where = idInput
+    ? { id: ref }
+    : { urn: normalizeUrnForLookup(parseUrnInput(ref).value) };
   const memory = await db.memory.findUnique({
     where,
     select: { id: true, deletedAt: true },
