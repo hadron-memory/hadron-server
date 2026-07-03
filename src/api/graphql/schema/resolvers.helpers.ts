@@ -289,12 +289,12 @@ export function defaultAiConfigOf(
   return p;
 }
 
-// ── Uniform find-many surface (#473) ───────────────────────────────────
+// ── Uniform find-many surface (#473) — Spec: cor:api:120 ───────────────
 
 // Standard page bounds for the uniform `<entity>s(filter, orgId, limit,
 // offset)` list queries — matches the globalSearch idiom (default 50, cap
 // 200). `limit: 0` is preserved (an empty page with just `total` — the cheap
-// count, same contract as memoryNodes).
+// count, same contract as memoryNodes). Spec: cor:api:120:02.
 export const LIST_PAGE_DEFAULT = 50;
 export const LIST_PAGE_MAX = 200;
 
