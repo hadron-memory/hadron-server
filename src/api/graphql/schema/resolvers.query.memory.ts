@@ -3,12 +3,53 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { deserializeTags } from '../../../integrations/db/provider.js';
 import {
   type Context,
   requireRole,
   getAccessibleMemoryIds,
   MEMORY_INCLUDE,
 } from './resolvers.helpers.js';
+
+// Graph-view fetch (issue #466): default page size + hard cap for the slim
+// memoryNodes / memoryEdges lists. Large enough to fill the graph in a few
+// round trips, capped so a single page stays bounded.
+const GRAPH_PAGE_DEFAULT = 1000;
+const GRAPH_PAGE_MAX = 2000;
+
+/**
+ * Clamp a graph page size: omitted → the default; otherwise the caller's value
+ * clamped to [0, MAX]. `limit: 0` is preserved (not bumped to 1) so a caller can
+ * fetch only `total` — the cheap "how big is this memory?" node/edge count — or
+ * suppress the payload during init, the standard limit-0 pattern.
+ */
+function clampGraphTake(limit?: number | null): number {
+  if (limit == null) return GRAPH_PAGE_DEFAULT;
+  return Math.min(GRAPH_PAGE_MAX, Math.max(0, limit));
+}
+
+/**
+ * Resolve a memoryId (ID or URN) to its id IFF the caller may read it; returns
+ * null when the ref does not resolve OR the caller lacks read access — so the
+ * graph-view queries return an empty page with no org/memory existence
+ * disclosure (same posture as memoryUsageSummary). Uses the scoped
+ * getAccessibleMemoryIds point-read so it stays an indexed check.
+ */
+async function resolveReadableMemoryId(ctx: Context, memoryId: string): Promise<string | null> {
+  let resolvedId: string;
+  try {
+    ({ id: resolvedId } = await resolveMemoryRef(ctx.db, memoryId));
+  } catch (e) {
+    // Only a genuine miss collapses to an empty page (no existence disclosure).
+    // A malformed URN or an unexpected DB/runtime error must propagate rather
+    // than masquerade as "empty graph" — mirrors the Query.memory(id:) resolver.
+    if (e instanceof MemoryNotFoundError) return null;
+    throw e;
+  }
+  const accessible = await getAccessibleMemoryIds(ctx, resolvedId);
+  if (accessible !== null && !accessible.includes(resolvedId)) return null;
+  return resolvedId;
+}
 
 export const memoryQueries = {
     memoryUsageSummary: async (_: unknown, { memoryId }: { memoryId: string }, ctx: Context) => {
@@ -267,6 +308,89 @@ export const memoryQueries = {
         });
       }
       throw new Error('Unauthenticated');
+    },
+
+    // #466: slim, paginated node list for the graph view. Phase one — the
+    // client loads these to completion, renders nodes, then loads memoryEdges.
+    // Returns only what a node-link graph draws (no content/abstract/data), so
+    // the payload is a fraction of the full node fragment.
+    memoryNodes: async (
+      _: unknown,
+      { memoryId, limit, offset }: { memoryId: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const resolvedId = await resolveReadableMemoryId(ctx, memoryId);
+      if (!resolvedId) return { nodes: [], total: 0 };
+
+      const take = clampGraphTake(limit);
+      const skip = Math.max(0, offset ?? 0);
+      const where = { memoryId: resolvedId, deletedAt: null };
+      const [total, rows] = await Promise.all([
+        ctx.db.node.count({ where }),
+        ctx.db.node.findMany({
+          where,
+          orderBy: { loc: 'asc' }, // loc is unique per memory → stable paging
+          skip,
+          take,
+          select: { id: true, loc: true, name: true, nodeType: true, tags: true },
+        }),
+      ]);
+      return {
+        total,
+        // GraphNode is a distinct slim type (not Node), so it has no Node.tags
+        // field resolver — deserialize the stored tags here. name/nodeType/tags
+        // are NOT NULL columns (nodeType defaults to 'info'), so they're typed
+        // non-null here to match GraphNode's String! / [String!]! — no null path.
+        nodes: rows.map((r: { id: string; loc: string; name: string; nodeType: string; tags: string[] | string }) => ({
+          id: r.id,
+          loc: r.loc,
+          name: r.name,
+          nodeType: r.nodeType,
+          tags: deserializeTags(r.tags),
+        })),
+      };
+    },
+
+    // #466: slim, paginated edge list for the graph view. Phase two — endpoint
+    // IDs only; the client already holds the nodes by the time it draws edges.
+    // Scoped by the edge's denormalized memoryId (edges whose SOURCE is in the
+    // memory); a cross-memory edge's target may fall outside this memory and is
+    // dropped client-side as a dangling endpoint.
+    memoryEdges: async (
+      _: unknown,
+      { memoryId, limit, offset }: { memoryId: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const resolvedId = await resolveReadableMemoryId(ctx, memoryId);
+      if (!resolvedId) return { edges: [], total: 0 };
+
+      const take = clampGraphTake(limit);
+      const skip = Math.max(0, offset ?? 0);
+      // Only edges whose BOTH endpoints are live nodes. deleteNode soft-deletes
+      // just the node row and leaves its edges live (only `hard` cascades), so
+      // an edge to/from a soft-deleted node would otherwise dangle — memoryNodes
+      // omits deleted nodes, so the client would draw a link to a node not in
+      // the set. Filtering the endpoints here (not edge.deletedAt alone) keeps
+      // the graph consistent and total accurate, without changing delete
+      // semantics. (A cross-memory edge's target may still fall outside this
+      // memory's node page — that legitimate dangling is dropped client-side.)
+      const where = {
+        memoryId: resolvedId,
+        deletedAt: null,
+        source: { deletedAt: null },
+        target: { deletedAt: null },
+      };
+      const [total, edges] = await Promise.all([
+        ctx.db.edge.count({ where }),
+        ctx.db.edge.findMany({
+          where,
+          orderBy: { loc: 'asc' }, // edge loc is unique per memory → stable paging
+          skip,
+          take,
+          select: { id: true, loc: true, name: true, sourceId: true, targetId: true },
+        }),
+      ]);
+      return { total, edges };
     },
 };
 

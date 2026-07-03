@@ -857,6 +857,11 @@ model Node {
   @@unique([loc, memoryId])
   @@index([loc])
   @@index([memoryId])
+  // Graph-view scale path (#466): memoryNodes runs
+  // `WHERE memory_id = ? ORDER BY loc LIMIT/OFFSET`. This composite lets
+  // Postgres seek to the memory's rows AND return them loc-ordered without a
+  // separate sort or a full loc-index scan across other memories.
+  @@index([memoryId, loc])
   @@map("nodes")
 }
 
@@ -985,6 +990,10 @@ model Edge {
   @@unique([loc, memoryId])
   @@index([memoryId])
   @@index([targetId])
+  // Graph-view scale path (#466): memoryEdges runs
+  // `WHERE memory_id = ? ORDER BY loc LIMIT/OFFSET` (plus endpoint-liveness
+  // joins). Same memory-scoped, loc-ordered seek as nodes_memory_id_loc_idx.
+  @@index([memoryId, loc])
   @@map("edges")
 }
 
