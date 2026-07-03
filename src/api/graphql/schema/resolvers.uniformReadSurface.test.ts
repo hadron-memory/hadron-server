@@ -365,4 +365,46 @@ describe('Query.organizations / Query.users — merged list semantics', () => {
     expect(page.total).toBe(3); // member, stranger, admin
     expect(page.items).toHaveLength(2);
   });
+
+  it('organizations filter.memberOnly: admin gets only their member orgs', async () => {
+    // A platform ADMIN who IS a member of exactly one org — memberOnly
+    // restricts even the admin's unscoped reach to their own memberships
+    // (the old myOrganizations semantics, cor:api:120:03).
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgA.id, userId: admin.id, role: 'READER' },
+    });
+    const adminCtx = ctx(admin.id, ['ADMIN']);
+    expect((await Q.organizations(null, {}, adminCtx)).total).toBe(2); // default: unscoped
+    const mine = await Q.organizations(null, { filter: { memberOnly: true } }, adminCtx);
+    expect(mine.total).toBe(1);
+    expect(mine.items[0].id).toBe(orgA.id);
+  });
+
+  it('organizations filter.memberOnly: no-op for a member (default scope IS memberships)', async () => {
+    const dflt = await Q.organizations(null, {}, ctx(member.id));
+    const scoped = await Q.organizations(null, { filter: { memberOnly: true } }, ctx(member.id));
+    expect(scoped.total).toBe(dflt.total);
+    expect(scoped.items.map((o: { id: string }) => o.id)).toEqual(
+      dflt.items.map((o: { id: string }) => o.id),
+    );
+    // memberOnly: false / omitted-field filter behaves like no filter.
+    expect((await Q.organizations(null, { filter: {} }, ctx(member.id))).total).toBe(dflt.total);
+  });
+
+  it('organizations filter.memberOnly: revoked membership excluded', async () => {
+    await db.orgMember.create({
+      data: {
+        id: generateId(), organizationId: orgB.id, userId: admin.id,
+        role: 'READER', deletedAt: new Date(),
+      },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgA.id, userId: admin.id, role: 'READER' },
+    });
+    const mine = await Q.organizations(
+      null, { filter: { memberOnly: true } }, ctx(admin.id, ['ADMIN']),
+    );
+    expect(mine.total).toBe(1);
+    expect(mine.items[0].id).toBe(orgA.id);
+  });
 });

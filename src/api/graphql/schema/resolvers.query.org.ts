@@ -269,10 +269,22 @@ export const orgQueries = {
     // #473 — the uniform paginated organization list; replaces organizations
     // (admin, all) + myOrganizations (memberships). Members get their member
     // orgs (App-key callers their own App's org); platform ADMIN/OWNER keep
-    // the established unscoped reach over every live org.
+    // the established unscoped reach over every live org. filter.memberOnly
+    // restricts the list to the caller's own memberships even for a platform
+    // admin (the old myOrganizations semantics, as a slice-as-filter —
+    // cor:api:120:03) so clients resolving "my orgs" (nav, active-org) don't
+    // receive every live org when the caller happens to be an admin.
     organizations: async (
       _: unknown,
-      { limit, offset }: { limit?: number | null; offset?: number | null },
+      {
+        filter,
+        limit,
+        offset,
+      }: {
+        filter?: { memberOnly?: boolean | null } | null;
+        limit?: number | null;
+        offset?: number | null;
+      },
       ctx: Context,
     ) => {
       const take = clampListTake(limit);
@@ -280,11 +292,19 @@ export const orgQueries = {
       const isPlatformAdmin =
         !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
       let where: Record<string, unknown>;
-      if (isPlatformAdmin) {
+      if (isPlatformAdmin && !filter?.memberOnly) {
         where = { deletedAt: null };
       } else {
+        // Membership scope — for non-admins (unchanged default) and for any
+        // caller with filter.memberOnly (a no-op for non-admins, whose default
+        // scope IS their memberships). resolveOrgScope excludes revoked
+        // (soft-deleted) memberships. Without an orgId argument it never
+        // returns null today, but handle it like the sibling list resolvers
+        // (empty page) instead of asserting — a future orgId addition or
+        // helper refactor must degrade, not crash (PR #479 review).
         const scope = await resolveOrgScope(ctx);
-        where = { deletedAt: null, id: { in: scope!.memberOrgIds } };
+        if (!scope) return { items: [], total: 0 };
+        where = { deletedAt: null, id: { in: scope.memberOrgIds } };
       }
       const [total, items] = await Promise.all([
         ctx.db.organization.count({ where }),

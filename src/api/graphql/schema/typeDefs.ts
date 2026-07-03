@@ -246,6 +246,16 @@ export const typeDefs = `#graphql
     visibility: MemoryVisibility
   }
 
+  "Filter for the uniform organizations() list (#473)."
+  input OrganizationFilter {
+    """
+    true restricts the list to the caller's own memberships — even for
+    platform ADMIN/OWNER, whose unscoped reach otherwise spans every live
+    org; the old myOrganizations semantics.
+    """
+    memberOnly: Boolean
+  }
+
   "Filter for the uniform agents() list (#473). Clauses AND-combine."
   input AgentFilter {
     type: AgentType
@@ -2102,10 +2112,12 @@ export const typeDefs = `#graphql
     """
     Uniform paginated organization list (#473) — replaces organizations +
     myOrganizations. Scope: the caller's memberships; platform ADMIN/OWNER
-    get every live org (the established admin unscoped reach). Name-ascending
-    order (id tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    get every live org (the established admin unscoped reach) unless
+    filter.memberOnly restricts the list to their own memberships (the old
+    myOrganizations view, as a slice-as-filter). Name-ascending order (id
+    tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
     """
-    organizations(limit: Int, offset: Int): OrganizationsPage!
+    organizations(filter: OrganizationFilter, limit: Int, offset: Int): OrganizationsPage!
 
     """
     Fetch an Organization (org member or platform ADMIN).
