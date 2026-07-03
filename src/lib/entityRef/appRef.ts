@@ -20,22 +20,23 @@ export async function resolveAppRef(
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'app');
   }
-  // Spec 021 FR-027 removed `App.urn`'s @unique constraint in favor of
-  // a partial unique index restricted to `uninstalled_at IS NULL`. So
-  // `findUnique({ where: { urn } })` is no longer well-typed — use
-  // `findFirst` with the active-row filter for URN lookups. ID lookups
-  // still use the PK. Normalization (prefix strip + `::`→`:`) is a no-op on
-  // an ID, so it runs only on the URN path.
+  // Spec 021 FR-027 removed `App.urn`'s @unique constraint in favor of a
+  // partial unique index restricted to `uninstalled_at IS NULL`, so the URN
+  // path already uses `findFirst` with the active-row filter. Use `findFirst`
+  // for the ID path too so the `deletedAt: null` soft-delete exclusion lives in
+  // the query for both (the `{ id }` selector is still unique-backed).
+  // Normalization (prefix strip + `::`→`:`) is a no-op on an ID, so it runs
+  // only on the URN path. No includeDeleted opt-in on this resolver.
   const app = idInput
-    ? await db.app.findUnique({
-        where: { id: ref },
-        select: { id: true, deletedAt: true },
+    ? await db.app.findFirst({
+        where: { id: ref, deletedAt: null },
+        select: { id: true },
       })
     : await db.app.findFirst({
-        where: { urn: normalizeUrnForLookup(parseUrnInput(ref).value), uninstalledAt: null },
-        select: { id: true, deletedAt: true },
+        where: { urn: normalizeUrnForLookup(parseUrnInput(ref).value), uninstalledAt: null, deletedAt: null },
+        select: { id: true },
       });
-  if (!app || app.deletedAt) {
+  if (!app) {
     throw new AppNotFoundError(ref);
   }
   return { id: app.id };

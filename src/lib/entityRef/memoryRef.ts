@@ -23,6 +23,16 @@ import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { MemoryNotFoundError } from '../asset/gate.js';
 
+type WhereClause = {
+  id: string;
+  urn?: undefined;
+  deletedAt?: null;
+} | {
+  urn: string;
+  id?: undefined;
+  deletedAt?: null;
+}
+
 export async function resolveMemoryRef(
   db: Pick<PrismaClient, 'memory'>,
   ref: string,
@@ -33,7 +43,7 @@ export async function resolveMemoryRef(
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'memory');
   }
-  const where = isId
+  const where: WhereClause = isId
     ? { id: ref }
       // ID inputs look up by PK directly. For a URN, strip any `hrn/urn:<type>:`
       // prefix (parseUrnInput) and collapse canonical `::` hierarchy separators to
@@ -43,12 +53,12 @@ export async function resolveMemoryRef(
     : { urn: normalizeUrnForLookup(parseUrnInput(ref).value) };
   // findFirst (not findUnique) so the soft-delete exclusion can live in the
   // query: the `{ id }` / `{ urn }` selector is still unique-backed, and
-  // `deletedAt: null` filters out soft-deleted rows unless the caller opts in.
+  // `deletedAt: null` filters out soft-deleted rows UNLESS the caller opts in.
+  if (!options?.includeDeleted) {
+    where.deletedAt = null;
+  }
   const memory = await db.memory.findFirst({
-    where: {
-      ...where,
-      ...(options?.includeDeleted ? {} : { deletedAt: null }),
-    },
+    where,
     select: { id: true },
   });
   if (!memory) {

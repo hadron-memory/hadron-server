@@ -38,11 +38,14 @@ export async function resolveUserRef(
   const where = idInput
     ? { id: ref }
     : { handle: normalizeUrnForLookup(parseUrnInput(ref).value).toLowerCase() };
-  const user = await db.user.findUnique({
-    where,
-    select: { id: true, deletedAt: true },
+  // findFirst + `deletedAt: null` so the soft-delete exclusion lives in the
+  // query (the `{ id }` / `{ handle }` selector is still unique-backed). No
+  // includeDeleted opt-in on this resolver — soft-deleted is always excluded.
+  const user = await db.user.findFirst({
+    where: { ...where, deletedAt: null },
+    select: { id: true },
   });
-  if (!user || user.deletedAt) {
+  if (!user) {
     throw new UserNotFoundError(ref);
   }
   return { id: user.id };

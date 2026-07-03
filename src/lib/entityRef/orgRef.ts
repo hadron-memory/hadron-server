@@ -29,11 +29,14 @@ export async function resolveOrgRef(
   const where = idInput
     ? { id: ref }
     : { urn: normalizeUrnForLookup(parseUrnInput(ref).value) };
-  const org = await db.organization.findUnique({
-    where,
-    select: { id: true, deletedAt: true },
+  // findFirst + `deletedAt: null` so the soft-delete exclusion lives in the
+  // query (the `{ id }` / `{ urn }` selector is still unique-backed). No
+  // includeDeleted opt-in on this resolver — soft-deleted is always excluded.
+  const org = await db.organization.findFirst({
+    where: { ...where, deletedAt: null },
+    select: { id: true },
   });
-  if (!org || org.deletedAt) {
+  if (!org) {
     throw new OrganizationNotFoundError(ref);
   }
   return { id: org.id };

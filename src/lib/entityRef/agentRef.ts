@@ -25,11 +25,14 @@ export async function resolveAgentRef(
   const where = idInput
     ? { id: ref }
     : { urn: normalizeUrnForLookup(parseUrnInput(ref).value) };
-  const agent = await db.agent.findUnique({
-    where,
-    select: { id: true, deletedAt: true },
+  // findFirst + `deletedAt: null` so the soft-delete exclusion lives in the
+  // query (the `{ id }` / `{ urn }` selector is still unique-backed). No
+  // includeDeleted opt-in on this resolver — soft-deleted is always excluded.
+  const agent = await db.agent.findFirst({
+    where: { ...where, deletedAt: null },
+    select: { id: true },
   });
-  if (!agent || agent.deletedAt) {
+  if (!agent) {
     throw new AgentNotFoundError(ref);
   }
   return { id: agent.id };
