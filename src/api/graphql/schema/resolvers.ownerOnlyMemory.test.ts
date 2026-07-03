@@ -137,3 +137,36 @@ describe('MemoryShare boundary (U8)', () => {
     ).rejects.toThrow();
   });
 });
+
+describe('myMemories — orgId scope (#463)', () => {
+  it('confines the union — including the caller own personal memories — to one org', async () => {
+    // Personal memory in the beforeEach org (org A).
+    const personalA = await resolvers.Mutation.createMemory(
+      null, { orgId: org.id, name: 'personal-a', memoryClass: 'personal' } as any, asOwner(),
+    );
+    // A second org the owner also belongs to, with their own personal memory.
+    const orgB = await db.organization.create({
+      data: { id: generateId(), name: 'org-b', urn: `org-b-${generateId()}` },
+    });
+    await db.orgMember.create({ data: { organizationId: orgB.id, userId: owner.id, role: 'READER' } });
+    const personalB = await resolvers.Mutation.createMemory(
+      null, { orgId: orgB.id, name: 'personal-b', memoryClass: 'personal' } as any, asOwner(),
+    );
+
+    // Unscoped: both personal memories present (cross-org union).
+    const all = (await resolvers.Query.myMemories(null, {}, asOwner())).map((m: any) => m.id);
+    expect(all).toEqual(expect.arrayContaining([personalA.id, personalB.id]));
+
+    // Scoped to org A: personalA present, personalB (org B) excluded — the fix
+    // (previously the personal/private clause ignored the org narrowing).
+    const scoped = (await resolvers.Query.myMemories(null, { orgId: org.id }, asOwner())).map((m: any) => m.id);
+    expect(scoped).toContain(personalA.id);
+    expect(scoped).not.toContain(personalB.id);
+
+    // Non-member org → empty, no existence disclosure.
+    const strangerOrg = await db.organization.create({
+      data: { id: generateId(), name: 'stranger', urn: `stranger-${generateId()}` },
+    });
+    expect(await resolvers.Query.myMemories(null, { orgId: strangerOrg.id }, asOwner())).toEqual([]);
+  });
+});

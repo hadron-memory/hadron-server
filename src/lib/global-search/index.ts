@@ -4,9 +4,17 @@
  *
  * Flow: classify the query (smart-sniff unless explicit `fields`) → run the
  * selected per-entity adapters concurrently (each applies its own access
- * scope) → merge into one ranked, flat list → cap at `limit`.
+ * scope) → merge into one ranked, flat list → slice to the requested page.
  *
- * Spec: cor:api:050 (feature) · cor:api:050:01 (field-sniff) · cor:api:050:02 (scope/access)
+ * Pagination (issue #465) is a BOUNDED contract: each adapter fetches at most
+ * `PER_ENTITY_CAP` candidates before JS scoring, so `total` is the ranked-match
+ * count within that bound, not an unbounded COUNT. Scoring happens in JS after
+ * the capped SQL fetch, so a SQL COUNT could not reproduce the post-scoring hit
+ * count — an accurate deep-paging `total` would require pushing scoring into
+ * SQL across every adapter. The cap is sized so the common case (an extension
+ * Find tab) pages truthfully; extreme result sets under-count, by design.
+ *
+ * Spec: cor:api:050 (feature) · cor:api:050:01 (field-sniff) · cor:api:050:02 (scope/access) · cor:api:050:03 (bounded pagination)
  */
 
 import { classifyQuery, urnSearchTerm } from './classify.js';
@@ -22,8 +30,14 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
-/** Candidate rows fetched per entity before scoring (≥ limit so ranking is fair). */
-const PER_ENTITY_CAP = 100;
+/**
+ * Candidate rows fetched per entity before JS scoring. Also the ceiling on the
+ * per-entity contribution to `total` (issue #465 bounded contract): the merged
+ * `total` can be at most `PER_ENTITY_CAP × entityTypes`. Raised from 100 to 200
+ * so a paged Find surface (limit ≤ MAX_LIMIT = 200) can walk a full page of a
+ * single dominant entity type without the bound truncating mid-page.
+ */
+const PER_ENTITY_CAP = 200;
 /** Defensive cap on query length before it flows into substring filters. */
 const MAX_QUERY_LEN = 512;
 
@@ -34,7 +48,7 @@ export async function globalSearch(
 ): Promise<GlobalSearchResult> {
   const degraded: string[] = [];
   const q = (params.query ?? '').trim().slice(0, MAX_QUERY_LEN);
-  if (q === '') return { hits: [], degraded };
+  if (q === '') return { hits: [], total: 0, degraded };
 
   const { fields } = classifyQuery(q, params.fields);
   const fieldSet = new Set(fields);
@@ -47,6 +61,7 @@ export async function globalSearch(
       : [...ALL_ENTITY_TYPES];
 
   const limit = Math.min(MAX_LIMIT, Math.max(1, params.limit ?? DEFAULT_LIMIT));
+  const offset = Math.max(0, params.offset ?? 0);
 
   const ctx: AdapterCtx = {
     db,
@@ -68,7 +83,10 @@ export async function globalSearch(
       a.entityType.localeCompare(b.entityType),
   );
 
-  return { hits: hits.slice(0, limit), degraded };
+  // `total` is the full ranked list length (bounded by PER_ENTITY_CAP per type);
+  // the page is a slice of that already-ranked list so rows can't shift between
+  // pages (the sort tiebreak is deterministic — issue #465).
+  return { hits: hits.slice(offset, offset + limit), total: hits.length, degraded };
 }
 
 export type {

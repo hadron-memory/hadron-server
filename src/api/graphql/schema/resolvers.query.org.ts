@@ -148,12 +148,16 @@ export const orgQueries = {
         query,
         entityTypes,
         fields,
+        orgId,
         limit,
+        offset,
       }: {
         query: string;
         entityTypes?: SearchEntityType[] | null;
         fields?: SearchField[] | null;
+        orgId?: string | null;
         limit?: number | null;
+        offset?: number | null;
       },
       ctx: Context,
     ) => {
@@ -164,18 +168,40 @@ export const orgQueries = {
       // org-rooted slices. App-Key callers (no userId) get no org-read → [].
       const isPlatformAdmin = !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
       const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
-      const orgIds = isPlatformAdmin
+      let orgIds = isPlatformAdmin
         ? null
         : ctx.userId
           ? await getMemberOrgIds(ctx.db, ctx.userId)
           : [];
+
+      // #463: optional single-org narrowing. orgScopeId AND-constrains the
+      // Memory + Node slices to that org's memories (never widening access);
+      // orgIds: [orgId] confines the org-rooted slices. A non-admin who is not a
+      // member of orgId gets an empty page (no org-existence disclosure); a
+      // platform admin may scope to any org.
+      let orgScopeId: string | null = null;
+      if (orgId != null) {
+        let resolvedOrgId: string;
+        try {
+          ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+        } catch {
+          return { hits: [], total: 0, degraded: [] };
+        }
+        if (!isPlatformAdmin && !(orgIds ?? []).includes(resolvedOrgId)) {
+          return { hits: [], total: 0, degraded: [] };
+        }
+        orgIds = [resolvedOrgId];
+        orgScopeId = resolvedOrgId;
+      }
+
       const principal: SearchPrincipal = {
         viewerUserId: ctx.userId ?? null,
         isPlatformAdmin,
         accessibleMemoryIds,
         orgIds,
+        orgScopeId,
       };
-      return runGlobalSearch(ctx.db, { query, entityTypes, fields, limit }, principal);
+      return runGlobalSearch(ctx.db, { query, entityTypes, fields, limit, offset }, principal);
     },
 
     me: async (_: unknown, __: unknown, ctx: Context) => {

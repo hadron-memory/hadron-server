@@ -44,6 +44,7 @@ import {
   getAccessibleMemoryIds,
   memoryAccessFilter,
 } from './resolvers.helpers.js';
+import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 
 export const nodeQueries = {
     resolveUrn: async (_: unknown, { urn }: { urn: string }, ctx: Context) => {
@@ -358,7 +359,7 @@ export const nodeQueries = {
     findNodes: async (
       _: unknown,
       {
-        query, mode, filter, fields, sort, expand, granularity, limit, offset,
+        query, mode, filter, fields, sort, expand, granularity, orgId, limit, offset,
       }: {
         query?: string | null;
         mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
@@ -378,6 +379,7 @@ export const nodeQueries = {
         sort?: 'relevance' | 'loc' | 'seq' | 'updatedAt' | null;
         expand?: number | null;
         granularity?: 'node' | 'chunk' | null;
+        orgId?: string | null;
         limit?: number | null;
         offset?: number | null;
       },
@@ -399,6 +401,30 @@ export const nodeQueries = {
       }
       if (f.updatedBefore && Number.isNaN(Date.parse(f.updatedBefore))) {
         throw badInput('findNodes filter.updatedBefore must be a valid date string.');
+      }
+
+      // #463: optional single-org narrowing. Resolve + membership-gate up front
+      // (member → scope; non-member → empty envelope, no existence disclosure;
+      // a platform admin may scope to any org), then intersect the resolved
+      // scope with that org's memories below. This is AND-narrowing — it can
+      // only ever shrink the caller's accessible set, never widen it. Combined
+      // with filter.isRunnable: true it is the "runnable task nodes in one org"
+      // query (there is no separate myTasks surface).
+      const emptyResult = { hits: [], passages: [], total: 0, reason: null, degraded: null };
+      let orgScopeId: string | null = null;
+      if (orgId != null) {
+        const isPlatformAdmin = !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
+        let resolvedOrgId: string;
+        try {
+          ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+        } catch {
+          return emptyResult;
+        }
+        if (!isPlatformAdmin) {
+          const memberOrgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+          if (!memberOrgIds.includes(resolvedOrgId)) return emptyResult;
+        }
+        orgScopeId = resolvedOrgId;
       }
 
       // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
@@ -437,6 +463,15 @@ export const nodeQueries = {
       } else {
         const rows = await ctx.db.memory.findMany({
           where: { id: { in: accessible }, ...(memClassClause ? { class: memClassClause as never } : {}) },
+          select: { id: true },
+        });
+        scopeIds = rows.map((m) => m.id);
+      }
+      // #463: intersect the resolved scope with the target org's memories. The
+      // membership gate above already authorized the org; this only narrows.
+      if (orgScopeId && scopeIds.length > 0) {
+        const rows = await ctx.db.memory.findMany({
+          where: { id: { in: scopeIds }, organizationId: orgScopeId },
           select: { id: true },
         });
         scopeIds = rows.map((m) => m.id);

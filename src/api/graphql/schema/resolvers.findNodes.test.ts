@@ -172,3 +172,30 @@ describe('findNodes — memoryClasses (cor:api:090:02)', () => {
     expect(res.hits.map((h: any) => h.node.loc)).toEqual(['s.node']);
   });
 });
+
+describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-in-one-org query', () => {
+  it('narrows a member to one org, returns empty for a non-member org, and admin may scope anywhere', async () => {
+    // orgA (fn-org) already has `graph`; add a runnable node there.
+    await mkNode(graph.id, { loc: 'org.taskA', name: 'Task A', isRunnable: true });
+    // A second org with its own knowledge memory + runnable node.
+    const b = await createDbOrgAndGraph(db, { orgName: 'fn-org-b', graphName: 'fnb/graph' });
+    await mkNode(b.graph.id, { loc: 'org.taskB', name: 'Task B', isRunnable: true });
+
+    // A user who is a member of orgA only.
+    const member = await db.user.create({ data: { githubId: 6100, githubUsername: 'fn-member', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: orgA.id, userId: member.id, role: 'READER' } });
+    const memberCtx = ctx({ userId: member.id, roles: [] });
+
+    // Scoped to orgA (member) + isRunnable → only orgA's runnable node.
+    const inA = await findNodes({ orgId: orgA.id, filter: { isRunnable: true } }, memberCtx);
+    expect(inA.hits.map((h: any) => h.node.loc)).toEqual(['org.taskA']);
+
+    // Scoped to orgB the caller is NOT a member of → empty (no existence disclosure).
+    const inB = await findNodes({ orgId: b.org.id, filter: { isRunnable: true } }, memberCtx);
+    expect(inB).toMatchObject({ hits: [], total: 0 });
+
+    // A platform admin may scope to any org.
+    const adminB = await findNodes({ orgId: b.org.id, filter: { isRunnable: true } }, admin());
+    expect(adminB.hits.map((h: any) => h.node.loc)).toEqual(['org.taskB']);
+  });
+});

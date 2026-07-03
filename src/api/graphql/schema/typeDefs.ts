@@ -207,6 +207,14 @@ export const typeDefs = `#graphql
   type GlobalSearchResult {
     hits: [GlobalSearchHit!]!
     """
+    Total ranked matches for building a pager. BOUNDED CONTRACT: this is the
+    count within the per-entity candidate cap (each entity type contributes at
+    most a fixed number of candidates before scoring), not an unbounded COUNT.
+    On very large result sets it under-counts; page slicing (offset/limit)
+    operates over this bounded, fully-ranked list.
+    """
+    total: Int!
+    """
     Notes when the search ran at reduced fidelity (e.g. content search skipped
     on encrypted memories).
     """
@@ -1801,6 +1809,12 @@ export const typeDefs = `#graphql
     weight-mask. \`filter\` is the structured, AND-combined filter context
     (SYSTEM memory class excluded by default; explicit wins). Returns a
     scored-hit envelope. Access-scoped identically to the per-kind node queries.
+
+    orgId (optional) narrows the accessible scope to a single organization the
+    caller is a member of; a non-member orgId returns an empty envelope
+    (total 0, no existence disclosure). Combined with filter.isRunnable: true
+    this is the canonical "the caller's runnable task nodes in one org" query
+    (there is no separate myTasks surface — a task is simply an isRunnable node).
     """
     findNodes(
       query: String
@@ -1810,6 +1824,7 @@ export const typeDefs = `#graphql
       sort: NodeSort
       expand: Int
       granularity: SearchGranularity
+      orgId: ID
       limit: Int
       offset: Int
     ): FindNodesResult!
@@ -1824,12 +1839,26 @@ export const typeDefs = `#graphql
     \`entityTypes\` to restrict the kinds searched. Every hit is access-scoped to
     the caller exactly as the per-kind queries are. Distinct from \`findNodes\`,
     which is the node-only, vector-aware retrieval surface.
+
+    orgId (optional) scopes every slice to a single organization: node/memory
+    hits are confined to that org's memories and org-rooted hits (organization /
+    agent / app / aiServiceConfig) to that org. Omit for the cross-org union
+    (default). A caller who is not a member of orgId gets an empty page
+    (total: 0) — no org-existence disclosure.
+
+    Paged in the repo standard idiom: limit (default 50, capped 200) + offset
+    (default 0), with total in the envelope. NOTE: total is the ranked-match
+    count WITHIN the per-entity candidate bound (a fixed cap per entity type),
+    not an unbounded COUNT — deep paging past that bound is not surfaced. See
+    GlobalSearchResult.total.
     """
     globalSearch(
       query: String!
       entityTypes: [SearchEntityType!]
       fields: [SearchField!]
+      orgId: ID
       limit: Int
+      offset: Int
     ): GlobalSearchResult!
 
     # All nodes whose loc starts with the given prefix
@@ -1926,10 +1955,18 @@ export const typeDefs = `#graphql
     """
     orgSystemMemories(orgId: ID!): [Memory!]!
 
-    # Memories accessible to the caller. Agent system memories are hidden
-    # by default; pass includeAgentSystem: true on the memories list page
-    # to surface them.
-    myMemories(includeAgentSystem: Boolean): [Memory!]!
+    # Memories accessible to the caller.
+    #
+    # memoryClasses (optional) restricts the result to exactly the listed
+    # classes (mirrors findNodes' NodeFilter.memoryClasses). Omitted, the noisy
+    # agent system class is hidden by default (the old includeAgentSystem: false
+    # behavior); to surface system memories pass them explicitly, e.g.
+    # memoryClasses: [system, knowledge, group, personal, private, app].
+    #
+    # orgId (optional) narrows the cross-org union to a single organization the
+    # caller is a member of; a non-member orgId returns [] (no existence leak).
+    # Omit for the default cross-org union.
+    myMemories(memoryClasses: [MemoryClass!], orgId: ID): [Memory!]!
 
     """
     Exchange connections for an org.
@@ -1955,8 +1992,12 @@ export const typeDefs = `#graphql
     app(id: ID!): App
     # The App authenticated by the current AppKey (null for JWT users without an App)
     myApp: App
-    # Apps where the current user is a member of the App's org
-    myApps: [App!]!
+    # Apps where the current user is a member of the App's org.
+    #
+    # orgId (optional) narrows to a single organization the caller is a member
+    # of; a non-member orgId returns [] (no existence leak). Omit for the
+    # default cross-org union.
+    myApps(orgId: ID): [App!]!
     # 005-agent-subscription FR-005: AgentSubscriptions held by the
     # authenticated user. Read-only in v1.
     myAgentSubscriptions: [AgentSubscription!]!

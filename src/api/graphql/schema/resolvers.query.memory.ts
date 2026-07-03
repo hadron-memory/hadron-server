@@ -152,14 +152,19 @@ export const memoryQueries = {
 
     myMemories: async (
       _: unknown,
-      { includeAgentSystem }: { includeAgentSystem?: boolean },
+      { memoryClasses, orgId }: { memoryClasses?: string[] | null; orgId?: string | null },
       ctx: Context,
     ) => {
-      // Agent system memories are hidden by default on listing pages. The
-      // portal passes includeAgentSystem: true only when the user toggles
-      // "Show system memories" at the top of /app/memories.
-      const typeFilter = includeAgentSystem
-        ? {}
+      // Class filter (mirrors findNodes NodeFilter.memoryClasses): when given,
+      // restrict to exactly the listed classes; when omitted, hide the noisy
+      // agent `system` class by default (the old includeAgentSystem: false
+      // behavior — the portal's list page relies on it). To surface system
+      // memories the caller passes them explicitly, e.g.
+      // memoryClasses: [system, knowledge, group, personal, private, app].
+      const classSet =
+        memoryClasses && memoryClasses.length > 0 ? new Set(memoryClasses) : null;
+      const typeFilter = classSet
+        ? { class: { in: [...classSet] as any } }
         : { class: { not: 'system' as const } };
 
       // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Surface
@@ -185,7 +190,9 @@ export const memoryQueries = {
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
           for (const item of aa.agent.memoryItems) {
-            if (!includeAgentSystem && item.memory.class === 'system') continue;
+            // Same class filter as the user branch: explicit list wins,
+            // otherwise hide `system` by default.
+            if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
             memoryMap.set(item.memory.id, item.memory);
           }
         }
@@ -197,7 +204,23 @@ export const memoryQueries = {
           where: { userId: ctx.userId, deletedAt: null },
           select: { organizationId: true },
         });
-        const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
+        let orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
+        // #463: optional single-org narrowing. Scope to [orgId] iff the caller
+        // is a member (accepting ID or URN); a non-member orgId returns [] — no
+        // org-existence disclosure. When scoped, the caller's own
+        // personal/private clause is org-filtered too (see below) so a scoped
+        // view can't leak the user's personal memories from OTHER orgs —
+        // consistent with how globalSearch scopes those same rows.
+        if (orgId != null) {
+          let resolvedOrgId: string;
+          try {
+            ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+          } catch {
+            return [];
+          }
+          if (!orgIds.includes(resolvedOrgId)) return [];
+          orgIds = [resolvedOrgId];
+        }
         if (orgIds.length === 0) return [];
         return ctx.db.memory.findMany({
           where: {
@@ -211,8 +234,15 @@ export const memoryQueries = {
               // personal/private never come in via the org.
               { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
               { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
-              // 034: the user's own owner-owned personal/private memories.
-              { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
+              // 034: the user's own owner-owned personal/private memories. When
+              // orgId-scoped, orgIds === [resolvedOrgId], so this spread
+              // confines them to that org (a no-op in the unscoped union, where
+              // the caller sees all their personal/private across orgs).
+              {
+                class: { in: ['personal', 'private'] as any },
+                userId: ctx.userId,
+                ...(orgId != null ? { organizationId: { in: orgIds } } : {}),
+              },
             ],
           },
           include: MEMORY_INCLUDE,

@@ -53,20 +53,38 @@ export interface AdapterCtx {
 
 const PERSONAL_CLASSES = ['personal', 'private'] as unknown as Prisma.Enumerable<never>;
 
+/**
+ * org-scope narrowing (issue #463): AND-ed onto the access scope so it can only
+ * ever *narrow*, never widen. Applied on the Memory + Node slices when
+ * `orgScopeId` is set; the org-rooted slices are confined via `orgIds` instead.
+ * A no-op (`{}`) merges harmlessly into an AND.
+ */
+function memoryOrgScope(p: SearchPrincipal): AnyWhere {
+  return p.orgScopeId ? { organizationId: p.orgScopeId } : {};
+}
+function nodeOrgScope(p: SearchPrincipal): AnyWhere {
+  return p.orgScopeId ? { memory: { organizationId: p.orgScopeId } } : {};
+}
+
 /** Memory scope as a Memory `where` (used by the Memory slice + encrypted count). */
 function memoryScopeWhere(p: SearchPrincipal): AnyWhere {
-  if (p.accessibleMemoryIds !== null) return { id: { in: p.accessibleMemoryIds } };
+  const org = memoryOrgScope(p);
+  if (p.accessibleMemoryIds !== null) return { AND: [{ id: { in: p.accessibleMemoryIds } }, org] };
   // Admin: everything except OTHER users' personal/private (034 carve-out).
   return {
-    NOT: { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } },
+    AND: [{ NOT: { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } } }, org],
   };
 }
 
 /** Memory scope projected onto a Node `where`. */
 function nodeScopeWhere(p: SearchPrincipal): AnyWhere {
-  if (p.accessibleMemoryIds !== null) return { memoryId: { in: p.accessibleMemoryIds } };
+  const org = nodeOrgScope(p);
+  if (p.accessibleMemoryIds !== null) return { AND: [{ memoryId: { in: p.accessibleMemoryIds } }, org] };
   return {
-    memory: { NOT: { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } } },
+    AND: [
+      { memory: { NOT: { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } } } },
+      org,
+    ],
   };
 }
 
