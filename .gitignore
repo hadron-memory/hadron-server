@@ -21,3 +21,4 @@ package-lock.json
 # Claude Code per-user / per-machine overrides
 # (the team-shared file at .claude/settings.json IS committed)
 .claude/settings.local.json
+.claude/worktrees/

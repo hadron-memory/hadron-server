@@ -29,6 +29,25 @@ export async function provisionPersonalWorkspace(
   userId: string,
   displayName: string,
 ): Promise<ProvisionResult> {
+  // Self-heal (PR-480 review): a REVOKED membership on the user's own
+  // personal org must REACTIVATE that workspace, not provision a new one.
+  // Personal-org URNs are deterministic (`<handle>-org`, or the
+  // `personal-<userId>` fallback), so a second create would either P2002 on
+  // the fallback URN (email flow) or read as a concurrent provision (GitHub
+  // flow) — neither actually heals the user. hasPersonalWorkspace counts
+  // LIVE memberships only, which routes the revoked case here.
+  const revoked = await db.orgMember.findFirst({
+    where: {
+      userId,
+      deletedAt: { not: null },
+      organization: { isVisible: { not: true }, createdBy: userId, deletedAt: null },
+    },
+    select: { organizationId: true },
+  });
+  if (revoked) {
+    return reactivatePersonalWorkspace(db, userId, revoked.organizationId);
+  }
+
   // Slug for the personal org. Prefer the user's handle (issue #360) so the
   // org reads as `<handle>-org`; fall back to the guaranteed-unique
   // `personal-<userId>` when the user has no URN-legal handle (email signups,
@@ -159,15 +178,83 @@ export async function provisionPersonalWorkspace(
 }
 
 /**
+ * Reactivate an existing personal workspace whose OWNER membership was
+ * soft-revoked (an invalid state — removeOrgMember's last-owner guard blocks
+ * creating it via the API, so this only repairs direct-DB damage). The org,
+ * agent, and app are reused; a fresh AppKey is minted and the PendingSetup
+ * row is upserted (userId is unique) so the login flow completes exactly like
+ * a fresh provision. A workspace shell missing its agent or app is a
+ * different corruption — fail loud for operator repair rather than half-
+ * provisioning around it.
+ */
+async function reactivatePersonalWorkspace(
+  db: PrismaClient,
+  userId: string,
+  organizationId: string,
+): Promise<ProvisionResult> {
+  await db.orgMember.update({
+    where: { organizationId_userId: { organizationId, userId } },
+    data: {
+      deletedAt: null,
+      deletedBy: null,
+      role: 'OWNER',
+      canInvite: true, // the fresh-provision grant for a personal OWNER
+      updatedBy: userId,
+    },
+  });
+  const agent = await db.agent.findFirst({
+    where: { organizationId, deletedAt: null },
+  });
+  const app = await db.app.findFirst({
+    where: { organizationId, deletedAt: null },
+  });
+  if (!agent || !app) {
+    throw new Error(
+      `Personal workspace org ${organizationId} is missing its ${!agent ? 'agent' : 'app'} — manual repair required`,
+    );
+  }
+  const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+  const keyHash = createHash('sha256').update(rawKey).digest('hex');
+  await db.appKey.create({
+    data: {
+      id: generateId(),
+      appId: app.id,
+      keyHash,
+      keyPreview: rawKey.slice(-4),
+      label: 'Workspace reactivation key',
+      createdBy: userId,
+    },
+  });
+  await db.pendingSetup.upsert({
+    where: { userId },
+    create: {
+      id: generateId(),
+      userId,
+      appId: app.id,
+      rawKeyEncrypted: rawKey, // TODO: encrypt at rest with app-level key
+      createdBy: userId,
+    },
+    update: { appId: app.id, rawKeyEncrypted: rawKey, consumed: false },
+  });
+  return { orgId: organizationId, agentId: agent.id, appId: app.id, rawKey };
+}
+
+/**
  * Check if a user already has a personal workspace provisioned.
  */
 export async function hasPersonalWorkspace(
   db: PrismaClient,
   userId: string,
 ): Promise<boolean> {
+  // deletedAt: null — a revoked personal-org membership (an invalid state;
+  // removeOrgMember's last-owner guard blocks creating it) must not count as
+  // "has a workspace": every read gate would deny it, so answering true here
+  // would strand the user with an inaccessible workspace. Answering false
+  // lets provisioning self-heal with a fresh personal org.
   const membership = await db.orgMember.findFirst({
     where: {
       userId,
+      deletedAt: null,
       organization: { isVisible: { not: true } },
     },
   });

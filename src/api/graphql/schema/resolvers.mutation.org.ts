@@ -301,7 +301,11 @@ export const orgMutations = {
         },
       });
 
-      // Add user to org if not already a member
+      // Add user to org if not already a LIVE member. A soft-revoked row
+      // (membership revocation is a soft delete — the audit tuple persists)
+      // is REACTIVATED with the invite's role: accepting a fresh invitation
+      // is the sanctioned rejoin path for a removed ex-member, and the
+      // composite (org, user) PK means a second row can't be created anyway.
       if (invite.organizationId) {
         const existing = await ctx.db.orgMember.findUnique({
           where: {
@@ -321,7 +325,27 @@ export const orgMutations = {
               createdBy: ctx.userId ?? null,
             },
           });
+        } else if (existing.deletedAt) {
+          await ctx.db.orgMember.update({
+            where: {
+              organizationId_userId: {
+                organizationId: invite.organizationId,
+                userId: ctx.userId!,
+              },
+            },
+            data: {
+              deletedAt: null,
+              deletedBy: null,
+              role: invite.memberRole as Role,
+              // Revocation clears ALL membership capabilities — a fresh row
+              // would default canInvite=false, so reactivation must not
+              // resurrect a stale invite grant (PR-480 review).
+              canInvite: false,
+              updatedBy: ctx.userId ?? null,
+            },
+          });
         }
+        // A live membership is a no-op (the activation is still recorded).
       }
 
       return true;
@@ -338,6 +362,31 @@ export const orgMutations = {
       // (userId is keyed by raw ID — User has no urn column.)
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+      // Membership revocation is a soft delete, so the composite (org, user)
+      // PK may hold a tombstone. Reactivate it with the new role instead of
+      // letting the create fail with a raw P2002; a LIVE duplicate gets a
+      // clean typed error instead of P2002 too.
+      const existing = await ctx.db.orgMember.findUnique({
+        where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
+      });
+      if (existing && !existing.deletedAt) {
+        throw new Error('User is already a member of this organization');
+      }
+      if (existing) {
+        return ctx.db.orgMember.update({
+          where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
+          data: {
+            deletedAt: null,
+            deletedBy: null,
+            role: role as Role,
+            // Revocation clears ALL membership capabilities — reactivation
+            // must not resurrect a stale canInvite grant (PR-480 review).
+            canInvite: false,
+            updatedBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+          include: { user: true },
+        });
+      }
       return ctx.db.orgMember.create({
         data: { id: generateId(), organizationId: resolvedOrgId, userId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: { user: true },
@@ -352,6 +401,26 @@ export const orgMutations = {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+      // Refuse to edit a soft-revoked row — silently retitling a tombstone
+      // (which no UI surfaces) would be API-misuse-only behavior; rejoin goes
+      // through addOrgMember / invitation reactivation.
+      const existing = await ctx.db.orgMember.findFirst({
+        where: { organizationId: resolvedOrgId, userId, deletedAt: null },
+      });
+      if (!existing) {
+        throw new Error('User is not a member of this organization');
+      }
+      // Demoting the last LIVE owner would leave the org unmanageable — same
+      // invariant removeOrgMember enforces (PR-480 Gemini review; the gap
+      // predates the lifecycle change but this is its home).
+      if (existing.role === 'OWNER' && role !== 'OWNER') {
+        const owners = await ctx.db.orgMember.findMany({
+          where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
+        });
+        if (owners.length <= 1) {
+          throw new Error('Cannot demote the last owner of an organization');
+        }
+      }
       return ctx.db.orgMember.update({
         where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
         data: { role: role as Role },
@@ -367,18 +436,32 @@ export const orgMutations = {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      // Cannot remove the last OWNER
-      const owners = await ctx.db.orgMember.findMany({
-        where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
-      });
       const member = await ctx.db.orgMember.findUniqueOrThrow({
         where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
       });
-      if (member.role === 'OWNER' && owners.length <= 1) {
-        throw new Error('Cannot remove the last owner of an organization');
+      // Already revoked → idempotent success. Checked BEFORE the last-owner
+      // guard: a revoked ex-OWNER isn't in the live owners count, so the
+      // guard would otherwise mis-fire "last owner" on a no-op re-removal.
+      if (member.deletedAt) return true;
+      // Cannot remove the last LIVE owner (revoked owners don't count — and
+      // this implicitly protects personal workspaces, whose user is the sole
+      // OWNER of their personal org).
+      if (member.role === 'OWNER') {
+        const owners = await ctx.db.orgMember.findMany({
+          where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
+        });
+        if (owners.length <= 1) {
+          throw new Error('Cannot remove the last owner of an organization');
+        }
       }
-      await ctx.db.orgMember.delete({
+      // Revocation is a SOFT delete (OrgMember carries the audit tuple; the
+      // platform hard-deletes only pure join rows — cor:dmo:010:04). Every
+      // read/auth gate filters deletedAt, and rejoin reactivates the row via
+      // addOrgMember / invitation acceptance, so history is preserved without
+      // ever authorizing a revoked member.
+      await ctx.db.orgMember.update({
         where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
       });
       return true;
     },
