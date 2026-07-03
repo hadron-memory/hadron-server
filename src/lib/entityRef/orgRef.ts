@@ -17,20 +17,20 @@ import { OrganizationNotFoundError } from './errors.js';
 
 export async function resolveOrgRef(
   db: Pick<PrismaClient, 'organization'>,
-  urn: string,
+  ref: string,
 ): Promise<{ id: string }> {
-  if (!isId(urn)) {
+  if (!isId(ref)) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
-    assertFullyQualifiedUrn(urn, 'org');
+    assertFullyQualifiedUrn(ref, 'org');
   }
-  const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
+  const normalized = normalizeUrnForLookup(parseUrnInput(ref).value);
   const where = isId(normalized) ? { id: normalized } : { urn: normalized };
   const org = await db.organization.findUnique({
     where,
     select: { id: true, deletedAt: true },
   });
   if (!org || org.deletedAt) {
-    throw new OrganizationNotFoundError(urn);
+    throw new OrganizationNotFoundError(ref);
   }
   return { id: org.id };
 }

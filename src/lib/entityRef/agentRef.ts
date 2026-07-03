@@ -13,20 +13,20 @@ import { AgentNotFoundError } from './errors.js';
 
 export async function resolveAgentRef(
   db: Pick<PrismaClient, 'agent'>,
-  urn: string,
+  ref: string,
 ): Promise<{ id: string }> {
-  if (!isId(urn)) {
+  if (!isId(ref)) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
-    assertFullyQualifiedUrn(urn, 'agent');
+    assertFullyQualifiedUrn(ref, 'agent');
   }
-  const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
+  const normalized = normalizeUrnForLookup(parseUrnInput(ref).value);
   const where = isId(normalized) ? { id: normalized } : { urn: normalized };
   const agent = await db.agent.findUnique({
     where,
     select: { id: true, deletedAt: true },
   });
   if (!agent || agent.deletedAt) {
-    throw new AgentNotFoundError(urn);
+    throw new AgentNotFoundError(ref);
   }
   return { id: agent.id };
 }

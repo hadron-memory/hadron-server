@@ -13,13 +13,13 @@ import { AppNotFoundError } from './errors.js';
 
 export async function resolveAppRef(
   db: Pick<PrismaClient, 'app'>,
-  urn: string,
+  ref: string,
 ): Promise<{ id: string }> {
-  if (!isId(urn)) {
+  if (!isId(ref)) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
-    assertFullyQualifiedUrn(urn, 'app');
+    assertFullyQualifiedUrn(ref, 'app');
   }
-  const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
+  const normalized = normalizeUrnForLookup(parseUrnInput(ref).value);
   // Spec 021 FR-027 removed `App.urn`'s @unique constraint in favor of
   // a partial unique index restricted to `uninstalled_at IS NULL`. So
   // `findUnique({ where: { urn } })` is no longer well-typed — use
@@ -35,7 +35,7 @@ export async function resolveAppRef(
         select: { id: true, deletedAt: true },
       });
   if (!app || app.deletedAt) {
-    throw new AppNotFoundError(urn);
+    throw new AppNotFoundError(ref);
   }
   return { id: app.id };
 }

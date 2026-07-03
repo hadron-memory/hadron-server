@@ -4,10 +4,11 @@
  *
  * Spec: 007-entity-id-or-urn / contracts/resolution-helpers.md.
  *
- * Three input forms all resolve to the same row:
- *   - "abc123…"                            (raw 32-hex-char ID)
- *   - "org-foo:family-recipes"             (bare URN, DB form)
- *   - "urn:memory:org-foo:family-recipes"  (prefixed URN, external form)
+ * Four input forms all resolve to the same row:
+ *   - "abc123…"                             (raw 32-hex-char ID)
+ *   - "org-foo:family-recipes"              (bare URN, DB form)
+ *   - "hrn:memory:org-foo::family-recipes"  (canonical fully qualified URN, external form)
+ *   - "urn:memory:org-foo::family-recipes"  (legacy fully qualified URN, external form)
  *
  * Soft-deleted memories return MemoryNotFoundError by default, matching
  * the existing convention. Pass `{ includeDeleted: true }` when the
@@ -22,26 +23,26 @@ import { MemoryNotFoundError } from '../asset/gate.js';
 
 export async function resolveMemoryRef(
   db: Pick<PrismaClient, 'memory'>,
-  urn: string,
+  ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  if (!isId(urn)) {
+  if (!isId(ref)) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
-    assertFullyQualifiedUrn(urn, 'memory');
+    assertFullyQualifiedUrn(ref, 'memory');
   }
-  // Strip a `urn:<type>:` prefix if present. parseUrnInput returns
+  // Strip a `hrn/urn:<type>:` prefix if present. parseUrnInput returns
   // the bare value; for already-bare input it returns the input
   // unchanged. Then `normalizeUrnForLookup` collapses canonical `::`
   // hierarchy separators to legacy `:` so the DB lookup matches
   // pre-spec-021-migrated rows.
-  const normalized = normalizeUrnForLookup(parseUrnInput(urn).value);
+  const normalized = normalizeUrnForLookup(parseUrnInput(ref).value);
   const where = isId(normalized) ? { id: normalized } : { urn: normalized };
   const memory = await db.memory.findUnique({
     where,
     select: { id: true, deletedAt: true },
   });
   if (!memory || (!options?.includeDeleted && memory.deletedAt)) {
-    throw new MemoryNotFoundError(urn);
+    throw new MemoryNotFoundError(ref);
   }
   return { id: memory.id };
 }
