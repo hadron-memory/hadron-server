@@ -155,7 +155,7 @@ describe('findNodes access control', () => {
 describe('Query.node access control', () => {
   it('returns node for ADMIN', async () => {
     const node = await resolvers.Query.node(
-      null, { loc: 'org-a.repo.nodeA' },
+      null, { ref: 'org-a.repo.nodeA' },
       ctx({ roles: ['ADMIN'] }),
     );
     expect(node).not.toBeNull();
@@ -164,7 +164,7 @@ describe('Query.node access control', () => {
 
   it('returns null for non-existent node', async () => {
     const node = await resolvers.Query.node(
-      null, { loc: 'does.not.exist' },
+      null, { ref: 'does.not.exist' },
       ctx({ roles: ['ADMIN'] }),
     );
     expect(node).toBeNull();
@@ -175,15 +175,15 @@ describe('Query.node access control', () => {
 // Query: subtree
 // ---------------------------------------------------------------------------
 
-describe('Query.subtree access control', () => {
-  it('filters subtree results by accessible memories', async () => {
-    const nodes = await resolvers.Query.subtree(
-      null, { prefix: 'org-' },
+describe('findNodes locPrefix access control (the former subtree query)', () => {
+  it('filters prefix results by accessible memories', async () => {
+    const result = await resolvers.Query.findNodes(
+      null, { filter: { locPrefix: 'org-' } },
       ctx({ clientId: `github:${userA.id}`, userId: userA.id, roles: ['READER'] }),
     );
     // User A only has access to org A, even though prefix matches both
-    expect(nodes).toHaveLength(1);
-    expect(nodes[0].loc).toBe('org-a.repo.nodeA');
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0].node.loc).toBe('org-a.repo.nodeA');
   });
 });
 

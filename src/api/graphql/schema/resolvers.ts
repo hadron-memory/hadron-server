@@ -16,6 +16,7 @@ export type { Context };
 import { typeResolvers } from './resolvers.types.js';
 
 import { nodeQueries } from './resolvers.query.node.js';
+import { edgeQueries } from './resolvers.query.edge.js';
 import { assetQueries } from './resolvers.query.asset.js';
 import { memoryQueries } from './resolvers.query.memory.js';
 import { orgQueries } from './resolvers.query.org.js';
@@ -37,6 +38,7 @@ export const resolvers = {
   ...typeResolvers,
   Query: {
     ...nodeQueries,
+    ...edgeQueries,
     ...assetQueries,
     ...memoryQueries,
     ...orgQueries,

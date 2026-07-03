@@ -55,6 +55,19 @@ export class NodeNotFoundError extends Error {
 }
 
 /**
+ * Surfaced by `resolveEdgeRef` when the inbound reference (ID or
+ * fully-qualified `hrn:edge:<memory-urn>::<loc>` URN) does not name a
+ * live edge. Spec 037: edges are first-class, loc-addressed peers of
+ * nodes, so they get the same typed not-found the other kinds have.
+ */
+export class EdgeNotFoundError extends Error {
+  constructor(public ref: string) {
+    super(`EDGE_NOT_FOUND: ${ref}`);
+    this.name = 'EdgeNotFoundError';
+  }
+}
+
+/**
  * Surfaced by `upsertNode` when called with `createOnly: true` and a
  * **live** (not soft-deleted) node already exists at the target
  * `(loc, memoryId)`. The GraphQL resolver layer reads `name` and

@@ -47,26 +47,26 @@ beforeEach(async () => {
 
 describe('Query.organization (007-entity-id-or-urn)', () => {
   it('accepts an ID', async () => {
-    const result = await resolvers.Query.organization({}, { id: org.id }, adminCtx());
+    const result = await resolvers.Query.organization({}, { ref: org.id }, adminCtx());
     expect(result?.id).toBe(org.id);
   });
 
   it('accepts a URN', async () => {
-    const result = await resolvers.Query.organization({}, { id: org.urn }, adminCtx());
+    const result = await resolvers.Query.organization({}, { ref: org.urn }, adminCtx());
     expect(result?.id).toBe(org.id);
   });
 
   it('accepts a prefixed URN (urn:org:...)', async () => {
     const result = await resolvers.Query.organization(
       {},
-      { id: `urn:org:${org.urn}` },
+      { ref: `urn:org:${org.urn}` },
       adminCtx(),
     );
     expect(result?.id).toBe(org.id);
   });
 });
 
-describe('Query.orgSystemMemories (007-entity-id-or-urn)', () => {
+describe('memories(orgId, memoryClasses: [system]) — the former orgSystemMemories (007-entity-id-or-urn)', () => {
   beforeEach(async () => {
     await db.memory.create({
       data: {
@@ -80,12 +80,12 @@ describe('Query.orgSystemMemories (007-entity-id-or-urn)', () => {
   });
 
   it('accepts an ID', async () => {
-    const mems = await resolvers.Query.orgSystemMemories({}, { orgId: org.id }, adminCtx());
+    const mems = (await resolvers.Query.memories({}, { orgId: org.id, filter: { memoryClasses: ['system'] } }, adminCtx())).items;
     expect(mems).toHaveLength(1);
   });
 
   it('accepts a URN', async () => {
-    const mems = await resolvers.Query.orgSystemMemories({}, { orgId: org.urn }, adminCtx());
+    const mems = (await resolvers.Query.memories({}, { orgId: org.urn, filter: { memoryClasses: ['system'] } }, adminCtx())).items;
     expect(mems).toHaveLength(1);
   });
 });
@@ -103,12 +103,12 @@ describe('Query.apps (007-entity-id-or-urn)', () => {
   });
 
   it('accepts an ID', async () => {
-    const apps = await resolvers.Query.apps({}, { orgId: org.id }, adminCtx());
+    const apps = (await resolvers.Query.apps({}, { orgId: org.id }, adminCtx())).items;
     expect(apps).toHaveLength(1);
   });
 
   it('accepts a URN', async () => {
-    const apps = await resolvers.Query.apps({}, { orgId: org.urn }, adminCtx());
+    const apps = (await resolvers.Query.apps({}, { orgId: org.urn }, adminCtx())).items;
     expect(apps).toHaveLength(1);
   });
 });

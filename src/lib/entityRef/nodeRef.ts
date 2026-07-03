@@ -127,34 +127,35 @@ export async function resolveNodeRef(
   // segments, the memory lookup missed, and the resolver fell
   // through to short-loc resolution against `contextMemoryId` (where
   // it failed again).
-  const parts = normalized.includes('::')
-    ? normalized.split('::')
-    : normalized.split(':');
+  const isCanonical = normalized.includes('::');
+  const parts = isCanonical ? normalized.split('::') : normalized.split(':');
   if (parts.length >= 3) {
-    // First two segments are <org>:<memorySlug>. Memory rows are
-    // stored bare (`<org>:<memorySlug>`) but may live in either
-    // legacy (`:`) or canonical (`::`) form during the spec-021
-    // migration window — the OR matches whichever form is on disk.
+    // Canonical (`::`) input: the LOC is the FINAL `::`-leaf (locs never
+    // contain `::`) and the memory URN is everything before it — which may
+    // itself span more than two hierarchy levels (e.g. a per-user
+    // `<org>::<agent>::app-user:<id>` memory), so a fixed two-segment prefix
+    // would mis-split those (PR-475 review, Codex P2 — fixed here for parity
+    // with resolveEdgeRef). Legacy single-`:` input is ambiguous and keeps
+    // the historical two-segment memory heuristic. Memory rows may be stored
+    // in either legacy (`:`) or canonical (`::`) form during the spec-021
+    // migration window — the candidates match whichever form is on disk.
+    const memLoc = isCanonical
+      ? parts[parts.length - 1]
+      : parts.slice(2).join(':');
+    const memoryUrnCandidates = isCanonical
+      ? [parts.slice(0, -1).join('::'), parts.slice(0, -1).join(':')]
+      : [`${parts[0]}:${parts[1]}`, `${parts[0]}::${parts[1]}`];
     const memory = await db.memory.findFirst({
-      where: {
-        OR: [
-          { urn: `${parts[0]}:${parts[1]}` },
-          { urn: `${parts[0]}::${parts[1]}` },
-        ],
-      },
+      where: { urn: { in: memoryUrnCandidates } },
       select: { id: true, deletedAt: true },
     });
     if (memory) {
-      // The 2-segment prefix names a memory row. Treat the body as
+      // The prefix names a memory row. Treat the body as
       // `<memory-urn>:<loc>` and resolve strictly — soft-deleted
       // memories produce a clean miss rather than a fall-through that
       // could resolve to the wrong node in `contextMemoryId`.
-      //
-      // The loc joins the remaining segments with single `:` because
-      // locs are stored that way (atoms inside a loc are colon-
-      // separated; `::` is only the memory/loc boundary separator).
       if (!options?.includeDeleted && memory.deletedAt) throw new NodeNotFoundError(ref);
-      const loc = parts.slice(2).join(':');
+      const loc = memLoc;
       const node = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
         select: { id: true, deletedAt: true },

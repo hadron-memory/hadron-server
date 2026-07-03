@@ -33,14 +33,14 @@ describe('008-agent-installation — GraphQL field-removal regression (T041)', (
 
   it('App.agentSubscriptions does not exist on the App type', () => {
     const errors = validationErrorMessages(`
-      query { app(id: "x") { id agentSubscriptions { agentId } } }
+      query { app(ref: "x") { id agentSubscriptions { agentId } } }
     `);
     expect(errors.some((m) => m.includes('Cannot query field "agentSubscriptions"'))).toBe(true);
   });
 
   it('AppAgentSub type does not exist', () => {
     const errors = validationErrorMessages(`
-      query { app(id: "x") { id ... on AppAgentSub { agentId } } }
+      query { app(ref: "x") { id ... on AppAgentSub { agentId } } }
     `);
     expect(
       errors.some(
@@ -68,7 +68,7 @@ describe('008-agent-installation — GraphQL field-removal regression (T041)', (
 
   it('App.agent (singular) is the canonical replacement', () => {
     const errors = validationErrorMessages(`
-      query { app(id: "x") { id agent { id name } } }
+      query { app(ref: "x") { id agent { id name } } }
     `);
     expect(errors).toEqual([]);
   });
@@ -79,7 +79,7 @@ describe('008-agent-installation — GraphQL field-removal regression (T041)', (
     // the full multi-Agent install set (per spec 023 US1 typedef). No
     // longer @deprecated; presence + parsability is what we assert here.
     const errors = validationErrorMessages(`
-      query { app(id: "x") { id agents { id } } }
+      query { app(ref: "x") { id agents { id } } }
     `);
     expect(errors).toEqual([]);
     const appType = schema.getType('App');
@@ -96,7 +96,7 @@ describe('008-agent-installation — GraphQL field-removal regression (T041)', (
 
   it('App.members and App.memberCount are part of the new surface', () => {
     const errors = validationErrorMessages(`
-      query { app(id: "x") { id members { userId role } memberCount } }
+      query { app(ref: "x") { id members { userId role } memberCount } }
     `);
     expect(errors).toEqual([]);
   });
@@ -105,7 +105,7 @@ describe('008-agent-installation — GraphQL field-removal regression (T041)', (
     // No top-level agent(id) query exists; reach Agent through Organization.
     const errors = validationErrorMessages(`
       query {
-        organization(id: "o") {
+        organization(ref: "o") {
           id
           agents {
             id
@@ -120,7 +120,7 @@ describe('008-agent-installation — GraphQL field-removal regression (T041)', (
 
   it('Memory.app and Memory.appId are part of the new surface', () => {
     const errors = validationErrorMessages(`
-      query { memory(id: "m") { id appId app { id urn } } }
+      query { memory(ref: "m") { id appId app { id urn } } }
     `);
     expect(errors).toEqual([]);
   });

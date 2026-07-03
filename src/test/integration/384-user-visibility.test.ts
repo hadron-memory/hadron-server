@@ -24,8 +24,13 @@ const User = resolvers.User as {
 const OrgMember = resolvers.OrgMember as {
   role: (m: unknown, a: unknown, c: Context) => Promise<string | null>;
 };
-const searchUsers = (resolvers.Query as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>)
-  .searchUsers;
+// #473: searchUsers merged into the uniform users(filter.query) query. This
+// shim preserves the old call shape so the #384 oracle assertions read the
+// same; it unwraps the { items, total } page envelope.
+const usersQuery = (resolvers.Query as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>)
+  .users;
+const searchUsers = async (p: unknown, args: { query: string }, c: Context) =>
+  ((await usersQuery(p, { filter: { query: args.query } }, c)) as { items: unknown[] }).items;
 
 function ctx(userId?: string, roles: Context['roles'] = []): Context {
   return { db, userId, roles };
@@ -207,9 +212,13 @@ describe('#384 field-level user visibility', () => {
       expect(rows.find((r) => r.id === zachId)).toBeTruthy();
     });
 
-    it('a blank / whitespace-only query returns nothing (no match-all)', async () => {
+    it('a blank / whitespace-only query from a NON-admin returns nothing (no match-all)', async () => {
       expect((await searchUsers(null, { query: '   ' }, ctx(fx.alice.id))) as unknown[]).toHaveLength(0);
-      expect((await searchUsers(null, { query: '' }, ctx(generateId(), ['ADMIN']))) as unknown[]).toHaveLength(0);
+    });
+
+    it('a blank query from a platform admin is the full user list (#473 — the old admin users query)', async () => {
+      const rows = (await searchUsers(null, { query: '' }, ctx(generateId(), ['ADMIN']))) as Array<{ id: string }>;
+      expect(rows.find((r) => r.id === zachId)).toBeTruthy();
     });
   });
 });

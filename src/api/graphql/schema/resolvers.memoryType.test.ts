@@ -527,7 +527,7 @@ describe('memory list filtering', () => {
     const { sys, knowledge } = await setupTwoMemories();
     const org = await resolvers.Query.organization(
       {},
-      { id: orgA.id },
+      { ref: orgA.id },
       adminCtx(),
     );
     const urns = org?.memories.map((m: { id: string }) => m.id) ?? [];
@@ -535,35 +535,35 @@ describe('memory list filtering', () => {
     expect(urns).not.toContain(sys.id);
   });
 
-  it('myMemories hides AGENT_SYSTEM by default', async () => {
+  it('memories hides AGENT_SYSTEM by default', async () => {
     const { sys, knowledge } = await setupTwoMemories();
-    const list = await resolvers.Query.myMemories({}, {}, adminCtx());
+    const list = (await resolvers.Query.memories({}, {}, adminCtx())).items;
     const ids = list.map((m: { id: string }) => m.id);
     expect(ids).toContain(knowledge.id);
     expect(ids).not.toContain(sys.id);
   });
 
-  it('myMemories(memoryClasses:) including system surfaces AGENT_SYSTEM', async () => {
+  it('memories(filter.memoryClasses:) including system surfaces AGENT_SYSTEM', async () => {
     const { sys, knowledge } = await setupTwoMemories();
-    const list = await resolvers.Query.myMemories(
+    const list = (await resolvers.Query.memories(
       {},
-      { memoryClasses: ['system', 'knowledge'] },
+      { filter: { memoryClasses: ['system', 'knowledge'] } },
       adminCtx(),
-    );
+    )).items;
     const ids = list.map((m: { id: string }) => m.id);
     expect(ids).toContain(knowledge.id);
     expect(ids).toContain(sys.id);
   });
 
-  it('myMemories(memoryClasses:) restricts to exactly the listed classes', async () => {
+  it('memories(filter.memoryClasses:) restricts to exactly the listed classes', async () => {
     const { sys, knowledge } = await setupTwoMemories();
     // Only system → the knowledge memory is excluded.
-    const onlySystem = await resolvers.Query.myMemories({}, { memoryClasses: ['system'] }, adminCtx());
+    const onlySystem = (await resolvers.Query.memories({}, { filter: { memoryClasses: ['system'] } }, adminCtx())).items;
     const sysIds = onlySystem.map((m: { id: string }) => m.id);
     expect(sysIds).toContain(sys.id);
     expect(sysIds).not.toContain(knowledge.id);
     // Only knowledge → the system memory is excluded (same as the default).
-    const onlyKnowledge = await resolvers.Query.myMemories({}, { memoryClasses: ['knowledge'] }, adminCtx());
+    const onlyKnowledge = (await resolvers.Query.memories({}, { filter: { memoryClasses: ['knowledge'] } }, adminCtx())).items;
     const kIds = onlyKnowledge.map((m: { id: string }) => m.id);
     expect(kIds).toContain(knowledge.id);
     expect(kIds).not.toContain(sys.id);
@@ -807,7 +807,7 @@ describe('deleteMemory (spec 013)', () => {
       adminCtx(),
     );
     await resolvers.Mutation.deleteMemory({}, { id: doomed.id }, adminCtx());
-    const list = await resolvers.Query.myMemories({}, {}, adminCtx());
+    const list = (await resolvers.Query.memories({}, {}, adminCtx())).items;
     const ids = (list as { id: string }[]).map((m) => m.id);
     expect(ids).toContain(live.id);
     expect(ids).not.toContain(doomed.id);

@@ -121,8 +121,12 @@ export async function requireOrgRole(
 ): Promise<void> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
   if (!ctx.userId) throw new Error('Forbidden');
-  const member = await ctx.db.orgMember.findUnique({
-    where: { organizationId_userId: { organizationId: orgId, userId: ctx.userId } },
+  // findFirst (not findUnique on the composite PK) so a REVOKED (soft-deleted)
+  // membership no longer authorizes — matches getMemberOrgIds / resolveOrgScope
+  // and the memory(ref) resolver's own membership check (PR-475 review, Codex
+  // P1: a removed member who still knew an agent/app ref could read it).
+  const member = await ctx.db.orgMember.findFirst({
+    where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
   });
   if (!member || (ROLE_ORDER[member.role] ?? -1) < ROLE_ORDER[required]) {
     throw new Error('Forbidden');
@@ -287,6 +291,62 @@ export function defaultAiConfigOf(
     defaultAiConfigMemo.set(src, p);
   }
   return p;
+}
+
+// ── Uniform find-many surface (#473) — Spec: cor:api:120 ───────────────
+
+// Standard page bounds for the uniform `<entity>s(filter, orgId, limit,
+// offset)` list queries — matches the globalSearch idiom (default 50, cap
+// 200). `limit: 0` is preserved (an empty page with just `total` — the cheap
+// count, same contract as memoryNodes). Spec: cor:api:120:02.
+export const LIST_PAGE_DEFAULT = 50;
+export const LIST_PAGE_MAX = 200;
+
+export function clampListTake(limit?: number | null): number {
+  if (limit == null) return LIST_PAGE_DEFAULT;
+  return Math.min(LIST_PAGE_MAX, Math.max(0, limit));
+}
+
+/**
+ * cor:api:100:01 — resolve the caller's organization scope for a uniform
+ * find-many query.
+ *
+ * Returns `{ memberOrgIds, scopedOrgId }` where `memberOrgIds` is the org set
+ * the query should range over (the caller's memberships, or `[orgId]` when a
+ * valid scope was requested), or `null` when the `orgId` gate fails —
+ * unresolvable ref OR non-member — in which case the caller must return an
+ * EMPTY page (no org-existence disclosure, no platform-admin bypass).
+ *
+ * App-key callers' "member org" is their own App's org (their access is
+ * already confined to it).
+ */
+export async function resolveOrgScope(
+  ctx: Context,
+  orgId?: string | null,
+): Promise<{ memberOrgIds: string[]; scopedOrgId: string | null } | null> {
+  let memberOrgIds: string[] = [];
+  if (ctx.userId) {
+    const memberships = await ctx.db.orgMember.findMany({
+      where: { userId: ctx.userId, deletedAt: null },
+      select: { organizationId: true },
+    });
+    memberOrgIds = memberships.map((m) => m.organizationId);
+  } else if (ctx.appId) {
+    const app = await ctx.db.app.findUnique({
+      where: { id: ctx.appId },
+      select: { organizationId: true },
+    });
+    memberOrgIds = app ? [app.organizationId] : [];
+  }
+  if (orgId == null) return { memberOrgIds, scopedOrgId: null };
+  let resolvedOrgId: string;
+  try {
+    ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+  } catch {
+    return null;
+  }
+  if (!memberOrgIds.includes(resolvedOrgId)) return null;
+  return { memberOrgIds: [resolvedOrgId], scopedOrgId: resolvedOrgId };
 }
 
 // ── Memory access control ──────────────────────────────────────────────
@@ -491,9 +551,10 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   // Non-personal/private: global ADMIN/OWNER bypass.
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
 
-  // Direct org member with CONTRIBUTOR+?
-  const member = await ctx.db.orgMember.findUnique({
-    where: { organizationId_userId: { organizationId: memory.organizationId, userId: ctx.userId } },
+  // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
+  // membership no longer grants write access (same rule as requireOrgRole).
+  const member = await ctx.db.orgMember.findFirst({
+    where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
   });
   if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
 
@@ -1135,8 +1196,10 @@ export async function isOrgAdminFor(
   if (user && (user.roles.includes('ADMIN') || user.roles.includes('OWNER'))) {
     return true;
   }
-  const member = await db.orgMember.findUnique({
-    where: { organizationId_userId: { organizationId, userId } },
+  // Same soft-revocation rule as requireOrgRole: a deleted membership row
+  // must not keep granting org-admin authority.
+  const member = await db.orgMember.findFirst({
+    where: { organizationId, userId, deletedAt: null },
   });
   return !!member && (member.role === 'ADMIN' || member.role === 'OWNER');
 }

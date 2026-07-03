@@ -476,11 +476,13 @@ describe('AiServiceConfig CRUD (US2)', () => {
     const storedRaw = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: created.id } });
     expect(JSON.stringify(created)).not.toContain(storedRaw.apiKeyEncrypted);
 
-    const listed = await resolvers.Query.aiServiceConfigs(
+    const listedPage = await resolvers.Query.aiServiceConfigs(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id },
+      { filter: { ownerType: 'AGENT', ownerId: agent.id } },
       ctxFor(admin.id),
     );
+    const listed = listedPage!.items;
+    expect(listedPage!.total).toBe(1);
     expect(listed).toHaveLength(1);
     expect(JSON.stringify(listed)).not.toContain('sk-ant-secret-1234');
     expect(JSON.stringify(listed)).not.toContain(storedRaw.apiKeyEncrypted);
@@ -539,7 +541,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Query.aiServiceConfigs(
         {},
-        { ownerType: 'ORGANIZATION', ownerId: org.id },
+        { filter: { ownerType: 'ORGANIZATION', ownerId: org.id } },
         ctxFor(outsider.id),
       ),
     ).rejects.toThrow(/Forbidden/);

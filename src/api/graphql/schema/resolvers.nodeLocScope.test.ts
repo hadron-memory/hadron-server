@@ -64,10 +64,10 @@ beforeEach(async () => {
   await mkNode('tasks:only-in-alpha', alphaId, true);
 });
 
-describe('Query.node(loc:) memory scoping (#335)', () => {
+describe('Query.node(ref: <loc>) memory scoping (#335)', () => {
   it('throws AMBIGUOUS_NODE_LOC when an unscoped loc collides across memories', async () => {
     await expect(
-      resolvers.Query.node({}, { loc: 'tasks:post-asana-comment' }, adminCtx()),
+      resolvers.Query.node({}, { ref: 'tasks:post-asana-comment' }, adminCtx()),
     ).rejects.toMatchObject({
       extensions: { code: 'AMBIGUOUS_NODE_LOC', loc: 'tasks:post-asana-comment' },
     });
@@ -75,7 +75,7 @@ describe('Query.node(loc:) memory scoping (#335)', () => {
 
   it('lists the candidate memoryIds in the ambiguity error', async () => {
     try {
-      await resolvers.Query.node({}, { loc: 'tasks:post-asana-comment' }, adminCtx());
+      await resolvers.Query.node({}, { ref: 'tasks:post-asana-comment' }, adminCtx());
       throw new Error('expected AMBIGUOUS_NODE_LOC');
     } catch (e: any) {
       const ids: string[] = e.extensions?.memoryIds ?? [];
@@ -84,30 +84,30 @@ describe('Query.node(loc:) memory scoping (#335)', () => {
   });
 
   it('resolves the correct node when scoped by memory ID', async () => {
-    const node = await resolvers.Query.node({}, { loc: 'tasks:post-asana-comment', memory: memAlpha.id }, adminCtx());
+    const node = await resolvers.Query.node({}, { ref: 'tasks:post-asana-comment', memory: memAlpha.id }, adminCtx());
     expect(node?.memoryId).toBe(memAlpha.id);
     expect(node?.isRunnable).toBe(true);
   });
 
   it('resolves the correct node when scoped by memory URN', async () => {
-    const node = await resolvers.Query.node({}, { loc: 'tasks:post-asana-comment', memory: memAlpha.urn }, adminCtx());
+    const node = await resolvers.Query.node({}, { ref: 'tasks:post-asana-comment', memory: memAlpha.urn }, adminCtx());
     expect(node?.memoryId).toBe(memAlpha.id);
     expect(node?.isRunnable).toBe(true);
   });
 
   it('returns the beta node (isRunnable null) when scoped to beta — proving scope selects the memory', async () => {
-    const node = await resolvers.Query.node({}, { loc: 'tasks:post-asana-comment', memory: memBeta.id }, adminCtx());
+    const node = await resolvers.Query.node({}, { ref: 'tasks:post-asana-comment', memory: memBeta.id }, adminCtx());
     expect(node?.memoryId).toBe(memBeta.id);
     expect(node?.isRunnable).toBeNull();
   });
 
   it('still resolves a unique loc with no scope (backward compatible)', async () => {
-    const node = await resolvers.Query.node({}, { loc: 'tasks:only-in-alpha' }, adminCtx());
+    const node = await resolvers.Query.node({}, { ref: 'tasks:only-in-alpha' }, adminCtx());
     expect(node?.memoryId).toBe(memAlpha.id);
   });
 
   it('returns null for a scoped lookup whose loc does not exist in that memory', async () => {
-    const node = await resolvers.Query.node({}, { loc: 'tasks:only-in-alpha', memory: memBeta.id }, adminCtx());
+    const node = await resolvers.Query.node({}, { ref: 'tasks:only-in-alpha', memory: memBeta.id }, adminCtx());
     expect(node).toBeNull();
   });
 });

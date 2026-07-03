@@ -382,27 +382,28 @@ describe('myApp', () => {
   });
 });
 
-describe('myApps', () => {
+describe('apps (the uniform member list, #473)', () => {
   it('returns Apps in the orgs the user is a member of', async () => {
     await createDbAppWithKey(db, 'one', orgId);
     await createDbAppWithKey(db, 'two', orgId);
-    const apps = await resolvers.Query.myApps({}, {}, ctx({ userId: user.id }));
-    expect(apps.length).toBe(2);
+    const apps = await resolvers.Query.apps({}, {}, ctx({ userId: user.id }));
+    expect(apps.items.length).toBe(2);
+    expect(apps.total).toBe(2);
   });
 
-  it('returns empty when the user has no org memberships', async () => {
+  it('returns an empty page when the user has no org memberships', async () => {
     const orphanUser = await db.user.create({
       data: { githubId: 8888, githubUsername: 'orphan', roles: ['READER'] },
     });
     await createDbAppWithKey(db, 'unrelated', orgId);
-    const apps = await resolvers.Query.myApps({}, {}, ctx({ userId: orphanUser.id }));
-    expect(apps).toEqual([]);
+    const apps = await resolvers.Query.apps({}, {}, ctx({ userId: orphanUser.id }));
+    expect(apps).toEqual({ items: [], total: 0 });
   });
 
-  it('returns empty when no userId is set (anonymous)', async () => {
+  it('returns an empty page when no userId is set (anonymous)', async () => {
     await createDbAppWithKey(db, 'anonymous-cant-see', orgId);
-    const apps = await resolvers.Query.myApps({}, {}, ctx());
-    expect(apps).toEqual([]);
+    const apps = await resolvers.Query.apps({}, {}, ctx());
+    expect(apps).toEqual({ items: [], total: 0 });
   });
 
   describe('orgId scope (#463)', () => {
@@ -416,22 +417,23 @@ describe('myApps', () => {
       await createDbAppWithKey(db, 'in-b', orgB.id);
 
       // Unscoped: both orgs' apps.
-      expect((await resolvers.Query.myApps({}, {}, ctx({ userId: user.id }))).length).toBe(2);
+      expect((await resolvers.Query.apps({}, {}, ctx({ userId: user.id }))).items.length).toBe(2);
       // Scoped to org A: only org A's app.
-      const scoped = await resolvers.Query.myApps({}, { orgId }, ctx({ userId: user.id }));
-      expect(scoped.length).toBe(1);
-      expect(scoped[0].organizationId).toBe(orgId);
+      const scoped = await resolvers.Query.apps({}, { orgId }, ctx({ userId: user.id }));
+      expect(scoped.items.length).toBe(1);
+      expect(scoped.total).toBe(1);
+      expect(scoped.items[0].organizationId).toBe(orgId);
     });
 
-    it('returns [] for a non-member org and for an invalid orgId (no disclosure)', async () => {
+    it('returns an empty page for a non-member org and for an invalid orgId (no disclosure)', async () => {
       await createDbAppWithKey(db, 'in-a2', orgId);
       const stranger = await db.organization.create({
         data: { id: generateId(), name: 'apps-stranger', urn: `apps-stranger-${generateId()}` },
       });
-      // Non-member org → [].
-      expect(await resolvers.Query.myApps({}, { orgId: stranger.id }, ctx({ userId: user.id }))).toEqual([]);
-      // Unresolvable orgId → [] (no disclosure).
-      expect(await resolvers.Query.myApps({}, { orgId: 'no-such-org' }, ctx({ userId: user.id }))).toEqual([]);
+      // Non-member org → empty page.
+      expect(await resolvers.Query.apps({}, { orgId: stranger.id }, ctx({ userId: user.id }))).toEqual({ items: [], total: 0 });
+      // Unresolvable orgId → empty page (no disclosure).
+      expect(await resolvers.Query.apps({}, { orgId: 'no-such-org' }, ctx({ userId: user.id }))).toEqual({ items: [], total: 0 });
     });
   });
 });
@@ -440,26 +442,26 @@ describe('myApps', () => {
 // myMemories — App-key orgId gate (#463)
 // ---------------------------------------------------------------------------
 
-describe('myMemories — App-key orgId', () => {
-  it('scopes to the App own org: match → its memories, any other org → []', async () => {
+describe('memories — App-key orgId', () => {
+  it('scopes to the App own org: match → its memories, any other org → empty page', async () => {
     const { app } = await createDbAppWithKey(db, 'mm-appkey', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId } });
     const appCtx = ctx({ appId: app.id });
 
     // No orgId → the App's memories (agent's memoryItem → the test memory).
-    const all = await resolvers.Query.myMemories({}, {}, appCtx);
-    expect(all.some((m: { id: string }) => m.id === memoryId)).toBe(true);
+    const all = await resolvers.Query.memories({}, {}, appCtx);
+    expect(all.items.some((m: { id: string }) => m.id === memoryId)).toBe(true);
 
     // orgId == the App's own org → same memories (a match-or-empty gate, NOT a
     // per-memory ownership filter — so subscribed-in memories would survive too).
-    const scoped = await resolvers.Query.myMemories({}, { orgId }, appCtx);
-    expect(scoped.some((m: { id: string }) => m.id === memoryId)).toBe(true);
+    const scoped = await resolvers.Query.memories({}, { orgId }, appCtx);
+    expect(scoped.items.some((m: { id: string }) => m.id === memoryId)).toBe(true);
 
-    // A different org → [] (the App has no other active-org context).
+    // A different org → empty page (the App has no other active-org context).
     const other = await db.organization.create({
       data: { id: generateId(), name: 'mm-other', urn: `mm-other-${generateId()}` },
     });
-    expect(await resolvers.Query.myMemories({}, { orgId: other.id }, appCtx)).toEqual([]);
+    expect(await resolvers.Query.memories({}, { orgId: other.id }, appCtx)).toEqual({ items: [], total: 0 });
   });
 });
 
@@ -591,7 +593,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
       where: { id: created.id },
       select: { urn: true },
     });
-    const byUrn = await resolvers.Query.app({}, { id: stored.urn }, adminCtx());
+    const byUrn = await resolvers.Query.app({}, { ref: stored.urn }, adminCtx());
     expect(byUrn?.id).toBe(created.id);
   });
 
@@ -605,7 +607,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
       where: { id: created.id },
       select: { urn: true },
     });
-    const byUrn = await resolvers.Query.app({}, { id: `urn:app:${stored.urn}` }, adminCtx());
+    const byUrn = await resolvers.Query.app({}, { ref: `urn:app:${stored.urn}` }, adminCtx());
     expect(byUrn?.id).toBe(created.id);
   });
 

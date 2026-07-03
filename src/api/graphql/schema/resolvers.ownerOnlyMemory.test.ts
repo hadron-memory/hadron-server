@@ -91,9 +91,9 @@ describe('private/personal access is owner-only', () => {
   it('the owner can read, list, and write their private memory', async () => {
     const mem = await createPrivate();
     // read via memory(id)
-    expect((await resolvers.Query.memory(null, { id: mem.id }, asOwner()))?.id).toBe(mem.id);
+    expect((await resolvers.Query.memory(null, { ref: mem.id }, asOwner()))?.id).toBe(mem.id);
     // appears in myMemories
-    const mine = await resolvers.Query.myMemories(null, {}, asOwner());
+    const mine = (await resolvers.Query.memories(null, {}, asOwner())).items;
     expect(mine.map((m: any) => m.id)).toContain(mem.id);
     // owner can write a node (READER role notwithstanding — it's their memory)
     const node = await resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.note', name: 'note' } } as any, asOwner());
@@ -105,8 +105,8 @@ describe('private/personal access is owner-only', () => {
 
   it('another org member cannot read, list, open, or write it', async () => {
     const mem = await createPrivate();
-    await expect(resolvers.Query.memory(null, { id: mem.id }, asOther())).rejects.toThrow('Forbidden');
-    const mine = await resolvers.Query.myMemories(null, {}, asOther());
+    await expect(resolvers.Query.memory(null, { ref: mem.id }, asOther())).rejects.toThrow('Forbidden');
+    const mine = (await resolvers.Query.memories(null, {}, asOther())).items;
     expect(mine.map((m: any) => m.id)).not.toContain(mem.id);
     const nodes = await listNodes({}, asOther());
     expect(nodes.some((n: any) => n.memoryId === mem.id)).toBe(false);
@@ -117,7 +117,7 @@ describe('private/personal access is owner-only', () => {
 
   it('a platform OWNER/ADMIN cannot read or write it (no role bypass)', async () => {
     const mem = await createPrivate();
-    await expect(resolvers.Query.memory(null, { id: mem.id }, asAdmin())).rejects.toThrow('Forbidden');
+    await expect(resolvers.Query.memory(null, { ref: mem.id }, asAdmin())).rejects.toThrow('Forbidden');
     await expect(
       resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.adminedit', name: 'x' } } as any, asAdmin()),
     ).rejects.toThrow('Forbidden');
@@ -154,13 +154,13 @@ describe('myMemories — active-org scope (#463)', () => {
     );
 
     // Unscoped: both personal memories present (cross-org union).
-    const all = (await resolvers.Query.myMemories(null, {}, asOwner())).map((m: any) => m.id);
+    const all = (await resolvers.Query.memories(null, {}, asOwner())).items.map((m: any) => m.id);
     expect(all).toEqual(expect.arrayContaining([personalA.id, personalB.id]));
 
     // Active org A: category (1) — the caller's OWN personal memories always
     // show, independent of the active org. So BOTH personalA and the org-B
     // personalB appear (they're user-owned, not org-owned).
-    const scoped = (await resolvers.Query.myMemories(null, { orgId: org.id }, asOwner())).map((m: any) => m.id);
+    const scoped = (await resolvers.Query.memories(null, { orgId: org.id }, asOwner())).items.map((m: any) => m.id);
     expect(scoped).toContain(personalA.id);
     expect(scoped).toContain(personalB.id);
 
@@ -168,7 +168,7 @@ describe('myMemories — active-org scope (#463)', () => {
     const strangerOrg = await db.organization.create({
       data: { id: generateId(), name: 'stranger', urn: `stranger-${generateId()}` },
     });
-    expect(await resolvers.Query.myMemories(null, { orgId: strangerOrg.id }, asOwner())).toEqual([]);
+    expect(await resolvers.Query.memories(null, { orgId: strangerOrg.id }, asOwner())).toEqual({ items: [], total: 0 });
   });
 
   it('active org shows the org own + subscribed memories, but not another member org own memory', async () => {
@@ -180,7 +180,7 @@ describe('myMemories — active-org scope (#463)', () => {
     await db.orgMember.create({ data: { organizationId: bKnowledge.org.id, userId: owner.id, role: 'READER' } });
 
     // Active org = A: A's own memory (2) is in; B's own memory is NOT.
-    const scoped = (await resolvers.Query.myMemories(null, { orgId: aKnowledge.org.id }, asOwner())).map((m: any) => m.id);
+    const scoped = (await resolvers.Query.memories(null, { orgId: aKnowledge.org.id }, asOwner())).items.map((m: any) => m.id);
     expect(scoped).toContain(aKnowledge.graph.id);
     expect(scoped).not.toContain(bKnowledge.graph.id);
   });

@@ -57,14 +57,14 @@ describe('#391 soft-deleted nodes excluded from read resolvers', () => {
     expect(ids).not.toContain(fx.deletedId);
   });
 
-  it('nodeById returns null for a soft-deleted node, the row for a live one', async () => {
-    expect(await Q.nodeById(null, { id: fx.deletedId }, adminCtx())).toBeNull();
-    expect(await Q.nodeById(null, { id: fx.liveId }, adminCtx())).not.toBeNull();
+  it('node(ref: <pk>) returns null for a soft-deleted node, the row for a live one', async () => {
+    expect(await Q.node(null, { ref: fx.deletedId }, adminCtx())).toBeNull();
+    expect(await Q.node(null, { ref: fx.liveId }, adminCtx())).not.toBeNull();
   });
 
-  it('node(loc:) returns null for a soft-deleted loc, the node for a live one', async () => {
-    expect(await Q.node(null, { loc: fx.deletedLoc, memory: fx.memoryId }, adminCtx())).toBeNull();
-    expect(await Q.node(null, { loc: fx.liveLoc, memory: fx.memoryId }, adminCtx())).not.toBeNull();
+  it('node(ref: <loc>) returns null for a soft-deleted loc, the node for a live one', async () => {
+    expect(await Q.node(null, { ref: fx.deletedLoc, memory: fx.memoryId }, adminCtx())).toBeNull();
+    expect(await Q.node(null, { ref: fx.liveLoc, memory: fx.memoryId }, adminCtx())).not.toBeNull();
   });
 
   it('nodeExport throws NOT_FOUND for a soft-deleted node', async () => {

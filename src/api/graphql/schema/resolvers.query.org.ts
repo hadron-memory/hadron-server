@@ -23,8 +23,9 @@ import { GraphQLError } from 'graphql';
 import { searchContains } from '../../../integrations/db/provider.js';
 import {
   type Context,
-  requireRole,
+  clampListTake,
   getAccessibleMemoryIds,
+  resolveOrgScope,
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
 
@@ -94,29 +95,90 @@ export const orgQueries = {
       return { ...result, user: subjectUser };
     },
 
-    users: async (_: unknown, __: unknown, ctx: Context) => {
-      requireRole(ctx, 'ADMIN');
-      return ctx.db.user.findMany({ where: { deletedAt: null }, orderBy: { createdAt: 'desc' } });
+    // #473 — the uniform single-user read. ref = PK or hrn:user:<handle>.
+    // Gate mirrors resolveUrn's user branch: self, platform ADMIN/OWNER, or a
+    // caller sharing ≥1 org with the target; everyone else gets null — denied
+    // and missing indistinguishable, preserving #384's anti-enumeration
+    // posture. PII fields stay gated by the User field resolvers.
+    user: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      let id: string;
+      try {
+        ({ id } = await resolveUserRef(ctx.db, ref));
+      } catch (e) {
+        // Genuine miss → null; malformed URN / unexpected errors propagate.
+        if (!(e instanceof UserNotFoundError)) throw e;
+        return null;
+      }
+      const isGlobalAdmin =
+        !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
+      if (!isGlobalAdmin && ctx.userId !== id) {
+        if (!ctx.userId) return null;
+        // Caller shares ≥1 org with the target — single query via the
+        // org-membership relation (mirrors resolveUrn's user branch).
+        const shared = await ctx.db.orgMember.findFirst({
+          where: {
+            userId: ctx.userId,
+            deletedAt: null,
+            organization: { members: { some: { userId: id, deletedAt: null } } },
+          },
+          select: { organizationId: true },
+        });
+        if (!shared) return null;
+      }
+      return ctx.db.user.findUnique({ where: { id } });
     },
 
-    searchUsers: async (_: unknown, { query }: { query: string }, ctx: Context) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
-      const q = query.trim();
-      // A blank query would make `contains: ''` match every row, re-opening the
-      // enumeration path #384 closes — return nothing instead.
-      if (q === '') return [];
+    // #473 — the uniform paginated user list; replaces the admin-only users
+    // list and searchUsers. Platform ADMIN/OWNER: every live user, query
+    // optional. Everyone else: query REQUIRED (blank/omitted → empty page),
+    // with the enumeration-safe matching #384 / cor:acl:070:02 established:
+    // public identifiers (handle, githubUsername) match by substring, email
+    // by EXACT equality, and a `name` match counts only for a viewer allowed
+    // to see that name (self/admin, or a co-member). The co-member
+    // restriction is pushed INTO the query — not a post-filter — so the page
+    // cap can't drop a legitimately visible co-member behind a wall of
+    // name-only stranger matches.
+    users: async (
+      _: unknown,
+      {
+        filter,
+        limit,
+        offset,
+      }: {
+        filter?: { query?: string | null } | null;
+        limit?: number | null;
+        offset?: number | null;
+      },
+      ctx: Context,
+    ) => {
+      const take = clampListTake(limit);
+      const skip = Math.max(0, offset ?? 0);
+      const page = async (where: Record<string, unknown>) => {
+        const [total, items] = await Promise.all([
+          ctx.db.user.count({ where }),
+          take === 0
+            ? Promise.resolve([])
+            : ctx.db.user.findMany({
+                where,
+                orderBy: [{ name: 'asc' }, { id: 'asc' }],
+                skip,
+                take,
+              }),
+        ]);
+        return { items, total };
+      };
 
-      // #384: name/email are PII gated to co-members (enforced on output by the
-      // User.name/email field resolvers). To stop searchUsers from also being a
-      // name/email enumeration oracle for non-co-members, MATCHING is scoped
-      // (Spec: cor:acl:070:02): public identifiers (handle, githubUsername)
-      // match by substring, email by EXACT equality, and a `name` match counts
-      // only for a viewer allowed to see that name (self/admin via platform
-      // role, or a co-member). The co-member restriction is pushed INTO the
-      // query — not a post-filter — so the `take` cap can't drop a legitimately
-      // visible co-member behind a wall of name-only stranger matches.
+      const q = filter?.query?.trim() ?? '';
       const isPlatformAdmin = !!ctx.roles?.some((r) => r === 'ADMIN' || r === 'OWNER');
-      const viewerOrgIds = isPlatformAdmin ? [] : await getMemberOrgIds(ctx.db, ctx.userId);
+      if (isPlatformAdmin && q === '') {
+        return page({ deletedAt: null });
+      }
+      if (!ctx.userId && !isPlatformAdmin) throw new Error('Unauthenticated');
+      // A blank query would make `contains: ''` match every row, re-opening
+      // the enumeration path #384 closes — return an empty page instead.
+      if (q === '') return { items: [], total: 0 };
+
+      const viewerOrgIds = isPlatformAdmin ? [] : await getMemberOrgIds(ctx.db, ctx.userId!);
       const nameMatch = isPlatformAdmin
         ? searchContains('name', q)
         : {
@@ -126,19 +188,14 @@ export const orgQueries = {
               { memberships: { some: { organizationId: { in: viewerOrgIds }, deletedAt: null } } },
             ],
           };
-
-      return ctx.db.user.findMany({
-        where: {
-          deletedAt: null,
-          OR: [
-            searchContains('handle', q),
-            searchContains('githubUsername', q),
-            { email: { equals: q, mode: 'insensitive' } },
-            nameMatch,
-          ],
-        },
-        take: 20,
-        orderBy: { name: 'asc' },
+      return page({
+        deletedAt: null,
+        OR: [
+          searchContains('handle', q),
+          searchContains('githubUsername', q),
+          { email: { equals: q, mode: 'insensitive' } },
+          nameMatch,
+        ],
       });
     },
 
@@ -209,23 +266,44 @@ export const orgQueries = {
       return ctx.db.user.findUnique({ where: { id: ctx.userId } });
     },
 
-    organizations: async (_: unknown, __: unknown, ctx: Context) => {
-      requireRole(ctx, 'ADMIN');
-      return ctx.db.organization.findMany({ where: { deletedAt: null }, orderBy: { name: 'asc' }, include: ORG_INCLUDE });
+    // #473 — the uniform paginated organization list; replaces organizations
+    // (admin, all) + myOrganizations (memberships). Members get their member
+    // orgs (App-key callers their own App's org); platform ADMIN/OWNER keep
+    // the established unscoped reach over every live org.
+    organizations: async (
+      _: unknown,
+      { limit, offset }: { limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const take = clampListTake(limit);
+      const skip = Math.max(0, offset ?? 0);
+      const isPlatformAdmin =
+        !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
+      let where: Record<string, unknown>;
+      if (isPlatformAdmin) {
+        where = { deletedAt: null };
+      } else {
+        const scope = await resolveOrgScope(ctx);
+        where = { deletedAt: null, id: { in: scope!.memberOrgIds } };
+      }
+      const [total, items] = await Promise.all([
+        ctx.db.organization.count({ where }),
+        take === 0
+          ? Promise.resolve([])
+          : ctx.db.organization.findMany({
+              where,
+              orderBy: [{ name: 'asc' }, { id: 'asc' }],
+              skip,
+              take,
+              include: ORG_INCLUDE,
+            }),
+      ]);
+      return { items, total };
     },
 
-    myOrganizations: async (_: unknown, __: unknown, ctx: Context) => {
-      if (!ctx.userId) return [];
-      const memberships = await ctx.db.orgMember.findMany({
-        where: { userId: ctx.userId, deletedAt: null },
-        include: { organization: { include: ORG_INCLUDE } },
-      });
-      return memberships.map((m: any) => m.organization);
-    },
-
-    organization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
+    organization: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveOrgRef(ctx.db, ref);
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
         if (!ctx.userId) throw new Error('Forbidden');
         const member = await ctx.db.orgMember.findFirst({
