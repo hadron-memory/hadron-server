@@ -161,8 +161,10 @@ export const typeDefs = `#graphql
   type GraphNode {
     id: ID!
     loc: String!
-    name: String
-    nodeType: String
+    "Non-null — mirrors Node.name (the DB column is NOT NULL)."
+    name: String!
+    "Non-null — mirrors Node.nodeType (NOT NULL, defaults to 'info')."
+    nodeType: String!
     tags: [String!]!
   }
 

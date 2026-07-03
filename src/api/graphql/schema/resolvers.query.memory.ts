@@ -39,8 +39,12 @@ async function resolveReadableMemoryId(ctx: Context, memoryId: string): Promise<
   let resolvedId: string;
   try {
     ({ id: resolvedId } = await resolveMemoryRef(ctx.db, memoryId));
-  } catch {
-    return null;
+  } catch (e) {
+    // Only a genuine miss collapses to an empty page (no existence disclosure).
+    // A malformed URN or an unexpected DB/runtime error must propagate rather
+    // than masquerade as "empty graph" — mirrors the Query.memory(id:) resolver.
+    if (e instanceof MemoryNotFoundError) return null;
+    throw e;
   }
   const accessible = await getAccessibleMemoryIds(ctx, resolvedId);
   if (accessible !== null && !accessible.includes(resolvedId)) return null;
