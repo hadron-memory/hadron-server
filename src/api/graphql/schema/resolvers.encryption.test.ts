@@ -275,9 +275,7 @@ describe('createNode with encryption', () => {
     expect(raw?.content?.startsWith('enc:v1:')).toBe(true);
 
     // Round-trip via a read through nodeById returns plaintext.
-    const read = await resolvers.Query.nodeById(
-      {},
-      { id: upserted.id },
+    const read = await resolvers.Query.node({}, { ref: upserted.id },
       sessionCtx,
     );
     expect(read?.abstract).toBe(ABSTRACT_PLAINTEXT);
@@ -355,9 +353,7 @@ describe('read path decryption', () => {
       },
       sessionCtx,
     );
-    const read = await resolvers.Query.nodeById(
-      {},
-      { id: written.id },
+    const read = await resolvers.Query.node({}, { ref: written.id },
       sessionCtx,
     );
     expect(read?.content).toBe('plain');
@@ -385,9 +381,7 @@ describe('read path decryption', () => {
     // value comes back as enc:v1:... which the caller can tell is ciphertext.
     // (Owner-only access per spec 034 — a platform admin can't read it.)
     const owned = await db.memory.findUniqueOrThrow({ where: { id: session.memoryId! }, select: { userId: true } });
-    const read = await resolvers.Query.nodeById(
-      {},
-      { id: written.id },
+    const read = await resolvers.Query.node({}, { ref: written.id },
       { db, userId: owned.userId! },
     );
     expect(read?.content?.startsWith('enc:v1:')).toBe(true);

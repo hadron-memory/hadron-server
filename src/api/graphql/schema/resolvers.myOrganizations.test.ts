@@ -1,5 +1,6 @@
 /**
- * Regression: production showed empty `myOrganizations` after the
+ * Regression: production showed empty organization lists (then `myOrganizations`,
+ * now the uniform `organizations` #473) after the
  * 008-agent-installation portal flip went out. Root cause:
  *
  * - The portal's new APP_FIELDS fragment selects
@@ -99,7 +100,7 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
     });
 
     // Step 4: call the resolver and walk the path the portal traverses.
-    const orgs = await resolvers.Query.myOrganizations({}, {}, ctx(user.id));
+    const orgs = (await resolvers.Query.organizations({}, {}, ctx(user.id))).items;
     expect(orgs).toHaveLength(1);
     const apps = (orgs[0] as { apps: unknown[] }).apps;
     expect(apps).toHaveLength(1);
@@ -162,7 +163,7 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
       },
     });
 
-    const orgs = await resolvers.Query.myOrganizations({}, {}, ctx(user.id));
+    const orgs = (await resolvers.Query.organizations({}, {}, ctx(user.id))).items;
     const apps = (orgs[0] as { apps: unknown[] }).apps;
     // 023-app-shape: invoke the App.agent resolver — see explanation in
     // the soft-deleted-agent test above.

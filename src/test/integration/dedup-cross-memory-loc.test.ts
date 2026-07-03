@@ -104,10 +104,12 @@ describe('Cross-memory same-loc nodes survive deduplication', () => {
     expect(memIds).toEqual(new Set([seeded.alphaId, seeded.betaId, seeded.gammaId]));
   });
 
-  it('GraphQL Query.subtree on shared prefix returns all three (no collapse)', async () => {
+  it('GraphQL findNodes locPrefix (the former subtree) returns all three (no collapse)', async () => {
     const seeded = await seedThreeMemoriesEachWithStartHere();
-    const result = await resolvers.Query.subtree({}, { prefix: 'start-here' }, adminCtx());
-    const starts = (result as Array<{ loc: string; memoryId: string }>);
+    const result = await resolvers.Query.findNodes(
+      {}, { filter: { locPrefix: 'start-here' } }, adminCtx(),
+    );
+    const starts = result.hits.map((h) => h.node as { loc: string; memoryId: string });
     expect(starts.length).toBe(3);
     expect(new Set(starts.map((n) => n.memoryId))).toEqual(
       new Set([seeded.alphaId, seeded.betaId, seeded.gammaId]),

@@ -3,41 +3,76 @@ import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { DEFAULT_AI_CONFIG_NAME } from '../../../lib/aiConfig.js';
 import { getDeploymentInfo } from '../../../mcp/deploymentInfo.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { GraphQLError } from 'graphql';
 import {
   type Context,
+  clampListTake,
   requireOrgRole,
+  resolveOrgScope,
   APP_INCLUDE,
 } from './resolvers.helpers.js';
 
 export const appQueries = {
     serverInfo: async (_: unknown, __: unknown, ___: Context) => getDeploymentInfo(),
 
-    apps: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
-      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      return ctx.db.app.findMany({
-        where: { organizationId: resolvedOrgId, deletedAt: null },
-        include: APP_INCLUDE,
-        orderBy: { name: 'asc' },
-      });
+    // #473 — the uniform paginated app list; replaces the org-ADMIN
+    // apps(orgId!) and the member myApps. App doesn't carry a userId, so org
+    // membership is the routing; platform ADMIN/OWNER unscoped get every
+    // live App. orgId follows cor:api:100:01 (member -> scope, non-member ->
+    // empty page, no disclosure, no admin bypass).
+    apps: async (
+      _: unknown,
+      {
+        orgId,
+        limit,
+        offset,
+      }: { orgId?: string | null; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const take = clampListTake(limit);
+      const skip = Math.max(0, offset ?? 0);
+      const scope = await resolveOrgScope(ctx, orgId);
+      if (!scope) return { items: [], total: 0 };
+      const isPlatformAdmin =
+        !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
+      // Admin unscoped reach applies only WITHOUT an orgId — the active-org
+      // selection is a membership concept (cor:api:100:01).
+      const where =
+        isPlatformAdmin && scope.scopedOrgId == null
+          ? { deletedAt: null }
+          : { organizationId: { in: scope.memberOrgIds }, deletedAt: null };
+      const [total, items] = await Promise.all([
+        ctx.db.app.count({ where }),
+        take === 0
+          ? Promise.resolve([])
+          : ctx.db.app.findMany({
+              where,
+              include: APP_INCLUDE,
+              orderBy: [{ name: 'asc' }, { id: 'asc' }],
+              skip,
+              take,
+            }),
+      ]);
+      return { items, total };
     },
 
-    app: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
+    app: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
       // Soft "not found" (return null) preserves existing semantics —
       // resolveAppRef would throw on missing/deleted, so swallow.
       let resolvedId: string;
       try {
-        ({ id: resolvedId } = await resolveAppRef(ctx.db, id));
+        ({ id: resolvedId } = await resolveAppRef(ctx.db, ref));
       } catch {
         return null;
       }
       const app = await ctx.db.app.findUnique({ where: { id: resolvedId }, include: APP_INCLUDE });
       if (!app || app.deletedAt) return null;
-      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      // #473: org MEMBER (or platform ADMIN) — the myApps exposure bar; the
+      // pre-473 org-ADMIN gate was stricter than the list a plain member
+      // could already read this App through. Admin-only material (keys,
+      // decrypted AI config) keeps its own gates (appKeys / appAIConfig).
+      await requireOrgRole(ctx, app.organizationId, 'READER');
       return app;
     },
 
@@ -47,35 +82,6 @@ export const appQueries = {
       return ctx.db.app.findUnique({
         where: { id: ctx.appId, deletedAt: null },
         include: APP_INCLUDE,
-      });
-    },
-
-    myApps: async (_: unknown, { orgId }: { orgId?: string | null }, ctx: Context) => {
-      // Apps where the current user is a member of the App's org. App doesn't
-      // carry userId, so org membership is the routing.
-      if (!ctx.userId) return [];
-      const memberships = await ctx.db.orgMember.findMany({
-        where: { userId: ctx.userId, deletedAt: null },
-        select: { organizationId: true },
-      });
-      let orgIds = memberships.map((m) => m.organizationId);
-      // #463: optional single-org narrowing — scope to [orgId] iff the caller is
-      // a member (ID or URN); a non-member orgId returns [] (no existence leak).
-      if (orgId != null) {
-        let resolvedOrgId: string;
-        try {
-          ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
-        } catch {
-          return [];
-        }
-        if (!orgIds.includes(resolvedOrgId)) return [];
-        orgIds = [resolvedOrgId];
-      }
-      if (orgIds.length === 0) return [];
-      return ctx.db.app.findMany({
-        where: { organizationId: { in: orgIds }, deletedAt: null },
-        include: APP_INCLUDE,
-        orderBy: { createdAt: 'desc' },
       });
     },
 

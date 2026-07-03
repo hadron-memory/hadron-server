@@ -9,17 +9,96 @@ import {
 } from '../../../lib/aiConfig.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import {
   type Context,
+  aiConfigOwnerOf,
+  clampListTake,
   requireOrgRole,
+  resolveOrgScope,
   isPlatformAdmin,
   toGqlAiServiceConfig,
   requireAiConfigOwnerAdmin,
   requireAiConfigPickerAccess,
   rethrowAiConfigTyped,
+  AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 
 export const agentQueries = {
+    // #473 — the uniform single-agent read; the first top-level Agent query
+    // (previously reachable only via Organization.agents / App.agents
+    // nesting). Gate mirrors resolveUrn's agent branch: member of the
+    // Agent's org or platform ADMIN/OWNER.
+    agent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      let resolvedId: string;
+      try {
+        ({ id: resolvedId } = await resolveAgentRef(ctx.db, ref));
+      } catch (e) {
+        // Genuine miss → null; malformed URNs propagate (AgentNotFoundError
+        // covers both shapes today — mirror app(ref)'s soft not-found).
+        if (!(e instanceof AgentNotFoundError)) throw e;
+        return null;
+      }
+      const agent = await ctx.db.agent.findUnique({
+        where: { id: resolvedId },
+        include: AGENT_INCLUDE,
+      });
+      if (!agent || agent.deletedAt) return null;
+      await requireOrgRole(ctx, agent.organizationId, 'READER');
+      return agent;
+    },
+
+    // #473 — the uniform paginated agent list. Scope: Agents owned by the
+    // caller's member orgs; platform ADMIN/OWNER unscoped get every live
+    // Agent. orgId follows cor:api:100:01 (member -> scope, non-member ->
+    // empty page, no disclosure, no admin bypass).
+    agents: async (
+      _: unknown,
+      {
+        filter,
+        orgId,
+        limit,
+        offset,
+      }: {
+        filter?: { type?: string | null; visibility?: string | null } | null;
+        orgId?: string | null;
+        limit?: number | null;
+        offset?: number | null;
+      },
+      ctx: Context,
+    ) => {
+      const take = clampListTake(limit);
+      const skip = Math.max(0, offset ?? 0);
+      const f = filter ?? {};
+      const scope = await resolveOrgScope(ctx, orgId);
+      if (!scope) return { items: [], total: 0 };
+      // Admin unscoped reach applies only WITHOUT an orgId — the active-org
+      // selection is a membership concept (cor:api:100:01).
+      const orgWhere =
+        isPlatformAdmin(ctx) && scope.scopedOrgId == null
+          ? {}
+          : { organizationId: { in: scope.memberOrgIds } };
+      const where = {
+        ...orgWhere,
+        deletedAt: null,
+        ...(f.type ? { type: f.type as never } : {}),
+        ...(f.visibility ? { visibility: f.visibility as never } : {}),
+      };
+      const [total, items] = await Promise.all([
+        ctx.db.agent.count({ where }),
+        take === 0
+          ? Promise.resolve([])
+          : ctx.db.agent.findMany({
+              where,
+              include: AGENT_INCLUDE,
+              orderBy: [{ name: 'asc' }, { id: 'asc' }],
+              skip,
+              take,
+            }),
+      ]);
+      return { items, total };
+    },
+
     agentAIConfig: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
@@ -42,19 +121,62 @@ export const agentQueries = {
 
     // ── 036-ai-service-config ─────────────────────────────────────────
 
+    // #473 — the uniform single-config read. AiServiceConfig is the one
+    // URN-less entity (ref = ID only, matching resolveUrn / effectiveAccess
+    // dispatch). Masked (no key material); auth mirrors the list gate:
+    // platform ADMIN/OWNER for HADRON_SERVER-owned rows, org ADMIN of the
+    // owning org otherwise.
+    aiServiceConfig: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      if (!ctx.userId && !isPlatformAdmin(ctx)) throw new Error('Unauthenticated');
+      const config = await ctx.db.aiServiceConfig.findUnique({ where: { id: ref } });
+      if (!config) return null;
+      try {
+        const owner = aiConfigOwnerOf(config);
+        await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        return toGqlAiServiceConfig(config);
+      } catch (e) {
+        rethrowAiConfigTyped(e);
+      }
+    },
+
+    // #473 — paginated; filter carries the owner. Omitted filter = the
+    // platform ADMIN/OWNER cross-owner view of every config.
     aiServiceConfigs: async (
       _: unknown,
-      { ownerType, ownerId }: { ownerType: AiConfigOwnerType; ownerId: string },
+      {
+        filter,
+        limit,
+        offset,
+      }: {
+        filter?: { ownerType: AiConfigOwnerType; ownerId: string } | null;
+        limit?: number | null;
+        offset?: number | null;
+      },
       ctx: Context,
     ) => {
       if (!ctx.userId && !isPlatformAdmin(ctx)) throw new Error('Unauthenticated');
       try {
-        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, ownerType, ownerId);
-        const configs = await ctx.db.aiServiceConfig.findMany({
-          where: ownerWhere,
-          orderBy: { name: 'asc' },
-        });
-        return configs.map(toGqlAiServiceConfig);
+        let ownerWhere: Record<string, string> = {};
+        if (filter) {
+          ({ ownerWhere } = await requireAiConfigOwnerAdmin(ctx, filter.ownerType, filter.ownerId));
+        } else if (!isPlatformAdmin(ctx)) {
+          // No owner filter = the cross-owner ops view — platform staff only.
+          throw new Error('Forbidden');
+        }
+        const take = clampListTake(limit);
+        const skip = Math.max(0, offset ?? 0);
+        const [total, configs] = await Promise.all([
+          ctx.db.aiServiceConfig.count({ where: ownerWhere }),
+          take === 0
+            ? Promise.resolve([])
+            : ctx.db.aiServiceConfig.findMany({
+                where: ownerWhere,
+                orderBy: [{ name: 'asc' }, { id: 'asc' }],
+                skip,
+                take,
+              }),
+        ]);
+        return { items: configs.map(toGqlAiServiceConfig), total };
       } catch (e) {
         rethrowAiConfigTyped(e);
       }

@@ -1,13 +1,14 @@
 // memoryQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { deserializeTags } from '../../../integrations/db/provider.js';
 import {
   type Context,
   requireRole,
+  clampListTake,
   getAccessibleMemoryIds,
+  resolveOrgScope,
   MEMORY_INCLUDE,
 } from './resolvers.helpers.js';
 
@@ -94,24 +95,16 @@ export const memoryQueries = {
       }));
     },
 
-    publicMemories: async (_: unknown, __: unknown, ctx: Context) => {
-      return ctx.db.memory.findMany({
-        where: { visibility: 'PUBLIC', deletedAt: null },
-        orderBy: { name: 'asc' },
-        include: MEMORY_INCLUDE,
-      });
-    },
-
-    memory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: id may be an ID or a URN. A raw ID needs no
+    memory: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: ref may be an ID or a URN. A raw ID needs no
       // resolution (skip the extra lookup); a URN is resolved to its id. Only a
       // genuine miss (MemoryNotFoundError) collapses to null — malformed URNs
       // and unexpected DB/runtime errors propagate rather than masking as a
       // misleading not-found (mirrors the effectiveAccess resolver).
-      let resolvedId = id;
-      if (!isId(id)) {
+      let resolvedId = ref;
+      if (!isId(ref)) {
         try {
-          ({ id: resolvedId } = await resolveMemoryRef(ctx.db, id));
+          ({ id: resolvedId } = await resolveMemoryRef(ctx.db, ref));
         } catch (e) {
           if (!(e instanceof MemoryNotFoundError)) throw e;
           return null;
@@ -164,68 +157,79 @@ export const memoryQueries = {
       return memory;
     },
 
-    orgSystemMemories: async (
+    // #473 — the uniform paginated memory list. Replaces myMemories (the
+    // caller's union), publicMemories (filter.visibility: PUBLIC), and
+    // orgSystemMemories (orgId + filter.memoryClasses: [system]).
+    memories: async (
       _: unknown,
-      { orgId }: { orgId: string },
+      {
+        filter,
+        orgId,
+        limit,
+        offset,
+      }: {
+        filter?: { memoryClasses?: string[] | null; visibility?: string | null } | null;
+        orgId?: string | null;
+        limit?: number | null;
+        offset?: number | null;
+      },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
-      // Authorization: platform ADMIN or member of the org
-      if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
-        if (!ctx.userId) throw new Error('Forbidden');
-        const member = await ctx.db.orgMember.findFirst({
-          where: { organizationId: resolvedOrgId, userId: ctx.userId, deletedAt: null },
-        });
-        if (!member) throw new Error('Forbidden');
-      }
-      return ctx.db.memory.findMany({
-        where: {
-          organizationId: resolvedOrgId,
-          deletedAt: null,
-          class: 'system',
-          userMemoryOfAgentId: null,
-        },
-        include: MEMORY_INCLUDE,
-        orderBy: { name: 'asc' },
-      });
-    },
+      const empty = { items: [], total: 0 };
+      const f = filter ?? {};
+      const take = clampListTake(limit);
+      const skip = Math.max(0, offset ?? 0);
 
-    myMemories: async (
-      _: unknown,
-      { memoryClasses, orgId }: { memoryClasses?: string[] | null; orgId?: string | null },
-      ctx: Context,
-    ) => {
       // Class filter (mirrors findNodes NodeFilter.memoryClasses): when given,
       // restrict to exactly the listed classes; when omitted, hide the noisy
-      // agent `system` class by default (the old includeAgentSystem: false
-      // behavior — the portal's list page relies on it). To surface system
-      // memories the caller passes them explicitly, e.g.
-      // memoryClasses: [system, knowledge, group, personal, private, app].
+      // agent `system` class by default (the portal's list page relies on it).
       const classSet =
-        memoryClasses && memoryClasses.length > 0 ? new Set(memoryClasses) : null;
-      const typeFilter = classSet
+        f.memoryClasses && f.memoryClasses.length > 0 ? new Set(f.memoryClasses) : null;
+      const classFilter = classSet
         ? { class: { in: [...classSet] as any } }
         : { class: { not: 'system' as const } };
 
-      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Surface
-      // memoryItems for every installed Agent (the "primary" notion is
-      // not load-bearing here — the resolver returns the union). Apps
-      // with no installed Agents see zero memories.
+      // #463 / cor:api:100:01 — optional single-org narrowing ("active
+      // organization"): member -> scope, non-member/unresolvable -> empty
+      // page with no org-existence disclosure, no platform-admin bypass.
+      const scope = await resolveOrgScope(ctx, orgId);
+      if (!scope) return empty;
+
+      const page = async (where: Record<string, unknown>) => {
+        const [total, items] = await Promise.all([
+          ctx.db.memory.count({ where }),
+          take === 0
+            ? Promise.resolve([])
+            : ctx.db.memory.findMany({
+                where,
+                include: MEMORY_INCLUDE,
+                orderBy: [{ name: 'asc' }, { id: 'asc' }],
+                skip,
+                take,
+              }),
+        ]);
+        return { items, total };
+      };
+
+      // filter.visibility: PUBLIC — the marketplace slice (the old
+      // publicMemories): every PUBLIC memory, readable by any caller, so the
+      // scope selection never widens access. Still class-filtered and
+      // org-narrowable like the default slice.
+      if (f.visibility === 'PUBLIC') {
+        return page({
+          visibility: 'PUBLIC',
+          deletedAt: null,
+          userMemoryOfAgentId: null,
+          ...classFilter,
+          ...(scope.scopedOrgId ? { organizationId: scope.scopedOrgId } : {}),
+        });
+      }
+
+      // 023-app-shape Phase 2b: App-key callers get the union of their
+      // installed Agents' memoryItems (App↔Agent is N:M via AppAgent). The
+      // union is assembled in memory — App memory sets are small — then
+      // class-filtered, sorted, and page-sliced with an exact total.
       if (ctx.appId) {
-        // #463: honor the optional org narrowing here too. An App-key's "active
-        // org" is its own App's org, so orgId is a match-or-empty gate on that
-        // org — NOT a per-memory ownership filter (which would wrongly drop
-        // memories the App's org merely SUBSCRIBES to, i.e. owned by another
-        // org). Unresolvable orgId → [].
-        let resolvedOrgId: string | null = null;
-        if (orgId != null) {
-          try {
-            ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
-          } catch {
-            return [];
-          }
-        }
         const app = await ctx.db.app.findUnique({
           where: { id: ctx.appId },
           select: {
@@ -241,70 +245,45 @@ export const memoryQueries = {
             },
           },
         });
-        if (!app || app.appAgents.length === 0) return [];
-        // A scope to any org other than the App's own → empty (the App has no
-        // other active-org context); a match → its full memory view below.
-        if (resolvedOrgId != null && resolvedOrgId !== app.organizationId) return [];
+        if (!app || app.appAgents.length === 0) return empty;
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
           for (const item of aa.agent.memoryItems) {
-            // Same class filter as the user branch: explicit list wins,
-            // otherwise hide `system` by default.
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
+            if (f.visibility && item.memory.visibility !== f.visibility) continue;
             memoryMap.set(item.memory.id, item.memory);
           }
         }
-        return Array.from(memoryMap.values());
+        const all = Array.from(memoryMap.values()).sort(
+          (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+        );
+        return { items: take === 0 ? [] : all.slice(skip, skip + take), total: all.length };
       }
-      // JWT/OAuth user — union of all org-accessible memories
+
+      // JWT/OAuth user — the caller's union:
+      //   (1) their OWN owner-owned personal/private memories — ALWAYS,
+      //       independent of the active org (they're user-owned, not part of
+      //       any org's collection; selecting an active org must not hide
+      //       your own notes),
+      //   (2) memories their member orgs OWN,
+      //   (3) memories their member orgs SUBSCRIBE to.
+      // Per-user agent memories (userMemoryOfAgentId) are excluded — they
+      // belong to the chatbot flow, not the regular memory list. 034:
+      // owner-owned personal/private never come in via the org.
       if (ctx.userId) {
-        const memberships = await ctx.db.orgMember.findMany({
-          where: { userId: ctx.userId, deletedAt: null },
-          select: { organizationId: true },
-        });
-        let orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
-        // #463: optional single-org narrowing ("active organization"). Scope to
-        // [orgId] iff the caller is a member (ID or URN); a non-member orgId
-        // returns [] — no org-existence disclosure. The active-org view is:
-        //   (1) the caller's OWN personal/private memories — ALWAYS (they're
-        //       user-owned, not org-owned, so they show in every org context),
-        //   (2) memories the active org OWNS,
-        //   (3) memories the active org SUBSCRIBES to.
-        // Other member orgs' resources and public memories are out of scope
-        // here (reached via other surfaces). No platform-admin bypass — the
-        // active org is always one the caller is a member of.
-        if (orgId != null) {
-          let resolvedOrgId: string;
-          try {
-            ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
-          } catch {
-            return [];
-          }
-          if (!orgIds.includes(resolvedOrgId)) return [];
-          orgIds = [resolvedOrgId];
-        }
-        if (orgIds.length === 0) return [];
-        return ctx.db.memory.findMany({
-          where: {
-            deletedAt: null,
-            ...typeFilter,
-            // Also exclude per-user agent memories — they belong to the chatbot
-            // flow, not the user's regular memory list.
-            userMemoryOfAgentId: null,
-            OR: [
-              // Org-shared classes via membership; 034: owner-owned
-              // personal/private never come in via the org.
-              { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
-              { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
-              // Category (1): the caller's own owner-owned personal/private
-              // memories — ALWAYS, independent of the active org (they're
-              // user-owned, not part of any org's collection). Deliberately NOT
-              // org-scoped: selecting an active org must not hide your own notes.
-              { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
-            ],
-          },
-          include: MEMORY_INCLUDE,
-          orderBy: { name: 'asc' },
+        // A caller with zero memberships still gets their own personal/private
+        // memories: `in: []` in the org clauses simply matches nothing.
+        const orgIds = scope.memberOrgIds;
+        return page({
+          deletedAt: null,
+          ...(f.visibility ? { visibility: f.visibility as any } : {}),
+          userMemoryOfAgentId: null,
+          AND: [classFilter],
+          OR: [
+            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
+            { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
+            { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
+          ],
         });
       }
       throw new Error('Unauthenticated');

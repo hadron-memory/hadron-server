@@ -29,6 +29,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -183,91 +184,137 @@ export const nodeQueries = {
       }
     },
 
-    node: async (_: unknown, { loc: rawLoc, memory: memoryRef, raw }: { loc: string; memory?: string; raw?: boolean }, ctx: Context) => {
-      const parsed = parseUrnInput(rawLoc);
+    // #473 — the uniform single-node read: node(ref:) subsumes the former
+    // nodeById(id:) + node(loc:, memory:) split. `ref` dispatch order:
+    //   1. PK (the old nodeById path),
+    //   2. explicit `hrn:node:` URN → strict resolveNodeRef,
+    //   3. bare loc — pinned by `memory:` when given (#335 scoped path);
+    //      unscoped, an unprefixed 3+-segment ref whose 2-segment prefix
+    //      names a live memory reads as a full URN, anything else resolves
+    //      across every readable memory with the #335 ambiguity guard.
+    node: async (
+      _: unknown,
+      { ref, memory: memoryRef, raw }: { ref: string; memory?: string | null; raw?: boolean | null },
+      ctx: Context,
+    ) => {
+      const access = await memoryAccessFilter(ctx);
+      const include = {
+        outgoingEdges: { include: { target: true } },
+        incomingEdges: { include: { source: true } },
+      };
+      // Denied ≡ not-found (null) — same non-disclosure the old queries had.
+      const allowed = (memoryId: string): boolean => {
+        if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
+          return (access.memoryId.in as string[]).includes(memoryId);
+        }
+        return true;
+      };
+      // Decrypt + (unless raw) compile Mustache templates — shared tail of
+      // every dispatch form. Generic so the full node row type flows through.
+      const finish = async <T extends { content: string | null; data: unknown; memoryId: string }>(
+        node: T,
+      ) => {
+        await decryptNodesBatch(ctx.db, [node]);
+        if (!raw && node.content?.includes('{{')) {
+          const compiled = await compileTemplate(
+            node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
+          );
+          return { ...node, content: compiled };
+        }
+        return node;
+      };
+
+      // Form 1: primary key. #391: a soft-deleted node must not resolve by PK
+      // (findUnique can't carry deletedAt in its where, so guard post-fetch).
+      if (isId(ref)) {
+        const node = await ctx.db.node.findUnique({ where: { id: ref }, include });
+        if (!node || node.deletedAt || !allowed(node.memoryId)) return null;
+        return finish(node);
+      }
+
+      const parsed = parseUrnInput(ref);
       const typeErr = validateUrnType(parsed, 'node');
       if (typeErr) throw new Error(typeErr);
-      const loc = parsed.value;
+      const value = parsed.value;
 
-      const access = await memoryAccessFilter(ctx);
+      // Form 2: explicit `hrn:node:` URN — strict resolution, no loc
+      // fallback (resolveNodeRef enforces the fully-qualified shape; a
+      // malformed input propagates as UrnNotQualifiedError rather than
+      // masking as not-found).
+      if (parsed.type === 'node') {
+        let id: string;
+        try {
+          ({ id } = await resolveNodeRef(ctx.db, ref));
+        } catch (e) {
+          if (e instanceof NodeNotFoundError) return null;
+          throw e;
+        }
+        const node = await ctx.db.node.findUnique({ where: { id }, include });
+        if (!node || node.deletedAt || !allowed(node.memoryId)) return null;
+        return finish(node);
+      }
 
-      // #335: optional `memory` scope (ID or URN per 007-entity-id-or-urn).
-      // Without it, node(loc:) resolves across EVERY readable memory; since
-      // `loc` is unique only per (loc, memoryId), the same loc can live in
-      // many memories, and the old code silently returned one — a false read
-      // from the wrong memory. Scoping pins the lookup; the access filter is
-      // still intersected so `memory` can never widen visibility.
-      let where: Record<string, unknown>;
+      // Form 3a: bare loc pinned by `memory:` (ID or URN per
+      // 007-entity-id-or-urn). #335: scoping pins the lookup; the access
+      // filter is still intersected so `memory` can never widen visibility.
       if (memoryRef != null && memoryRef !== '') {
         const { id: scopedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-        if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
-          if (!(access.memoryId.in as string[]).includes(scopedMemoryId)) return null;
-        }
-        where = { loc, memoryId: scopedMemoryId };
-      } else {
-        where = { loc, ...access };
+        if (!allowed(scopedMemoryId)) return null;
+        const node = await ctx.db.node.findFirst({
+          where: { loc: value, memoryId: scopedMemoryId, deletedAt: null },
+          include,
+        });
+        return node ? finish(node) : null;
       }
-      // #391: exclude soft-deleted nodes so node(loc:) matches resolveUrn — a
-      // leaked deleted row is what makes a node list/open but 404 by URN.
-      where.deletedAt = null;
 
+      // Form 3b: unprefixed + unscoped. A 3+-segment ref whose 2-segment
+      // prefix names a live memory is a full URN (mirrors resolveNodeRef's
+      // fallthrough — canonical `::` split preferred, legacy `:` accepted);
+      // pass `memory:` to force loc interpretation of such a ref.
+      const parts = value.includes('::') ? value.split('::') : value.split(':');
+      if (parts.length >= 3) {
+        const memory = await ctx.db.memory.findFirst({
+          where: {
+            OR: [
+              { urn: `${parts[0]}:${parts[1]}` },
+              { urn: `${parts[0]}::${parts[1]}` },
+            ],
+            deletedAt: null,
+          },
+          select: { id: true },
+        });
+        if (memory) {
+          if (!allowed(memory.id)) return null;
+          const node = await ctx.db.node.findFirst({
+            where: { loc: parts.slice(2).join(':'), memoryId: memory.id, deletedAt: null },
+            include,
+          });
+          return node ? finish(node) : null;
+        }
+      }
+
+      // Form 3c: bare loc across EVERY readable memory. #391: exclude
+      // soft-deleted rows so node(ref:) matches resolveUrn.
       const candidates = await ctx.db.node.findMany({
-        where,
-        include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+        where: { loc: value, ...access, deletedAt: null },
+        include,
       });
       if (candidates.length === 0) return null;
 
       // #335: fail loud on a cross-memory loc collision instead of silently
       // picking one. The (loc, memoryId) unique guarantees >1 candidate ⇒
       // distinct memories, so this only fires for a genuinely ambiguous
-      // unscoped read. Callers disambiguate with `memory:` (above) or
-      // nodeById(id:) for a single-node read.
+      // unscoped read.
       if (candidates.length > 1) {
         const memoryIds = candidates.map((n) => n.memoryId);
         throw new GraphQLError(
-          `loc "${loc}" matches ${candidates.length} readable memories ` +
+          `loc "${value}" matches ${candidates.length} readable memories ` +
             `(${memoryIds.join(', ')}). Pass \`memory:\` to scope the lookup, ` +
-            `or use nodeById(id:) for an unambiguous single-node read.`,
-          { extensions: { code: 'AMBIGUOUS_NODE_LOC', loc, memoryIds } },
+            `or pass the node's PK or full URN as \`ref\` for an unambiguous read.`,
+          { extensions: { code: 'AMBIGUOUS_NODE_LOC', loc: value, memoryIds } },
         );
       }
-
-      // Decrypt any nodes that come from encrypted memories (in place).
-      await decryptNodesBatch(ctx.db, candidates);
-      const node = candidates[0];
-
-      // Compile Mustache templates unless raw: true
-      if (!raw && node.content?.includes('{{')) {
-        const compiled = await compileTemplate(
-          node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
-        );
-        return { ...node, content: compiled };
-      }
-      return node;
-    },
-
-    nodeById: async (_: unknown, { id, raw }: { id: string; raw?: boolean }, ctx: Context) => {
-      const access = await memoryAccessFilter(ctx);
-      const node = await ctx.db.node.findUnique({
-        where: { id },
-        include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
-      });
-      // #391: a soft-deleted node must not resolve by PK either (findUnique
-      // can't carry deletedAt in its where, so guard post-fetch) — matches
-      // resolveUrn and keeps the by-PK page from opening a deleted node.
-      if (!node || node.deletedAt) return null;
-      if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
-        if (!(access.memoryId.in as string[]).includes(node.memoryId)) return null;
-      }
-      await decryptNodesBatch(ctx.db, [node]);
-
-      if (!raw && node.content?.includes('{{')) {
-        const compiled = await compileTemplate(
-          node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
-        );
-        return { ...node, content: compiled };
-      }
-      return node;
+      return finish(candidates[0]);
     },
 
     // #386: render one node to its portable single-node file. Same node-read
@@ -772,18 +819,6 @@ export const nodeQueries = {
         null,
         null,
       );
-    },
-
-    subtree: async (_: unknown, { prefix: rawPrefix }: { prefix: string }, ctx: Context) => {
-      const prefix = parseUrnInput(rawPrefix).value;
-      const access = await memoryAccessFilter(ctx);
-      const results = await ctx.db.node.findMany({
-        where: { ...access, loc: { startsWith: prefix } },
-        orderBy: { loc: 'asc' },
-        include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
-      });
-      await decryptNodesBatch(ctx.db, results);
-      return results;
     },
 
     /**

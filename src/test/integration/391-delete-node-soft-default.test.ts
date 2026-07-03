@@ -45,8 +45,8 @@ describe('#391 deleteNode soft-by-default / hard opt-in', () => {
     expect(raw!.deletedBy).toBe(ADMIN);
 
     // Disappears from the read surfaces (post-#391 filters).
-    expect(await Q.nodeById(null, { id: fx.nodeId }, adminCtx())).toBeNull();
-    expect(await Q.node(null, { loc: fx.loc, memory: fx.memoryId }, adminCtx())).toBeNull();
+    expect(await Q.node(null, { ref: fx.nodeId }, adminCtx())).toBeNull();
+    expect(await Q.node(null, { ref: fx.loc, memory: fx.memoryId }, adminCtx())).toBeNull();
   });
 
   it('hard: true removes the row entirely', async () => {

@@ -696,7 +696,7 @@ describe('Organization memory listing', () => {
     // Query the organization — should show the regular memory but not the user one
     const org = await resolvers.Query.organization(
       {},
-      { id: orgA.id },
+      { ref: orgA.id },
       adminCtx(),
     );
     expect(org?.memories.map((m: { urn: string }) => m.urn)).toContain('org-a:knowledge');

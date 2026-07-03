@@ -189,6 +189,111 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  # ── Uniform find-many envelopes (#473) ────────────────────────────────
+  #
+  # Every entity's paginated list query returns the same { items, total }
+  # shape so a client can drive one generic pager for all of them. total is
+  # the exact full count for the query's scope+filter; limit defaults to 50
+  # (capped 200) and limit: 0 returns just the total (the cheap count).
+
+  type MemoriesPage {
+    items: [Memory!]!
+    total: Int!
+  }
+
+  type OrganizationsPage {
+    items: [Organization!]!
+    total: Int!
+  }
+
+  type AppsPage {
+    items: [App!]!
+    total: Int!
+  }
+
+  type AgentsPage {
+    items: [Agent!]!
+    total: Int!
+  }
+
+  type EdgesPage {
+    items: [Edge!]!
+    total: Int!
+  }
+
+  type UsersPage {
+    items: [User!]!
+    total: Int!
+  }
+
+  type AiServiceConfigsPage {
+    items: [AiServiceConfig!]!
+    total: Int!
+  }
+
+  """
+  Filter for the uniform memories() list (#473). All clauses AND-combine and
+  only ever narrow the caller's accessible scope — with one documented scope
+  SELECTION: visibility: PUBLIC switches from the caller's own union
+  (org-owned + org-subscribed + own personal/private) to the public
+  marketplace slice (every PUBLIC memory — the old publicMemories query).
+  Both slices are readable by the caller, so this never widens access.
+  """
+  input MemoryFilter {
+    "Restrict to exactly these classes. Omitted, the noisy agent system class is hidden by default; pass it explicitly to surface system memories."
+    memoryClasses: [MemoryClass!]
+    "Restrict by visibility. PUBLIC selects the marketplace slice (see above)."
+    visibility: MemoryVisibility
+  }
+
+  "Filter for the uniform agents() list (#473). Clauses AND-combine."
+  input AgentFilter {
+    type: AgentType
+    visibility: AgentVisibility
+  }
+
+  """
+  Filter for the uniform edges() list (#473). Clauses AND-combine and are
+  intersected with the caller's readable memories. memoryId / sourceNodeId /
+  targetNodeId each accept an ID or a fully-qualified URN; an unresolvable
+  ref yields an empty page (consistent with the no-disclosure posture).
+  """
+  input EdgeFilter {
+    "Confine to edges whose (denormalized, source-side) memory is this one."
+    memoryId: ID
+    "Edges leaving this node."
+    sourceNodeId: ID
+    "Edges arriving at this node."
+    targetNodeId: ID
+    isRunnable: Boolean
+    "Include soft-deleted edges (default false)."
+    includeDeleted: Boolean
+  }
+
+  """
+  Filter for the uniform users() list (#473). For a non-platform-admin caller
+  'query' is REQUIRED (a blank/omitted query returns an empty page) and
+  matching is enumeration-safe per cor:acl:070:02: public identifiers
+  (handle, githubUsername) match by substring, email by exact equality, and
+  name only where the viewer may see it (self/admin/co-member). Platform
+  ADMIN/OWNER may omit 'query' for the full user list.
+  """
+  input UserFilter {
+    query: String
+  }
+
+  """
+  Filter for the uniform aiServiceConfigs() list (#473) — the owning entity.
+  Omitted entirely, the list is the platform ADMIN/OWNER's cross-owner view
+  of every config; non-admin callers MUST filter by owner (org ADMIN of the
+  owning org, mirroring the management-surface gate).
+  """
+  input AiServiceConfigFilter {
+    ownerType: AiConfigOwnerType!
+    "The owning entity — accepts ID or URN (HADRON_SERVER: ID only)."
+    ownerId: ID!
+  }
+
   """
   Entity types the cross-entity global search (globalSearch) can return.
   Mirrors the SearchEntityType union in src/lib/global-search.
@@ -1799,22 +1904,26 @@ export const typeDefs = `#graphql
     """
     effectiveAccess(user: ID!, resource: ID!): EffectiveAccess!
 
-    # Get a single node by its loc path (raw: true to skip template compilation).
-    #
-    # loc is unique only WITHIN a memory, so pass "memory" (an ID or URN) to
-    # scope the lookup whenever the same loc may exist in more than one memory
-    # you can read. Without "memory", an unscoped read that matches the same
-    # loc in multiple readable memories is REJECTED with extensions.code
-    # AMBIGUOUS_NODE_LOC (listing the candidate memoryIds) rather than silently
-    # returning one — a cross-memory collision used to return a node from the
-    # wrong memory (#335). For an unambiguous single-node read by primary key,
-    # use nodeById(id:).
-    node(loc: String!, memory: ID, raw: Boolean): Node
+    """
+    The uniform single-node read (#473) — subsumes the former nodeById(id:)
+    and node(loc:, memory:) split. 'ref' accepts, in dispatch order:
 
-    # Get a single node by its ID (raw: true to skip template compilation).
-    # The unambiguous single-node read — prefer this (or node with memory:)
-    # over a bare node(loc:) when a loc may collide across memories (#335).
-    nodeById(id: ID!, raw: Boolean): Node
+      1. a primary key (the unambiguous read — the old nodeById),
+      2. a fully-qualified node URN (\`hrn:node:<org>::<memory>::<loc>\`,
+         legacy \`urn:\` scheme accepted),
+      3. a bare loc — scoped by 'memory' (an ID or URN) when given; unscoped,
+         it resolves across every readable memory and a cross-memory loc
+         collision is REJECTED with extensions.code AMBIGUOUS_NODE_LOC
+         (listing the candidate memoryIds) rather than silently returning
+         one (#335). An unprefixed 3+-segment ref whose first two segments
+         name a readable memory is treated as form 2 (a full URN); pass
+         'memory' to force loc interpretation.
+
+    raw: true skips Mustache template compilation. Soft-deleted nodes do not
+    resolve. Access: the caller's readable-memory set (same gate the old
+    queries used); denied and missing are both null.
+    """
+    node(ref: ID!, memory: ID, raw: Boolean): Node
 
     # Render one node to a portable, self-contained file (spec cor:api).
     # full: true (default) returns the CANONICAL form — byte-identical to
@@ -1822,7 +1931,7 @@ export const typeDefs = `#graphql
     #   "hadron node import". Requires MD or JSON; sections is ignored.
     # full: false returns a PRESENTATION render of the selected sections
     #   (default: all); not guaranteed round-trippable.
-    # Auth: same node-read gate as nodeById. (HTML/PDF + asUrl delivery land
+    # Auth: same node-read gate as node(ref:). (HTML/PDF + asUrl delivery land
     # later; the result shape is forward-compatible.)
     nodeExport(
       id: ID!
@@ -1895,21 +2004,36 @@ export const typeDefs = `#graphql
       offset: Int
     ): GlobalSearchResult!
 
-    # All nodes whose loc starts with the given prefix
-    subtree(prefix: String!): [Node!]!
+    """
+    The uniform single-edge read (#473) — edges are first-class, loc-addressed
+    peers of nodes (spec 037). 'ref' accepts a primary key or a
+    fully-qualified edge URN (\`hrn:edge:<org>::<memory>::<loc>\`; the edge's
+    memory is its SOURCE node's memory). Access: the edge's memory must be in
+    the caller's readable set; denied and missing are both null.
+    """
+    edge(ref: ID!): Edge
+
+    """
+    Uniform paginated edge list (#473). Scope: edges whose (denormalized,
+    source-side) memory the caller can read, AND-narrowed by the filter.
+    orgId follows cor:api:100:01 (member -> scope, non-member -> empty page,
+    no disclosure, no admin bypass). Deterministic loc-ascending order
+    (id tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    """
+    edges(filter: EdgeFilter, orgId: ID, limit: Int, offset: Int): EdgesPage!
 
     """
     Batch read (spec cor:api:040) — the full node projection (select any Node
     fields, including content + edges) for MANY nodes in one call, eliminating
-    the N+1 of one nodeById per node (e.g. 'spec lint --all'). Provide EITHER
+    the N+1 of one node(ref:) per node (e.g. 'spec lint --all'). Provide EITHER
     'ids' (explicit set, returned in input order) OR 'memory' + 'locPrefix'
     (subtree, loc order) — not both. Per-node access is applied independently:
     denied or missing ids come back in 'unavailable' and never fail the call.
     Bounded by hard caps — over the node-count cap throws BAD_USER_INPUT; over
     the response-size cap returns a partial result with 'truncated: true' and
     the dropped ids in 'omitted' (never a silent short read). Node content is
-    returned raw — Mustache templates are NOT compiled (unlike single-node
-    'node'/'nodeById'), since this is a bulk source read for lint / audit /
+    returned raw — Mustache templates are NOT compiled (unlike the single-node
+    'node' read), since this is a bulk source read for lint / audit /
     migration and compiling per node would re-introduce the N+1 it eliminates.
     """
     nodeBatch(ids: [ID!], memory: ID, locPrefix: String): NodeBatchResult!
@@ -1951,60 +2075,80 @@ export const typeDefs = `#graphql
     sessions(type: String, repo: String, customerId: String, limit: Int, offset: Int): [Session!]!
     session(id: ID!): Session
 
-    # Users (admin only)
-    users: [User!]!
-    # Search users by name, email, or GitHub username
-    searchUsers(query: String!): [User!]!
+    """
+    The uniform single-user read (#473). 'ref' accepts a primary key or a
+    \`hrn:user:<handle>\` URN. Resolves for the user themselves, a platform
+    ADMIN/OWNER, or a caller sharing at least one organization with the
+    target (the resolveUrn user gate); anyone else gets null — denied and
+    missing are indistinguishable, preserving #384's anti-enumeration
+    posture. PII fields (name/email) stay gated by the User field resolvers.
+    """
+    user(ref: ID!): User
+
+    """
+    Uniform paginated user list (#473) — replaces the admin-only users list
+    and searchUsers. Platform ADMIN/OWNER: every live user, filter.query
+    optional. Everyone else: filter.query is REQUIRED (blank/omitted -> empty
+    page) and matching is enumeration-safe per cor:acl:070:02 — handle /
+    githubUsername by substring, email by exact match, name only where the
+    viewer may see it (self/admin/co-member). Name-ascending order (id
+    tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    """
+    users(filter: UserFilter, limit: Int, offset: Int): UsersPage!
 
     # Current authenticated user
     me: User
 
-    # Organizations
-    organizations: [Organization!]!       # platform ADMIN: all orgs
-    myOrganizations: [Organization!]!     # authenticated user: their memberships
     """
-    Fetch an Organization by id (org member or platform ADMIN).
+    Uniform paginated organization list (#473) — replaces organizations +
+    myOrganizations. Scope: the caller's memberships; platform ADMIN/OWNER
+    get every live org (the established admin unscoped reach). Name-ascending
+    order (id tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    """
+    organizations(limit: Int, offset: Int): OrganizationsPage!
 
-    Accepts the entity's ID or URN.
     """
-    organization(id: ID!): Organization
+    Fetch an Organization (org member or platform ADMIN).
+
+    'ref' accepts the entity's ID or URN.
+    """
+    organization(ref: ID!): Organization
 
     # Invitation lookup (public — no auth required, used by invite acceptance page)
     invitation(slug: String!): UserInvitation
 
-    # Public memory marketplace — any authenticated user
-    publicMemories: [Memory!]!
+    """
+    Fetch a single Memory (org member, shared-read gate, or platform ADMIN).
+
+    'ref' accepts the entity's ID or URN.
+    """
+    memory(ref: ID!): Memory
 
     """
-    Fetch a single Memory (org member or platform ADMIN).
+    Uniform paginated memory list (#473) — replaces myMemories,
+    publicMemories, and orgSystemMemories.
 
-    Accepts the entity's ID or URN.
+    Default scope: the caller's union — (1) their OWN personal/private
+    memories (always; they are user-owned and show in every org context),
+    (2) memories their member orgs own, (3) memories their member orgs
+    subscribe to. Per-user agent memories (userMemoryOfAgentId) are excluded.
+    App-key callers get the union of their installed Agents' memory items.
+
+    filter.visibility: PUBLIC selects the public marketplace slice instead
+    (every PUBLIC memory — the old publicMemories). filter.memoryClasses
+    restricts to exactly the listed classes; omitted, the noisy agent system
+    class is hidden by default (pass it explicitly to surface system
+    memories, e.g. the old orgSystemMemories = orgId + memoryClasses:
+    [system]).
+
+    orgId follows cor:api:100:01: member -> the "active organization" view
+    (own personal/private + that org's owned + subscribed memories);
+    non-member -> empty page, no existence disclosure, no admin bypass.
+
+    Name-ascending order (id tiebreak); limit default 50 / cap 200;
+    limit: 0 -> count only.
     """
-    memory(id: ID!): Memory
-
-    """
-    System memories belonging to an org (org member or platform ADMIN).
-
-    Accepts the entity's ID or URN.
-    """
-    orgSystemMemories(orgId: ID!): [Memory!]!
-
-    # Memories accessible to the caller.
-    #
-    # memoryClasses (optional) restricts the result to exactly the listed
-    # classes (mirrors findNodes' NodeFilter.memoryClasses). Omitted, the noisy
-    # agent system class is hidden by default (the old includeAgentSystem: false
-    # behavior); to surface system memories pass them explicitly, e.g.
-    # memoryClasses: [system, knowledge, group, personal, private, app].
-    #
-    # orgId (optional) selects an "active organization" the caller is a member
-    # of. The scoped view is: (1) the caller's OWN personal/private memories
-    # (ALWAYS — they are user-owned, shown in every org context), (2) memories
-    # the active org owns, and (3) memories the active org subscribes to. Other
-    # member orgs' resources and public memories are out of scope here. A
-    # non-member orgId returns [] (no existence leak); no platform-admin bypass.
-    # Omit for the default cross-org union over all your member orgs.
-    myMemories(memoryClasses: [MemoryClass!], orgId: ID): [Memory!]!
+    memories(filter: MemoryFilter, orgId: ID, limit: Int, offset: Int): MemoriesPage!
 
     """
     Exchange connections for an org.
@@ -2016,26 +2160,47 @@ export const typeDefs = `#graphql
     exchangeFolders(connectionId: ID!): [ExchangeFolder!]!
 
     """
-    Apps in an organization (org ADMIN).
-
-    Accepts the entity's ID or URN.
+    Uniform paginated app list (#473) — replaces the org-ADMIN apps(orgId!)
+    and the member myApps. Scope: Apps in the caller's member orgs (App
+    doesn't carry a userId, so org membership is the routing); platform
+    ADMIN/OWNER unscoped get every live App. orgId follows cor:api:100:01
+    (member -> scope, non-member -> empty page, no disclosure, no admin
+    bypass). Name-ascending order (id tiebreak); limit default 50 / cap 200;
+    limit: 0 -> count only.
     """
-    apps(orgId: ID!): [App!]!
+    apps(orgId: ID, limit: Int, offset: Int): AppsPage!
 
     """
-    Fetch an App.
+    Fetch an App (member of the App's org, or platform ADMIN — the myApps
+    exposure bar; #473 relaxed this from org ADMIN for read parity with the
+    list).
 
-    Accepts the entity's ID or URN.
+    'ref' accepts the entity's ID or URN.
     """
-    app(id: ID!): App
+    app(ref: ID!): App
     # The App authenticated by the current AppKey (null for JWT users without an App)
     myApp: App
-    # Apps where the current user is a member of the App's org.
-    #
-    # orgId (optional) narrows to a single organization the caller is a member
-    # of; a non-member orgId returns [] (no existence leak). Omit for the
-    # default cross-org union.
-    myApps(orgId: ID): [App!]!
+
+    """
+    The uniform single-agent read (#473) — the first top-level Agent query;
+    previously Agents were reachable only via Organization.agents /
+    App.agents nesting. Gate mirrors resolveUrn's agent branch: member of
+    the Agent's org or platform ADMIN/OWNER; denied throws Forbidden,
+    missing is null.
+
+    'ref' accepts the entity's ID or URN.
+    """
+    agent(ref: ID!): Agent
+
+    """
+    Uniform paginated agent list (#473). Scope: Agents owned by the caller's
+    member orgs; platform ADMIN/OWNER unscoped get every live Agent. orgId
+    follows cor:api:100:01 (member -> scope, non-member -> empty page, no
+    disclosure, no admin bypass). filter narrows by type / visibility.
+    Name-ascending order (id tiebreak); limit default 50 / cap 200;
+    limit: 0 -> count only.
+    """
+    agents(filter: AgentFilter, orgId: ID, limit: Int, offset: Int): AgentsPage!
     # 005-agent-subscription FR-005: AgentSubscriptions held by the
     # authenticated user. Read-only in v1.
     myAgentSubscriptions: [AgentSubscription!]!
@@ -2118,15 +2283,29 @@ export const typeDefs = `#graphql
     agentAIConfig(agentId: ID!): AgentAIConfig
 
     """
-    036-ai-service-config: masked list of the AI configs owned by one
-    entity. Never returns key material — only hasApiKey + apiKeyPreview.
-
-    Auth: platform ADMIN/OWNER for HADRON_SERVER owners; org ADMIN of
-    the owning org for ORGANIZATION / APP / AGENT owners.
-
-    ownerId accepts the entity's ID or URN (HADRON_SERVER: ID only).
+    The uniform single-config read (#473). 'ref' is the config's ID —
+    AiServiceConfig is the one URN-less entity (matching resolveUrn /
+    effectiveAccess dispatch). Masked: never returns key material, only
+    hasApiKey + apiKeyPreview (resolveAIConfig is the privileged decrypted
+    read). Auth mirrors the list: platform ADMIN/OWNER for
+    HADRON_SERVER-owned configs, org ADMIN of the owning org otherwise;
+    denied throws Forbidden, missing is null.
     """
-    aiServiceConfigs(ownerType: AiConfigOwnerType!, ownerId: ID!): [AiServiceConfig!]!
+    aiServiceConfig(ref: ID!): AiServiceConfig
+
+    """
+    036-ai-service-config: masked, paginated list of AI configs (#473).
+    Never returns key material — only hasApiKey + apiKeyPreview.
+
+    filter names the owning entity. Auth: platform ADMIN/OWNER for
+    HADRON_SERVER owners; org ADMIN of the owning org for ORGANIZATION /
+    APP / AGENT owners. filter omitted entirely = the platform ADMIN/OWNER
+    cross-owner view of every config (non-admin callers must filter).
+
+    Name-ascending order (id tiebreak); limit default 50 / cap 200;
+    limit: 0 -> count only.
+    """
+    aiServiceConfigs(filter: AiServiceConfigFilter, limit: Int, offset: Int): AiServiceConfigsPage!
 
     """
     036-ai-service-config: resolve a config name for an execution context
