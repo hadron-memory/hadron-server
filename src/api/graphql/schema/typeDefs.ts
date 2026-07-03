@@ -157,6 +157,36 @@ export const typeDefs = `#graphql
     degraded: String
   }
 
+  "Slim node projection for the graph view (issue #466) — only what a node-link graph draws."
+  type GraphNode {
+    id: ID!
+    loc: String!
+    name: String
+    nodeType: String
+    tags: [String!]!
+  }
+
+  "Slim edge projection for the graph view (issue #466) — endpoint IDs only."
+  type GraphEdge {
+    id: ID!
+    loc: String!
+    name: String
+    sourceId: ID!
+    targetId: ID!
+  }
+
+  "Paged envelope for memoryNodes — the standard limit/offset/total idiom; total is the memory's full node count."
+  type GraphNodesPage {
+    nodes: [GraphNode!]!
+    total: Int!
+  }
+
+  "Paged envelope for memoryEdges — total is the memory's full edge count."
+  type GraphEdgesPage {
+    edges: [GraphEdge!]!
+    total: Int!
+  }
+
   """
   Entity types the cross-entity global search (globalSearch) can return.
   Mirrors the SearchEntityType union in src/lib/global-search.
@@ -1975,6 +2005,32 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     appNodes(appId: ID!, limit: Int): [Node!]!
+
+    """
+    Slim, paginated node list for rendering a memory's graph view (issue #466).
+    Returns ONLY the fields a node-link graph draws (id, loc, name, nodeType,
+    tags) — no content / abstract / data / tokens / edges — so the payload is a
+    fraction of the full node fragment. The graph view loads this to completion
+    (page by page) and renders nodes, THEN loads memoryEdges to draw the links.
+
+    memoryId accepts the memory's ID or URN; a memory the caller can't read
+    returns an empty page (total 0, no existence disclosure). Paged via limit
+    (default 1000, hard-capped 2000) + offset; total is the memory's full node
+    count so the client can show "N of M" and know when it has paged them all.
+    Deterministic loc-ascending order so offset paging never drops/duplicates.
+    """
+    memoryNodes(memoryId: ID!, limit: Int, offset: Int): GraphNodesPage!
+
+    """
+    Slim, paginated edge list for a memory's graph view (issue #466) — phase two
+    after memoryNodes. Returns endpoint IDs only (sourceId/targetId); the client
+    already holds the nodes by the time it draws edges, so it maps id -> node
+    itself. Scoped by the edge's denormalized memoryId (edges whose SOURCE is in
+    the memory); a cross-memory edge may reference a target outside this memory,
+    which the client drops as a dangling endpoint. Same access gate, paging, and
+    deterministic loc-ascending order as memoryNodes.
+    """
+    memoryEdges(memoryId: ID!, limit: Int, offset: Int): GraphEdgesPage!
 
     """
     Decrypted AI config for an App (org ADMIN of the App's org).
