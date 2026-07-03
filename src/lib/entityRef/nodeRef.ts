@@ -58,13 +58,17 @@ export async function resolveNodeRef(
   contextMemoryId?: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  // Form 1: bare ID — no URN parsing needed; look up by PK directly.
+  // Form 1: bare ID — no URN parsing needed; look up by PK directly. This is a
+  // single unique lookup (like the sibling resolvers), so the soft-delete
+  // exclusion lives in the query: findFirst + `deletedAt: null` unless
+  // includeDeleted. (The URN paths below keep post-fetch checks because their
+  // memory lookup gates control flow.)
   if (isId(ref)) {
-    const node = await db.node.findUnique({
-      where: { id: ref },
-      select: { id: true, deletedAt: true },
+    const node = await db.node.findFirst({
+      where: { id: ref, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
+      select: { id: true },
     });
-    if (!node || (!options?.includeDeleted && node.deletedAt)) throw new NodeNotFoundError(ref);
+    if (!node) throw new NodeNotFoundError(ref);
     return { id: node.id };
   }
 
