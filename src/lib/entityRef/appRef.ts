@@ -7,7 +7,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isId } from './shape.js';
+import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { AppNotFoundError } from './errors.js';
 
@@ -16,8 +16,8 @@ export async function resolveAppRef(
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  const idInput = isId(ref);
-  if (!idInput) {
+  const isId = isIdFunc(ref);
+  if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'app');
   }
@@ -29,7 +29,7 @@ export async function resolveAppRef(
   // + `::`→`:`) is a no-op on an ID, so it runs only on the URN path. Excluded
   // by default; `{ includeDeleted: true }` opts in (matches memoryRef).
   const deletedFilter = options?.includeDeleted ? {} : { deletedAt: null };
-  const app = idInput
+  const app = isId
     ? await db.app.findFirst({
         where: { id: ref, ...deletedFilter },
         select: { id: true },

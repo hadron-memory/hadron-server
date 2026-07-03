@@ -11,7 +11,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isId } from './shape.js';
+import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { OrganizationNotFoundError } from './errors.js';
 
@@ -20,14 +20,14 @@ export async function resolveOrgRef(
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  const idInput = isId(ref);
-  if (!idInput) {
+  const isId = isIdFunc(ref);
+  if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'org');
   }
   // ID → PK lookup; URN → normalized (prefix stripped, `::` collapsed to `:`).
   // Normalization is a no-op on an ID, so the ID path skips it.
-  const where = idInput
+  const where = isId
     ? { id: ref }
     : { urn: normalizeUrnForLookup(parseUrnInput(ref).value) };
   // findFirst + `deletedAt: null` so the soft-delete exclusion lives in the

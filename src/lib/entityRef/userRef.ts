@@ -18,7 +18,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isId } from './shape.js';
+import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { UserNotFoundError } from './errors.js';
 
@@ -27,8 +27,8 @@ export async function resolveUserRef(
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
-  const idInput = isId(ref);
-  if (!idInput) {
+  const isId = isIdFunc(ref);
+  if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
     assertFullyQualifiedUrn(ref, 'user');
   }
@@ -36,7 +36,7 @@ export async function resolveUserRef(
   // Handles are lowercase-canonical (#325), so lowercase the input for
   // case-insensitive resolution (hrn:user:Holger → the `holger` row).
   // Normalization is a no-op on an ID, so it runs only on the handle path.
-  const where = idInput
+  const where = isId
     ? { id: ref }
     : { handle: normalizeUrnForLookup(parseUrnInput(ref).value).toLowerCase() };
   // findFirst + `deletedAt: null` so the soft-delete exclusion lives in the

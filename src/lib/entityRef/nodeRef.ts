@@ -48,7 +48,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isId } from './shape.js';
+import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
 import { NodeNotFoundError } from './errors.js';
 
@@ -63,7 +63,7 @@ export async function resolveNodeRef(
   // exclusion lives in the query: findFirst + `deletedAt: null` unless
   // includeDeleted. (The URN paths below keep post-fetch checks because their
   // memory lookup gates control flow.)
-  if (isId(ref)) {
+  if (isIdFunc(ref)) {
     const node = await db.node.findFirst({
       where: { id: ref, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
       select: { id: true },
@@ -93,7 +93,7 @@ export async function resolveNodeRef(
   // valid node-URN shape — node URNs are always `<memory-urn>:<loc>`. (An
   // unprefixed bare ID was already handled above.) Reject rather than silently
   // looking it up.
-  if (isId(normalized)) {
+  if (isIdFunc(normalized)) {
     throw new NodeNotFoundError(ref);
   }
 
