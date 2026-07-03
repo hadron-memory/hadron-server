@@ -19,12 +19,18 @@ const TGT_ID = 'b'.repeat(32);
 function mockDb() {
   return {
     // Spec 037: createEdge fetches both endpoints to compose/derive the edge
-    // loc + denormalize memoryId. #322: resolveNodeRef first does a
-    // select:{id,deletedAt} PK lookup, then the resolver re-fetches
-    // loc/memoryId — one impl returning a superset row serves both, and
-    // echoes back the requested id so source/target stay distinct.
+    // loc + denormalize memoryId. #322: resolveNodeRef first does a bare-ID PK
+    // lookup (findFirst, `deletedAt: null` filter), then the resolver re-fetches
+    // loc/memoryId (findUnique) — one impl returning a superset row serves both,
+    // and echoes back the requested id so source/target stay distinct.
     node: {
       findUnique: vi.fn().mockImplementation(async ({ where }: { where: { id?: string } }) => ({
+        id: where?.id ?? SRC_ID,
+        deletedAt: null,
+        loc: 'l',
+        memoryId: 'mem-1',
+      })),
+      findFirst: vi.fn().mockImplementation(async ({ where }: { where: { id?: string } }) => ({
         id: where?.id ?? SRC_ID,
         deletedAt: null,
         loc: 'l',
