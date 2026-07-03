@@ -551,9 +551,10 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   // Non-personal/private: global ADMIN/OWNER bypass.
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
 
-  // Direct org member with CONTRIBUTOR+?
-  const member = await ctx.db.orgMember.findUnique({
-    where: { organizationId_userId: { organizationId: memory.organizationId, userId: ctx.userId } },
+  // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
+  // membership no longer grants write access (same rule as requireOrgRole).
+  const member = await ctx.db.orgMember.findFirst({
+    where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
   });
   if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
 

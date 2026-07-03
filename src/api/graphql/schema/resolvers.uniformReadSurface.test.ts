@@ -167,6 +167,32 @@ describe('Query.agent(ref) — the uniform single-agent read', () => {
     await expect(Q.agent(null, { ref: agentA.id }, ctx(member.id))).rejects.toThrow('Forbidden');
     await expect(Q.app(null, { ref: app.id }, ctx(member.id))).rejects.toThrow('Forbidden');
   });
+
+  it('a REVOKED membership no longer grants memory WRITE access (requireMemoryWriteAccess sweep)', async () => {
+    // Promote to CONTRIBUTOR, verify write works, revoke, verify denied.
+    await db.orgMember.updateMany({
+      where: { organizationId: orgA.id, userId: member.id },
+      data: { role: 'CONTRIBUTOR' },
+    });
+    const M = resolvers.Mutation as any;
+    const written = await M.createNode(
+      null,
+      { input: { memoryId: memA.id, loc: 'uni:write-check', name: 'w' } },
+      ctx(member.id),
+    );
+    expect(written?.loc).toBe('uni:write-check');
+    await db.orgMember.updateMany({
+      where: { organizationId: orgA.id, userId: member.id },
+      data: { deletedAt: new Date() },
+    });
+    await expect(
+      M.createNode(
+        null,
+        { input: { memoryId: memA.id, loc: 'uni:write-check-2', name: 'w2' } },
+        ctx(member.id),
+      ),
+    ).rejects.toThrow(/Forbidden|no write access/);
+  });
 });
 
 describe('Query.agents — the uniform paginated agent list', () => {

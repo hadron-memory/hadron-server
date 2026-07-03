@@ -912,18 +912,20 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
+      // findFirst + deletedAt in both checks so a REVOKED membership no
+      // longer authorizes subscription management (same rule as requireOrgRole).
       const isOwnerAdmin = async () => {
         if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
         if (!ctx.userId) return false;
-        const m = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: memory.organizationId, userId: ctx.userId } },
+        const m = await ctx.db.orgMember.findFirst({
+          where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
         });
         return m?.role === 'ADMIN' || m?.role === 'OWNER';
       };
       const isSubscriberAdmin = async () => {
         if (!ctx.userId) return false;
-        const m = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: ctx.userId } },
+        const m = await ctx.db.orgMember.findFirst({
+          where: { organizationId: resolvedOrgId, userId: ctx.userId, deletedAt: null },
         });
         return m?.role === 'ADMIN' || m?.role === 'OWNER';
       };

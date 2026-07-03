@@ -145,8 +145,10 @@ export const nodeQueries = {
           // The dedicated app(id) query requires org ADMIN; mirror that.
           if (!isGlobalAdmin) {
             if (!ctx.userId) return null;
-            const member = await ctx.db.orgMember.findUnique({
-              where: { organizationId_userId: { organizationId: app.organizationId, userId: ctx.userId } },
+            // findFirst + deletedAt so a REVOKED membership no longer
+            // resolves app URNs (same rule as requireOrgRole).
+            const member = await ctx.db.orgMember.findFirst({
+              where: { organizationId: app.organizationId, userId: ctx.userId, deletedAt: null },
             });
             if (!member || (ROLE_ORDER[member.role] ?? -1) < ROLE_ORDER['ADMIN']) return null;
           }
