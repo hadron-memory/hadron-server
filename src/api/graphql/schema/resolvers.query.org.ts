@@ -168,17 +168,17 @@ export const orgQueries = {
       // org-rooted slices. App-Key callers (no userId) get no org-read → [].
       const isPlatformAdmin = !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
       const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
-      let orgIds = isPlatformAdmin
-        ? null
-        : ctx.userId
-          ? await getMemberOrgIds(ctx.db, ctx.userId)
-          : [];
+      // The caller's member orgs (admin included) — both the default org scope
+      // for non-admins and the membership gate for orgId. Computed once.
+      const callerOrgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+      let orgIds: string[] | null = isPlatformAdmin ? null : callerOrgIds;
 
       // #463: optional single-org narrowing. orgScopeId AND-constrains the
       // Memory + Node slices to that org's memories (never widening access);
-      // orgIds: [orgId] confines the org-rooted slices. A non-admin who is not a
-      // member of orgId gets an empty page (no org-existence disclosure); a
-      // platform admin may scope to any org.
+      // orgIds: [orgId] confines the org-rooted slices. Uniform member-only —
+      // the active org must be one the caller is a member of (NO platform-admin
+      // bypass); a non-member orgId gets an empty page (no org-existence
+      // disclosure).
       let orgScopeId: string | null = null;
       if (orgId != null) {
         let resolvedOrgId: string;
@@ -187,7 +187,7 @@ export const orgQueries = {
         } catch {
           return { hits: [], total: 0, degraded: [] };
         }
-        if (!isPlatformAdmin && !(orgIds ?? []).includes(resolvedOrgId)) {
+        if (!callerOrgIds.includes(resolvedOrgId)) {
           return { hits: [], total: 0, degraded: [] };
         }
         orgIds = [resolvedOrgId];

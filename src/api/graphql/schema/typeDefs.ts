@@ -1963,9 +1963,13 @@ export const typeDefs = `#graphql
     # behavior); to surface system memories pass them explicitly, e.g.
     # memoryClasses: [system, knowledge, group, personal, private, app].
     #
-    # orgId (optional) narrows the cross-org union to a single organization the
-    # caller is a member of; a non-member orgId returns [] (no existence leak).
-    # Omit for the default cross-org union.
+    # orgId (optional) selects an "active organization" the caller is a member
+    # of. The scoped view is: (1) the caller's OWN personal/private memories
+    # (ALWAYS — they are user-owned, shown in every org context), (2) memories
+    # the active org owns, and (3) memories the active org subscribes to. Other
+    # member orgs' resources and public memories are out of scope here. A
+    # non-member orgId returns [] (no existence leak); no platform-admin bypass.
+    # Omit for the default cross-org union over all your member orgs.
     myMemories(memoryClasses: [MemoryClass!], orgId: ID): [Memory!]!
 
     """

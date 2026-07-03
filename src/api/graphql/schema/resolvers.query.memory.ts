@@ -172,6 +172,17 @@ export const memoryQueries = {
       // not load-bearing here — the resolver returns the union). Apps
       // with no installed Agents see zero memories.
       if (ctx.appId) {
+        // #463: honor the optional org narrowing here too — an App-key caller's
+        // memories all live in the App's org, so a non-matching orgId returns []
+        // (rather than silently ignoring the arg). Unresolvable orgId → [].
+        let resolvedOrgId: string | null = null;
+        if (orgId != null) {
+          try {
+            ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+          } catch {
+            return [];
+          }
+        }
         const app = await ctx.db.app.findUnique({
           where: { id: ctx.appId },
           select: {
@@ -193,6 +204,7 @@ export const memoryQueries = {
             // Same class filter as the user branch: explicit list wins,
             // otherwise hide `system` by default.
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
+            if (resolvedOrgId != null && item.memory.organizationId !== resolvedOrgId) continue;
             memoryMap.set(item.memory.id, item.memory);
           }
         }
@@ -205,12 +217,16 @@ export const memoryQueries = {
           select: { organizationId: true },
         });
         let orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
-        // #463: optional single-org narrowing. Scope to [orgId] iff the caller
-        // is a member (accepting ID or URN); a non-member orgId returns [] — no
-        // org-existence disclosure. When scoped, the caller's own
-        // personal/private clause is org-filtered too (see below) so a scoped
-        // view can't leak the user's personal memories from OTHER orgs —
-        // consistent with how globalSearch scopes those same rows.
+        // #463: optional single-org narrowing ("active organization"). Scope to
+        // [orgId] iff the caller is a member (ID or URN); a non-member orgId
+        // returns [] — no org-existence disclosure. The active-org view is:
+        //   (1) the caller's OWN personal/private memories — ALWAYS (they're
+        //       user-owned, not org-owned, so they show in every org context),
+        //   (2) memories the active org OWNS,
+        //   (3) memories the active org SUBSCRIBES to.
+        // Other member orgs' resources and public memories are out of scope
+        // here (reached via other surfaces). No platform-admin bypass — the
+        // active org is always one the caller is a member of.
         if (orgId != null) {
           let resolvedOrgId: string;
           try {
@@ -234,15 +250,11 @@ export const memoryQueries = {
               // personal/private never come in via the org.
               { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
               { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
-              // 034: the user's own owner-owned personal/private memories. When
-              // orgId-scoped, orgIds === [resolvedOrgId], so this spread
-              // confines them to that org (a no-op in the unscoped union, where
-              // the caller sees all their personal/private across orgs).
-              {
-                class: { in: ['personal', 'private'] as any },
-                userId: ctx.userId,
-                ...(orgId != null ? { organizationId: { in: orgIds } } : {}),
-              },
+              // Category (1): the caller's own owner-owned personal/private
+              // memories — ALWAYS, independent of the active org (they're
+              // user-owned, not part of any org's collection). Deliberately NOT
+              // org-scoped: selecting an active org must not hide your own notes.
+              { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
             ],
           },
           include: MEMORY_INCLUDE,

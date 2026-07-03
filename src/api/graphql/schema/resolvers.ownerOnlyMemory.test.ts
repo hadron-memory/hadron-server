@@ -138,9 +138,9 @@ describe('MemoryShare boundary (U8)', () => {
   });
 });
 
-describe('myMemories — orgId scope (#463)', () => {
-  it('confines the union — including the caller own personal memories — to one org', async () => {
-    // Personal memory in the beforeEach org (org A).
+describe('myMemories — active-org scope (#463)', () => {
+  it('shows the caller own personal memories regardless of the active org (category 1)', async () => {
+    // Owner's personal memory in org A (the beforeEach org).
     const personalA = await resolvers.Mutation.createMemory(
       null, { orgId: org.id, name: 'personal-a', memoryClass: 'personal' } as any, asOwner(),
     );
@@ -157,16 +157,31 @@ describe('myMemories — orgId scope (#463)', () => {
     const all = (await resolvers.Query.myMemories(null, {}, asOwner())).map((m: any) => m.id);
     expect(all).toEqual(expect.arrayContaining([personalA.id, personalB.id]));
 
-    // Scoped to org A: personalA present, personalB (org B) excluded — the fix
-    // (previously the personal/private clause ignored the org narrowing).
+    // Active org A: category (1) — the caller's OWN personal memories always
+    // show, independent of the active org. So BOTH personalA and the org-B
+    // personalB appear (they're user-owned, not org-owned).
     const scoped = (await resolvers.Query.myMemories(null, { orgId: org.id }, asOwner())).map((m: any) => m.id);
     expect(scoped).toContain(personalA.id);
-    expect(scoped).not.toContain(personalB.id);
+    expect(scoped).toContain(personalB.id);
 
     // Non-member org → empty, no existence disclosure.
     const strangerOrg = await db.organization.create({
       data: { id: generateId(), name: 'stranger', urn: `stranger-${generateId()}` },
     });
     expect(await resolvers.Query.myMemories(null, { orgId: strangerOrg.id }, asOwner())).toEqual([]);
+  });
+
+  it('active org shows the org own + subscribed memories, but not another member org own memory', async () => {
+    // Org A owns a knowledge memory; owner is a member of A.
+    const aKnowledge = await createDbOrgAndGraph(db, { orgName: 'a-owner', graphName: 'a/know', visibility: 'ORGANIZATION' });
+    await db.orgMember.create({ data: { organizationId: aKnowledge.org.id, userId: owner.id, role: 'READER' } });
+    // Another member org B with its own knowledge memory.
+    const bKnowledge = await createDbOrgAndGraph(db, { orgName: 'b-owner', graphName: 'b/know', visibility: 'ORGANIZATION' });
+    await db.orgMember.create({ data: { organizationId: bKnowledge.org.id, userId: owner.id, role: 'READER' } });
+
+    // Active org = A: A's own memory (2) is in; B's own memory is NOT.
+    const scoped = (await resolvers.Query.myMemories(null, { orgId: aKnowledge.org.id }, asOwner())).map((m: any) => m.id);
+    expect(scoped).toContain(aKnowledge.graph.id);
+    expect(scoped).not.toContain(bKnowledge.graph.id);
   });
 });

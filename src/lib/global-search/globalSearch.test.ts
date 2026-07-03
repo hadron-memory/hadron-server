@@ -366,8 +366,16 @@ describe('globalSearch — GraphQL resolver wiring', () => {
     expect(r.total).toBe(0);
   });
 
-  it('a platform admin may scope to any org', async () => {
-    const r = await resolvers.Query.globalSearch({}, { query: 'Beta', orgId: fx.orgB }, ctxFor(fx.admin, true));
-    expect(r.hits.some((h) => h.id === fx.memoryB)).toBe(true);
+  it('is membership-gated even for a platform admin (no admin bypass)', async () => {
+    // fx.admin is a member of no org → scoping to orgB is empty despite the
+    // platform role (uniform member-only).
+    const denied = await resolvers.Query.globalSearch({}, { query: 'Beta', orgId: fx.orgB }, ctxFor(fx.admin, true));
+    expect(denied.hits).toHaveLength(0);
+    expect(denied.total).toBe(0);
+
+    // Once that admin joins orgB, the same scope resolves.
+    await db.orgMember.create({ data: { organizationId: fx.orgB, userId: fx.admin, role: 'READER' } });
+    const scoped = await resolvers.Query.globalSearch({}, { query: 'Beta', orgId: fx.orgB }, ctxFor(fx.admin, true));
+    expect(scoped.hits.some((h) => h.id === fx.memoryB)).toBe(true);
   });
 });

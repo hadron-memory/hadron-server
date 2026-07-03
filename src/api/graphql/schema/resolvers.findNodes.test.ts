@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
+import { cleanDb, createDbOrgAndGraph, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -174,7 +174,7 @@ describe('findNodes — memoryClasses (cor:api:090:02)', () => {
 });
 
 describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-in-one-org query', () => {
-  it('narrows a member to one org, returns empty for a non-member org, and admin may scope anywhere', async () => {
+  it('narrows a member to one org; non-member org is empty; admin is ALSO membership-gated (no bypass)', async () => {
     // orgA (fn-org) already has `graph`; add a runnable node there.
     await mkNode(graph.id, { loc: 'org.taskA', name: 'Task A', isRunnable: true });
     // A second org with its own knowledge memory + runnable node.
@@ -194,8 +194,38 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
     const inB = await findNodes({ orgId: b.org.id, filter: { isRunnable: true } }, memberCtx);
     expect(inB).toMatchObject({ hits: [], total: 0 });
 
-    // A platform admin may scope to any org.
+    // Uniform member-only: `admin()` (admin-fn) is a member of no org, so even a
+    // platform admin gets an empty page for orgB — no admin bypass.
     const adminB = await findNodes({ orgId: b.org.id, filter: { isRunnable: true } }, admin());
-    expect(adminB.hits.map((h: any) => h.node.loc)).toEqual(['org.taskB']);
+    expect(adminB).toMatchObject({ hits: [], total: 0 });
+
+    // A real admin who IS a member of orgB can scope to it — membership, not the
+    // platform role, is what authorizes the scope.
+    const adminUser = await db.user.create({ data: { githubId: 6101, githubUsername: 'fn-admin', roles: ['ADMIN'] } });
+    await db.orgMember.create({ data: { organizationId: b.org.id, userId: adminUser.id, role: 'READER' } });
+    const adminMemberB = await findNodes(
+      { orgId: b.org.id, filter: { isRunnable: true } },
+      ctx({ userId: adminUser.id, roles: ['ADMIN'] }),
+    );
+    expect(adminMemberB.hits.map((h: any) => h.node.loc)).toEqual(['org.taskB']);
+  });
+
+  it('an App-key caller may scope to its own App org, but not another org', async () => {
+    await mkNode(graph.id, { loc: 'app.task', name: 'App Task', isRunnable: true });
+    // App in orgA + a session scoped to orgA's `graph` memory → App-key access.
+    const { app } = await createDbAppWithKey(db, 'fn-appkey', orgA.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, memoryId: graph.id },
+    });
+    const appCtx = ctx({ appId: app.id, sessionId: session.id });
+
+    // Own org (orgA) → authorized; the session's memory is in orgA → its node shows.
+    const own = await findNodes({ orgId: orgA.id, filter: { isRunnable: true } }, appCtx);
+    expect(own.hits.map((h: any) => h.node.loc)).toEqual(['app.task']);
+
+    // A different org → gate rejects (empty), no disclosure.
+    const other = await createDbOrgAndGraph(db, { orgName: 'fn-other', graphName: 'other/graph' });
+    const cross = await findNodes({ orgId: other.org.id, filter: { isRunnable: true } }, appCtx);
+    expect(cross).toMatchObject({ hits: [], total: 0 });
   });
 });

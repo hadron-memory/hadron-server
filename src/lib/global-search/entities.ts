@@ -53,39 +53,28 @@ export interface AdapterCtx {
 
 const PERSONAL_CLASSES = ['personal', 'private'] as unknown as Prisma.Enumerable<never>;
 
-/**
- * org-scope narrowing (issue #463): AND-ed onto the access scope so it can only
- * ever *narrow*, never widen. Applied on the Memory + Node slices when
- * `orgScopeId` is set; the org-rooted slices are confined via `orgIds` instead.
- * A no-op (`{}`) merges harmlessly into an AND.
- */
-function memoryOrgScope(p: SearchPrincipal): AnyWhere {
-  return p.orgScopeId ? { organizationId: p.orgScopeId } : {};
-}
-function nodeOrgScope(p: SearchPrincipal): AnyWhere {
-  return p.orgScopeId ? { memory: { organizationId: p.orgScopeId } } : {};
-}
+// org-scope narrowing (issue #463): when `orgScopeId` is set, AND it onto the
+// access scope so it can only ever *narrow*, never widen (the Memory + Node
+// slices; the org-rooted slices are confined via `orgIds` instead). When unset,
+// the base `where` is returned untouched — no empty-`AND` wrapper.
 
 /** Memory scope as a Memory `where` (used by the Memory slice + encrypted count). */
 function memoryScopeWhere(p: SearchPrincipal): AnyWhere {
-  const org = memoryOrgScope(p);
-  if (p.accessibleMemoryIds !== null) return { AND: [{ id: { in: p.accessibleMemoryIds } }, org] };
-  // Admin: everything except OTHER users' personal/private (034 carve-out).
-  return {
-    AND: [{ NOT: { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } } }, org],
-  };
+  const base: AnyWhere =
+    p.accessibleMemoryIds !== null
+      ? { id: { in: p.accessibleMemoryIds } }
+      // Admin: everything except OTHER users' personal/private (034 carve-out).
+      : { NOT: { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } } };
+  return p.orgScopeId ? { AND: [base, { organizationId: p.orgScopeId }] } : base;
 }
 
 /** Memory scope projected onto a Node `where`. */
 function nodeScopeWhere(p: SearchPrincipal): AnyWhere {
-  const org = nodeOrgScope(p);
-  if (p.accessibleMemoryIds !== null) return { AND: [{ memoryId: { in: p.accessibleMemoryIds } }, org] };
-  return {
-    AND: [
-      { memory: { NOT: { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } } } },
-      org,
-    ],
-  };
+  const base: AnyWhere =
+    p.accessibleMemoryIds !== null
+      ? { memoryId: { in: p.accessibleMemoryIds } }
+      : { memory: { NOT: { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } } } };
+  return p.orgScopeId ? { AND: [base, { memory: { organizationId: p.orgScopeId } }] } : base;
 }
 
 // ── Predicate builders ──────────────────────────────────────────────────────
