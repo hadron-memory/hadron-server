@@ -34,7 +34,10 @@
  * Throws `NodeNotFoundError` for any unresolvable ref. Throws
  * `UrnNotQualifiedError` when a non-ID, non-context-relative input
  * lacks the org+memory+loc shape. Soft-deleted nodes are treated as
- * not-existing.
+ * not-existing — including a node reached through a soft-deleted memory
+ * prefix. Pass `{ includeDeleted: true }` to ignore soft-delete state along
+ * the whole resolution path (the target node AND the memory that locates it),
+ * matching `memoryRef`'s opt-in (e.g. a `deleteNode` re-delete for idempotency).
  *
  * Why this lives next to `memoryRef.ts` and friends: spec 007's
  * resolution-helpers contract is the single place callers go to turn
@@ -53,7 +56,18 @@ export async function resolveNodeRef(
   db: Pick<PrismaClient, 'node' | 'memory'>,
   ref: string,
   contextMemoryId?: string,
+  options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
+  // Form 1: bare ID — no URN parsing needed; look up by PK directly.
+  if (isId(ref)) {
+    const node = await db.node.findUnique({
+      where: { id: ref },
+      select: { id: true, deletedAt: true },
+    });
+    if (!node || (!options?.includeDeleted && node.deletedAt)) throw new NodeNotFoundError(ref);
+    return { id: node.id };
+  }
+
   const parsed = parseUrnInput(ref);
 
   // A wrong-type URN prefix (e.g. `urn:memory:...`, `urn:org:...`)
@@ -71,19 +85,12 @@ export async function resolveNodeRef(
   // when the caller's intent was unambiguously the named memory.
   const strictUrnNode = parsed.type === 'node';
 
-  // Form 1: bare ID.
+  // A prefixed input whose body is a bare ID (e.g. `urn:node:<id>`) is not a
+  // valid node-URN shape — node URNs are always `<memory-urn>:<loc>`. (An
+  // unprefixed bare ID was already handled above.) Reject rather than silently
+  // looking it up.
   if (isId(normalized)) {
-    if (strictUrnNode) {
-      // `urn:node:<id>` is not a defined shape — node URNs are always
-      // `<memory-urn>:<loc>`. Reject rather than silently accepting.
-      throw new NodeNotFoundError(ref);
-    }
-    const node = await db.node.findUnique({
-      where: { id: normalized },
-      select: { id: true, deletedAt: true },
-    });
-    if (!node || node.deletedAt) throw new NodeNotFoundError(ref);
-    return { id: node.id };
+    throw new NodeNotFoundError(ref);
   }
 
   // Spec 022 enforcement: API-boundary callers MUST NOT pass
@@ -142,13 +149,13 @@ export async function resolveNodeRef(
       // The loc joins the remaining segments with single `:` because
       // locs are stored that way (atoms inside a loc are colon-
       // separated; `::` is only the memory/loc boundary separator).
-      if (memory.deletedAt) throw new NodeNotFoundError(ref);
+      if (!options?.includeDeleted && memory.deletedAt) throw new NodeNotFoundError(ref);
       const loc = parts.slice(2).join(':');
       const node = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
         select: { id: true, deletedAt: true },
       });
-      if (!node || node.deletedAt) throw new NodeNotFoundError(ref);
+      if (!node || (!options?.includeDeleted && node.deletedAt)) throw new NodeNotFoundError(ref);
       return { id: node.id };
     }
     if (strictUrnNode) {
@@ -177,6 +184,6 @@ export async function resolveNodeRef(
     where: { loc_memoryId: { loc: normalized, memoryId: contextMemoryId } },
     select: { id: true, deletedAt: true },
   });
-  if (!node || node.deletedAt) throw new NodeNotFoundError(ref);
+  if (!node || (!options?.includeDeleted && node.deletedAt)) throw new NodeNotFoundError(ref);
   return { id: node.id };
 }

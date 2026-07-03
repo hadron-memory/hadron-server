@@ -133,6 +133,19 @@ describe('resolveNodeRef', () => {
     );
   });
 
+  it('resolves a soft-deleted node when includeDeleted is true', async () => {
+    const node = await db.node.create({
+      data: { memoryId, loc: 'noderef-test-services:db-inc', name: 'db-inc', deletedAt: new Date() },
+    });
+    // bare ID and short-loc-within-context both resolve with the opt-in.
+    await expect(
+      resolveNodeRef(db, node.id, undefined, { includeDeleted: true }),
+    ).resolves.toEqual({ id: node.id });
+    await expect(
+      resolveNodeRef(db, node.loc, memoryId, { includeDeleted: true }),
+    ).resolves.toEqual({ id: node.id });
+  });
+
   it('does not fall back to short-loc when explicit urn:node: names a missing memory', async () => {
     // A node exists in the context memory whose loc happens to match
     // the body of the explicit URN. Without strict handling, the
@@ -173,6 +186,33 @@ describe('resolveNodeRef', () => {
         memoryId,
       ),
     ).rejects.toBeInstanceOf(NodeNotFoundError);
+  });
+
+  it('resolves through a soft-deleted memory prefix when includeDeleted is true', async () => {
+    const delOrg = await db.organization.create({
+      data: { name: 'noderef-test-inc-org', urn: `noderef-test-inc-${Date.now()}` },
+    });
+    const delMem = await db.memory.create({
+      data: {
+        organizationId: delOrg.id,
+        urn: `${delOrg.urn}:gone`,
+        name: 'noderef-test-inc-mem',
+        class: 'knowledge',
+        deletedAt: new Date(),
+      },
+    });
+    // A LIVE node inside the soft-deleted memory — only the memory is deleted.
+    const node = await db.node.create({
+      data: { memoryId: delMem.id, loc: 'noderef-test-services:db', name: 'in-deleted-mem' },
+    });
+    const fullUrn = `${delMem.urn}:noderef-test-services:db`;
+    // Default: the soft-deleted memory prefix blocks resolution.
+    await expect(resolveNodeRef(db, fullUrn, memoryId)).rejects.toBeInstanceOf(NodeNotFoundError);
+    // includeDeleted ignores soft-delete along the whole path, so the node
+    // resolves through its soft-deleted memory.
+    await expect(
+      resolveNodeRef(db, fullUrn, memoryId, { includeDeleted: true }),
+    ).resolves.toEqual({ id: node.id });
   });
 
   it('rejects an explicit urn:node:<id> form (node URNs are <memory-urn>:<loc>, not IDs)', async () => {
