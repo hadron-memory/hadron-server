@@ -75,6 +75,26 @@ describe('memoryNodes (#466)', () => {
     const page = await memoryNodes({ memoryId: mem.id }, ctx({ userId: stranger.id, roles: [] }));
     expect(page).toEqual({ nodes: [], total: 0 });
   });
+
+  it('a personal memory is graphable by its owner only — a platform admin still gets an empty page (034 carve-out)', async () => {
+    const orgP = await db.organization.create({
+      data: { id: generateId(), name: 'gv-personal-org', urn: `gv-p-${generateId()}` },
+    });
+    const owner = await db.user.create({ data: { githubId: 6300, githubUsername: 'gv-owner', roles: [] } });
+    const personal = await db.memory.create({
+      data: { id: generateId(), organizationId: orgP.id, urn: `gv-personal-${generateId()}`, name: 'Personal', class: 'personal', userId: owner.id },
+    });
+    await db.node.create({ data: { id: generateId(), memoryId: personal.id, loc: 'p.a', name: 'p.a', tags: [] } });
+
+    // Owner → sees the node.
+    expect((await memoryNodes({ memoryId: personal.id }, ctx({ userId: owner.id }))).total).toBe(1);
+    // Another user → empty (owner-only).
+    const otherUser = await db.user.create({ data: { githubId: 6301, githubUsername: 'gv-otheru', roles: [] } });
+    expect(await memoryNodes({ memoryId: personal.id }, ctx({ userId: otherUser.id }))).toEqual({ nodes: [], total: 0 });
+    // Platform admin → ALSO empty (admins don't see other users' personal/private).
+    const adminU = await db.user.create({ data: { githubId: 6302, githubUsername: 'gv-adminu', roles: ['ADMIN'] } });
+    expect(await memoryNodes({ memoryId: personal.id }, ctx({ userId: adminU.id, roles: ['ADMIN'] }))).toEqual({ nodes: [], total: 0 });
+  });
 });
 
 describe('memoryEdges (#466)', () => {
