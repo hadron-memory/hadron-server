@@ -59,6 +59,14 @@ describe('memoryNodes (#466)', () => {
     expect((await memoryNodes({ memoryId: mem.urn })).total).toBe(1);
   });
 
+  it('limit: 0 returns an empty page with just the total (cheap node count)', async () => {
+    await mkNode('c.a');
+    await mkNode('c.b');
+    const page = await memoryNodes({ memoryId: mem.id, limit: 0 });
+    expect(page.nodes).toEqual([]);
+    expect(page.total).toBe(2); // count still returned — the limit-0 count pattern
+  });
+
   it('returns an empty page for a memory the caller cannot read (no disclosure)', async () => {
     await mkNode('secret.a');
     const other = await createDbOrgAndGraph(db, { orgName: 'gv-other', graphName: 'gvo/graph' });
@@ -86,6 +94,11 @@ describe('memoryEdges (#466)', () => {
     const p2 = await memoryEdges({ memoryId: mem.id, limit: 1, offset: 1 });
     expect(p2.edges.map((e: any) => e.loc)).toEqual(['edge.2']);
     expect(p2.total).toBe(2);
+
+    // limit: 0 → empty page, total still returned (cheap edge count).
+    const countOnly = await memoryEdges({ memoryId: mem.id, limit: 0 });
+    expect(countOnly.edges).toEqual([]);
+    expect(countOnly.total).toBe(2);
   });
 
   it('returns an empty page for a memory the caller cannot read', async () => {

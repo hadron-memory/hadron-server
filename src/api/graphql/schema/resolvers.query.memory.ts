@@ -18,6 +18,17 @@ const GRAPH_PAGE_DEFAULT = 1000;
 const GRAPH_PAGE_MAX = 2000;
 
 /**
+ * Clamp a graph page size: omitted → the default; otherwise the caller's value
+ * clamped to [0, MAX]. `limit: 0` is preserved (not bumped to 1) so a caller can
+ * fetch only `total` — the cheap "how big is this memory?" node/edge count — or
+ * suppress the payload during init, the standard limit-0 pattern.
+ */
+function clampGraphTake(limit?: number | null): number {
+  if (limit == null) return GRAPH_PAGE_DEFAULT;
+  return Math.min(GRAPH_PAGE_MAX, Math.max(0, limit));
+}
+
+/**
  * Resolve a memoryId (ID or URN) to its id IFF the caller may read it; returns
  * null when the ref does not resolve OR the caller lacks read access — so the
  * graph-view queries return an empty page with no org/memory existence
@@ -260,7 +271,7 @@ export const memoryQueries = {
       const resolvedId = await resolveReadableMemoryId(ctx, memoryId);
       if (!resolvedId) return { nodes: [], total: 0 };
 
-      const take = Math.min(GRAPH_PAGE_MAX, Math.max(1, limit ?? GRAPH_PAGE_DEFAULT));
+      const take = clampGraphTake(limit);
       const skip = Math.max(0, offset ?? 0);
       const where = { memoryId: resolvedId, deletedAt: null };
       const [total, rows] = await Promise.all([
@@ -300,7 +311,7 @@ export const memoryQueries = {
       const resolvedId = await resolveReadableMemoryId(ctx, memoryId);
       if (!resolvedId) return { edges: [], total: 0 };
 
-      const take = Math.min(GRAPH_PAGE_MAX, Math.max(1, limit ?? GRAPH_PAGE_DEFAULT));
+      const take = clampGraphTake(limit);
       const skip = Math.max(0, offset ?? 0);
       const where = { memoryId: resolvedId, deletedAt: null };
       const [total, edges] = await Promise.all([

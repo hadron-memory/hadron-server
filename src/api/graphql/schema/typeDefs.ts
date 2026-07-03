@@ -2017,7 +2017,9 @@ export const typeDefs = `#graphql
     returns an empty page (total 0, no existence disclosure). Paged via limit
     (default 1000, hard-capped 2000) + offset; total is the memory's full node
     count so the client can show "N of M" and know when it has paged them all.
-    Deterministic loc-ascending order so offset paging never drops/duplicates.
+    limit: 0 returns an empty page with just the total — the cheap "how big is
+    this memory" node count. Deterministic loc-ascending order so offset paging
+    never drops/duplicates.
     """
     memoryNodes(memoryId: ID!, limit: Int, offset: Int): GraphNodesPage!
 
