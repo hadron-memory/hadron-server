@@ -298,9 +298,13 @@ export const orgQueries = {
         // Membership scope — for non-admins (unchanged default) and for any
         // caller with filter.memberOnly (a no-op for non-admins, whose default
         // scope IS their memberships). resolveOrgScope excludes revoked
-        // (soft-deleted) memberships.
+        // (soft-deleted) memberships. Without an orgId argument it never
+        // returns null today, but handle it like the sibling list resolvers
+        // (empty page) instead of asserting — a future orgId addition or
+        // helper refactor must degrade, not crash (PR #479 review).
         const scope = await resolveOrgScope(ctx);
-        where = { deletedAt: null, id: { in: scope!.memberOrgIds } };
+        if (!scope) return { items: [], total: 0 };
+        where = { deletedAt: null, id: { in: scope.memberOrgIds } };
       }
       const [total, items] = await Promise.all([
         ctx.db.organization.count({ where }),
