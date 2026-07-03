@@ -319,6 +319,26 @@ describe('globalSearch — pagination (issue #465)', () => {
     expect(r.hits).toHaveLength(0);
     expect(r.total).toBe(4);
   });
+
+  it('pages stably when hits share score+name+type (unique-id tiebreak)', async () => {
+    // Two memories with the SAME name → equal score, name, and entityType. Only
+    // the final id tiebreak makes the order total, so offset paging can't drop
+    // or duplicate a row across separate requests.
+    const m1 = await db.memory.create({
+      data: { id: generateId(), organizationId: fx.orgA, urn: `org-a:dup1-${generateId()}`, name: 'Duplicate Name', class: 'knowledge' },
+    });
+    const m2 = await db.memory.create({
+      data: { id: generateId(), organizationId: fx.orgA, urn: `org-a:dup2-${generateId()}`, name: 'Duplicate Name', class: 'knowledge' },
+    });
+    const args = { query: 'Duplicate Name', entityTypes: ['memory'] as SearchEntityType[] };
+    const p1 = await globalSearch(db, { ...args, limit: 1, offset: 0 }, allP());
+    const p2 = await globalSearch(db, { ...args, limit: 1, offset: 1 }, allP());
+    // Disjoint pages that together cover both — no dup, no skip.
+    expect(new Set([...p1.hits, ...p2.hits].map((h) => h.id))).toEqual(new Set([m1.id, m2.id]));
+    // Deterministic across repeated calls (id order is stable).
+    const p1again = await globalSearch(db, { ...args, limit: 1, offset: 0 }, allP());
+    expect(p1again.hits[0].id).toBe(p1.hits[0].id);
+  });
 });
 
 describe('globalSearch — org scope (issue #463)', () => {

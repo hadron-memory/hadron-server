@@ -80,12 +80,20 @@ export async function globalSearch(
     (a, b) =>
       b.score - a.score ||
       (a.name ?? a.urn ?? a.id).localeCompare(b.name ?? b.urn ?? b.id) ||
-      a.entityType.localeCompare(b.entityType),
+      a.entityType.localeCompare(b.entityType) ||
+      // Final tiebreak on the unique id → a TOTAL order. Without it, two hits
+      // with equal score+name+entityType keep their input order, which is the
+      // DB's (unordered) candidate-fetch order and can differ between the page-1
+      // and page-2 requests — a row could appear on both pages or be skipped.
+      a.id.localeCompare(b.id),
   );
 
-  // `total` is the full ranked list length (bounded by PER_ENTITY_CAP per type);
-  // the page is a slice of that already-ranked list so rows can't shift between
-  // pages (the sort tiebreak is deterministic — issue #465).
+  // `total` is the full ranked list length. Page = a slice of this fully-ordered
+  // list; the id tiebreak above makes paging stable WITHIN the per-entity
+  // candidate bound. NOTE (issue #465): when a type has more than PER_ENTITY_CAP
+  // matches, WHICH candidates are fetched is itself bounded/approximate (they're
+  // capped before scoring), so `total` and deep pages past the bound are not
+  // exact — the documented bounded-search contract.
   return { hits: hits.slice(offset, offset + limit), total: hits.length, degraded };
 }
 

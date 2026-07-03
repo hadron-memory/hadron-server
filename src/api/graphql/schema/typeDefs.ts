@@ -1840,11 +1840,13 @@ export const typeDefs = `#graphql
     the caller exactly as the per-kind queries are. Distinct from \`findNodes\`,
     which is the node-only, vector-aware retrieval surface.
 
-    orgId (optional) scopes every slice to a single organization: node/memory
-    hits are confined to that org's memories and org-rooted hits (organization /
-    agent / app / aiServiceConfig) to that org. Omit for the cross-org union
-    (default). A caller who is not a member of orgId gets an empty page
-    (total: 0) — no org-existence disclosure.
+    orgId (optional) narrows the org-anchored slices to a single organization:
+    node/memory hits are confined to that org's memories and organization /
+    agent / app / aiServiceConfig hits to that org. (The user slice is NOT
+    org-scoped — users aren't org-owned; they stay gated by the caller's
+    user-visibility as usual.) Omit for the cross-org union (default). A caller
+    who is not a member of orgId gets an empty page (total: 0) — no
+    org-existence disclosure; membership-gated for everyone, no admin bypass.
 
     Paged in the repo standard idiom: limit (default 50, capped 200) + offset
     (default 0), with total in the envelope. NOTE: total is the ranked-match

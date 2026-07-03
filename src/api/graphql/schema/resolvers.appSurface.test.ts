@@ -437,6 +437,33 @@ describe('myApps', () => {
 });
 
 // ---------------------------------------------------------------------------
+// myMemories — App-key orgId gate (#463)
+// ---------------------------------------------------------------------------
+
+describe('myMemories — App-key orgId', () => {
+  it('scopes to the App own org: match → its memories, any other org → []', async () => {
+    const { app } = await createDbAppWithKey(db, 'mm-appkey', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    const appCtx = ctx({ appId: app.id });
+
+    // No orgId → the App's memories (agent's memoryItem → the test memory).
+    const all = await resolvers.Query.myMemories({}, {}, appCtx);
+    expect(all.some((m: { id: string }) => m.id === memoryId)).toBe(true);
+
+    // orgId == the App's own org → same memories (a match-or-empty gate, NOT a
+    // per-memory ownership filter — so subscribed-in memories would survive too).
+    const scoped = await resolvers.Query.myMemories({}, { orgId }, appCtx);
+    expect(scoped.some((m: { id: string }) => m.id === memoryId)).toBe(true);
+
+    // A different org → [] (the App has no other active-org context).
+    const other = await db.organization.create({
+      data: { id: generateId(), name: 'mm-other', urn: `mm-other-${generateId()}` },
+    });
+    expect(await resolvers.Query.myMemories({}, { orgId: other.id }, appCtx)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // appNodes
 // ---------------------------------------------------------------------------
 

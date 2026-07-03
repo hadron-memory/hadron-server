@@ -172,9 +172,11 @@ export const memoryQueries = {
       // not load-bearing here — the resolver returns the union). Apps
       // with no installed Agents see zero memories.
       if (ctx.appId) {
-        // #463: honor the optional org narrowing here too — an App-key caller's
-        // memories all live in the App's org, so a non-matching orgId returns []
-        // (rather than silently ignoring the arg). Unresolvable orgId → [].
+        // #463: honor the optional org narrowing here too. An App-key's "active
+        // org" is its own App's org, so orgId is a match-or-empty gate on that
+        // org — NOT a per-memory ownership filter (which would wrongly drop
+        // memories the App's org merely SUBSCRIBES to, i.e. owned by another
+        // org). Unresolvable orgId → [].
         let resolvedOrgId: string | null = null;
         if (orgId != null) {
           try {
@@ -186,6 +188,7 @@ export const memoryQueries = {
         const app = await ctx.db.app.findUnique({
           where: { id: ctx.appId },
           select: {
+            organizationId: true,
             appAgents: {
               select: {
                 agent: {
@@ -198,13 +201,15 @@ export const memoryQueries = {
           },
         });
         if (!app || app.appAgents.length === 0) return [];
+        // A scope to any org other than the App's own → empty (the App has no
+        // other active-org context); a match → its full memory view below.
+        if (resolvedOrgId != null && resolvedOrgId !== app.organizationId) return [];
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
           for (const item of aa.agent.memoryItems) {
             // Same class filter as the user branch: explicit list wins,
             // otherwise hide `system` by default.
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
-            if (resolvedOrgId != null && item.memory.organizationId !== resolvedOrgId) continue;
             memoryMap.set(item.memory.id, item.memory);
           }
         }
