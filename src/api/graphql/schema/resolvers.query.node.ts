@@ -145,16 +145,9 @@ export const nodeQueries = {
           // The dedicated app(ref:) query admits any member of the App's org
           // (#473 relaxed it from org ADMIN); mirror that so a member's
           // /app/u/<app-urn> share link resolves to the same page they can
-          // already open directly.
-          if (!isGlobalAdmin) {
-            if (!ctx.userId) return null;
-            // findFirst + deletedAt so a REVOKED membership no longer
-            // resolves app URNs (same rule as requireOrgRole).
-            const member = await ctx.db.orgMember.findFirst({
-              where: { organizationId: app.organizationId, userId: ctx.userId, deletedAt: null },
-            });
-            if (!member) return null;
-          }
+          // already open directly. isOrgMember covers the global-admin
+          // bypass and the revoked-membership (deletedAt) rule.
+          if (!(await isOrgMember(app.organizationId))) return null;
           return { kind: 'app', id, organizationId: app.organizationId };
         }
         case 'user': {
