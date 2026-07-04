@@ -16,8 +16,8 @@ areas in a request, run `hadron_find_nodes` first, then `hadron_get_node` on pro
 Cite node `loc` values when you reference what you found.
 
 (2) Call `hadron_get_node` with `urn: "hrn:node:hadronmemory.com::dev::instructions"` to load
-the project introduction (what Hadron is, URN grammar, the platform-specs corpus, core
-architecture). Read it once per session.
+the project introduction (what Hadron is, URN grammar, the specs corpus
+(`hadronmemory.com::specs`), core architecture). Read it once per session.
 
 (3) At the start of **every change** — before drafting a plan — call `hadron_get_node` with
 `urn: "hrn:node:hadronmemory.com::dev::preflight"`. It's a symptom-to-pattern routing
