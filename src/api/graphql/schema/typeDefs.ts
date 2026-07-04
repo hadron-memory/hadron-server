@@ -154,6 +154,12 @@ export const typeDefs = `#graphql
     passages: [Passage!]!
     total: Int
     reason: String
+    """
+    Reduced-fidelity flag(s); hits are usable. May carry MULTIPLE
+    comma-separated codes (e.g. 'no_vector_index,literal_fallback') —
+    parse the set, never compare the whole string. Codes: no_vector_index,
+    embedding_unavailable, literal_fallback.
+    """
     degraded: String
   }
 
@@ -1956,8 +1962,12 @@ export const typeDefs = `#graphql
     rank queries in PR3). Omit \`query\` for a filtered list in deterministic
     order (subsumes \`nodes\`); pass \`query\` to rank by \`mode\`
     (keyword | vector | hybrid | regex). Lexical modes honor boolean operators
-    (\`(a OR b) AND c\`, quoted phrases, NOT/-) and \`fields\` as a ranking
-    weight-mask. \`filter\` is the structured, AND-combined filter context
+    (\`(a OR b) AND c\`, quoted phrases, NOT/-) — operator words are
+    UPPERCASE-ONLY, so natural phrases like 'not sure' search literally —
+    and \`fields\` as a ranking weight-mask. Malformed boolean syntax
+    (unmatched parenthesis, unterminated quote) DEGRADES to a literal phrase
+    search flagged \`degraded: 'literal_fallback'\` instead of erroring; only
+    mode: regex fails loudly on bad syntax. \`filter\` is the structured, AND-combined filter context
     (SYSTEM memory class excluded by default; explicit wins). Returns a
     scored-hit envelope. Access-scoped identically to the per-kind node queries.
 

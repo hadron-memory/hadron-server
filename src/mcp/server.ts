@@ -1240,7 +1240,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_find_nodes',
-    'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term`. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory. Soft-deleted nodes are excluded.',
+    'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Use `parentRel` to scope to a subtree and `memoryUrn` to scope to a memory. Soft-deleted nodes are excluded.',
     {
       query: z.string().describe('For mode:keyword (default) / mode:hybrid — a full-text query: stemmed terms ranked by relevance, with boolean operators `(a OR b) AND c`, quoted phrases, and `-term` / `NOT`. For mode:vector / mode:hybrid — also embedded and matched semantically against the memory\'s vector index. For mode:regex — a POSIX regular expression. Use "*" or "" to list all nodes (survey mode; rejected for mode:vector / mode:hybrid).'),
       mode: z.enum(['keyword', 'vector', 'hybrid', 'regex']).optional().describe('keyword (default): full-text search — stemmed, relevance-ranked, boolean operators, body + abstract indexed. vector: semantic search over the memory\'s vector index (requires vectorIndexEnabled). hybrid: keyword + vector fused by reciprocal-rank fusion (RRF, k=60). regex: POSIX regular-expression match over node text. On a non-indexed memory, mode:hybrid degrades to keyword-only and emits a [degraded:no_vector_index] note. Spec 033 + cor:api:090.'),
@@ -1450,16 +1450,29 @@ export function createMcpServerInstance(
           'Note: vector search is unavailable — no embedding endpoint is configured or embed() failed. [embedding_unavailable]\n\nFound 0 node(s).',
         );
       }
-      let note: string | null = null;
-      if (result.degraded === 'no_vector_index') {
-        note =
-          'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]';
-      } else if (result.degraded === 'embedding_unavailable') {
+      // `degraded` may carry MULTIPLE comma-separated flags (PR-482 — e.g.
+      // 'no_vector_index,literal_fallback'), so parse the set instead of
+      // comparing the whole string.
+      const degradedFlags = new Set((result.degraded ?? '').split(',').filter(Boolean));
+      const noteLines: string[] = [];
+      if (degradedFlags.has('no_vector_index')) {
+        noteLines.push(
+          'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]',
+        );
+      }
+      if (degradedFlags.has('embedding_unavailable')) {
         // findNodes sets this code both when no endpoint is configured AND when
         // embed() throws — name both causes rather than assert one.
-        note =
-          'Note: vector half unavailable — no embedding endpoint is configured or embed() failed; showing keyword results only. [degraded:embedding_unavailable]';
+        noteLines.push(
+          'Note: vector half unavailable — no embedding endpoint is configured or embed() failed; showing keyword results only. [degraded:embedding_unavailable]',
+        );
       }
+      if (degradedFlags.has('literal_fallback')) {
+        noteLines.push(
+          'Note: the query was not valid boolean syntax, so it ran as a literal phrase search. Operators are UPPERCASE-only (AND/OR/NOT). [degraded:literal_fallback]',
+        );
+      }
+      const note: string | null = noteLines.length ? noteLines.join('\n') : null;
 
       // ── Node rendering ─────────────────────────────────────────────────────
       const renderHit = async (hit: {
