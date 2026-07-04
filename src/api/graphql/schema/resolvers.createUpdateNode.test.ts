@@ -205,6 +205,17 @@ describe('updateNode — name preserve-on-omit (D4)', () => {
 // ---------------------------------------------------------------------------
 
 describe('#476 — contentType HTML→Markdown conversion', () => {
+  it('explicit contentType: null is consumed and stores content as-is (PR-486 Codex P2)', async () => {
+    const node = await createNode({
+      loc: 'ct:null',
+      name: 'CTNull',
+      content: '# already markdown',
+      contentType: null,
+    });
+    expect(node.content).toBe('# already markdown');
+    expect(convertHtmlToMarkdown).not.toHaveBeenCalled();
+  });
+
   it('text/html content is converted and the extracted title fills properties.title', async () => {
     const node = await createNode({
       memoryId, loc: 'cun:html-1', name: 'Import',

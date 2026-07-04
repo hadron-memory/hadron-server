@@ -122,11 +122,21 @@ export async function writeNodeCore(
       // 'text/html' converts via hadrontool-pdf (which sanitizes — no second
       // pass here) and fills properties.title from the extracted title when
       // the caller didn't set one. The field is consumed here, never stored.
-      if (input.contentType != null) {
-        const ct = input.contentType.trim().toLowerCase();
+      if (input.contentType !== undefined) {
+        // Consume the field FIRST — for explicit null as well as strings
+        // (PR-486 review, Codex P2): contentType is not a Node column, and
+        // a `contentType: null` that skipped consumption would leak into
+        // the Prisma payload and turn a plain store-as-Markdown request
+        // into a validation error.
+        const rawContentType = input.contentType;
+        {
+          const { contentType: _consumed, ...rest } = input;
+          input = rest;
+        }
+        const ct = rawContentType == null ? 'text/markdown' : rawContentType.trim().toLowerCase();
         if (ct !== 'text/html' && ct !== 'text/markdown') {
           throw new GraphQLError(
-            `Unsupported contentType "${input.contentType}" — use text/markdown (default) or text/html.`,
+            `Unsupported contentType "${rawContentType}" — use text/markdown (default) or text/html.`,
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
@@ -151,11 +161,6 @@ export async function writeNodeCore(
             };
           }
         }
-        // Consume the field via destructuring — `delete` on the original
-        // args object would throw if a GraphQL runner freezes args
-        // (PR-485 review; matches the frozen-args defense noted below).
-        const { contentType: _consumed, ...rest } = input;
-        input = rest;
       }
 
       // Spec 031 — abstract validation + normalization. Length-cap check
