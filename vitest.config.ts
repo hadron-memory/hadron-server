@@ -21,6 +21,17 @@ export default defineConfig({
       // 64 hex chars = 32 bytes = AES-256 key. Fixed for test reproducibility.
       HADRON_ENCRYPTION_KEY: '0'.repeat(64),
       GRAPHS_PATH: '/tmp/hadron-test-graphs',
+      // Prisma auto-loads .env into every worker, so a dev machine's real
+      // endpoints leak into tests that CI (no .env) never sees — e.g. the
+      // llama.cpp EMBEDDING_API_URL caused knowledge-class fixtures (vector-
+      // indexed by default) to fire real prompt-drains whose async
+      // embeddingError landed as [embed-failed] noise in later assertions.
+      // Pin the outbound-service vars OFF ('' is falsy for every configured-
+      // predicate); tests that need one set it explicitly.
+      EMBEDDING_API_URL: '',
+      EMBEDDING_SAGEMAKER_ENDPOINT_NAME: '',
+      NATS_URL: '',
+      PDF_SERVICE_URL: '',
     },
     coverage: {
       provider: 'v8',

@@ -1537,6 +1537,115 @@ export const typeDefs = `#graphql
     jobId: ID
   }
 
+  # ── Spec 040 — headless agent runs (cor:agt:010) ──────────────────────────
+
+  enum AppRunStatus { PENDING RUNNING COMPLETED FAILED TIMED_OUT CANCELLED }
+  enum AppRunTriggerKind { SCHEDULE WEBHOOK MANUAL INTEGRATION }
+
+  # One headless run — the audit record AND (v1) the activation: policy
+  # snapshot, live budgets (zeroing halts the run), lifecycle, trigger
+  # provenance. Spec cor:agt:010:02.
+  type AppRun {
+    id: ID!
+    organizationId: ID!
+    appId: ID!
+    agentId: ID
+    "On-behalf-of user (cor:agt:010:01). Null = pure App service identity."
+    userId: ID
+    triggerKind: AppRunTriggerKind!
+    triggerId: ID
+    entryNodeUrn: String!
+    eventData: JSON
+    policy: JSON
+    "Remaining LLM-token budget — live-decremented; zero halts the run."
+    budgetTokens: Int
+    "Remaining action budget — live-decremented per write/tool action."
+    budgetActions: Int
+    status: AppRunStatus!
+    curNodeUrn: String
+    parentRunId: ID
+    failure: JSON
+    timeoutMs: Int
+    attempts: Int!
+    startedAt: String
+    finishedAt: String
+    createdAt: String!
+    createdBy: String
+  }
+
+  type AppRunsPage {
+    items: [AppRun!]!
+    total: Int!
+  }
+
+  "Recurring trigger (cor:agt:010, D-2026-07-04-E)."
+  type AgentSchedule {
+    id: ID!
+    organizationId: ID!
+    appId: ID!
+    agentId: ID
+    "On-behalf-of user captured at creation; v1 only the creator themself."
+    userId: ID
+    name: String!
+    cron: String!
+    timezone: String!
+    entryNodeUrn: String!
+    eventData: JSON
+    policy: JSON
+    aiConfigName: String
+    enabled: Boolean!
+    lastRunAt: String
+    nextRunAt: String
+    createdAt: String!
+    createdBy: String
+  }
+
+  type AgentSchedulesPage {
+    items: [AgentSchedule!]!
+    total: Int!
+  }
+
+  input CreateAgentScheduleInput {
+    "App the run executes as (ID or URN)."
+    appId: String!
+    name: String!
+    "5-field cron expression, evaluated in timezone (default UTC)."
+    cron: String!
+    timezone: String
+    "Fully-qualified URN of the prompt node to run (D-2026-05-09-012/017)."
+    entryNodeUrn: String!
+    agentId: ID
+    "true: the run acts on behalf of YOU (required to reach your personal memories). v1 never delegates a third party (cor:agt:010:01)."
+    runAsSelf: Boolean
+    "Static payload merged into each run's template args."
+    eventData: JSON
+    "Trigger-layer allow-list { allow: [...] } — one link of the conjunctive chain (cor:acl:040)."
+    policy: JSON
+    "Named AI config for this trigger (spec-036 walk override)."
+    aiConfigName: String
+    enabled: Boolean
+  }
+
+  input UpdateAgentScheduleInput {
+    name: String
+    cron: String
+    timezone: String
+    entryNodeUrn: String
+    runAsSelf: Boolean
+    eventData: JSON
+    policy: JSON
+    aiConfigName: String
+    enabled: Boolean
+  }
+
+  input TriggerAppRunInput {
+    appId: String!
+    entryNodeUrn: String!
+    eventData: JSON
+    runAsSelf: Boolean
+    aiConfigName: String
+  }
+
   """
   Text-bearing Node fields that searchReplaceInNodes may rewrite. JSON fields
   (data, properties) and the structural 'loc' are intentionally excluded in v1.
@@ -2478,6 +2587,12 @@ export const typeDefs = `#graphql
     (it may carry credentials).
     """
     serverInfo: ServerInfo!
+
+    # Spec 040 — the run audit surface (what ran, why, what it cost).
+    "One run by ID (runs are URN-less, like AiServiceConfig)."
+    appRun(ref: ID!): AppRun
+    appRuns(appId: ID, orgId: ID, status: AppRunStatus, limit: Int, offset: Int): AppRunsPage!
+    agentSchedules(appId: String!, limit: Int, offset: Int): AgentSchedulesPage!
   }
 
   """
@@ -2592,6 +2707,16 @@ export const typeDefs = `#graphql
     write seam (contentType defaults to text/html here, unlike createNode).
     """
     importNode(input: ImportNodeInput!): ImportNodeResult!
+
+    # Spec 040 — headless runs. Schedule CRUD is org-ADMIN-gated; a schedule
+    # fires the launch gate (cor:acl:050) per due tick and mints an AppRun.
+    createAgentSchedule(input: CreateAgentScheduleInput!): AgentSchedule!
+    updateAgentSchedule(id: ID!, input: UpdateAgentScheduleInput!): AgentSchedule!
+    deleteAgentSchedule(id: ID!): Boolean!
+    "Run an entry node now (MANUAL trigger) — same launch gate + kernel as a schedule."
+    triggerAppRun(input: TriggerAppRunInput!): AppRun!
+    "The kill switch manual handle: PENDING/RUNNING to CANCELLED (cor:agt:010:02)."
+    cancelAppRun(id: ID!): AppRun!
 
     # Asset upload — v1 (spec 004)
     beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!

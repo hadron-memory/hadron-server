@@ -519,110 +519,110 @@ model Memory {
 
   /// Globally unique identifier, e.g. "baragaun.com:secureid".
   /// Derived from `org.urn + ":" + slug`.
-  urn                  String           @unique
+  urn                       String            @unique
   /// Human-friendly display name, e.g. "SecureID Service".
-  name                 String
+  name                      String
   /// One-line summary for marketplace listings and search results.
-  shortDescription     String?          @map("short_description")
+  shortDescription          String?           @map("short_description")
   /// Full description (markdown); shown when expanding a listing.
-  description          String?
+  description               String?
   /// Free-form structured metadata for this memory — a client-defined
   /// JSON bag with no server-side semantics. Written via the GraphQL
   /// createMemory / updateMemory mutations; surfaced read-only over MCP
   /// (h-list-memories renders it as a `data:` line). The MCP surface has
   /// no memory-mutation tool, so writes stay GraphQL-only. NULL when unset.
-  data                 Json?
+  data                      Json?
   /// Classification tags for search and filtering.
-  tags                 String[]
+  tags                      String[]
   /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").
-  license              String?
+  license                   String?
   /// Primary category (e.g. "Developer Tools").
-  category0            String?          @map("category_0")
+  category0                 String?           @map("category_0")
   /// Secondary category (e.g. "Backend").
-  category1            String?          @map("category_1")
+  category1                 String?           @map("category_1")
   /// Tertiary category (e.g. "Node.js").
-  category2            String?          @map("category_2")
+  category2                 String?           @map("category_2")
   /// Square icon/logo URL for listings.
-  iconUrl              String?          @map("icon_url")
+  iconUrl                   String?           @map("icon_url")
   /// Banner image URL for the detail page.
-  heroUrl              String?          @map("hero_url")
+  heroUrl                   String?           @map("hero_url")
   /// External homepage or documentation URL.
-  homeUrl              String?          @map("home_url")
+  homeUrl                   String?           @map("home_url")
   /// Git clone URL; null = DB-only mode (no git backing).
-  source               String?
+  source                    String?
   /// AES-256-GCM-encrypted access token for repos not covered by the
   /// org's GitHub App installation (e.g. personal repos, GitLab,
   /// Bitbucket). Plaintext never stored or displayed after initial entry.
-  sourceTokenEncrypted String?          @map("source_token_encrypted")
+  sourceTokenEncrypted      String?           @map("source_token_encrypted")
   /// Expiry of the stored token; server warns via MemoryLogEntry
   /// before expiration.
-  sourceTokenExpiresAt DateTime?        @map("source_token_expires_at")
+  sourceTokenExpiresAt      DateTime?         @map("source_token_expires_at")
   /// Branch to clone/pull from (default: repo default branch).
-  readBranch           String?          @map("read_branch")
+  readBranch                String?           @map("read_branch")
   /// Branch for mutations (default: "hadron-updates").
-  writeBranch          String?          @map("write_branch")
+  writeBranch               String?           @map("write_branch")
   /// 035-visibility-enum-cleanup: nullable, no default. Set only for
   /// `knowledge` (PUBLIC/ORGANIZATION) and `group` (GROUP); NULL for
   /// system/app/personal/private (enforced by chk_memory_visibility_class).
-  visibility           MemoryVisibility?
+  visibility                MemoryVisibility?
   /// Whether the memory's contents (including asset bytes) are
   /// encrypted at rest using AES-256-GCM under HADRON_ENCRYPTION_KEY.
-  isEncrypted          Boolean          @default(false) @map("is_encrypted")
+  isEncrypted               Boolean           @default(false) @map("is_encrypted")
   // 005-agent-subscription (2026-04-30): four-way memory typology. Required
   // post-migration; backfilled by the migration's UPDATE statements.
   /// Per-class governance — see MemoryClass enum doc for the four
   /// classes and their addressing rules.
-  class                MemoryClass
+  class                     MemoryClass
   /// When an anonymous (pre-account-creation) memory expires and is
   /// reaped by the janitor. NULL for non-anonymous memories.
-  anonymousExpiresAt   DateTime?        @map("anonymous_expires_at")
+  anonymousExpiresAt        DateTime?         @map("anonymous_expires_at")
   /// If true, any subscription must have a valid MemoryLicense.
-  requiresLicense      Boolean          @default(false) @map("requires_license")
+  requiresLicense           Boolean           @default(false) @map("requires_license")
   /// Last successful git sync.
-  lastSyncedAt         DateTime?        @map("last_synced_at")
-  syncStatus           SyncStatus       @default(PENDING) @map("sync_status")
+  lastSyncedAt              DateTime?         @map("last_synced_at")
+  syncStatus                SyncStatus        @default(PENDING) @map("sync_status")
   /// Error message from the last failed sync.
-  syncError            String?          @map("sync_error")
+  syncError                 String?           @map("sync_error")
   /// Number of unresolved PendingEdge records (denormalized for
   /// dashboard display).
-  pendingEdgeCount     Int              @default(0) @map("pending_edge_count")
+  pendingEdgeCount          Int               @default(0) @map("pending_edge_count")
   // 006-asset-upload-redesign (2026-05-01): per-memory upload acceptance
   // flag. Default true at the column level; system-class memories must
   // opt out explicitly at creation time. Migration backfilled existing
   // rows by class (system → false; app/knowledge/personal → true).
   /// Whether this memory accepts asset uploads. system-class memories
   /// typically opt out.
-  acceptsUploads       Boolean          @default(true) @map("accepts_uploads")
+  acceptsUploads            Boolean           @default(true) @map("accepts_uploads")
   // ─── 033-rag-vector-retrieval: per-memory vector-index config ───
   /// Opt-in: when true, this memory's nodes are vector-indexed. DB default is
   /// `false`; the **class-derived default** is applied at createMemory — a
   /// `knowledge`-class, non-encrypted memory is created with `true`, all other
   /// classes and any encrypted memory stay `false` (FR-001). Flippable per memory.
-  vectorIndexEnabled        Boolean          @default(false) @map("vector_index_enabled")
+  vectorIndexEnabled        Boolean           @default(false) @map("vector_index_enabled")
   /// What the vector index is built from. Memory property, NOT a query
   /// parameter (FR-002). Only meaningful when vectorIndexEnabled.
-  embeddingSource           EmbeddingSource  @default(abstract) @map("embedding_source")
+  embeddingSource           EmbeddingSource   @default(abstract) @map("embedding_source")
   /// Per-memory chunking dials (FR-003). NULL ⇒ platform default (512 / 64).
   /// Consulted only when embeddingSource includes chunks.
-  chunkTokens               Int?             @map("chunk_tokens")
-  chunkOverlap              Int?             @map("chunk_overlap")
+  chunkTokens               Int?              @map("chunk_tokens")
+  chunkOverlap              Int?              @map("chunk_overlap")
   /// Force fixed-size chunking, bypassing structure-aware (FR-015).
-  forceFixedSize            Boolean          @default(false) @map("force_fixed_size")
+  forceFixedSize            Boolean           @default(false) @map("force_fixed_size")
   /// Timestamp the owner acknowledged the embedding-inversion disclosure for an
   /// ENCRYPTED memory (FR-026). NULL ⇒ not acknowledged. Gates encrypted-memory
   /// indexing via chk_memory_vector_encrypted_ack.
-  vectorIndexEncryptedAckAt DateTime?        @map("vector_index_encrypted_ack_at")
-  createdAt            DateTime         @default(now()) @map("created_at")
-  createdBy            String?          @map("created_by")
-  updatedAt            DateTime         @updatedAt @map("updated_at")
-  updatedBy            String?          @map("updated_by")
-  deletedAt            DateTime?        @map("deleted_at")
-  deletedBy            String?          @map("deleted_by")
+  vectorIndexEncryptedAckAt DateTime?         @map("vector_index_encrypted_ack_at")
+  createdAt                 DateTime          @default(now()) @map("created_at")
+  createdBy                 String?           @map("created_by")
+  updatedAt                 DateTime          @updatedAt @map("updated_at")
+  updatedBy                 String?           @map("updated_by")
+  deletedAt                 DateTime?         @map("deleted_at")
+  deletedBy                 String?           @map("deleted_by")
 
   organization             Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   nodes                    Node[]
-  edges                    Edge[]               // first-class edges, scoped via denormalized memoryId
-  embeddings               NodeEmbedding[]      // 033: per-memory vectors (denormalized memoryId)
+  edges                    Edge[] // first-class edges, scoped via denormalized memoryId
+  embeddings               NodeEmbedding[] // 033: per-memory vectors (denormalized memoryId)
   assets                   Asset[]
   subscriptions            MemorySubscription[]
   agentItems               AgentMemoryItem[]
@@ -764,18 +764,18 @@ model Asset {
 model Node {
   /// UUIDv7 from `node.yaml` when supplied by the importer (stable across
   /// moves); falls back to `cuid()` for inserts that omit `id`.
-  id          String    @id @default(cuid())
-  memoryId    String    @map("memory_id")
+  id                 String    @id @default(cuid())
+  memoryId           String    @map("memory_id")
   /// See the node-types list in the model doc. Default `info`.
-  nodeType    String    @default("info") @map("node_type")
+  nodeType           String    @default("info") @map("node_type")
   /// Human-friendly display name of this node.
-  name        String
+  name               String
   /// Alternative name.
-  alias       String?
+  alias              String?
   /// Colon-delimited path within the memory (e.g. "auth:tokens").
-  loc         String
-  isLink      Boolean   @default(false) @map("is_link")
-  description String?
+  loc                String
+  isLink             Boolean   @default(false) @map("is_link")
+  description        String?
   /// Paragraph-length summary of this node. Cap is 2000 characters,
   /// enforced at the API boundary (not as a DB CHECK — caps are
   /// validation, not invariants). Surfacing rules across MCP tools
@@ -784,15 +784,15 @@ model Node {
   /// motivation are documented in spec 031 (FR-005 + edge cases). That
   /// is the load-bearing reference; this comment is the cold-read
   /// pointer for someone scanning the schema.
-  abstract    String?
+  abstract           String?
   /// The topic content (topic.md full text).
-  content     String?
+  content            String?
   /// SHA256(yaml+md)[0:8] for change detection. Set by external
   /// producers (YAML frontmatter via importer, Git sync). UNCHANGED by
   /// spec 032 — that spec adds `abstractOriginHash` below as a separate
   /// column with its own domain (SHA256(content)[0:8]); the two are
   /// never compared against each other.
-  contentHash String?   @map("content_hash")
+  contentHash        String?   @map("content_hash")
   /// Spec 032 — fingerprint of `content` value at the time `abstract`
   /// was authored. SHA-256 of plaintext content truncated to 8 hex
   /// chars (same width as `contentHash`, different domain). At read
@@ -803,7 +803,7 @@ model Node {
   /// `Source: abstract-stale` marker, `h-validate`'s `[stale-abstract]`
   /// warning, and the upcoming RAG layer. System-managed: never
   /// settable via GraphQL `NodeInput`.
-  abstractOriginHash String? @map("abstract_origin_hash")
+  abstractOriginHash String?   @map("abstract_origin_hash")
   // ─── 033-rag-vector-retrieval: durable embedding-queue markers ───
   /// Set when this node needs (re-)embedding; cleared on success. The single
   /// work signal the embedding worker drains (FR-006/FR-007). Operational
@@ -817,38 +817,38 @@ model Node {
   /// Last embed error (diagnosability; surfaced by h-validate).
   embeddingError     String?   @map("embedding_error")
   /// Number of input tokens.
-  tokens      Int?
+  tokens             Int?
   /// Classification tags.
-  tags        String[]
+  tags               String[]
   /// Typed key-value structured data; queryable via the API.
-  properties  Json?
+  properties         Json?
   /// Structured JSON on the node; used for template-variable
   /// resolution, user profiles, extracted facts, reference metadata.
   /// Returned by `h-get-data`, set by `h-set-data`.
-  data        Json?
+  data               Json?
   /// Sort order among sibling nodes (lower values come first); used
   /// by `h-read-next-node` and portal drag-and-drop reordering.
-  seq         Int?
+  seq                Int?
   /// GitHub repo slug (e.g. "micromentor/mmdata").
-  ownerRepo   String?   @map("owner_repo")
+  ownerRepo          String?   @map("owner_repo")
   /// If true, this node can be executed as a task.
-  isRunnable  Boolean?  @map("is_runnable")
+  isRunnable         Boolean?  @map("is_runnable")
   /// LLM model that created or last modified this node (e.g.
   /// "claude-opus-4-6", "gpt-4o").
-  llmModel    String?   @map("llm_model")
+  llmModel           String?   @map("llm_model")
   /// AI agent tool that created or last modified this node (e.g.
   /// "claude-code", "cursor", "hadron-portal").
-  aiAgent     String?   @map("ai_agent")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  createdBy   String?   @map("created_by")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
-  updatedBy   String?   @map("updated_by")
-  deletedAt   DateTime? @map("deleted_at")
-  deletedBy   String?   @map("deleted_by")
+  aiAgent            String?   @map("ai_agent")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  createdBy          String?   @map("created_by")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+  updatedBy          String?   @map("updated_by")
+  deletedAt          DateTime? @map("deleted_at")
+  deletedBy          String?   @map("deleted_by")
 
-  memory        Memory        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
-  outgoingEdges Edge[]        @relation("SourceNode")
-  incomingEdges Edge[]        @relation("TargetNode")
+  memory        Memory          @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  outgoingEdges Edge[]          @relation("SourceNode")
+  incomingEdges Edge[]          @relation("TargetNode")
   pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
   versions      NodeVersion[]
@@ -887,24 +887,24 @@ enum EmbeddingKind {
 /// (`$queryRaw`/`$executeRaw`). The HNSW index + abstract partial-unique index
 /// live in the migration + post-push.sql (not expressible in Prisma schema).
 model NodeEmbedding {
-  id       String        @id @default(cuid())
-  nodeId   String        @map("node_id")
+  id         String                      @id @default(cuid())
+  nodeId     String                      @map("node_id")
   /// Denormalized for fast per-memory similarity filtering (search filters by
   /// memory before ORDER BY distance).
-  memoryId String        @map("memory_id")
-  kind     EmbeddingKind
+  memoryId   String                      @map("memory_id")
+  kind       EmbeddingKind
   /// Embedding provider — "local" | "openai" | "voyage" … v1 is always "local".
-  provider String
+  provider   String
   /// Stored model id (FR-014) — e.g. "nomic-embed-text-v1.5". Forward-compat
   /// for a deliberate re-embed when the platform model changes.
-  model    String
+  model      String
   /// Vector dimension (sanity / forward-compat guard).
-  dim      Int
+  dim        Int
   // ── chunk-only locators (NULL for kind = abstract); FR-016 ──
-  chunkIndex Int?    @map("chunk_index")
-  charStart  Int?    @map("char_start")
-  charEnd    Int?    @map("char_end")
-  chunkText  String? @map("chunk_text")
+  chunkIndex Int?                        @map("chunk_index")
+  charStart  Int?                        @map("char_start")
+  charEnd    Int?                        @map("char_end")
+  chunkText  String?                     @map("chunk_text")
   // ── the vector — pgvector; Prisma has no native type ──
   // Declared OPTIONAL (and nullable in the DB) on purpose: a REQUIRED Unsupported
   // field drops the model from Prisma's client create/upsert and breaks the
@@ -912,8 +912,8 @@ model NodeEmbedding {
   // both nullable means migrations and schema.prisma agree (the migration-smoke
   // test). Rows are only ever inserted via raw SQL, which always supplies the
   // vector, so a NULL embedding never occurs in practice.
-  embedding Unsupported("vector(768)")?
-  createdAt DateTime @default(now()) @map("created_at")
+  embedding  Unsupported("vector(768)")?
+  createdAt  DateTime                    @default(now()) @map("created_at")
 
   node   Node   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
@@ -933,26 +933,26 @@ model NodeEmbedding {
 /// drive task execution/automation and the chatbot/conversation platform,
 /// not just describe graph relationships.
 model Edge {
-  id        String    @id @default(cuid())
+  id          String    @id @default(cuid())
   /// Denormalized from the SOURCE node's memory so `loc` can be made
   /// unique within a memory (a unique index can't span the source-node
   /// table). For cross-memory edges this is the source's memory.
-  memoryId  String    @map("memory_id")
-  sourceId  String    @map("source_id")
-  targetId  String    @map("target_id")
+  memoryId    String    @map("memory_id")
+  sourceId    String    @map("source_id")
+  targetId    String    @map("target_id")
   /// Colon-delimited path within the memory — the edge's identity and
   /// the suffix of its URN (`hrn:edge:<org>::<memory>::<loc>`). Required;
   /// derived from the endpoints + name when not authored (see
   /// `src/lib/edgeLoc.ts`). Mirrors `Node.loc`.
-  loc       String
+  loc         String
   /// Free-form relationship name (e.g. imports, depends_on, abstract-of).
   /// Optional since spec-037 — `loc` is now the identity. (Was `label`.)
-  name      String?
+  name        String?
   /// Human-readable description of the edge (parity with `Node.description`).
   description String?
   /// If true, this edge can be executed/run (task automation, conversation
   /// transitions). Mirrors `Node.isRunnable`.
-  isRunnable Boolean? @map("is_runnable")
+  isRunnable  Boolean?  @map("is_runnable")
   // Edge-condition spec: JSONLogic gating expression. Null = always fires.
   // Validated server-side at save and evaluate time. See
   // src/lib/edge-conditions/.
@@ -964,7 +964,7 @@ model Edge {
   /// `hadron-concept/spec-kits/specs/001-edge-condition-spec/spec.md`
   /// (sister repo). User docs:
   /// https://docs.hadronmemory.com/reference/edge-conditions/.
-  condition Json?
+  condition   Json?
   // Stable ordering hook (lower = earlier). Future agent-exceptions
   // feature uses this so handler edges can sit at the top of the
   // resolution order without re-architecting.
@@ -972,16 +972,16 @@ model Edge {
   /// fires first, ties broken by insertion order. Reserved space for
   /// the future agent-exceptions feature to slot handler edges at the
   /// top.
-  priority  Int       @default(0)
+  priority    Int       @default(0)
   /// Free-form structured payload on the edge (e.g. transition
   /// metadata for conversation-design edges).
-  data      Json?
-  createdAt DateTime  @default(now()) @map("created_at")
-  createdBy String?   @map("created_by")
-  updatedAt DateTime? @map("updated_at")
-  updatedBy String?   @map("updated_by")
-  deletedAt DateTime? @map("deleted_at")
-  deletedBy String?   @map("deleted_by")
+  data        Json?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  createdBy   String?   @map("created_by")
+  updatedAt   DateTime? @map("updated_at")
+  updatedBy   String?   @map("updated_by")
+  deletedAt   DateTime? @map("deleted_at")
+  deletedBy   String?   @map("deleted_by")
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   source Node   @relation("SourceNode", fields: [sourceId], references: [id], onDelete: Cascade)
@@ -1172,31 +1172,31 @@ model UsageEvent {
 /// from), "Juno" (the mentee chat agent shared across MicroMentor
 /// orgs).
 model Agent {
-  id                   String           @id @default(cuid())
-  organizationId       String           @map("organization_id")
+  id                   String          @id @default(cuid())
+  organizationId       String          @map("organization_id")
   /// Globally unique identifier (e.g. "micromentor.org:juno");
   /// derived from `org.urn + ":" + slug`.
-  urn                  String           @unique
+  urn                  String          @unique
   /// Display name of this agent.
   name                 String
   description          String?
   /// System prompt sent to the LLM at session start.
-  systemPrompt         String?          @map("system_prompt")
+  systemPrompt         String?         @map("system_prompt")
   /// Memory containing conversation designs (stages, prompts,
   /// partials). Universally read-only from any App context post-008
   /// (DEVELOP-from-App is dropped per R-10); edits happen in the
   /// Agent ownership surface.
-  systemMemoryId       String?          @map("system_memory_id")
+  systemMemoryId       String?         @map("system_memory_id")
   /// PUBLIC | ORGANIZATION | PERSONAL (035-visibility-enum-cleanup gave
   /// agents their own enum). PERSONAL is the creator-only draft state.
-  visibility           AgentVisibility  @default(PERSONAL)
+  visibility           AgentVisibility @default(PERSONAL)
   /// Coarse behavior hint — see AgentType enum doc. Largely legacy
   /// post-008.
-  type                 AgentType        @default(ASSISTANT)
+  type                 AgentType       @default(ASSISTANT)
   /// Surfaces this Agent is designed for (free-form per 008 R-9; v1
   /// known values: 'chat', 'slack', 'mcp', 'web'). Distinct from the
   /// per-App `surfaces` — this is the *design-time* declaration.
-  surfaces             String[]         @default([])
+  surfaces             String[]        @default([])
   // 036-ai-service-config: the legacy ai_provider/ai_model/
   // ai_api_key_encrypted/ai_api_key_preview columns were dropped in favor
   // of Agent-owned AiServiceConfig rows (the Agent's design-time default
@@ -1205,12 +1205,12 @@ model Agent {
   /// Loc of the currently-published revision of the Agent's system
   /// memory. Lets the Builder ship draft revisions without affecting
   /// running Apps.
-  publishedRevisionLoc String?          @map("published_revision_loc")
+  publishedRevisionLoc String?         @map("published_revision_loc")
   /// Optimistic editor-lock owner (one Builder at a time can hold the
   /// edit lock on the system memory).
-  editorLockUserId     String?          @map("editor_lock_user_id")
+  editorLockUserId     String?         @map("editor_lock_user_id")
   /// When the editor lock expires (auto-released on stale).
-  editorLockExpiresAt  DateTime?        @map("editor_lock_expires_at")
+  editorLockExpiresAt  DateTime?       @map("editor_lock_expires_at")
   /// Agent working state (per-user data like family budget,
   /// preferences); automatically available to the LLM as context.
   properties           Json?
@@ -1221,7 +1221,7 @@ model Agent {
   /// provisioned. Shape: `{ appMemory: 'shared' | 'user' | 'none' }`.
   /// `personalMemory` provisioning is implicit (lazy-create on first
   /// user-attributed write). 008-agent-installation FR-008.
-  memoryProvisioning   Json             @default("{\"appMemory\": \"shared\"}") @map("memory_provisioning")
+  memoryProvisioning   Json            @default("{\"appMemory\": \"shared\"}") @map("memory_provisioning")
   // 008-agent-installation (2026-05-02): Agent declares membership constraints.
   // Schema: { maxMembers: number | 'unlimited', memberRoles: string[] }.
   // Enforced at AppMember invite-acceptance time.
@@ -1229,13 +1229,13 @@ model Agent {
   /// Agent. Shape: `{ maxMembers: number | 'unlimited', memberRoles:
   /// string[] }`. `maxMembers` enforced at AppMember
   /// invite-acceptance time. 008-agent-installation FR-009.
-  installationPolicy   Json             @default("{\"maxMembers\": \"unlimited\", \"memberRoles\": [\"owner\"]}") @map("installation_policy")
-  createdAt            DateTime         @default(now()) @map("created_at")
-  createdBy            String?          @map("created_by")
-  updatedAt            DateTime?        @map("updated_at")
-  updatedBy            String?          @map("updated_by")
-  deletedAt            DateTime?        @map("deleted_at")
-  deletedBy            String?          @map("deleted_by")
+  installationPolicy   Json            @default("{\"maxMembers\": \"unlimited\", \"memberRoles\": [\"owner\"]}") @map("installation_policy")
+  createdAt            DateTime        @default(now()) @map("created_at")
+  createdBy            String?         @map("created_by")
+  updatedAt            DateTime?       @map("updated_at")
+  updatedBy            String?         @map("updated_by")
+  deletedAt            DateTime?       @map("deleted_at")
+  deletedBy            String?         @map("deleted_by")
 
   /// Spec 021 FR-032 online URN-shape migration gate (transient). Null =
   /// pre-canonical row; set = canonical-form row. Dropped post-migration.
@@ -1674,30 +1674,30 @@ model EmailVerificationToken {
 /// A versioned snapshot of a Node's content. Written every time a
 /// Node is updated, so the full history is recoverable.
 model NodeVersion {
-  id          String   @id @default(cuid())
-  nodeId      String   @map("node_id")
-  loc         String
-  name        String
-  alias       String?
-  description String?
+  id                 String   @id @default(cuid())
+  nodeId             String   @map("node_id")
+  loc                String
+  name               String
+  alias              String?
+  description        String?
   /// Paragraph summary at the time of the snapshot. Spec 031.
   /// Added in the US1 implementation when the live `Node.abstract`
   /// column landed — version history would otherwise silently drop
   /// abstract edits.
-  abstract    String?
+  abstract           String?
   /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
   /// version capture. Restored verbatim by `restoreNodeVersion`;
   /// legacy versions (pre-spec) have NULL here, which short-circuits
   /// the staleness check on the live row after restore (no false
   /// positives).
-  abstractOriginHash String? @map("abstract_origin_hash")
-  content     String?
-  tags        String[]
+  abstractOriginHash String?  @map("abstract_origin_hash")
+  content            String?
+  tags               String[]
   /// Free-form author label (typically a User.id, but may be an
   /// agent identifier for AI edits).
-  editedBy    String?  @map("edited_by")
-  createdBy   String?  @map("created_by")
-  createdAt   DateTime @default(now()) @map("created_at")
+  editedBy           String?  @map("edited_by")
+  createdBy          String?  @map("created_by")
+  createdAt          DateTime @default(now()) @map("created_at")
 
   node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
 
@@ -1897,15 +1897,15 @@ model App {
   /// TODO(spec-021-cleanup): drop alongside urnNormalizedAt.
   urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
 
-  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization     Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   // 023-app-shape Phase 2b: App↔Agent is N:M through AppAgent. The
   // direct `agent` relation is gone (dropped with `agentId`).
-  appAgents     AppAgent[]
-  keys          AppKey[]
-  members       AppMember[]
-  memories      Memory[]       @relation("AppMemories")
-  users         User[]
-  sessions      Session[]
+  appAgents        AppAgent[]
+  keys             AppKey[]
+  members          AppMember[]
+  memories         Memory[]          @relation("AppMemories")
+  users            User[]
+  sessions         Session[]
   logEntries       AppLogEntry[]
   usageEvents      UsageEvent[]
   pendingSetups    PendingSetup[]
@@ -2457,4 +2457,140 @@ model AuthCode {
   @@index([userId])
   @@index([clientId])
   @@map("auth_codes")
+}
+
+// ─── Spec 040 — headless agent runs ─────────────────────────────────────────
+// Plan: specs/040-headless-runs/plan.md (D-2026-07-04 A–F over the 2026-05/06
+// design corpus). Spec: cor:agt:010 (+ cor:acl:040/:050).
+
+enum AppRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  TIMED_OUT
+  CANCELLED
+}
+
+enum AppRunTriggerKind {
+  SCHEDULE
+  WEBHOOK
+  MANUAL
+  INTEGRATION
+}
+
+/// One headless run (cor:agt:010:02). Simultaneously the audit record AND —
+/// v1, D-2026-07-04-D — the activation: created only after the launch gate
+/// passes; every action inside the run re-checks status + policy and
+/// decrements the live budgets; zeroing a budget or setting CANCELLED halts
+/// the run at its next action (the kill switch). Also the outbox row for
+/// run.requested.v1 (publishedAt NULL ⇒ sweep republishes).
+model AppRun {
+  id             String            @id
+  organizationId String            @map("organization_id")
+  appId          String            @map("app_id")
+  agentId        String?           @map("agent_id")
+  /// On-behalf-of user (cor:agt:010:01, D-2026-07-04-C). NULL ⇒ pure App
+  /// service identity — no personal/private reach.
+  userId         String?           @map("user_id")
+  triggerKind    AppRunTriggerKind @map("trigger_kind")
+  triggerId      String?           @map("trigger_id")
+  entryNodeUrn   String            @map("entry_node_urn")
+  eventData      Json?             @map("event_data")
+  /// Run-layer allow-list snapshot (the narrowest chain link; plan §4).
+  policy         Json?
+  /// Remaining LLM tokens — live-decrement kill switch.
+  budgetTokens   Int?              @map("budget_tokens")
+  /// Remaining tool/write actions — live-decrement kill switch.
+  budgetActions  Int?              @map("budget_actions")
+  status         AppRunStatus      @default(PENDING)
+  curNodeUrn     String?           @map("cur_node_urn")
+  parentRunId    String?           @map("parent_run_id")
+  failure        Json?
+  timeoutMs      Int?              @map("timeout_ms")
+  attempts       Int               @default(0)
+  publishedAt    DateTime?         @map("published_at")
+  startedAt      DateTime?         @map("started_at")
+  finishedAt     DateTime?         @map("finished_at")
+  createdAt      DateTime          @default(now()) @map("created_at")
+  createdBy      String?           @map("created_by")
+
+  @@index([status, publishedAt])
+  @@index([appId, createdAt])
+  @@index([triggerId, status])
+  @@index([organizationId, createdAt])
+  @@map("app_runs")
+}
+
+/// Recurring trigger (cor:agt:010, D-2026-07-04-E) — per-kind table
+/// mirroring the decided AgentWebhook shape. The scheduler claims rows by
+/// (enabled, nextRunAt) and mints an AppRun per due tick.
+model AgentSchedule {
+  id             String    @id
+  organizationId String    @map("organization_id")
+  appId          String    @map("app_id")
+  agentId        String?   @map("agent_id")
+  /// On-behalf-of user, captured at creation (cor:agt:010:01).
+  userId         String?   @map("user_id")
+  name           String
+  /// 5-field cron expression, evaluated in `timezone`.
+  cron           String
+  timezone       String    @default("UTC")
+  entryNodeUrn   String    @map("entry_node_urn")
+  eventData      Json?     @map("event_data")
+  /// Trigger-layer allow-list (chain link; plan §4).
+  policy         Json?
+  /// Per-trigger AI-config override (name into the spec-036 walk).
+  aiConfigName   String?   @map("ai_config_name")
+  enabled        Boolean   @default(true)
+  lastRunAt      DateTime? @map("last_run_at")
+  /// Next due time — the scheduler's work signal. A skipped overlap STILL
+  /// advances this (plan §7; prevents back-to-back storms).
+  nextRunAt      DateTime? @map("next_run_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
+
+  @@index([enabled, nextRunAt])
+  @@index([appId, deletedAt])
+  @@map("agent_schedules")
+}
+
+/// Continuous quota tier (cor:acl:050:01/:04): windowed counters per App and
+/// per org for run.execute + llm.tokens. Checked at the launch gate and
+/// decremented live during runs.
+model QuotaCounter {
+  id        String   @id
+  scopeKind String   @map("scope_kind")
+  scopeId   String   @map("scope_id")
+  action    String
+  window    String
+  used      Int      @default(0)
+  limit     Int
+  resetAt   DateTime @map("reset_at")
+
+  @@unique([scopeKind, scopeId, action, window])
+  @@map("quota_counters")
+}
+
+/// Consumable quota tier (cor:acl:050:01/:04): TAN-style tickets, v1 required
+/// only for the outbound-communication action class. The ledger answers
+/// "where did they all go?" — every consumption names the run.
+model ActionTicket {
+  id              String    @id
+  organizationId  String    @map("organization_id")
+  appId           String?   @map("app_id")
+  action          String
+  mintedBy        String    @map("minted_by")
+  note            String?
+  consumedByRunId String?   @map("consumed_by_run_id")
+  consumedAt      DateTime? @map("consumed_at")
+  expiresAt       DateTime? @map("expires_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@index([organizationId, action, consumedAt])
+  @@map("action_tickets")
 }
