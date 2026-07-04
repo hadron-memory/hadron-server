@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { compileBooleanQuery, BooleanQueryError } from './tsquery.js';
+import { compileBooleanQuery, literalQuery, BooleanQueryError } from './tsquery.js';
 
 describe('compileBooleanQuery', () => {
   it('compiles a single term to a bound plainto_tsquery', () => {
@@ -56,5 +56,43 @@ describe('compileBooleanQuery', () => {
     ['"unterminated', 'unterminated phrase'],
   ])('throws BooleanQueryError on malformed input: %s', (input) => {
     expect(() => compileBooleanQuery(input, 4)).toThrow(BooleanQueryError);
+  });
+
+  // Operator words are UPPERCASE-ONLY (the search-engine convention) so
+  // natural-language input is never silently rewritten into a boolean
+  // expression.
+  it('treats lowercase not/or/and as plain terms — "not sure" does not negate', () => {
+    const r = compileBooleanQuery('not sure', 1);
+    expect(r.sql).not.toContain('!!');
+    expect(r.params).toEqual(['not', 'sure']);
+    const o = compileBooleanQuery('cats or dogs', 1);
+    expect(o.sql).not.toContain('||');
+    expect(o.params).toEqual(['cats', 'or', 'dogs']);
+    // Mixed case is a plain term too.
+    const m = compileBooleanQuery('Not sure', 1);
+    expect(m.sql).not.toContain('!!');
+  });
+
+  it('uppercase operators still work', () => {
+    expect(compileBooleanQuery('NOT sure', 1).sql).toContain('!!');
+    expect(compileBooleanQuery('cats OR dogs', 1).sql).toContain('||');
+  });
+
+  describe('literalQuery — the always-parseable literal form', () => {
+    it('wraps raw text as a single phrase leaf', () => {
+      const r = compileBooleanQuery(literalQuery('not sure (about this'), 1);
+      expect(r.sql).toBe("phraseto_tsquery('english', $1)");
+      expect(r.params).toEqual(['not sure (about this']);
+    });
+
+    it.each([
+      '(banana OR apple',
+      '"unterminated',
+      'memory OR',
+      'weird "mid"quote text',
+      'NOT',
+    ])('never throws, even for previously-malformed input: %s', (input) => {
+      expect(() => compileBooleanQuery(literalQuery(input), 1)).not.toThrow();
+    });
   });
 });

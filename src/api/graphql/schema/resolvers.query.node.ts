@@ -16,7 +16,7 @@ import {
 } from '../../../lib/embedding/index.js';
 import { reciprocalRankFusion } from '../../../lib/rrf.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
-import { BooleanQueryError } from '../../../lib/retrieval/tsquery.js';
+import { BooleanQueryError, literalQuery } from '../../../lib/retrieval/tsquery.js';
 import type { LexicalField } from '../../../lib/retrieval/provider.js';
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
@@ -704,17 +704,25 @@ export const nodeQueries = {
 
       // ── LEXICAL modes: keyword (FTS) / regex — filter + sort + page in SQL ──
       if (effectiveMode === 'keyword' || effectiveMode === 'regex') {
+        const common = {
+          db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
+          includeDeleted: !!f.includeDeleted, sort: lexSort, offset: off, limit: finalLimit,
+        };
         try {
-          const common = {
-            db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
-            includeDeleted: !!f.includeDeleted, sort: lexSort, offset: off, limit: finalLimit,
-          };
           const ranked = effectiveMode === 'regex'
             ? await provider.regexSearch({ ...common, pattern: q })
             : await provider.lexicalSearch({ ...common, query: q });
           return await hydrateInOrder(ranked, null, null, null);
         } catch (e) {
-          if (e instanceof BooleanQueryError) throw badInput(e.message);
+          if (e instanceof BooleanQueryError) {
+            // Literal fallback: malformed boolean syntax (unmatched paren,
+            // unterminated quote, dangling operator) runs as a literal
+            // phrase, flagged in the envelope — a search box never turns a
+            // typo into BAD_USER_INPUT. Only mode:regex still fails loudly
+            // (regex syntax is explicit intent).
+            const ranked = await provider.lexicalSearch({ ...common, query: literalQuery(q) });
+            return await hydrateInOrder(ranked, null, null, 'literal_fallback');
+          }
           if (e instanceof Error && (/invalid regular expression/i.test(e.message) || (e as { code?: string }).code === '2201B')) {
             throw badInput(`Invalid regex: ${e.message}`);
           }
@@ -731,24 +739,37 @@ export const nodeQueries = {
 
       // Keyword candidate source for hybrid RRF: relevance-ranked, filter applied
       // (buildResult re-filters the fused set too, so this is just less waste).
+      // Malformed boolean syntax degrades to a literal phrase here too;
+      // lexicalDegraded carries the flag into whichever degrade string the
+      // hybrid path ends up emitting.
+      let lexicalDegraded: string | null = null;
+      const mergeDegraded = (d: string | null): string | null =>
+        [d, lexicalDegraded].filter(Boolean).join(',') || null;
       const runKeywordRanked = async () => {
+        const args = {
+          db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
+          includeDeleted: !!f.includeDeleted, sort: 'relevance' as const, offset: 0, limit: fetchN,
+        };
         try {
-          return await provider.lexicalSearch({ db: ctx.db, query: q, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter, includeDeleted: !!f.includeDeleted, sort: 'relevance', offset: 0, limit: fetchN });
+          return await provider.lexicalSearch({ ...args, query: q });
         } catch (e) {
-          if (e instanceof BooleanQueryError) throw badInput(e.message);
+          if (e instanceof BooleanQueryError) {
+            lexicalDegraded = 'literal_fallback';
+            return provider.lexicalSearch({ ...args, query: literalQuery(q) });
+          }
           throw e;
         }
       };
 
       if (indexedIds.length === 0) {
         if (effectiveMode === 'hybrid') {
-          return await buildResult(await runKeywordRanked(), null, null, 'no_vector_index');
+          return await buildResult(await runKeywordRanked(), null, null, mergeDegraded('no_vector_index'));
         }
         return { hits: [], passages: [], total: 0, reason: 'no_vector_index', degraded: null };
       }
       if (!isEmbeddingConfigured()) {
         if (effectiveMode === 'hybrid') {
-          return await buildResult(await runKeywordRanked(), null, null, 'embedding_unavailable');
+          return await buildResult(await runKeywordRanked(), null, null, mergeDegraded('embedding_unavailable'));
         }
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
@@ -759,7 +780,7 @@ export const nodeQueries = {
       } catch (err) {
         console.warn(`[findNodes] embed() failed in mode:${effectiveMode}; degrading.`, err);
         if (effectiveMode === 'hybrid') {
-          return await buildResult(await runKeywordRanked(), null, null, 'embedding_unavailable');
+          return await buildResult(await runKeywordRanked(), null, null, mergeDegraded('embedding_unavailable'));
         }
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
@@ -817,7 +838,7 @@ export const nodeQueries = {
         fusedIds.map((id) => ({ nodeId: id, score: simById.get(id) ?? kwScore.get(id) ?? 0 })),
         simById,
         null,
-        null,
+        mergeDegraded(null),
       );
     },
 

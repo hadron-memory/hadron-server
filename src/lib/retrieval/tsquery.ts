@@ -2,8 +2,11 @@
  * Boolean query grammar → Postgres tsquery expression (cor:api:090:01, D12).
  *
  * Surface grammar honored in lexical modes: bare terms, `"quoted phrases"`,
- * `AND` / `OR` / `NOT` (case-insensitive), leading `-` as NOT, and parentheses.
- * Precedence: NOT > AND > OR. Adjacent operands are implicitly ANDed
+ * `AND` / `OR` / `NOT` (UPPERCASE-ONLY — the search-engine convention), leading
+ * `-` as NOT, and parentheses. Lowercase/mixed-case `and`/`or`/`not` are plain
+ * search terms, so a natural-language query like "not sure" or "cats or dogs"
+ * is never silently rewritten into a boolean expression. Precedence:
+ * NOT > AND > OR. Adjacent operands are implicitly ANDed
  * (`memory graph` == `memory AND graph`).
  *
  * Rather than hand-build a raw tsquery lexeme string (fragile, unstemmed, an
@@ -11,7 +14,10 @@
  * `plainto_tsquery` / `phraseto_tsquery` leaves (which normalize + stem) with
  * the tsquery operators `&&` (and), `||` (or), `!!` (not). Leaf terms are bound
  * as parameters — never interpolated. Malformed input throws
- * BooleanQueryError, which the resolver maps to BAD_USER_INPUT.
+ * BooleanQueryError; the findNodes resolver DEGRADES it to a literal
+ * phrase search (envelope flag `literal_fallback`) rather than erroring, so a
+ * search box never turns a typo into BAD_USER_INPUT. Use `literalQuery` to
+ * pre-quote raw text.
  */
 
 export class BooleanQueryError extends Error {
@@ -65,10 +71,12 @@ function tokenize(input: string): Tok[] {
     } else if (word === '-') {
       continue; // stray dash — ignore
     }
-    const upper = word.toUpperCase();
-    if (upper === 'AND') toks.push({ t: 'and' });
-    else if (upper === 'OR') toks.push({ t: 'or' });
-    else if (upper === 'NOT') toks.push({ t: 'not' });
+    // Operator words are UPPERCASE-ONLY: a lowercase "not"/"or"/"and" is a
+    // plain term, so natural phrases ("not sure", "cats or dogs") search
+    // literally instead of silently turning into boolean expressions.
+    if (word === 'AND') toks.push({ t: 'and' });
+    else if (word === 'OR') toks.push({ t: 'or' });
+    else if (word === 'NOT') toks.push({ t: 'not' });
     else toks.push({ t: 'term', v: word });
   }
   return toks;
@@ -171,4 +179,15 @@ export function compileBooleanQuery(input: string, startIndex: number): Compiled
   const sql = emit(ast);
   if (params.length === 0) throw new BooleanQueryError('Query has no searchable terms.');
   return { sql, params };
+}
+
+/**
+ * Quote raw text as a single literal phrase leaf — the grammar's literal
+ * form. Internal double quotes become spaces (the grammar has no quote
+ * escape), so the result always tokenizes as exactly one `phrase` and can
+ * never throw a parse error. Backs the findNodes literal fallback for
+ * malformed boolean input.
+ */
+export function literalQuery(raw: string): string {
+  return `"${raw.replace(/"/g, ' ')}"`;
 }

@@ -74,8 +74,53 @@ describe('findNodes — boolean operators (cor:api:090:01)', () => {
     expect(locs).toEqual(['b.ashake', 'b.bshake']);
   });
 
-  it('rejects a malformed boolean query with BAD_USER_INPUT', async () => {
-    await expect(findNodes({ query: '(banana OR', mode: 'keyword' })).rejects.toMatchObject({
+  it('degrades a malformed boolean query to a literal phrase search (no BAD_USER_INPUT)', async () => {
+    // '(banana OR' is malformed boolean syntax. Instead of erroring, the
+    // query runs as the literal phrase '"(banana OR"' — phraseto_tsquery
+    // drops the punctuation/stopwords, so the banana fixtures still match —
+    // and the envelope flags the degrade so a client can hint.
+    const res = await findNodes({ query: '(banana OR', mode: 'keyword' });
+    expect(res.degraded).toBe('literal_fallback');
+    expect(res.hits.length).toBeGreaterThan(0);
+    for (const h of res.hits) expect(h.node.name.toLowerCase()).toContain('banana');
+  });
+
+  it('literal fallback still FINDS content when the typo query has real words', async () => {
+    // An unterminated quote around a real phrase — the fallback searches the
+    // words literally and hits.
+    const res = await findNodes({ query: '"banana shake', mode: 'keyword' });
+    expect(res.degraded).toBe('literal_fallback');
+    expect(res.hits.map((h: any) => h.node.loc)).toContain('b.bshake');
+  });
+
+  it('operator words are UPPERCASE-ONLY — "banana or apple" is a literal AND, not a boolean OR', async () => {
+    // Lowercase 'or' is a plain (stopword-ish) term: the query requires
+    // banana AND apple together, which no fixture satisfies — whereas the
+    // old case-insensitive grammar returned both shakes via boolean OR.
+    const res = await findNodes({ query: 'banana or apple', mode: 'keyword' });
+    expect(res.degraded).toBeNull();
+    expect(res.hits).toEqual([]);
+    // The uppercase form is the boolean expression.
+    const upper = await findNodes({ query: '(banana OR apple) AND shake', mode: 'keyword' });
+    expect(upper.hits.map((h: any) => h.node.loc).sort()).toEqual(['b.ashake', 'b.bshake']);
+  });
+
+  it('lowercase "not" does not negate — the "not sure" landmine', async () => {
+    await mkNode(graph.id, { loc: 'b.sure', name: 'Sure-fire banana tips' });
+    const res = await findNodes({ query: 'not sure', mode: 'keyword' });
+    // Must NOT be interpreted as (NOT sure): a doc containing 'sure' is not
+    // excluded. ('not' is an English stopword, so the query reduces to the
+    // 'sure' term and the doc matches.)
+    expect(res.hits.map((h: any) => h.node.loc)).toContain('b.sure');
+  });
+
+  it('hybrid on a non-indexed memory merges degrade flags: no_vector_index + literal_fallback', async () => {
+    const res = await findNodes({ query: '(banana OR', mode: 'hybrid' });
+    expect(res.degraded).toBe('no_vector_index,literal_fallback');
+  });
+
+  it('mode: regex still fails loudly on bad syntax (explicit intent)', async () => {
+    await expect(findNodes({ query: 'ban(ana', mode: 'regex' })).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
   });
