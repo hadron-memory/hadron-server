@@ -29,6 +29,7 @@ import {
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { GraphQLError } from 'graphql';
+import { convertHtmlToMarkdown } from '../../../lib/pdfClient.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import {
@@ -112,6 +113,32 @@ export async function writeNodeCore(
           });
         }
         throw e;
+      }
+
+      // #476 — contentType conversion at the single write seam, so the
+      // converted Markdown (not the source HTML) is what every downstream
+      // invariant sees: encryption, NodeVersion snapshot, abstractOriginHash,
+      // re-embed, git mirror. 'text/markdown' (default) is a no-op;
+      // 'text/html' converts via hadrontool-pdf (which sanitizes — no second
+      // pass here) and fills properties.title from the extracted title when
+      // the caller didn't set one. The field is consumed here, never stored.
+      if (input.contentType != null) {
+        const ct = input.contentType.trim().toLowerCase();
+        if (ct === 'text/html') {
+          if (typeof input.content === 'string' && input.content.trim() !== '') {
+            const { markdown, title } = await convertHtmlToMarkdown(input.content);
+            input = { ...input, content: markdown };
+            if (title && (input.properties as Record<string, unknown> | undefined)?.title == null) {
+              input.properties = { ...(input.properties ?? {}), title };
+            }
+          }
+        } else if (ct !== 'text/markdown') {
+          throw new GraphQLError(
+            `Unsupported contentType "${input.contentType}" — use text/markdown (default) or text/html.`,
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
+        delete (input as { contentType?: unknown }).contentType;
       }
 
       // Spec 031 — abstract validation + normalization. Length-cap check
