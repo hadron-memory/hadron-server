@@ -702,6 +702,21 @@ export const nodeQueries = {
         return { hits, passages: [], total: null, reason, degraded };
       };
 
+      // Literal fallback for malformed boolean syntax: run the literalized
+      // query; a quote-only/empty input still compiles to 'Empty query.'
+      // even after literalQuery, which is genuinely zero searchable text —
+      // return zero hits, never an error (PR-482 review).
+      const safeLiteralSearch = async (
+        searchArgs: Omit<Parameters<typeof provider.lexicalSearch>[0], 'query'>,
+      ) => {
+        try {
+          return await provider.lexicalSearch({ ...searchArgs, query: literalQuery(q) });
+        } catch (e) {
+          if (e instanceof BooleanQueryError) return [];
+          throw e;
+        }
+      };
+
       // ── LEXICAL modes: keyword (FTS) / regex — filter + sort + page in SQL ──
       if (effectiveMode === 'keyword' || effectiveMode === 'regex') {
         const common = {
@@ -714,14 +729,15 @@ export const nodeQueries = {
             : await provider.lexicalSearch({ ...common, query: q });
           return await hydrateInOrder(ranked, null, null, null);
         } catch (e) {
-          if (e instanceof BooleanQueryError) {
+          // keyword only, explicitly: regexSearch never parses the boolean
+          // grammar, but regex must stay hard-error by contract, so the
+          // guard is self-documenting rather than incidental.
+          if (e instanceof BooleanQueryError && effectiveMode === 'keyword') {
             // Literal fallback: malformed boolean syntax (unmatched paren,
             // unterminated quote, dangling operator) runs as a literal
             // phrase, flagged in the envelope — a search box never turns a
-            // typo into BAD_USER_INPUT. Only mode:regex still fails loudly
-            // (regex syntax is explicit intent).
-            const ranked = await provider.lexicalSearch({ ...common, query: literalQuery(q) });
-            return await hydrateInOrder(ranked, null, null, 'literal_fallback');
+            // typo into BAD_USER_INPUT.
+            return await hydrateInOrder(await safeLiteralSearch(common), null, null, 'literal_fallback');
           }
           if (e instanceof Error && (/invalid regular expression/i.test(e.message) || (e as { code?: string }).code === '2201B')) {
             throw badInput(`Invalid regex: ${e.message}`);
@@ -755,7 +771,7 @@ export const nodeQueries = {
         } catch (e) {
           if (e instanceof BooleanQueryError) {
             lexicalDegraded = 'literal_fallback';
-            return provider.lexicalSearch({ ...args, query: literalQuery(q) });
+            return safeLiteralSearch(args);
           }
           throw e;
         }

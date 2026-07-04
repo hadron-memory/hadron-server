@@ -119,6 +119,15 @@ describe('findNodes — boolean operators (cor:api:090:01)', () => {
     expect(res.degraded).toBe('no_vector_index,literal_fallback');
   });
 
+  it('a quote-only query — where even the literalized form is empty — is zero hits, not an error (PR-482 review)', async () => {
+    const kw = await findNodes({ query: '"', mode: 'keyword' });
+    expect(kw.degraded).toBe('literal_fallback');
+    expect(kw.hits).toEqual([]);
+    const hy = await findNodes({ query: '"', mode: 'hybrid' });
+    expect(hy.degraded).toBe('no_vector_index,literal_fallback');
+    expect(hy.hits).toEqual([]);
+  });
+
   it('mode: regex still fails loudly on bad syntax (explicit intent)', async () => {
     await expect(findNodes({ query: 'ban(ana', mode: 'regex' })).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },

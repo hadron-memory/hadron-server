@@ -184,9 +184,13 @@ export function compileBooleanQuery(input: string, startIndex: number): Compiled
 /**
  * Quote raw text as a single literal phrase leaf — the grammar's literal
  * form. Internal double quotes become spaces (the grammar has no quote
- * escape), so the result always tokenizes as exactly one `phrase` and can
- * never throw a parse error. Backs the findNodes literal fallback for
- * malformed boolean input.
+ * escape), so any input with searchable text tokenizes as exactly one
+ * `phrase` and cannot hit a parse error. CAVEAT: input that is empty or
+ * quotes/whitespace-only literalizes to an empty phrase, which tokenize()
+ * drops — compile still throws 'Empty query.' Callers of the findNodes
+ * literal fallback treat that as zero hits (see safeLiteralSearch), never
+ * an error. Backs the findNodes literal fallback for malformed boolean
+ * input.
  */
 export function literalQuery(raw: string): string {
   return `"${raw.replace(/"/g, ' ')}"`;

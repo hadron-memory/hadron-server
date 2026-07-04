@@ -154,6 +154,12 @@ export const typeDefs = `#graphql
     passages: [Passage!]!
     total: Int
     reason: String
+    """
+    Reduced-fidelity flag(s); hits are usable. May carry MULTIPLE
+    comma-separated codes (e.g. 'no_vector_index,literal_fallback') —
+    parse the set, never compare the whole string. Codes: no_vector_index,
+    embedding_unavailable, literal_fallback.
+    """
     degraded: String
   }
 

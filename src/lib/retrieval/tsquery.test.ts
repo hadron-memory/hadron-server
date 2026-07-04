@@ -91,8 +91,20 @@ describe('compileBooleanQuery', () => {
       'memory OR',
       'weird "mid"quote text',
       'NOT',
-    ])('never throws, even for previously-malformed input: %s', (input) => {
+    ])('never throws for input with searchable text: %s', (input) => {
       expect(() => compileBooleanQuery(literalQuery(input), 1)).not.toThrow();
+    });
+
+    // The documented caveat (PR-482 review): empty / quotes-and-whitespace-only
+    // input literalizes to an empty phrase and still compiles to 'Empty
+    // query.' — the findNodes fallback guards this as zero hits.
+    it.each([
+      '',
+      '"',
+      '""',
+      '  "  " ',
+    ])('quote/whitespace-only input still throws Empty query at compile: %j', (input) => {
+      expect(() => compileBooleanQuery(literalQuery(input), 1)).toThrow(BooleanQueryError);
     });
   });
 });

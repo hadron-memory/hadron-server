@@ -1450,16 +1450,29 @@ export function createMcpServerInstance(
           'Note: vector search is unavailable — no embedding endpoint is configured or embed() failed. [embedding_unavailable]\n\nFound 0 node(s).',
         );
       }
-      let note: string | null = null;
-      if (result.degraded === 'no_vector_index') {
-        note =
-          'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]';
-      } else if (result.degraded === 'embedding_unavailable') {
+      // `degraded` may carry MULTIPLE comma-separated flags (PR-482 — e.g.
+      // 'no_vector_index,literal_fallback'), so parse the set instead of
+      // comparing the whole string.
+      const degradedFlags = new Set((result.degraded ?? '').split(',').filter(Boolean));
+      const noteLines: string[] = [];
+      if (degradedFlags.has('no_vector_index')) {
+        noteLines.push(
+          'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]',
+        );
+      }
+      if (degradedFlags.has('embedding_unavailable')) {
         // findNodes sets this code both when no endpoint is configured AND when
         // embed() throws — name both causes rather than assert one.
-        note =
-          'Note: vector half unavailable — no embedding endpoint is configured or embed() failed; showing keyword results only. [degraded:embedding_unavailable]';
+        noteLines.push(
+          'Note: vector half unavailable — no embedding endpoint is configured or embed() failed; showing keyword results only. [degraded:embedding_unavailable]',
+        );
       }
+      if (degradedFlags.has('literal_fallback')) {
+        noteLines.push(
+          'Note: the query was not valid boolean syntax, so it ran as a literal phrase search. Operators are UPPERCASE-only (AND/OR/NOT). [degraded:literal_fallback]',
+        );
+      }
+      const note: string | null = noteLines.length ? noteLines.join('\n') : null;
 
       // ── Node rendering ─────────────────────────────────────────────────────
       const renderHit = async (hit: {
