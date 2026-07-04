@@ -33,8 +33,13 @@ vi.mock('../../../lib/pdfClient.js', async (importOriginal) => ({
     markdown: `converted:${html.length}`,
     title: 'Extracted Title',
   })),
+  convertPdfToMarkdown: vi.fn(async (pdfBase64: string) => ({
+    markdown: `pdf:${pdfBase64.length}`,
+    title: 'PDF Title',
+    pageCount: 2,
+  })),
 }));
-import { convertHtmlToMarkdown } from '../../../lib/pdfClient.js';
+import { convertHtmlToMarkdown, convertPdfToMarkdown } from '../../../lib/pdfClient.js';
 
 let orgId: string;
 let memoryId: string;
@@ -248,8 +253,23 @@ describe('#476 — contentType HTML→Markdown conversion', () => {
 
   it('an unsupported contentType rejects with BAD_USER_INPUT', async () => {
     await expect(
-      createNode({ memoryId, loc: 'cun:bad-ct', name: 'x', content: 'x', contentType: 'application/pdf' }),
+      createNode({ memoryId, loc: 'cun:bad-ct', name: 'x', content: 'x', contentType: 'application/json' }),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+
+  it('application/pdf content is extracted and the PDF title fills properties.title (#488)', async () => {
+    vi.mocked(convertHtmlToMarkdown).mockClear();
+    const node = await createNode({
+      memoryId, loc: 'cun:pdf-1', name: 'Paper',
+      content: 'JVBERi0=', contentType: 'application/pdf',
+    });
+    expect(node.content).toBe('pdf:8'); // 'JVBERi0='.length
+    expect((node.properties as Record<string, unknown>)?.title).toBe('PDF Title');
+    expect(convertPdfToMarkdown).toHaveBeenCalledWith('JVBERi0=');
+    expect(convertHtmlToMarkdown).not.toHaveBeenCalled();
+    // contentType is consumed, never persisted anywhere on the row.
+    const row = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'cun:pdf-1' } });
+    expect(JSON.stringify(row)).not.toContain('application/pdf');
   });
 
   it('updateNode converts too (same seam)', async () => {

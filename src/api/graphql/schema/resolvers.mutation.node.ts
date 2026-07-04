@@ -29,7 +29,7 @@ import {
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { GraphQLError } from 'graphql';
-import { convertHtmlToMarkdown } from '../../../lib/pdfClient.js';
+import { convertHtmlToMarkdown, convertPdfToMarkdown } from '../../../lib/pdfClient.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import {
@@ -115,13 +115,15 @@ export async function writeNodeCore(
         throw e;
       }
 
-      // #476 — contentType conversion at the single write seam, so the
-      // converted Markdown (not the source HTML) is what every downstream
+      // #476 / #488 — contentType conversion at the single write seam, so the
+      // converted Markdown (not the source HTML/PDF) is what every downstream
       // invariant sees: encryption, NodeVersion snapshot, abstractOriginHash,
-      // re-embed, git mirror. 'text/markdown' (default) is a no-op;
-      // 'text/html' converts via hadrontool-pdf (which sanitizes — no second
-      // pass here) and fills properties.title from the extracted title when
-      // the caller didn't set one. The field is consumed here, never stored.
+      // re-embed, git mirror. 'text/markdown' (default) is a no-op; 'text/html'
+      // converts captured DOM via hadrontool-pdf (which sanitizes — no second
+      // pass here); 'application/pdf' takes raw base64 (a PDF is binary, so the
+      // inline `content` String carries it base64-encoded) and extracts the
+      // text layer. Both non-markdown types fill properties.title from the
+      // converter's extraction. The field is consumed here, never stored.
       if (input.contentType !== undefined) {
         // Consume the field FIRST — for explicit null as well as strings
         // (PR-486 review, Codex P2): contentType is not a Node column, and
@@ -134,14 +136,17 @@ export async function writeNodeCore(
           input = rest;
         }
         const ct = rawContentType == null ? 'text/markdown' : rawContentType.trim().toLowerCase();
-        if (ct !== 'text/html' && ct !== 'text/markdown') {
+        if (ct !== 'text/html' && ct !== 'text/markdown' && ct !== 'application/pdf') {
           throw new GraphQLError(
-            `Unsupported contentType "${rawContentType}" — use text/markdown (default) or text/html.`,
+            `Unsupported contentType "${rawContentType}" — use text/markdown (default), text/html, or application/pdf.`,
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
-        if (ct === 'text/html' && typeof input.content === 'string' && input.content.trim() !== '') {
-          const { markdown, title } = await convertHtmlToMarkdown(input.content);
+        if (ct !== 'text/markdown' && typeof input.content === 'string' && input.content.trim() !== '') {
+          const { markdown, title } =
+            ct === 'text/html'
+              ? await convertHtmlToMarkdown(input.content)
+              : await convertPdfToMarkdown(input.content);
           input = { ...input, content: markdown };
           // Fill title only when properties is absent or a plain object — a
           // caller-supplied scalar/array JSON value passes through untouched
