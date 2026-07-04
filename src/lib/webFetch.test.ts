@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isForbiddenAddress, parseImportUrl } from './webFetch.js';
+import { isForbiddenAddress, embeddedIpv4, parseImportUrl } from './webFetch.js';
 
 describe('isForbiddenAddress', () => {
   it('blocks the private/reserved IPv4 ranges', () => {
@@ -43,10 +43,31 @@ describe('isForbiddenAddress', () => {
     }
   });
 
-  it('unwraps IPv4-mapped IPv6 and applies the IPv4 rules', () => {
+  it('unwraps IPv4-mapped IPv6 (dotted AND hex forms) and applies the IPv4 rules', () => {
+    // Dotted shape.
     expect(isForbiddenAddress('::ffff:127.0.0.1')).toBe(true);
     expect(isForbiddenAddress('::ffff:169.254.169.254')).toBe(true);
     expect(isForbiddenAddress('::ffff:8.8.8.8')).toBe(false);
+    // Hex shape — the bypass Codex/Gemini flagged (PR-486): the OS treats
+    // these identically to the dotted form.
+    expect(isForbiddenAddress('::ffff:7f00:1')).toBe(true); // 127.0.0.1
+    expect(isForbiddenAddress('::ffff:7f00:0001')).toBe(true); // leading zeros
+    expect(isForbiddenAddress('::ffff:a9fe:a9fe')).toBe(true); // 169.254.169.254
+    expect(isForbiddenAddress('::ffff:0a00:0001')).toBe(true); // 10.0.0.1
+    expect(isForbiddenAddress('::ffff:808:808')).toBe(false); // 8.8.8.8
+    // Deprecated IPv4-compatible form (::/96) — also unwrapped.
+    expect(isForbiddenAddress('::7f00:1')).toBe(true); // 127.0.0.1
+    expect(isForbiddenAddress('::127.0.0.1')).toBe(true);
+    expect(isForbiddenAddress('::808:808')).toBe(false); // 8.8.8.8
+  });
+
+  it('embeddedIpv4 extracts from both textual shapes and ignores plain IPv6', () => {
+    expect(embeddedIpv4('::ffff:7f00:1')).toBe('127.0.0.1');
+    expect(embeddedIpv4('::ffff:192.168.0.1')).toBe('192.168.0.1');
+    expect(embeddedIpv4('::a9fe:a9fe')).toBe('169.254.169.254');
+    expect(embeddedIpv4('2606:4700:4700::1111')).toBeNull();
+    expect(embeddedIpv4('::1')).toBeNull(); // plain loopback, not embedded v4
+    expect(embeddedIpv4('::')).toBeNull();
   });
 
   it('allows public IPv6', () => {
