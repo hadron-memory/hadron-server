@@ -33,7 +33,7 @@ import {
   hasPersonalWorkspace,
 } from './provisioning/personal-workspace.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
-import { startEmbeddingWorkerLoop } from './jobs/embedNodes.js';
+import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
 import { getBusClient } from './lib/bus/index.js';
 
@@ -899,6 +899,10 @@ export async function createServer(): Promise<Express> {
   // memory is vector-indexed but no embedding endpoint is configured.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_EMBED_WORKER !== 'true') {
     startEmbeddingWorkerLoop(db);
+    // Same-process bus listener (spec 039): near-instant retries + backfill
+    // drains via embed.wake.v1. No-op (null) when NATS_URL is unset — the
+    // sweep loop above is the standalone fallback (D-2026-06-17-004).
+    void startEmbeddingBusListener(db);
     void db.memory
       .count({ where: { vectorIndexEnabled: true, deletedAt: null } })
       .then((n) => {

@@ -13,7 +13,27 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isEmbeddingConfigured } from '../../lib/embedding/index.js';
-import { embedNode, type EmbedPlaintext } from '../../jobs/embedNodes.js';
+import { embedNode, EMBED_WAKE_SUBJECT, type EmbedPlaintext } from '../../jobs/embedNodes.js';
+import { getBusClient } from '../../lib/bus/index.js';
+
+/**
+ * Fire-and-forget bus wake-up (spec 039). Never throws — a broker outage
+ * must not break the write path; the durable marker + sweep remain the
+ * recovery net. The idempotency key is intentionally UNIQUE per publish
+ * (dedup only needs to guard broker-level republish retries, not distinct
+ * enqueues of the same node).
+ */
+export async function publishEmbedWake(payload: { nodeId?: string }): Promise<void> {
+  try {
+    const bus = await getBusClient();
+    if (!bus) return;
+    await bus.publish(EMBED_WAKE_SUBJECT, payload, {
+      idempotencyKey: `${payload.nodeId ?? 'drain'}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    });
+  } catch (err) {
+    console.error('[embed-enqueue] bus publish error (sweep will recover):', err);
+  }
+}
 
 export interface EnqueueArgs {
   nodeId: string;
@@ -49,6 +69,13 @@ export async function enqueueNodeEmbedding(
         embeddingAttempts: 0,
       },
     });
+
+    // Bus wake-up (spec 039): covers what the prompt-drain can't — a crash
+    // between marker and drain, transient prompt-drain failures (bus
+    // redelivery beats sweep ticks), and work distribution once multiple
+    // instances share the queue group. The listener is idempotent (a marker
+    // the prompt-drain already cleared resolves to a cheap skip).
+    void publishEmbedWake({ nodeId: args.nodeId });
 
     // Prompt-drain: embed now with in-closure plaintext, off the request path.
     // Only when an endpoint is configured — otherwise leave it for the sweep
@@ -86,5 +113,9 @@ export async function backfillMemoryEmbeddings(
       embeddingAttempts: 0,
     },
   });
+  // Drain ping (empty payload): the bus listener drains the whole queue now
+  // instead of trickling it out at sweep pace — the big win for re-indexing
+  // a large memory. Fire-and-forget; the sweep remains the fallback.
+  void publishEmbedWake({});
   return res.count;
 }

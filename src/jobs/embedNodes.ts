@@ -300,12 +300,12 @@ export interface DrainResult {
  */
 export async function drainEmbeddingQueue(
   db: PrismaClient,
-  opts: { batchSize?: number; maxAttempts?: number } = {},
+  opts: { batchSize?: number; maxAttempts?: number; client?: EmbeddingClient } = {},
 ): Promise<DrainResult> {
   if (!isEmbeddingConfigured()) return { embedded: 0, failed: 0, skipped: 0 };
   const batchSize = opts.batchSize ?? 25;
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-  const client = getEmbeddingClient();
+  const client = opts.client ?? getEmbeddingClient();
 
   const pending = await db.node.findMany({
     where: { embeddingPendingAt: { not: null }, embeddingAttempts: { lt: maxAttempts } },
@@ -349,4 +349,92 @@ export function startEmbeddingWorkerLoop(
     void run();
     setInterval(() => void run(), intervalMs);
   }, initialDelayMs);
+}
+
+// ── Bus wake-up (spec 039 — first same-process job listener) ────────────────
+//
+// Subject `embed.wake.v1` on the platform bus. Payload { nodeId } wakes a
+// check-and-embed for one node; an EMPTY payload is a drain ping (published
+// after a backfill stamp) that drains the whole queue without waiting for
+// sweep ticks. Everything is idempotent off the durable marker columns —
+// duplicate deliveries and bus-vs-sweep races resolve to skips (the
+// at-least-once contract in src/lib/bus/types.ts). With no broker configured
+// the listener simply never starts and the sweep alone drains the queue
+// (D-2026-06-17-004). The write-path prompt-drain is NOT replaced: it embeds
+// encrypted memories from in-closure plaintext, which no bus message can
+// carry.
+
+import { getBusClient } from '../lib/bus/index.js';
+
+export const EMBED_WAKE_SUBJECT = 'embed.wake.v1';
+export const EMBED_QUEUE_GROUP = 'embed-worker';
+
+export interface EmbedWakePayload {
+  nodeId?: string;
+}
+
+// A drain ping processes at most this many batches before yielding back to
+// the bus (re-published pings / the sweep pick up any remainder). Guards
+// against a pathological queue where skipped rows retain their marker.
+const MAX_DRAIN_BATCHES = 200;
+
+/**
+ * Handle one wake-up. Throws ONLY on a transient single-node failure so the
+ * bus redelivers with its delay (faster + capped-by-max_deliver retry, vs
+ * waiting out sweep ticks); everything else resolves (ack).
+ */
+export async function handleEmbedWake(
+  db: PrismaClient,
+  payload: EmbedWakePayload,
+  client?: EmbeddingClient,
+): Promise<void> {
+  // No endpoint configured → nothing this process can do; ack and leave the
+  // marker for the sweep once configuration arrives (same posture as drain).
+  if (!isEmbeddingConfigured()) return;
+  if (payload?.nodeId) {
+    // Idempotency gate: embedNode itself embeds unconditionally (the sweep
+    // pre-filters on the marker; the prompt-drain runs right after setting
+    // it), so the wake-up checks the marker here — a node the prompt-drain
+    // or sweep already drained resolves to one cheap SELECT, not a re-embed
+    // (the at-least-once duplicate-delivery contract).
+    const row = await db.node.findUnique({
+      where: { id: payload.nodeId },
+      select: { embeddingPendingAt: true },
+    });
+    if (!row?.embeddingPendingAt) return;
+    const outcome = await embedNode(db, payload.nodeId, undefined, client);
+    if (outcome === 'failed-transient') {
+      throw new Error(`transient embed failure for node ${payload.nodeId} — nak for redelivery`);
+    }
+    return;
+  }
+  // Drain ping: pull full batches until the queue comes up short.
+  const batchSize = 25;
+  for (let i = 0; i < MAX_DRAIN_BATCHES; i++) {
+    const r = await drainEmbeddingQueue(db, { batchSize, ...(client ? { client } : {}) });
+    const processed = r.embedded + r.failed + r.skipped;
+    if (processed < batchSize) return;
+  }
+  console.warn('[embed-worker] drain ping hit the batch cap — remainder left to the sweep');
+}
+
+/**
+ * Start the same-process bus listener. Resolves to the unsubscribe function,
+ * or null when the bus is off (NATS_URL unset / broker unreachable) — the
+ * sweep loop is the fallback either way.
+ */
+export async function startEmbeddingBusListener(
+  db: PrismaClient,
+): Promise<(() => Promise<void>) | null> {
+  const bus = await getBusClient();
+  if (!bus) return null;
+  const unsubscribe = await bus.subscribeQueue(
+    EMBED_WAKE_SUBJECT,
+    EMBED_QUEUE_GROUP,
+    async (msg) => {
+      await handleEmbedWake(db, (msg.payload ?? {}) as EmbedWakePayload);
+    },
+  );
+  console.log(`[embed-worker] bus listener active on ${EMBED_WAKE_SUBJECT}`);
+  return unsubscribe;
 }
