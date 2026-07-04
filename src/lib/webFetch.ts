@@ -1,7 +1,7 @@
 /**
  * SSRF-guarded synchronous web fetch for importNode (#457, sync v1).
  *
- * Egress policy (spec rule pending — suggested cor:api:130):
+ * Egress policy — Spec: cor:api:130:02.
  *   - http:/https: only, URL ≤ 2k chars.
  *   - Every hostname is resolved and EVERY resolved address must fall outside
  *     private/reserved/link-local/metadata ranges; IP-literal hosts are
@@ -16,7 +16,7 @@
  * private one. Closing it requires pinning the connection through a custom
  * dispatcher lookup (undici Agent) while preserving SNI; deferred until the
  * import surface is exposed beyond user-initiated callers (the chrome
- * extension) — tracked in the egress-policy spec rule.
+ * extension) — accepted-and-expiring per cor:api:130:02.
  *
  * Auth boundary (issue #457): this fetch carries NO user credentials —
  * authenticated pages must come through importNode's inline `content` path.
