@@ -1333,6 +1333,14 @@ export interface NodeInput {
   /** Paragraph-length summary. Spec 031. Optional; `null` clears, omitted preserves. */
   abstract?: string | null;
   content?: string;
+  /**
+   * MIME type of `content` (#476, spec cor:cnv:010:01). 'text/markdown'
+   * (default) stores as-is; 'text/html' converts to Markdown via
+   * hadrontool-pdf before storage (the extracted title lands in
+   * properties.title when the caller didn't set one). Consumed at the write
+   * seam — never persisted.
+   */
+  contentType?: string | null;
   data?: Record<string, unknown>;
   seq?: number;
   tags?: string[];

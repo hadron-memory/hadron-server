@@ -1436,6 +1436,8 @@ export const typeDefs = `#graphql
     "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Optional. Empty + whitespace-only normalize to null. Cap is 2000 characters."
     abstract: String
     content: String
+    "MIME type of content (#476, spec cor:cnv:010:01): 'text/markdown' (default) stores as-is; 'text/html' converts to Markdown via the conversion service before storage (the extracted page title fills properties.title when not supplied). Consumed at write time — never persisted. Any other value is rejected."
+    contentType: String
     seq: Int
     tags: [String!]
     properties: JSON
@@ -1472,6 +1474,8 @@ export const typeDefs = `#graphql
     "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."
     abstract: String
     content: String
+    "MIME type of content (#476, spec cor:cnv:010:01): 'text/markdown' (default) stores as-is; 'text/html' converts to Markdown via the conversion service before storage (the extracted page title fills properties.title when not supplied). Consumed at write time — never persisted. Any other value is rejected."
+    contentType: String
     seq: Int
     "Omit to preserve existing tags (issue #235); supply to replace the set."
     tags: [String!]

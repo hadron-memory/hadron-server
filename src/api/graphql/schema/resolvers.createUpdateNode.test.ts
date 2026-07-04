@@ -25,6 +25,17 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
 
+// #476 — HTML→Markdown conversion is delegated to hadrontool-pdf; mock the
+// client so these tests pin the write-seam behavior without the service.
+vi.mock('../../../lib/pdfClient.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  convertHtmlToMarkdown: vi.fn(async (html: string) => ({
+    markdown: `converted:${html.length}`,
+    title: 'Extracted Title',
+  })),
+}));
+import { convertHtmlToMarkdown } from '../../../lib/pdfClient.js';
+
 let orgId: string;
 let memoryId: string;
 let adminId: string;
@@ -185,5 +196,75 @@ describe('updateNode — name preserve-on-omit (D4)', () => {
     const created = await createNode({ loc: 'n2', name: 'Original' });
     const updated = await updateNode({ id: created.id, name: 'Renamed' });
     expect(updated.name).toBe('Renamed');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// #476 — contentType: text/html conversion at the write seam
+// ---------------------------------------------------------------------------
+
+describe('#476 — contentType HTML→Markdown conversion', () => {
+  it('explicit contentType: null is consumed and stores content as-is (PR-486 Codex P2)', async () => {
+    const node = await createNode({
+      loc: 'ct:null',
+      name: 'CTNull',
+      content: '# already markdown',
+      contentType: null,
+    });
+    expect(node.content).toBe('# already markdown');
+    expect(convertHtmlToMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('text/html content is converted and the extracted title fills properties.title', async () => {
+    const node = await createNode({
+      memoryId, loc: 'cun:html-1', name: 'Import',
+      content: '<h1>Hi</h1>', contentType: 'text/html',
+    });
+    expect(node.content).toBe('converted:11'); // '<h1>Hi</h1>'.length
+    expect((node.properties as Record<string, unknown>)?.title).toBe('Extracted Title');
+    expect(convertHtmlToMarkdown).toHaveBeenCalledWith('<h1>Hi</h1>');
+    // contentType is consumed, never persisted anywhere on the row.
+    const row = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'cun:html-1' } });
+    expect(JSON.stringify(row)).not.toContain('text/html');
+  });
+
+  it('a caller-supplied properties.title wins over the extracted one', async () => {
+    const node = await createNode({
+      memoryId, loc: 'cun:html-2', name: 'Import',
+      content: '<p>x</p>', contentType: 'text/html',
+      properties: { title: 'Mine' },
+    });
+    expect((node.properties as Record<string, unknown>)?.title).toBe('Mine');
+  });
+
+  it('text/markdown (and case-variants) is a stored-as-is no-op', async () => {
+    const node = await createNode({
+      memoryId, loc: 'cun:md-1', name: 'MD',
+      content: '# raw', contentType: 'Text/Markdown',
+    });
+    expect(node.content).toBe('# raw');
+  });
+
+  it('an unsupported contentType rejects with BAD_USER_INPUT', async () => {
+    await expect(
+      createNode({ memoryId, loc: 'cun:bad-ct', name: 'x', content: 'x', contentType: 'application/pdf' }),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+
+  it('updateNode converts too (same seam)', async () => {
+    await createNode({ memoryId, loc: 'cun:html-3', name: 'U', content: 'plain' });
+    const updated = await (resolvers.Mutation as any).updateNode(
+      {},
+      { input: { memoryId, loc: 'cun:html-3', content: '<b>new</b>', contentType: 'text/html' } },
+      gqlCtx(),
+    );
+    expect(updated.content).toBe('converted:10'); // '<b>new</b>'.length
+  });
+
+  it('empty/omitted content with text/html is a no-op (no service call)', async () => {
+    vi.mocked(convertHtmlToMarkdown).mockClear();
+    await createNode({ memoryId, loc: 'cun:html-4', name: 'E', contentType: 'text/html' });
+    expect(convertHtmlToMarkdown).not.toHaveBeenCalled();
   });
 });

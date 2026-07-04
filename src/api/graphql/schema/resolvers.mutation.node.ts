@@ -29,6 +29,7 @@ import {
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { GraphQLError } from 'graphql';
+import { convertHtmlToMarkdown } from '../../../lib/pdfClient.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import {
@@ -112,6 +113,54 @@ export async function writeNodeCore(
           });
         }
         throw e;
+      }
+
+      // #476 — contentType conversion at the single write seam, so the
+      // converted Markdown (not the source HTML) is what every downstream
+      // invariant sees: encryption, NodeVersion snapshot, abstractOriginHash,
+      // re-embed, git mirror. 'text/markdown' (default) is a no-op;
+      // 'text/html' converts via hadrontool-pdf (which sanitizes — no second
+      // pass here) and fills properties.title from the extracted title when
+      // the caller didn't set one. The field is consumed here, never stored.
+      if (input.contentType !== undefined) {
+        // Consume the field FIRST — for explicit null as well as strings
+        // (PR-486 review, Codex P2): contentType is not a Node column, and
+        // a `contentType: null` that skipped consumption would leak into
+        // the Prisma payload and turn a plain store-as-Markdown request
+        // into a validation error.
+        const rawContentType = input.contentType;
+        {
+          const { contentType: _consumed, ...rest } = input;
+          input = rest;
+        }
+        const ct = rawContentType == null ? 'text/markdown' : rawContentType.trim().toLowerCase();
+        if (ct !== 'text/html' && ct !== 'text/markdown') {
+          throw new GraphQLError(
+            `Unsupported contentType "${rawContentType}" — use text/markdown (default) or text/html.`,
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
+        if (ct === 'text/html' && typeof input.content === 'string' && input.content.trim() !== '') {
+          const { markdown, title } = await convertHtmlToMarkdown(input.content);
+          input = { ...input, content: markdown };
+          // Fill title only when properties is absent or a plain object — a
+          // caller-supplied scalar/array JSON value passes through untouched
+          // (PR-485 review: spreading a string would corrupt it into
+          // {0:'…'}). And never mutate in place: args may be frozen.
+          const props = input.properties as unknown;
+          const propsIsPlain =
+            props == null || (typeof props === 'object' && !Array.isArray(props));
+          if (
+            title &&
+            propsIsPlain &&
+            (props as Record<string, unknown> | null | undefined)?.title == null
+          ) {
+            input = {
+              ...input,
+              properties: { ...((props as Record<string, unknown>) ?? {}), title },
+            };
+          }
+        }
       }
 
       // Spec 031 — abstract validation + normalization. Length-cap check
