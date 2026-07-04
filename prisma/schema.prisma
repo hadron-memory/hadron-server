@@ -2594,3 +2594,37 @@ model ActionTicket {
   @@index([organizationId, action, consumedAt])
   @@map("action_tickets")
 }
+
+/// Webhook trigger (D-2026-05-02, spec 040 plan §8) — per-kind table like
+/// AgentSchedule. URL shape: /hooks/<secret>/<name>?hpt=<platform JWT>.
+/// The opaque secret is the lookup key (no app/agent IDs in the URL);
+/// the time-limited platform JWT is the second factor — a leaked URL is
+/// useless without it (D-2026-05-02-006).
+model AgentWebhook {
+  id             String    @id
+  organizationId String    @map("organization_id")
+  appId          String    @map("app_id")
+  agentId        String?   @map("agent_id")
+  /// On-behalf-of user, captured at creation (cor:agt:010:01).
+  userId         String?   @map("user_id")
+  name           String
+  /// Opaque URL secret — unique lookup key, never reused across webhooks.
+  secret         String    @unique
+  /// JSON Schema for POST args (stored in v1; Ajv enforcement is follow-on).
+  argsSchema     Json?     @map("args_schema")
+  entryNodeUrn   String    @map("entry_node_urn")
+  eventData      Json?     @map("event_data")
+  policy         Json?
+  aiConfigName   String?   @map("ai_config_name")
+  enabled        Boolean   @default(true)
+  lastCalledAt   DateTime? @map("last_called_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
+
+  @@index([appId, deletedAt])
+  @@map("agent_webhooks")
+}

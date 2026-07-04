@@ -19,6 +19,7 @@ import { resolveAiConfigWithFallback, type ResolvedAiConfig } from '../lib/aiCon
 import { generateText } from '../lib/llm/index.js';
 import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../lib/urn.js';
 import type { RunExecutionDeps } from './appRuns.js';
+import { dispatchRunCallback } from '../api/webhooks.js';
 
 function runContext(db: PrismaClient, run: AppRun): Context {
   // The run principal (cor:agt:010:01): App + optional on-behalf-of user.
@@ -90,6 +91,8 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     },
 
     llm: (resolved, req) => generateText(resolved, req),
+
+    onTerminal: (run) => dispatchRunCallback(db, run),
 
     writeOutput: async (run, text) => {
       const { memory, loc, node } = await loadEntry(db, run.entryNodeUrn, run.organizationId);

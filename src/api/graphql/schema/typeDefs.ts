@@ -1646,6 +1646,85 @@ export const typeDefs = `#graphql
     aiConfigName: String
   }
 
+  "Webhook trigger (D-2026-05-02). The secret is NEVER exposed here — the URL is returned once at create/rotate."
+  type AgentWebhook {
+    id: ID!
+    organizationId: ID!
+    appId: ID!
+    agentId: ID
+    userId: ID
+    name: String!
+    argsSchema: JSON
+    entryNodeUrn: String!
+    eventData: JSON
+    policy: JSON
+    aiConfigName: String
+    enabled: Boolean!
+    lastCalledAt: String
+    createdAt: String!
+    createdBy: String
+  }
+
+  type AgentWebhooksPage {
+    items: [AgentWebhook!]!
+    total: Int!
+  }
+
+  "Create/rotate result — path + platform token are shown ONCE."
+  type AgentWebhookCredentials {
+    webhook: AgentWebhook!
+    "Server-relative URL path: /hooks/<secret>/<name>. Append ?hpt=<token>."
+    path: String!
+    "The time-limited platform JWT (hpt) — the second factor. Store it now."
+    token: String!
+  }
+
+  input CreateAgentWebhookInput {
+    appId: String!
+    "Lowercase alphanumeric/dash, 1-64 chars — part of the URL."
+    name: String!
+    entryNodeUrn: String!
+    agentId: ID
+    runAsSelf: Boolean
+    "JSON Schema for POST args (stored in v1; enforcement is follow-on)."
+    argsSchema: JSON
+    eventData: JSON
+    policy: JSON
+    aiConfigName: String
+    enabled: Boolean
+  }
+
+  "One consumable ticket in the org ledger (cor:acl:050:04 tier 2)."
+  type ActionTicket {
+    id: ID!
+    organizationId: ID!
+    appId: ID
+    action: String!
+    mintedBy: String!
+    note: String
+    consumedByRunId: ID
+    consumedAt: String
+    expiresAt: String
+    createdAt: String!
+  }
+
+  type ActionTicketsPage {
+    items: [ActionTicket!]!
+    total: Int!
+  }
+
+  input MintActionTicketsInput {
+    orgId: String!
+    "Scope tickets to one App; omit for org-wide."
+    appId: ID
+    "v1: comm.outbound only."
+    action: String!
+    count: Int!
+    "Ledger legibility — why these tickets exist."
+    note: String
+    expiresAt: String
+  }
+
   """
   Text-bearing Node fields that searchReplaceInNodes may rewrite. JSON fields
   (data, properties) and the structural 'loc' are intentionally excluded in v1.
@@ -2593,6 +2672,9 @@ export const typeDefs = `#graphql
     appRun(ref: ID!): AppRun
     appRuns(appId: ID, orgId: ID, status: AppRunStatus, limit: Int, offset: Int): AppRunsPage!
     agentSchedules(appId: String!, limit: Int, offset: Int): AgentSchedulesPage!
+    agentWebhooks(appId: String!, limit: Int, offset: Int): AgentWebhooksPage!
+    "The ticket ledger: minted, consumed-by-which-run, expired (org-ADMIN)."
+    actionTickets(orgId: String!, limit: Int, offset: Int): ActionTicketsPage!
   }
 
   """
@@ -2717,6 +2799,14 @@ export const typeDefs = `#graphql
     triggerAppRun(input: TriggerAppRunInput!): AppRun!
     "The kill switch manual handle: PENDING/RUNNING to CANCELLED (cor:agt:010:02)."
     cancelAppRun(id: ID!): AppRun!
+
+    "Create a webhook trigger — returns the URL path + platform token ONCE (D-2026-05-02)."
+    createAgentWebhook(input: CreateAgentWebhookInput!): AgentWebhookCredentials!
+    "New secret + token; the old URL dies immediately."
+    rotateAgentWebhook(id: ID!): AgentWebhookCredentials!
+    deleteAgentWebhook(id: ID!): Boolean!
+    "Mint comm.outbound tickets into the org ledger (org-ADMIN; cor:acl:050:04)."
+    mintActionTickets(input: MintActionTicketsInput!): Int!
 
     # Asset upload — v1 (spec 004)
     beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!

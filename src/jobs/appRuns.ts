@@ -162,6 +162,45 @@ export async function recordQuotaUsage(
   });
 }
 
+// ── Action tickets (cor:acl:050:01/:04 tier 2) ──────────────────────────────
+
+/**
+ * Atomically consume one unconsumed, unexpired ticket for the action —
+ * app-scoped tickets are preferred over org-wide ones. Returns false when
+ * the ledger has none (the caller SKIPS the outbound action and records
+ * why — outbound communication never happens off-ledger).
+ */
+export async function consumeActionTicket(
+  db: PrismaClient,
+  organizationId: string,
+  appId: string | null,
+  action: string,
+  runId: string,
+): Promise<boolean> {
+  const now = new Date();
+  const candidates = await db.actionTicket.findMany({
+    where: {
+      organizationId,
+      action,
+      consumedAt: null,
+      OR: [{ appId: null }, ...(appId ? [{ appId }] : [])],
+      AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] }],
+    },
+    orderBy: [{ appId: { sort: 'desc', nulls: 'last' } }, { createdAt: 'asc' }],
+    take: 5,
+    select: { id: true },
+  });
+  for (const t of candidates) {
+    // Claim atomically — a raced ticket just moves to the next candidate.
+    const res = await db.actionTicket.updateMany({
+      where: { id: t.id, consumedAt: null },
+      data: { consumedAt: now, consumedByRunId: runId },
+    });
+    if (res.count === 1) return true;
+  }
+  return false;
+}
+
 // ── Mint (plan §4 steps 1–2: launch gate + activation) ──────────────────────
 
 export interface MintAppRunArgs {
@@ -298,6 +337,8 @@ export interface RunExecutionDeps {
   llm: (resolved: ResolvedAiConfig, req: { system?: string; prompt: string; maxTokens?: number }) => Promise<LlmResult>;
   writeOutput: (run: AppRun, text: string) => Promise<string | null>; // returns written node id/urn
   resolveConfig: (run: AppRun) => Promise<ResolvedAiConfig>;
+  /** Fired once after a run reaches a terminal state (callback dispatch etc.). Best-effort. */
+  onTerminal?: (run: AppRun) => Promise<void>;
 }
 
 export type RunOutcome = 'completed' | 'failed' | 'skipped' | 'transient';
@@ -308,6 +349,25 @@ export type RunOutcome = 'completed' | 'failed' | 'skipped' | 'transient';
  * is a result, not a retry — cor:agt:010:02).
  */
 export async function executeAppRun(
+  db: PrismaClient,
+  runId: string,
+  deps: RunExecutionDeps,
+): Promise<RunOutcome> {
+  const outcome = await executeAppRunInner(db, runId, deps);
+  if (outcome === 'completed' || outcome === 'failed') {
+    // Terminal → fire the after-hook (webhook callbacks etc.). Best-effort:
+    // a hook failure must never resurrect or re-fail the run.
+    try {
+      const fresh = await db.appRun.findUnique({ where: { id: runId } });
+      if (fresh && deps.onTerminal) await deps.onTerminal(fresh);
+    } catch (err) {
+      console.error(`[run-worker] onTerminal hook failed for ${runId}:`, err);
+    }
+  }
+  return outcome;
+}
+
+async function executeAppRunInner(
   db: PrismaClient,
   runId: string,
   deps: RunExecutionDeps,

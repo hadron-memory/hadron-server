@@ -148,6 +148,18 @@ async function assertHostAllowed(url: URL): Promise<void> {
   }
 }
 
+/**
+ * Validate an arbitrary outbound URL against the egress policy WITHOUT
+ * fetching it (scheme + resolved-address classes). Used by outbound
+ * callbacks (webhook `callbackUrl`, spec 040 §8) — the cor:api:130:02
+ * posture applies to every server-originated request, not only imports.
+ */
+export async function assertUrlAllowed(raw: string): Promise<URL> {
+  const url = parseImportUrl(raw);
+  await assertHostAllowed(url);
+  return url;
+}
+
 export function parseImportUrl(raw: string): URL {
   if (raw.length > MAX_URL_CHARS) {
     throw importError(`URL exceeds ${MAX_URL_CHARS} characters.`, 'IMPORT_URL_INVALID');
