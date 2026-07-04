@@ -803,3 +803,38 @@ describe('cor:api:060 — isRunnable filter (find/list)', () => {
     expect(text).not.toContain('(missing');
   });
 });
+
+// ---------------------------------------------------------------------------
+// PR-482 — literal fallback + multi-flag degraded notes on the MCP surface
+// ---------------------------------------------------------------------------
+
+describe('PR-482 — hadron_find_nodes literal fallback notes', () => {
+  it('malformed keyword query degrades with a [degraded:literal_fallback] note, not an error', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: '(unbalanced',
+      mode: 'keyword',
+      memoryUrn: fx.memory.urn,
+    });
+    expect(text).toContain('[degraded:literal_fallback]');
+    expect(text).not.toContain('BAD_USER_INPUT');
+  });
+
+  it('malformed hybrid query on a non-indexed memory renders BOTH notes (flags are a comma-set)', async () => {
+    // The envelope carries 'no_vector_index,literal_fallback'; the renderer
+    // must parse the set — an exact-match would silently drop the vector
+    // warning (Codex P3).
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: '(unbalanced',
+      mode: 'hybrid',
+      memoryUrn: fx.memory.urn,
+    });
+    // Which vector flag fires depends on the fixture (index disabled →
+    // no_vector_index; index on but no embedding endpoint →
+    // embedding_unavailable) — either way the vector warning must survive
+    // alongside the fallback note.
+    expect(text).toMatch(/\[degraded:(no_vector_index|embedding_unavailable)\]/);
+    expect(text).toContain('[degraded:literal_fallback]');
+  });
+});
