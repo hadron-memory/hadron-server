@@ -27,6 +27,7 @@ export interface CreateAgentScheduleInput {
   enabled?: boolean | null;
 }
 
+/** Resolve the App (ID or URN), require it live, and require org-ADMIN on its org. */
 async function requireScheduleAdmin(ctx: Context, appId: string) {
   const { id } = await resolveAppRef(ctx.db, appId);
   const app = await ctx.db.app.findFirst({
@@ -40,6 +41,7 @@ async function requireScheduleAdmin(ctx: Context, appId: string) {
   return app;
 }
 
+/** Next occurrence for a cron+timezone pair, as a typed BAD_USER_INPUT on invalid input. */
 function validatedCronNext(cron: string, timezone: string): Date {
   try {
     return nextCronOccurrence(cron, timezone);
@@ -77,6 +79,7 @@ async function assertAgentInstalled(ctx: Context, appId: string, agentId: string
 }
 
 export const appRunMutations = {
+  /** Create a recurring trigger (org-ADMIN). nextRunAt is seeded from the validated cron. */
   createAgentSchedule: async (
     _: unknown,
     { input }: { input: CreateAgentScheduleInput },
@@ -116,6 +119,7 @@ export const appRunMutations = {
     });
   },
 
+  /** Partial update (org-ADMIN); a cron/timezone change recomputes nextRunAt. */
   updateAgentSchedule: async (
     _: unknown,
     { id, input }: { id: string; input: Partial<CreateAgentScheduleInput> },
@@ -157,6 +161,7 @@ export const appRunMutations = {
     });
   },
 
+  /** Soft-delete + disable (org-ADMIN). */
   deleteAgentSchedule: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentSchedule.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
@@ -324,7 +329,15 @@ export const appRunMutations = {
     }
     const count = Math.min(Math.max(input.count, 1), 1000);
     const mintedBy = ctx.userId ?? ctx.clientId ?? 'unknown';
-    const expiresAt = input.expiresAt ? new Date(input.expiresAt) : null;
+    let expiresAt: Date | null = null;
+    if (input.expiresAt) {
+      expiresAt = new Date(input.expiresAt);
+      if (Number.isNaN(expiresAt.getTime())) {
+        throw new GraphQLError(`Invalid expiresAt "${input.expiresAt}" — use an ISO-8601 date.`, {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+    }
     await ctx.db.actionTicket.createMany({
       data: Array.from({ length: count }, () => ({
         id: generateId(),
@@ -341,6 +354,7 @@ export const appRunMutations = {
 };
 
 export const appRunQueries = {
+  /** Paginated schedules for an App (org-ADMIN; cor:api:120 envelope). */
   agentSchedules: async (
     _: unknown,
     { appId, limit, offset }: { appId: string; limit?: number | null; offset?: number | null },

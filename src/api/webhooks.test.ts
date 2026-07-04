@@ -209,6 +209,16 @@ describe('dispatchRunCallback — the first ticketed action (cor:acl:050:04)', (
     }
   });
 
+  it('an egress-denied destination at send time skips WITHOUT burning a ticket (PR-494)', async () => {
+    await makeTicket();
+    const run = await terminalRun('http://169.254.169.254/latest'); // internal — denied at send time
+    await dispatchRunCallback(db, run);
+    const consumed = await db.actionTicket.findMany({ where: { consumedAt: { not: null } } });
+    expect(consumed).toHaveLength(0); // ticket NOT burned for a never-attempted send
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect((after.eventData as Record<string, unknown>).__callbackResult).toBe('skipped:egress-denied');
+  });
+
   it('an expired ticket never gets consumed', async () => {
     await makeTicket({ expiresAt: new Date(Date.now() - 1000) });
     expect(await consumeActionTicket(db, orgId, appId, 'comm.outbound', generateId())).toBe(false);

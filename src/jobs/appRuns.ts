@@ -38,6 +38,7 @@ const QUOTA_RUNS_PER_DAY_ORG = intEnv('QUOTA_RUNS_PER_DAY_ORG', 1_000);
 const QUOTA_TOKENS_PER_DAY_APP = intEnv('QUOTA_TOKENS_PER_DAY_APP', 2_000_000);
 const QUOTA_TOKENS_PER_DAY_ORG = intEnv('QUOTA_TOKENS_PER_DAY_ORG', 10_000_000);
 
+/** Parse a positive-integer env var, falling back when unset/invalid. */
 function intEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   const n = raw == null ? NaN : Number(raw);
@@ -62,6 +63,7 @@ export class RunLaunchDeniedError extends Error {
 
 // ── Quota counters (cor:acl:050:01/:04 tier 1) ──────────────────────────────
 
+/** Start of the next UTC day — the daily quota window boundary. */
 function nextUtcMidnight(): Date {
   const d = new Date();
   d.setUTCHours(24, 0, 0, 0);
@@ -193,7 +195,13 @@ export async function consumeActionTicket(
   for (const t of candidates) {
     // Claim atomically — a raced ticket just moves to the next candidate.
     const res = await db.actionTicket.updateMany({
-      where: { id: t.id, consumedAt: null },
+      // Re-check expiry at claim time: a ticket can lapse between the read
+      // and the claim (PR-494 review).
+      where: {
+        id: t.id,
+        consumedAt: null,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
       data: { consumedAt: now, consumedByRunId: runId },
     });
     if (res.count === 1) return true;
@@ -348,6 +356,12 @@ export type RunOutcome = 'completed' | 'failed' | 'skipped' | 'transient';
  * a bus redelivery; run-level failures are recorded on the row (a failed run
  * is a result, not a retry — cor:agt:010:02).
  */
+/**
+ * Claim + execute one run, then fire the terminal hook (callback dispatch).
+ * Returns 'transient' ONLY for infra failures worth a bus redelivery;
+ * run-level failures are recorded on the row (a failed run is a result,
+ * not a retry — cor:agt:010:02).
+ */
 export async function executeAppRun(
   db: PrismaClient,
   runId: string,
@@ -367,6 +381,7 @@ export async function executeAppRun(
   return outcome;
 }
 
+/** The §4 steps 3–5 sequence: atomic claim → per-action activation checks → LLM → output → finish. */
 async function executeAppRunInner(
   db: PrismaClient,
   runId: string,

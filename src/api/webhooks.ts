@@ -44,15 +44,23 @@ export async function mintWebhookPlatformToken(webhookId: string): Promise<strin
     .sign(jwtSecret());
 }
 
+/**
+ * Verify an inbound platform token against the secret-resolved webhook.
+ * Only VERIFICATION failures return false (uniform 404 upstream) — a
+ * missing JWT_SECRET is a configuration error and throws loudly instead of
+ * masquerading as not-found (PR-494 review).
+ */
 async function verifyWebhookPlatformToken(hpt: string, webhookId: string): Promise<boolean> {
+  const secret = jwtSecret(); // config errors surface, not swallowed
   try {
-    const { payload } = await jwtVerify(hpt, jwtSecret());
+    const { payload } = await jwtVerify(hpt, secret);
     return payload.use === 'webhook' && payload.wh === webhookId;
   } catch {
     return false;
   }
 }
 
+/** Mount the /hooks/:secret/:name trigger route (all methods; 405 except GET/POST). */
 export function mountWebhookRoutes(app: Express, db: PrismaClient): void {
   app.all('/hooks/:secret/:name', (req, res) => {
     void handleWebhook(db, req, res).catch((err) => {
@@ -62,6 +70,11 @@ export function mountWebhookRoutes(app: Express, db: PrismaClient): void {
   });
 }
 
+/**
+ * The trigger request handler: resolve by secret → verify the bound
+ * platform token → validate args/callbackUrl → launch gate → 202 + runId.
+ * All auth failures are a uniform 404 (see module header).
+ */
 async function handleWebhook(db: PrismaClient, req: Request, res: Response): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'POST') {
     res.status(405).json({ error: 'method not allowed' });
@@ -168,6 +181,17 @@ export async function dispatchRunCallback(db: PrismaClient, run: AppRun): Promis
     });
   };
 
+  // Send-time egress re-check BEFORE the ticket is touched — a destination
+  // that became disallowed (DNS change, policy update) must not burn a
+  // ticket for an attempt that never happens (PR-494 review).
+  try {
+    await assertUrlAllowed(callbackUrl);
+  } catch {
+    console.warn(`[webhook] run ${run.id}: callback destination no longer allowed`);
+    await record('skipped:egress-denied');
+    return;
+  }
+
   const ticket = await consumeActionTicket(db, run.organizationId, run.appId, 'comm.outbound', run.id);
   if (!ticket) {
     console.warn(`[webhook] run ${run.id}: callback skipped — no comm.outbound ticket`);
@@ -175,12 +199,16 @@ export async function dispatchRunCallback(db: PrismaClient, run: AppRun): Promis
     return;
   }
   try {
-    await assertUrlAllowed(callbackUrl); // re-check at send time
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), CALLBACK_TIMEOUT_MS);
     try {
+      // redirect: 'manual' — the egress policy was checked against THIS
+      // destination only; following a 3xx could tunnel to an internal
+      // address (PR-494 review, the fetchWebPage per-hop posture). A
+      // redirecting callback endpoint gets its 3xx recorded, not followed.
       const resp = await fetch(callbackUrl, {
         method: 'POST',
+        redirect: 'manual',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           runId: run.id,
@@ -190,13 +218,16 @@ export async function dispatchRunCallback(db: PrismaClient, run: AppRun): Promis
         }),
         signal: controller.signal,
       });
+      // Drain/cancel the body — undici leaks sockets on unconsumed
+      // responses (PR-494 review; matches webFetch).
+      await resp.body?.cancel().catch(() => {});
       await record(`sent:${resp.status}`);
     } finally {
       clearTimeout(timer);
     }
   } catch (err) {
     // Best-effort, once: a dead callback endpoint is the CALLER's problem —
-    // the ticket is still consumed (the outbound attempt happened).
+    // the ticket is consumed (the outbound attempt happened).
     console.warn(`[webhook] run ${run.id}: callback failed:`, err);
     await record('failed');
   }
