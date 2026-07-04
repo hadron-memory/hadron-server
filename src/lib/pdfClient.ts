@@ -159,3 +159,102 @@ export async function convertHtmlToMarkdown(
   }
   return { markdown: payload.markdown, ...(payload.title ? { title: payload.title } : {}) };
 }
+
+export interface PdfToMarkdownResult {
+  markdown: string;
+  /** Title from the PDF's metadata (info dict), when present. */
+  title?: string;
+  /** Number of pages the extractor processed. */
+  pageCount: number;
+}
+
+/**
+ * Base64 cap for inline PDF content (#488). A PDF is binary, so the inline
+ * `content` String carries it base64-encoded; base64 inflates ~4/3, so this
+ * ~9.5 MiB of text is ~7 MiB of PDF — comfortably under hadrontool-pdf's 10mb
+ * MAX_BODY_SIZE (leaving room for the JSON envelope) so an oversized capture
+ * fails as a clean typed error here instead of the tool's 413.
+ */
+export const MAX_PDF_BASE64_CHARS = 10_000_000;
+
+/**
+ * Extract Markdown from a base64-encoded PDF via hadrontool-pdf's
+ * POST /convert/pdf-to-markdown (#488). The tool decodes the base64, validates
+ * the %PDF- header, and pulls the text layer (no OCR) — so this client forwards
+ * the base64 string as-is rather than decoding it here. Scanned/image-only PDFs
+ * extract to nothing and surface as a typed PDF_NO_TEXT error (OCR is out of
+ * scope). Same config + error surface as convertHtmlToMarkdown.
+ */
+export async function convertPdfToMarkdown(pdfBase64: string): Promise<PdfToMarkdownResult> {
+  // Caller-error checks before infra checks: the cap applies regardless of
+  // whether the service is configured.
+  if (pdfBase64.length > MAX_PDF_BASE64_CHARS) {
+    throw new GraphQLError(
+      `PDF content exceeds the ${MAX_PDF_BASE64_CHARS.toLocaleString('en-US')}-character (base64) conversion cap.`,
+      { extensions: { code: 'PDF_TOO_LARGE', length: pdfBase64.length, max: MAX_PDF_BASE64_CHARS } },
+    );
+  }
+  const baseUrl = process.env.PDF_SERVICE_URL;
+  if (!baseUrl) {
+    throw new GraphQLError('PDF conversion is not configured (PDF_SERVICE_URL unset).', {
+      extensions: { code: 'PDF_SERVICE_NOT_CONFIGURED' },
+    });
+  }
+  const token = process.env.PDF_SERVICE_TOKEN;
+  const url = `${baseUrl.replace(/\/+$/, '')}/convert/pdf-to-markdown`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ pdfBase64 }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const timedOut = controller.signal.aborted;
+    throw new GraphQLError(
+      timedOut ? 'PDF service timed out.' : 'PDF service is unreachable.',
+      { extensions: { code: 'PDF_SERVICE_UNREACHABLE', cause: String(err) } },
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new GraphQLError(`PDF service error (${res.status}).`, {
+      extensions: { code: 'PDF_SERVICE_ERROR', status: res.status, detail: detail.slice(0, 500) },
+    });
+  }
+
+  const payload = (await res.json().catch(() => null)) as
+    | { markdown?: string; pageCount?: number; info?: { title?: string } }
+    | null;
+  if (!payload || typeof payload.markdown !== 'string') {
+    throw new GraphQLError('PDF service returned an unexpected response.', {
+      extensions: { code: 'PDF_SERVICE_BAD_RESPONSE' },
+    });
+  }
+
+  // Scanned/image-only PDFs (no text layer) extract to nothing — surface a
+  // clear typed error rather than storing an empty node. OCR is out of scope.
+  if (payload.markdown.trim() === '') {
+    throw new GraphQLError(
+      'No extractable text found in the PDF (it may be scanned or image-only).',
+      { extensions: { code: 'PDF_NO_TEXT' } },
+    );
+  }
+
+  const title = payload.info?.title;
+  return {
+    markdown: payload.markdown,
+    pageCount: typeof payload.pageCount === 'number' ? payload.pageCount : 0,
+    ...(title ? { title } : {}),
+  };
+}

@@ -1436,7 +1436,7 @@ export const typeDefs = `#graphql
     "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Optional. Empty + whitespace-only normalize to null. Cap is 2000 characters."
     abstract: String
     content: String
-    "MIME type of content (#476, spec cor:cnv:010:01): 'text/markdown' (default) stores as-is; 'text/html' converts to Markdown via the conversion service before storage (the extracted page title fills properties.title when not supplied). Consumed at write time — never persisted. Any other value is rejected."
+    "MIME type of content (#476/#488, spec cor:cnv:010:01): 'text/markdown' (default) stores as-is; 'text/html' converts captured DOM to Markdown; 'application/pdf' extracts a PDF's text layer to Markdown (send 'content' as raw base64 — a PDF is binary; scanned/image-only PDFs error). The conversion runs before storage and fills properties.title from the extracted title when not supplied. Consumed at write time — never persisted. Any other value is rejected."
     contentType: String
     seq: Int
     tags: [String!]
@@ -1474,7 +1474,7 @@ export const typeDefs = `#graphql
     "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."
     abstract: String
     content: String
-    "MIME type of content (#476, spec cor:cnv:010:01): 'text/markdown' (default) stores as-is; 'text/html' converts to Markdown via the conversion service before storage (the extracted page title fills properties.title when not supplied). Consumed at write time — never persisted. Any other value is rejected."
+    "MIME type of content (#476/#488, spec cor:cnv:010:01): 'text/markdown' (default) stores as-is; 'text/html' converts captured DOM to Markdown; 'application/pdf' extracts a PDF's text layer to Markdown (send 'content' as raw base64 — a PDF is binary; scanned/image-only PDFs error). The conversion runs before storage and fills properties.title from the extracted title when not supplied. Consumed at write time — never persisted. Any other value is rejected."
     contentType: String
     seq: Int
     "Omit to preserve existing tags (issue #235); supply to replace the set."
@@ -1510,11 +1510,11 @@ export const typeDefs = `#graphql
     url: String
     "Inline source content (e.g. the Web Clipper's authenticated-DOM capture). XOR with 'url'."
     content: String
-    "MIME type of 'content': text/html (DEFAULT here — unlike createNode) converts to Markdown at the write seam; text/markdown stores as-is. Ignored on the url path (always HTML)."
+    "MIME type of 'content': text/html (DEFAULT here — unlike createNode) converts to Markdown at the write seam; text/markdown stores as-is; application/pdf extracts a PDF's text layer to Markdown ('content' must be raw base64 — a PDF is binary; scanned/image-only PDFs error). Ignored on the url path (always HTML)."
     contentType: String
-    "Display name. Default: the extracted page/article title; on a re-import of an existing node the current name is preserved; a fresh create without either falls back to the loc leaf."
+    "Display name. Default: the extracted page/article/document title; on a re-import of an existing node the current name is preserved; a fresh create without either falls back to the loc leaf."
     name: String
-    "Default 'webpage'."
+    "Default 'webpage' (or 'info' when contentType is application/pdf)."
     nodeType: String
     "Merged provenance metadata; the server sets properties.url on the url path when absent (properties.title is filled from the extracted title by the write seam)."
     properties: JSON

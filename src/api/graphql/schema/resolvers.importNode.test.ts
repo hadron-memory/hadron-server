@@ -33,6 +33,11 @@ vi.mock('../../../lib/pdfClient.js', async (importOriginal) => ({
     markdown: `md:${html}`,
     title: 'Converter Title',
   })),
+  convertPdfToMarkdown: vi.fn(async (pdfBase64: string) => ({
+    markdown: `pdfmd:${pdfBase64}`,
+    title: 'PDF Title',
+    pageCount: 3,
+  })),
 }));
 
 vi.mock('../../../lib/webFetch.js', async (importOriginal) => ({
@@ -52,7 +57,7 @@ vi.mock('../../../lib/articleExtract.js', () => ({
 
 import { fetchWebPage } from '../../../lib/webFetch.js';
 import { extractArticle } from '../../../lib/articleExtract.js';
-import { convertHtmlToMarkdown } from '../../../lib/pdfClient.js';
+import { convertHtmlToMarkdown, convertPdfToMarkdown } from '../../../lib/pdfClient.js';
 
 let memoryId: string;
 let adminId: string;
@@ -207,6 +212,34 @@ describe('importNode — inline content path (sync)', () => {
     });
     expect(res.node.content).toBe('# already markdown');
     expect(convertHtmlToMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('application/pdf extracts to Markdown, defaults nodeType to info (#488)', async () => {
+    const res = await importNode({
+      memoryId,
+      loc: 'clips:paper',
+      content: 'JVBERi0=', // stand-in base64 (the real decode happens in the tool)
+      contentType: 'application/pdf',
+    });
+    expect(res.status).toBe('STORED');
+    expect(convertPdfToMarkdown).toHaveBeenCalledWith('JVBERi0=');
+    expect(convertHtmlToMarkdown).not.toHaveBeenCalled();
+    expect(res.node.content).toBe('pdfmd:JVBERi0=');
+    // PDF imports are plain 'info', not 'webpage'.
+    expect(res.node.nodeType).toBe('info');
+    // Extracted PDF title fills properties.title.
+    expect((res.node.properties as { title?: string }).title).toBe('PDF Title');
+  });
+
+  it('a caller-supplied nodeType overrides the application/pdf default', async () => {
+    const res = await importNode({
+      memoryId,
+      loc: 'clips:paper2',
+      content: 'JVBERi0=',
+      contentType: 'application/pdf',
+      nodeType: 'record',
+    });
+    expect(res.node.nodeType).toBe('record');
   });
 
   it('accepts a nodeUrn target that does not exist yet', async () => {

@@ -137,6 +137,12 @@ export const importNodeMutations = {
       }
     }
 
+    // Default nodeType by source shape: a captured web page is a 'webpage',
+    // an imported PDF (a paper, statement, saved article) is plain 'info'
+    // (#488). A caller-supplied nodeType always wins.
+    const defaultNodeType =
+      contentType.trim().toLowerCase() === 'application/pdf' ? 'info' : 'webpage';
+
     // ── Store (update-in-place on an existing loc) ─────────────────────
     // Mode: 'upsert' whenever a name is available (create-or-replace in one
     // call). When name is OMITTED to preserve an existing node's curated
@@ -151,7 +157,7 @@ export const importNodeMutations = {
         name,
         content,
         contentType,
-        nodeType: input.nodeType ?? 'webpage',
+        nodeType: input.nodeType ?? defaultNodeType,
         properties,
       },
       ctx,
