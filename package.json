@@ -27,6 +27,9 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@ai-sdk/amazon-bedrock": "^5.0.10",
+    "@ai-sdk/anthropic": "^4.0.7",
+    "@ai-sdk/openai": "^4.0.7",
     "@apollo/server": "^4.11.0",
     "@aws-sdk/client-s3": "^3.1038.0",
     "@aws-sdk/client-sagemaker-runtime": "^3.1059.0",
@@ -39,9 +42,11 @@
     "@nats-io/transport-node": "^3.4.0",
     "@prisma/client": "^6.19.2",
     "@types/pg": "^8.20.0",
+    "ai": "^7.0.14",
     "bcrypt": "^5.1.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
+    "cron-parser": "^5.6.1",
     "csrf-csrf": "^4.0.3",
     "dotenv": "^17.3.1",
     "express": "^4.21.0",

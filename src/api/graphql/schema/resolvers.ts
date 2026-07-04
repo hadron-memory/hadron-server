@@ -26,6 +26,7 @@ import { chatQueries } from './resolvers.query.chat.js';
 import { sessionQueries } from './resolvers.query.session.js';
 
 import { nodeMutations } from './resolvers.mutation.node.js';
+import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
 import { importNodeMutations } from './resolvers.mutation.importNode.js';
 import { assetMutations } from './resolvers.mutation.asset.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
@@ -47,9 +48,11 @@ export const resolvers = {
     ...appQueries,
     ...chatQueries,
     ...sessionQueries,
+    ...appRunQueries,
   },
   Mutation: {
     ...nodeMutations,
+    ...appRunMutations,
     ...importNodeMutations,
     ...assetMutations,
     ...memoryMutations,

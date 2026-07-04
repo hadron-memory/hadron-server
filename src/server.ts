@@ -36,6 +36,9 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
 import { getBusClient } from './lib/bus/index.js';
+import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js';
+import { makeProdRunDeps } from './jobs/appRunDeps.js';
+import { startSchedulerLoop } from './jobs/scheduler.js';
 
 export async function createServer(): Promise<Express> {
   const app = express();
@@ -920,6 +923,19 @@ export async function createServer(): Promise<Express> {
         }
       })
       .catch(() => {});
+  }
+
+  // Spec 040 — headless runs: scheduler + run listener + sweep. The same
+  // optional-bus posture: with NATS off the sweep executes runs directly.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_RUN_WORKER !== 'true') {
+    const runDeps = makeProdRunDeps(db);
+    startAppRunBusListener(db, runDeps).catch((err) => {
+      console.error('[run-worker] failed to start bus listener (sweep continues):', err);
+    });
+    startAppRunSweepLoop(db, runDeps);
+    if (process.env.DISABLE_SCHEDULER !== 'true') {
+      startSchedulerLoop(db);
+    }
   }
 
   // 039 Phase 1 — platform message bus (NATS JetStream). Optional by design
