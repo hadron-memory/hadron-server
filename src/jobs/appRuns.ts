@@ -38,6 +38,7 @@ const QUOTA_RUNS_PER_DAY_ORG = intEnv('QUOTA_RUNS_PER_DAY_ORG', 1_000);
 const QUOTA_TOKENS_PER_DAY_APP = intEnv('QUOTA_TOKENS_PER_DAY_APP', 2_000_000);
 const QUOTA_TOKENS_PER_DAY_ORG = intEnv('QUOTA_TOKENS_PER_DAY_ORG', 10_000_000);
 
+/** Parse a positive-integer env var, falling back when unset/invalid. */
 function intEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   const n = raw == null ? NaN : Number(raw);
@@ -62,6 +63,7 @@ export class RunLaunchDeniedError extends Error {
 
 // ── Quota counters (cor:acl:050:01/:04 tier 1) ──────────────────────────────
 
+/** Start of the next UTC day — the daily quota window boundary. */
 function nextUtcMidnight(): Date {
   const d = new Date();
   d.setUTCHours(24, 0, 0, 0);
@@ -160,6 +162,51 @@ export async function recordQuotaUsage(
     where: { scopeKind, scopeId, action, window: QUOTA_WINDOW },
     data: { used: { increment: amount } },
   });
+}
+
+// ── Action tickets (cor:acl:050:01/:04 tier 2) ──────────────────────────────
+
+/**
+ * Atomically consume one unconsumed, unexpired ticket for the action —
+ * app-scoped tickets are preferred over org-wide ones. Returns false when
+ * the ledger has none (the caller SKIPS the outbound action and records
+ * why — outbound communication never happens off-ledger).
+ */
+export async function consumeActionTicket(
+  db: PrismaClient,
+  organizationId: string,
+  appId: string | null,
+  action: string,
+  runId: string,
+): Promise<boolean> {
+  const now = new Date();
+  const candidates = await db.actionTicket.findMany({
+    where: {
+      organizationId,
+      action,
+      consumedAt: null,
+      OR: [{ appId: null }, ...(appId ? [{ appId }] : [])],
+      AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] }],
+    },
+    orderBy: [{ appId: { sort: 'desc', nulls: 'last' } }, { createdAt: 'asc' }],
+    take: 5,
+    select: { id: true },
+  });
+  for (const t of candidates) {
+    // Claim atomically — a raced ticket just moves to the next candidate.
+    const res = await db.actionTicket.updateMany({
+      // Re-check expiry at claim time: a ticket can lapse between the read
+      // and the claim (PR-494 review).
+      where: {
+        id: t.id,
+        consumedAt: null,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      data: { consumedAt: now, consumedByRunId: runId },
+    });
+    if (res.count === 1) return true;
+  }
+  return false;
 }
 
 // ── Mint (plan §4 steps 1–2: launch gate + activation) ──────────────────────
@@ -298,6 +345,8 @@ export interface RunExecutionDeps {
   llm: (resolved: ResolvedAiConfig, req: { system?: string; prompt: string; maxTokens?: number }) => Promise<LlmResult>;
   writeOutput: (run: AppRun, text: string) => Promise<string | null>; // returns written node id/urn
   resolveConfig: (run: AppRun) => Promise<ResolvedAiConfig>;
+  /** Fired once after a run reaches a terminal state (callback dispatch etc.). Best-effort. */
+  onTerminal?: (run: AppRun) => Promise<void>;
 }
 
 export type RunOutcome = 'completed' | 'failed' | 'skipped' | 'transient';
@@ -307,7 +356,33 @@ export type RunOutcome = 'completed' | 'failed' | 'skipped' | 'transient';
  * a bus redelivery; run-level failures are recorded on the row (a failed run
  * is a result, not a retry — cor:agt:010:02).
  */
+/**
+ * Claim + execute one run, then fire the terminal hook (callback dispatch).
+ * Returns 'transient' ONLY for infra failures worth a bus redelivery;
+ * run-level failures are recorded on the row (a failed run is a result,
+ * not a retry — cor:agt:010:02).
+ */
 export async function executeAppRun(
+  db: PrismaClient,
+  runId: string,
+  deps: RunExecutionDeps,
+): Promise<RunOutcome> {
+  const outcome = await executeAppRunInner(db, runId, deps);
+  if (outcome === 'completed' || outcome === 'failed') {
+    // Terminal → fire the after-hook (webhook callbacks etc.). Best-effort:
+    // a hook failure must never resurrect or re-fail the run.
+    try {
+      const fresh = await db.appRun.findUnique({ where: { id: runId } });
+      if (fresh && deps.onTerminal) await deps.onTerminal(fresh);
+    } catch (err) {
+      console.error(`[run-worker] onTerminal hook failed for ${runId}:`, err);
+    }
+  }
+  return outcome;
+}
+
+/** The §4 steps 3–5 sequence: atomic claim → per-action activation checks → LLM → output → finish. */
+async function executeAppRunInner(
   db: PrismaClient,
   runId: string,
   deps: RunExecutionDeps,

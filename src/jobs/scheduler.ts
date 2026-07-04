@@ -21,6 +21,11 @@ export function nextCronOccurrence(cron: string, timezone: string, from = new Da
   return it.next().toDate();
 }
 
+/**
+ * One scheduler pass: claim due schedules by atomically advancing nextRunAt
+ * (the claim IS the advance — multi-instance safe), apply the overlap-skip
+ * policy, and mint a run per claimed schedule. Returns the mint count.
+ */
 export async function schedulerTick(db: PrismaClient, now = new Date()): Promise<number> {
   const due = await db.agentSchedule.findMany({
     where: { enabled: true, deletedAt: null, nextRunAt: { lte: now } },
@@ -91,6 +96,7 @@ export async function schedulerTick(db: PrismaClient, now = new Date()): Promise
   return minted;
 }
 
+/** Start the periodic scheduler loop (default 60s). Returns the interval handle. */
 export function startSchedulerLoop(
   db: PrismaClient,
   opts: { intervalMs?: number } = {},

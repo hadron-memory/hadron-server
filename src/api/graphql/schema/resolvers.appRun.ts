@@ -4,6 +4,8 @@
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
 import { mintAppRun, RunLaunchDeniedError } from '../../../jobs/appRuns.js';
+import { mintWebhookPlatformToken, generateWebhookSecret } from '../../webhooks.js';
+import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { nextCronOccurrence } from '../../../jobs/scheduler.js';
 import { parsePolicyLink } from '../../../lib/policy/index.js';
 import { assertFullyQualifiedUrn } from '../../../lib/urn.js';
@@ -25,6 +27,7 @@ export interface CreateAgentScheduleInput {
   enabled?: boolean | null;
 }
 
+/** Resolve the App (ID or URN), require it live, and require org-ADMIN on its org. */
 async function requireScheduleAdmin(ctx: Context, appId: string) {
   const { id } = await resolveAppRef(ctx.db, appId);
   const app = await ctx.db.app.findFirst({
@@ -38,6 +41,7 @@ async function requireScheduleAdmin(ctx: Context, appId: string) {
   return app;
 }
 
+/** Next occurrence for a cron+timezone pair, as a typed BAD_USER_INPUT on invalid input. */
 function validatedCronNext(cron: string, timezone: string): Date {
   try {
     return nextCronOccurrence(cron, timezone);
@@ -75,6 +79,7 @@ async function assertAgentInstalled(ctx: Context, appId: string, agentId: string
 }
 
 export const appRunMutations = {
+  /** Create a recurring trigger (org-ADMIN). nextRunAt is seeded from the validated cron. */
   createAgentSchedule: async (
     _: unknown,
     { input }: { input: CreateAgentScheduleInput },
@@ -114,6 +119,7 @@ export const appRunMutations = {
     });
   },
 
+  /** Partial update (org-ADMIN); a cron/timezone change recomputes nextRunAt. */
   updateAgentSchedule: async (
     _: unknown,
     { id, input }: { id: string; input: Partial<CreateAgentScheduleInput> },
@@ -155,6 +161,7 @@ export const appRunMutations = {
     });
   },
 
+  /** Soft-delete + disable (org-ADMIN). */
   deleteAgentSchedule: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentSchedule.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
@@ -216,9 +223,138 @@ export const appRunMutations = {
     });
     return ctx.db.appRun.findUniqueOrThrow({ where: { id } });
   },
+
+  /**
+   * Create a webhook trigger (D-2026-05-02). Returns the full URL path and
+   * the platform token — the token is shown ONCE; rotate to get a new one.
+   */
+  createAgentWebhook: async (
+    _: unknown,
+    {
+      input,
+    }: {
+      input: {
+        appId: string;
+        name: string;
+        entryNodeUrn: string;
+        agentId?: string | null;
+        runAsSelf?: boolean | null;
+        argsSchema?: Record<string, unknown> | null;
+        eventData?: Record<string, unknown> | null;
+        policy?: unknown;
+        aiConfigName?: string | null;
+        enabled?: boolean | null;
+      };
+    },
+    ctx: Context,
+  ) => {
+    const app = await requireScheduleAdmin(ctx, input.appId);
+    assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+    await assertAgentInstalled(ctx, app.id, input.agentId);
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(input.name)) {
+      throw new GraphQLError('Webhook name must be lowercase alphanumeric/dash, 1-64 chars.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    if (input.policy != null && parsePolicyLink(input.policy) == null) {
+      throw new GraphQLError('policy must be { allow: string[] }.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    const webhook = await ctx.db.agentWebhook.create({
+      data: {
+        id: generateId(),
+        organizationId: app.organizationId,
+        appId: app.id,
+        agentId: input.agentId ?? null,
+        userId: resolveRunAsSelf(ctx, input.runAsSelf),
+        name: input.name,
+        secret: generateWebhookSecret(),
+        argsSchema: (input.argsSchema ?? undefined) as never,
+        entryNodeUrn: input.entryNodeUrn,
+        eventData: (input.eventData ?? undefined) as never,
+        policy: (input.policy ?? undefined) as never,
+        aiConfigName: input.aiConfigName ?? null,
+        enabled: input.enabled ?? true,
+        createdBy: ctx.userId ?? ctx.clientId ?? null,
+      },
+    });
+    const token = await mintWebhookPlatformToken(webhook.id);
+    return { webhook, path: `/hooks/${webhook.secret}/${webhook.name}`, token };
+  },
+
+  /** New secret + new platform token; the old URL/token die immediately. */
+  rotateAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
+    const webhook = await ctx.db.agentWebhook.update({
+      where: { id },
+      data: { secret: generateWebhookSecret(), updatedBy: ctx.userId ?? ctx.clientId ?? null },
+    });
+    const token = await mintWebhookPlatformToken(webhook.id);
+    return { webhook, path: `/hooks/${webhook.secret}/${webhook.name}`, token };
+  },
+
+  deleteAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
+    await ctx.db.agentWebhook.update({
+      where: { id },
+      data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null, enabled: false },
+    });
+    return true;
+  },
+
+  /**
+   * Mint comm.outbound tickets into the org ledger (cor:acl:050:04 tier 2).
+   * Org-ADMIN only; `note` keeps the ledger legible ("where did they go?").
+   */
+  mintActionTickets: async (
+    _: unknown,
+    {
+      input,
+    }: {
+      input: { orgId: string; appId?: string | null; action: string; count: number; note?: string | null; expiresAt?: string | null };
+    },
+    ctx: Context,
+  ) => {
+    const { id: organizationId } = await resolveOrgRef(ctx.db, input.orgId);
+    await requireOrgRole(ctx, organizationId, 'ADMIN');
+    if (input.action !== 'comm.outbound') {
+      throw new GraphQLError('v1 tickets exist for the comm.outbound action class only (cor:acl:050:04).', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    const count = Math.min(Math.max(input.count, 1), 1000);
+    const mintedBy = ctx.userId ?? ctx.clientId ?? 'unknown';
+    let expiresAt: Date | null = null;
+    if (input.expiresAt) {
+      expiresAt = new Date(input.expiresAt);
+      if (Number.isNaN(expiresAt.getTime())) {
+        throw new GraphQLError(`Invalid expiresAt "${input.expiresAt}" — use an ISO-8601 date.`, {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+    }
+    await ctx.db.actionTicket.createMany({
+      data: Array.from({ length: count }, () => ({
+        id: generateId(),
+        organizationId,
+        appId: input.appId ?? null,
+        action: input.action,
+        mintedBy,
+        note: input.note ?? null,
+        expiresAt,
+      })),
+    });
+    return count;
+  },
 };
 
 export const appRunQueries = {
+  /** Paginated schedules for an App (org-ADMIN; cor:api:120 envelope). */
   agentSchedules: async (
     _: unknown,
     { appId, limit, offset }: { appId: string; limit?: number | null; offset?: number | null },
@@ -279,6 +415,40 @@ export const appRunQueries = {
     const [items, total] = await Promise.all([
       ctx.db.appRun.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.appRun.count({ where }),
+    ]);
+    return { items, total };
+  },
+
+  agentWebhooks: async (
+    _: unknown,
+    { appId, limit, offset }: { appId: string; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => {
+    const app = await requireScheduleAdmin(ctx, appId);
+    const where = { appId: app.id, deletedAt: null };
+    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const [items, total] = await Promise.all([
+      ctx.db.agentWebhook.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
+      ctx.db.agentWebhook.count({ where }),
+    ]);
+    // The secret is intentionally NOT part of the GraphQL type (leak surface);
+    // the URL is only shown at create/rotate time.
+    return { items, total };
+  },
+
+  /** The ticket ledger (cor:acl:050:04): where did they all go? */
+  actionTickets: async (
+    _: unknown,
+    { orgId, limit, offset }: { orgId: string; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => {
+    const { id: organizationId } = await resolveOrgRef(ctx.db, orgId);
+    await requireOrgRole(ctx, organizationId, 'ADMIN');
+    const where = { organizationId };
+    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const [items, total] = await Promise.all([
+      ctx.db.actionTicket.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
+      ctx.db.actionTicket.count({ where }),
     ]);
     return { items, total };
   },

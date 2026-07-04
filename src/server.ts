@@ -39,6 +39,7 @@ import { getBusClient } from './lib/bus/index.js';
 import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js';
 import { makeProdRunDeps } from './jobs/appRunDeps.js';
 import { startSchedulerLoop } from './jobs/scheduler.js';
+import { mountWebhookRoutes } from './api/webhooks.js';
 
 export async function createServer(): Promise<Express> {
   const app = express();
@@ -886,6 +887,9 @@ export async function createServer(): Promise<Express> {
         'OAuth dynamic client registration is not supported. Authenticate to /mcp with an App Key via the Authorization: Bearer hdr_app_… header.',
     });
   });
+
+  // Spec 040 §8 — webhook triggers (/hooks/<secret>/<name>?hpt=...).
+  mountWebhookRoutes(app, db);
 
   app.get('/health', (_req, res) => {
     res.json({ ok: true });

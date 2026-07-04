@@ -27,6 +27,12 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.aiServiceConfig.deleteMany();
   await db.hadronServer.deleteMany();
   await db.usageEvent.deleteMany();
+  // Spec 040 — headless-run tables (no FKs between them; order-free).
+  await db.appRun.deleteMany();
+  await db.agentSchedule.deleteMany();
+  await db.agentWebhook.deleteMany();
+  await db.quotaCounter.deleteMany();
+  await db.actionTicket.deleteMany();
   await db.edge.deleteMany();
   await db.pendingEdge.deleteMany();
   await db.session.deleteMany();
