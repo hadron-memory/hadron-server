@@ -124,21 +124,38 @@ export async function writeNodeCore(
       // the caller didn't set one. The field is consumed here, never stored.
       if (input.contentType != null) {
         const ct = input.contentType.trim().toLowerCase();
-        if (ct === 'text/html') {
-          if (typeof input.content === 'string' && input.content.trim() !== '') {
-            const { markdown, title } = await convertHtmlToMarkdown(input.content);
-            input = { ...input, content: markdown };
-            if (title && (input.properties as Record<string, unknown> | undefined)?.title == null) {
-              input.properties = { ...(input.properties ?? {}), title };
-            }
-          }
-        } else if (ct !== 'text/markdown') {
+        if (ct !== 'text/html' && ct !== 'text/markdown') {
           throw new GraphQLError(
             `Unsupported contentType "${input.contentType}" — use text/markdown (default) or text/html.`,
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
-        delete (input as { contentType?: unknown }).contentType;
+        if (ct === 'text/html' && typeof input.content === 'string' && input.content.trim() !== '') {
+          const { markdown, title } = await convertHtmlToMarkdown(input.content);
+          input = { ...input, content: markdown };
+          // Fill title only when properties is absent or a plain object — a
+          // caller-supplied scalar/array JSON value passes through untouched
+          // (PR-485 review: spreading a string would corrupt it into
+          // {0:'…'}). And never mutate in place: args may be frozen.
+          const props = input.properties as unknown;
+          const propsIsPlain =
+            props == null || (typeof props === 'object' && !Array.isArray(props));
+          if (
+            title &&
+            propsIsPlain &&
+            (props as Record<string, unknown> | null | undefined)?.title == null
+          ) {
+            input = {
+              ...input,
+              properties: { ...((props as Record<string, unknown>) ?? {}), title },
+            };
+          }
+        }
+        // Consume the field via destructuring — `delete` on the original
+        // args object would throw if a GraphQL runner freezes args
+        // (PR-485 review; matches the frozen-args defense noted below).
+        const { contentType: _consumed, ...rest } = input;
+        input = rest;
       }
 
       // Spec 031 — abstract validation + normalization. Length-cap check
