@@ -67,9 +67,13 @@ export function isForbiddenAddress(ip: string): boolean {
   }
   if (family === 6) {
     const lower = ip.toLowerCase();
-    // IPv4-mapped (::ffff:a.b.c.d) — validate the embedded IPv4.
-    const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return isForbiddenAddress(mapped[1]);
+    // IPv4 embedded in IPv6 — mapped (::ffff:0:0/96) or the deprecated
+    // IPv4-compatible form (::/96) — must be validated by the IPv4 rules.
+    // BOTH textual shapes count: dotted (::ffff:127.0.0.1) AND hex
+    // (::ffff:7f00:1) — the hex form bypassed a dotted-only unwrap
+    // (PR-486 review, Codex P1 / Gemini critical).
+    const embedded = embeddedIpv4(lower);
+    if (embedded != null) return isForbiddenAddress(embedded);
     if (lower === '::' || lower === '::1') return true; // unspecified + loopback
     if (/^f[cd]/.test(lower)) return true; // fc00::/7 ULA
     if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
@@ -78,6 +82,45 @@ export function isForbiddenAddress(ip: string): boolean {
   }
   // Not an IP at all — callers pass resolver output, so treat as forbidden.
   return true;
+}
+
+/**
+ * Extract the IPv4 address embedded in an IPv4-mapped (::ffff:0:0/96) or
+ * IPv4-compatible (::/96, deprecated but OS-honored) IPv6 literal, in EITHER
+ * textual shape (dotted or hex groups). Returns null when the address is
+ * plain IPv6. Works on the full 8-group expansion so `::` compression and
+ * leading-zero variants can't dodge the check.
+ */
+export function embeddedIpv4(ip6: string): string | null {
+  let s = ip6.toLowerCase();
+  // Fold a trailing dotted-quad into two hex groups so the expansion below
+  // is uniform.
+  const dotted = s.match(/^(.*:)(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) {
+    const parts = dotted[2].split('.').map(Number);
+    if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p > 255)) return null;
+    s =
+      dotted[1] +
+      ((parts[0] << 8) | parts[1]).toString(16) +
+      ':' +
+      ((parts[2] << 8) | parts[3]).toString(16);
+  }
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 && missing < 0) return null;
+  const groups =
+    halves.length === 2 ? [...head, ...Array<string>(missing).fill('0'), ...tail] : head;
+  if (groups.length !== 8) return null;
+  const g = groups.map((x) => parseInt(x || '0', 16));
+  if (g.some((n) => Number.isNaN(n) || n < 0 || n > 0xffff)) return null;
+  const zeroTo = (i: number) => g.slice(0, i).every((n) => n === 0);
+  const isMapped = zeroTo(5) && g[5] === 0xffff;
+  const isCompat = zeroTo(6) && (g[6] !== 0 || g[7] > 1); // excludes :: and ::1 (plain v6)
+  if (!isMapped && !isCompat) return null;
+  return `${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`;
 }
 
 /** Validate a URL's host: IP literals directly, hostnames via full resolution. */
@@ -207,7 +250,23 @@ export async function fetchWebPage(rawUrl: string): Promise<WebFetchResult> {
           { contentType },
         );
       }
-      const html = await readCapped(res);
+      // Body-read failures happen OUTSIDE the fetch() try above — a page
+      // that returns headers then stalls aborts during reader.read(), and
+      // a raw AbortError must not leak past the typed-error contract
+      // (PR-486 review, Codex P2).
+      let html: string;
+      try {
+        html = await readCapped(res);
+      } catch (err) {
+        if (err instanceof GraphQLError) throw err; // our own size-cap error
+        throw importError(
+          controller.signal.aborted
+            ? `Import fetch timed out after ${TOTAL_TIMEOUT_MS / 1000}s.`
+            : 'Import fetch failed while reading the response body.',
+          controller.signal.aborted ? 'IMPORT_FETCH_TIMEOUT' : 'IMPORT_FETCH_FAILED',
+          { cause: String(err) },
+        );
+      }
       return { html, finalUrl: url.toString() };
     }
   } finally {

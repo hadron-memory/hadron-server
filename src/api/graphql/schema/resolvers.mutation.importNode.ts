@@ -20,7 +20,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { fetchWebPage } from '../../../lib/webFetch.js';
 import { extractArticle } from '../../../lib/articleExtract.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
-import { type Context } from './resolvers.helpers.js';
+import { type Context, requireMemoryWriteAccess } from './resolvers.helpers.js';
 
 export interface ImportNodeInput {
   // Target — (memoryId + loc) XOR nodeUrn. The URN may name a
@@ -51,14 +51,20 @@ export const importNodeMutations = {
     }
 
     // ── Target dispatch: (memoryId + loc) XOR nodeUrn ──────────────────
+    // Empty strings normalize to absent across all three selectors so a
+    // client serializing unset fields as '' gets the intended
+    // BAD_USER_INPUT instead of a downstream URN-qualification error
+    // (PR-486 review).
+    const memoryIdIn = input.memoryId != null && input.memoryId !== '' ? input.memoryId : null;
+    const locIn = input.loc != null && input.loc !== '' ? input.loc : null;
     const hasUrn = input.nodeUrn != null && input.nodeUrn !== '';
-    if (hasUrn && (input.memoryId != null || input.loc != null)) {
+    if (hasUrn && (memoryIdIn != null || locIn != null)) {
       throw new GraphQLError(
         'importNode: identify the target by `nodeUrn` OR by `memoryId` + `loc`, not both.',
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
-    if (!hasUrn && (input.memoryId == null || input.loc == null)) {
+    if (!hasUrn && (memoryIdIn == null || locIn == null)) {
       throw new GraphQLError(
         'importNode: supply `nodeUrn` or both `memoryId` and `loc`.',
         { extensions: { code: 'BAD_USER_INPUT' } },
@@ -77,9 +83,16 @@ export const importNodeMutations = {
       // Resolve here (ID-or-URN dispatch) rather than leaving it to the
       // write core: the name-preservation existence check below needs the
       // definite id, and a bad memory ref should fail before any fetch.
-      ({ id: memoryId } = await resolveMemoryRef(ctx.db, input.memoryId as string));
-      loc = input.loc as string;
+      ({ id: memoryId } = await resolveMemoryRef(ctx.db, memoryIdIn as string));
+      loc = locIn as string;
     }
+
+    // ── Authorize BEFORE acquiring content ─────────────────────────────
+    // The write core re-checks, but the check must also run pre-fetch: an
+    // unauthorized caller must not be able to use importNode as an egress /
+    // resource-consumption primitive (a full 30s fetch with redirects) just
+    // to be denied at the write (PR-486 review, Codex P1).
+    await requireMemoryWriteAccess(ctx, memoryId);
 
     // ── Acquire content ────────────────────────────────────────────────
     // The url path fetches WITHOUT user credentials — authenticated pages
@@ -96,8 +109,9 @@ export const importNodeMutations = {
     } else {
       content = input.content as string;
       // Default text/html: the clipper sends captured DOM. text/markdown
-      // passes through; anything else is rejected by the write seam.
-      contentType = input.contentType ?? 'text/html';
+      // passes through; anything else is rejected by the write seam. An
+      // empty/whitespace contentType counts as unset (PR-486 review).
+      contentType = input.contentType?.trim() ? input.contentType : 'text/html';
     }
 
     // ── Provenance + defaults ──────────────────────────────────────────

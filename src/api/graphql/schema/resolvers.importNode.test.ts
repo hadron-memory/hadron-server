@@ -126,6 +126,57 @@ describe('importNode — input contract', () => {
   it('rejects loc without memoryId', async () => {
     await expectCode(importNode({ loc: 'x', content: '<p>a</p>' }), 'BAD_USER_INPUT');
   });
+
+  it('treats empty-string selectors as absent (PR-486 review)', async () => {
+    await expectCode(importNode({ memoryId: '', loc: '', content: '<p>a</p>' }), 'BAD_USER_INPUT');
+    // '' selectors are ABSENT, so nodeUrn alongside them stays valid.
+    const res = await importNode({
+      nodeUrn: `${MEMORY_URN}::clips:emptysel`,
+      memoryId: '',
+      loc: '',
+      content: '<p>a</p>',
+    });
+    expect(res.status).toBe('STORED');
+  });
+
+  it('an empty-string contentType falls back to the text/html default', async () => {
+    const res = await importNode({
+      memoryId,
+      loc: 'clips:ctdefault',
+      content: '<p>c</p>',
+      contentType: '',
+    });
+    expect(res.node.content).toBe('md:<p>c</p>');
+  });
+});
+
+// ───── authorization ordering (Codex P1) ────────────────────────────────────
+
+describe('importNode — authorization precedes any fetch', () => {
+  it('a caller without write access is denied BEFORE fetchWebPage runs', async () => {
+    const outsider = await db.user.create({
+      data: { githubId: 9982, githubUsername: 'imp-outsider', roles: ['READER'] },
+    });
+    const outsiderCtx: Context = {
+      db,
+      roles: ['READER'],
+      userId: outsider.id,
+      clientId: `user:${outsider.id}`,
+    };
+    let caught: unknown;
+    try {
+      await resolvers.Mutation.importNode(
+        {},
+        { input: { memoryId, loc: 'clips:denied', url: 'https://example.com/x' } as never },
+        outsiderCtx,
+      );
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    // The load-bearing assertion: no egress happened for the denied caller.
+    expect(fetchWebPage).not.toHaveBeenCalled();
+  });
 });
 
 // ───── content path ─────────────────────────────────────────────────────────
