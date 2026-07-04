@@ -1495,6 +1495,49 @@ export const typeDefs = `#graphql
   }
 
   """
+  Input for importNode (#457). Target: 'nodeUrn' XOR ('memoryId' + 'loc') —
+  the URN may name a not-yet-existing node (import creates it). Source:
+  exactly one of 'url' | 'content'.
+  """
+  input ImportNodeInput {
+    "Target memory (ID or fully-qualified URN), with 'loc'. XOR with 'nodeUrn'."
+    memoryId: String
+    "Target loc within 'memoryId'. XOR with 'nodeUrn'."
+    loc: String
+    "Fully-qualified node URN naming the target (existing or new). XOR with memoryId+loc."
+    nodeUrn: String
+    "Source URL (http/https) — fetched server-side, SSRF-guarded, WITHOUT user credentials."
+    url: String
+    "Inline source content (e.g. the Web Clipper's authenticated-DOM capture). XOR with 'url'."
+    content: String
+    "MIME type of 'content': text/html (DEFAULT here — unlike createNode) converts to Markdown at the write seam; text/markdown stores as-is. Ignored on the url path (always HTML)."
+    contentType: String
+    "Display name. Default: the extracted page/article title; on a re-import of an existing node the current name is preserved; a fresh create without either falls back to the loc leaf."
+    name: String
+    "Default 'webpage'."
+    nodeType: String
+    "Merged provenance metadata; the server sets properties.url on the url path when absent (properties.title is filled from the extracted title by the write seam)."
+    properties: JSON
+  }
+
+  """
+  importNode outcome. Sync v1 always returns STORED with the stored node;
+  FETCH_PENDING + jobId are RESERVED for the future async url path (same API
+  shape, no breaking change when it lands).
+  """
+  enum ImportNodeStatus {
+    STORED
+    FETCH_PENDING
+  }
+
+  type ImportNodeResult {
+    status: ImportNodeStatus!
+    node: Node
+    "Reserved for the async path — always null in sync v1."
+    jobId: ID
+  }
+
+  """
   Text-bearing Node fields that searchReplaceInNodes may rewrite. JSON fields
   (data, properties) and the structural 'loc' are intentionally excluded in v1.
   """
@@ -2537,6 +2580,18 @@ export const typeDefs = `#graphql
     # Returns the assembled instructions (node content with {{arg}} substitution and referenced nodes).
     # Spec cor:api:060.
     runTask(task: String, memory: String, urn: String, args: JSON): String!
+
+    """
+    Import external content into a node (#457, sync v1). Source: exactly one
+    of 'url' (server-fetched inline, SSRF-guarded, Readability-extracted,
+    ~30s budget — the fetch carries NO user credentials, so authenticated
+    pages must come as 'content') or 'content' (client-captured, e.g. the
+    Web Clipper's authenticated DOM). Target: 'nodeUrn' XOR ('memoryId' +
+    'loc'); an existing node is updated IN PLACE (NodeVersion snapshot is
+    the undo), a missing one is created. HTML converts to Markdown at the
+    write seam (contentType defaults to text/html here, unlike createNode).
+    """
+    importNode(input: ImportNodeInput!): ImportNodeResult!
 
     # Asset upload — v1 (spec 004)
     beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!
