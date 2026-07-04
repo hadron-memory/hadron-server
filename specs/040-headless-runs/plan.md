@@ -48,111 +48,123 @@ build the kernel + first triggers, everything else is the Opus handoff (§10).
 
 ```prisma
 enum AppRunStatus { PENDING RUNNING COMPLETED FAILED TIMED_OUT CANCELLED }
+enum AppRunTriggerKind { SCHEDULE WEBHOOK MANUAL INTEGRATION }
 
 model AppRun {
   id             String       @id            // also the bus idempotency key
-  organizationId String
-  appId          String
-  agentId        String?
-  userId         String?                     // on-behalf-of (D-2026-07-04-C)
+  organizationId String       @map("organization_id")
+  appId          String       @map("app_id")
+  agentId        String?      @map("agent_id")
+  userId         String?      @map("user_id") // on-behalf-of (D-2026-07-04-C)
   // Trigger provenance (audit: "what caused this run")
-  triggerKind    String                      // 'schedule' | 'webhook' | 'manual' | 'integration'
-  triggerId      String?                     // AgentSchedule.id / AgentWebhook.id / null
-  entryNodeUrn   String                      // the prompt node executed (D12/D17)
-  eventData      Json?                       // trigger payload (webhook args, schedule context)
+  triggerKind    AppRunTriggerKind @map("trigger_kind")
+  triggerId      String?      @map("trigger_id") // AgentSchedule.id / AgentWebhook.id / null
+  entryNodeUrn   String       @map("entry_node_urn") // the prompt node executed (D12/D17)
+  eventData      Json?        @map("event_data")     // trigger payload (webhook args, schedule context)
   // Activation (D-2026-07-04-D): this row IS the activation token
-  policy         Json?                       // run-layer allow-list snapshot (narrowest chain link)
-  budgetTokens   Int?                        // remaining LLM tokens; live-decrement kill switch
-  budgetActions  Int?                        // remaining tool/write actions
+  policy         Json?                        // run-layer allow-list snapshot (narrowest chain link)
+  budgetTokens   Int?         @map("budget_tokens")  // remaining LLM tokens; live-decrement kill switch
+  budgetActions  Int?         @map("budget_actions") // remaining tool/write actions
   // Lifecycle (D11 + D20/D24)
   status         AppRunStatus @default(PENDING)
-  curNodeUrn     String?                     // position; retained through terminal state
-  parentRunId    String?                     // spawn lineage (post-v1 writes it; column now)
-  failure        Json?                       // typed failure payload (observable, D20)
-  timeoutMs      Int?
+  curNodeUrn     String?      @map("cur_node_urn")   // position; retained through terminal state
+  parentRunId    String?      @map("parent_run_id")  // spawn lineage (post-v1 writes it; column now)
+  failure        Json?                        // typed failure payload (observable, D20)
+  timeoutMs      Int?         @map("timeout_ms")
   attempts       Int          @default(0)
-  publishedAt    DateTime?                   // outbox marker (039 §4 idiom)
-  startedAt      DateTime?
-  finishedAt     DateTime?
-  createdAt      DateTime     @default(now())
-  createdBy      String?
+  publishedAt    DateTime?    @map("published_at")   // outbox marker (039 §4 idiom)
+  startedAt      DateTime?    @map("started_at")
+  finishedAt     DateTime?    @map("finished_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  createdBy      String?      @map("created_by")
 
   @@index([status, publishedAt])
   @@index([appId, createdAt])
+  @@index([triggerId, status])     // scheduler overlap check + per-trigger audit
+  @@index([organizationId, createdAt]) // appRuns(orgId) audit listing
   @@map("app_runs")
 }
 
 model AgentSchedule {
   id             String    @id
-  organizationId String
-  appId          String
-  agentId        String?
-  userId         String?                     // on-behalf-of, captured at creation (C)
+  organizationId String    @map("organization_id")
+  appId          String    @map("app_id")
+  agentId        String?   @map("agent_id")
+  userId         String?   @map("user_id")     // on-behalf-of, captured at creation (C)
   name           String
-  cron           String                      // 5-field cron
+  cron           String                        // 5-field cron
   timezone       String    @default("UTC")
-  entryNodeUrn   String                      // prompt node to run (D17)
-  eventData      Json?                       // static payload merged into each run
-  policy         Json?                       // trigger-layer allow-list (chain link)
-  aiConfigName   String?                     // per-trigger AI config override (mirrors webhook D5)
+  entryNodeUrn   String    @map("entry_node_urn") // prompt node to run (D17)
+  eventData      Json?     @map("event_data")     // static payload merged into each run
+  policy         Json?                        // trigger-layer allow-list (chain link)
+  aiConfigName   String?   @map("ai_config_name") // per-trigger AI config override (mirrors webhook D5)
   enabled        Boolean   @default(true)
-  lastRunAt      DateTime?
-  nextRunAt      DateTime?                   // computed; the scheduler's work signal
-  createdBy      String?
-  createdAt      DateTime  @default(now())
-  deletedAt      DateTime?
+  lastRunAt      DateTime? @map("last_run_at")
+  nextRunAt      DateTime? @map("next_run_at")    // computed; the scheduler's work signal
+  // Standard audit set (user-managed config model — schema convention)
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
 
   @@index([enabled, nextRunAt])
+  @@index([appId, deletedAt])      // agentSchedules(appId) listing
   @@map("agent_schedules")
 }
 
 // AgentWebhook: exactly the decided D-2026-05-02 shape (Day 3):
 // { id, agentId/appId/orgId, name, secret, argsSchema?, entryNodeUrn,
 //   aiConfigName?, userId? (on-behalf-of), policy?, enabled, ... }
+// — same @map/audit/index conventions as AgentSchedule.
 
 model QuotaCounter {
   id        String   @id
-  scopeKind String                           // 'app' | 'org'
-  scopeId   String
+  scopeKind String   @map("scope_kind")      // 'app' | 'org'
+  scopeId   String   @map("scope_id")
   action    String                           // 'run.execute' | 'llm.tokens'
   window    String                           // 'day'
   used      Int      @default(0)
   limit     Int
-  resetAt   DateTime
+  resetAt   DateTime @map("reset_at")
   @@unique([scopeKind, scopeId, action, window])
   @@map("quota_counters")
 }
 
 model ActionTicket {
-  id             String    @id
-  organizationId String
-  appId          String?
-  action         String                      // v1: 'comm.outbound'
-  mintedBy       String
-  note           String?                     // ledger legibility ("where did they go?")
-  consumedByRunId String?
-  consumedAt     DateTime?
-  expiresAt      DateTime?
-  createdAt      DateTime  @default(now())
+  id              String    @id
+  organizationId  String    @map("organization_id")
+  appId           String?   @map("app_id")
+  action          String                     // v1: 'comm.outbound'
+  mintedBy        String    @map("minted_by")
+  note            String?                    // ledger legibility ("where did they go?")
+  consumedByRunId String?   @map("consumed_by_run_id")
+  consumedAt      DateTime? @map("consumed_at")
+  expiresAt       DateTime? @map("expires_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
   @@index([organizationId, action, consumedAt])
   @@map("action_tickets")
 }
 ```
 
 Notes: single-`id` PKs throughout (no `MODELS_WITHOUT_ID` change). `AppRun` doubles as
-outbox row (039 §4 idiom) and activation token (D). Apply via `pnpm db:dev-setup`.
+outbox row (039 §4 idiom) and activation token (D). All fields `@map`ed snake_case per
+schema convention; `AgentSchedule` carries the full audit set (user-managed config).
+Apply via `pnpm db:dev-setup`.
 
 ## 4. Authorization flow (the load-bearing sequence)
 
 ```
-trigger fires (scheduler tick / webhook / mutation)
+trigger fires (scheduler tick / webhook / MANUAL mutation / integration)
   1. LAUNCH GATE (cor:acl:050): quota counters have headroom (run.execute), the
      trigger is enabled, the App/Agent/org are live, on-behalf-of user (if any)
      still has the required relationship (AppMember/AgentSubscription).
   2. MINT: create AppRun(PENDING) — policy snapshot = conjunction-ready chain links
      (org defaults ∧ user link ∧ app link ∧ trigger.policy), budgets from quota
      headroom. Tx-commit, then bus.publish('run.requested.v1', {runId},
-     {idempotencyKey: runId}); publishedAt NULL on failure → sweep republishes.
+     {idempotencyKey: runId}) and STAMP publishedAt on success; on publish
+     failure leave publishedAt NULL → the sweep republishes (and stamps).
   3. CLAIM (listener): atomic PENDING→RUNNING flip (the #489 idiom). Duplicate
      delivery ⇒ claim count 0 ⇒ ack+drop.
   4. EXECUTE: every action inside the run — LLM call, node write, tool use —
@@ -163,9 +175,11 @@ trigger fires (scheduler tick / webhook / mutation)
   5. FINISH: COMPLETED/FAILED/TIMED_OUT + failure payload + UsageEvent(tokens).
 ```
 
-`evaluatePolicyChain(action, links[])`: `links.every(l => allows(l, action))` where a
-missing link layer contributes the platform default for that layer (A: shape now — the
-allow() over JSON allow-lists; the rule language grows inside this signature).
+`evaluatePolicyChain(action, links[])`: `links.every(l => allows(l, action))`. An
+ABSENT layer contributes no additional restriction (it is simply not in `links`) —
+the base layer (class gates ∩ App scope) is always present and default-deny governs
+each present link's allow-list (A: shape now; the rule language grows inside
+`allows()` without touching call sites).
 
 Action vocabulary v1: `run.execute`, `llm.invoke`, `memory.read`, `memory.write`,
 `comm.outbound` (ticketed), `tool.<name>` (reserved).
@@ -202,7 +216,9 @@ update — multi-instance-safe), run the §4 sequence per row, compute nextRunAt
 `cron-parser` (tiny, zero-dep — flag to Holger in PR). Misfire policy v1: run once if
 overdue, never backfill multiple missed ticks. Overlap policy v1: skip if a PENDING/
 RUNNING run exists for the same schedule (idempotency for overlapping ticks — the
-reserved D-2026-05-09 question, answered minimally).
+reserved D-2026-05-09 question, answered minimally). A skip STILL advances
+nextRunAt to the next cron occurrence — otherwise the due condition stays true and
+the completed run is followed by an immediate back-to-back execution storm.
 
 ## 8. Webhook trigger (Day 3, decided shape)
 
