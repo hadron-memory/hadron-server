@@ -181,17 +181,23 @@ export const MAX_PDF_BASE64_CHARS = 10_000_000;
  * Extract Markdown from a base64-encoded PDF via hadrontool-pdf's
  * POST /convert/pdf-to-markdown (#488). The tool decodes the base64, validates
  * the %PDF- header, and pulls the text layer (no OCR) — so this client forwards
- * the base64 string as-is rather than decoding it here. Scanned/image-only PDFs
- * extract to nothing and surface as a typed PDF_NO_TEXT error (OCR is out of
- * scope). Same config + error surface as convertHtmlToMarkdown.
+ * the base64 string rather than decoding it here. The documented contract is
+ * raw base64 (the clipper strips the FileReader data-URL prefix), but a stray
+ * `data:...;base64,` prefix is stripped defensively so a forgetful client gets
+ * a clean result instead of a %PDF- 400 on garbage bytes. Scanned/image-only
+ * PDFs extract to nothing and surface as a typed PDF_NO_TEXT error (OCR is out
+ * of scope). Same config + error surface as convertHtmlToMarkdown.
  */
 export async function convertPdfToMarkdown(pdfBase64: string): Promise<PdfToMarkdownResult> {
+  // Tolerate a data-URL prefix even though the contract is raw base64.
+  const rawBase64 = pdfBase64.replace(/^data:[^;,]*;base64,/, '');
+
   // Caller-error checks before infra checks: the cap applies regardless of
   // whether the service is configured.
-  if (pdfBase64.length > MAX_PDF_BASE64_CHARS) {
+  if (rawBase64.length > MAX_PDF_BASE64_CHARS) {
     throw new GraphQLError(
       `PDF content exceeds the ${MAX_PDF_BASE64_CHARS.toLocaleString('en-US')}-character (base64) conversion cap.`,
-      { extensions: { code: 'PDF_TOO_LARGE', length: pdfBase64.length, max: MAX_PDF_BASE64_CHARS } },
+      { extensions: { code: 'PDF_TOO_LARGE', length: rawBase64.length, max: MAX_PDF_BASE64_CHARS } },
     );
   }
   const baseUrl = process.env.PDF_SERVICE_URL;
@@ -213,7 +219,7 @@ export async function convertPdfToMarkdown(pdfBase64: string): Promise<PdfToMark
         'content-type': 'application/json',
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ pdfBase64 }),
+      body: JSON.stringify({ pdfBase64: rawBase64 }),
       signal: controller.signal,
     });
   } catch (err) {
@@ -251,7 +257,10 @@ export async function convertPdfToMarkdown(pdfBase64: string): Promise<PdfToMark
     );
   }
 
-  const title = payload.info?.title;
+  // Type-check + trim: PDF metadata titles are often junk (whitespace, empty),
+  // and a whitespace-only string would otherwise propagate as a blank title.
+  const rawTitle = payload.info?.title;
+  const title = typeof rawTitle === 'string' ? rawTitle.trim() : '';
   return {
     markdown: payload.markdown,
     pageCount: typeof payload.pageCount === 'number' ? payload.pageCount : 0,
