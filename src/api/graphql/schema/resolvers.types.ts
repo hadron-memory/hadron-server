@@ -37,6 +37,14 @@ import {
   assetUrn,
 } from './resolvers.helpers.js';
 
+// #481 (Codex review): normalize a STORED memory urn to canonical form before
+// composing node/edge URNs. Legacy single-colon role-marker urns (e.g.
+// `org:agent:app-user:<id>`) would otherwise be rejected by composeNodeUrn's
+// canonicalizer (it can't know the marker:id boundary), dropping those nodes
+// to the non-parseable raw fallback. Mirrors Memory.urn's two-branch logic.
+const canonicalStoredMemoryUrn = (urn: string): string =>
+  urn.includes('::') ? urn : legacyMemoryUrnToCanonical(urn);
+
 export const typeResolvers = {
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
@@ -66,11 +74,12 @@ export const typeResolvers = {
       // data; a canonicalization failure falls back to a raw compose (same
       // serve-and-log posture as safeCanonicalUrn).
       if (!memUrn) return `hrn:node:unknown::${n.loc}`;
+      const canonicalMem = canonicalStoredMemoryUrn(memUrn);
       try {
-        return composeNodeUrn(memUrn, n.loc);
+        return composeNodeUrn(canonicalMem, n.loc);
       } catch (err) {
         console.warn(`[Node.urn] failed to canonicalize memory urn "${memUrn}":`, err);
-        return `hrn:node:${memUrn}::${n.loc}`;
+        return `hrn:node:${canonicalMem}::${n.loc}`;
       }
     },
     // Spec 033 embedding-state DateTime fields — Prisma returns Date,
@@ -106,11 +115,12 @@ export const typeResolvers = {
     urn: async (e: { loc: string; memoryId: string }, _: unknown, ctx: Context) => {
       const memUrn = await loadMemoryUrn(ctx, e.memoryId);
       if (!memUrn) return `hrn:edge:unknown::${e.loc}`;
+      const canonicalMem = canonicalStoredMemoryUrn(memUrn);
       try {
-        return composeEdgeUrn(memUrn, e.loc);
+        return composeEdgeUrn(canonicalMem, e.loc);
       } catch (err) {
         console.warn(`[Edge.urn] failed to canonicalize memory urn "${memUrn}":`, err);
-        return `hrn:edge:${memUrn}::${e.loc}`;
+        return `hrn:edge:${canonicalMem}::${e.loc}`;
       }
     },
   },

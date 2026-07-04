@@ -467,3 +467,34 @@ describe('Node.urn / Edge.urn (#481)', () => {
     expect(urn).toBe('hrn:node:unknown::x');
   });
 });
+
+describe('Node.urn / Edge.urn — legacy role-marker memory URNs (#481 Codex review)', () => {
+  it('composes a canonical, parseable URN for a legacy app-user memory', async () => {
+    const T = resolvers as any;
+    const mlMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgA.id,
+        urn: `${orgA.urn}:agent-x:app-user:42`, // legacy single-colon role-marker form
+        name: 'uni-ml',
+        class: 'knowledge',
+      },
+    });
+    const n = await db.node.create({
+      data: { id: generateId(), memoryId: mlMem.id, loc: 'ml:leaf', name: 'ml' },
+    });
+    const nodeUrn = await T.Node.urn({ loc: n.loc, memoryId: mlMem.id }, {}, ctx(member.id));
+    // Marker:id boundary preserved: …::agent-x::app-user:42::<loc> — the
+    // canonical form resolveNodeRef/parseUrn accept, NOT a raw single-colon
+    // fallback.
+    expect(nodeUrn).toBe(`hrn:node:${orgA.urn}::agent-x::app-user:42::ml:leaf`);
+    const src = await db.node.create({
+      data: { id: generateId(), memoryId: mlMem.id, loc: 'ml:src', name: 's' },
+    });
+    const e = await db.edge.create({
+      data: { id: generateId(), memoryId: mlMem.id, sourceId: src.id, targetId: n.id, loc: 'ml:src:next' },
+    });
+    const edgeUrn = await T.Edge.urn({ loc: e.loc, memoryId: mlMem.id }, {}, ctx(member.id));
+    expect(edgeUrn).toBe(`hrn:edge:${orgA.urn}::agent-x::app-user:42::ml:src:next`);
+  });
+});
