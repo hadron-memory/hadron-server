@@ -26,6 +26,7 @@ import { chatQueries } from './resolvers.query.chat.js';
 import { sessionQueries } from './resolvers.query.session.js';
 
 import { nodeMutations } from './resolvers.mutation.node.js';
+import { importNodeMutations } from './resolvers.mutation.importNode.js';
 import { assetMutations } from './resolvers.mutation.asset.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
 import { orgMutations } from './resolvers.mutation.org.js';
@@ -49,6 +50,7 @@ export const resolvers = {
   },
   Mutation: {
     ...nodeMutations,
+    ...importNodeMutations,
     ...assetMutations,
     ...memoryMutations,
     ...orgMutations,
