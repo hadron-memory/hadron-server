@@ -411,6 +411,8 @@ export const typeDefs = `#graphql
     memoryId: String!
     nodeType: String!
     loc: String!
+    "Fully-qualified node URN (hrn:node:<org>::<memory>::<loc>), composed server-side from the node's memory URN + loc (#481). Carried by every Node-returning surface (findNodes, node, appNodes, nodeBatch, mutation returns)."
+    urn: String!
     isLink: Boolean!
     name: String!
     alias: String
@@ -472,10 +474,10 @@ export const typeDefs = `#graphql
     id: ID!
     source: Node!
     target: Node!
+    "Fully-qualified edge URN (hrn:edge:<org>::<memory>::<loc>), composed server-side from the edge's (source-side) memory URN + loc (#481 parity — edges are loc-addressed peers of nodes, spec 037)."
+    urn: String!
     # Colon-delimited path within the (source node's) memory — the edge's
     # identity and the suffix of its URN hrn:edge:<org>::<memory>::<loc>.
-    # Compose the full URN client-side as <source.memory.urn>::<loc>, the
-    # same way node URNs are composed.
     loc: String!
     # Free-form relationship name (e.g. imports, depends_on). Optional since
     # spec 037 — loc is the identity. (Was the required 'label'.)

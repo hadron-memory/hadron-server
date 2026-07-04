@@ -50,6 +50,28 @@ export interface Context {
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.
   edgeEndpointNodeCache?: Map<string, Promise<unknown>>;
+  // Request-scoped memo for Node.urn / Edge.urn composition (#481) — a list
+  // response's nodes/edges overwhelmingly share a memory, so the memory-urn
+  // lookup is memoized per request (lazily created; see loadMemoryUrn).
+  memoryUrnCache?: Map<string, Promise<string | null>>;
+}
+
+/**
+ * Fetch a memory's stored urn by id, memoized per request (#481). Backs the
+ * Node.urn / Edge.urn field resolvers on list surfaces (findNodes, appNodes,
+ * edges, nodeBatch), where every row in a page typically shares one memory —
+ * without memoization each row would issue an identical findUnique.
+ */
+export function loadMemoryUrn(ctx: Context, memoryId: string): Promise<string | null> {
+  const cache = (ctx.memoryUrnCache ??= new Map<string, Promise<string | null>>());
+  let pending = cache.get(memoryId);
+  if (!pending) {
+    pending = ctx.db.memory
+      .findUnique({ where: { id: memoryId }, select: { urn: true } })
+      .then((m: { urn: string } | null) => m?.urn ?? null);
+    cache.set(memoryId, pending);
+  }
+  return pending;
 }
 
 /**
