@@ -1,4 +1,5 @@
 // importNode (#457, sync v1) — import external content into a node.
+// Spec: cor:api:130 (surface contract :01, egress policy :02).
 //
 // Binding decisions (handoff 2026-07-03 + the 2026-07-01 spec-039 session):
 //   - SYNCHRONOUS v1: the url path fetches inline (~30s budget) and returns
