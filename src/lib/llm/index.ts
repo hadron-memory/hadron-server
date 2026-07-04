@@ -75,6 +75,13 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
           );
         }
       }
+      if (key && (!triple.accessKeyId || !triple.secretAccessKey || !triple.region)) {
+        throw new LlmInvocationError(
+          'bedrock apiKey JSON triple must carry accessKeyId, secretAccessKey, AND region.',
+          provider,
+          false,
+        );
+      }
       return createAmazonBedrock({
         region: triple.region,
         accessKeyId: triple.accessKeyId,

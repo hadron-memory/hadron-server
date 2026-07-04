@@ -52,7 +52,8 @@ export class RunLaunchDeniedError extends Error {
       | 'TRIGGER_DISABLED'
       | 'RELATIONSHIP_MISSING'
       | 'POLICY_DENIED'
-      | 'APP_NOT_FOUND',
+      | 'APP_NOT_FOUND'
+      | 'AGENT_NOT_INSTALLED',
   ) {
     super(message);
     this.name = 'RunLaunchDeniedError';
@@ -67,41 +68,98 @@ function nextUtcMidnight(): Date {
   return d;
 }
 
+const QUOTA_WINDOW = 'day';
+
 /**
- * Atomically consume `amount` from a windowed counter, creating the row with
- * platform defaults on first touch and resetting it when the window rolled.
- * Returns false when the counter has no headroom (the launch gate / live
- * decrement then denies).
+ * Ensure the counter row exists (seeded with the platform-default limit) and
+ * roll an expired window. The stored `limit` column is the enforced value
+ * from then on — operators can raise/lower it per row and the default is
+ * only the seed (PR-493 review, Gemini).
+ */
+async function ensureQuotaRow(
+  db: PrismaClient,
+  scopeKind: 'app' | 'org',
+  scopeId: string,
+  action: 'run.execute' | 'llm.tokens',
+  defaultLimit: number,
+): Promise<void> {
+  try {
+    await db.quotaCounter.create({
+      data: {
+        id: generateId(), scopeKind, scopeId, action,
+        window: QUOTA_WINDOW, used: 0, limit: defaultLimit, resetAt: nextUtcMidnight(),
+      },
+    });
+  } catch (err) {
+    // Only the unique-constraint race is success (prisma-upsert-not-race-safe);
+    // anything else — connectivity, permissions — must surface (PR-493 review).
+    if ((err as { code?: string }).code !== 'P2002') throw err;
+  }
+  await db.quotaCounter.updateMany({
+    where: { scopeKind, scopeId, action, window: QUOTA_WINDOW, resetAt: { lte: new Date() } },
+    data: { used: 0, resetAt: nextUtcMidnight() },
+  });
+}
+
+/**
+ * Atomically consume `amount` iff the STORED limit has headroom. Raw SQL
+ * because the check is column-vs-column (used + amount <= limit), which
+ * Prisma's where cannot express.
  */
 export async function consumeQuota(
   db: PrismaClient,
   scopeKind: 'app' | 'org',
   scopeId: string,
   action: 'run.execute' | 'llm.tokens',
-  limit: number,
+  defaultLimit: number,
   amount = 1,
 ): Promise<boolean> {
-  const window = 'day';
-  // Ensure the row exists (create is race-safe via the unique constraint —
-  // prisma-upsert-not-race-safe: treat P2002 as success).
-  try {
-    await db.quotaCounter.create({
-      data: { id: generateId(), scopeKind, scopeId, action, window, used: 0, limit, resetAt: nextUtcMidnight() },
-    });
-  } catch {
-    // exists — fine
-  }
-  // Roll the window when expired (best-effort; harmless if raced).
-  await db.quotaCounter.updateMany({
-    where: { scopeKind, scopeId, action, window, resetAt: { lte: new Date() } },
-    data: { used: 0, resetAt: nextUtcMidnight() },
+  await ensureQuotaRow(db, scopeKind, scopeId, action, defaultLimit);
+  const res = await db.$executeRaw`
+    UPDATE quota_counters SET used = used + ${amount}
+    WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
+      AND action = ${action} AND "window" = ${QUOTA_WINDOW}
+      AND used + ${amount} <= "limit"`;
+  return res === 1;
+}
+
+/** Stored-limit headroom check WITHOUT consuming (the launch gate's token look-ahead). */
+export async function hasQuotaHeadroom(
+  db: PrismaClient,
+  scopeKind: 'app' | 'org',
+  scopeId: string,
+  action: 'run.execute' | 'llm.tokens',
+  defaultLimit: number,
+): Promise<boolean> {
+  await ensureQuotaRow(db, scopeKind, scopeId, action, defaultLimit);
+  const row = await db.quotaCounter.findUnique({
+    where: { scopeKind_scopeId_action_window: { scopeKind, scopeId, action, window: QUOTA_WINDOW } },
+    select: { used: true, limit: true },
   });
-  // Atomic consume-if-headroom.
-  const res = await db.quotaCounter.updateMany({
-    where: { scopeKind, scopeId, action, window, used: { lte: limit - amount } },
+  return row != null && row.used < row.limit;
+}
+
+/**
+ * Record spend UNCONDITIONALLY (may exceed the limit — the honest ledger).
+ * Used for post-hoc costs (LLM tokens are already spent at the provider when
+ * usage is known); enforcement happens at the NEXT launch gate, which denies
+ * while used >= limit (PR-493 review, Codex P2 — enforcement point chosen so
+ * a completed run's paid-for output is never discarded).
+ */
+export async function recordQuotaUsage(
+  db: PrismaClient,
+  scopeKind: 'app' | 'org',
+  scopeId: string,
+  action: 'run.execute' | 'llm.tokens',
+  defaultLimit: number,
+  amount: number,
+): Promise<void> {
+  if (amount <= 0) return;
+  await ensureQuotaRow(db, scopeKind, scopeId, action, defaultLimit);
+  await db.quotaCounter.updateMany({
+    where: { scopeKind, scopeId, action, window: QUOTA_WINDOW },
     data: { used: { increment: amount } },
   });
-  return res.count === 1;
 }
 
 // ── Mint (plan §4 steps 1–2: launch gate + activation) ──────────────────────
@@ -116,7 +174,6 @@ export interface MintAppRunArgs {
   entryNodeUrn: string;
   eventData?: Record<string, unknown> | null;
   policy?: unknown;
-  aiConfigName?: string | null;
   timeoutMs?: number | null;
   createdBy?: string | null;
 }
@@ -129,6 +186,22 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   });
   if (!app || app.organizationId !== args.organizationId) {
     throw new RunLaunchDeniedError('App not found or not in this organization.', 'APP_NOT_FOUND');
+  }
+  // agentId must be an Agent actually installed in this App — otherwise the
+  // AI-config walk would consult a FOREIGN agent's credentials (PR-493
+  // review, Codex P1). Checked here (defense in depth) and at trigger
+  // creation.
+  if (args.agentId) {
+    const installed = await db.appAgent.findFirst({
+      where: { appId: args.appId, agentId: args.agentId },
+      select: { agentId: true },
+    });
+    if (!installed) {
+      throw new RunLaunchDeniedError(
+        'agentId is not installed in this App.',
+        'AGENT_NOT_INSTALLED',
+      );
+    }
   }
   // On-behalf-of relationship re-verified at launch, not only at trigger
   // creation (cor:agt:010:01): AppMember OR an active AgentSubscription to
@@ -171,6 +244,15 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       data: { used: { decrement: 1 } },
     });
     throw new RunLaunchDeniedError('Organization run quota exhausted for today.', 'QUOTA_EXCEEDED');
+  }
+  // Token look-ahead: deny NEW launches while the daily token ledger is at
+  // or over its stored limit (the enforcement point for post-hoc token
+  // spend — see recordQuotaUsage).
+  if (!(await hasQuotaHeadroom(db, 'app', args.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP))) {
+    throw new RunLaunchDeniedError('App token quota exhausted for today.', 'QUOTA_EXCEEDED');
+  }
+  if (!(await hasQuotaHeadroom(db, 'org', args.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG))) {
+    throw new RunLaunchDeniedError('Organization token quota exhausted for today.', 'QUOTA_EXCEEDED');
   }
 
   // 2. MINT the activation (AppRun row) + publish the wake-up.
@@ -239,11 +321,13 @@ export async function executeAppRun(
   const run = await db.appRun.findUniqueOrThrow({ where: { id: runId } });
 
   const fail = async (code: string, message: string): Promise<RunOutcome> => {
-    await db.appRun.update({
-      where: { id: runId },
+    // Guarded transition: a concurrent cancelAppRun must not be overwritten
+    // to FAILED — the audit log keeps CANCELLED (PR-493 review, Gemini).
+    const res = await db.appRun.updateMany({
+      where: { id: runId, status: 'RUNNING' },
       data: { status: 'FAILED', failure: { code, message }, finishedAt: new Date() },
     });
-    return 'failed';
+    return res.count === 1 ? 'failed' : 'skipped';
   };
 
   try {
@@ -304,12 +388,14 @@ export async function executeAppRun(
       where: { id: runId },
       data: { budgetTokens: { decrement: Math.min(spent, budget ?? spent) } },
     });
-    await consumeQuota(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
-    await consumeQuota(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
+    // Recorded even into overage — tokens are already spent at the provider;
+    // the NEXT launch gate is the enforcement point (PR-493 Codex P2).
+    await recordQuotaUsage(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
+    await recordQuotaUsage(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
 
     if (Date.now() >= deadline) {
-      await db.appRun.update({
-        where: { id: runId },
+      await db.appRun.updateMany({
+        where: { id: runId, status: 'RUNNING' },
         data: { status: 'TIMED_OUT', finishedAt: new Date(), failure: { code: 'TIMEOUT' } },
       });
       return 'failed';
@@ -326,15 +412,16 @@ export async function executeAppRun(
       return fail('OUTPUT_WRITE_FAILED', String((err as Error)?.message ?? err));
     }
 
-    // 5. FINISH.
-    await db.appRun.update({
-      where: { id: runId },
+    // 5. FINISH — guarded for the same concurrent-cancel reason as fail().
+    const finished = await db.appRun.updateMany({
+      where: { id: runId, status: 'RUNNING' },
       data: {
         status: 'COMPLETED',
         finishedAt: new Date(),
         curNodeUrn: writtenRef ?? run.entryNodeUrn,
       },
     });
+    if (finished.count === 0) return 'skipped'; // cancelled at the wire
     await db.usageEvent
       .create({
         data: {

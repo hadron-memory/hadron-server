@@ -6,10 +6,6 @@
 -- artifacts (HNSW / tsv raw-SQL objects) stripped — see
 -- findings:prisma-dev-db-phantom-drift.
 
-Already up to date
-Done in 254ms using pnpm v11.5.2
-Already up to date
-Done in 218ms using pnpm v11.5.2
 -- CreateEnum
 CREATE TYPE "AppRunStatus" AS ENUM ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'TIMED_OUT', 'CANCELLED');
 

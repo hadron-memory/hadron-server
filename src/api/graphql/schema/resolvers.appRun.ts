@@ -42,7 +42,33 @@ function validatedCronNext(cron: string, timezone: string): Date {
   try {
     return nextCronOccurrence(cron, timezone);
   } catch {
-    throw new GraphQLError(`Invalid cron expression "${cron}".`, {
+    throw new GraphQLError(
+      `Invalid cron expression "${cron}" or timezone "${timezone}".`,
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
+}
+
+/** runAsSelf REQUIRES an authenticated user — never silently degrade to a no-user run (PR-493). */
+function resolveRunAsSelf(ctx: Context, runAsSelf: boolean | null | undefined): string | null {
+  if (!runAsSelf) return null;
+  if (!ctx.userId) {
+    throw new GraphQLError('runAsSelf requires an authenticated user.', {
+      extensions: { code: 'UNAUTHENTICATED' },
+    });
+  }
+  return ctx.userId;
+}
+
+/** agentId must be installed in the App — a foreign agent would leak its AI config into the walk (PR-493, Codex P1). */
+async function assertAgentInstalled(ctx: Context, appId: string, agentId: string | null | undefined) {
+  if (!agentId) return;
+  const installed = await ctx.db.appAgent.findFirst({
+    where: { appId, agentId },
+    select: { agentId: true },
+  });
+  if (!installed) {
+    throw new GraphQLError('agentId is not installed in this App.', {
       extensions: { code: 'BAD_USER_INPUT' },
     });
   }
@@ -56,6 +82,7 @@ export const appRunMutations = {
   ) => {
     const app = await requireScheduleAdmin(ctx, input.appId);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+    await assertAgentInstalled(ctx, app.id, input.agentId);
     const timezone = input.timezone?.trim() || 'UTC';
     const nextRunAt = validatedCronNext(input.cron, timezone);
     if (input.policy != null && parsePolicyLink(input.policy) == null) {
@@ -72,7 +99,7 @@ export const appRunMutations = {
         // v1: a schedule runs on behalf of its CREATOR or nobody — never a
         // third party (delegating another user's authority needs the rule
         // language; cor:agt:010:01 tunable).
-        userId: input.runAsSelf ? (ctx.userId ?? null) : null,
+        userId: resolveRunAsSelf(ctx, input.runAsSelf),
         name: input.name,
         cron: input.cron,
         timezone,
@@ -104,6 +131,7 @@ export const appRunMutations = {
         ? validatedCronNext(cron, timezone)
         : undefined;
     if (input.entryNodeUrn != null) assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+    if (input.agentId !== undefined) await assertAgentInstalled(ctx, existing.appId, input.agentId);
     if (input.policy != null && parsePolicyLink(input.policy) == null) {
       throw new GraphQLError('policy must be { allow: string[] }.', {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -120,9 +148,7 @@ export const appRunMutations = {
         ...(input.policy !== undefined ? { policy: input.policy as never } : {}),
         ...(input.aiConfigName !== undefined ? { aiConfigName: input.aiConfigName } : {}),
         ...(input.enabled != null ? { enabled: input.enabled } : {}),
-        ...(input.runAsSelf != null
-          ? { userId: input.runAsSelf ? (ctx.userId ?? null) : null }
-          : {}),
+        ...(input.runAsSelf != null ? { userId: resolveRunAsSelf(ctx, input.runAsSelf) } : {}),
         ...(nextRunAt ? { nextRunAt } : {}),
         updatedBy: ctx.userId ?? ctx.clientId ?? null,
       },
@@ -162,7 +188,7 @@ export const appRunMutations = {
       return await mintAppRun(ctx.db, {
         organizationId: app.organizationId,
         appId: app.id,
-        userId: input.runAsSelf ? (ctx.userId ?? null) : null,
+        userId: resolveRunAsSelf(ctx, input.runAsSelf),
         triggerKind: 'MANUAL',
         entryNodeUrn: input.entryNodeUrn,
         eventData: {
@@ -202,7 +228,7 @@ export const appRunQueries = {
     const where = { appId: app.id, deletedAt: null };
     const take = Math.min(Math.max(limit ?? 50, 1), 200);
     const [items, total] = await Promise.all([
-      ctx.db.agentSchedule.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: offset ?? 0 }),
+      ctx.db.agentSchedule.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.agentSchedule.count({ where }),
     ]);
     return { items, total };
@@ -235,7 +261,15 @@ export const appRunQueries = {
     if (!organizationId) {
       throw new GraphQLError('Provide appId or orgId.', { extensions: { code: 'BAD_USER_INPUT' } });
     }
-    if (!isPlatformAdmin(ctx)) await requireOrgRole(ctx, organizationId, 'READER');
+    if (!isPlatformAdmin(ctx)) {
+      try {
+        await requireOrgRole(ctx, organizationId, 'READER');
+      } catch {
+        // Denied ≡ not-found (no existence oracle for foreign apps/orgs —
+        // PR-493 review; cor:api:120:01 non-disclosure posture).
+        throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+      }
+    }
     const where = {
       organizationId,
       ...(appId ? { appId } : {}),
@@ -243,7 +277,7 @@ export const appRunQueries = {
     };
     const take = Math.min(Math.max(limit ?? 50, 1), 200);
     const [items, total] = await Promise.all([
-      ctx.db.appRun.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: offset ?? 0 }),
+      ctx.db.appRun.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.appRun.count({ where }),
     ]);
     return { items, total };

@@ -27,6 +27,7 @@ import {
   mintAppRun,
   executeAppRun,
   consumeQuota,
+  recordQuotaUsage,
   RunLaunchDeniedError,
   type RunExecutionDeps,
 } from './appRuns.js';
@@ -109,6 +110,24 @@ describe('mintAppRun — launch gate (cor:acl:050:01)', () => {
     });
   });
 
+  it('rejects an agentId not installed in the App (PR-493 Codex P1 — foreign AI-config leak)', async () => {
+    const foreignAgent = await db.agent.create({
+      data: { id: generateId(), organizationId: orgId, urn: 'run-org:foreign', name: 'foreign' },
+    });
+    await expect(mint({ agentId: foreignAgent.id })).rejects.toMatchObject({
+      code: 'AGENT_NOT_INSTALLED',
+    });
+    await db.appAgent.create({ data: { appId, agentId: foreignAgent.id } });
+    const run = await mint({ agentId: foreignAgent.id });
+    expect(run.agentId).toBe(foreignAgent.id);
+  });
+
+  it('denies NEW launches when the daily token ledger is at its stored limit (PR-493 Codex P2)', async () => {
+    // Simulate yesterday's overage: record spend far past the default limit.
+    await recordQuotaUsage(db, 'app', appId, 'llm.tokens', 1_000, 5_000);
+    await expect(mint()).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' });
+  });
+
   it('enforces the app run quota and refunds on org denial', async () => {
     // Exhaust the app counter artificially.
     await db.quotaCounter.create({
@@ -132,6 +151,28 @@ describe('consumeQuota', () => {
     expect(await consumeQuota(db, 'app', appId, 'run.execute', 2)).toBe(true);
     expect(await consumeQuota(db, 'app', appId, 'run.execute', 2)).toBe(true);
     expect(await consumeQuota(db, 'app', appId, 'run.execute', 2)).toBe(false);
+  });
+
+  it('respects the STORED row limit over the default parameter (PR-493 Gemini)', async () => {
+    // Seed with default limit 1, exhaust it…
+    expect(await consumeQuota(db, 'app', appId, 'run.execute', 1)).toBe(true);
+    expect(await consumeQuota(db, 'app', appId, 'run.execute', 1)).toBe(false);
+    // …then an operator raises the ROW limit; the same default param no
+    // longer caps it.
+    await db.quotaCounter.updateMany({
+      where: { scopeKind: 'app', scopeId: appId, action: 'run.execute' },
+      data: { limit: 5 },
+    });
+    expect(await consumeQuota(db, 'app', appId, 'run.execute', 1)).toBe(true);
+  });
+
+  it('recordQuotaUsage writes into overage (the honest ledger)', async () => {
+    await recordQuotaUsage(db, 'app', appId, 'llm.tokens', 100, 250);
+    const row = await db.quotaCounter.findFirst({
+      where: { scopeKind: 'app', scopeId: appId, action: 'llm.tokens' },
+    });
+    expect(row?.used).toBe(250);
+    expect(row?.limit).toBe(100);
   });
 
   it('rolls the window when resetAt has passed', async () => {
@@ -206,6 +247,21 @@ describe('executeAppRun — kernel + activation contract (cor:agt:010:02)', () =
     const d = deps();
     expect(await executeAppRun(db, run.id, d)).toBe('skipped'); // claim finds no PENDING
     expect(d.llm).not.toHaveBeenCalled();
+  });
+
+  it('a concurrent cancel is never overwritten by COMPLETED/FAILED (PR-493 Gemini)', async () => {
+    const run = await mint();
+    const d = deps({
+      llm: vi.fn(async () => {
+        // Cancel arrives while the model call is in flight.
+        await db.appRun.update({ where: { id: run.id }, data: { status: 'CANCELLED' } });
+        return { text: 'late result', tokensIn: 10, tokensOut: 5, provider: 'anthropic', model: 'test' };
+      }),
+    });
+    const outcome = await executeAppRun(db, run.id, d);
+    expect(outcome).toBe('skipped');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe('CANCELLED'); // audit log keeps the cancellation
   });
 
   it('a run-layer policy denying llm.invoke fails before the LLM', async () => {

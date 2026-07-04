@@ -37,12 +37,16 @@ interface OutputSpec {
   mode?: 'replace' | 'append';
 }
 
-async function loadEntry(db: PrismaClient, entryNodeUrn: string) {
+async function loadEntry(db: PrismaClient, entryNodeUrn: string, organizationId: string) {
   const { memoryUrn, loc } = splitNodeUrn(entryNodeUrn);
   const normalized = normalizeUrnForLookup(memoryUrn);
+  // Tenant-scoped: a URN can only resolve inside the run's own organization
+  // (PR-493 review, Gemini security) — cross-org reads are not a run
+  // capability in v1 regardless of URN knowledge.
   const memory = await db.memory.findFirst({
     where: {
       OR: [{ urn: normalized }, { urn: legacyMemoryUrnToCanonical(normalized) }],
+      organizationId,
       deletedAt: null,
     },
     select: { id: true, urn: true },
@@ -88,7 +92,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     llm: (resolved, req) => generateText(resolved, req),
 
     writeOutput: async (run, text) => {
-      const { memory, loc, node } = await loadEntry(db, run.entryNodeUrn);
+      const { memory, loc, node } = await loadEntry(db, run.entryNodeUrn, run.organizationId);
       const spec: OutputSpec =
         node.data && typeof node.data === 'object' && !Array.isArray(node.data)
           ? ((node.data as Record<string, unknown>).output as OutputSpec) ?? {}
@@ -103,6 +107,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         const targetMemory = await db.memory.findFirst({
           where: {
             OR: [{ urn: normalized }, { urn: legacyMemoryUrnToCanonical(normalized) }],
+            organizationId: run.organizationId, // tenant-scoped (PR-493)
             deletedAt: null,
           },
           select: { id: true },
