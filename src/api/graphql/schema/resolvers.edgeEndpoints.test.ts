@@ -13,7 +13,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { resolvers, type Context } from './resolvers.js';
 
-const edge = resolvers.Edge as {
+const edge = resolvers.Edge as unknown as {
   source: (e: unknown, a: unknown, c: Context) => Promise<unknown>;
   target: (e: unknown, a: unknown, c: Context) => Promise<unknown>;
 };

@@ -7,6 +7,8 @@ import {
 } from '../../../lib/appAgent.js';
 import {
   composeInstalledAgentUrn,
+  composeNodeUrn,
+  composeEdgeUrn,
   legacyMemoryUrnToCanonical,
 } from '../../../lib/urn.js';
 import { userUrn } from '../../../lib/userHandle.js';
@@ -22,6 +24,7 @@ import {
 import {
   type Context,
   loadEdgeEndpointNode,
+  loadMemoryUrn,
   defaultAiConfigOf,
   safeCanonicalUrn,
   AGENT_INCLUDE,
@@ -33,6 +36,14 @@ import {
   readPrimaryAgentField,
   assetUrn,
 } from './resolvers.helpers.js';
+
+// #481 (Codex review): normalize a STORED memory urn to canonical form before
+// composing node/edge URNs. Legacy single-colon role-marker urns (e.g.
+// `org:agent:app-user:<id>`) would otherwise be rejected by composeNodeUrn's
+// canonicalizer (it can't know the marker:id boundary), dropping those nodes
+// to the non-parseable raw fallback. Mirrors Memory.urn's two-branch logic.
+const canonicalStoredMemoryUrn = (urn: string): string =>
+  urn.includes('::') ? urn : legacyMemoryUrnToCanonical(urn);
 
 export const typeResolvers = {
   Node: {
@@ -46,6 +57,31 @@ export const typeResolvers = {
     // included it (e.g. appNodes). Same pattern as MemoryShare.memory.
     memory: async (n: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
       n.memory ?? ctx.db.memory.findUnique({ where: { id: n.memoryId } }),
+    // #481 — the fully-qualified node URN, composed server-side so every
+    // Node-returning surface carries it (the extension's URN chip + run-via-
+    // URN light up without a client release). Uses the preloaded relation's
+    // urn when a resolver already included it (guarding against partial
+    // selects that omit urn), else the request-memoized memory-urn loader.
+    urn: async (
+      n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      const memUrn =
+        (typeof n.memory?.urn === 'string' ? n.memory.urn : null) ??
+        (await loadMemoryUrn(ctx, n.memoryId));
+      // The field is String! — never null it. A missing memory row is corrupt
+      // data; a canonicalization failure falls back to a raw compose (same
+      // serve-and-log posture as safeCanonicalUrn).
+      if (!memUrn) return `hrn:node:unknown::${n.loc}`;
+      const canonicalMem = canonicalStoredMemoryUrn(memUrn);
+      try {
+        return composeNodeUrn(canonicalMem, n.loc);
+      } catch (err) {
+        console.warn(`[Node.urn] failed to canonicalize memory urn "${memUrn}":`, err);
+        return `hrn:node:${canonicalMem}::${n.loc}`;
+      }
+    },
     // Spec 033 embedding-state DateTime fields — Prisma returns Date,
     // portal (and any other GraphQL consumer) needs ISO strings.
     embeddingPendingAt: (n: { embeddingPendingAt?: Date | string | null }) =>
@@ -73,6 +109,20 @@ export const typeResolvers = {
       e.source ?? loadEdgeEndpointNode(ctx, e.sourceId),
     target: (e: { targetId: string; target?: unknown }, _: unknown, ctx: Context) =>
       e.target ?? loadEdgeEndpointNode(ctx, e.targetId),
+    // #481 parity — edges are loc-addressed peers of nodes (spec 037), so
+    // they carry their fully-qualified URN the same way. Edge.memoryId is the
+    // denormalized SOURCE-side memory, which is exactly the URN's memory.
+    urn: async (e: { loc: string; memoryId: string }, _: unknown, ctx: Context) => {
+      const memUrn = await loadMemoryUrn(ctx, e.memoryId);
+      if (!memUrn) return `hrn:edge:unknown::${e.loc}`;
+      const canonicalMem = canonicalStoredMemoryUrn(memUrn);
+      try {
+        return composeEdgeUrn(canonicalMem, e.loc);
+      } catch (err) {
+        console.warn(`[Edge.urn] failed to canonicalize memory urn "${memUrn}":`, err);
+        return `hrn:edge:${canonicalMem}::${e.loc}`;
+      }
+    },
   },
   NodeVersion: {
     createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
