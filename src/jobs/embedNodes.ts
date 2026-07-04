@@ -385,26 +385,48 @@ const MAX_DRAIN_BATCHES = 200;
  */
 export async function handleEmbedWake(
   db: PrismaClient,
-  payload: EmbedWakePayload,
+  payload: unknown,
   client?: EmbeddingClient,
 ): Promise<void> {
+  // Payload validation (PR-489 review): a malformed message (null, string,
+  // array, non-string nodeId) must NOT be mistaken for a drain ping — that
+  // would turn junk into an expensive full-queue drain. Log + ack; the
+  // durable markers mean nothing is lost.
+  if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) {
+    console.warn('[embed-worker] ignoring malformed embed.wake payload:', payload);
+    return;
+  }
+  const { nodeId } = payload as EmbedWakePayload;
+  if (nodeId !== undefined && typeof nodeId !== 'string') {
+    console.warn('[embed-worker] ignoring embed.wake with non-string nodeId');
+    return;
+  }
   // No endpoint configured → nothing this process can do; ack and leave the
   // marker for the sweep once configuration arrives (same posture as drain).
   if (!isEmbeddingConfigured()) return;
-  if (payload?.nodeId) {
+  if (nodeId) {
     // Idempotency gate: embedNode itself embeds unconditionally (the sweep
     // pre-filters on the marker; the prompt-drain runs right after setting
     // it), so the wake-up checks the marker here — a node the prompt-drain
     // or sweep already drained resolves to one cheap SELECT, not a re-embed
     // (the at-least-once duplicate-delivery contract).
     const row = await db.node.findUnique({
-      where: { id: payload.nodeId },
-      select: { embeddingPendingAt: true },
+      where: { id: nodeId },
+      select: { embeddingPendingAt: true, memory: { select: { isEncrypted: true } } },
     });
     if (!row?.embeddingPendingAt) return;
-    const outcome = await embedNode(db, payload.nodeId, undefined, client);
+    // Encrypted memory: PUNT (PR-489 review, Codex P2). The wake arrives
+    // within milliseconds of the write — while the prompt-drain (which holds
+    // the plaintext this bus message cannot carry) may still be in flight.
+    // A plaintext-less embedNode here would record a PERMANENT
+    // encrypted-no-plaintext failure (#206) and clear the marker, and the
+    // prompt-drain's latest-wins guard would then skip its write — leaving
+    // the node unembedded. The prompt-drain owns encrypted embeds; the sweep
+    // keeps its documented #206 behavior for crash recovery.
+    if (row.memory.isEncrypted) return;
+    const outcome = await embedNode(db, nodeId, undefined, client);
     if (outcome === 'failed-transient') {
-      throw new Error(`transient embed failure for node ${payload.nodeId} — nak for redelivery`);
+      throw new Error(`transient embed failure for node ${nodeId} — nak for redelivery`);
     }
     return;
   }
@@ -413,6 +435,19 @@ export async function handleEmbedWake(
   for (let i = 0; i < MAX_DRAIN_BATCHES; i++) {
     const r = await drainEmbeddingQueue(db, { batchSize, ...(client ? { client } : {}) });
     const processed = r.embedded + r.failed + r.skipped;
+    if (r.failed > 0) {
+      // Failed rows RETAIN their marker with an old pendingAt, so the next
+      // batch would re-select exactly them and burn the attempts cap within
+      // milliseconds (PR-489 review, Gemini). Stop the tight loop instead:
+      // on a full batch, THROW so the bus redelivers this ping after the
+      // nak delay (spaced retries, max_deliver-capped); on a short batch
+      // the queue is nearly done — return and let the sweep's cadence
+      // handle the stragglers.
+      if (processed === batchSize) {
+        throw new Error('embed drain paused after failures — nak for spaced continuation');
+      }
+      return;
+    }
     if (processed < batchSize) return;
   }
   console.warn('[embed-worker] drain ping hit the batch cap — remainder left to the sweep');
@@ -432,7 +467,10 @@ export async function startEmbeddingBusListener(
     EMBED_WAKE_SUBJECT,
     EMBED_QUEUE_GROUP,
     async (msg) => {
-      await handleEmbedWake(db, (msg.payload ?? {}) as EmbedWakePayload);
+      // Pass the payload through UNCOERCED — handleEmbedWake validates the
+      // shape itself, so a JSON null can't masquerade as a drain ping
+      // (PR-489 review).
+      await handleEmbedWake(db, msg.payload);
     },
   );
   console.log(`[embed-worker] bus listener active on ${EMBED_WAKE_SUBJECT}`);

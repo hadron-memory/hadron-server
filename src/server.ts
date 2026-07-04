@@ -902,7 +902,13 @@ export async function createServer(): Promise<Express> {
     // Same-process bus listener (spec 039): near-instant retries + backfill
     // drains via embed.wake.v1. No-op (null) when NATS_URL is unset — the
     // sweep loop above is the standalone fallback (D-2026-06-17-004).
-    void startEmbeddingBusListener(db);
+    startEmbeddingBusListener(db).catch((err) => {
+      // A subscribe/consumer failure (broker auth, incompatible durable)
+      // must not become an unhandled rejection that can take boot down —
+      // the sweep loop above keeps draining regardless (PR-489 review,
+      // Codex P2 + Gemini).
+      console.error('[embed-worker] failed to start bus listener (sweep continues):', err);
+    });
     void db.memory
       .count({ where: { vectorIndexEnabled: true, deletedAt: null } })
       .then((n) => {

@@ -169,4 +169,59 @@ describe('handleEmbedWake', () => {
     const node = await createNodeRow('w4');
     await expect(handleEmbedWake(db, { nodeId: node.id })).resolves.toBeUndefined();
   });
+
+  it('PUNTS on encrypted memories — prompt-drain owns those (Codex P2)', async () => {
+    // Encrypted + vector-indexed requires the explicit ack (spec 033 US5,
+    // chk_memory_vector_encrypted_ack) — set it like the portal opt-in does.
+    await db.memory.update({
+      where: { id: memoryId },
+      data: { isEncrypted: true, vectorIndexEncryptedAckAt: new Date() },
+    });
+    const node = await createNodeRow('enc1');
+    const client = fakeClient();
+    await handleEmbedWake(db, { nodeId: node.id }, client);
+    expect(client.embed).not.toHaveBeenCalled();
+    // Marker retained — NOT flipped to a permanent encrypted-no-plaintext
+    // failure by a wake racing the plaintext-holding prompt-drain.
+    const row = await db.node.findUnique({ where: { id: node.id } });
+    expect(row?.embeddingPendingAt).not.toBeNull();
+    expect(row?.embeddingFailedAt).toBeNull();
+  });
+
+  it('ignores malformed payloads instead of treating them as drain pings', async () => {
+    await createNodeRow('m1'); // pending — a junk-triggered drain would clear it
+    const client = fakeClient();
+    for (const junk of [null, 'drain', 42, ['x'], { nodeId: 123 }]) {
+      await expect(handleEmbedWake(db, junk, client)).resolves.toBeUndefined();
+    }
+    expect(client.embed).not.toHaveBeenCalled();
+    const row = await db.node.findFirst({ where: { memoryId, loc: 'm1' } });
+    expect(row?.embeddingPendingAt).not.toBeNull();
+  });
+
+  it('drain ping stops on a failing FULL batch by throwing (nak → spaced continuation)', async () => {
+    // 26 pending rows (> one batch of 25), client always fails transiently:
+    // without the guard the loop would re-select the same failing rows
+    // back-to-back and burn the 5-attempt cap in milliseconds (Gemini).
+    for (let i = 0; i < 26; i++) await createNodeRow(`f${i}`);
+    const failing = fakeClient({
+      embed: vi.fn(async () => {
+        throw new Error('connect ECONNREFUSED');
+      }),
+    });
+    await expect(handleEmbedWake(db, {}, failing)).rejects.toThrow(/nak for spaced/);
+    // Exactly ONE drain round ran: every row has at most 1 attempt.
+    const rows = await db.node.findMany({ where: { memoryId }, select: { embeddingAttempts: true } });
+    expect(Math.max(...rows.map((r) => r.embeddingAttempts))).toBeLessThanOrEqual(1);
+  });
+
+  it('drain ping returns quietly when failures occur in a short (final) batch', async () => {
+    await createNodeRow('sf1');
+    const failing = fakeClient({
+      embed: vi.fn(async () => {
+        throw new Error('connect ECONNREFUSED');
+      }),
+    });
+    await expect(handleEmbedWake(db, {}, failing)).resolves.toBeUndefined();
+  });
 });
