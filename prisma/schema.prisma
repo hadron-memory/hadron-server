@@ -388,6 +388,7 @@ model User {
   // 025-oauth-for-mcp: user-level credential + OAuth back-relations.
   userApiKeys               UserApiKey[]
   authCodes                 AuthCode[]
+  authHandoffCodes          AuthHandoffCode[]
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -2457,6 +2458,47 @@ model AuthCode {
   @@index([userId])
   @@index([clientId])
   @@map("auth_codes")
+}
+
+/// Short-lived, single-use handoff codes that keep the session JWT out of
+/// browser-visible URLs (#477). Two kinds share the same shape:
+///   - 'login'          — minted after GitHub/email auth; the portal's server
+///                        `load` redeems it at POST /auth/session for the JWT,
+///                        which it sets as an HttpOnly cookie. For the GitHub
+///                        flow `clientStateHash` binds the finishing browser to
+///                        the login it started (session-fixation defense); the
+///                        email flow leaves it null (magic links open cross-device).
+///   - 'exchange_start' — minted by POST /auth/microsoft/start (Bearer-authed,
+///                        server-to-server) so the long-lived JWT never rides in
+///                        the /auth/microsoft redirect URL.
+/// The raw code is only ever handed out once; the DB stores its SHA-256 hash.
+/// Single use is enforced by an atomic `updateMany(redeemedAt: null)` claim,
+/// mirroring AuthCode. DB-backed (not in-memory) so it survives multi-worker
+/// deploys, unlike the legacy pendingStates maps.
+model AuthHandoffCode {
+  id              String    @id @default(cuid())
+  /// SHA-256 hash of the raw code handed to the browser/portal.
+  codeHash        String    @unique @map("code_hash")
+  /// 'login' | 'exchange_start'.
+  kind            String
+  userId          String    @map("user_id")
+  /// Post-redemption destination path (login: portal path; exchange: return path).
+  redirect        String?
+  /// login only — whether the user was just provisioned (drives /app/setup).
+  isNew           Boolean   @default(false) @map("is_new")
+  /// exchange_start only — the org the Exchange connection is being attached to.
+  orgId           String?   @map("org_id")
+  /// login+GitHub only — SHA-256 of the portal-set browser nonce; the redeemer
+  /// must present the matching raw nonce (constant-time compared).
+  clientStateHash String?   @map("client_state_hash")
+  expiresAt       DateTime  @map("expires_at")
+  redeemedAt      DateTime? @map("redeemed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("auth_handoff_codes")
 }
 
 // ─── Spec 040 — headless agent runs ─────────────────────────────────────────

@@ -17,6 +17,12 @@ import {
   sendMagicLink,
   verifyMagicLink,
 } from './auth/index.js';
+import {
+  issueLoginCode,
+  redeemLoginCode,
+  issueExchangeStartNonce,
+  redeemExchangeStartNonce,
+} from './auth/authHandoff.js';
 import { resolveAuthContext } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
@@ -111,7 +117,7 @@ export async function createServer(): Promise<Express> {
   // bouncing the JWT through the frontend.
   const pendingStates = new Map<
     string,
-    { redirect: string; returnTo?: string; expiresAt: number }
+    { redirect: string; returnTo?: string; clientState?: string; expiresAt: number }
   >();
 
   app.get('/auth/github', (req, res) => {
@@ -149,10 +155,35 @@ export async function createServer(): Promise<Express> {
       if (p.expiresAt < now) pendingStates.delete(s);
     }
 
+    // #477 session-fixation binding: the portal sets an HttpOnly browser nonce
+    // at login start (/auth/start/github) and forwards it here as `client_state`.
+    // We carry it through the OAuth round-trip and stamp it onto the login
+    // handoff code so the browser that FINISHES login must be the one that
+    // STARTED it.
+    const clientStateRaw = req.query.client_state;
+    const clientState = typeof clientStateRaw === 'string' && clientStateRaw !== ''
+      ? clientStateRaw
+      : undefined;
+
+    // The binding is MANDATORY on the portal-handoff path (Codex #504 P2): an
+    // unbound login code redeems for any browser, which reopens the very
+    // session-fixation vector this change closes (an attacker mints a code for
+    // their own account by hitting this backend URL directly, then lures a
+    // victim to /auth/callback?code=… within the TTL). Option-C (`return_to`)
+    // is exempt — it sets the hadron_token cookie on this server's origin and
+    // mints NO handoff code, so there is nothing to bind.
+    if (!returnTo && !clientState) {
+      res.status(400).json({
+        error: 'client_state is required — start login via the portal (/auth/start/github), not the backend URL directly.',
+      });
+      return;
+    }
+
     const state = crypto.randomBytes(16).toString('hex');
     pendingStates.set(state, {
       redirect,
       returnTo,
+      clientState,
       expiresAt: now + 10 * 60 * 1000,
     });
     res.redirect(buildAuthUrl(state));
@@ -290,12 +321,21 @@ export async function createServer(): Promise<Express> {
         return;
       }
 
+      // #477 Sink 1: hand off via a single-use, short-TTL code instead of
+      // putting the 30-day JWT in the redirect URL. The portal's server `load`
+      // redeems it at POST /auth/session (server-to-server) and sets the cookie
+      // itself. redirect + isNew ride in the code record, not the URL. The
+      // GitHub-flow clientState binds the finishing browser (session fixation).
+      const handoffCode = await issueLoginCode({
+        userId: user.id,
+        redirect: isNew ? '/app/setup' : pending.redirect,
+        isNew,
+        clientState: pending.clientState ?? null,
+      });
       const frontendUrl =
         process.env.FRONTEND_URL || 'http://localhost:5173';
       const callbackUrl = new URL('/auth/callback', frontendUrl);
-      callbackUrl.searchParams.set('token', jwt);
-      // New users go to setup page instead of their intended redirect
-      callbackUrl.searchParams.set('redirect', isNew ? '/app/setup' : pending.redirect);
+      callbackUrl.searchParams.set('code', handoffCode);
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('OAuth callback error:', err);
@@ -373,24 +413,71 @@ export async function createServer(): Promise<Express> {
         );
       }
 
-      const jwt = await signJwt({
-        sub: user.id,
-        email: user.email ?? undefined,
-        roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+      // #477 Sink 1: hand off via a single-use code, not the JWT-in-URL. No
+      // clientState binding on the email flow — a magic link legitimately opens
+      // on a different device than the one that requested it, so there's no
+      // browser nonce to bind. (Session fixation via email would require forging
+      // a valid magic link for the victim's own address, which isn't possible;
+      // the magic-link token is itself single-use and email-bound.)
+      // Custom redirect (e.g., from invite link) takes priority, then setup for new users.
+      const dest = redirectParam ? redirectParam : isNew ? '/app/setup' : '/';
+      const code = await issueLoginCode({
+        userId: user.id,
+        redirect: dest,
+        isNew,
+        clientState: null,
       });
-
       const frontendUrl =
         process.env.FRONTEND_URL || 'http://localhost:5173';
       const callbackUrl = new URL('/auth/callback', frontendUrl);
-      callbackUrl.searchParams.set('token', jwt);
-      // Custom redirect (e.g., from invite link) takes priority, then setup for new users
-      if (redirectParam) callbackUrl.searchParams.set('redirect', redirectParam);
-      else if (isNew) callbackUrl.searchParams.set('redirect', '/app/setup');
+      callbackUrl.searchParams.set('code', code);
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('Email verify error:', err);
       res.status(500).json({ error: 'Email verification failed' });
     }
+  });
+
+  // #477 Sink 1 — login handoff exchange. The portal's server `load` (NOT the
+  // browser) POSTs the one-time code from /auth/callback?code=… here and gets
+  // the session JWT back in the response body, which it seats as an HttpOnly
+  // cookie on the portal origin. The JWT never rides in a browser-visible URL.
+  // `clientState` (GitHub flow) is the raw browser nonce the portal read from
+  // its HttpOnly cookie; the code's stored hash must match (session fixation).
+  app.post('/auth/session', async (req, res) => {
+    const body = (req.body ?? {}) as { code?: unknown; clientState?: unknown };
+    const code = typeof body.code === 'string' ? body.code : '';
+    const clientState = typeof body.clientState === 'string' ? body.clientState : undefined;
+    if (!code) {
+      res.status(400).json({ error: 'Missing code' });
+      return;
+    }
+
+    const redeemed = await redeemLoginCode(code, clientState);
+    if (!redeemed) {
+      // Unknown / expired / already-redeemed / clientState mismatch all collapse
+      // to one uninformative error (no probing signal).
+      res.status(400).json({ error: 'Invalid or expired code' });
+      return;
+    }
+
+    const user = await db.user.findUnique({ where: { id: redeemed.userId } });
+    if (!user) {
+      res.status(400).json({ error: 'Invalid or expired code' });
+      return;
+    }
+
+    // Rebuild the same claim set the GitHub/email flows used to mint, from the
+    // authoritative user row (roles may have changed since the code was issued).
+    const jwt = await signJwt({
+      sub: user.id,
+      roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+      ...(user.githubUsername ? { githubUsername: user.githubUsername } : {}),
+      ...(user.githubId != null ? { githubId: user.githubId } : {}),
+      ...(user.email ? { email: user.email } : {}),
+    });
+
+    res.json({ token: jwt, redirect: redeemed.redirect, isNew: redeemed.isNew });
   });
 
   app.get('/auth/me', async (req, res) => {
@@ -659,35 +746,58 @@ export async function createServer(): Promise<Express> {
     { orgId: string; userId: string; redirect: string; expiresAt: number }
   >();
 
-  app.get('/auth/microsoft', async (req, res) => {
-    // Token passed as query param (redirect-based flow, no Bearer header)
-    const token = req.query.token as string | undefined;
-    if (!token) {
+  // #477 Sink 2 — Exchange OAuth start. The portal calls this server-to-server
+  // (Bearer-authed, NOT a browser redirect) and gets back a single-use, short-
+  // TTL nonce. The 30-day JWT authenticates the initiating user HERE, over a
+  // header on a server-to-server POST — it never rides in the /auth/microsoft
+  // redirect URL (where it would land in access logs + browser history).
+  app.post('/auth/microsoft/start', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
       res.status(401).json({ error: 'No token provided' });
       return;
     }
-
     let userId: string;
     try {
-      const payload = await verifyJwt(token);
+      const payload = await verifyJwt(authHeader.slice(7));
       userId = payload.sub;
     } catch {
       res.status(401).json({ error: 'Invalid or expired token' });
       return;
     }
 
-    const orgId = req.query.orgId as string;
-    const redirect = (req.query.redirect as string) || '/';
+    const body = (req.body ?? {}) as { orgId?: unknown; redirect?: unknown };
+    const orgId = typeof body.orgId === 'string' ? body.orgId : '';
+    const redirect = typeof body.redirect === 'string' && body.redirect ? body.redirect : '/';
     if (!orgId) {
       res.status(400).json({ error: 'orgId is required' });
       return;
     }
 
+    const nonce = await issueExchangeStartNonce({ userId, orgId, redirect });
+    res.json({ nonce });
+  });
+
+  app.get('/auth/microsoft', async (req, res) => {
+    // #477 Sink 2: the browser arrives with a single-use nonce (minted by
+    // POST /auth/microsoft/start), not the session JWT. Look it up, discard it,
+    // and proceed with the Microsoft OAuth round-trip.
+    const nonce = req.query.nonce as string | undefined;
+    if (!nonce) {
+      res.status(400).json({ error: 'Missing nonce' });
+      return;
+    }
+    const started = await redeemExchangeStartNonce(nonce);
+    if (!started) {
+      res.status(400).json({ error: 'Invalid or expired nonce' });
+      return;
+    }
+
     const state = crypto.randomBytes(16).toString('hex');
     pendingMsStates.set(state, {
-      orgId,
-      userId,
-      redirect,
+      orgId: started.orgId,
+      userId: started.userId,
+      redirect: started.redirect,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
 
