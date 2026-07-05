@@ -1606,15 +1606,16 @@ export const typeDefs = `#graphql
   }
 
   input CreateAgentScheduleInput {
-    "App the run executes as (ID or URN)."
-    appId: String!
+    "App the run executes as — ref: PK or fully-qualified URN."
+    appRef: String!
     name: String!
     "5-field cron expression, evaluated in timezone (default UTC)."
     cron: String!
     timezone: String
     "Fully-qualified URN of the prompt node to run (D-2026-05-09-012/017)."
     entryNodeUrn: String!
-    agentId: ID
+    "Agent — ref: PK or URN; must be installed in the App."
+    agentRef: String
     "true: the run acts on behalf of YOU (required to reach your personal memories). v1 never delegates a third party (cor:agt:010:01)."
     runAsSelf: Boolean
     "Static payload merged into each run's template args."
@@ -1631,6 +1632,8 @@ export const typeDefs = `#graphql
     cron: String
     timezone: String
     entryNodeUrn: String
+    "Agent — ref: PK or URN; must be installed in the App."
+    agentRef: String
     runAsSelf: Boolean
     eventData: JSON
     policy: JSON
@@ -1639,7 +1642,8 @@ export const typeDefs = `#graphql
   }
 
   input TriggerAppRunInput {
-    appId: String!
+    "App — ref: PK or fully-qualified URN."
+    appRef: String!
     entryNodeUrn: String!
     eventData: JSON
     runAsSelf: Boolean
@@ -1680,11 +1684,13 @@ export const typeDefs = `#graphql
   }
 
   input CreateAgentWebhookInput {
-    appId: String!
+    "App — ref: PK or fully-qualified URN."
+    appRef: String!
     "Lowercase alphanumeric/dash, 1-64 chars — part of the URL."
     name: String!
     entryNodeUrn: String!
-    agentId: ID
+    "Agent — ref: PK or URN; must be installed in the App."
+    agentRef: String
     runAsSelf: Boolean
     "JSON Schema for POST args (stored in v1; enforcement is follow-on)."
     argsSchema: JSON
@@ -1714,9 +1720,10 @@ export const typeDefs = `#graphql
   }
 
   input MintActionTicketsInput {
-    orgId: String!
-    "Scope tickets to one App; omit for org-wide."
-    appId: ID
+    "Organization — ref: PK or URN."
+    orgRef: String!
+    "Scope tickets to one App (ref: PK or URN); omit for org-wide."
+    appRef: String
     "v1: comm.outbound only."
     action: String!
     count: Int!
@@ -2670,11 +2677,11 @@ export const typeDefs = `#graphql
     # Spec 040 — the run audit surface (what ran, why, what it cost).
     "One run by ID (runs are URN-less, like AiServiceConfig)."
     appRun(ref: ID!): AppRun
-    appRuns(appId: ID, orgId: ID, status: AppRunStatus, limit: Int, offset: Int): AppRunsPage!
-    agentSchedules(appId: String!, limit: Int, offset: Int): AgentSchedulesPage!
-    agentWebhooks(appId: String!, limit: Int, offset: Int): AgentWebhooksPage!
+    appRuns(appRef: String, orgRef: String, status: AppRunStatus, limit: Int, offset: Int): AppRunsPage!
+    agentSchedules(appRef: String!, limit: Int, offset: Int): AgentSchedulesPage!
+    agentWebhooks(appRef: String!, limit: Int, offset: Int): AgentWebhooksPage!
     "The ticket ledger: minted, consumed-by-which-run, expired (org-ADMIN)."
-    actionTickets(orgId: String!, limit: Int, offset: Int): ActionTicketsPage!
+    actionTickets(orgRef: String!, limit: Int, offset: Int): ActionTicketsPage!
   }
 
   """
