@@ -77,7 +77,10 @@ async function resolveInstalledAgent(
   appId: string,
   agentRef: string | null | undefined,
 ): Promise<string | null> {
-  if (!agentRef) return null;
+  // Empty string ≡ absent (the platform's '' -> absent convention from
+  // PR-486): '' never silently clears or skips validation — clearing an
+  // agent is expressed with an explicit null (PR-502 review).
+  if (agentRef == null || agentRef.trim() === '') return null;
   const { id: agentId } = await resolveAgentRef(ctx.db, agentRef);
   const installed = await ctx.db.appAgent.findFirst({
     where: { appId, agentId },
@@ -150,8 +153,10 @@ export const appRunMutations = {
         ? validatedCronNext(cron, timezone)
         : undefined;
     if (input.entryNodeUrn != null) assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+    // agentRef semantics on update: undefined/'' = no change (''≡absent),
+    // null = clear the agent, string = set (validated as installed).
     const agentId =
-      input.agentRef !== undefined
+      input.agentRef !== undefined && input.agentRef !== ''
         ? await resolveInstalledAgent(ctx, existing.appId, input.agentRef)
         : undefined;
     if (input.policy != null && parsePolicyLink(input.policy) == null) {
@@ -339,7 +344,23 @@ export const appRunMutations = {
   ) => {
     const { id: organizationId } = await resolveOrgRef(ctx.db, input.orgRef);
     await requireOrgRole(ctx, organizationId, 'ADMIN');
-    const appId = input.appRef ? (await resolveAppRef(ctx.db, input.appRef)).id : null;
+    // appRef must name an app IN this org — cross-org tickets would be
+    // unconsumable dead rows (consumeActionTicket queries by org+app) and
+    // an org-ADMIN must not mint against foreign apps (PR-502 review,
+    // Gemini high + Copilot). ''≡absent per the platform convention.
+    let appId: string | null = null;
+    if (input.appRef && input.appRef.trim() !== '') {
+      const { id } = await resolveAppRef(ctx.db, input.appRef);
+      const app = await ctx.db.app.findFirst({
+        where: { id, organizationId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!app) {
+        // Denied ≡ not-found (non-disclosure posture, cor:api:120:01).
+        throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+      }
+      appId = app.id;
+    }
     if (input.action !== 'comm.outbound') {
       throw new GraphQLError('v1 tickets exist for the comm.outbound action class only (cor:acl:050:04).', {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -412,7 +433,12 @@ export const appRunQueries = {
     if (appRef) {
       // ref dispatch (was raw-PK-only — the refactor also makes URNs work here)
       ({ id: appId } = await resolveAppRef(ctx.db, appRef));
-      const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null } });
+      const app = await ctx.db.app.findFirst({
+        // When orgRef was ALSO given, scope the app to that org — a mismatch
+        // is NOT_FOUND rather than orgRef being silently overridden by the
+        // app's org (PR-502 review; non-disclosure posture preserved).
+        where: { id: appId, deletedAt: null, ...(orgRef ? { organizationId: organizationId as string } : {}) },
+      });
       if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
       organizationId = app.organizationId;
     }
