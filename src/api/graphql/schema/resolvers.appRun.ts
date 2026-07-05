@@ -10,15 +10,18 @@ import { nextCronOccurrence } from '../../../jobs/scheduler.js';
 import { parsePolicyLink } from '../../../lib/policy/index.js';
 import { assertFullyQualifiedUrn } from '../../../lib/urn.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { type Context, requireOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 
 export interface CreateAgentScheduleInput {
-  appId: string;
+  /** App reference — PK or fully-qualified URN (the platform-wide `ref` convention). */
+  appRef: string;
   name: string;
   cron: string;
   timezone?: string | null;
   entryNodeUrn: string;
-  agentId?: string | null;
+  /** Agent reference — PK or URN; must be installed in the App. */
+  agentRef?: string | null;
   /** On-behalf-of user (cor:agt:010:01). v1: only the caller themself. */
   runAsSelf?: boolean | null;
   eventData?: Record<string, unknown> | null;
@@ -27,9 +30,9 @@ export interface CreateAgentScheduleInput {
   enabled?: boolean | null;
 }
 
-/** Resolve the App (ID or URN), require it live, and require org-ADMIN on its org. */
-async function requireScheduleAdmin(ctx: Context, appId: string) {
-  const { id } = await resolveAppRef(ctx.db, appId);
+/** Resolve the App ref (PK or URN), require it live, and require org-ADMIN on its org. */
+async function requireScheduleAdmin(ctx: Context, appRef: string) {
+  const { id } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findFirst({
     where: { id, deletedAt: null },
     select: { id: true, organizationId: true },
@@ -64,18 +67,28 @@ function resolveRunAsSelf(ctx: Context, runAsSelf: boolean | null | undefined): 
   return ctx.userId;
 }
 
-/** agentId must be installed in the App — a foreign agent would leak its AI config into the walk (PR-493, Codex P1). */
-async function assertAgentInstalled(ctx: Context, appId: string, agentId: string | null | undefined) {
-  if (!agentId) return;
+/**
+ * Resolve an agent ref (PK or URN) and require it INSTALLED in the App — a
+ * foreign agent would leak its AI config into the walk (PR-493, Codex P1).
+ * Returns the resolved agent id (null when no ref given).
+ */
+async function resolveInstalledAgent(
+  ctx: Context,
+  appId: string,
+  agentRef: string | null | undefined,
+): Promise<string | null> {
+  if (!agentRef) return null;
+  const { id: agentId } = await resolveAgentRef(ctx.db, agentRef);
   const installed = await ctx.db.appAgent.findFirst({
     where: { appId, agentId },
     select: { agentId: true },
   });
   if (!installed) {
-    throw new GraphQLError('agentId is not installed in this App.', {
+    throw new GraphQLError('agentRef does not name an agent installed in this App.', {
       extensions: { code: 'BAD_USER_INPUT' },
     });
   }
+  return agentId;
 }
 
 export const appRunMutations = {
@@ -85,9 +98,9 @@ export const appRunMutations = {
     { input }: { input: CreateAgentScheduleInput },
     ctx: Context,
   ) => {
-    const app = await requireScheduleAdmin(ctx, input.appId);
+    const app = await requireScheduleAdmin(ctx, input.appRef);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    await assertAgentInstalled(ctx, app.id, input.agentId);
+    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
     const timezone = input.timezone?.trim() || 'UTC';
     const nextRunAt = validatedCronNext(input.cron, timezone);
     if (input.policy != null && parsePolicyLink(input.policy) == null) {
@@ -100,7 +113,7 @@ export const appRunMutations = {
         id: generateId(),
         organizationId: app.organizationId,
         appId: app.id,
-        agentId: input.agentId ?? null,
+        agentId,
         // v1: a schedule runs on behalf of its CREATOR or nobody — never a
         // third party (delegating another user's authority needs the rule
         // language; cor:agt:010:01 tunable).
@@ -137,7 +150,10 @@ export const appRunMutations = {
         ? validatedCronNext(cron, timezone)
         : undefined;
     if (input.entryNodeUrn != null) assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    if (input.agentId !== undefined) await assertAgentInstalled(ctx, existing.appId, input.agentId);
+    const agentId =
+      input.agentRef !== undefined
+        ? await resolveInstalledAgent(ctx, existing.appId, input.agentRef)
+        : undefined;
     if (input.policy != null && parsePolicyLink(input.policy) == null) {
       throw new GraphQLError('policy must be { allow: string[] }.', {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -155,6 +171,7 @@ export const appRunMutations = {
         ...(input.aiConfigName !== undefined ? { aiConfigName: input.aiConfigName } : {}),
         ...(input.enabled != null ? { enabled: input.enabled } : {}),
         ...(input.runAsSelf != null ? { userId: resolveRunAsSelf(ctx, input.runAsSelf) } : {}),
+        ...(agentId !== undefined ? { agentId } : {}),
         ...(nextRunAt ? { nextRunAt } : {}),
         updatedBy: ctx.userId ?? ctx.clientId ?? null,
       },
@@ -180,7 +197,7 @@ export const appRunMutations = {
       input,
     }: {
       input: {
-        appId: string;
+        appRef: string;
         entryNodeUrn: string;
         eventData?: Record<string, unknown> | null;
         runAsSelf?: boolean | null;
@@ -189,7 +206,7 @@ export const appRunMutations = {
     },
     ctx: Context,
   ) => {
-    const app = await requireScheduleAdmin(ctx, input.appId);
+    const app = await requireScheduleAdmin(ctx, input.appRef);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     try {
       return await mintAppRun(ctx.db, {
@@ -234,10 +251,10 @@ export const appRunMutations = {
       input,
     }: {
       input: {
-        appId: string;
+        appRef: string;
         name: string;
         entryNodeUrn: string;
-        agentId?: string | null;
+        agentRef?: string | null;
         runAsSelf?: boolean | null;
         argsSchema?: Record<string, unknown> | null;
         eventData?: Record<string, unknown> | null;
@@ -248,9 +265,9 @@ export const appRunMutations = {
     },
     ctx: Context,
   ) => {
-    const app = await requireScheduleAdmin(ctx, input.appId);
+    const app = await requireScheduleAdmin(ctx, input.appRef);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    await assertAgentInstalled(ctx, app.id, input.agentId);
+    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(input.name)) {
       throw new GraphQLError('Webhook name must be lowercase alphanumeric/dash, 1-64 chars.', {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -266,7 +283,7 @@ export const appRunMutations = {
         id: generateId(),
         organizationId: app.organizationId,
         appId: app.id,
-        agentId: input.agentId ?? null,
+        agentId,
         userId: resolveRunAsSelf(ctx, input.runAsSelf),
         name: input.name,
         secret: generateWebhookSecret(),
@@ -316,12 +333,13 @@ export const appRunMutations = {
     {
       input,
     }: {
-      input: { orgId: string; appId?: string | null; action: string; count: number; note?: string | null; expiresAt?: string | null };
+      input: { orgRef: string; appRef?: string | null; action: string; count: number; note?: string | null; expiresAt?: string | null };
     },
     ctx: Context,
   ) => {
-    const { id: organizationId } = await resolveOrgRef(ctx.db, input.orgId);
+    const { id: organizationId } = await resolveOrgRef(ctx.db, input.orgRef);
     await requireOrgRole(ctx, organizationId, 'ADMIN');
+    const appId = input.appRef ? (await resolveAppRef(ctx.db, input.appRef)).id : null;
     if (input.action !== 'comm.outbound') {
       throw new GraphQLError('v1 tickets exist for the comm.outbound action class only (cor:acl:050:04).', {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -342,7 +360,7 @@ export const appRunMutations = {
       data: Array.from({ length: count }, () => ({
         id: generateId(),
         organizationId,
-        appId: input.appId ?? null,
+        appId,
         action: input.action,
         mintedBy,
         note: input.note ?? null,
@@ -357,10 +375,10 @@ export const appRunQueries = {
   /** Paginated schedules for an App (org-ADMIN; cor:api:120 envelope). */
   agentSchedules: async (
     _: unknown,
-    { appId, limit, offset }: { appId: string; limit?: number | null; offset?: number | null },
+    { appRef, limit, offset }: { appRef: string; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const app = await requireScheduleAdmin(ctx, appId);
+    const app = await requireScheduleAdmin(ctx, appRef);
     const where = { appId: app.id, deletedAt: null };
     const take = Math.min(Math.max(limit ?? 50, 1), 200);
     const [items, total] = await Promise.all([
@@ -374,28 +392,32 @@ export const appRunQueries = {
   appRuns: async (
     _: unknown,
     {
-      appId,
-      orgId,
+      appRef,
+      orgRef,
       status,
       limit,
       offset,
     }: {
-      appId?: string | null;
-      orgId?: string | null;
+      appRef?: string | null;
+      orgRef?: string | null;
       status?: string | null;
       limit?: number | null;
       offset?: number | null;
     },
     ctx: Context,
   ) => {
-    let organizationId = orgId ?? ctx.organizationId ?? null;
-    if (appId) {
+    let organizationId = ctx.organizationId ?? null;
+    let appId: string | null = null;
+    if (orgRef) ({ id: organizationId } = await resolveOrgRef(ctx.db, orgRef));
+    if (appRef) {
+      // ref dispatch (was raw-PK-only — the refactor also makes URNs work here)
+      ({ id: appId } = await resolveAppRef(ctx.db, appRef));
       const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null } });
       if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
       organizationId = app.organizationId;
     }
     if (!organizationId) {
-      throw new GraphQLError('Provide appId or orgId.', { extensions: { code: 'BAD_USER_INPUT' } });
+      throw new GraphQLError('Provide appRef or orgRef.', { extensions: { code: 'BAD_USER_INPUT' } });
     }
     if (!isPlatformAdmin(ctx)) {
       try {
@@ -421,10 +443,10 @@ export const appRunQueries = {
 
   agentWebhooks: async (
     _: unknown,
-    { appId, limit, offset }: { appId: string; limit?: number | null; offset?: number | null },
+    { appRef, limit, offset }: { appRef: string; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const app = await requireScheduleAdmin(ctx, appId);
+    const app = await requireScheduleAdmin(ctx, appRef);
     const where = { appId: app.id, deletedAt: null };
     const take = Math.min(Math.max(limit ?? 50, 1), 200);
     const [items, total] = await Promise.all([
@@ -439,10 +461,10 @@ export const appRunQueries = {
   /** The ticket ledger (cor:acl:050:04): where did they all go? */
   actionTickets: async (
     _: unknown,
-    { orgId, limit, offset }: { orgId: string; limit?: number | null; offset?: number | null },
+    { orgRef, limit, offset }: { orgRef: string; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const { id: organizationId } = await resolveOrgRef(ctx.db, orgId);
+    const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
     await requireOrgRole(ctx, organizationId, 'ADMIN');
     const where = { organizationId };
     const take = Math.min(Math.max(limit ?? 50, 1), 200);
