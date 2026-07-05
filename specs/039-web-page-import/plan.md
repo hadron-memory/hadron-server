@@ -10,8 +10,38 @@ converted (via `hadrontool-pdf`) and stored **synchronously**. A URL is recorded
 converts HTML → Markdown, writes the node through the shared node-write core, and
 generates an abstract via the org-resolved `AiServiceConfig`.
 
-**Date**: 2026-07-02 (decisions resolved 2026-07-01) · **Status**: Draft plan (no spec.md
-yet — promote via speckit if desired)
+**Date**: 2026-07-02 (decisions resolved 2026-07-01) · **Status**: SUPERSEDED IN PART —
+see the 2026-07-05 amendment below.
+
+---
+
+## ⚠️ Amendment (2026-07-05) — what actually shipped
+
+The 2026-07-03 handoff (`handoffs:457-import-node-design`, now deleted) revised
+this plan before implementation; the shipped reality differs from §§3–5/7 below:
+
+- **`importNode` shipped fully SYNCHRONOUS** (hadron-server#485 seam + #487):
+  BOTH paths — inline `content` AND `url` — execute in the request cycle. The
+  url path fetches inline (SSRF-guarded per **cor:api:130:02**, Readability-
+  extracted server-side via `@mozilla/readability` + `linkedom`) rather than
+  through a `WebImportTask` worker. **No `WebImportTask` table, no
+  `webimport.requested.v1` subject, and no webimport worker exist.**
+- The **canonical spec is `cor:api:130`** (:00 provisions, :01 surface
+  contract, :02 egress policy) — read that, not §5/§8 below, for the contract.
+  `FETCH_PENDING` + `jobId` remain RESERVED in the result shape for a future
+  async url path (D6: payloads staged in object storage, not task rows).
+- **Conflicts update in place** (no CREATE_ONLY mode); name policy: caller →
+  extracted title → preserve-on-existing → loc leaf.
+- Abstract generation (§7 step 5 / Phase 4 here) did NOT ship with import; the
+  LLM layer (`src/lib/llm/`) was instead built by **spec 040** (headless runs),
+  which is now the natural home for post-import enrichment (see
+  `handoffs:040-headless-opus-backlog`).
+- Phases 0–2 shipped as planned (#460 node-write split, #462/#489 bus,
+  hadrontool-pdf endpoint); Phase 5 landed as the Web Clipper alignment on
+  hadron-chrome-extension#6.
+
+Sections below are retained as the historical design record; where they
+conflict with the amendment, the amendment and `cor:api:130` win.
 
 ---
 
