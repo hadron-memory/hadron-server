@@ -156,14 +156,28 @@ export async function createServer(): Promise<Express> {
     }
 
     // #477 session-fixation binding: the portal sets an HttpOnly browser nonce
-    // at login start and forwards it here as `client_state`. We carry it through
-    // the OAuth round-trip and stamp it onto the login handoff code so the
-    // browser that FINISHES login must be the one that STARTED it. Absent on
-    // legacy/direct callers — the binding is simply not enforced then.
+    // at login start (/auth/start/github) and forwards it here as `client_state`.
+    // We carry it through the OAuth round-trip and stamp it onto the login
+    // handoff code so the browser that FINISHES login must be the one that
+    // STARTED it.
     const clientStateRaw = req.query.client_state;
     const clientState = typeof clientStateRaw === 'string' && clientStateRaw !== ''
       ? clientStateRaw
       : undefined;
+
+    // The binding is MANDATORY on the portal-handoff path (Codex #504 P2): an
+    // unbound login code redeems for any browser, which reopens the very
+    // session-fixation vector this change closes (an attacker mints a code for
+    // their own account by hitting this backend URL directly, then lures a
+    // victim to /auth/callback?code=… within the TTL). Option-C (`return_to`)
+    // is exempt — it sets the hadron_token cookie on this server's origin and
+    // mints NO handoff code, so there is nothing to bind.
+    if (!returnTo && !clientState) {
+      res.status(400).json({
+        error: 'client_state is required — start login via the portal (/auth/start/github), not the backend URL directly.',
+      });
+      return;
+    }
 
     const state = crypto.randomBytes(16).toString('hex');
     pendingStates.set(state, {

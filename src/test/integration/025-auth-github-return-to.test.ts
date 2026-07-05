@@ -65,10 +65,21 @@ describe('/auth/github GET — Option-C return_to (FR-007)', () => {
     expect(res.headers.get('location')).toMatch(/github\.com/);
   });
 
-  it('accepts no return_to (existing portal flow unchanged)', async () => {
-    const res = await getAuthGithub('');
+  it('accepts the portal handoff path (client_state, no return_to)', async () => {
+    // #477: the portal-handoff flow (no return_to) now carries a client_state
+    // nonce; that is the happy path to GitHub.
+    const res = await getAuthGithub('?client_state=' + 'a'.repeat(64));
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toMatch(/github\.com/);
+  });
+
+  it('rejects a bare start with no return_to and no client_state (#477 fixation binding)', async () => {
+    // Hitting the backend URL directly (no return_to, no client_state) would
+    // mint an UNBOUND login code — the session-fixation vector. Must 400.
+    const res = await getAuthGithub('');
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/client_state is required/);
   });
 
   // ── Rejected: open-redirect to external origin ────────────────────
