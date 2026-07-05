@@ -1,7 +1,11 @@
 import { GraphQLError } from 'graphql';
 
 /**
- * Client for the internal hadrontool-pdf service (markdown -> PDF).
+ * Client for the internal hadrontool-pdf service. Despite the name, it serves
+ * two directions: PDF *export* (markdown -> PDF, `renderMarkdownToPdf`) and
+ * content *conversion* for imports (HTML/PDF -> Markdown, `convertHtmlToMarkdown`
+ * / `convertPdfToMarkdown`). Error messages are worded per-direction so a
+ * web-page clip doesn't surface a confusing "PDF service" error (#503).
  *
  * hadron-server stays the front door: it has already run access control and
  * decrypted the node before calling here. This module only ships the rendered
@@ -137,7 +141,9 @@ export async function convertHtmlToMarkdown(
   } catch (err) {
     const timedOut = controller.signal.aborted;
     throw new GraphQLError(
-      timedOut ? 'PDF service timed out.' : 'PDF service is unreachable.',
+      timedOut
+        ? 'Content conversion service timed out.'
+        : 'Content conversion service is unreachable.',
       { extensions: { code: 'PDF_SERVICE_UNREACHABLE', cause: String(err) } },
     );
   } finally {
@@ -146,14 +152,19 @@ export async function convertHtmlToMarkdown(
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new GraphQLError(`PDF service error (${res.status}).`, {
+    // Import path (web-page / HTML clip): message it as a content-conversion
+    // failure, not "PDF service" — the endpoint is HTML→Markdown, and a
+    // web-page clipper surfacing "PDF service error" confuses users (#503).
+    // A 404 here typically means the deployed hadrontool-pdf predates the
+    // /convert/html-to-markdown route (#476) or PDF_SERVICE_URL is misconfigured.
+    throw new GraphQLError(`Content conversion service error (${res.status}).`, {
       extensions: { code: 'PDF_SERVICE_ERROR', status: res.status, detail: detail.slice(0, 500) },
     });
   }
 
   const payload = (await res.json().catch(() => null)) as { markdown?: string; title?: string } | null;
   if (!payload || typeof payload.markdown !== 'string') {
-    throw new GraphQLError('PDF service returned an unexpected response.', {
+    throw new GraphQLError('Content conversion service returned an unexpected response.', {
       extensions: { code: 'PDF_SERVICE_BAD_RESPONSE' },
     });
   }
@@ -225,7 +236,9 @@ export async function convertPdfToMarkdown(pdfBase64: string): Promise<PdfToMark
   } catch (err) {
     const timedOut = controller.signal.aborted;
     throw new GraphQLError(
-      timedOut ? 'PDF service timed out.' : 'PDF service is unreachable.',
+      timedOut
+        ? 'Content conversion service timed out.'
+        : 'Content conversion service is unreachable.',
       { extensions: { code: 'PDF_SERVICE_UNREACHABLE', cause: String(err) } },
     );
   } finally {
@@ -234,7 +247,10 @@ export async function convertPdfToMarkdown(pdfBase64: string): Promise<PdfToMark
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new GraphQLError(`PDF service error (${res.status}).`, {
+    // Import path (PDF → Markdown): a content-conversion failure. A 404 here
+    // typically means the deployed hadrontool-pdf predates the
+    // /convert/pdf-to-markdown route (#488) or PDF_SERVICE_URL is misconfigured (#503).
+    throw new GraphQLError(`Content conversion service error (${res.status}).`, {
       extensions: { code: 'PDF_SERVICE_ERROR', status: res.status, detail: detail.slice(0, 500) },
     });
   }
@@ -243,7 +259,7 @@ export async function convertPdfToMarkdown(pdfBase64: string): Promise<PdfToMark
     | { markdown?: string; pageCount?: number; info?: { title?: string } }
     | null;
   if (!payload || typeof payload.markdown !== 'string') {
-    throw new GraphQLError('PDF service returned an unexpected response.', {
+    throw new GraphQLError('Content conversion service returned an unexpected response.', {
       extensions: { code: 'PDF_SERVICE_BAD_RESPONSE' },
     });
   }
