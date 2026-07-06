@@ -365,7 +365,6 @@ export function startEmbeddingWorkerLoop(
 // carry.
 
 import { getBusClient } from '../lib/bus/index.js';
-import { NODE_WRITTEN_SUBJECT, isNodeWrittenEvent } from '../lib/events/nodeWritten.js';
 
 export const EMBED_WAKE_SUBJECT = 'embed.wake.v1';
 export const EMBED_QUEUE_GROUP = 'embed-worker';
@@ -455,27 +454,22 @@ export async function handleEmbedWake(
 }
 
 /**
- * Start the same-process bus listeners. Two subscriptions (event pivot):
+ * Start the same-process bus listener. Resolves to the unsubscribe function,
+ * or null when the bus is off (NATS_URL unset / broker unreachable) — the
+ * sweep loop is the fallback either way.
  *
- *   1. `embed.wake.v1` (job queue) — drain pings from backfills, plus any
- *      legacy per-node wakes still in flight from an older release.
- *   2. `evt.node.written.v1` (event fan-out, durable `embed-worker`) — the
- *      per-node wake now rides the platform write event instead of a
- *      module-specific publish. The handler is the same marker-gated
- *      check-and-embed, so a write the prompt-drain already embedded
- *      resolves to one cheap SELECT.
- *
- * Resolves to a combined unsubscribe function, or null when the bus is off
- * (NATS_URL unset / broker unreachable) — the write-path prompt-drain and
- * the sweep loop are the fallback either way (no local event handler is
- * registered: enqueueNodeEmbedding IS the in-process path).
+ * Embedding deliberately does NOT subscribe to evt.node.written.v1 (PR-507
+ * review): its wake must be ordered AFTER the durable marker stamp, which
+ * only enqueueNodeEmbedding can guarantee (see the comment there). The
+ * event serves modules without a write-path ordering dependency (git
+ * mirror).
  */
 export async function startEmbeddingBusListener(
   db: PrismaClient,
 ): Promise<(() => Promise<void>) | null> {
   const bus = await getBusClient();
   if (!bus) return null;
-  const unsubWake = await bus.subscribeQueue(
+  const unsubscribe = await bus.subscribeQueue(
     EMBED_WAKE_SUBJECT,
     EMBED_QUEUE_GROUP,
     async (msg) => {
@@ -485,25 +479,6 @@ export async function startEmbeddingBusListener(
       await handleEmbedWake(db, msg.payload);
     },
   );
-  const unsubEvent = await bus.subscribePubSub(
-    NODE_WRITTEN_SUBJECT,
-    EMBED_QUEUE_GROUP,
-    async (msg) => {
-      if (!isNodeWrittenEvent(msg.payload)) {
-        console.warn('[embed-worker] ignoring malformed node.written payload:', msg.payload);
-        return;
-      }
-      // Note the event may arrive before enqueueNodeEmbedding stamps the
-      // marker (both fire post-write): the no-marker skip is correct then —
-      // the prompt-drain and sweep own that window, as they always have.
-      await handleEmbedWake(db, { nodeId: msg.payload.nodeId });
-    },
-  );
-  console.log(
-    `[embed-worker] bus listeners active on ${EMBED_WAKE_SUBJECT} + ${NODE_WRITTEN_SUBJECT}`,
-  );
-  return async () => {
-    await unsubWake();
-    await unsubEvent();
-  };
+  console.log(`[embed-worker] bus listener active on ${EMBED_WAKE_SUBJECT}`);
+  return unsubscribe;
 }

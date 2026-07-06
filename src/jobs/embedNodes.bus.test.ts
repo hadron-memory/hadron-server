@@ -3,11 +3,12 @@
  *
  * What this file pins (bus module mocked — the broker transport itself is
  * pinned by src/lib/bus/bus.test.ts):
- *   - enqueueNodeEmbedding publishes NOTHING (event pivot: the per-node wake
- *     rides evt.node.written.v1, emitted by the write paths themselves).
- *   - backfillMemoryEmbeddings publishes an empty drain ping on
- *     embed.wake.v1 (a job command, not a fact); a publish failure never
- *     breaks the backfill.
+ *   - enqueueNodeEmbedding publishes a { nodeId } wake-up AFTER the durable
+ *     marker stamp (PR-507 review: the wake must not ride
+ *     evt.node.written.v1 — the fact event races the stamp) for
+ *     vector-indexed memories and nothing otherwise; a publish failure
+ *     never breaks enqueue.
+ *   - backfillMemoryEmbeddings publishes an empty drain ping.
  *   - handleEmbedWake: { nodeId } embeds off the stored marker (idempotent —
  *     a cleared marker skips); a transient failure THROWS (bus nak/redelivery
  *     contract); an empty payload drains the queue to exhaustion.
@@ -84,21 +85,50 @@ afterEach(() => {
 });
 
 describe('publishes on the write path', () => {
-  it('enqueueNodeEmbedding publishes NO per-node wake (event pivot) but still stamps the marker', async () => {
+  it('enqueueNodeEmbedding publishes a { nodeId } wake-up AFTER stamping the marker', async () => {
     // No endpoint for the prompt-drain in this test — delete AFTER fixture
     // setup so isEmbeddingConfigured() is false during enqueue and the
     // prompt-drain doesn't race the assertion.
     delete process.env.EMBEDDING_API_URL;
     const node = await createNodeRow('p1', false);
+    // Pin the post-marker ordering (PR-507 review): at publish time the
+    // durable marker must already be visible — that's the whole reason the
+    // wake lives here and not on evt.node.written.v1.
+    let markerAtPublish: Date | null | undefined;
+    publish.mockImplementationOnce(async () => {
+      const row = await db.node.findUnique({ where: { id: node.id } });
+      markerAtPublish = row?.embeddingPendingAt ?? null;
+    });
+    await enqueueNodeEmbedding(db, { nodeId: node.id, memoryId, plaintext: {} });
+    // The wake publish is void-fired; wait for the snapshot inside the mock.
+    await vi.waitFor(() => expect(markerAtPublish).not.toBeUndefined());
+    expect(publish).toHaveBeenCalledWith(
+      EMBED_WAKE_SUBJECT,
+      { nodeId: node.id },
+      expect.objectContaining({ idempotencyKey: expect.stringContaining(node.id) }),
+    );
+    expect(markerAtPublish).not.toBeNull();
+  });
+
+  it('does not publish for a non-indexed memory', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { vectorIndexEnabled: false } });
+    const node = await createNodeRow('p2', false);
     await enqueueNodeEmbedding(db, { nodeId: node.id, memoryId, plaintext: {} });
     expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('a publish failure never breaks the enqueue (marker still set)', async () => {
+    delete process.env.EMBEDDING_API_URL;
+    publish.mockRejectedValueOnce(new Error('broker down'));
+    const node = await createNodeRow('p3', false);
+    await enqueueNodeEmbedding(db, { nodeId: node.id, memoryId, plaintext: {} });
     const row = await db.node.findUnique({ where: { id: node.id } });
     expect(row?.embeddingPendingAt).not.toBeNull();
   });
 
   it('a drain-ping publish failure never breaks the backfill', async () => {
     publish.mockRejectedValueOnce(new Error('broker down'));
-    await createNodeRow('p3', false);
+    await createNodeRow('p5', false);
     const count = await backfillMemoryEmbeddings(db, memoryId);
     expect(count).toBe(1);
   });

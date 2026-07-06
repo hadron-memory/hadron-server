@@ -118,6 +118,29 @@ describe('handleNodeWrittenForGit', () => {
     expect(mockWrite).not.toHaveBeenCalled();
   });
 
+  it('refuses an event whose memoryId disagrees with the node (forged/corrupt routing)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const otherMemory = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: (await db.memory.findUniqueOrThrow({ where: { id: memoryId } }))
+          .organizationId,
+        name: 'other',
+        urn: 'git-evt-org:other',
+        class: 'knowledge',
+      },
+    });
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'real-home', name: 'Real', tags: [] },
+    });
+    // Event claims the node lives in otherMemory — mirroring would route this
+    // node's content into otherMemory's repo (PR-507 review, Codex P2).
+    await handleNodeWrittenForGit(db, { nodeId: node.id, memoryId: otherMemory.id });
+    expect(mockWrite).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('memoryId mismatch'));
+    warnSpy.mockRestore();
+  });
+
   it('punts on an encrypted memory (request-time direct write owns those)', async () => {
     await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } });
     const node = await db.node.create({

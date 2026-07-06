@@ -20,6 +20,7 @@ import {
   NODE_WRITTEN_SUBJECT,
   isNodeWrittenEvent,
   registerNodeWrittenLocalHandler,
+  setNodeWrittenBusActive,
   type NodeWrittenEvent,
 } from '../../lib/events/nodeWritten.js';
 import { deserializeTags } from '../db/provider.js';
@@ -44,6 +45,17 @@ export async function handleNodeWrittenForGit(
     include: { outgoingEdges: { include: { target: true } } },
   });
   if (!node || node.deletedAt) return;
+  // The event's memoryId must agree with the node's actual memory: routing
+  // (target repo) and the encryption gate below both key off it, so a
+  // mismatched (corrupt/forged) event could mirror one memory's node into
+  // another memory's repository (PR-507 review, Codex P2). Refuse, loudly.
+  if (node.memoryId !== evt.memoryId) {
+    console.warn(
+      `[git-mirror] node.written memoryId mismatch — node ${evt.nodeId} lives in ` +
+        `${node.memoryId}, event claims ${evt.memoryId}; skipping`,
+    );
+    return;
+  }
   const memory = await db.memory.findUnique({
     where: { id: evt.memoryId },
     select: { isEncrypted: true },
@@ -77,8 +89,12 @@ export async function handleNodeWrittenForGit(
 /**
  * Wire the git mirror into the event flow: ALWAYS registers the in-process
  * fallback (so bus-off deployments keep mirroring), then adds the durable
- * bus subscription when a broker is available. Returns the bus unsubscribe
- * function, or null when the bus is off.
+ * bus subscription when a broker is available. The local handler stays the
+ * delivery path until the subscription is CONFIRMED active
+ * (setNodeWrittenBusActive) — a reachable broker with a failed/never-started
+ * subscriber must not silently park events in the stream (PR-507 review,
+ * Codex P2). Returns the bus unsubscribe function (which also flips the
+ * handler back to local dispatch), or null when the bus is off.
  */
 export async function startGitMirrorSubscriber(
   db: PrismaClient,
@@ -101,6 +117,10 @@ export async function startGitMirrorSubscriber(
       await handleNodeWrittenForGit(db, msg.payload);
     },
   );
+  setNodeWrittenBusActive(GIT_MIRROR_SUBSCRIBER, true);
   console.log(`[git-mirror] bus subscriber active on ${NODE_WRITTEN_SUBJECT}`);
-  return unsubscribe;
+  return async () => {
+    setNodeWrittenBusActive(GIT_MIRROR_SUBSCRIBER, false);
+    await unsubscribe();
+  };
 }

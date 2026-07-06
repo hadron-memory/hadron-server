@@ -8,18 +8,25 @@
  * the broker; subscribers re-read from the DB, which is also what makes
  * duplicate delivery harmless).
  *
- * Consumers today: the git mirror (re-read + push) and the embedding wake
- * (marker check + embed). The point of the event is that the write core no
- * longer knows that list — a new module that cares about writes registers a
- * subscriber; the write paths don't change.
+ * Consumer today: the git mirror (re-read + push). The point of the event is
+ * that the write core no longer knows that list — a new module that cares
+ * about writes registers a subscriber; the write paths don't change.
+ * (The embedding wake deliberately does NOT ride this event: it must be
+ * published AFTER the durable embeddingPendingAt stamp, an ordering only the
+ * embedding module itself can guarantee — see enqueueNodeEmbedding. A fact
+ * event emitted by the write path can't carry that ordering; PR-507 review.)
  *
- * Delivery:
- *   - Bus ON  → durable fan-out via subscribePubSub (each module has its own
- *     durable consumer; at-least-once, so handlers are idempotent).
- *   - Bus OFF (NATS_URL unset / broker down) → the LOCAL fallback: handlers
- *     registered via registerNodeWrittenLocalHandler run in-process off a
- *     setImmediate, preserving D-2026-06-17-004 (a missing broker never
- *     changes behavior, only transport).
+ * Delivery — per handler, not per process (PR-507 review):
+ *   - A handler whose bus subscription is confirmed ACTIVE (the module
+ *     called setNodeWrittenBusActive after subscribing) is served by the
+ *     durable fan-out (at-least-once; handlers are idempotent).
+ *   - Every OTHER registered handler gets the LOCAL in-process dispatch off
+ *     a setImmediate — this covers bus-off deployments (D-2026-06-17-004)
+ *     AND the bus-on-but-subscription-dead window (boot subscribe failure,
+ *     broker recovered after boot): mirroring must not silently stop just
+ *     because the broker accepted the publish. The durable replay may later
+ *     deliver the same event to a recovered subscriber — idempotent
+ *     re-mirror, harmless.
  *
  * NOT published by syncGraphFromGithub: a git-sync-triggered event would
  * bounce straight back into the git mirror (echo loop). Sync keeps its
@@ -50,6 +57,9 @@ export function isNodeWrittenEvent(payload: unknown): payload is NodeWrittenEven
 type LocalHandler = (evt: NodeWrittenEvent) => Promise<void>;
 
 const localHandlers = new Map<string, LocalHandler>();
+// Handlers whose durable bus subscription is currently confirmed active —
+// these are served by the broker fan-out, so the local dispatch skips them.
+const busActiveHandlers = new Set<string>();
 
 /**
  * Register a module's in-process fallback handler (keyed by the same name
@@ -61,9 +71,23 @@ export function registerNodeWrittenLocalHandler(name: string, handler: LocalHand
   localHandlers.set(name, handler);
 }
 
-/** Test hook: drop all local handlers. */
+/**
+ * Mark a handler's durable bus subscription as active/inactive. While
+ * active, the local dispatch skips that handler (the broker delivers);
+ * call with false on unsubscribe so the local path takes over again.
+ * A handler that never confirms stays on local dispatch even when
+ * publishes succeed — a reachable broker does NOT imply a live subscriber
+ * (PR-507 review).
+ */
+export function setNodeWrittenBusActive(name: string, active: boolean): void {
+  if (active) busActiveHandlers.add(name);
+  else busActiveHandlers.delete(name);
+}
+
+/** Test hook: drop all local handlers + bus-active marks. */
 export function clearNodeWrittenLocalHandlers(): void {
   localHandlers.clear();
+  busActiveHandlers.clear();
 }
 
 /**
@@ -73,6 +97,7 @@ export function clearNodeWrittenLocalHandlers(): void {
  * fallback dispatch. Never throws.
  */
 export async function publishNodeWritten(evt: NodeWrittenEvent): Promise<void> {
+  let published = false;
   try {
     const bus = await getBusClient();
     if (bus) {
@@ -81,14 +106,20 @@ export async function publishNodeWritten(evt: NodeWrittenEvent): Promise<void> {
         // distinct writes of the same node (mirrors publishEmbedWake).
         idempotencyKey: `${evt.nodeId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
       });
-      return;
+      published = true;
     }
   } catch (err) {
     // Fall through to the local path — a publish failure downgrades the
     // transport, it doesn't drop the side effects.
     console.error('[events] node.written publish error — dispatching locally:', err);
   }
+  // Local dispatch for every handler the broker is NOT confirmed to serve:
+  // all of them when the publish didn't happen, and the not-bus-active ones
+  // even when it did (a reachable broker ≠ a live subscriber — PR-507
+  // review; without this, a boot-time subscribe failure silently parks
+  // events in the stream until a restart).
   for (const [name, handler] of localHandlers) {
+    if (published && busActiveHandlers.has(name)) continue;
     setImmediate(() => {
       handler(evt).catch((err) => {
         console.error(`[events] local node.written handler "${name}" error:`, err);
