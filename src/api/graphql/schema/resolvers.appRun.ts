@@ -455,8 +455,10 @@ export const appRunMutations = {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
-    if (!Number.isInteger(input.limit) || input.limit < 0) {
-      throw new GraphQLError('limit must be a non-negative integer (0 = pause the scope).', {
+    // Cap at int32 — the column is a 4-byte Int; beyond it Postgres would
+    // overflow into a raw 500 (PR-512 review).
+    if (!Number.isInteger(input.limit) || input.limit < 0 || input.limit > 2_147_483_647) {
+      throw new GraphQLError('limit must be a non-negative 32-bit integer (0 = pause the scope).', {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
@@ -644,9 +646,7 @@ export const appRunQueries = {
       if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
       scopes.push({ scopeKind: 'app', scopeId: app.id });
     }
-    for (const s of scopes) {
-      await ensureQuotaRowsForScope(ctx.db, s.scopeKind, s.scopeId);
-    }
+    await Promise.all(scopes.map((s) => ensureQuotaRowsForScope(ctx.db, s.scopeKind, s.scopeId)));
     return ctx.db.quotaCounter.findMany({
       where: { OR: scopes.map((s) => ({ scopeKind: s.scopeKind, scopeId: s.scopeId })) },
       orderBy: [{ scopeKind: 'asc' }, { action: 'asc' }],

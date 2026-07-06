@@ -29,7 +29,6 @@ import {
 } from '../../../controller/operations/updateMemoryMemberRole.js';
 import { removeMemoryMember } from '../../../controller/operations/removeMemoryMember.js';
 import {
-  Prisma,
   type MemoryShareRole as MemoryShareRoleType,
   type MemoryMemberRole as MemoryMemberRoleType,
   type Role,
@@ -854,21 +853,21 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
-      try {
-        await ctx.db.agentMemoryItem.update({
-          where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
-          data: { role },
-        });
-      } catch (e) {
-        // #501: a missing grant row must be a typed NOT_FOUND, not a raw
-        // P2025 → 500. addMemoryToAgent is the create/upsert path.
-        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
-          throw new GraphQLError(
-            'No grant exists for this agent+memory pair — use addMemoryToAgent to create one.',
-            { extensions: { code: 'NOT_FOUND' } },
-          );
-        }
-        throw e;
+      // #501: only a LIVE grant is updatable — updateMany + deletedAt:null
+      // (findUnique on the composite PK can't filter soft-deletes; the
+      // requireOrgRole-pattern rule from findings:revoked-membership-auth-
+      // gates, PR-512 review). Zero rows = typed NOT_FOUND, never a raw
+      // P2025 → 500; a soft-deleted grant stays inactive until
+      // addMemoryToAgent resurrects it.
+      const updated = await ctx.db.agentMemoryItem.updateMany({
+        where: { agentId: resolvedAgentId, memoryId: resolvedMemoryId, deletedAt: null },
+        data: { role },
+      });
+      if (updated.count === 0) {
+        throw new GraphQLError(
+          'No active grant exists for this agent+memory pair — use addMemoryToAgent to create one.',
+          { extensions: { code: 'NOT_FOUND' } },
+        );
       }
       return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },

@@ -593,8 +593,8 @@ async function executeAppRunInner(
  * Parse an AppRun.policy snapshot into chain links. Two stored shapes:
  * `{chain: [link, ...]}` (#510 — the full conjunctive snapshot) and the
  * pre-#510 single-link object (runs minted before the deploy). Anything
- * unparseable yields an empty chain = no restriction, matching the
- * absent-layer semantics.
+ * unparseable yields `[null]` — an absent link, which the evaluator treats
+ * as no restriction (PR-512 review: comment matched to behavior).
  */
 export function parseRunPolicySnapshot(raw: unknown): Array<{ allow: string[] } | null> {
   if (raw != null && typeof raw === 'object' && !Array.isArray(raw)) {

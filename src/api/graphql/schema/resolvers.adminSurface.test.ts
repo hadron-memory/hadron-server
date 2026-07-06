@@ -313,4 +313,22 @@ describe('agent-memory grants (#501)', () => {
       ),
     ).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
   });
+
+  it('updateAgentMemoryRole refuses a soft-deleted grant (stays inactive; PR-512 review)', async () => {
+    await db.agentMemoryItem.create({
+      data: { agentId, memoryId, role: 'read', deletedAt: new Date() },
+    });
+    await expect(
+      resolvers.Mutation.updateAgentMemoryRole(
+        {},
+        { agentId, memoryId, role: 'read-write' },
+        adminCtx(),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
+    const grant = await db.agentMemoryItem.findUniqueOrThrow({
+      where: { agentId_memoryId: { agentId, memoryId } },
+    });
+    expect(grant.role).toBe('read'); // untouched — resurrection is addMemoryToAgent's job
+    expect(grant.deletedAt).not.toBeNull();
+  });
 });
