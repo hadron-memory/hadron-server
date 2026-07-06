@@ -41,6 +41,12 @@ import {
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
+import { GraphQLError } from 'graphql';
+import {
+  stageRequestMemoryKeys,
+  MemoryUnlockError,
+  REQUEST_KEYS_HEADER,
+} from './lib/memoryUnlock.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
 import { getBusClient } from './lib/bus/index.js';
 import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js';
@@ -604,8 +610,23 @@ export async function createServer(): Promise<Express> {
   app.use(
     '/graphql',
     expressMiddleware(apollo, {
-      context: async ({ req }) => {
+      context: async ({ req, res }) => {
         const auth = await resolveAuthContext(req, db);
+        // Spec 041: stage caller-held unlock keys from the request header
+        // into sessionKeyCache under a synthetic req:<uuid> session — every
+        // existing encrypt/decrypt call site consults the cache by memoryId,
+        // so this is the whole stateless-unlock integration. Evicted on
+        // response end; a wrong key fails HERE (typed), before any resolver.
+        const evictKeys = await stageRequestMemoryKeys(
+          db,
+          req.headers[REQUEST_KEYS_HEADER],
+        ).catch((err) => {
+          if (err instanceof MemoryUnlockError) {
+            throw new GraphQLError(err.message, { extensions: { code: err.code } });
+          }
+          throw err;
+        });
+        if (evictKeys) res.on('finish', evictKeys);
         return { db, ...auth };
       },
     }),

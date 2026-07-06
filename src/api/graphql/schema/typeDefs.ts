@@ -3745,13 +3745,16 @@ export const typeDefs = `#graphql
     linkMemoryToUser(memoryId: ID!, externalUserId: String!, dataKey: String): Memory!
 
     """
-    Convert an existing plaintext memory to an encrypted one. The caller
-    provides the data key; all existing node content/data is re-written
-    as ciphertext in a single transaction.
+    Convert a plaintext PRIVATE memory to encrypted (spec 041, caller-held
+    keys). Exactly one of dataKey (base64, 32 bytes) / passphrase (scrypt-
+    derived; salt + params stored on the memory, the key itself never).
+    Owner or org-App-key. All node content/abstract/data is re-written as
+    ciphertext in one transaction. One-way without the key: the server
+    cannot recover the content.
 
     Accepts the entity's ID or URN.
     """
-    encryptMemory(memoryId: ID!, dataKey: String!): Memory!
+    encryptMemory(memoryId: ID!, dataKey: String, passphrase: String): Memory!
   }
 
   # ── Chat types ──────────────────────────────────────────────────────

@@ -35,6 +35,12 @@ import {
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
 import { parseDataKey } from '../../../lib/crypto.js';
+import {
+  generateKdfSalt,
+  deriveDataKeyFromPassphrase,
+  makeKeyVerifier,
+  DEFAULT_KDF_PARAMS,
+} from '../../../lib/memoryUnlock.js';
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import {
   NodeAbstractTooLongError,
@@ -1143,44 +1149,107 @@ export const memoryMutations = {
       });
     },
 
+    // Spec 041 (D-2026-07-06-B): convert a plaintext PRIVATE memory to
+    // encrypted. Caller supplies exactly one of dataKey / passphrase; the
+    // passphrase path stores KDF salt+params, and BOTH paths store a
+    // keyVerifier so later unlocks detect a wrong key without touching
+    // node rows. The server never persists the key itself.
     encryptMemory: async (
       _: unknown,
-      { memoryId, dataKey }: { memoryId: string; dataKey: string },
+      {
+        memoryId,
+        dataKey,
+        passphrase,
+      }: { memoryId: string; dataKey?: string | null; passphrase?: string | null },
       ctx: Context,
     ) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-      if (memory.organizationId !== app.organizationId) {
-        throw new Error('Forbidden: memory does not belong to this app\'s organization');
+      // Auth: the App-key path (same org — the SECRET-mode flow) OR the
+      // memory's OWNER (private memories are owner-only; spec 041 makes
+      // self-encryption a first-class user action).
+      if (ctx.appId) {
+        const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
+        if (memory.organizationId !== app.organizationId) {
+          throw new Error('Forbidden: memory does not belong to this app\'s organization');
+        }
+      } else if (!ctx.userId || memory.userId !== ctx.userId) {
+        throw new GraphQLError('Only the memory owner (or an org App) may encrypt it.', {
+          extensions: { code: 'FORBIDDEN' },
+        });
+      }
+      // Class gate (D-2026-07-06-B): 'private' is the only class users may
+      // encrypt. EXCEPTION, flagged for review: the pre-041 SECRET-mode App
+      // flow (Tier 2.5) already encrypts the class='personal' memories it
+      // auto-provisions — the App-key path keeps that shipped contract.
+      const classAllowed =
+        memory.class === 'private' || (ctx.appId != null && memory.class === 'personal');
+      if (!classAllowed) {
+        throw new GraphQLError(
+          "Only class='private' memories support encryption (D-2026-07-06-B).",
+          { extensions: { code: 'BAD_USER_INPUT', memoryClass: memory.class } },
+        );
       }
       if (memory.isEncrypted) {
         throw new Error('Memory is already encrypted');
       }
-      const key = parseDataKey(dataKey);
+      // Vector indexing on an encrypted memory requires the FR-026 ack;
+      // converting an INDEXED memory would violate chk_memory_vector_
+      // encrypted_ack — surface it as a typed error, not a DB error.
+      if (memory.vectorIndexEnabled && !memory.vectorIndexEncryptedAckAt) {
+        throw new GraphQLError(
+          'Disable the vector index (or acknowledge the inversion disclosure) before encrypting.',
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+      let key;
+      let kdfFields: { kdfSalt?: string; kdfParams?: InputJsonValue } = {};
+      if (passphrase) {
+        if (dataKey) {
+          throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+        const kdfSalt = generateKdfSalt();
+        key = deriveDataKeyFromPassphrase(passphrase, kdfSalt, DEFAULT_KDF_PARAMS);
+        kdfFields = { kdfSalt, kdfParams: DEFAULT_KDF_PARAMS as unknown as InputJsonValue };
+      } else if (dataKey) {
+        key = parseDataKey(dataKey);
+      } else {
+        throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       const nodes = await ctx.db.node.findMany({
         where: { memoryId: resolvedMemoryId, deletedAt: null },
-        select: { id: true, content: true, data: true },
+        // abstract encrypts alongside content since spec 031 — the old
+        // select missed it, leaving abstracts plaintext (spec-041 fix).
+        select: { id: true, content: true, abstract: true, data: true },
       });
       await ctx.db.$transaction(async (tx) => {
         for (const node of nodes) {
           const encrypted = encryptNodeFieldsWithKey(
-            { content: node.content, data: node.data },
+            { content: node.content, abstract: node.abstract, data: node.data },
             key,
           );
           await tx.node.update({
             where: { id: node.id },
             data: {
               content: encrypted.content ?? null,
+              abstract: encrypted.abstract ?? null,
               data: (encrypted.data ?? null) as InputJsonValue,
             },
           });
         }
         await tx.memory.update({
           where: { id: resolvedMemoryId },
-          data: { isEncrypted: true, updatedBy: ctx.appId },
+          data: {
+            isEncrypted: true,
+            keyVerifier: makeKeyVerifier(key),
+            ...kdfFields,
+            updatedBy: ctx.appId ?? ctx.userId ?? null,
+          },
         });
       });
       return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });

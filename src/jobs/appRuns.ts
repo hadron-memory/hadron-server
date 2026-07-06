@@ -22,6 +22,7 @@ import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '../lib/policy/index.js';
+import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
 import { generateText, LlmInvocationError, type LlmResult } from '../lib/llm/index.js';
 import type { ResolvedAiConfig } from '../lib/aiConfig.js';
@@ -54,7 +55,8 @@ export class RunLaunchDeniedError extends Error {
       | 'RELATIONSHIP_MISSING'
       | 'POLICY_DENIED'
       | 'APP_NOT_FOUND'
-      | 'AGENT_NOT_INSTALLED',
+      | 'AGENT_NOT_INSTALLED'
+      | 'ENCRYPTED_MEMORY_UNSUPPORTED',
   ) {
     super(message);
     this.name = 'RunLaunchDeniedError';
@@ -321,6 +323,28 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       }
     }
   }
+  // Encrypted-memory guard (spec 041, D-2026-07-06-B): headless runs are
+  // UNAVAILABLE on encrypted memories — the server never holds the key, and
+  // a run has no session to supply one. Fail loud at the gate, not deep in
+  // assembly. Resolved best-effort: an unresolvable entry URN falls through
+  // to the runner's normal assembly failure.
+  try {
+    const { id: entryNodeId } = await resolveNodeRef(db, args.entryNodeUrn);
+    const entryNode = await db.node.findUnique({
+      where: { id: entryNodeId },
+      select: { memory: { select: { isEncrypted: true } } },
+    });
+    if (entryNode?.memory.isEncrypted) {
+      throw new RunLaunchDeniedError(
+        'Headless runs are unavailable on encrypted memories (caller-held keys, D-2026-07-06-B).',
+        'ENCRYPTED_MEMORY_UNSUPPORTED',
+      );
+    }
+  } catch (err) {
+    if (err instanceof RunLaunchDeniedError) throw err;
+    // Unresolvable ref → the assembly step owns that failure mode.
+  }
+
   // Assemble the full conjunctive chain (cor:acl:040:02, plan §6 step 2):
   // org ∧ user (when on-behalf-of) ∧ app ∧ trigger. Snapshotted onto the
   // run row below — later policy edits apply to FUTURE mints only (a live

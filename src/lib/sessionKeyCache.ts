@@ -21,7 +21,10 @@ interface MemoryKeyEntry {
 
 export class SessionKeyCache {
   private byMemory = new Map<string, MemoryKeyEntry>();
-  private sessionToMemory = new Map<string, string>();
+  // One session may hold keys for SEVERAL memories (spec 041: a request
+  // staging keys for multiple encrypted memories via the unlock header) —
+  // a Set per session, so evict() releases every reference.
+  private sessionToMemories = new Map<string, Set<string>>();
 
   /**
    * Register a data key for a session. If the memory already has an active
@@ -39,7 +42,12 @@ export class SessionKeyCache {
     } else {
       this.byMemory.set(memoryId, { key, sessionIds: new Set([sessionId]) });
     }
-    this.sessionToMemory.set(sessionId, memoryId);
+    let memories = this.sessionToMemories.get(sessionId);
+    if (!memories) {
+      memories = new Set();
+      this.sessionToMemories.set(sessionId, memories);
+    }
+    memories.add(memoryId);
   }
 
   /** Look up the key for a given memory; null if no session is active. */
@@ -53,18 +61,20 @@ export class SessionKeyCache {
   }
 
   /**
-   * Evict a session's reference. If this was the last session holding the
+   * Evict a session's references. If this was the last session holding a
    * memory's key, the key is removed from the cache.
    */
   evict(sessionId: string): void {
-    const memoryId = this.sessionToMemory.get(sessionId);
-    if (!memoryId) return;
-    this.sessionToMemory.delete(sessionId);
-    const entry = this.byMemory.get(memoryId);
-    if (!entry) return;
-    entry.sessionIds.delete(sessionId);
-    if (entry.sessionIds.size === 0) {
-      this.byMemory.delete(memoryId);
+    const memories = this.sessionToMemories.get(sessionId);
+    if (!memories) return;
+    this.sessionToMemories.delete(sessionId);
+    for (const memoryId of memories) {
+      const entry = this.byMemory.get(memoryId);
+      if (!entry) continue;
+      entry.sessionIds.delete(sessionId);
+      if (entry.sessionIds.size === 0) {
+        this.byMemory.delete(memoryId);
+      }
     }
   }
 
@@ -76,7 +86,7 @@ export class SessionKeyCache {
   /** Clear everything. Intended for tests only. */
   clear(): void {
     this.byMemory.clear();
-    this.sessionToMemory.clear();
+    this.sessionToMemories.clear();
   }
 }
 
