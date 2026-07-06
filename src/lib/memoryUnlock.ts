@@ -19,7 +19,19 @@
  * staging is the ONLY integration point stateless surfaces need.
  */
 
-import { scryptSync, randomBytes } from 'crypto';
+import { scrypt as scryptCb, randomBytes, type ScryptOptions } from 'crypto';
+
+// promisify() picks the options-less overload; wrap by hand.
+function scrypt(
+  password: string,
+  salt: Buffer,
+  keylen: number,
+  options: ScryptOptions,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scryptCb(password, salt, keylen, options, (err, dk) => (err ? reject(err) : resolve(dk)));
+  });
+}
 import type { PrismaClient } from '../generated/prisma/index.js';
 import {
   parseDataKey,
@@ -49,7 +61,7 @@ export const DEFAULT_KDF_PARAMS: KdfParams = { alg: 'scrypt', N: 32768, r: 8, p:
 export class MemoryUnlockError extends Error {
   constructor(
     message: string,
-    public readonly code: 'WRONG_KEY' | 'BAD_UNLOCK_INPUT' | 'NOT_ENCRYPTED',
+    public readonly code: 'WRONG_KEY' | 'BAD_UNLOCK_INPUT' | 'NOT_ENCRYPTED' | 'NOT_FOUND' | 'UNAUTHENTICATED',
   ) {
     super(message);
     this.name = 'MemoryUnlockError';
@@ -61,28 +73,48 @@ export function generateKdfSalt(): string {
   return randomBytes(16).toString('base64');
 }
 
-/** Parse a stored kdfParams JSON column; unknown algs fail loud. */
+/**
+ * Parse a stored kdfParams JSON column; unknown algs fail loud. Types AND
+ * ranges are validated (PR-514 review): the column is persisted JSON, so a
+ * tampered/malformed row must become a typed error, not a scrypt crash —
+ * and the upper bounds stop a hostile row turning derivation into a
+ * memory/CPU bomb.
+ */
 export function parseKdfParams(raw: unknown): KdfParams {
   const p = raw as Partial<KdfParams> | null;
-  if (!p || p.alg !== 'scrypt' || !p.N || !p.r || !p.p) {
+  const intIn = (v: unknown, min: number, max: number): v is number =>
+    typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+  if (
+    !p ||
+    p.alg !== 'scrypt' ||
+    !intIn(p.N, 2, 2 ** 22) ||
+    (p.N & (p.N - 1)) !== 0 || // scrypt requires a power of two
+    !intIn(p.r, 1, 32) ||
+    !intIn(p.p, 1, 16)
+  ) {
     throw new MemoryUnlockError('Memory has no usable KDF parameters.', 'BAD_UNLOCK_INPUT');
   }
   return { alg: 'scrypt', N: p.N, r: p.r, p: p.p };
 }
 
-/** Derive the 32-byte data key from a passphrase + stored salt/params. */
-export function deriveDataKeyFromPassphrase(
+/**
+ * Derive the 32-byte data key from a passphrase + stored salt/params.
+ * ASYNC on purpose (PR-514 review, Gemini high): scrypt at interactive
+ * strength costs tens of ms — the sync variant would block the event loop
+ * for every concurrent request on the process.
+ */
+export async function deriveDataKeyFromPassphrase(
   passphrase: string,
   saltB64: string,
   params: KdfParams,
-): EncryptionKey {
-  const raw = scryptSync(passphrase, Buffer.from(saltB64, 'base64'), 32, {
+): Promise<EncryptionKey> {
+  const raw = (await scrypt(passphrase, Buffer.from(saltB64, 'base64'), 32, {
     N: params.N,
     r: params.r,
     p: params.p,
     // scrypt default maxmem (32MB) is exceeded at N=2^15 r=8; give headroom.
     maxmem: 128 * params.N * params.r * 2,
-  });
+  })) as Buffer;
   return { raw };
 }
 
@@ -112,10 +144,10 @@ export interface SuppliedKeyInput {
  * the key as-supplied (legacy posture: a wrong key surfaces as failed GCM
  * decrypts downstream, exactly as before).
  */
-export function resolveSuppliedKey(
+export async function resolveSuppliedKey(
   memory: { kdfSalt: string | null; kdfParams: unknown; keyVerifier: string | null },
   input: SuppliedKeyInput,
-): EncryptionKey {
+): Promise<EncryptionKey> {
   const hasKey = !!input.dataKey;
   const hasPass = !!input.passphrase;
   if (hasKey === hasPass) {
@@ -135,7 +167,7 @@ export function resolveSuppliedKey(
         'BAD_UNLOCK_INPUT',
       );
     }
-    key = deriveDataKeyFromPassphrase(
+    key = await deriveDataKeyFromPassphrase(
       input.passphrase as string,
       memory.kdfSalt,
       parseKdfParams(memory.kdfParams),
@@ -167,15 +199,38 @@ export const REQUEST_KEYS_HEADER = 'x-hadron-memory-keys';
  * establishes it). Throws MemoryUnlockError on malformed input / wrong
  * keys — surfacing at context time, before any resolver runs.
  */
+// Worst-case work bounds for a hostile header (PR-514 review, Copilot):
+// each entry costs DB lookups + a scrypt derivation.
+const MAX_HEADER_BYTES = 16 * 1024;
+const MAX_HEADER_ENTRIES = 8;
+
 export async function stageRequestMemoryKeys(
   db: PrismaClient,
   headerValue: string | string[] | undefined,
+  userId: string | null | undefined,
 ): Promise<void> {
   if (!headerValue) return;
-  const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  // Unlock requires an authenticated USER (PR-514 review, Copilot): without
+  // this, the header is an unauthenticated probing oracle (existence /
+  // encryption state / passphrase guesses, each burning a scrypt).
+  if (!userId) {
+    throw new MemoryUnlockError(
+      `${REQUEST_KEYS_HEADER} requires an authenticated user.`,
+      'UNAUTHENTICATED',
+    );
+  }
+  if (Array.isArray(headerValue)) {
+    throw new MemoryUnlockError(
+      `Multiple ${REQUEST_KEYS_HEADER} headers are not allowed.`,
+      'BAD_UNLOCK_INPUT',
+    );
+  }
+  if (headerValue.length > MAX_HEADER_BYTES) {
+    throw new MemoryUnlockError(`${REQUEST_KEYS_HEADER} header too large.`, 'BAD_UNLOCK_INPUT');
+  }
   let entries: RequestKeyEntry[];
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(headerValue);
     if (!Array.isArray(parsed)) throw new Error('not an array');
     entries = parsed as RequestKeyEntry[];
   } catch {
@@ -184,20 +239,58 @@ export async function stageRequestMemoryKeys(
       'BAD_UNLOCK_INPUT',
     );
   }
+  if (entries.length > MAX_HEADER_ENTRIES) {
+    throw new MemoryUnlockError(
+      `At most ${MAX_HEADER_ENTRIES} unlock entries per request.`,
+      'BAD_UNLOCK_INPUT',
+    );
+  }
   for (const entry of entries) {
     if (!entry || typeof entry.memory !== 'string') {
       throw new MemoryUnlockError('Each header entry needs a memory ref.', 'BAD_UNLOCK_INPUT');
     }
-    const { id: memoryId } = await resolveMemoryRef(db, entry.memory);
-    const memory = await db.memory.findUniqueOrThrow({
-      where: { id: memoryId },
-      select: { isEncrypted: true, kdfSalt: true, kdfParams: true, keyVerifier: true },
-    });
-    if (!memory.isEncrypted) {
-      throw new MemoryUnlockError('Memory is not encrypted.', 'NOT_ENCRYPTED');
+    // Owner-only, with a uniform NOT_FOUND for nonexistent / unowned /
+    // unresolvable refs — no existence or encryption-state oracle for
+    // memories the caller doesn't own (PR-514 review, Copilot). Only the
+    // OWNER's own memories can be header-unlocked: private memories are
+    // owner-only by class, and Tier-2.5 personal memories unlock via their
+    // App session, never this header.
+    let memory: {
+      isEncrypted: boolean;
+      userId: string | null;
+      kdfSalt: string | null;
+      kdfParams: unknown;
+      keyVerifier: string | null;
+    } | null = null;
+    try {
+      const { id: memoryId } = await resolveMemoryRef(db, entry.memory);
+      memory = await db.memory.findUnique({
+        where: { id: memoryId },
+        select: {
+          id: true,
+          isEncrypted: true,
+          userId: true,
+          kdfSalt: true,
+          kdfParams: true,
+          keyVerifier: true,
+        },
+      });
+      if (memory && memory.userId === userId) {
+        if (!memory.isEncrypted) {
+          throw new MemoryUnlockError('Memory is not encrypted.', 'NOT_ENCRYPTED');
+        }
+        // Verified before staging; partial staging on a later failure is
+        // harmless — the store is request-local and dies with the request.
+        setRequestKey(
+          (memory as unknown as { id: string }).id,
+          await resolveSuppliedKey(memory, entry),
+        );
+        continue;
+      }
+    } catch (err) {
+      if (err instanceof MemoryUnlockError) throw err;
+      // Unresolvable ref falls through to the uniform NOT_FOUND below.
     }
-    // Verified before staging; partial staging on a later failure is
-    // harmless — the store is request-local and dies with the request.
-    setRequestKey(memoryId, resolveSuppliedKey(memory, entry));
+    throw new MemoryUnlockError('Memory not found.', 'NOT_FOUND');
   }
 }

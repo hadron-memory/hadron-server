@@ -132,12 +132,13 @@ describe('encryptMemory — passphrase path (spec 041)', () => {
     await requestKeyStorage.run(new Map(), async () => {
       // Wrong passphrase → typed WRONG_KEY at staging time.
       await expect(
-        stageRequestMemoryKeys(db, JSON.stringify([{ memory: memoryId, passphrase: 'wrong' }])),
+        stageRequestMemoryKeys(db, JSON.stringify([{ memory: memoryId, passphrase: 'wrong' }]), owner.id),
       ).rejects.toMatchObject({ code: 'WRONG_KEY' });
       // Right passphrase → staged key decrypts the row, inside this request.
       await stageRequestMemoryKeys(
         db,
         JSON.stringify([{ memory: memoryId, passphrase: 'open sesame' }]),
+        owner.id,
       );
       const node = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
       decryptNodeFields(node, { id: memoryId, isEncrypted: true });

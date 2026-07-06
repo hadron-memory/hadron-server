@@ -623,7 +623,11 @@ export async function createServer(): Promise<Express> {
         // which checks the request store first — this is the whole
         // stateless-unlock integration. A wrong key fails HERE (typed),
         // before any resolver.
-        await stageRequestMemoryKeys(db, req.headers[REQUEST_KEYS_HEADER]).catch((err) => {
+        await stageRequestMemoryKeys(
+          db,
+          req.headers[REQUEST_KEYS_HEADER],
+          (auth as { userId?: string | null }).userId,
+        ).catch((err) => {
           if (err instanceof MemoryUnlockError) {
             throw new GraphQLError(err.message, { extensions: { code: err.code } });
           }

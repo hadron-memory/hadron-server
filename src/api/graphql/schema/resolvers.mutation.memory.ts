@@ -34,7 +34,7 @@ import {
   type Role,
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
-import { parseDataKey } from '../../../lib/crypto.js';
+import { parseDataKey, isCiphertext } from '../../../lib/crypto.js';
 import {
   generateKdfSalt,
   deriveDataKeyFromPassphrase,
@@ -1212,46 +1212,86 @@ export const memoryMutations = {
           });
         }
         const kdfSalt = generateKdfSalt();
-        key = deriveDataKeyFromPassphrase(passphrase, kdfSalt, DEFAULT_KDF_PARAMS);
+        key = await deriveDataKeyFromPassphrase(passphrase, kdfSalt, DEFAULT_KDF_PARAMS);
         kdfFields = { kdfSalt, kdfParams: DEFAULT_KDF_PARAMS as unknown as InputJsonValue };
       } else if (dataKey) {
-        key = parseDataKey(dataKey);
+        try {
+          key = parseDataKey(dataKey);
+        } catch (e) {
+          // A malformed key is caller input, not a server fault (PR-514
+          // review, Copilot) — surface as typed BAD_USER_INPUT.
+          throw new GraphQLError(String((e as Error).message), {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
       } else {
         throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
-      const nodes = await ctx.db.node.findMany({
-        where: { memoryId: resolvedMemoryId, deletedAt: null },
-        // abstract encrypts alongside content since spec 031 — the old
-        // select missed it, leaving abstracts plaintext (spec-041 fix).
-        select: { id: true, content: true, abstract: true, data: true },
+      // FLIP FIRST, then converge (PR-514 review, Copilot — conversion
+      // race): once isEncrypted commits, every concurrent write path either
+      // encrypts (key present) or fails closed (SESSION_EXPIRED) — so
+      // plaintext can no longer be ADDED. The encryption passes below then
+      // converge on zero plaintext rows: a row written plaintext between
+      // our scan and the flip is caught by the next pass. Idempotent by the
+      // enc:v1 prefix (isCiphertext), so re-running a pass is safe.
+      await ctx.db.memory.update({
+        where: { id: resolvedMemoryId },
+        data: {
+          isEncrypted: true,
+          keyVerifier: makeKeyVerifier(key),
+          ...kdfFields,
+          updatedBy: ctx.appId ?? ctx.userId ?? null,
+        },
       });
-      await ctx.db.$transaction(async (tx) => {
-        for (const node of nodes) {
-          const encrypted = encryptNodeFieldsWithKey(
-            { content: node.content, abstract: node.abstract, data: node.data },
-            key,
-          );
-          await tx.node.update({
-            where: { id: node.id },
-            data: {
-              content: encrypted.content ?? null,
-              abstract: encrypted.abstract ?? null,
-              data: (encrypted.data ?? null) as InputJsonValue,
-            },
+      const BATCH = 200; // bound memory per pass (PR-514 review, Gemini)
+      for (let pass = 0; pass < 5; pass++) {
+        let converted = 0;
+        // Paginate by id to keep memory bounded for large graphs.
+        let cursor: string | undefined;
+        for (;;) {
+          const nodes = await ctx.db.node.findMany({
+            where: { memoryId: resolvedMemoryId, deletedAt: null },
+            // abstract encrypts alongside content since spec 031 — the old
+            // select missed it, leaving abstracts plaintext (spec-041 fix).
+            select: { id: true, content: true, abstract: true, data: true },
+            orderBy: { id: 'asc' },
+            take: BATCH,
+            ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
           });
+          if (nodes.length === 0) break;
+          cursor = nodes[nodes.length - 1].id;
+          for (const node of nodes) {
+            const plaintextContent = node.content != null && !isCiphertext(node.content);
+            const plaintextAbstract = node.abstract != null && !isCiphertext(node.abstract);
+            const plaintextData =
+              node.data != null &&
+              !(typeof node.data === 'object' && (node.data as { __enc?: string }).__enc);
+            if (!plaintextContent && !plaintextAbstract && !plaintextData) continue;
+            const encrypted = encryptNodeFieldsWithKey(
+              { content: node.content, abstract: node.abstract, data: node.data },
+              key,
+            );
+            await ctx.db.node.update({
+              where: { id: node.id },
+              data: {
+                content: encrypted.content ?? null,
+                abstract: encrypted.abstract ?? null,
+                data: (encrypted.data ?? null) as InputJsonValue,
+              },
+            });
+            converted += 1;
+          }
+          if (nodes.length < BATCH) break;
         }
-        await tx.memory.update({
-          where: { id: resolvedMemoryId },
-          data: {
-            isEncrypted: true,
-            keyVerifier: makeKeyVerifier(key),
-            ...kdfFields,
-            updatedBy: ctx.appId ?? ctx.userId ?? null,
-          },
-        });
-      });
+        if (converted === 0) break; // clean pass — converged
+        if (pass === 4) {
+          console.error(
+            `[encryptMemory] memory ${resolvedMemoryId} did not converge after 5 passes — investigate`,
+          );
+        }
+      }
       return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
     },
 
