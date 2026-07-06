@@ -209,9 +209,10 @@ describe('locked vs unlocked writes', () => {
     expect(row.content).not.toContain('updated secret');
   });
 
-  it('hadron_update_node while locked is REJECTED', async () => {
+  it('hadron_update_node while locked is REJECTED with NO side effects — not even a version row (PR-517 Codex P2)', async () => {
     const server = mcp(ownerAuth());
     const before = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
+    const versionsBefore = await db.nodeVersion.count({ where: { nodeId: before.id } });
     const out = await server.callToolText('hadron_update_node', {
       urn: `mcp41-org::vault::secret-note`,
       content: 'plaintext overwrite attempt',
@@ -219,10 +220,60 @@ describe('locked vs unlocked writes', () => {
     expect(out).toContain('encrypted and locked');
     const after = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
     expect(after.content).toBe(before.content); // untouched ciphertext
+    expect(await db.nodeVersion.count({ where: { nodeId: before.id } })).toBe(versionsBefore);
+  });
+
+  it('an abstract-only update hashes the DECRYPTED content — no false-stale (PR-517 Codex P2)', async () => {
+    const server = mcp(ownerAuth());
+    await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });
+    const out = await server.callToolText('hadron_update_node', {
+      urn: `mcp41-org::vault::secret-note`,
+      abstract: 'A brand new summary.',
+    });
+    expect(out).toContain('Node updated');
+    // The fresh abstract must NOT be marked stale: its origin hash was
+    // computed against the plaintext content, so the unlocked read's
+    // staleness compare (also on plaintext) agrees.
+    const read = await server.callToolText('hadron_get_node', {
+      urn: `mcp41-org::vault::secret-note`,
+      contentScope: 'all',
+    });
+    expect(read).toContain('A brand new summary.');
+    expect(read).not.toContain('abstract-stale');
+  });
+
+  it('version rows for encrypted memories store CIPHERTEXT (at-rest form)', async () => {
+    const server = mcp(ownerAuth());
+    await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });
+    await server.callToolText('hadron_update_node', {
+      urn: `mcp41-org::vault::secret-note`,
+      content: 'v2 secret',
+    });
+    const node = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
+    const version = await db.nodeVersion.findFirstOrThrow({
+      where: { nodeId: node.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(isCiphertext(version.content)).toBe(true);
+    expect(version.content).not.toContain('the plaintext secret');
   });
 });
 
 describe('hadron_lock_memory', () => {
+  it('is no existence oracle: unowned refs get the same not-found as missing ones (PR-517 Codex P2)', async () => {
+    const strangerServer = mcp({
+      userId: stranger.id,
+      roles: ['ADMIN'],
+      clientId: `user:${stranger.id}`,
+    });
+    const existing = await strangerServer.callToolText('hadron_lock_memory', { memoryUrn });
+    const missing = await strangerServer.callToolText('hadron_lock_memory', {
+      memoryUrn: 'mcp41-org:no-such-memory',
+    });
+    expect(existing).toContain('not found');
+    expect(missing).toContain('not found');
+  });
+
   it('drops this session\'s key: reads return to Locked', async () => {
     const server = mcp(ownerAuth());
     await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });

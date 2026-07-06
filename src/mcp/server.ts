@@ -2320,9 +2320,20 @@ export function createMcpServerInstance(
     async ({ memoryUrn }) => {
       const sid = getSessionId();
       if (!sid) return textResult('No active MCP session.');
+      // Same owner gate + uniform not-found as hadron_unlock_memory
+      // (PR-517 review, Codex P2): without it, the existing-vs-missing
+      // response split makes lock an existence oracle for private URNs.
+      if (!auth.userId) {
+        return textResult('hadron_lock_memory requires a user-authenticated MCP connection.');
+      }
       const mem = await resolveMemoryByUrn(memoryUrn);
-      if (!mem) return textResult(`Memory "${memoryUrn}" not found.`);
-      sessionKeyCache.release(`mcp:${sid}`, mem.id);
+      const row = mem
+        ? await db.memory.findUnique({ where: { id: mem.id }, select: { id: true, userId: true } })
+        : null;
+      if (!row || row.userId !== auth.userId) {
+        return textResult(`Memory "${memoryUrn}" not found.`);
+      }
+      sessionKeyCache.release(`mcp:${sid}`, row.id);
       return textResult(`Memory locked for this session: ${memoryUrn}.`);
     },
   );
@@ -2698,9 +2709,27 @@ export function createMcpServerInstance(
         throw e;
       }
 
+      // Spec 041 (PR-2, PR-517 review): the encrypted-memory gate runs
+      // BEFORE any side effect — a locked rejection must leave NO trace,
+      // including the version-history row below (Codex P2).
+      const updMemEnc = await db.memory.findUnique({
+        where: { id: existing.memoryId },
+        select: { isEncrypted: true },
+      });
+      const updKey = updMemEnc?.isEncrypted
+        ? sessionKeyCache.getByMemoryId(existing.memoryId)
+        : null;
+      if (updMemEnc?.isEncrypted && !updKey) {
+        return textResult(
+          'This memory is encrypted and locked — call hadron_unlock_memory first (spec 041).',
+        );
+      }
+
       // Snapshot current state for version history.
       // Spec 032 — capture existing.abstractOriginHash so the version
-      // history round-trips the staleness signal.
+      // history round-trips the staleness signal. On an encrypted memory
+      // `existing` still holds CIPHERTEXT here — versions store the
+      // at-rest form, deliberately (the decrypt happens just below).
       await db.nodeVersion.create({
         data: {
           id: generateId(),
@@ -2718,14 +2747,20 @@ export function createMcpServerInstance(
         },
       }).catch(() => {});
 
+      // Spec 041 (PR-517 review, Codex P2): decrypt `existing` in place NOW
+      // — everything below (the abstractOriginHash matrix, the embedding
+      // enqueue's fallback plaintext) treats existing.content/abstract as
+      // PLAINTEXT. Without this, an abstract-only update hashes ciphertext
+      // (false-stale forever) and a content-only update embeds ciphertext.
+      if (updKey) {
+        decryptNodeFieldsWithKey(existing, updKey);
+      }
+
       // Spec 032 — abstractOriginHash partial-update matrix (9 rows from
       // the contract). Drives off whether `normalizedAbstract` was
       // supplied (undefined = preserve, null = clear, string = set).
-      //
-      // Encryption posture: MCP write path stores content plaintext
-      // today (encryption parity for MCP is deferred — see #206), so
-      // `existing.content` IS plaintext. Hash always computed on
-      // plaintext per FR-009.
+      // Hash always computed on plaintext per FR-009 (existing.* is
+      // plaintext here — decrypted above for encrypted memories).
       let nextAbstractOriginHash: string | null | undefined;
       if (normalizedAbstract === undefined) {
         nextAbstractOriginHash = undefined;
@@ -2753,25 +2788,16 @@ export function createMcpServerInstance(
       if (aiAgent !== undefined) data.aiAgent = aiAgent;
 
       // Spec 041 (PR-2): encrypted memory — encrypt the provided encrypted-
-      // envelope fields with this session's key, or REJECT when locked.
-      const updMemEnc = await db.memory.findUnique({
-        where: { id: existing.memoryId },
-        select: { isEncrypted: true },
-      });
-      if (updMemEnc?.isEncrypted) {
-        const key = sessionKeyCache.getByMemoryId(existing.memoryId);
-        if (!key) {
-          return textResult(
-            'This memory is encrypted and locked — call hadron_unlock_memory first (spec 041).',
-          );
-        }
+      // envelope fields with this session's key (gate + key resolved above,
+      // before the version snapshot).
+      if (updKey) {
         const enc = encryptNodeFieldsWithKey(
           {
             content: (data.content as string | null | undefined) ?? null,
             abstract: (data.abstract as string | null | undefined) ?? null,
             data: (data.data as unknown) ?? null,
           },
-          key,
+          updKey,
         );
         if (data.content !== undefined) data.content = enc.content ?? null;
         if (data.abstract !== undefined) data.abstract = enc.abstract ?? null;
