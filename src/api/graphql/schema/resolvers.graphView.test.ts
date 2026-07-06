@@ -33,7 +33,11 @@ beforeEach(async () => {
 
 describe('memoryNodes (#466)', () => {
   it('returns slim node fields, total, loc-ordered, paginated; excludes deleted', async () => {
-    const a = await mkNode('n.a', { nodeType: 'info', tags: ['x', 'y'], content: 'BIG BODY that must not ship' });
+    const a = await mkNode('n.a', {
+      nodeType: 'info', tags: ['x', 'y'], content: 'BIG BODY that must not ship',
+      // #513: small scalars the portal tree/graph render.
+      seq: 3, isRunnable: true, description: 'a short desc',
+    });
     await mkNode('n.b');
     await mkNode('n.c');
     await mkNode('n.gone', { deletedAt: new Date() });
@@ -42,9 +46,14 @@ describe('memoryNodes (#466)', () => {
     expect(page.total).toBe(3); // soft-deleted excluded
     expect(page.nodes.map((n: any) => n.loc)).toEqual(['n.a', 'n.b', 'n.c']); // loc-ordered
 
-    // Slim projection: exactly the graph fields, no content/abstract/data.
-    expect(page.nodes[0]).toEqual({ id: a.id, loc: 'n.a', name: 'n.a', nodeType: 'info', tags: ['x', 'y'] });
+    // Slim projection: exactly the graph fields (incl. #513 scalars), no content/abstract/data.
+    expect(page.nodes[0]).toEqual({
+      id: a.id, loc: 'n.a', name: 'n.a', nodeType: 'info', tags: ['x', 'y'],
+      seq: 3, isRunnable: true, description: 'a short desc',
+    });
     expect('content' in page.nodes[0]).toBe(false);
+    // #513 nullable pass-through: a node with none of them set → null.
+    expect(page.nodes[1]).toMatchObject({ loc: 'n.b', seq: null, isRunnable: null, description: null });
 
     // Stable offset paging over the loc-ordered list.
     const p1 = await memoryNodes({ memoryId: mem.id, limit: 2, offset: 0 });
