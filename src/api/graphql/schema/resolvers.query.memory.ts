@@ -311,7 +311,19 @@ export const memoryQueries = {
           orderBy: { loc: 'asc' }, // loc is unique per memory → stable paging
           skip,
           take,
-          select: { id: true, loc: true, name: true, nodeType: true, tags: true },
+          // #513: seq / isRunnable / description are small scalars the portal's
+          // tree + graph render (sibling order, action dot, tooltip). Kept in
+          // the slim projection — the heavy body (content/abstract/data) stays out.
+          select: {
+            id: true,
+            loc: true,
+            name: true,
+            nodeType: true,
+            tags: true,
+            seq: true,
+            isRunnable: true,
+            description: true,
+          },
         }),
       ]);
       return {
@@ -320,13 +332,29 @@ export const memoryQueries = {
         // field resolver — deserialize the stored tags here. name/nodeType/tags
         // are NOT NULL columns (nodeType defaults to 'info'), so they're typed
         // non-null here to match GraphNode's String! / [String!]! — no null path.
-        nodes: rows.map((r: { id: string; loc: string; name: string; nodeType: string; tags: string[] | string }) => ({
-          id: r.id,
-          loc: r.loc,
-          name: r.name,
-          nodeType: r.nodeType,
-          tags: deserializeTags(r.tags),
-        })),
+        // seq/isRunnable/description are nullable columns → passed through as-is
+        // (GraphQL Int / Boolean / String, all nullable).
+        nodes: rows.map(
+          (r: {
+            id: string;
+            loc: string;
+            name: string;
+            nodeType: string;
+            tags: string[] | string;
+            seq: number | null;
+            isRunnable: boolean | null;
+            description: string | null;
+          }) => ({
+            id: r.id,
+            loc: r.loc,
+            name: r.name,
+            nodeType: r.nodeType,
+            tags: deserializeTags(r.tags),
+            seq: r.seq,
+            isRunnable: r.isRunnable,
+            description: r.description,
+          }),
+        ),
       };
     },
 

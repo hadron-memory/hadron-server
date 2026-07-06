@@ -172,6 +172,12 @@ export const typeDefs = `#graphql
     "Non-null — mirrors Node.nodeType (NOT NULL, defaults to 'info')."
     nodeType: String!
     tags: [String!]!
+    "Sibling sort order in the tree view (nullable; #513). Small scalar — kept in the slim projection."
+    seq: Int
+    "Whether the node can be run as a task — drives the tree action indicator (nullable; #513)."
+    isRunnable: Boolean
+    "Short one-line description for graph tooltips / detail (nullable; #513). NOT the heavy body — content/abstract/data stay out of the slim projection."
+    description: String
   }
 
   "Slim edge projection for the graph view (issue #466) — endpoint IDs only."
