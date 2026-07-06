@@ -198,6 +198,9 @@ describe('createAgent auto-provisions a system memory', () => {
     const promoted = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
     expect(promoted.class).toBe('system');
     expect(promoted.name).toBe('wizard-agent System');
+    // system-class memories must opt out of uploads (schema.prisma) — the
+    // promote path forces it even though createMemory defaulted it true.
+    expect(promoted.acceptsUploads).toBe(false);
   });
 
   // #519 review (P2): a system memory holds conversation design, not assets —
@@ -299,6 +302,8 @@ describe('updateAgent first-attach of systemMemoryId (legacy agents)', () => {
     // 035: agent visibility no longer syncs onto the system memory — it is
     // always NULL (chk_memory_visibility_class).
     expect(updated.visibility).toBeNull();
+    // system-class memories must opt out of uploads (schema.prisma).
+    expect(updated.acceptsUploads).toBe(false);
   });
 
   it('refuses a memory from a different org', async () => {

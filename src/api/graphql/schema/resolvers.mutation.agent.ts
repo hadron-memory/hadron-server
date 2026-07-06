@@ -97,6 +97,10 @@ export const agentMutations = {
               class: 'system',
               name: `${name} System`,
               visibility: null,
+              // system-class memories must opt out of uploads (schema.prisma,
+              // 006-asset-upload-redesign). Applies when promoting too, not
+              // just on auto-provision. #519 review.
+              acceptsUploads: false,
             },
           });
           resolvedSystemMemoryId = systemMemoryId;
@@ -121,11 +125,9 @@ export const agentMutations = {
               urn: systemMemoryUrn,
               name: `${name} System`,
               class: 'system',
-              // A system memory holds conversation design, not user assets —
-              // opt out of uploads (the DB default is true; the asset gate only
-              // checks Memory.acceptsUploads after write auth, so leaving it
-              // true would let these hidden agent-definition memories accept
-              // asset uploads). #519 review.
+              // system-class memories must opt out of uploads (schema.prisma,
+              // 006-asset-upload-redesign — DB default is true; the asset gate
+              // only checks Memory.acceptsUploads after write auth). #519 review.
               acceptsUploads: false,
               createdBy: ctx.userId ?? ctx.clientId ?? null,
             },
@@ -193,6 +195,9 @@ export const agentMutations = {
               class: 'system',
               name: `${name ?? agent.name} System`,
               visibility: null,
+              // system-class memories must opt out of uploads (schema.prisma,
+              // 006-asset-upload-redesign). #519 review.
+              acceptsUploads: false,
             },
           });
         }
