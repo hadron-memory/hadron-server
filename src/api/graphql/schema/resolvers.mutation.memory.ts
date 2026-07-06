@@ -34,7 +34,13 @@ import {
   type Role,
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
-import { parseDataKey } from '../../../lib/crypto.js';
+import { parseDataKey, isCiphertext } from '../../../lib/crypto.js';
+import {
+  generateKdfSalt,
+  deriveDataKeyFromPassphrase,
+  makeKeyVerifier,
+  DEFAULT_KDF_PARAMS,
+} from '../../../lib/memoryUnlock.js';
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import {
   NodeAbstractTooLongError,
@@ -1143,46 +1149,149 @@ export const memoryMutations = {
       });
     },
 
+    // Spec 041 (D-2026-07-06-B): convert a plaintext PRIVATE memory to
+    // encrypted. Caller supplies exactly one of dataKey / passphrase; the
+    // passphrase path stores KDF salt+params, and BOTH paths store a
+    // keyVerifier so later unlocks detect a wrong key without touching
+    // node rows. The server never persists the key itself.
     encryptMemory: async (
       _: unknown,
-      { memoryId, dataKey }: { memoryId: string; dataKey: string },
+      {
+        memoryId,
+        dataKey,
+        passphrase,
+      }: { memoryId: string; dataKey?: string | null; passphrase?: string | null },
       ctx: Context,
     ) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-      if (memory.organizationId !== app.organizationId) {
-        throw new Error('Forbidden: memory does not belong to this app\'s organization');
+      // Auth: the App-key path (same org — the SECRET-mode flow) OR the
+      // memory's OWNER (private memories are owner-only; spec 041 makes
+      // self-encryption a first-class user action).
+      if (ctx.appId) {
+        const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
+        if (memory.organizationId !== app.organizationId) {
+          throw new Error('Forbidden: memory does not belong to this app\'s organization');
+        }
+      } else if (!ctx.userId || memory.userId !== ctx.userId) {
+        throw new GraphQLError('Only the memory owner (or an org App) may encrypt it.', {
+          extensions: { code: 'FORBIDDEN' },
+        });
+      }
+      // Class gate (D-2026-07-06-B): 'private' is the only class users may
+      // encrypt. EXCEPTION, flagged for review: the pre-041 SECRET-mode App
+      // flow (Tier 2.5) already encrypts the class='personal' memories it
+      // auto-provisions — the App-key path keeps that shipped contract.
+      const classAllowed =
+        memory.class === 'private' || (ctx.appId != null && memory.class === 'personal');
+      if (!classAllowed) {
+        throw new GraphQLError(
+          "Only class='private' memories support encryption (D-2026-07-06-B).",
+          { extensions: { code: 'BAD_USER_INPUT', memoryClass: memory.class } },
+        );
       }
       if (memory.isEncrypted) {
         throw new Error('Memory is already encrypted');
       }
-      const key = parseDataKey(dataKey);
-      const nodes = await ctx.db.node.findMany({
-        where: { memoryId: resolvedMemoryId, deletedAt: null },
-        select: { id: true, content: true, data: true },
-      });
-      await ctx.db.$transaction(async (tx) => {
-        for (const node of nodes) {
-          const encrypted = encryptNodeFieldsWithKey(
-            { content: node.content, data: node.data },
-            key,
-          );
-          await tx.node.update({
-            where: { id: node.id },
-            data: {
-              content: encrypted.content ?? null,
-              data: (encrypted.data ?? null) as InputJsonValue,
-            },
+      // Vector indexing on an encrypted memory requires the FR-026 ack;
+      // converting an INDEXED memory would violate chk_memory_vector_
+      // encrypted_ack — surface it as a typed error, not a DB error.
+      if (memory.vectorIndexEnabled && !memory.vectorIndexEncryptedAckAt) {
+        throw new GraphQLError(
+          'Disable the vector index (or acknowledge the inversion disclosure) before encrypting.',
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+      let key;
+      let kdfFields: { kdfSalt?: string; kdfParams?: InputJsonValue } = {};
+      if (passphrase) {
+        if (dataKey) {
+          throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
+            extensions: { code: 'BAD_USER_INPUT' },
           });
         }
-        await tx.memory.update({
-          where: { id: resolvedMemoryId },
-          data: { isEncrypted: true, updatedBy: ctx.appId },
+        const kdfSalt = generateKdfSalt();
+        key = await deriveDataKeyFromPassphrase(passphrase, kdfSalt, DEFAULT_KDF_PARAMS);
+        kdfFields = { kdfSalt, kdfParams: DEFAULT_KDF_PARAMS as unknown as InputJsonValue };
+      } else if (dataKey) {
+        try {
+          key = parseDataKey(dataKey);
+        } catch (e) {
+          // A malformed key is caller input, not a server fault (PR-514
+          // review, Copilot) — surface as typed BAD_USER_INPUT.
+          throw new GraphQLError(String((e as Error).message), {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+      } else {
+        throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
+          extensions: { code: 'BAD_USER_INPUT' },
         });
+      }
+      // FLIP FIRST, then converge (PR-514 review, Copilot — conversion
+      // race): once isEncrypted commits, every concurrent write path either
+      // encrypts (key present) or fails closed (SESSION_EXPIRED) — so
+      // plaintext can no longer be ADDED. The encryption passes below then
+      // converge on zero plaintext rows: a row written plaintext between
+      // our scan and the flip is caught by the next pass. Idempotent by the
+      // enc:v1 prefix (isCiphertext), so re-running a pass is safe.
+      await ctx.db.memory.update({
+        where: { id: resolvedMemoryId },
+        data: {
+          isEncrypted: true,
+          keyVerifier: makeKeyVerifier(key),
+          ...kdfFields,
+          updatedBy: ctx.appId ?? ctx.userId ?? null,
+        },
       });
+      const BATCH = 200; // bound memory per pass (PR-514 review, Gemini)
+      for (let pass = 0; pass < 5; pass++) {
+        let converted = 0;
+        // Paginate by id to keep memory bounded for large graphs.
+        let cursor: string | undefined;
+        for (;;) {
+          const nodes = await ctx.db.node.findMany({
+            where: { memoryId: resolvedMemoryId, deletedAt: null },
+            // abstract encrypts alongside content since spec 031 — the old
+            // select missed it, leaving abstracts plaintext (spec-041 fix).
+            select: { id: true, content: true, abstract: true, data: true },
+            orderBy: { id: 'asc' },
+            take: BATCH,
+            ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+          });
+          if (nodes.length === 0) break;
+          cursor = nodes[nodes.length - 1].id;
+          for (const node of nodes) {
+            const plaintextContent = node.content != null && !isCiphertext(node.content);
+            const plaintextAbstract = node.abstract != null && !isCiphertext(node.abstract);
+            const plaintextData =
+              node.data != null &&
+              !(typeof node.data === 'object' && (node.data as { __enc?: string }).__enc);
+            if (!plaintextContent && !plaintextAbstract && !plaintextData) continue;
+            const encrypted = encryptNodeFieldsWithKey(
+              { content: node.content, abstract: node.abstract, data: node.data },
+              key,
+            );
+            await ctx.db.node.update({
+              where: { id: node.id },
+              data: {
+                content: encrypted.content ?? null,
+                abstract: encrypted.abstract ?? null,
+                data: (encrypted.data ?? null) as InputJsonValue,
+              },
+            });
+            converted += 1;
+          }
+          if (nodes.length < BATCH) break;
+        }
+        if (converted === 0) break; // clean pass — converged
+        if (pass === 4) {
+          console.error(
+            `[encryptMemory] memory ${resolvedMemoryId} did not converge after 5 passes — investigate`,
+          );
+        }
+      }
       return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
     },
 

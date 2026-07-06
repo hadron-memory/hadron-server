@@ -126,6 +126,26 @@ describe('mintAppRun — launch gate (cor:acl:050:01)', () => {
     expect(run.agentId).toBe(foreignAgent.id);
   });
 
+  it('denies launches whose entry node lives in an encrypted memory (spec 041, D-2026-07-06-B)', async () => {
+    const user = await db.user.findUniqueOrThrow({ where: { id: userId } });
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, name: 'vault', urn: 'run-org:vault',
+        class: 'private', userId: user.id, isEncrypted: true,
+      },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: memory.id, loc: 'tasks:secret', name: 'Secret task', tags: [] },
+    });
+    await expect(mint({ entryNodeUrn: 'run-org::vault::tasks:secret' })).rejects.toMatchObject({
+      code: 'ENCRYPTED_MEMORY_UNSUPPORTED',
+    });
+    // The same entry in a PLAINTEXT memory mints fine (guard is encryption-keyed).
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: false } });
+    const run = await mint({ entryNodeUrn: 'run-org::vault::tasks:secret' });
+    expect(run.status).toBe('PENDING');
+  });
+
   it('denies NEW launches when the daily token ledger is at its stored limit (PR-493 Codex P2)', async () => {
     // Simulate yesterday's overage: record spend far past the default limit.
     await recordQuotaUsage(db, 'app', appId, 'llm.tokens', 1_000, 5_000);

@@ -619,6 +619,18 @@ model Memory {
   chunkOverlap              Int?              @map("chunk_overlap")
   /// Force fixed-size chunking, bypassing structure-aware (FR-015).
   forceFixedSize            Boolean           @default(false) @map("force_fixed_size")
+  /// Spec 041 (D-2026-07-06-B) — passphrase-derivation material for a
+  /// caller-held-key encrypted memory. Parameters, NOT secrets: salt
+  /// (base64) + scrypt params. NULL when the memory was encrypted with a
+  /// raw data key (no passphrase) or is not encrypted.
+  kdfSalt                      String?   @map("kdf_salt")
+  kdfParams                    Json?     @map("kdf_params")
+  /// enc:v1 encryption of a fixed check string under the data key — lets
+  /// every unlock verify the supplied key WITHOUT touching node rows
+  /// (wrong passphrase = typed WRONG_KEY, never garbage plaintext). The
+  /// server still never holds the key itself.
+  keyVerifier                  String?   @map("key_verifier")
+
   /// Timestamp the owner acknowledged the embedding-inversion disclosure for an
   /// ENCRYPTED memory (FR-026). NULL ⇒ not acknowledged. Gates encrypted-memory
   /// indexing via chk_memory_vector_encrypted_ack.
