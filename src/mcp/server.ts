@@ -64,6 +64,9 @@ import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
+import { sessionKeyCache } from '../lib/sessionKeyCache.js';
+import { decryptNodeFieldsWithKey, encryptNodeFieldsWithKey } from '../lib/nodeCrypto.js';
+import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import {
   NodeNotFoundError,
@@ -575,9 +578,34 @@ type ReadProjectionNode = {
   incomingEdges: Array<{ name: string | null; loc: string; source: { id: string; loc: string; memoryId: string; name: string } }>;
 };
 
+/**
+ * Spec 041 (PR-2, #206): decrypt a fetched node in place when this process
+ * holds the memory's key (MCP session unlock / any live session), or mark
+ * it locked. On 'unlocked' the projection is plaintext and downstream logic
+ * (staleness hash, fallbacks) behaves exactly like a plaintext memory — the
+ * helper flips the projection's isEncrypted flag to say so. On 'locked' the
+ * encrypted fields are BLANKED (a `Locked:` meta line replaces enc:v1 noise).
+ */
+function mcpDecryptOrMark(
+  node: Pick<ReadProjectionNode, 'memoryId' | 'content' | 'abstract' | 'data' | 'memory'>,
+): 'plaintext' | 'unlocked' | 'locked' {
+  if (!node.memory.isEncrypted) return 'plaintext';
+  const key = sessionKeyCache.getByMemoryId(node.memoryId);
+  if (key) {
+    decryptNodeFieldsWithKey(node, key);
+    node.memory = { isEncrypted: false }; // projection-local: it IS plaintext now
+    return 'unlocked';
+  }
+  node.content = null;
+  node.abstract = null;
+  node.data = null;
+  return 'locked';
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
+  opts: { locked?: boolean } = {},
 ): Promise<string> {
   const urn = await nodeUrn(node.loc, node.memoryId);
   const outgoingLines = await Promise.all(
@@ -599,10 +627,11 @@ async function renderNodeReadProjection(
   const hasAbstract = !!(node.abstract && node.abstract.length > 0);
   const isFallback = scope === 'content' && !hasContent && hasAbstract;
 
-  // Spec 032 FR-010 — `Source: abstract-stale` marker. Encryption gate: the
-  // MCP read path does NOT decrypt today (asymmetry tracked by #206), so on an
-  // encrypted memory `computeContentHash(content)` hashes ciphertext and would
-  // false-positive on every node — v1 skips the predicate there. Scope gate:
+  // Spec 032 FR-010 — `Source: abstract-stale` marker. Encryption gate:
+  // since spec 041 PR-2 the MCP read path decrypts when the session holds
+  // the key — mcpDecryptOrMark flips the projection's isEncrypted to false
+  // on success, so the predicate below runs on PLAINTEXT for unlocked
+  // memories and is (correctly) skipped only while locked. Scope gate:
   // the marker only fires under scopes that surface the abstract (`abstract` /
   // `all`); the default `content` scope omits it (the abstract isn't in the
   // response). The explicit `abstractOriginHash != null` guard is load-bearing
@@ -631,6 +660,9 @@ async function renderNodeReadProjection(
     `ID: ${node.id}`,
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
+    opts.locked
+      ? 'Locked: encrypted memory — call hadron_unlock_memory to read/write its content (spec 041)'
+      : '',
     isFallback ? 'Source: abstract-fallback' : '',
     includeStaleMarker ? 'Source: abstract-stale' : '',
     node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
@@ -1557,7 +1589,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_get_node',
-    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (org::memory::loc). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; not emitted on encrypted memories in v1 — see #206). Spec 031 + 032.",
+    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (org::memory::loc). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). Spec 031 + 032.",
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::architecture" or "hrn:node:acme.com::mmdata::architecture"'),
       contentScope: z
@@ -1642,9 +1674,14 @@ export function createMcpServerInstance(
         return textResult(err.message);
       }
       const scope = contentScope ?? 'content';
+      // Spec 041: decrypt when this session holds the key; mark locked
+      // otherwise (blanked fields + Locked meta line, never raw ciphertext).
+      const lockState = mcpDecryptOrMark(node);
       // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      return textResult(await renderNodeReadProjection(node, scope));
+      return textResult(
+        await renderNodeReadProjection(node, scope, { locked: lockState === 'locked' }),
+      );
     },
   );
 
@@ -1803,7 +1840,10 @@ export function createMcpServerInstance(
           omitted.push(await nodeUrn(n.loc, n.memoryId));
           continue;
         }
-        const projection = await renderNodeReadProjection(n, scope);
+        const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
+        const projection = await renderNodeReadProjection(n, scope, {
+          locked: lockState === 'locked',
+        });
         const size = Buffer.byteLength(projection, 'utf8');
         if (blocks.length > 0 && bytes + size > BATCH_READ_MAX_BYTES) {
           truncated = true;
@@ -2222,6 +2262,82 @@ export function createMcpServerInstance(
     return raw;
   }
 
+  // ── hadron_unlock_memory / hadron_lock_memory (spec 041 PR-2, closes #206) ──
+
+  server.tool(
+    'hadron_unlock_memory',
+    'Unlock an encrypted PRIVATE memory for THIS MCP session (spec 041). Supply exactly one of passphrase / dataKey; owner-only. While unlocked, reads return plaintext and writes encrypt; other sessions are unaffected. The key lives only in server memory and is dropped when the session closes (or via hadron_lock_memory).',
+    {
+      memoryUrn: z.string().describe('Memory URN or id'),
+      passphrase: z.string().optional().describe('The passphrase the memory was encrypted with'),
+      dataKey: z.string().optional().describe('Raw base64 32-byte data key (alternative to passphrase)'),
+    },
+    async ({ memoryUrn, passphrase, dataKey }) => {
+      // Owner-only, mirroring the GraphQL header-unlock rule (PR-514):
+      // private memories are owner-only by class; an App-key session has no
+      // business unlocking them, and unowned refs get a uniform not-found.
+      if (!auth.userId) {
+        return textResult('hadron_unlock_memory requires a user-authenticated MCP connection.');
+      }
+      const sid = getSessionId();
+      if (!sid) return textResult('No active MCP session.');
+      const mem = await resolveMemoryByUrn(memoryUrn);
+      const row = mem
+        ? await db.memory.findUnique({
+            where: { id: mem.id },
+            select: {
+              id: true, urn: true, userId: true, isEncrypted: true,
+              kdfSalt: true, kdfParams: true, keyVerifier: true,
+            },
+          })
+        : null;
+      if (!row || row.userId !== auth.userId) {
+        return textResult(`Memory "${memoryUrn}" not found.`);
+      }
+      if (!row.isEncrypted) {
+        return textResult(`Memory "${row.urn}" is not encrypted.`);
+      }
+      try {
+        const key = await resolveSuppliedKey(row, { passphrase, dataKey });
+        sessionKeyCache.set(`mcp:${sid}`, row.id, key);
+      } catch (err) {
+        if (err instanceof MemoryUnlockError) return textResult(err.message);
+        // Key conflict (another live session holds a DIFFERENT key) or
+        // unexpected — surface the message, never the stack.
+        return textResult(String((err as Error).message));
+      }
+      return textResult(
+        `Memory unlocked for this session: ${row.urn}. Reads now return plaintext; writes encrypt. ` +
+          'The key is dropped when this session ends (or call hadron_lock_memory).',
+      );
+    },
+  );
+
+  server.tool(
+    'hadron_lock_memory',
+    'Drop THIS MCP session\'s key for an encrypted memory (spec 041) — reads return to locked markers, writes to it are rejected. Other sessions holding the key are unaffected.',
+    { memoryUrn: z.string().describe('Memory URN or id') },
+    async ({ memoryUrn }) => {
+      const sid = getSessionId();
+      if (!sid) return textResult('No active MCP session.');
+      // Same owner gate + uniform not-found as hadron_unlock_memory
+      // (PR-517 review, Codex P2): without it, the existing-vs-missing
+      // response split makes lock an existence oracle for private URNs.
+      if (!auth.userId) {
+        return textResult('hadron_lock_memory requires a user-authenticated MCP connection.');
+      }
+      const mem = await resolveMemoryByUrn(memoryUrn);
+      const row = mem
+        ? await db.memory.findUnique({ where: { id: mem.id }, select: { id: true, userId: true } })
+        : null;
+      if (!row || row.userId !== auth.userId) {
+        return textResult(`Memory "${memoryUrn}" not found.`);
+      }
+      sessionKeyCache.release(`mcp:${sid}`, row.id);
+      return textResult(`Memory locked for this session: ${memoryUrn}.`);
+    },
+  );
+
   // ── hadron_create_node ───────────────────────────────────────────────────────────
 
   server.tool(
@@ -2345,6 +2461,35 @@ export function createMcpServerInstance(
             ? await nextSiblingSeq(db, memoryId, loc)
             : null;
 
+      // Spec 041 (PR-2, closes #206 write-side): on an encrypted memory,
+      // encrypt with this session's key — or REJECT when locked. Pre-041 the
+      // MCP path silently stored plaintext rows into encrypted memories.
+      // abstractOriginHash above is computed on PLAINTEXT (FR-009), before
+      // this envelope; the enqueueNodeEmbedding call below keeps the
+      // in-closure plaintext (FR-027 prompt-drain).
+      const memEncRow = await db.memory.findUnique({
+        where: { id: memoryId },
+        select: { isEncrypted: true },
+      });
+      let storedContent = content ?? null;
+      let storedAbstract = normalizedAbstract;
+      let storedData = (nodeData ?? undefined) as unknown;
+      if (memEncRow?.isEncrypted) {
+        const key = sessionKeyCache.getByMemoryId(memoryId);
+        if (!key) {
+          return textResult(
+            'This memory is encrypted and locked — call hadron_unlock_memory first (spec 041).',
+          );
+        }
+        const enc = encryptNodeFieldsWithKey(
+          { content: storedContent, abstract: storedAbstract, data: storedData ?? null },
+          key,
+        );
+        storedContent = enc.content ?? null;
+        storedAbstract = enc.abstract ?? null;
+        storedData = enc.data ?? undefined;
+      }
+
       const upserted = await db.node.upsert({
         where: { loc_memoryId: { loc, memoryId } },
         create: {
@@ -2355,13 +2500,13 @@ export function createMcpServerInstance(
           nodeType: nodeType ?? 'info',
           isRunnable: isRunnable ?? null,
           description: description ?? null,
-          abstract: normalizedAbstract,
+          abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
-          content: content ?? null,
+          content: storedContent,
           seq: createSeq,
           tags: tags ?? [],
           properties: properties as any ?? undefined,
-          data: nodeData as any ?? undefined,
+          data: storedData as any ?? undefined,
           llmModel: llmModel ?? null,
           aiAgent: aiAgent ?? null,
           createdBy: auth.clientId ?? null,
@@ -2371,16 +2516,16 @@ export function createMcpServerInstance(
           ...(nodeType ? { nodeType } : {}),
           ...(isRunnable !== undefined ? { isRunnable } : {}),
           description: description ?? null,
-          abstract: normalizedAbstract,
+          abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
-          content: content ?? null,
+          content: storedContent,
           // seq is structural ordering, not content: preserve it on update when
           // omitted (parity with the upsertNode resolver) so a content-only
           // re-write doesn't wipe a node out of its ordered list (PR #309 review).
           ...(seq !== undefined ? { seq } : {}),
           tags: tags ?? [],
           ...(properties !== undefined ? { properties: properties as any } : {}),
-          ...(nodeData !== undefined ? { data: nodeData as any } : {}),
+          ...(nodeData !== undefined ? { data: storedData as any } : {}),
           ...(llmModel ? { llmModel } : {}),
           ...(aiAgent ? { aiAgent } : {}),
         } as any,
@@ -2564,9 +2709,27 @@ export function createMcpServerInstance(
         throw e;
       }
 
+      // Spec 041 (PR-2, PR-517 review): the encrypted-memory gate runs
+      // BEFORE any side effect — a locked rejection must leave NO trace,
+      // including the version-history row below (Codex P2).
+      const updMemEnc = await db.memory.findUnique({
+        where: { id: existing.memoryId },
+        select: { isEncrypted: true },
+      });
+      const updKey = updMemEnc?.isEncrypted
+        ? sessionKeyCache.getByMemoryId(existing.memoryId)
+        : null;
+      if (updMemEnc?.isEncrypted && !updKey) {
+        return textResult(
+          'This memory is encrypted and locked — call hadron_unlock_memory first (spec 041).',
+        );
+      }
+
       // Snapshot current state for version history.
       // Spec 032 — capture existing.abstractOriginHash so the version
-      // history round-trips the staleness signal.
+      // history round-trips the staleness signal. On an encrypted memory
+      // `existing` still holds CIPHERTEXT here — versions store the
+      // at-rest form, deliberately (the decrypt happens just below).
       await db.nodeVersion.create({
         data: {
           id: generateId(),
@@ -2584,14 +2747,20 @@ export function createMcpServerInstance(
         },
       }).catch(() => {});
 
+      // Spec 041 (PR-517 review, Codex P2): decrypt `existing` in place NOW
+      // — everything below (the abstractOriginHash matrix, the embedding
+      // enqueue's fallback plaintext) treats existing.content/abstract as
+      // PLAINTEXT. Without this, an abstract-only update hashes ciphertext
+      // (false-stale forever) and a content-only update embeds ciphertext.
+      if (updKey) {
+        decryptNodeFieldsWithKey(existing, updKey);
+      }
+
       // Spec 032 — abstractOriginHash partial-update matrix (9 rows from
       // the contract). Drives off whether `normalizedAbstract` was
       // supplied (undefined = preserve, null = clear, string = set).
-      //
-      // Encryption posture: MCP write path stores content plaintext
-      // today (encryption parity for MCP is deferred — see #206), so
-      // `existing.content` IS plaintext. Hash always computed on
-      // plaintext per FR-009.
+      // Hash always computed on plaintext per FR-009 (existing.* is
+      // plaintext here — decrypted above for encrypted memories).
       let nextAbstractOriginHash: string | null | undefined;
       if (normalizedAbstract === undefined) {
         nextAbstractOriginHash = undefined;
@@ -2617,6 +2786,23 @@ export function createMcpServerInstance(
       if (nodeData !== undefined) data.data = nodeData as any;
       if (llmModel !== undefined) data.llmModel = llmModel;
       if (aiAgent !== undefined) data.aiAgent = aiAgent;
+
+      // Spec 041 (PR-2): encrypted memory — encrypt the provided encrypted-
+      // envelope fields with this session's key (gate + key resolved above,
+      // before the version snapshot).
+      if (updKey) {
+        const enc = encryptNodeFieldsWithKey(
+          {
+            content: (data.content as string | null | undefined) ?? null,
+            abstract: (data.abstract as string | null | undefined) ?? null,
+            data: (data.data as unknown) ?? null,
+          },
+          updKey,
+        );
+        if (data.content !== undefined) data.content = enc.content ?? null;
+        if (data.abstract !== undefined) data.abstract = enc.abstract ?? null;
+        if (data.data !== undefined) data.data = (enc.data ?? null) as never;
+      }
 
       if (Object.keys(data).length > 0) {
         await db.node.update({ where: { id: existing.id }, data });
@@ -4665,6 +4851,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     if (sid) {
       transports.delete(sid);
       activeAppByMcpSession.delete(sid); // spec 026 — clear per-session active App
+      sessionKeyCache.evict(`mcp:${sid}`); // spec 041 — drop unlock keys with the session
     }
   };
 
@@ -4693,5 +4880,6 @@ export async function handleMcpDelete(req: Request, res: Response): Promise<void
   await transport.close();
   transports.delete(sessionId);
   activeAppByMcpSession.delete(sessionId); // spec 026 — DELETE path also clears
+  sessionKeyCache.evict(`mcp:${sessionId}`); // spec 041 — DELETE drops unlock keys too
   res.status(200).json({ ok: true });
 }
