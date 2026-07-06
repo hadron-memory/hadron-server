@@ -68,6 +68,21 @@ export class SessionKeyCache {
   }
 
   /**
+   * Release ONE memory's key from a session (spec 041 hadron_lock_memory)
+   * without touching the session's other keys. Removes the key entirely
+   * when this was the last holding session.
+   */
+  release(sessionId: string, memoryId: string): void {
+    const memories = this.sessionToMemories.get(sessionId);
+    if (!memories?.delete(memoryId)) return;
+    if (memories.size === 0) this.sessionToMemories.delete(sessionId);
+    const entry = this.byMemory.get(memoryId);
+    if (!entry) return;
+    entry.sessionIds.delete(sessionId);
+    if (entry.sessionIds.size === 0) this.byMemory.delete(memoryId);
+  }
+
+  /**
    * Evict a session's references. If this was the last session holding a
    * memory's key, the key is removed from the cache.
    */
