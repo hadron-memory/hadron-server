@@ -29,6 +29,7 @@ import {
 } from '../../../controller/operations/updateMemoryMemberRole.js';
 import { removeMemoryMember } from '../../../controller/operations/removeMemoryMember.js';
 import {
+  Prisma,
   type MemoryShareRole as MemoryShareRoleType,
   type MemoryMemberRole as MemoryMemberRoleType,
   type Role,
@@ -821,7 +822,26 @@ export const memoryMutations = {
       if (memory.class === 'system') {
         throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
       }
-      await ctx.db.agentMemoryItem.create({ data: { agentId: resolvedAgentId, memoryId: resolvedMemoryId, role: role ?? 'read', createdBy: ctx.userId ?? ctx.clientId ?? null } });
+      // Upsert semantics (#501): granting is idempotent — re-attaching an
+      // already-attached memory updates the role, and a soft-deleted grant
+      // row (which still occupies the @@unique(agentId, memoryId) slot) is
+      // resurrected instead of surfacing a raw P2002.
+      await ctx.db.agentMemoryItem.upsert({
+        where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
+        create: {
+          agentId: resolvedAgentId,
+          memoryId: resolvedMemoryId,
+          role: role ?? 'read',
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+        update: {
+          role: role ?? 'read',
+          deletedAt: null,
+          deletedBy: null,
+          updatedAt: new Date(),
+          updatedBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+      });
       return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },
 
@@ -834,10 +854,22 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
-      await ctx.db.agentMemoryItem.update({
-        where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
-        data: { role },
-      });
+      try {
+        await ctx.db.agentMemoryItem.update({
+          where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
+          data: { role },
+        });
+      } catch (e) {
+        // #501: a missing grant row must be a typed NOT_FOUND, not a raw
+        // P2025 → 500. addMemoryToAgent is the create/upsert path.
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+          throw new GraphQLError(
+            'No grant exists for this agent+memory pair — use addMemoryToAgent to create one.',
+            { extensions: { code: 'NOT_FOUND' } },
+          );
+        }
+        throw e;
+      }
       return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },
 

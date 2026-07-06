@@ -103,6 +103,52 @@ async function ensureQuotaRow(
   });
 }
 
+/** Platform-default (env-seeded) limit for a scope × action (#510 admin surface). */
+export function defaultQuotaLimit(
+  scopeKind: 'app' | 'org',
+  action: 'run.execute' | 'llm.tokens',
+): number {
+  if (action === 'run.execute') {
+    return scopeKind === 'app' ? QUOTA_RUNS_PER_DAY_APP : QUOTA_RUNS_PER_DAY_ORG;
+  }
+  return scopeKind === 'app' ? QUOTA_TOKENS_PER_DAY_APP : QUOTA_TOKENS_PER_DAY_ORG;
+}
+
+/**
+ * Materialize the canonical counter rows for a scope (#510): both actions,
+ * seeded with the platform defaults, expired windows rolled. Lets the admin
+ * surface show usage-vs-limit BEFORE the scope's first run touches a row.
+ */
+export async function ensureQuotaRowsForScope(
+  db: PrismaClient,
+  scopeKind: 'app' | 'org',
+  scopeId: string,
+): Promise<void> {
+  for (const action of ['run.execute', 'llm.tokens'] as const) {
+    await ensureQuotaRow(db, scopeKind, scopeId, action, defaultQuotaLimit(scopeKind, action));
+  }
+}
+
+/**
+ * Set the STORED (enforced) limit for a scope × action (#510). The row is
+ * the source of truth from first touch (env values only seed) — this is the
+ * operator dial that previously required psql. Persists across window rolls
+ * (the roll resets `used`, never `limit`).
+ */
+export async function setQuotaLimit(
+  db: PrismaClient,
+  scopeKind: 'app' | 'org',
+  scopeId: string,
+  action: 'run.execute' | 'llm.tokens',
+  limit: number,
+): Promise<void> {
+  await ensureQuotaRow(db, scopeKind, scopeId, action, defaultQuotaLimit(scopeKind, action));
+  await db.quotaCounter.updateMany({
+    where: { scopeKind, scopeId, action, window: QUOTA_WINDOW },
+    data: { limit },
+  });
+}
+
 /**
  * Atomically consume `amount` iff the STORED limit has headroom. Raw SQL
  * because the check is column-vs-column (used + amount <= limit), which
@@ -275,11 +321,33 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       }
     }
   }
-  // Trigger-layer policy must allow run.execute at all (conjunction floor).
-  const triggerLink = parsePolicyLink(args.policy);
-  if (!evaluatePolicyChain('run.execute', [triggerLink])) {
-    throw new RunLaunchDeniedError('Trigger policy does not allow run.execute.', 'POLICY_DENIED');
+  // Assemble the full conjunctive chain (cor:acl:040:02, plan §6 step 2):
+  // org ∧ user (when on-behalf-of) ∧ app ∧ trigger. Snapshotted onto the
+  // run row below — later policy edits apply to FUTURE mints only (a live
+  // run's kill switch is budgets/cancel, not policy edits). #510 wired the
+  // upper layers; before that only the trigger link was evaluated.
+  const [orgPolicyRow, appPolicyRow, userPolicyRow] = await Promise.all([
+    db.organization.findUnique({ where: { id: args.organizationId }, select: { policy: true } }),
+    db.app.findUnique({ where: { id: args.appId }, select: { policy: true } }),
+    args.userId
+      ? db.user.findUnique({ where: { id: args.userId }, select: { policy: true } })
+      : Promise.resolve(null),
+  ]);
+  const chainLinks = [
+    parsePolicyLink(orgPolicyRow?.policy),
+    parsePolicyLink(userPolicyRow?.policy),
+    parsePolicyLink(appPolicyRow?.policy),
+    parsePolicyLink(args.policy),
+  ];
+  if (!evaluatePolicyChain('run.execute', chainLinks)) {
+    throw new RunLaunchDeniedError(
+      'Policy chain does not allow run.execute (org ∧ user ∧ app ∧ trigger).',
+      'POLICY_DENIED',
+    );
   }
+  // The snapshot stores only PRESENT links — an absent layer contributes
+  // nothing to the conjunction, then or later.
+  const presentLinks = chainLinks.filter((l): l is NonNullable<typeof l> => l != null);
   // Quota tier 1: runs/day per App AND per org (both must pass — consume
   // app first, refund on org denial to keep the counters truthful).
   if (!(await consumeQuota(db, 'app', args.appId, 'run.execute', QUOTA_RUNS_PER_DAY_APP))) {
@@ -314,7 +382,10 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       triggerId: args.triggerId ?? null,
       entryNodeUrn: args.entryNodeUrn,
       eventData: (args.eventData ?? undefined) as never,
-      policy: (triggerLink ?? undefined) as never,
+      // Chain snapshot: `{chain: [...]}` since #510. checkActivation also
+      // accepts the pre-#510 single-link shape for runs minted before the
+      // deploy (PENDING rows survive a restart).
+      policy: (presentLinks.length > 0 ? { chain: presentLinks } : undefined) as never,
       budgetTokens: DEFAULT_RUN_TOKEN_BUDGET,
       budgetActions: DEFAULT_RUN_ACTION_BUDGET,
       timeoutMs: args.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
@@ -519,6 +590,21 @@ async function executeAppRunInner(
 }
 
 /**
+ * Parse an AppRun.policy snapshot into chain links. Two stored shapes:
+ * `{chain: [link, ...]}` (#510 — the full conjunctive snapshot) and the
+ * pre-#510 single-link object (runs minted before the deploy). Anything
+ * unparseable yields an empty chain = no restriction, matching the
+ * absent-layer semantics.
+ */
+export function parseRunPolicySnapshot(raw: unknown): Array<{ allow: string[] } | null> {
+  if (raw != null && typeof raw === 'object' && !Array.isArray(raw)) {
+    const chain = (raw as { chain?: unknown }).chain;
+    if (Array.isArray(chain)) return chain.map((l) => parsePolicyLink(l));
+  }
+  return [parsePolicyLink(raw)];
+}
+
+/**
  * The activation re-check (cor:agt:010:02): status live + policy allows +
  * (optionally) action budget headroom, decremented atomically on the same
  * statement so cancellation/zeroing halts the run at its next action.
@@ -534,7 +620,7 @@ async function checkActivation(
     select: { status: true, policy: true, budgetActions: true, budgetTokens: true },
   });
   if (!run || run.status !== 'RUNNING') return false;
-  if (!evaluatePolicyChain(action, [parsePolicyLink(run.policy)])) return false;
+  if (!evaluatePolicyChain(action, parseRunPolicySnapshot(run.policy))) return false;
   if (run.budgetTokens != null && run.budgetTokens <= 0) return false; // zeroed = kill switch
   const cost = opts.actionCost ?? 0;
   if (cost > 0) {

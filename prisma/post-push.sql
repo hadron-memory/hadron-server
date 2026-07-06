@@ -46,6 +46,13 @@ ALTER TABLE memories
     (class <> 'group' AND visibility <> 'GROUP')
   );
 
+-- #510: an AgentSchedule is EITHER recurring (cron) or one-shot (run_at).
+ALTER TABLE agent_schedules
+  DROP CONSTRAINT IF EXISTS chk_agent_schedule_cron_xor_run_at;
+ALTER TABLE agent_schedules
+  ADD CONSTRAINT chk_agent_schedule_cron_xor_run_at
+  CHECK ((cron IS NULL) <> (run_at IS NULL));
+
 -- 023-app-shape FR-025: group memory has no single owner.
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_group_no_owner;

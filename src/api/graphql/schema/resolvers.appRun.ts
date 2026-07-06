@@ -3,11 +3,17 @@
 
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
-import { mintAppRun, RunLaunchDeniedError } from '../../../jobs/appRuns.js';
+import {
+  mintAppRun,
+  RunLaunchDeniedError,
+  setQuotaLimit as setQuotaLimitKernel,
+  ensureQuotaRowsForScope,
+} from '../../../jobs/appRuns.js';
 import { mintWebhookPlatformToken, generateWebhookSecret } from '../../webhooks.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { nextCronOccurrence } from '../../../jobs/scheduler.js';
-import { parsePolicyLink } from '../../../lib/policy/index.js';
+import { parsePolicyLink, explainPolicyChain, type PolicyAction } from '../../../lib/policy/index.js';
 import { assertFullyQualifiedUrn } from '../../../lib/urn.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -17,7 +23,10 @@ export interface CreateAgentScheduleInput {
   /** App reference — PK or fully-qualified URN (the platform-wide `ref` convention). */
   appRef: string;
   name: string;
-  cron: string;
+  /** Recurring: 5-field cron. XOR with runAt (#510). */
+  cron?: string | null;
+  /** One-shot: run once at this ISO instant. XOR with cron (#510). */
+  runAt?: string | null;
   timezone?: string | null;
   entryNodeUrn: string;
   /** Agent reference — PK or URN; must be installed in the App. */
@@ -54,6 +63,17 @@ function validatedCronNext(cron: string, timezone: string): Date {
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
+}
+
+/** Parse an ISO runAt into a Date, typed BAD_USER_INPUT on garbage (#510 one-shots). */
+function validatedRunAt(runAt: string): Date {
+  const d = new Date(runAt);
+  if (Number.isNaN(d.getTime())) {
+    throw new GraphQLError(`Invalid runAt "${runAt}" — use an ISO-8601 datetime.`, {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  return d;
 }
 
 /** runAsSelf REQUIRES an authenticated user — never silently degrade to a no-user run (PR-493). */
@@ -105,7 +125,17 @@ export const appRunMutations = {
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
     const timezone = input.timezone?.trim() || 'UTC';
-    const nextRunAt = validatedCronNext(input.cron, timezone);
+    // Exactly one of cron (recurring) / runAt (one-shot) — mirrors
+    // chk_agent_schedule_cron_xor_run_at so the constraint never surfaces
+    // as a raw DB error (#510).
+    if ((input.cron == null) === (input.runAt == null)) {
+      throw new GraphQLError('Provide exactly one of cron (recurring) or runAt (one-shot).', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    const nextRunAt = input.cron != null
+      ? validatedCronNext(input.cron, timezone)
+      : validatedRunAt(input.runAt as string);
     if (input.policy != null && parsePolicyLink(input.policy) == null) {
       throw new GraphQLError('policy must be { allow: string[] }.', {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -122,7 +152,8 @@ export const appRunMutations = {
         // language; cor:agt:010:01 tunable).
         userId: resolveRunAsSelf(ctx, input.runAsSelf),
         name: input.name,
-        cron: input.cron,
+        cron: input.cron ?? null,
+        runAt: input.runAt != null ? validatedRunAt(input.runAt) : null,
         timezone,
         entryNodeUrn: input.entryNodeUrn,
         eventData: (input.eventData ?? undefined) as never,
@@ -146,12 +177,25 @@ export const appRunMutations = {
     });
     if (!existing) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
-    const cron = input.cron ?? existing.cron;
     const timezone = input.timezone?.trim() || existing.timezone;
-    const nextRunAt =
-      input.cron != null || input.timezone != null
-        ? validatedCronNext(cron, timezone)
-        : undefined;
+    // Mode transitions (#510): providing cron switches to recurring (clears
+    // runAt); providing runAt switches to one-shot (clears cron). Both in
+    // one call is ambiguous. A timezone-only change recomputes only for
+    // recurring schedules — a one-shot's runAt is an absolute instant.
+    if (input.cron != null && input.runAt != null) {
+      throw new GraphQLError('Provide at most one of cron (recurring) or runAt (one-shot).', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    let modeFields: { cron?: string | null; runAt?: Date | null; nextRunAt?: Date } = {};
+    if (input.cron != null) {
+      modeFields = { cron: input.cron, runAt: null, nextRunAt: validatedCronNext(input.cron, timezone) };
+    } else if (input.runAt != null) {
+      const at = validatedRunAt(input.runAt);
+      modeFields = { cron: null, runAt: at, nextRunAt: at };
+    } else if (input.timezone != null && existing.cron != null) {
+      modeFields = { nextRunAt: validatedCronNext(existing.cron, timezone) };
+    }
     if (input.entryNodeUrn != null) assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     // agentRef semantics on update: undefined/'' = no change (''≡absent),
     // null = clear the agent, string = set (validated as installed).
@@ -168,7 +212,7 @@ export const appRunMutations = {
       where: { id },
       data: {
         ...(input.name != null ? { name: input.name } : {}),
-        ...(input.cron != null ? { cron: input.cron } : {}),
+        ...modeFields,
         ...(input.timezone != null ? { timezone } : {}),
         ...(input.entryNodeUrn != null ? { entryNodeUrn: input.entryNodeUrn } : {}),
         ...(input.eventData !== undefined ? { eventData: input.eventData as never } : {}),
@@ -177,7 +221,6 @@ export const appRunMutations = {
         ...(input.enabled != null ? { enabled: input.enabled } : {}),
         ...(input.runAsSelf != null ? { userId: resolveRunAsSelf(ctx, input.runAsSelf) } : {}),
         ...(agentId !== undefined ? { agentId } : {}),
-        ...(nextRunAt ? { nextRunAt } : {}),
         updatedBy: ctx.userId ?? ctx.clientId ?? null,
       },
     });
@@ -390,6 +433,73 @@ export const appRunMutations = {
     });
     return count;
   },
+
+  /**
+   * Set the STORED (enforced) quota limit for a scope × action (#510) —
+   * the operator dial that previously required psql. Org-ADMIN; an app
+   * scope must belong to the org (same posture as mintActionTickets).
+   */
+  setQuotaLimit: async (
+    _: unknown,
+    {
+      input,
+    }: {
+      input: { orgRef: string; appRef?: string | null; action: string; limit: number };
+    },
+    ctx: Context,
+  ) => {
+    const { id: organizationId } = await resolveOrgRef(ctx.db, input.orgRef);
+    await requireOrgRole(ctx, organizationId, 'ADMIN');
+    if (input.action !== 'run.execute' && input.action !== 'llm.tokens') {
+      throw new GraphQLError('action must be run.execute or llm.tokens.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    if (!Number.isInteger(input.limit) || input.limit < 0) {
+      throw new GraphQLError('limit must be a non-negative integer (0 = pause the scope).', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    let scopeKind: 'app' | 'org' = 'org';
+    let scopeId = organizationId;
+    if (input.appRef && input.appRef.trim() !== '') {
+      const { id } = await resolveAppRef(ctx.db, input.appRef);
+      const app = await ctx.db.app.findFirst({
+        where: { id, organizationId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+      scopeKind = 'app';
+      scopeId = app.id;
+    }
+    await setQuotaLimitKernel(ctx.db, scopeKind, scopeId, input.action, input.limit);
+    return ctx.db.quotaCounter.findFirstOrThrow({
+      where: { scopeKind, scopeId, action: input.action, window: 'day' },
+    });
+  },
+
+  /**
+   * Author the caller's OWN user-layer policy link (cor:acl:040:02, #510):
+   * constrains every future run made on-behalf-of this user. Pass null to
+   * remove the link (= no restriction). Self-service by design — a user's
+   * link belongs to the user, not to an org admin.
+   */
+  updateMyPolicy: async (_: unknown, { policy }: { policy?: unknown }, ctx: Context) => {
+    if (!ctx.userId) {
+      throw new GraphQLError('updateMyPolicy requires an authenticated user.', {
+        extensions: { code: 'UNAUTHENTICATED' },
+      });
+    }
+    if (policy != null && parsePolicyLink(policy) == null) {
+      throw new GraphQLError('policy must be { allow: string[] } or null.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    return ctx.db.user.update({
+      where: { id: ctx.userId },
+      data: { policy: (policy ?? null) as never },
+    });
+  },
 };
 
 export const appRunQueries = {
@@ -507,5 +617,75 @@ export const appRunQueries = {
     if (!run) return null;
     if (!isPlatformAdmin(ctx)) await requireOrgRole(ctx, run.organizationId, 'READER');
     return run;
+  },
+
+  /**
+   * Usage-vs-limit for a scope (#510): the org's counters, plus one app's
+   * when appRef is given. Rows are materialized on first view (seeded with
+   * the platform defaults) so the admin surface never shows a blank —
+   * ensureQuotaRowsForScope also rolls expired windows.
+   */
+  quotaCounters: async (
+    _: unknown,
+    { orgRef, appRef }: { orgRef: string; appRef?: string | null },
+    ctx: Context,
+  ) => {
+    const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
+    await requireOrgRole(ctx, organizationId, 'ADMIN');
+    const scopes: Array<{ scopeKind: 'app' | 'org'; scopeId: string }> = [
+      { scopeKind: 'org', scopeId: organizationId },
+    ];
+    if (appRef && appRef.trim() !== '') {
+      const { id } = await resolveAppRef(ctx.db, appRef);
+      const app = await ctx.db.app.findFirst({
+        where: { id, organizationId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+      scopes.push({ scopeKind: 'app', scopeId: app.id });
+    }
+    for (const s of scopes) {
+      await ensureQuotaRowsForScope(ctx.db, s.scopeKind, s.scopeId);
+    }
+    return ctx.db.quotaCounter.findMany({
+      where: { OR: scopes.map((s) => ({ scopeKind: s.scopeKind, scopeId: s.scopeId })) },
+      orderBy: [{ scopeKind: 'asc' }, { action: 'asc' }],
+    });
+  },
+
+  /**
+   * The policy debug surface (#510): explain the STANDING chain — org ∧
+   * user (optional) ∧ app — for one action, with per-layer verdicts. This
+   * answers "would a run of this app (as this user) be allowed to X, and
+   * which link says no". Trigger/run links are per-trigger and therefore
+   * not part of the standing chain; the run detail shows the snapshot that
+   * actually applied.
+   */
+  effectiveActionPolicy: async (
+    _: unknown,
+    { appRef, action, userRef }: { appRef: string; action: string; userRef?: string | null },
+    ctx: Context,
+  ) => {
+    const app = await requireScheduleAdmin(ctx, appRef);
+    const [org, appRow] = await Promise.all([
+      ctx.db.organization.findUniqueOrThrow({
+        where: { id: app.organizationId },
+        select: { policy: true },
+      }),
+      ctx.db.app.findUniqueOrThrow({ where: { id: app.id }, select: { policy: true } }),
+    ]);
+    const layers: Array<{ layer: string; link: ReturnType<typeof parsePolicyLink> }> = [
+      { layer: 'org', link: parsePolicyLink(org.policy) },
+    ];
+    if (userRef && userRef.trim() !== '') {
+      const { id: userId } = await resolveUserRef(ctx.db, userRef);
+      const user = await ctx.db.user.findUniqueOrThrow({
+        where: { id: userId },
+        select: { policy: true },
+      });
+      layers.push({ layer: 'user', link: parsePolicyLink(user.policy) });
+    }
+    layers.push({ layer: 'app', link: parsePolicyLink(appRow.policy) });
+    return explainPolicyChain(action as PolicyAction, layers);
   },
 };

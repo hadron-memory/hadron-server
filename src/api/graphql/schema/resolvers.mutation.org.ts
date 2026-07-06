@@ -1,6 +1,8 @@
 // orgMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
+import { parsePolicyLink } from '../../../lib/policy/index.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   normalizeHandle,
@@ -77,12 +79,26 @@ export const orgMutations = {
 
     updateOrganization: async (
       _: unknown,
-      { id, name, urn, isVisible }: { id: string; name?: string; urn?: string; isVisible?: boolean },
+      {
+        id,
+        name,
+        urn,
+        isVisible,
+        policy,
+      }: { id: string; name?: string; urn?: string; isVisible?: boolean; policy?: unknown },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
       await requireOrgRole(ctx, resolvedId, 'ADMIN');
+
+      // #510: the org-layer action-policy link (cor:acl:040:02). Explicit
+      // null clears the link (= no restriction); omitted preserves.
+      if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
+        throw new GraphQLError('policy must be { allow: string[] } or null.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
 
       // #376: reject a malformed org URN BEFORE storing or cascading it.
       // `propagateOrgUrnRename` treats `<orgUrn>:` as an unambiguous prefix
@@ -99,6 +115,7 @@ export const orgMutations = {
         ...(name ? { name } : {}),
         ...(urn ? { urn } : {}),
         ...(isVisible !== undefined ? { isVisible } : {}),
+        ...(policy !== undefined ? { policy: policy as never } : {}),
       };
 
       // Fast path: no URN change requested → a plain update.
