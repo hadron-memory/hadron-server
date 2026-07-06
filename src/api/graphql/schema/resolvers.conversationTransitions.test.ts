@@ -46,16 +46,12 @@ beforeEach(async () => {
     { orgId: orgA.id, name: 'sage', visibility: 'PERSONAL' },
     adminCtx(),
   );
-  systemMemory = await resolvers.Mutation.createMemory(
-    {},
-    { orgId: orgA.id, name: 'sage-system' },
-    adminCtx(),
-  );
-  await resolvers.Mutation.updateAgent(
-    {},
-    { id: agent.id, systemMemoryId: systemMemory.id },
-    adminCtx(),
-  );
+  // createAgent now auto-provisions the agent's class='system' memory (#518);
+  // read it back rather than creating + attaching a separate one.
+  const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
+  systemMemory = await db.memory.findUniqueOrThrow({
+    where: { id: agentRow.systemMemoryId! },
+  });
 });
 
 // ---------------------------------------------------------------------------
