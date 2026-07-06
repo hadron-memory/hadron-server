@@ -199,6 +199,76 @@ describe('createAgent auto-provisions a system memory', () => {
     expect(promoted.class).toBe('system');
     expect(promoted.name).toBe('wizard-agent System');
   });
+
+  // #519 review (P2): a system memory holds conversation design, not assets —
+  // the auto-provisioned one must opt out of uploads (DB default is true).
+  it('opts the auto-provisioned system memory out of uploads', async () => {
+    const { sys } = await createAgentWithSystem('no-uploads');
+    expect(sys.acceptsUploads).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #519 review (P2): the auto-provisioned system memory's URN is derived from
+// the agent URN, so a rename must move it in lockstep — otherwise the old
+// `${slug}-system` memory keeps the old slug reserved and blocks re-creating
+// an agent at that slug.
+// ---------------------------------------------------------------------------
+
+describe('updateAgent syncs the derived system-memory URN on rename', () => {
+  it('moves `${slug}-system` in lockstep with the agent URN', async () => {
+    const { agent, sys } = await createAgentWithSystem('renamer');
+    expect(sys.urn).toBe(`${orgA.urn}:renamer-system`);
+
+    await resolvers.Mutation.updateAgent(
+      {},
+      { id: agent.id, urn: 'renamed' },
+      adminCtx(),
+    );
+
+    const movedSys = await db.memory.findUniqueOrThrow({ where: { id: sys.id } });
+    expect(movedSys.urn).toBe(`${orgA.urn}:renamed-system`);
+  });
+
+  it('frees the old slug so a new agent can be created there', async () => {
+    const { agent } = await createAgentWithSystem('reuse-me');
+    await resolvers.Mutation.updateAgent(
+      {},
+      { id: agent.id, urn: 'moved-away' },
+      adminCtx(),
+    );
+
+    // Re-creating an agent at the vacated slug must succeed (previously the
+    // stale `reuse-me-system` memory blocked it on the URN-reclaim check).
+    const fresh = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'reuse-me' },
+      adminCtx(),
+    );
+    expect(fresh.systemMemoryId).toBeTruthy();
+    const freshSys = await db.memory.findUniqueOrThrow({ where: { id: fresh.systemMemoryId! } });
+    expect(freshSys.urn).toBe(`${orgA.urn}:reuse-me-system`);
+  });
+
+  it('leaves a wizard-supplied (non-derived) system-memory URN untouched on rename', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'custom-brain' },
+      adminCtx(),
+    );
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'wiz', systemMemoryId: mem.id },
+      adminCtx(),
+    );
+    await resolvers.Mutation.updateAgent(
+      {},
+      { id: agent.id, urn: 'wiz-renamed' },
+      adminCtx(),
+    );
+    const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(after.urn).toBe(`${orgA.urn}:custom-brain`);
+  });
 });
 
 // ---------------------------------------------------------------------------

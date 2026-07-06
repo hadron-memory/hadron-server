@@ -121,6 +121,12 @@ export const agentMutations = {
               urn: systemMemoryUrn,
               name: `${name} System`,
               class: 'system',
+              // A system memory holds conversation design, not user assets —
+              // opt out of uploads (the DB default is true; the asset gate only
+              // checks Memory.acceptsUploads after write auth, so leaving it
+              // true would let these hidden agent-definition memories accept
+              // asset uploads). #519 review.
+              acceptsUploads: false,
               createdBy: ctx.userId ?? ctx.clientId ?? null,
             },
           });
@@ -188,6 +194,35 @@ export const agentMutations = {
               name: `${name ?? agent.name} System`,
               visibility: null,
             },
+          });
+        }
+      }
+
+      // ── URN sync for an auto-derived system memory.
+      // An auto-provisioned system memory's URN is `${agentUrn}-system` (see
+      // createAgent). If the agent's URN changes we must move the memory's URN
+      // in lockstep — otherwise the stale `${oldUrn}-system` memory keeps the
+      // old slug reserved, and re-creating an agent at that slug fails the
+      // system-memory URN-reclaim check (#519 review). Only touch a memory whose
+      // URN still matches the derived pattern: a wizard-supplied system memory
+      // carries its own author-chosen URN we must not rewrite.
+      if (agent.systemMemoryId && newUrn !== undefined && newUrn !== agent.urn) {
+        const derivedOldUrn = `${agent.urn}-system`;
+        const sys = await ctx.db.memory.findUnique({
+          where: { id: agent.systemMemoryId },
+          select: { urn: true },
+        });
+        if (sys?.urn === derivedOldUrn) {
+          await ctx.db.memory.update({
+            where: { id: agent.systemMemoryId },
+            data: {
+              urn: `${newUrn}-system`,
+              updatedBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+          }).catch((err) => {
+            // Best-effort, like the name sync below: a rare collision on the
+            // new URN shouldn't fail the whole agent rename.
+            console.warn('[updateAgent] system memory URN sync failed:', err);
           });
         }
       }
