@@ -15,6 +15,10 @@ spec-era groundwork: `src/lib/nodeCrypto.ts`, `sessionKeyCache`, the
 2. **`class='private'` is the ONLY encryptable class.** Enforced at every
    encrypt entry point. OFF by default at creation; flip-later is an
    explicit product decision once experience accumulates.
+   **Known collision (#516):** the shipped SECRET-mode App flow (Tier 2.5)
+   encrypts the `class='personal'` memories it auto-provisions; PR-1
+   grandfathered that App-key path. Design discussion tracked in #516 —
+   resolve before flipping any encryption default.
 3. **Consequences accepted, not worked around:** headless runs on encrypted
    memories are UNAVAILABLE (no session, no key — mint should fail loud);
    keyword search (tsv) matches nothing inside encrypted fields; vector
