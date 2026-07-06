@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import {
@@ -98,8 +99,19 @@ describe('login handoff codes', () => {
       expect(await redeemLoginCode(code, 'browser-nonce-abc')).toBeNull();
     });
 
-    it('email-flow code (no binding) redeems with no clientState', async () => {
-      const code = await issueLoginCode({ userId, redirect: '/', isNew: false, clientState: null });
+    it('binds via a pre-hashed clientStateHash (email flow, #505)', async () => {
+      // The email flow only has the hash at mint time (raw nonce lived in a
+      // request-time cookie); issueLoginCode must bind on it identically.
+      const nonce = 'email-browser-nonce';
+      const clientStateHash = createHash('sha256').update(nonce).digest('hex');
+      const code = await issueLoginCode({ userId, redirect: '/', isNew: false, clientStateHash });
+      expect(await redeemLoginCode(code, 'wrong')).toBeNull();
+      const again = await issueLoginCode({ userId, redirect: '/', isNew: false, clientStateHash });
+      expect((await redeemLoginCode(again, nonce))?.userId).toBe(userId);
+    });
+
+    it('a code with neither clientState nor clientStateHash is unbound', async () => {
+      const code = await issueLoginCode({ userId, redirect: '/', isNew: false });
       expect((await redeemLoginCode(code))?.userId).toBe(userId);
     });
   });

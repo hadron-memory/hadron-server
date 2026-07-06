@@ -49,16 +49,25 @@ export interface IssueLoginCodeArgs {
   isNew: boolean;
   /**
    * Raw browser nonce the portal set as an HttpOnly cookie at login start
-   * (GitHub flow). When present, redemption REQUIRES the matching nonce —
-   * this is the session-fixation binding. Omit for the email flow.
+   * (GitHub flow, via `client_state`). Hashed here. When present, redemption
+   * REQUIRES the matching nonce — the session-fixation binding.
    */
   clientState?: string | null;
+  /**
+   * Pre-computed SHA-256 of the browser nonce (email flow): the nonce was set
+   * as a cookie at magic-link REQUEST time and only its hash was persisted on
+   * the EmailVerificationToken, so the raw value isn't available at mint time.
+   * Takes precedence over `clientState`. Same binding effect at redemption.
+   */
+  clientStateHash?: string | null;
 }
 
 /** Mint a `login` handoff code and return the raw opaque value (handed to the
  *  browser once, as `?code=`). */
 export async function issueLoginCode(args: IssueLoginCodeArgs): Promise<string> {
   const rawCode = randomBytes(32).toString('hex'); // 256 bits
+  const clientStateHash =
+    args.clientStateHash ?? (args.clientState ? sha256(args.clientState) : null);
   await db.authHandoffCode.create({
     data: {
       codeHash: sha256(rawCode),
@@ -66,7 +75,7 @@ export async function issueLoginCode(args: IssueLoginCodeArgs): Promise<string> 
       userId: args.userId,
       redirect: args.redirect,
       isNew: args.isNew,
-      clientStateHash: args.clientState ? sha256(args.clientState) : null,
+      clientStateHash,
       expiresAt: new Date(Date.now() + HANDOFF_TTL_MS),
     },
   });
