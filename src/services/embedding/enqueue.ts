@@ -75,6 +75,13 @@ export async function enqueueNodeEmbedding(
     // redelivery beats sweep ticks), and work distribution once multiple
     // instances share the queue group. The listener is idempotent (a marker
     // the prompt-drain already cleared resolves to a cheap skip).
+    //
+    // This deliberately does NOT ride evt.node.written.v1 (PR-507 review):
+    // the wake is only reliable when published AFTER the durable marker
+    // stamp above, and that ordering exists solely inside this function —
+    // the write paths fire the fact event concurrently with this enqueue,
+    // so an event-borne wake can race the stamp, ack on "no marker", and
+    // leave the node to the slow sweep. Module-internal job, by design.
     void publishEmbedWake({ nodeId: args.nodeId });
 
     // Prompt-drain: embed now with in-closure plaintext, off the request path.

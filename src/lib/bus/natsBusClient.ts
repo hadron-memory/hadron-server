@@ -13,13 +13,19 @@
  * self-healed to include the token wildcard — otherwise publishes to new
  * subjects under the token fail with a mystifying "no stream matches".
  *
- * Retention (plan §11 D10, decided here): **WorkQueue** — a message is
- * removed once acknowledged, which is exactly job semantics (the DB task row
- * is the durable source of truth, the stream is the wake-up transport,
- * D-2026-06-17-004). The trade-off vs Limits+durable: WorkQueue allows only
- * ONE consumer (filter) per subject — fine for job queues, and the
- * subscribePubSub verb (fan-out, NOT WorkQueue) is reserved for when a
- * feature actually needs multi-consumer delivery.
+ * Retention is decided by subject kind (see the conventions in types.ts):
+ *
+ *   JOB streams (any non-`evt` token): **WorkQueue** — a message is removed
+ *   once acknowledged, which is exactly job semantics (the DB task row is
+ *   the durable source of truth, the stream is the wake-up transport,
+ *   D-2026-06-17-004). The trade-off: WorkQueue allows only ONE consumer
+ *   (filter) per subject — fine for job queues.
+ *
+ *   The EVENT stream (`EVT`, subjects `evt.>`): **Limits** with a bounded
+ *   max_age — WorkQueue physically can't fan out (one consumer per subject),
+ *   so events retain messages for a window and each subscriber tracks its
+ *   own durable cursor. The age bound (not ack-based removal) is what lets a
+ *   restarting subscriber resume and a NEW subscriber replay recent history.
  */
 
 import { connect, type NatsConnection } from '@nats-io/transport-node';
@@ -71,6 +77,14 @@ const NAK_DELAY_MS = 15_000;
 // config comment). 8 is generous for LLM-scale handlers; job features can
 // add their own tighter throttle.
 const MAX_ACK_PENDING = 8;
+// Event-stream retention window (Limits streams): long enough that a
+// restarting/redeployed subscriber never misses events, short enough that a
+// BRAND-NEW subscriber's DeliverPolicy.All replay stays cheap. Event
+// handlers are idempotent by contract, so the exact value is operational
+// tuning, not correctness.
+const EVENT_MAX_AGE_NS = 48 * 60 * 60 * 1_000_000_000; // 48h
+// The single fan-out stream for `evt.>` subjects (types.ts conventions).
+const EVENT_STREAM = 'EVT';
 
 export class NatsBusClient implements BusClient {
   private readonly ensuredStreams = new Set<string>();
@@ -118,13 +132,15 @@ export class NatsBusClient implements BusClient {
       }
       // Genuinely absent (or racing another node) — add() is idempotent for
       // an identical config and throws only on a conflicting one, which is
-      // a deploy bug we WANT loud.
+      // a deploy bug we WANT loud. Retention by subject kind: the EVT stream
+      // fans out (Limits + age window), job streams are queues (WorkQueue).
       await jsm.streams.add({
         name: stream,
         subjects: [wildcard],
-        retention: RetentionPolicy.Workqueue,
+        retention: stream === EVENT_STREAM ? RetentionPolicy.Limits : RetentionPolicy.Workqueue,
         storage: StorageType.File,
         duplicate_window: DUPE_WINDOW_NS,
+        ...(stream === EVENT_STREAM ? { max_age: EVENT_MAX_AGE_NS } : {}),
       });
     }
     this.ensuredStreams.add(stream);
@@ -139,24 +155,37 @@ export class NatsBusClient implements BusClient {
     });
   }
 
-  async subscribeQueue(
-    subject: string,
-    queueGroup: string,
+  /**
+   * Idempotently provision a durable consumer on `stream` filtered to
+   * `filterSubject`, then attach `handler` with the shared ack discipline:
+   * malformed JSON terminates the message (permanent, don't burn
+   * redeliveries — PR-462 review), handler errors nak with a delay for
+   * spaced redelivery up to MAX_DELIVER, success acks. Shared by
+   * subscribeQueue (jobs) and subscribePubSub (events) — the delivery
+   * contract is identical; only stream retention differs.
+   */
+  private async consumeDurable(
+    stream: string,
+    durableName: string,
+    filterSubject: string,
     handler: BusQueueHandler,
   ): Promise<() => Promise<void>> {
-    const stream = await this.ensureStream(subject);
     const jsm = await jetstreamManager(this.nc);
     try {
-      await jsm.consumers.info(stream, queueGroup);
+      await jsm.consumers.info(stream, durableName);
     } catch (err) {
       if (!(err instanceof JetStreamApiError && err.code === JetStreamApiCodes.ConsumerNotFound)) {
         throw err;
       }
       await jsm.consumers.add(stream, {
-        durable_name: queueGroup,
+        durable_name: durableName,
         ack_policy: AckPolicy.Explicit,
+        // All (not New): covers the gap between stream creation and this
+        // consumer's first registration — for events it also means a new
+        // subscriber replays the retained window, which idempotent handlers
+        // absorb (types.ts contract).
         deliver_policy: DeliverPolicy.All,
-        filter_subject: subject,
+        filter_subject: filterSubject,
         ack_wait: ACK_WAIT_NS,
         max_deliver: MAX_DELIVER,
         // Concurrency safety net: the broker stops delivering when this many
@@ -166,7 +195,7 @@ export class NatsBusClient implements BusClient {
         max_ack_pending: MAX_ACK_PENDING,
       });
     }
-    const consumer = await jetstream(this.nc).consumers.get(stream, queueGroup);
+    const consumer = await jetstream(this.nc).consumers.get(stream, durableName);
     const messages = await consumer.consume({
       callback: (m) => {
         void (async () => {
@@ -202,11 +231,39 @@ export class NatsBusClient implements BusClient {
     };
   }
 
-  async subscribePubSub(
-    _subjectPattern: string,
-    _handler: BusQueueHandler,
+  async subscribeQueue(
+    subject: string,
+    queueGroup: string,
+    handler: BusQueueHandler,
   ): Promise<() => Promise<void>> {
-    throw new NotImplementedError('subscribePubSub');
+    const stream = await this.ensureStream(subject);
+    return this.consumeDurable(stream, queueGroup, subject, handler);
+  }
+
+  async subscribePubSub(
+    subjectPattern: string,
+    subscriberName: string,
+    handler: BusQueueHandler,
+  ): Promise<() => Promise<void>> {
+    // Event subjects live on the fan-out stream — reject a job subject here
+    // loudly: subscribing it via pub/sub would silently compete with the
+    // queue consumer for WorkQueue-retained messages.
+    if (streamNameForSubject(subjectPattern) !== EVENT_STREAM) {
+      throw new Error(
+        `subscribePubSub is for event subjects ("evt.…"); got "${subjectPattern}". ` +
+          `Use subscribeQueue for job subjects (src/lib/bus/types.ts conventions).`,
+      );
+    }
+    // The durable-consumer name must be broker-safe (no dots — JetStream
+    // reserves them) and stable across releases: it IS the subscriber's
+    // resume cursor.
+    if (!/^[A-Za-z0-9_-]+$/.test(subscriberName)) {
+      throw new Error(
+        `Invalid subscriberName "${subscriberName}" — use [A-Za-z0-9_-]+ (it names the durable consumer).`,
+      );
+    }
+    const stream = await this.ensureStream(subjectPattern);
+    return this.consumeDurable(stream, subscriberName, subjectPattern, handler);
   }
 
   async requestReply(

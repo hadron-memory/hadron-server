@@ -40,6 +40,7 @@ import {
 } from './provisioning/personal-workspace.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
+import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
 import { getBusClient } from './lib/bus/index.js';
 import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js';
@@ -1037,6 +1038,19 @@ export async function createServer(): Promise<Express> {
         }
       })
       .catch(() => {});
+  }
+
+  // Event pivot: the git mirror consumes evt.node.written.v1. Registers its
+  // in-process fallback unconditionally (bus-off deployments keep mirroring)
+  // and adds the durable bus subscription when a broker is up. Skipped in
+  // tests, which drive handleNodeWrittenForGit directly.
+  if (process.env.NODE_ENV !== 'test') {
+    startGitMirrorSubscriber(db).catch((err) => {
+      // Same boot posture as the embed listener: a subscribe failure must
+      // not take boot down — the local fallback registered above the bus
+      // attempt keeps mirroring.
+      console.error('[git-mirror] failed to start bus subscriber (local fallback active):', err);
+    });
   }
 
   // Spec 040 — headless runs: scheduler + run listener + sweep. The same

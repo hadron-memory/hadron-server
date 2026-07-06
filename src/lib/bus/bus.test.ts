@@ -5,7 +5,8 @@
  * stream-name derivation, and the reserved-verb NotImplementedError.
  *
  * Integration layer (gated on BUS_TEST_NATS_URL): echo round-trip, dedup
- * window, and malformed-payload termination against a real broker — start
+ * window, malformed-payload termination, and pub/sub fan-out (event pivot)
+ * against a real broker — start
  * one with `docker compose up -d nats` and run
  * `BUS_TEST_NATS_URL=nats://localhost:4222 pnpm vitest run src/lib/bus`.
  * CI doesn't set the var, so the suite skips there (plan §6: no broker
@@ -194,12 +195,53 @@ describe.runIf(!!BROKER)('NATS integration', () => {
   it('reserved verbs throw NotImplementedError', async () => {
     const client = await NatsBusClient.connect(BROKER as string, process.env.BUS_TEST_NATS_TOKEN);
     try {
-      await expect(client.subscribePubSub('echo.>', async () => {})).rejects.toBeInstanceOf(
-        NotImplementedError,
-      );
       await expect(client.requestReply('echo.rpc.v1', {}, 1000)).rejects.toBeInstanceOf(
         NotImplementedError,
       );
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('subscribePubSub rejects job subjects and bad subscriber names', async () => {
+    const client = await NatsBusClient.connect(BROKER as string, process.env.BUS_TEST_NATS_TOKEN);
+    try {
+      await expect(
+        client.subscribePubSub('echo.ping.v1', 'sub-a', async () => {}),
+      ).rejects.toThrow(/event subjects/);
+      await expect(
+        client.subscribePubSub('evt.thing.done.v1', 'has.dots', async () => {}),
+      ).rejects.toThrow(/subscriberName/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('subscribePubSub fans out: every subscriber gets every event', async () => {
+    const client = await NatsBusClient.connect(BROKER as string, process.env.BUS_TEST_NATS_TOKEN);
+    try {
+      // Unique marker per run — the EVT stream retains events (Limits, not
+      // WorkQueue), so a dirty dev broker can replay earlier runs into a
+      // resumed durable. Idempotent-handler contract in miniature.
+      const marker = `fan-${process.pid}-${Date.now()}`;
+      const hits: Record<string, boolean> = {};
+      const done: Promise<void>[] = [];
+      for (const name of ['fan-sub-a', 'fan-sub-b']) {
+        let resolveHit!: () => void;
+        done.push(new Promise<void>((resolve) => (resolveHit = resolve)));
+        await client.subscribePubSub('evt.thing.done.v1', name, async (msg) => {
+          if ((msg.payload as { marker?: string })?.marker === marker) {
+            hits[name] = true;
+            resolveHit();
+          }
+        });
+      }
+      await client.publish('evt.thing.done.v1', { marker }, { idempotencyKey: marker });
+      await Promise.race([
+        Promise.all(done),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('fan-out timeout (5s)')), 5000)),
+      ]);
+      expect(hits).toEqual({ 'fan-sub-a': true, 'fan-sub-b': true });
     } finally {
       await client.close();
     }

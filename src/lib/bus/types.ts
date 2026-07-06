@@ -15,7 +15,18 @@
  * payload and subject convention, not in broker ACLs.
  *
  * Subjects are versioned and dot-delimited, owned by hadron-server
- * (D-2026-06-17-003): e.g. `webimport.requested.v1`.
+ * (D-2026-06-17-003). Two kinds, distinguished by the top-level token:
+ *
+ *   JOBS   `<module>.<verb>.v1`      e.g. `embed.wake.v1`, `run.requested.v1`
+ *          Commands — "this work needs doing". One consumer per subject
+ *          (WorkQueue retention); published via publish + subscribeQueue.
+ *
+ *   EVENTS `evt.<entity>.<happened>.v1`   e.g. `evt.node.written.v1`
+ *          Facts — "this happened", past tense, IDs only (never node
+ *          content: plaintext must not transit the broker). Any number of
+ *          modules subscribe independently (Limits retention, durable
+ *          consumer per subscriber); published via publish + subscribePubSub.
+ *          The `evt.` prefix is what routes a subject to the fan-out stream.
  */
 
 /** A decoded message delivered to a queue handler. */
@@ -48,9 +59,9 @@ export interface BusPublishOpts {
 
 /**
  * The narrow platform bus interface (D-2026-06-11-007, verbatim shape).
- * V1 implements publish + subscribeQueue for real; subscribePubSub and
- * requestReply throw NotImplementedError until a feature needs them —
- * interface complete, implementation on demand.
+ * publish + subscribeQueue (jobs) and subscribePubSub (events) are
+ * implemented; requestReply throws NotImplementedError until a feature
+ * needs it — interface complete, implementation on demand.
  */
 export interface BusClient {
   /** JSON-encode and durably publish payload on subject. */
@@ -69,9 +80,25 @@ export interface BusClient {
     handler: BusQueueHandler,
   ): Promise<() => Promise<void>>;
 
-  /** Fan-out pub/sub over a subject pattern. NOT IMPLEMENTED in V1. */
+  /**
+   * Durable fan-out subscription for EVENT subjects (`evt.…` — see the
+   * subject conventions above). Unlike subscribeQueue, EVERY subscriber
+   * (distinct `subscriberName`) receives every message: events state facts
+   * ("node was written"), and each interested module consumes them
+   * independently. Delivery is still at-least-once with explicit ack —
+   * handlers MUST be idempotent, same contract as queue handlers. A
+   * subscriber that first appears after messages were published starts from
+   * the retained history (bounded by the event stream's age limit), so
+   * handlers must also tolerate replays of recent events.
+   *
+   * `subscriberName` identifies the durable consumer (one per module, e.g.
+   * `git-mirror`) — restarts resume where that subscriber left off. Returns
+   * an unsubscribe function (stops consuming; the durable consumer is
+   * retained).
+   */
   subscribePubSub(
     subjectPattern: string,
+    subscriberName: string,
     handler: BusQueueHandler,
   ): Promise<() => Promise<void>>;
 
@@ -82,7 +109,7 @@ export interface BusClient {
   close(): Promise<void>;
 }
 
-/** Thrown by the V1 client for the two not-yet-needed verbs. */
+/** Thrown by the V1 client for the not-yet-needed requestReply verb. */
 export class NotImplementedError extends Error {
   constructor(what: string) {
     super(`${what} is not implemented in the V1 bus client (interface reserved by D-2026-06-11-007).`);

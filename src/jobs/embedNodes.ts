@@ -457,6 +457,12 @@ export async function handleEmbedWake(
  * Start the same-process bus listener. Resolves to the unsubscribe function,
  * or null when the bus is off (NATS_URL unset / broker unreachable) — the
  * sweep loop is the fallback either way.
+ *
+ * Embedding deliberately does NOT subscribe to evt.node.written.v1 (PR-507
+ * review): its wake must be ordered AFTER the durable marker stamp, which
+ * only enqueueNodeEmbedding can guarantee (see the comment there). The
+ * event serves modules without a write-path ordering dependency (git
+ * mirror).
  */
 export async function startEmbeddingBusListener(
   db: PrismaClient,
