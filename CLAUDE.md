@@ -34,6 +34,25 @@ When referring a human to a node, link `https://hadronmemory.com/app/u/<URN>`.
 
 Quick reference for AI agents working in this repo. Updated 2026-06-25.
 
+## Production DB (alpha)
+
+Alpha is the prod host (Debian, Hetzner Oregon). Postgres runs **bare metal**;
+Hadron runs in Docker via Komodo. The container no longer ships `psql` and
+`DATABASE_URL` is not a plain container env var (only `DOPPLER_TOKEN` is —
+Doppler injects the URL at process start). To run an app-user query, fetch the
+URL via Doppler and run the **host's** psql against it (keep it in a var so the
+password isn't echoed):
+
+```bash
+ssh root@alpha   # holger is not in the docker group; root for docker/pg ops
+URL=$(docker exec hadron-server sh -c 'doppler run -- printenv DATABASE_URL' | tr -d '\r' | sed 's/host.docker.internal/localhost/')
+psql "$URL" -c 'SELECT ...'
+# Superuser ops (DDL you don't own, P3009 recovery): sudo -u postgres psql -d hadron
+```
+
+Full runbook (SSH accounts, Prisma/P3009 recovery, ownership fixes, Komodo
+layout, network notes): [`ops:alpha:db-access`](https://hadronmemory.com/app/u/hrn:node:hadronmemory.com::dev::ops:alpha:db-access).
+
 ## Local Postgres setup
 
 The trust boundary is the LX container. The OS user (`root`) and the Postgres
