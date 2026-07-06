@@ -24,6 +24,7 @@ import { signJwt } from '../../auth/index.js';
 let server: Server;
 let baseUrl: string;
 let userId: string;
+let orgId: string;
 
 beforeAll(async () => {
   const app = await createServer();
@@ -44,6 +45,11 @@ beforeEach(async () => {
     data: { githubId: 47701, githubUsername: 'handoff-int', roles: ['READER'] },
   });
   userId = user.id;
+  const org = await db.organization.create({ data: { name: 'exch-org', urn: 'exch-org' } });
+  orgId = org.id;
+  // The initiating user is an ADMIN of this org (the role /auth/microsoft/start
+  // now requires, #506).
+  await db.orgMember.create({ data: { organizationId: orgId, userId, role: 'ADMIN' } });
 });
 
 const postJson = (path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -93,16 +99,44 @@ describe('POST /auth/microsoft/start', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns a nonce for a valid Bearer token', async () => {
+  it('returns a nonce for an org admin (#506)', async () => {
     const jwt = await signJwt({ sub: userId, roles: ['READER'] });
     const res = await postJson(
       '/auth/microsoft/start',
-      { orgId: 'o1', redirect: '/app/orgs/o1/integrations' },
+      { orgId, redirect: `/app/orgs/${orgId}/integrations` },
       { authorization: `Bearer ${jwt}` },
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { nonce: string };
     expect(body.nonce).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('403s when the caller is not an admin of the target org (#506)', async () => {
+    // A different org the caller has no membership in — attaching a mailbox
+    // here would be a cross-tenant write.
+    const otherOrg = await db.organization.create({ data: { name: 'other-org', urn: 'other-org' } });
+    const jwt = await signJwt({ sub: userId, roles: ['READER'] });
+    const res = await postJson(
+      '/auth/microsoft/start',
+      { orgId: otherOrg.id, redirect: '/' },
+      { authorization: `Bearer ${jwt}` },
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('403s when the caller is only a non-admin member (#506)', async () => {
+    // CONTRIBUTOR in an org — managing integrations requires ADMIN.
+    const contributor = await db.user.create({
+      data: { githubId: 47702, githubUsername: 'handoff-contrib', roles: ['READER'] },
+    });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: contributor.id, role: 'CONTRIBUTOR' } });
+    const jwt = await signJwt({ sub: contributor.id, roles: ['READER'] });
+    const res = await postJson(
+      '/auth/microsoft/start',
+      { orgId, redirect: '/' },
+      { authorization: `Bearer ${jwt}` },
+    );
+    expect(res.status).toBe(403);
   });
 });
 

@@ -28,6 +28,7 @@ import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
+import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError } from './lib/urn.js';
 import { normalizeHandleOrNull } from './lib/userHandle.js';
@@ -758,9 +759,11 @@ export async function createServer(): Promise<Express> {
       return;
     }
     let userId: string;
+    let roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined;
     try {
       const payload = await verifyJwt(authHeader.slice(7));
       userId = payload.sub;
+      roles = payload.roles;
     } catch {
       res.status(401).json({ error: 'Invalid or expired token' });
       return;
@@ -771,6 +774,20 @@ export async function createServer(): Promise<Express> {
     const redirect = typeof body.redirect === 'string' && body.redirect ? body.redirect : '/';
     if (!orgId) {
       res.status(400).json({ error: 'orgId is required' });
+      return;
+    }
+
+    // #506: the Bearer JWT authenticates the caller but says nothing about
+    // which org they may act on. Without this gate any authenticated user could
+    // attach their own Microsoft mailbox to an ARBITRARY org (the nonce carries
+    // orgId straight to /auth/microsoft/callback's ExchangeConnection upsert).
+    // Require org ADMIN — the same role deleteExchangeConnection enforces.
+    // requireOrgRole short-circuits for platform ADMIN/OWNER and rejects
+    // revoked (soft-deleted) members.
+    try {
+      await requireOrgRole({ db, userId, roles }, orgId, 'ADMIN');
+    } catch {
+      res.status(403).json({ error: 'Forbidden: you must be an admin of this organization.' });
       return;
     }
 
@@ -831,6 +848,28 @@ export async function createServer(): Promise<Express> {
 
     if (!pending || pending.expiresAt < Date.now()) {
       res.status(400).json({ error: 'Invalid or expired state' });
+      return;
+    }
+
+    // #506 defense-in-depth: /auth/microsoft/start already gated on org ADMIN,
+    // but authority can narrow during the OAuth round-trip (the ~2-min nonce
+    // window — e.g. the user's membership is revoked). Re-verify before writing
+    // the connection. Roles aren't carried on this browser redirect, so fetch
+    // them for requireOrgRole's platform-admin short-circuit.
+    try {
+      const initiator = await db.user.findUnique({
+        where: { id: pending.userId },
+        select: { roles: true },
+      });
+      await requireOrgRole(
+        { db, userId: pending.userId, roles: initiator?.roles },
+        pending.orgId,
+        'ADMIN',
+      );
+    } catch {
+      const errorUrl = new URL('/app/dashboard', frontendUrl);
+      errorUrl.searchParams.set('exchangeError', 'not_authorized');
+      res.redirect(errorUrl.toString());
       return;
     }
 
