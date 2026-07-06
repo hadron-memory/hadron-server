@@ -1,4 +1,5 @@
 import type { EncryptionKey } from './crypto.js';
+import { getRequestKey } from './requestKeys.js';
 
 /**
  * In-memory, ref-counted cache mapping session IDs to the data keys needed to
@@ -50,14 +51,20 @@ export class SessionKeyCache {
     memories.add(memoryId);
   }
 
-  /** Look up the key for a given memory; null if no session is active. */
+  /**
+   * Look up the key for a given memory; null if none is available. The
+   * CURRENT REQUEST's staged keys (x-hadron-memory-keys header, spec 041)
+   * take precedence and are visible only inside that request's async
+   * context — a concurrent request for the same memory sees nothing
+   * (PR-514 review, Codex P1). Session-lived keys come from the global map.
+   */
   getByMemoryId(memoryId: string): EncryptionKey | null {
-    return this.byMemory.get(memoryId)?.key ?? null;
+    return getRequestKey(memoryId) ?? this.byMemory.get(memoryId)?.key ?? null;
   }
 
-  /** True if the cache has any active session for the given memory. */
+  /** True if a key is available for the given memory (request or session). */
   hasMemory(memoryId: string): boolean {
-    return this.byMemory.has(memoryId);
+    return getRequestKey(memoryId) != null || this.byMemory.has(memoryId);
   }
 
   /**

@@ -20,6 +20,7 @@ import {
   MemoryUnlockError,
   DEFAULT_KDF_PARAMS,
 } from './memoryUnlock.js';
+import { requestKeyStorage } from './requestKeys.js';
 
 // Interactive-strength scrypt is slow by design; a light cost keeps the
 // suite fast while exercising the same code path.
@@ -101,40 +102,61 @@ describe('stageRequestMemoryKeys', () => {
     memoryId = memory.id;
   });
 
-  it('stages a verified key under a request session and the evict releases it', async () => {
-    const evict = await stageRequestMemoryKeys(
-      db,
-      JSON.stringify([{ memory: memoryId, dataKey: key.raw.toString('base64') }]),
-    );
-    expect(evict).not.toBeNull();
-    expect(sessionKeyCache.getByMemoryId(memoryId)?.raw.equals(key.raw)).toBe(true);
-    evict!();
+  it('stages a verified key visible ONLY inside the request scope (PR-514 Codex P1)', async () => {
+    await requestKeyStorage.run(new Map(), async () => {
+      await stageRequestMemoryKeys(
+        db,
+        JSON.stringify([{ memory: memoryId, dataKey: key.raw.toString('base64') }]),
+      );
+      expect(sessionKeyCache.getByMemoryId(memoryId)?.raw.equals(key.raw)).toBe(true);
+      // A CONCURRENT request (its own store) sees nothing.
+      await requestKeyStorage.run(new Map(), async () => {
+        expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
+      });
+    });
+    // Outside every request scope — e.g. after an aborted response — the
+    // key is unreachable with no eviction bookkeeping at all.
     expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
   });
 
   it('absent header is a no-op; malformed header is typed', async () => {
-    expect(await stageRequestMemoryKeys(db, undefined)).toBeNull();
-    await expect(stageRequestMemoryKeys(db, 'not json')).rejects.toBeInstanceOf(MemoryUnlockError);
+    await requestKeyStorage.run(new Map(), async () => {
+      await expect(stageRequestMemoryKeys(db, undefined)).resolves.toBeUndefined();
+      await expect(stageRequestMemoryKeys(db, 'not json')).rejects.toBeInstanceOf(
+        MemoryUnlockError,
+      );
+    });
   });
 
-  it('wrong key fails typed and leaves nothing staged', async () => {
+  it('wrong key fails typed and nothing escapes the request scope', async () => {
     const wrong = generateDataKey();
-    await expect(
-      stageRequestMemoryKeys(
-        db,
-        JSON.stringify([{ memory: memoryId, dataKey: wrong.raw.toString('base64') }]),
-      ),
-    ).rejects.toMatchObject({ code: 'WRONG_KEY' });
-    expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
+    await requestKeyStorage.run(new Map(), async () => {
+      await expect(
+        stageRequestMemoryKeys(
+          db,
+          JSON.stringify([{ memory: memoryId, dataKey: wrong.raw.toString('base64') }]),
+        ),
+      ).rejects.toMatchObject({ code: 'WRONG_KEY' });
+      expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
+    });
   });
 
   it('a not-encrypted memory rejects NOT_ENCRYPTED', async () => {
     await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: false } });
-    await expect(
-      stageRequestMemoryKeys(
-        db,
-        JSON.stringify([{ memory: memoryId, dataKey: key.raw.toString('base64') }]),
-      ),
-    ).rejects.toMatchObject({ code: 'NOT_ENCRYPTED' });
+    await requestKeyStorage.run(new Map(), async () => {
+      await expect(
+        stageRequestMemoryKeys(
+          db,
+          JSON.stringify([{ memory: memoryId, dataKey: key.raw.toString('base64') }]),
+        ),
+      ).rejects.toMatchObject({ code: 'NOT_ENCRYPTED' });
+    });
+  });
+
+  it('session-lived keys in the global cache still resolve outside any request scope', () => {
+    sessionKeyCache.set('sess-1', memoryId, key);
+    expect(sessionKeyCache.getByMemoryId(memoryId)?.raw.equals(key.raw)).toBe(true);
+    sessionKeyCache.evict('sess-1');
+    expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
   });
 });

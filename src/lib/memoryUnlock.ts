@@ -10,14 +10,16 @@
  *     data key. Every unlock verifies against it, so a wrong passphrase is
  *     a typed WRONG_KEY — never garbage plaintext leaking to the caller.
  *
- * Keys enter per request (the `x-hadron-memory-keys` header, staged into
- * sessionKeyCache under a synthetic `req:` session and evicted on response
- * end) or per live session (startAgentSession / the MCP unlock tool). All
- * existing encrypt/decrypt call sites consult sessionKeyCache by memoryId,
- * so staging is the ONLY integration point stateless surfaces need.
+ * Keys enter per request (the `x-hadron-memory-keys` header, staged into a
+ * request-scoped AsyncLocalStorage store — see requestKeys.ts — invisible
+ * to concurrent requests and gone with the request's async context) or per
+ * live session (startAgentSession / the MCP unlock tool, via the global
+ * sessionKeyCache). All existing encrypt/decrypt call sites consult
+ * sessionKeyCache.getByMemoryId, which checks the request store first, so
+ * staging is the ONLY integration point stateless surfaces need.
  */
 
-import { scryptSync, randomBytes, randomUUID } from 'crypto';
+import { scryptSync, randomBytes } from 'crypto';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import {
   parseDataKey,
@@ -28,7 +30,7 @@ import {
   isCiphertext,
   type EncryptionKey,
 } from './crypto.js';
-import { sessionKeyCache } from './sessionKeyCache.js';
+import { setRequestKey } from './requestKeys.js';
 import { resolveMemoryRef } from './entityRef/memoryRef.js';
 
 const KEY_CHECK_PLAINTEXT = 'hadron-key-check:v1';
@@ -156,17 +158,20 @@ export interface RequestKeyEntry {
 export const REQUEST_KEYS_HEADER = 'x-hadron-memory-keys';
 
 /**
- * Stage per-request unlock keys from the raw header value into
- * sessionKeyCache under a synthetic `req:<uuid>` session. Returns the evict
- * callback the transport MUST invoke on response end (res.on('finish')), or
- * null when the header is absent. Throws MemoryUnlockError on malformed
- * input / wrong keys — surfacing at context time, before any resolver runs.
+ * Stage per-request unlock keys from the raw header value into the CURRENT
+ * request's AsyncLocalStorage store (src/lib/requestKeys.ts) — never the
+ * global cache, so concurrent requests can't observe them and an aborted
+ * response leaves nothing behind (PR-514 review, Codex P1 ×2): the store is
+ * garbage-collected with the request's async context, finished or not.
+ * Must run inside requestKeyStorage.run(...) (the /graphql middleware
+ * establishes it). Throws MemoryUnlockError on malformed input / wrong
+ * keys — surfacing at context time, before any resolver runs.
  */
 export async function stageRequestMemoryKeys(
   db: PrismaClient,
   headerValue: string | string[] | undefined,
-): Promise<(() => void) | null> {
-  if (!headerValue) return null;
+): Promise<void> {
+  if (!headerValue) return;
   const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
   let entries: RequestKeyEntry[];
   try {
@@ -179,28 +184,20 @@ export async function stageRequestMemoryKeys(
       'BAD_UNLOCK_INPUT',
     );
   }
-  const requestSessionId = `req:${randomUUID()}`;
-  let staged = 0;
-  try {
-    for (const entry of entries) {
-      if (!entry || typeof entry.memory !== 'string') {
-        throw new MemoryUnlockError('Each header entry needs a memory ref.', 'BAD_UNLOCK_INPUT');
-      }
-      const { id: memoryId } = await resolveMemoryRef(db, entry.memory);
-      const memory = await db.memory.findUniqueOrThrow({
-        where: { id: memoryId },
-        select: { isEncrypted: true, kdfSalt: true, kdfParams: true, keyVerifier: true },
-      });
-      if (!memory.isEncrypted) {
-        throw new MemoryUnlockError('Memory is not encrypted.', 'NOT_ENCRYPTED');
-      }
-      const key = resolveSuppliedKey(memory, entry);
-      sessionKeyCache.set(requestSessionId, memoryId, key);
-      staged += 1;
+  for (const entry of entries) {
+    if (!entry || typeof entry.memory !== 'string') {
+      throw new MemoryUnlockError('Each header entry needs a memory ref.', 'BAD_UNLOCK_INPUT');
     }
-  } catch (err) {
-    if (staged > 0) sessionKeyCache.evict(requestSessionId);
-    throw err;
+    const { id: memoryId } = await resolveMemoryRef(db, entry.memory);
+    const memory = await db.memory.findUniqueOrThrow({
+      where: { id: memoryId },
+      select: { isEncrypted: true, kdfSalt: true, kdfParams: true, keyVerifier: true },
+    });
+    if (!memory.isEncrypted) {
+      throw new MemoryUnlockError('Memory is not encrypted.', 'NOT_ENCRYPTED');
+    }
+    // Verified before staging; partial staging on a later failure is
+    // harmless — the store is request-local and dies with the request.
+    setRequestKey(memoryId, resolveSuppliedKey(memory, entry));
   }
-  return () => sessionKeyCache.evict(requestSessionId);
 }

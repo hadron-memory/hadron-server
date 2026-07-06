@@ -16,6 +16,7 @@ import { isCiphertext } from '../../../lib/crypto.js';
 import { decryptNodeFields } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { stageRequestMemoryKeys } from '../../../lib/memoryUnlock.js';
+import { requestKeyStorage } from '../../../lib/requestKeys.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -128,20 +129,23 @@ describe('encryptMemory — passphrase path (spec 041)', () => {
 
   it('full loop: passphrase unlock via header staging decrypts what encryptMemory wrote', async () => {
     await resolvers.Mutation.encryptMemory({}, { memoryId, passphrase: 'open sesame' }, ownerCtx());
-    // Wrong passphrase → typed WRONG_KEY at staging time.
-    await expect(
-      stageRequestMemoryKeys(db, JSON.stringify([{ memory: memoryId, passphrase: 'wrong' }])),
-    ).rejects.toMatchObject({ code: 'WRONG_KEY' });
-    // Right passphrase → staged key decrypts the row.
-    const evict = await stageRequestMemoryKeys(
-      db,
-      JSON.stringify([{ memory: memoryId, passphrase: 'open sesame' }]),
-    );
-    const node = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
-    decryptNodeFields(node, { id: memoryId, isEncrypted: true });
-    expect(node.content).toBe('my secret plaintext');
-    expect(node.abstract).toBe('A secret abstract.');
-    expect(node.data).toEqual({ mood: 'good' });
-    evict!();
+    await requestKeyStorage.run(new Map(), async () => {
+      // Wrong passphrase → typed WRONG_KEY at staging time.
+      await expect(
+        stageRequestMemoryKeys(db, JSON.stringify([{ memory: memoryId, passphrase: 'wrong' }])),
+      ).rejects.toMatchObject({ code: 'WRONG_KEY' });
+      // Right passphrase → staged key decrypts the row, inside this request.
+      await stageRequestMemoryKeys(
+        db,
+        JSON.stringify([{ memory: memoryId, passphrase: 'open sesame' }]),
+      );
+      const node = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+      decryptNodeFields(node, { id: memoryId, isEncrypted: true });
+      expect(node.content).toBe('my secret plaintext');
+      expect(node.abstract).toBe('A secret abstract.');
+      expect(node.data).toEqual({ mood: 'good' });
+    });
+    // Outside the request scope the memory is locked again.
+    expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
   });
 });

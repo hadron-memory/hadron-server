@@ -47,6 +47,7 @@ import {
   MemoryUnlockError,
   REQUEST_KEYS_HEADER,
 } from './lib/memoryUnlock.js';
+import { requestKeyStorage } from './lib/requestKeys.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
 import { getBusClient } from './lib/bus/index.js';
 import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js';
@@ -609,24 +610,25 @@ export async function createServer(): Promise<Express> {
 
   app.use(
     '/graphql',
+    // Spec 041: establish the request-scoped key store BEFORE Apollo so the
+    // context builder and every resolver run inside it. Keys staged here are
+    // invisible to concurrent requests and vanish with the request's async
+    // context — aborted responses included (PR-514 review, Codex P1 ×2).
+    (_req, _res, next) => requestKeyStorage.run(new Map(), next),
     expressMiddleware(apollo, {
-      context: async ({ req, res }) => {
+      context: async ({ req }) => {
         const auth = await resolveAuthContext(req, db);
-        // Spec 041: stage caller-held unlock keys from the request header
-        // into sessionKeyCache under a synthetic req:<uuid> session — every
-        // existing encrypt/decrypt call site consults the cache by memoryId,
-        // so this is the whole stateless-unlock integration. Evicted on
-        // response end; a wrong key fails HERE (typed), before any resolver.
-        const evictKeys = await stageRequestMemoryKeys(
-          db,
-          req.headers[REQUEST_KEYS_HEADER],
-        ).catch((err) => {
+        // Stage caller-held unlock keys from the request header. Every
+        // encrypt/decrypt call site consults sessionKeyCache.getByMemoryId,
+        // which checks the request store first — this is the whole
+        // stateless-unlock integration. A wrong key fails HERE (typed),
+        // before any resolver.
+        await stageRequestMemoryKeys(db, req.headers[REQUEST_KEYS_HEADER]).catch((err) => {
           if (err instanceof MemoryUnlockError) {
             throw new GraphQLError(err.message, { extensions: { code: err.code } });
           }
           throw err;
         });
-        if (evictKeys) res.on('finish', evictKeys);
         return { db, ...auth };
       },
     }),
