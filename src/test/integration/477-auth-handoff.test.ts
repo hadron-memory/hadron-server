@@ -106,6 +106,23 @@ describe('POST /auth/microsoft/start', () => {
   });
 });
 
+describe('POST /auth/email', () => {
+  it('rejects a request with no clientState (#505 — no unbound codes)', async () => {
+    // Without the request-time browser nonce the minted handoff code would be
+    // unbound and transferable — the email session-fixation vector. Must 400
+    // BEFORE sending anything.
+    const res = await postJson('/auth/email', { email: 'a@example.test' });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/client_state is required/);
+  });
+
+  it('rejects a request with no email', async () => {
+    const res = await postJson('/auth/email', { clientState: 'n' });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('GET /auth/microsoft', () => {
   it('rejects a missing nonce with 400 (no JWT-in-URL path anymore)', async () => {
     const res = await fetch(`${baseUrl}/auth/microsoft`, { redirect: 'manual' });

@@ -20,12 +20,21 @@ export async function sendMagicLink(
   email: string,
   db: PrismaClient,
   redirect?: string,
+  /** #505: SHA-256 of the portal's request-time browser nonce, persisted so the
+   *  handoff code minted at verify time binds to the requesting browser. */
+  clientStateHash?: string,
 ): Promise<void> {
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + TOKEN_EXPIRY_MINUTES * 60 * 1000);
 
   await db.emailVerificationToken.create({
-    data: { id: generateId(), email: email.toLowerCase(), token, expiresAt },
+    data: {
+      id: generateId(),
+      email: email.toLowerCase(),
+      token,
+      expiresAt,
+      clientStateHash: clientStateHash ?? null,
+    },
   });
 
   // `||` (not `??`) so empty-string BASE_URL / PORT — e.g. shell `BASE_URL= node ...`
@@ -56,7 +65,7 @@ export async function sendMagicLink(
 export async function verifyMagicLink(
   token: string,
   db: PrismaClient,
-): Promise<{ email: string } | null> {
+): Promise<{ email: string; clientStateHash: string | null } | null> {
   const record = await db.emailVerificationToken.findUnique({
     where: { token },
   });
@@ -70,5 +79,5 @@ export async function verifyMagicLink(
     data: { usedAt: new Date() },
   });
 
-  return { email: record.email };
+  return { email: record.email, clientStateHash: record.clientStateHash };
 }

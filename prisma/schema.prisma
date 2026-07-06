@@ -1667,6 +1667,12 @@ model EmailVerificationToken {
   expiresAt DateTime  @map("expires_at")
   usedAt    DateTime? @map("used_at")
   createdAt DateTime  @default(now()) @map("created_at")
+  /// #505 session-fixation binding: SHA-256 of the browser nonce the portal set
+  /// (HttpOnly cookie) when the magic link was REQUESTED. Carried into the login
+  /// handoff code's clientStateHash at verify time so the browser that redeems
+  /// must be the one that requested the link. NOT NULL in practice (POST
+  /// /auth/email requires clientState); nullable only for forward-compat.
+  clientStateHash String? @map("client_state_hash")
 
   @@index([email])
   @@map("email_verification_tokens")

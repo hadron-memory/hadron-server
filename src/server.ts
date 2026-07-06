@@ -361,16 +361,28 @@ export async function createServer(): Promise<Express> {
   // ---------------------------------------------------------------------------
 
   app.post('/auth/email', async (req, res) => {
-    const { email, redirect } = req.body as {
+    const { email, redirect, clientState } = req.body as {
       email?: string;
       redirect?: string;
+      clientState?: string;
     };
     if (!email || typeof email !== 'string') {
       res.status(400).json({ error: 'Email is required' });
       return;
     }
+    // #505: require the portal's request-time browser nonce so every email
+    // handoff code is bound (session-fixation defense). The portal supplies it
+    // via /auth/start/email; a direct caller without it would otherwise mint an
+    // unbound, transferable code that any browser could redeem.
+    if (!clientState || typeof clientState !== 'string') {
+      res.status(400).json({
+        error: 'client_state is required — request the sign-in link through the portal.',
+      });
+      return;
+    }
+    const clientStateHash = crypto.createHash('sha256').update(clientState).digest('hex');
     try {
-      await sendMagicLink(email.trim(), db, redirect);
+      await sendMagicLink(email.trim(), db, redirect, clientStateHash);
       res.json({ ok: true });
     } catch (err) {
       console.error('Email auth error:', err);
@@ -413,19 +425,21 @@ export async function createServer(): Promise<Express> {
         );
       }
 
-      // #477 Sink 1: hand off via a single-use code, not the JWT-in-URL. No
-      // clientState binding on the email flow — a magic link legitimately opens
-      // on a different device than the one that requested it, so there's no
-      // browser nonce to bind. (Session fixation via email would require forging
-      // a valid magic link for the victim's own address, which isn't possible;
-      // the magic-link token is itself single-use and email-bound.)
+      // #477 Sink 1: hand off via a single-use code, not the JWT-in-URL.
+      // #505 session-fixation binding: the handoff code inherits the
+      // clientStateHash stored on the token at request time (the SHA-256 of the
+      // portal's browser nonce). At /auth/session the redeeming browser must
+      // present the matching raw nonce from its cookie — so the browser that
+      // REQUESTED the link is the only one that can complete sign-in. (This
+      // makes email magic links same-browser-only by design; cross-device open
+      // is intentionally no longer supported — the fixation defense requires it.)
       // Custom redirect (e.g., from invite link) takes priority, then setup for new users.
       const dest = redirectParam ? redirectParam : isNew ? '/app/setup' : '/';
       const code = await issueLoginCode({
         userId: user.id,
         redirect: dest,
         isNew,
-        clientState: null,
+        clientStateHash: result.clientStateHash,
       });
       const frontendUrl =
         process.env.FRONTEND_URL || 'http://localhost:5173';
