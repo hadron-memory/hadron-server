@@ -361,10 +361,11 @@ export async function createServer(): Promise<Express> {
   // ---------------------------------------------------------------------------
 
   app.post('/auth/email', async (req, res) => {
-    const { email, redirect, clientState } = req.body as {
+    const { email, redirect, clientState, client_state } = req.body as {
       email?: string;
       redirect?: string;
       clientState?: string;
+      client_state?: string;
     };
     if (!email || typeof email !== 'string') {
       res.status(400).json({ error: 'Email is required' });
@@ -373,14 +374,16 @@ export async function createServer(): Promise<Express> {
     // #505: require the portal's request-time browser nonce so every email
     // handoff code is bound (session-fixation defense). The portal supplies it
     // via /auth/start/email; a direct caller without it would otherwise mint an
-    // unbound, transferable code that any browser could redeem.
-    if (!clientState || typeof clientState !== 'string') {
+    // unbound, transferable code that any browser could redeem. Accept either
+    // casing so a direct caller following the error message can't trip on it.
+    const effectiveClientState = clientState ?? client_state;
+    if (!effectiveClientState || typeof effectiveClientState !== 'string') {
       res.status(400).json({
         error: 'client_state is required — request the sign-in link through the portal.',
       });
       return;
     }
-    const clientStateHash = crypto.createHash('sha256').update(clientState).digest('hex');
+    const clientStateHash = crypto.createHash('sha256').update(effectiveClientState).digest('hex');
     try {
       await sendMagicLink(email.trim(), db, redirect, clientStateHash);
       res.json({ ok: true });
@@ -400,6 +403,16 @@ export async function createServer(): Promise<Express> {
     try {
       const result = await verifyMagicLink(token, db);
       if (!result) {
+        res.status(400).json({ error: 'Invalid or expired token' });
+        return;
+      }
+      // #505 (Codex #511 P2): a token minted before this deploy — or by any path
+      // that skipped the clientState requirement — carries no binding hash.
+      // Refuse it rather than mint an UNBOUND, transferable handoff code (which
+      // would leave the email fixation gap open for still-valid legacy tokens).
+      // Fail closed: the user re-requests and gets a bound link. verifyMagicLink
+      // has already consumed the token, so there's nothing to clean up.
+      if (!result.clientStateHash) {
         res.status(400).json({ error: 'Invalid or expired token' });
         return;
       }

@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { createServer } from '../../server.js';
@@ -120,6 +121,39 @@ describe('POST /auth/email', () => {
   it('rejects a request with no email', async () => {
     const res = await postJson('/auth/email', { clientState: 'n' });
     expect(res.status).toBe(400);
+  });
+});
+
+describe('GET /auth/email/verify', () => {
+  let seq = 0;
+  async function insertEmailToken(clientStateHash: string | null): Promise<string> {
+    const token = `evtok-${seq++}-${clientStateHash ? 'bound' : 'unbound'}`;
+    await db.emailVerificationToken.create({
+      data: {
+        id: `evt-${token}`,
+        email: `verify-${token}@example.test`,
+        token,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+        clientStateHash,
+      },
+    });
+    return token;
+  }
+
+  it('rejects a token with no clientStateHash — no unbound code minted (#511 P2)', async () => {
+    const token = await insertEmailToken(null);
+    const res = await fetch(`${baseUrl}/auth/email/verify?token=${token}`, { redirect: 'manual' });
+    expect(res.status).toBe(400);
+  });
+
+  it('a bound token redeems to a ?code= handoff (no token in URL)', async () => {
+    const token = await insertEmailToken(createHash('sha256').update('nonce').digest('hex'));
+    const res = await fetch(`${baseUrl}/auth/email/verify?token=${token}`, { redirect: 'manual' });
+    expect(res.status).toBe(302);
+    const loc = new URL(res.headers.get('location') as string);
+    expect(loc.pathname).toBe('/auth/callback');
+    expect(loc.searchParams.get('code')).toMatch(/^[0-9a-f]{64}$/);
+    expect(loc.searchParams.get('token')).toBeNull();
   });
 });
 
