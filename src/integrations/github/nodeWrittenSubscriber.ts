@@ -1,0 +1,106 @@
+/**
+ * Git mirror as an `evt.node.written.v1` subscriber (event pivot).
+ *
+ * The write paths used to call writeNodeToGit directly with the node
+ * in-closure; now they emit the event and this module re-reads the node and
+ * mirrors it. Re-reading (instead of shipping content on the bus) is what
+ * keeps the event payload IDs-only AND makes duplicate delivery free: two
+ * deliveries mirror the same latest state.
+ *
+ * ENCRYPTED memories are punted here (same posture as the embedding wake's
+ * encrypted punt): decryptNodeFields needs a session key from the
+ * per-request cache, which a background subscriber can't rely on having.
+ * The GraphQL write paths keep their direct in-closure writeNodeToGit call
+ * for encrypted memories — request time is when the plaintext exists.
+ */
+
+import type { PrismaClient } from '../../generated/prisma/index.js';
+import { getBusClient } from '../../lib/bus/index.js';
+import {
+  NODE_WRITTEN_SUBJECT,
+  isNodeWrittenEvent,
+  registerNodeWrittenLocalHandler,
+  type NodeWrittenEvent,
+} from '../../lib/events/nodeWritten.js';
+import { deserializeTags } from '../db/provider.js';
+import { writeNodeToGit } from './writeNodeToGit.js';
+
+/** Durable-consumer + local-fallback registration name. */
+export const GIT_MIRROR_SUBSCRIBER = 'git-mirror';
+
+/**
+ * Handle one event: re-read the node (with outgoing edges) and mirror it to
+ * the memory's git repo. Resolves as a no-op for a node that vanished or was
+ * deleted since the event (mirror-on-delete is deleteNode's own concern) and
+ * for encrypted memories (see the module contract). writeNodeToGit handles
+ * its own soft failures (missing repo, no clone) by logging.
+ */
+export async function handleNodeWrittenForGit(
+  db: PrismaClient,
+  evt: NodeWrittenEvent,
+): Promise<void> {
+  const node = await db.node.findUnique({
+    where: { id: evt.nodeId },
+    include: { outgoingEdges: { include: { target: true } } },
+  });
+  if (!node || node.deletedAt) return;
+  const memory = await db.memory.findUnique({
+    where: { id: evt.memoryId },
+    select: { isEncrypted: true },
+  });
+  if (!memory) return;
+  if (memory.isEncrypted) return; // request-time direct write owns encrypted mirrors
+  await writeNodeToGit(
+    {
+      id: node.id,
+      loc: node.loc,
+      name: node.name,
+      nodeType: node.nodeType,
+      alias: node.alias,
+      description: node.description,
+      abstract: node.abstract,
+      abstractOriginHash: node.abstractOriginHash,
+      contentHash: node.contentHash,
+      content: node.content,
+      tags: deserializeTags(node.tags) as string[],
+      seq: node.seq,
+      data: node.data,
+      properties: node.properties,
+      outgoingEdges: node.outgoingEdges ?? [],
+    },
+    evt.ownerRepo ?? '',
+    evt.clientId ?? null,
+    evt.memoryId,
+  );
+}
+
+/**
+ * Wire the git mirror into the event flow: ALWAYS registers the in-process
+ * fallback (so bus-off deployments keep mirroring), then adds the durable
+ * bus subscription when a broker is available. Returns the bus unsubscribe
+ * function, or null when the bus is off.
+ */
+export async function startGitMirrorSubscriber(
+  db: PrismaClient,
+): Promise<(() => Promise<void>) | null> {
+  registerNodeWrittenLocalHandler(GIT_MIRROR_SUBSCRIBER, (evt) =>
+    handleNodeWrittenForGit(db, evt),
+  );
+  const bus = await getBusClient();
+  if (!bus) return null;
+  const unsubscribe = await bus.subscribePubSub(
+    NODE_WRITTEN_SUBJECT,
+    GIT_MIRROR_SUBSCRIBER,
+    async (msg) => {
+      // Shape-check the wire payload; malformed events are logged and acked
+      // (terminating garbage beats redelivering it — PR-489 posture).
+      if (!isNodeWrittenEvent(msg.payload)) {
+        console.warn('[git-mirror] ignoring malformed node.written payload:', msg.payload);
+        return;
+      }
+      await handleNodeWrittenForGit(db, msg.payload);
+    },
+  );
+  console.log(`[git-mirror] bus subscriber active on ${NODE_WRITTEN_SUBJECT}`);
+  return unsubscribe;
+}

@@ -58,7 +58,7 @@ import {
   type SearchPrincipal,
 } from '../lib/global-search/index.js';
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
-import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
+import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash } from '../lib/contentHash.js';
 import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
@@ -2438,32 +2438,18 @@ export function createMcpServerInstance(
         },
       }).catch(() => {});
 
-      // Write to git (fire-and-forget)
-      const nodeForGit = await db.node.findUnique({
-        where: { id: upserted.id },
-        include: { outgoingEdges: { include: { target: true } } },
+      // Announce the write (event pivot): the git mirror subscriber re-reads
+      // and mirrors — this replaced the re-fetch + direct writeNodeToGit.
+      // Note: on an ENCRYPTED memory the subscriber punts, so MCP writes
+      // (which store plaintext on the row, #206) no longer git-mirror there —
+      // acceptable in the #206 gray zone and safer than pushing maybe-mixed
+      // rows.
+      void publishNodeWritten({
+        nodeId: upserted.id,
+        memoryId,
+        ownerRepo: '',
+        clientId: auth.clientId,
       });
-      if (nodeForGit) {
-        writeNodeToGit({
-          id: nodeForGit.id,
-          loc: nodeForGit.loc,
-          name: nodeForGit.name,
-          nodeType: nodeForGit.nodeType,
-          alias: nodeForGit.alias,
-          description: nodeForGit.description,
-          abstract: nodeForGit.abstract,
-          abstractOriginHash: nodeForGit.abstractOriginHash,
-          contentHash: nodeForGit.contentHash,
-          content: nodeForGit.content,
-          tags: nodeForGit.tags as string[],
-          seq: nodeForGit.seq,
-          data: nodeForGit.data,
-          properties: nodeForGit.properties,
-          outgoingEdges: nodeForGit.outgoingEdges ?? [],
-        }, '', auth.clientId, memoryId).catch((err) => {
-          console.error('[hadron_create_node] git write error:', err);
-        });
-      }
 
       // 033 — (re-)embed on write. MCP stores plaintext on the row (#206), and
       // `content`/`normalizedAbstract` are plaintext here.
@@ -2659,32 +2645,14 @@ export function createMcpServerInstance(
         },
       }).catch(() => {});
 
-      // Write to git (fire-and-forget)
-      const updatedNode = await db.node.findUnique({
-        where: { id: existing.id },
-        include: { outgoingEdges: { include: { target: true } } },
+      // Announce the write (event pivot): the git mirror subscriber re-reads
+      // and mirrors (encrypted memories punt there — see hadron_create_node).
+      void publishNodeWritten({
+        nodeId: existing.id,
+        memoryId: existing.memoryId,
+        ownerRepo: '',
+        clientId: auth.clientId,
       });
-      if (updatedNode) {
-        writeNodeToGit({
-          id: updatedNode.id,
-          loc: updatedNode.loc,
-          name: updatedNode.name,
-          nodeType: updatedNode.nodeType,
-          alias: updatedNode.alias,
-          description: updatedNode.description,
-          abstract: updatedNode.abstract,
-          abstractOriginHash: updatedNode.abstractOriginHash,
-          contentHash: updatedNode.contentHash,
-          content: updatedNode.content,
-          tags: updatedNode.tags as string[],
-          seq: updatedNode.seq,
-          data: updatedNode.data,
-          properties: updatedNode.properties,
-          outgoingEdges: updatedNode.outgoingEdges ?? [],
-        }, '', auth.clientId, existing.memoryId).catch((err) => {
-          console.error('[hadron_update_node] git write error:', err);
-        });
-      }
 
       // 033 — re-embed when content or abstract changed (existing.* is plaintext
       // on the MCP path, #206). Other-field-only updates don't touch the index.

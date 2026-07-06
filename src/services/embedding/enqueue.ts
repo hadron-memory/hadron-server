@@ -70,12 +70,11 @@ export async function enqueueNodeEmbedding(
       },
     });
 
-    // Bus wake-up (spec 039): covers what the prompt-drain can't — a crash
-    // between marker and drain, transient prompt-drain failures (bus
-    // redelivery beats sweep ticks), and work distribution once multiple
-    // instances share the queue group. The listener is idempotent (a marker
-    // the prompt-drain already cleared resolves to a cheap skip).
-    void publishEmbedWake({ nodeId: args.nodeId });
+    // No per-node bus wake here anymore (event pivot): the write paths emit
+    // `evt.node.written.v1` and the embedding module subscribes — cross-
+    // instance wakes ride the platform event, not a module-specific publish.
+    // The drain ping below (backfill) keeps `embed.wake.v1`: that's a job
+    // command, not a fact.
 
     // Prompt-drain: embed now with in-closure plaintext, off the request path.
     // Only when an endpoint is configured — otherwise leave it for the sweep
