@@ -786,8 +786,16 @@ export async function createServer(): Promise<Express> {
     // revoked (soft-deleted) members.
     try {
       await requireOrgRole({ db, userId, roles }, orgId, 'ADMIN');
-    } catch {
-      res.status(403).json({ error: 'Forbidden: you must be an admin of this organization.' });
+    } catch (err) {
+      // Only the explicit authorization failure is a 403 — an unexpected fault
+      // (DB outage, transient Prisma error) must surface as 500, not masquerade
+      // as "not an admin" (PR-509 Copilot review).
+      if (err instanceof Error && err.message === 'Forbidden') {
+        res.status(403).json({ error: 'Forbidden: you must be an admin of this organization.' });
+        return;
+      }
+      console.error('microsoft/start authorization error:', err);
+      res.status(500).json({ error: 'Internal error' });
       return;
     }
 
@@ -861,14 +869,25 @@ export async function createServer(): Promise<Express> {
         where: { id: pending.userId },
         select: { roles: true },
       });
+      // A deleted initiator (null) has no roles and no membership → requireOrgRole
+      // rejects it. Cast the Prisma Role[] to the Context.roles union (they are
+      // the same string set) for the platform-admin short-circuit.
       await requireOrgRole(
-        { db, userId: pending.userId, roles: initiator?.roles },
+        {
+          db,
+          userId: pending.userId,
+          roles: initiator?.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined,
+        },
         pending.orgId,
         'ADMIN',
       );
-    } catch {
+    } catch (err) {
+      // Distinguish the authorization failure from an operational fault so a DB
+      // outage doesn't masquerade as "not authorized" (PR-509 Copilot review).
+      const forbidden = err instanceof Error && err.message === 'Forbidden';
+      if (!forbidden) console.error('microsoft/callback re-check error:', err);
       const errorUrl = new URL('/app/dashboard', frontendUrl);
-      errorUrl.searchParams.set('exchangeError', 'not_authorized');
+      errorUrl.searchParams.set('exchangeError', forbidden ? 'not_authorized' : 'server_error');
       res.redirect(errorUrl.toString());
       return;
     }
