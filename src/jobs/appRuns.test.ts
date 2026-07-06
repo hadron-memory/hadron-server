@@ -28,6 +28,10 @@ import {
   executeAppRun,
   consumeQuota,
   recordQuotaUsage,
+  parseRunPolicySnapshot,
+  setQuotaLimit,
+  ensureQuotaRowsForScope,
+  defaultQuotaLimit,
   RunLaunchDeniedError,
   type RunExecutionDeps,
 } from './appRuns.js';
@@ -331,5 +335,110 @@ describe('schedulerTick (plan §7)', () => {
   it('a not-yet-due schedule is untouched', async () => {
     await makeSchedule({ nextRunAt: new Date(Date.now() + 3_600_000) });
     expect(await schedulerTick(db)).toBe(0);
+  });
+
+  it('a due one-shot (runAt, no cron) fires once and disables itself (#510)', async () => {
+    const s = await makeSchedule({ cron: null, runAt: new Date(Date.now() - 60_000) });
+    expect(await schedulerTick(db)).toBe(1);
+    const after = await db.agentSchedule.findUniqueOrThrow({ where: { id: s.id } });
+    expect(after.enabled).toBe(false);
+    expect(after.nextRunAt).toBeNull(); // the disable IS the claim
+    expect(await db.appRun.count({ where: { triggerId: s.id } })).toBe(1);
+    // A later tick never re-fires the row.
+    expect(await schedulerTick(db)).toBe(0);
+    expect(await db.appRun.count({ where: { triggerId: s.id } })).toBe(1);
+  });
+});
+
+// ───── policy chain (#510) ──────────────────────────────────────────────────
+
+describe('mintAppRun — conjunctive chain assembly (#510, cor:acl:040:02)', () => {
+  it('an org-layer link that omits run.execute denies every mint in the org', async () => {
+    await db.organization.update({
+      where: { id: orgId },
+      data: { policy: { allow: ['memory.read'] } },
+    });
+    await expect(mint()).rejects.toMatchObject({ code: 'POLICY_DENIED' });
+  });
+
+  it('snapshots the PRESENT links as {chain: [...]} on the run row', async () => {
+    await db.organization.update({ where: { id: orgId }, data: { policy: { allow: ['*'] } } });
+    await db.app.update({
+      where: { id: appId },
+      data: { policy: { allow: ['run.execute', 'llm.invoke', 'memory.*'] } },
+    });
+    const run = await mint({ policy: { allow: ['run.execute', 'llm.invoke'] } });
+    expect(run.policy).toEqual({
+      chain: [
+        { allow: ['*'] },
+        { allow: ['run.execute', 'llm.invoke', 'memory.*'] },
+        { allow: ['run.execute', 'llm.invoke'] },
+      ],
+    });
+  });
+
+  it('the user layer joins the conjunction for on-behalf-of runs', async () => {
+    await db.appMember.create({ data: { appId, userId, role: 'member' } });
+    await db.user.update({
+      where: { id: userId },
+      data: { policy: { allow: ['memory.read'] } }, // no run.execute
+    });
+    await expect(mint({ userId })).rejects.toMatchObject({ code: 'POLICY_DENIED' });
+    // The same user WITHOUT on-behalf-of does not constrain the App's runs.
+    const run = await mint();
+    expect(run.status).toBe('PENDING');
+  });
+
+  it('an app link narrower than the trigger link halts the run at the action gate', async () => {
+    // Chain allows the mint (run.execute) but NOT llm.invoke — the per-action
+    // re-check inside the kernel must stop it (kill-switch contract).
+    await db.app.update({
+      where: { id: appId },
+      data: { policy: { allow: ['run.execute'] } },
+    });
+    const run = await mint();
+    const d = deps();
+    await executeAppRun(db, run.id, d);
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe('FAILED');
+    expect((after.failure as { code?: string })?.code).toBe('ACTIVATION_DENIED');
+    expect(d.llm).not.toHaveBeenCalled();
+  });
+
+  it('parseRunPolicySnapshot accepts the pre-#510 single-link shape', () => {
+    expect(parseRunPolicySnapshot({ allow: ['run.execute'] })).toEqual([
+      { allow: ['run.execute'] },
+    ]);
+    expect(parseRunPolicySnapshot({ chain: [{ allow: ['*'] }, { allow: ['llm.invoke'] }] })).toEqual([
+      { allow: ['*'] },
+      { allow: ['llm.invoke'] },
+    ]);
+    expect(parseRunPolicySnapshot(null)).toEqual([null]); // absent = no restriction
+  });
+});
+
+// ───── quota admin helpers (#510) ───────────────────────────────────────────
+
+describe('setQuotaLimit + ensureQuotaRowsForScope (#510)', () => {
+  it('materializes both action rows with the platform defaults', async () => {
+    await ensureQuotaRowsForScope(db, 'org', orgId);
+    const rows = await db.quotaCounter.findMany({ where: { scopeKind: 'org', scopeId: orgId } });
+    expect(rows.map((r) => r.action).sort()).toEqual(['llm.tokens', 'run.execute']);
+    expect(rows.every((r) => r.limit === defaultQuotaLimit('org', r.action as never))).toBe(true);
+  });
+
+  it('the stored limit persists across a window roll (limit is the dial, used resets)', async () => {
+    await setQuotaLimit(db, 'app', appId, 'run.execute', 3);
+    // Expire the window, then touch it again via consume.
+    await db.quotaCounter.updateMany({
+      where: { scopeKind: 'app', scopeId: appId, action: 'run.execute' },
+      data: { used: 3, resetAt: new Date(Date.now() - 1000) },
+    });
+    expect(await consumeQuota(db, 'app', appId, 'run.execute', 999)).toBe(true); // rolled: used 0
+    const row = await db.quotaCounter.findFirstOrThrow({
+      where: { scopeKind: 'app', scopeId: appId, action: 'run.execute' },
+    });
+    expect(row.limit).toBe(3); // NOT re-seeded from env
+    expect(row.used).toBe(1);
   });
 });

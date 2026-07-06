@@ -51,6 +51,14 @@ export async function setup() {
       CHECK (class NOT IN ('personal', 'private') OR app_id IS NULL OR user_memory_of_agent_id IS NOT NULL);
   `);
 
+  // #510: an AgentSchedule is EITHER recurring (cron) or one-shot (run_at).
+  await client.query(`
+    ALTER TABLE "agent_schedules" DROP CONSTRAINT IF EXISTS "chk_agent_schedule_cron_xor_run_at";
+    ALTER TABLE "agent_schedules"
+      ADD CONSTRAINT "chk_agent_schedule_cron_xor_run_at"
+      CHECK (("cron" IS NULL) <> ("run_at" IS NULL));
+  `);
+
   // 035-visibility-enum-cleanup: visibility is meaningful only for knowledge
   // (PUBLIC/ORGANIZATION) and group (GROUP); NULL for every other class.
   await client.query(`

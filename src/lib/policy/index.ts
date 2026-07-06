@@ -57,3 +57,33 @@ export function evaluatePolicyChain(
 ): boolean {
   return links.every((l) => l == null || allows(l, action));
 }
+
+/** One layer's verdict in an explained evaluation (#510 debug surface). */
+export interface PolicyLayerVerdict {
+  /** Caller-supplied layer label (e.g. 'org', 'user', 'app', 'trigger'). */
+  layer: string;
+  /** Whether this layer has a link at all (absent = no restriction). */
+  present: boolean;
+  /** This layer's verdict for the action (true when absent). */
+  allowed: boolean;
+  /** The parsed allow-list, for display (null when absent). */
+  allow: string[] | null;
+}
+
+/**
+ * evaluatePolicyChain with per-layer attribution — answers "which link
+ * denies this action" for the effectiveActionPolicy debug query (#510).
+ * Same semantics as the evaluator: overall = every layer allowed.
+ */
+export function explainPolicyChain(
+  action: PolicyAction,
+  layers: Array<{ layer: string; link: PolicyLink | null | undefined }>,
+): { allowed: boolean; layers: PolicyLayerVerdict[] } {
+  const verdicts = layers.map(({ layer, link }) => ({
+    layer,
+    present: link != null,
+    allowed: link == null || allows(link, action),
+    allow: link?.allow ?? null,
+  }));
+  return { allowed: verdicts.every((v) => v.allowed), layers: verdicts };
+}

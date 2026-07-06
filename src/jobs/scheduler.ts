@@ -9,6 +9,11 @@
  *
  * Misfire policy v1: an overdue schedule runs ONCE; missed ticks are never
  * backfilled (nextRunAt advances from NOW, not from the missed slot).
+ *
+ * One-shot schedules (#510): runAt XOR cron. The claim disables the row
+ * (enabled=false, nextRunAt=null) instead of advancing — same atomicity,
+ * and the row remains as the audit record. An overdue one-shot fires once,
+ * per the misfire policy.
  */
 
 import { CronExpressionParser } from 'cron-parser';
@@ -35,18 +40,25 @@ export async function schedulerTick(db: PrismaClient, now = new Date()): Promise
   let minted = 0;
   for (const s of due) {
     // Atomic claim-by-advance: only the instance that moves nextRunAt off
-    // the due value proceeds. Invalid cron → disable loudly (config bug).
-    let next: Date;
-    try {
-      next = nextCronOccurrence(s.cron, s.timezone, now);
-    } catch (err) {
-      console.error(`[scheduler] invalid cron on schedule ${s.id} — disabling:`, err);
-      await db.agentSchedule.updateMany({ where: { id: s.id }, data: { enabled: false } });
-      continue;
+    // the due value proceeds. One-shot schedules (runAt, no cron — #510)
+    // claim by DISABLING instead of advancing: the flip IS the claim, and
+    // the row survives as the audit record of what was scheduled. Invalid
+    // cron → disable loudly (config bug).
+    let claimData: { nextRunAt: Date } | { enabled: false; nextRunAt: null };
+    if (s.cron == null) {
+      claimData = { enabled: false, nextRunAt: null };
+    } else {
+      try {
+        claimData = { nextRunAt: nextCronOccurrence(s.cron, s.timezone, now) };
+      } catch (err) {
+        console.error(`[scheduler] invalid cron on schedule ${s.id} — disabling:`, err);
+        await db.agentSchedule.updateMany({ where: { id: s.id }, data: { enabled: false } });
+        continue;
+      }
     }
     const claimed = await db.agentSchedule.updateMany({
       where: { id: s.id, nextRunAt: s.nextRunAt }, // optimistic: unchanged since read
-      data: { nextRunAt: next },
+      data: claimData,
     });
     if (claimed.count === 0) continue; // another instance took it
 

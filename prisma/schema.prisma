@@ -331,6 +331,10 @@ model User {
   /// node frontmatter `author` field. Defaults to githubUsername on
   /// signup.
   handle           String?           @unique
+  /// User-layer action-policy link (cor:acl:040:02) — constrains runs made
+  /// on-behalf-of this user. Same allow-list shape as Organization.policy;
+  /// NULL = no restriction. Self-authored (updateMyPolicy).
+  policy           Json?
   /// GitHub numeric account id.
   githubId         Int?              @unique @map("github_id")
   /// GitHub login.
@@ -429,6 +433,12 @@ model Organization {
   memories            Memory[]
   agents              Agent[]
   subscriptions       MemorySubscription[]
+  /// Org-layer action-policy link of the conjunctive chain (cor:acl:040:02):
+  /// allow-list JSON `{ "allow": ["action", "prefix.*", "*"] }`. NULL = no
+  /// restriction (the layer is absent, not deny-all). Snapshotted into
+  /// AppRun.policy at mint — edits apply to FUTURE runs only.
+  policy              Json?
+
   invitations         UserInvitation[]     @relation("OrgInvitations")
   exchangeConnections ExchangeConnection[]
   apps                App[]
@@ -1814,6 +1824,10 @@ model App {
   id                    String               @id @default(cuid())
   /// Display name.
   name                  String
+  /// App-layer action-policy link (cor:acl:040:02) — same allow-list shape
+  /// as Organization.policy; NULL = no restriction. Org-admin-authored
+  /// (updateApp). Snapshotted into AppRun.policy at mint.
+  policy                Json?
   /// Globally unique identifier; derived from `org.urn + ":" + slug`.
   ///
   /// **Spec 021 (FR-027) — uniqueness is now PARTIAL.** The DB-level
@@ -2575,9 +2589,14 @@ model AgentSchedule {
   /// On-behalf-of user, captured at creation (cor:agt:010:01).
   userId         String?   @map("user_id")
   name           String
-  /// 5-field cron expression, evaluated in `timezone`.
-  cron           String
+  /// 5-field cron expression, evaluated in `timezone` — recurring
+  /// schedules. XOR with `runAt` (chk_agent_schedule_cron_xor_run_at).
+  cron           String?
   timezone       String    @default("UTC")
+  /// One-shot: run once at this instant (#510). XOR with `cron`; the
+  /// scheduler claim flips `enabled` to false instead of advancing
+  /// `nextRunAt`. Misfire policy unchanged (overdue runs once).
+  runAt          DateTime? @map("run_at")
   entryNodeUrn   String    @map("entry_node_urn")
   eventData      Json?     @map("event_data")
   /// Trigger-layer allow-list (chain link; plan §4).

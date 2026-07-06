@@ -558,6 +558,8 @@ export const typeDefs = `#graphql
   type User {
     id: ID!
     handle: String
+    "User-layer action-policy link (cor:acl:040:02, #510) — constrains runs made on the user's behalf. Null = no restriction. Self-authored via updateMyPolicy."
+    policy: JSON
     # Canonical \`hrn:user:<handle>\` URN (spec cor:urn:010:01). Computed from the
     # handle; null for a handle-less user (who has no URN).
     urn: String
@@ -585,6 +587,8 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     urn: String!
+    "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."
+    policy: JSON
     organizationId: String!
     organization: Organization
     # 008-agent-installation: direct FK replaces the AppAgent join.
@@ -992,6 +996,8 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     urn: String!
+    "Org-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateOrganization."
+    policy: JSON
     isVisible: Boolean
     githubInstallationId: Int
     githubAppId: String
@@ -1587,7 +1593,10 @@ export const typeDefs = `#graphql
     "On-behalf-of user captured at creation; v1 only the creator themself."
     userId: ID
     name: String!
-    cron: String!
+    "5-field cron for recurring schedules; null for one-shots (#510)."
+    cron: String
+    "One-shot instant (#510); null for recurring schedules. XOR with cron."
+    runAt: String
     timezone: String!
     entryNodeUrn: String!
     eventData: JSON
@@ -1609,8 +1618,10 @@ export const typeDefs = `#graphql
     "App the run executes as — ref: PK or fully-qualified URN."
     appRef: String!
     name: String!
-    "5-field cron expression, evaluated in timezone (default UTC)."
-    cron: String!
+    "Recurring: 5-field cron expression, evaluated in timezone (default UTC). Provide exactly one of cron / runAt."
+    cron: String
+    "One-shot: run once at this ISO-8601 instant (#510). Provide exactly one of cron / runAt."
+    runAt: String
     timezone: String
     "Fully-qualified URN of the prompt node to run (D-2026-05-09-012/017)."
     entryNodeUrn: String!
@@ -1629,7 +1640,10 @@ export const typeDefs = `#graphql
 
   input UpdateAgentScheduleInput {
     name: String
+    "Providing cron switches the schedule to recurring (clears runAt)."
     cron: String
+    "Providing runAt switches the schedule to one-shot (clears cron). At most one of cron / runAt per call."
+    runAt: String
     timezone: String
     entryNodeUrn: String
     "Agent — ref: PK or URN; must be installed in the App."
@@ -1712,6 +1726,49 @@ export const typeDefs = `#graphql
     consumedAt: String
     expiresAt: String
     createdAt: String!
+  }
+
+  "Usage-vs-limit for one scope x action window (#510). The stored limit is the enforced value; env defaults only seed first touch."
+  type QuotaCounter {
+    id: ID!
+    "app or org."
+    scopeKind: String!
+    scopeId: String!
+    "run.execute or llm.tokens."
+    action: String!
+    "Window kind (day). The row rolls in place at UTC midnight - used resets, limit persists."
+    window: String!
+    used: Int!
+    limit: Int!
+    resetAt: String!
+  }
+
+  input SetQuotaLimitInput {
+    "Org - ref: PK or URN."
+    orgRef: String!
+    "Optional app scope - ref: PK or URN; must belong to the org. Omit to set the org-level limit."
+    appRef: String
+    "run.execute or llm.tokens."
+    action: String!
+    "Non-negative integer; 0 pauses the scope (every launch denies QUOTA_EXCEEDED)."
+    limit: Int!
+  }
+
+  "One layer's verdict in an explained policy evaluation (#510)."
+  type PolicyLayerVerdict {
+    "org, user, or app."
+    layer: String!
+    "Whether this layer has a link at all (absent = no restriction)."
+    present: Boolean!
+    allowed: Boolean!
+    "The layer's allow-list, for display; null when absent."
+    allow: [String!]
+  }
+
+  "The standing-chain policy debug surface (#510): per-layer verdicts for one action (cor:acl:040:02). Trigger/run links are per-trigger and not part of the standing chain."
+  type EffectiveActionPolicy {
+    allowed: Boolean!
+    layers: [PolicyLayerVerdict!]!
   }
 
   type ActionTicketsPage {
@@ -2682,6 +2739,10 @@ export const typeDefs = `#graphql
     agentWebhooks(appRef: String!, limit: Int, offset: Int): AgentWebhooksPage!
     "The ticket ledger: minted, consumed-by-which-run, expired (org-ADMIN)."
     actionTickets(orgRef: String!, limit: Int, offset: Int): ActionTicketsPage!
+    "Usage-vs-limit counters for an org (+ one app when appRef given). Org-ADMIN. Rows materialize on first view, seeded with platform defaults (#510)."
+    quotaCounters(orgRef: String!, appRef: String): [QuotaCounter!]!
+    "Explain the standing policy chain (org / user / app) for one action - which layer denies it (#510, cor:acl:040:02). Org-ADMIN on the app's org."
+    effectiveActionPolicy(appRef: String!, action: String!, userRef: String): EffectiveActionPolicy!
   }
 
   """
@@ -2814,6 +2875,10 @@ export const typeDefs = `#graphql
     deleteAgentWebhook(id: ID!): Boolean!
     "Mint comm.outbound tickets into the org ledger (org-ADMIN; cor:acl:050:04)."
     mintActionTickets(input: MintActionTicketsInput!): Int!
+    "Set the stored (enforced) quota limit for a scope x action (#510) - the operator dial that previously required psql. Org-ADMIN."
+    setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
+    "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."
+    updateMyPolicy(policy: JSON): User!
 
     # Asset upload — v1 (spec 004)
     beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!
@@ -2855,7 +2920,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateOrganization(id: ID!, name: String, urn: String, isVisible: Boolean): Organization!
+    updateOrganization(id: ID!, name: String, urn: String, isVisible: Boolean, policy: JSON): Organization!
 
     """
     Soft-delete an Organization.
@@ -3299,6 +3364,8 @@ export const typeDefs = `#graphql
       identifyUserMethod: IdentifyUserMethod
       sessionTimeoutSeconds: Int
       anonymousTtlDays: Int
+      "App-layer action-policy link (cor:acl:040:02, #510). Explicit null clears; omitted preserves."
+      policy: JSON
     ): App!
 
     """

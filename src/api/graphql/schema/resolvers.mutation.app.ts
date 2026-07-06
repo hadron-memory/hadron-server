@@ -34,6 +34,7 @@ import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { parsePolicyLink } from '../../../lib/policy/index.js';
 import { GraphQLError } from 'graphql';
 import {
   type AppType,
@@ -361,6 +362,7 @@ export const appMutations = {
         identifyUserMethod,
         sessionTimeoutSeconds,
         anonymousTtlDays,
+        policy,
       }: {
         id: string; name?: string; urn?: string;
         appType?: AppType;
@@ -380,6 +382,9 @@ export const appMutations = {
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
         anonymousTtlDays?: number;
+        // #510: app-layer action-policy link (cor:acl:040:02).
+        // Explicit null clears; omitted preserves.
+        policy?: unknown;
       },
       ctx: Context,
     ) => {
@@ -387,6 +392,13 @@ export const appMutations = {
       const { id: resolvedId } = await resolveAppRef(ctx.db, id);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      // #510: the app-layer action-policy link (cor:acl:040:02) — validate
+      // shape before storing; explicit null clears (= no restriction).
+      if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
+        throw new GraphQLError('policy must be { allow: string[] } or null.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       // URN updates: accept a new slug and rebuild the full URN against the
       // app's current org.
       let newUrn: string | undefined;
@@ -470,6 +482,7 @@ export const appMutations = {
           ...(identifyUserMethod !== undefined ? { identifyUserMethod } : {}),
           ...(sessionTimeoutSeconds !== undefined ? { sessionTimeoutSeconds } : {}),
           ...(anonymousTtlDays !== undefined ? { anonymousTtlDays } : {}),
+          ...(policy !== undefined ? { policy: policy as never } : {}),
           updatedBy: ctx.userId ?? null,
         },
         include: APP_INCLUDE,

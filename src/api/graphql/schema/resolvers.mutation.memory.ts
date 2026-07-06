@@ -821,7 +821,26 @@ export const memoryMutations = {
       if (memory.class === 'system') {
         throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
       }
-      await ctx.db.agentMemoryItem.create({ data: { agentId: resolvedAgentId, memoryId: resolvedMemoryId, role: role ?? 'read', createdBy: ctx.userId ?? ctx.clientId ?? null } });
+      // Upsert semantics (#501): granting is idempotent — re-attaching an
+      // already-attached memory updates the role, and a soft-deleted grant
+      // row (which still occupies the @@unique(agentId, memoryId) slot) is
+      // resurrected instead of surfacing a raw P2002.
+      await ctx.db.agentMemoryItem.upsert({
+        where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
+        create: {
+          agentId: resolvedAgentId,
+          memoryId: resolvedMemoryId,
+          role: role ?? 'read',
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+        update: {
+          role: role ?? 'read',
+          deletedAt: null,
+          deletedBy: null,
+          updatedAt: new Date(),
+          updatedBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+      });
       return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },
 
@@ -834,10 +853,22 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
-      await ctx.db.agentMemoryItem.update({
-        where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
+      // #501: only a LIVE grant is updatable — updateMany + deletedAt:null
+      // (findUnique on the composite PK can't filter soft-deletes; the
+      // requireOrgRole-pattern rule from findings:revoked-membership-auth-
+      // gates, PR-512 review). Zero rows = typed NOT_FOUND, never a raw
+      // P2025 → 500; a soft-deleted grant stays inactive until
+      // addMemoryToAgent resurrects it.
+      const updated = await ctx.db.agentMemoryItem.updateMany({
+        where: { agentId: resolvedAgentId, memoryId: resolvedMemoryId, deletedAt: null },
         data: { role },
       });
+      if (updated.count === 0) {
+        throw new GraphQLError(
+          'No active grant exists for this agent+memory pair — use addMemoryToAgent to create one.',
+          { extensions: { code: 'NOT_FOUND' } },
+        );
+      }
       return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },
 

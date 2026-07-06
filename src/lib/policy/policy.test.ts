@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { allows, evaluatePolicyChain, parsePolicyLink } from './index.js';
+import { allows, evaluatePolicyChain, explainPolicyChain, parsePolicyLink } from './index.js';
 
 describe('parsePolicyLink', () => {
   it('accepts { allow: string[] } and rejects everything else', () => {
@@ -55,5 +55,34 @@ describe('evaluatePolicyChain — strict conjunction, absent layers unrestrictiv
     expect(evaluatePolicyChain('run.execute', [])).toBe(true);
     expect(evaluatePolicyChain('run.execute', [null, { allow: ['run.execute'] }])).toBe(true);
     expect(evaluatePolicyChain('comm.outbound', [null, { allow: ['run.execute'] }])).toBe(false);
+  });
+});
+
+describe('explainPolicyChain — per-layer attribution (#510)', () => {
+  it('mirrors the evaluator and names the denying layer', () => {
+    const result = explainPolicyChain('comm.outbound', [
+      { layer: 'org', link: { allow: ['*'] } },
+      { layer: 'user', link: null },
+      { layer: 'app', link: { allow: ['run.execute'] } },
+    ]);
+    expect(result.allowed).toBe(false);
+    expect(result.layers).toEqual([
+      { layer: 'org', present: true, allowed: true, allow: ['*'] },
+      { layer: 'user', present: false, allowed: true, allow: null },
+      { layer: 'app', present: true, allowed: false, allow: ['run.execute'] },
+    ]);
+    // Agreement with the evaluator on the same links.
+    expect(
+      evaluatePolicyChain('comm.outbound', [{ allow: ['*'] }, null, { allow: ['run.execute'] }]),
+    ).toBe(false);
+  });
+
+  it('an all-absent chain allows everything', () => {
+    const result = explainPolicyChain('run.execute', [
+      { layer: 'org', link: null },
+      { layer: 'app', link: undefined },
+    ]);
+    expect(result.allowed).toBe(true);
+    expect(result.layers.every((l) => !l.present && l.allowed)).toBe(true);
   });
 });
