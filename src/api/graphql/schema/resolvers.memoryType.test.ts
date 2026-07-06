@@ -122,18 +122,168 @@ describe('createMemory vector-index defaults (#281)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// First-attach flow: updateAgent sets systemMemoryId → memory becomes
-// class='system'. 035-visibility-enum-cleanup removed the `type` column;
-// `class` is authoritative, and the attach clears the memory's visibility.
+// Helpers for the system-memory tests.
+//
+// createAgent now auto-provisions a class='system' memory for every agent
+// (regardless of the legacy ASSISTANT/CHATBOT type), so most tests can read the
+// owned system memory straight off `agent.systemMemoryId`. The updateAgent
+// first-attach path only ever fires for LEGACY agents (systemMemoryId=null),
+// which we build via a raw db.agent.create that bypasses the resolver.
 // ---------------------------------------------------------------------------
 
-describe('updateAgent first-attach of systemMemoryId', () => {
-  it('marks the target memory as class=system, renames it, clears visibility', async () => {
+/** Create an agent through the resolver and return it plus its auto-provisioned system memory. */
+async function createAgentWithSystem(name: string, extra: Record<string, unknown> = {}) {
+  const agent = await resolvers.Mutation.createAgent(
+    {},
+    { orgId: orgA.id, name, ...extra },
+    adminCtx(),
+  );
+  const sys = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } });
+  return { agent, sys };
+}
+
+/** Create a legacy agent (no system memory) directly, to exercise the first-attach path. */
+async function createLegacyAgent(name: string) {
+  return db.agent.create({
+    data: { id: generateId(), name, urn: `${orgA.urn}:${name}`, organizationId: orgA.id },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Auto-provisioning: every agent owns a class='system' memory from birth
+// (cor:dmo:050:01, GH #518). Regardless of type, no caller-supplied
+// systemMemoryId required.
+// ---------------------------------------------------------------------------
+
+describe('createAgent auto-provisions a system memory', () => {
+  it('creates and attaches a class=system memory (URN derived from the agent, name synced, visibility NULL)', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'juno', visibility: 'ORGANIZATION' },
+      { orgId: orgA.id, name: 'solo' },
       adminCtx(),
     );
+    expect(agent.systemMemoryId).toBeTruthy();
+    const sys = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } });
+    expect(sys.class).toBe('system');
+    expect(sys.urn).toBe(`${agent.urn}-system`);
+    expect(sys.name).toBe('solo System');
+    // chk_memory_visibility_class forbids a non-null visibility on class='system'.
+    expect(sys.visibility).toBeNull();
+  });
+
+  it('provisions a system memory even for an ASSISTANT (no systemMemoryId supplied)', async () => {
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'assistant-1', type: 'ASSISTANT' },
+      adminCtx(),
+    );
+    expect(agent.type).toBe('ASSISTANT');
+    expect(agent.systemMemoryId).toBeTruthy();
+    const sys = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } });
+    expect(sys.class).toBe('system');
+  });
+
+  it('promotes a caller-supplied systemMemoryId instead of provisioning a new one', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'byo-brain' },
+      adminCtx(),
+    );
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'wizard-agent', systemMemoryId: mem.id },
+      adminCtx(),
+    );
+    expect(agent.systemMemoryId).toBe(mem.id);
+    const promoted = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(promoted.class).toBe('system');
+    expect(promoted.name).toBe('wizard-agent System');
+    // system-class memories must opt out of uploads (schema.prisma) — the
+    // promote path forces it even though createMemory defaulted it true.
+    expect(promoted.acceptsUploads).toBe(false);
+  });
+
+  // #519 review (P2): a system memory holds conversation design, not assets —
+  // the auto-provisioned one must opt out of uploads (DB default is true).
+  it('opts the auto-provisioned system memory out of uploads', async () => {
+    const { sys } = await createAgentWithSystem('no-uploads');
+    expect(sys.acceptsUploads).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #519 review (P2): the auto-provisioned system memory's URN is derived from
+// the agent URN, so a rename must move it in lockstep — otherwise the old
+// `${slug}-system` memory keeps the old slug reserved and blocks re-creating
+// an agent at that slug.
+// ---------------------------------------------------------------------------
+
+describe('updateAgent syncs the derived system-memory URN on rename', () => {
+  it('moves `${slug}-system` in lockstep with the agent URN', async () => {
+    const { agent, sys } = await createAgentWithSystem('renamer');
+    expect(sys.urn).toBe(`${orgA.urn}:renamer-system`);
+
+    await resolvers.Mutation.updateAgent(
+      {},
+      { id: agent.id, urn: 'renamed' },
+      adminCtx(),
+    );
+
+    const movedSys = await db.memory.findUniqueOrThrow({ where: { id: sys.id } });
+    expect(movedSys.urn).toBe(`${orgA.urn}:renamed-system`);
+  });
+
+  it('frees the old slug so a new agent can be created there', async () => {
+    const { agent } = await createAgentWithSystem('reuse-me');
+    await resolvers.Mutation.updateAgent(
+      {},
+      { id: agent.id, urn: 'moved-away' },
+      adminCtx(),
+    );
+
+    // Re-creating an agent at the vacated slug must succeed (previously the
+    // stale `reuse-me-system` memory blocked it on the URN-reclaim check).
+    const fresh = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'reuse-me' },
+      adminCtx(),
+    );
+    expect(fresh.systemMemoryId).toBeTruthy();
+    const freshSys = await db.memory.findUniqueOrThrow({ where: { id: fresh.systemMemoryId! } });
+    expect(freshSys.urn).toBe(`${orgA.urn}:reuse-me-system`);
+  });
+
+  it('leaves a wizard-supplied (non-derived) system-memory URN untouched on rename', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: orgA.id, name: 'custom-brain' },
+      adminCtx(),
+    );
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'wiz', systemMemoryId: mem.id },
+      adminCtx(),
+    );
+    await resolvers.Mutation.updateAgent(
+      {},
+      { id: agent.id, urn: 'wiz-renamed' },
+      adminCtx(),
+    );
+    const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(after.urn).toBe(`${orgA.urn}:custom-brain`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// First-attach flow (LEGACY agents only): updateAgent sets systemMemoryId on
+// an agent that has none → memory becomes class='system'.
+// 035-visibility-enum-cleanup removed the `type` column; `class` is
+// authoritative, and the attach clears the memory's visibility.
+// ---------------------------------------------------------------------------
+
+describe('updateAgent first-attach of systemMemoryId (legacy agents)', () => {
+  it('marks the target memory as class=system, renames it, clears visibility', async () => {
+    const agent = await createLegacyAgent('juno');
     const mem = await resolvers.Mutation.createMemory(
       {},
       { orgId: orgA.id, name: 'juno-system' },
@@ -152,17 +302,15 @@ describe('updateAgent first-attach of systemMemoryId', () => {
     // 035: agent visibility no longer syncs onto the system memory — it is
     // always NULL (chk_memory_visibility_class).
     expect(updated.visibility).toBeNull();
+    // system-class memories must opt out of uploads (schema.prisma).
+    expect(updated.acceptsUploads).toBe(false);
   });
 
   it('refuses a memory from a different org', async () => {
     const otherOrg = await db.organization.create({
       data: { id: generateId(), name: 'org-b', urn: 'org-b' },
     });
-    const agent = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'juno' },
-      adminCtx(),
-    );
+    const agent = await createLegacyAgent('juno');
     const foreign = await db.memory.create({
       data: {
         id: generateId(),
@@ -182,16 +330,8 @@ describe('updateAgent first-attach of systemMemoryId', () => {
   });
 
   it('refuses a memory already attached to another agent', async () => {
-    const agent1 = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'juno' },
-      adminCtx(),
-    );
-    const agent2 = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'other' },
-      adminCtx(),
-    );
+    const agent1 = await createLegacyAgent('juno');
+    const agent2 = await createLegacyAgent('other');
     const mem = await resolvers.Mutation.createMemory(
       {},
       { orgId: orgA.id, name: 'shared-system' },
@@ -218,21 +358,9 @@ describe('updateAgent first-attach of systemMemoryId', () => {
 
 describe('updateAgent lock on existing systemMemoryId', () => {
   async function agentWithSystem() {
-    const agent = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'juno' },
-      adminCtx(),
-    );
-    const mem = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'juno-system' },
-      adminCtx(),
-    );
-    await resolvers.Mutation.updateAgent(
-      {},
-      { id: agent.id, systemMemoryId: mem.id },
-      adminCtx(),
-    );
+    // Auto-provisioning gives every agent a system memory at birth, so the
+    // lock is already armed straight out of createAgent — no attach needed.
+    const { agent, sys: mem } = await createAgentWithSystem('juno');
     return { agent, mem };
   }
 
@@ -270,21 +398,7 @@ describe('updateAgent lock on existing systemMemoryId', () => {
 
 describe('agent → system memory sync', () => {
   it('renames the system memory when the agent is renamed', async () => {
-    const agent = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'juno' },
-      adminCtx(),
-    );
-    const mem = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'juno-system' },
-      adminCtx(),
-    );
-    await resolvers.Mutation.updateAgent(
-      {},
-      { id: agent.id, systemMemoryId: mem.id },
-      adminCtx(),
-    );
+    const { agent, sys: mem } = await createAgentWithSystem('juno');
 
     await resolvers.Mutation.updateAgent(
       {},
@@ -300,21 +414,7 @@ describe('agent → system memory sync', () => {
   // system memory — a system memory's visibility is always NULL. This is the
   // inverse of the old "syncs visibility" behavior.
   it('does not propagate agent visibility onto the system memory', async () => {
-    const agent = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'juno', visibility: 'PERSONAL' },
-      adminCtx(),
-    );
-    const mem = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'juno-system' },
-      adminCtx(),
-    );
-    await resolvers.Mutation.updateAgent(
-      {},
-      { id: agent.id, systemMemoryId: mem.id },
-      adminCtx(),
-    );
+    const { agent, sys: mem } = await createAgentWithSystem('juno', { visibility: 'PERSONAL' });
 
     await resolvers.Mutation.updateAgent(
       {},
@@ -336,21 +436,7 @@ describe('agent → system memory sync', () => {
 
 describe('AGENT_SYSTEM memory guards', () => {
   it('refuses to attach an AGENT_SYSTEM memory via addMemoryToAgent', async () => {
-    const agent = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'juno' },
-      adminCtx(),
-    );
-    const mem = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'juno-system' },
-      adminCtx(),
-    );
-    await resolvers.Mutation.updateAgent(
-      {},
-      { id: agent.id, systemMemoryId: mem.id },
-      adminCtx(),
-    );
+    const { sys: mem } = await createAgentWithSystem('juno');
 
     const other = await resolvers.Mutation.createAgent(
       {},
@@ -367,21 +453,7 @@ describe('AGENT_SYSTEM memory guards', () => {
   });
 
   it('refuses to delete an AGENT_SYSTEM memory directly', async () => {
-    const agent = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'juno' },
-      adminCtx(),
-    );
-    const mem = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'juno-system' },
-      adminCtx(),
-    );
-    await resolvers.Mutation.updateAgent(
-      {},
-      { id: agent.id, systemMemoryId: mem.id },
-      adminCtx(),
-    );
+    const { sys: mem } = await createAgentWithSystem('juno');
 
     await expect(
       resolvers.Mutation.deleteMemory({}, { id: mem.id }, adminCtx()),
@@ -471,21 +543,7 @@ describe('AGENT_SYSTEM memory guards', () => {
   });
 
   it('cascades system memory deletion when the agent is deleted', async () => {
-    const agent = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'juno' },
-      adminCtx(),
-    );
-    const mem = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'juno-system' },
-      adminCtx(),
-    );
-    await resolvers.Mutation.updateAgent(
-      {},
-      { id: agent.id, systemMemoryId: mem.id },
-      adminCtx(),
-    );
+    const { agent, sys: mem } = await createAgentWithSystem('juno');
 
     await resolvers.Mutation.deleteAgent({}, { id: agent.id }, adminCtx());
 
@@ -500,21 +558,7 @@ describe('AGENT_SYSTEM memory guards', () => {
 
 describe('memory list filtering', () => {
   async function setupTwoMemories() {
-    const agent = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'juno' },
-      adminCtx(),
-    );
-    const sys = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'juno-system' },
-      adminCtx(),
-    );
-    await resolvers.Mutation.updateAgent(
-      {},
-      { id: agent.id, systemMemoryId: sys.id },
-      adminCtx(),
-    );
+    const { sys } = await createAgentWithSystem('juno');
     const knowledge = await resolvers.Mutation.createMemory(
       {},
       { orgId: orgA.id, name: 'knowledge' },
@@ -576,22 +620,7 @@ describe('memory list filtering', () => {
 
 describe('Memory.agent derived field', () => {
   it('returns the owning agent for an AGENT_SYSTEM memory', async () => {
-    const agent = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'juno' },
-      adminCtx(),
-    );
-    const mem = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'juno-system' },
-      adminCtx(),
-    );
-    await resolvers.Mutation.updateAgent(
-      {},
-      { id: agent.id, systemMemoryId: mem.id },
-      adminCtx(),
-    );
-    const updated = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    const { agent, sys: updated } = await createAgentWithSystem('juno');
 
     const resolved = await resolvers.Memory.agent(
       { id: updated.id, class: updated.class },

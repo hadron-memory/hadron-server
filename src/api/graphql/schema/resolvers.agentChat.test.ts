@@ -45,23 +45,17 @@ beforeEach(async () => {
     data: { organizationId: orgA.id, userId: otherUser.id, role: 'CONTRIBUTOR' },
   });
 
-  // Create the agent first (so the system memory can reference it)
-  agent = await resolvers.Mutation.createAgent(
+  const created = await resolvers.Mutation.createAgent(
     {},
     { orgId: orgA.id, name: 'research-agent', visibility: 'ORGANIZATION' },
     adminCtx(),
   );
-  // Create a system memory and attach it to the agent
-  systemMemory = await resolvers.Mutation.createMemory(
-    {},
-    { orgId: orgA.id, name: 'research-system' },
-    adminCtx(),
-  );
-  await resolvers.Mutation.updateAgent(
-    {},
-    { id: agent.id, systemMemoryId: systemMemory.id },
-    adminCtx(),
-  );
+  agent = created;
+  // createAgent now auto-provisions the agent's class='system' memory (#518);
+  // read it straight off the returned agent rather than create + attach.
+  systemMemory = await db.memory.findUniqueOrThrow({
+    where: { id: created.systemMemoryId! },
+  });
   // 008-agent-installation: personal-class memory pivots on (app_id, user_id).
   // The JWT-user startChat path resolves the App via App.agent_id matching the
   // chat agent inside the user's accessible orgs. Seed an App linking this
@@ -408,11 +402,11 @@ describe('startChat (JWT user)', () => {
   });
 
   it('throws when the agent has no system memory', async () => {
-    const naked = await resolvers.Mutation.createAgent(
-      {},
-      { orgId: orgA.id, name: 'naked-agent' },
-      adminCtx(),
-    );
+    // createAgent auto-provisions a system memory (#518), so a system-memory-less
+    // agent only exists as a legacy row — build one directly to hit the guard.
+    const naked = await db.agent.create({
+      data: { id: generateId(), name: 'naked-agent', urn: `${orgA.urn}:naked-agent`, organizationId: orgA.id },
+    });
     await expect(
       resolvers.Mutation.startChat({}, { agentId: naked.id }, userCtx(adminUser.id)),
     ).rejects.toThrow(/system memory/);
@@ -616,16 +610,10 @@ describe('chatHistory', () => {
       { orgId: orgA.id, name: 'no-app-agent', visibility: 'ORGANIZATION' },
       adminCtx(),
     );
-    const noAppSysMem = await resolvers.Mutation.createMemory(
-      {},
-      { orgId: orgA.id, name: 'no-app-system' },
-      adminCtx(),
-    );
-    await resolvers.Mutation.updateAgent(
-      {},
-      { id: noAppAgent.id, systemMemoryId: noAppSysMem.id },
-      adminCtx(),
-    );
+    // createAgent auto-provisions the system memory (#518); read it back.
+    const noAppSysMem = await db.memory.findUniqueOrThrow({
+      where: { id: noAppAgent.systemMemoryId! },
+    });
     // Seed minimal conversation + stage so startChat can find a first stage.
     const seedNodes = [
       { loc: 'conversations', name: 'conversations', nodeType: 'system' },

@@ -43,21 +43,17 @@ beforeEach(async () => {
     data: { organizationId: orgA.id, userId: otherAdmin.id, role: 'ADMIN' },
   });
 
-  agent = await resolvers.Mutation.createAgent(
+  const created = await resolvers.Mutation.createAgent(
     {},
     { orgId: orgA.id, name: 'rev-agent', visibility: 'PERSONAL' },
     adminCtx(),
   );
-  systemMemory = await resolvers.Mutation.createMemory(
-    {},
-    { orgId: orgA.id, name: 'rev-system' },
-    adminCtx(),
-  );
-  await resolvers.Mutation.updateAgent(
-    {},
-    { id: agent.id, systemMemoryId: systemMemory.id },
-    adminCtx(),
-  );
+  agent = created;
+  // createAgent now auto-provisions the agent's class='system' memory (#518);
+  // read it straight off the returned agent rather than create + attach.
+  systemMemory = await db.memory.findUniqueOrThrow({
+    where: { id: created.systemMemoryId! },
+  });
 
   // Seed a conversation + stage + prompt
   for (const n of [

@@ -21,6 +21,7 @@ import {
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { generateId } from '../../../lib/id.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import {
@@ -62,46 +63,90 @@ export const agentMutations = {
       const defaultSurfaces = inferredType === 'CHATBOT' ? ['api'] : ['mcp'];
       const agentVisibility = (visibility as AgentVisibility) ?? 'PERSONAL';
 
-      // If a systemMemoryId is provided at create time, validate the target
-      // and promote it to class='system' with the synced name. This is the
-      // wizard's primary entry point.
-      // 035-visibility-enum-cleanup: the memory's `class` (not the dropped
-      // `type` column) marks it as a system memory, and its `visibility` is
-      // cleared to NULL — agent visibility no longer syncs onto the system
-      // memory (chk_memory_visibility_class forbids a non-null visibility on
-      // class='system').
-      if (systemMemoryId) {
-        const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
-        if (target.organizationId !== resolvedOrgId) {
-          throw new Error('System memory must belong to the same organization as the agent');
+      // Every agent owns a system memory (cor:dmo:050:01 — the Agent carries a
+      // pointer to its own class='system' memory). Two entry points:
+      //   1. systemMemoryId supplied (wizard flow) → promote that existing
+      //      memory to class='system'.
+      //   2. no systemMemoryId → auto-provision a fresh class='system' memory.
+      // This applies regardless of the legacy ASSISTANT/CHATBOT type, which is
+      // not load-bearing (cor:dmo:050:01 "what invalidates this spec").
+      // The memory-provision + agent-create run in one transaction so a
+      // failure never leaves a dangling system memory or an ownerless agent.
+      //
+      // 035-visibility-enum-cleanup: a system memory is marked by `class` (not
+      // the dropped `type` column) and its `visibility` is always NULL
+      // (chk_memory_visibility_class forbids a non-null visibility on
+      // class='system'); agent visibility does not sync onto it.
+      const createdAgent = await ctx.db.$transaction(async (tx) => {
+        let resolvedSystemMemoryId: string;
+        if (systemMemoryId) {
+          const target = await tx.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
+          if (target.organizationId !== resolvedOrgId) {
+            throw new Error('System memory must belong to the same organization as the agent');
+          }
+          const otherAgent = await tx.agent.findFirst({
+            where: { systemMemoryId, deletedAt: null },
+            select: { id: true },
+          });
+          if (otherAgent) {
+            throw new Error('This memory is already the system memory of another agent');
+          }
+          await tx.memory.update({
+            where: { id: systemMemoryId },
+            data: {
+              class: 'system',
+              name: `${name} System`,
+              visibility: null,
+              // system-class memories must opt out of uploads (schema.prisma,
+              // 006-asset-upload-redesign). Applies when promoting too, not
+              // just on auto-provision. #519 review.
+              acceptsUploads: false,
+            },
+          });
+          resolvedSystemMemoryId = systemMemoryId;
+        } else {
+          // Auto-provision. The memory URN derives from the (unique) agent URN
+          // so it's collision-free and stable. If a soft-deleted memory still
+          // holds that URN (e.g. an earlier agent at this URN was deleted),
+          // hard-delete it first — mirrors createMemory's URN-reclaim path.
+          const systemMemoryUrn = `${agentUrn}-system`;
+          const staleHolder = await tx.memory.findUnique({ where: { urn: systemMemoryUrn } });
+          if (staleHolder) {
+            if (staleHolder.deletedAt) {
+              await tx.memory.delete({ where: { id: staleHolder.id } });
+            } else {
+              throw new Error(`A memory with URN "${systemMemoryUrn}" already exists`);
+            }
+          }
+          const systemMemory = await tx.memory.create({
+            data: {
+              id: generateId(),
+              organizationId: resolvedOrgId,
+              urn: systemMemoryUrn,
+              name: `${name} System`,
+              class: 'system',
+              // system-class memories must opt out of uploads (schema.prisma,
+              // 006-asset-upload-redesign — DB default is true; the asset gate
+              // only checks Memory.acceptsUploads after write auth). #519 review.
+              acceptsUploads: false,
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+          });
+          resolvedSystemMemoryId = systemMemory.id;
         }
-        const otherAgent = await ctx.db.agent.findFirst({
-          where: { systemMemoryId, deletedAt: null },
-          select: { id: true },
-        });
-        if (otherAgent) {
-          throw new Error('This memory is already the system memory of another agent');
-        }
-        await ctx.db.memory.update({
-          where: { id: systemMemoryId },
-          data: {
-            class: 'system',
-            name: `${name} System`,
-            visibility: null,
-          },
-        });
-      }
 
-      return ctx.db.agent.create({
-        data: {
-          organizationId: resolvedOrgId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: systemMemoryId ?? null,
-          visibility: agentVisibility,
-          type: inferredType,
-          surfaces: surfaces ?? defaultSurfaces,
-          createdBy: ctx.userId ?? ctx.clientId ?? null,
-        },
-        include: AGENT_INCLUDE,
+        return tx.agent.create({
+          data: {
+            organizationId: resolvedOrgId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: resolvedSystemMemoryId,
+            visibility: agentVisibility,
+            type: inferredType,
+            surfaces: surfaces ?? defaultSurfaces,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+          include: AGENT_INCLUDE,
+        });
       });
+      return createdAgent;
     },
 
     updateAgent: async (
@@ -150,7 +195,39 @@ export const agentMutations = {
               class: 'system',
               name: `${name ?? agent.name} System`,
               visibility: null,
+              // system-class memories must opt out of uploads (schema.prisma,
+              // 006-asset-upload-redesign). #519 review.
+              acceptsUploads: false,
             },
+          });
+        }
+      }
+
+      // ── URN sync for an auto-derived system memory.
+      // An auto-provisioned system memory's URN is `${agentUrn}-system` (see
+      // createAgent). If the agent's URN changes we must move the memory's URN
+      // in lockstep — otherwise the stale `${oldUrn}-system` memory keeps the
+      // old slug reserved, and re-creating an agent at that slug fails the
+      // system-memory URN-reclaim check (#519 review). Only touch a memory whose
+      // URN still matches the derived pattern: a wizard-supplied system memory
+      // carries its own author-chosen URN we must not rewrite.
+      if (agent.systemMemoryId && newUrn !== undefined && newUrn !== agent.urn) {
+        const derivedOldUrn = `${agent.urn}-system`;
+        const sys = await ctx.db.memory.findUnique({
+          where: { id: agent.systemMemoryId },
+          select: { urn: true },
+        });
+        if (sys?.urn === derivedOldUrn) {
+          await ctx.db.memory.update({
+            where: { id: agent.systemMemoryId },
+            data: {
+              urn: `${newUrn}-system`,
+              updatedBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+          }).catch((err) => {
+            // Best-effort, like the name sync below: a rare collision on the
+            // new URN shouldn't fail the whole agent rename.
+            console.warn('[updateAgent] system memory URN sync failed:', err);
           });
         }
       }
