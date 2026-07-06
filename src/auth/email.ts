@@ -66,18 +66,19 @@ export async function verifyMagicLink(
   token: string,
   db: PrismaClient,
 ): Promise<{ email: string; clientStateHash: string | null } | null> {
-  const record = await db.emailVerificationToken.findUnique({
-    where: { token },
-  });
-
-  if (!record) return null;
-  if (record.usedAt) return null;
-  if (record.expiresAt < new Date()) return null;
-
-  await db.emailVerificationToken.update({
-    where: { id: record.id },
+  // Atomic single-use claim (PR-511 Copilot review): a read-then-update lets two
+  // concurrent requests both observe usedAt=null and both mint a login code. The
+  // conditional updateMany is the lock — exactly one caller flips usedAt and sees
+  // count=1; the others get 0 and are rejected. Mirrors the AuthCode /token and
+  // authHandoff redemptions.
+  const claim = await db.emailVerificationToken.updateMany({
+    where: { token, usedAt: null, expiresAt: { gt: new Date() } },
     data: { usedAt: new Date() },
   });
+  if (claim.count !== 1) return null;
+
+  const record = await db.emailVerificationToken.findUnique({ where: { token } });
+  if (!record) return null; // unreachable after a successful claim; keeps types honest
 
   return { email: record.email, clientStateHash: record.clientStateHash };
 }

@@ -19,6 +19,7 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
+import { generateId } from '../../lib/id.js';
 import { issueLoginCode } from '../../auth/authHandoff.js';
 import { signJwt } from '../../auth/index.js';
 
@@ -125,12 +126,11 @@ describe('POST /auth/email', () => {
 });
 
 describe('GET /auth/email/verify', () => {
-  let seq = 0;
   async function insertEmailToken(clientStateHash: string | null): Promise<string> {
-    const token = `evtok-${seq++}-${clientStateHash ? 'bound' : 'unbound'}`;
+    const token = `evtok-${generateId()}`;
     await db.emailVerificationToken.create({
       data: {
-        id: `evt-${token}`,
+        id: generateId(),
         email: `verify-${token}@example.test`,
         token,
         expiresAt: new Date(Date.now() + 15 * 60 * 1000),

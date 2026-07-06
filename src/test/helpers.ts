@@ -59,6 +59,10 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.authCode.deleteMany();
   await db.userApiKey.deleteMany();
   await db.oAuthClient.deleteMany();
+  // EmailVerificationToken has no user FK (keyed on the email string), so
+  // user.deleteMany() doesn't cascade to it — clear it explicitly or rows leak
+  // across tests (#505/#511). authHandoffCode DOES cascade via its user FK.
+  await db.emailVerificationToken.deleteMany();
   await db.user.deleteMany();
 }
 

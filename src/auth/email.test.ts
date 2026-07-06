@@ -50,6 +50,12 @@ describe('verifyMagicLink', () => {
     expect(await verifyMagicLink(token, db)).toBeNull(); // usedAt now set
   });
 
+  it('is atomic under concurrency — exactly one of two racers wins (#511)', async () => {
+    const token = await insertToken({ clientStateHash: 'h' });
+    const results = await Promise.all([verifyMagicLink(token, db), verifyMagicLink(token, db)]);
+    expect(results.filter((r) => r !== null)).toHaveLength(1);
+  });
+
   it('rejects an expired token', async () => {
     const token = await insertToken({ expiresAt: new Date(Date.now() - 1000) });
     expect(await verifyMagicLink(token, db)).toBeNull();
