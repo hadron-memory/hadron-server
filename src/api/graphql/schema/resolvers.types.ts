@@ -364,7 +364,21 @@ export const typeResolvers = {
     ) => {
       const agentUrn = await readPrimaryAgentField(a, ctx, 'urn');
       if (!agentUrn) return null;
-      return composeInstalledAgentUrn(a.urn, agentUrn);
+      // #520 — fail soft: composeInstalledAgentUrn throws on a malformed app
+      // or agent URN (not exactly <org>::<slug>), and a thrown resolver adds
+      // an errors[] entry that makes graphql-request reject the WHOLE app(ref:)
+      // / apps read — one bad row 404s the portal's app-detail page. This field
+      // is nullable, so serve-and-log instead (same posture as Node.urn /
+      // Edge.urn above): warn the offending URNs and return null.
+      try {
+        return composeInstalledAgentUrn(a.urn, agentUrn);
+      } catch (err) {
+        console.warn(
+          `[App.installedAgentUrn] failed to compose from appUrn "${a.urn}" + agentUrn "${agentUrn}":`,
+          err,
+        );
+        return null;
+      }
     },
     // 023-app-shape Phase 2b: `App.agent` and `App.agents` are
     // soft-deprecated convenience fields that resolve via the AppAgent
