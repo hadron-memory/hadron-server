@@ -773,7 +773,10 @@ export const sessionMutations = {
         const run = await triggerManualRun(ctx, {
           appRef,
           entryNodeUrn: nodeUrn,
-          eventData: stringArgs,
+          // Pass the ORIGINAL structured args (not stringArgs) so eventData keeps
+          // its JSON shape for audit + downstream consumers — the assemble path
+          // stringifies for Mustache when it renders (#531 review, Copilot).
+          eventData: args,
           runAsSelf,
         });
         return run.id;

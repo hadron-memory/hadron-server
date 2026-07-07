@@ -106,6 +106,35 @@ export const importNodeMutations = {
     // to be denied at the write (PR-486 review, Codex P1).
     await requireMemoryWriteAccess(ctx, memoryId);
 
+    // ── #528 — validate the post-import task-run preconditions BEFORE the
+    // fetch/write, so a bad taskRef / missing App / non-runnable task fails
+    // fast without a wasted 30s fetch or an orphaned node (#531 review). The
+    // run itself is minted after the write (it needs the stored node's URN).
+    let taskRun: { entryNodeUrn: string; appRef: string } | null = null;
+    if (input.taskRef != null && input.taskRef !== '') {
+      const runAppRef = input.appRef ?? ctx.appId;
+      if (!runAppRef) {
+        throw new GraphQLError(
+          'importNode: `taskRef` requires an App — pass `appRef` or call with an App context.',
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+      const { id: taskNodeId } = await resolveNodeRef(ctx.db, input.taskRef);
+      const taskNode = await ctx.db.node.findUniqueOrThrow({
+        where: { id: taskNodeId },
+        select: { loc: true, isRunnable: true, memory: { select: { urn: true } } },
+      });
+      if (!taskNode.isRunnable) {
+        throw new GraphQLError('importNode: `taskRef` must be a runnable task node.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      taskRun = {
+        entryNodeUrn: composeNodeUrn(taskNode.memory.urn, taskNode.loc),
+        appRef: runAppRef,
+      };
+    }
+
     // ── Acquire content ────────────────────────────────────────────────
     // The url path fetches WITHOUT user credentials — authenticated pages
     // must come through the inline `content` path (issue #457 auth boundary).
@@ -177,37 +206,29 @@ export const importNodeMutations = {
     );
 
     // ── #528 — post-import task run ────────────────────────────────────
-    // When a taskRef is supplied, hand the just-stored node to that task via a
-    // MANUAL AppRun (the same kernel behind triggerAppRun / runTask(appRef:)).
-    // The run is async: return FETCH_PENDING + the run id as jobId (poll
-    // appRun(ref:) for status + output). The imported node's URN is passed in
-    // eventData so the task template can target it (e.g. distill-imported-page).
-    if (input.taskRef != null && input.taskRef !== '') {
-      const runAppRef = input.appRef ?? ctx.appId;
-      if (!runAppRef) {
-        throw new GraphQLError(
-          'importNode: `taskRef` requires an App — pass `appRef` or call with an App context.',
-          { extensions: { code: 'BAD_USER_INPUT' } },
-        );
-      }
-      // Resolve taskRef (PK or URN) to a fully-qualified node URN for the run
-      // entry, and compose the imported node's URN for the task to target.
-      const { id: taskNodeId } = await resolveNodeRef(ctx.db, input.taskRef);
-      const taskNode = await ctx.db.node.findUniqueOrThrow({
-        where: { id: taskNodeId },
-        select: { loc: true, memory: { select: { urn: true } } },
-      });
-      const entryNodeUrn = composeNodeUrn(taskNode.memory.urn, taskNode.loc);
+    // Preconditions were validated pre-write above; now that the node exists,
+    // hand it to the task via a MANUAL AppRun (the same kernel behind
+    // triggerAppRun / runTask(appRef:)). Async: return FETCH_PENDING + the run
+    // id as jobId (poll appRun(ref:) for status + output). The imported node's
+    // URN is passed in eventData so the task can target it (e.g. distill).
+    if (taskRun) {
       const importedMemory = await ctx.db.memory.findUniqueOrThrow({
         where: { id: memoryId },
-        select: { urn: true },
+        select: { urn: true, class: true },
       });
       const importedNodeUrn = composeNodeUrn(importedMemory.urn, node.loc);
 
+      // Attribute the run to the importing user ONLY when the target is
+      // owner-only (personal/private) — there the run needs the user's identity
+      // to read the imported node and write back (#531 review, Gemini). For
+      // knowledge/app targets the app can already read it, so run app-only and
+      // avoid imposing the on-behalf-of App-relationship requirement.
+      const ownerOnly = importedMemory.class === 'personal' || importedMemory.class === 'private';
       const run = await triggerManualRun(ctx, {
-        appRef: runAppRef,
-        entryNodeUrn,
+        appRef: taskRun.appRef,
+        entryNodeUrn: taskRun.entryNodeUrn,
         eventData: { ...(input.taskArgs ?? {}), importedNodeUrn },
+        runAsSelf: ownerOnly && !!ctx.userId,
       });
       return { node, status: 'FETCH_PENDING', jobId: run.id };
     }
