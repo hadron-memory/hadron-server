@@ -18,6 +18,12 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 
+// @updatedAt writes a JS `new Date()` (millisecond precision), so create and
+// update must be separated by more than one clock tick for the strict-increase
+// assertion to hold. 5ms can round to 0 on coarse timers — use a comfortable
+// margin (#527 review).
+const SETTLE_MS = 25;
+
 beforeEach(async () => {
   await cleanDb(db);
 });
@@ -33,7 +39,7 @@ describe('#523 — @updatedAt auto-stamps updatedAt on previously-unstamped mode
     // @updatedAt stamps on create too (matches the models that already had it).
     expect(created.updatedAt).toBeInstanceOf(Date);
 
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, SETTLE_MS));
     const updated = await db.agent.update({
       where: { id: created.id },
       data: { description: 'changed' },
@@ -50,7 +56,7 @@ describe('#523 — @updatedAt auto-stamps updatedAt on previously-unstamped mode
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app`, name: 'app' },
     });
     expect(app.updatedAt).toBeInstanceOf(Date);
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, SETTLE_MS));
     const updated = await db.app.update({
       where: { id: app.id },
       data: { name: 'app-2' },
@@ -77,11 +83,23 @@ describe('#523 — @updatedAt auto-stamps updatedAt on previously-unstamped mode
       },
     });
     expect(edge.updatedAt).toBeInstanceOf(Date);
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, SETTLE_MS));
     const updated = await db.edge.update({
       where: { id: edge.id },
       data: { name: 'rel2' },
     });
     expect(updated.updatedAt!.getTime()).toBeGreaterThan(edge.updatedAt!.getTime());
+  });
+
+  it('Session: set on create, bumped on update', async () => {
+    // Session.id is caller-generated; type defaults to DEVELOPER.
+    const session = await db.session.create({ data: { id: generateId() } });
+    expect(session.updatedAt).toBeInstanceOf(Date);
+    await new Promise((r) => setTimeout(r, SETTLE_MS));
+    const updated = await db.session.update({
+      where: { id: session.id },
+      data: { summary: 'touched' },
+    });
+    expect(updated.updatedAt!.getTime()).toBeGreaterThan(session.updatedAt!.getTime());
   });
 });
