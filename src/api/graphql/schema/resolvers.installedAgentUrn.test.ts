@@ -8,7 +8,7 @@
  * the author-org segment.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -214,13 +214,18 @@ describe('App.installedAgentUrn — spec 021 US1', () => {
       },
     });
 
+    // The resolver intentionally console.warns on the malformed URN — suppress
+    // it to keep test output clean, and assert it fired so the log path is
+    // covered too.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const result = await (resolvers.App as Record<string, Function>).installedAgentUrn(
       badApp,
       {},
       { db } as unknown as Context,
     );
-
     expect(result).toBeNull();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it('#520 — returns null when the Agent URN is malformed', async () => {
@@ -242,12 +247,14 @@ describe('App.installedAgentUrn — spec 021 US1', () => {
       badAgent.id,
     );
 
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const result = await (resolvers.App as Record<string, Function>).installedAgentUrn(
       app,
       {},
       { db } as unknown as Context,
     );
-
     expect(result).toBeNull();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
