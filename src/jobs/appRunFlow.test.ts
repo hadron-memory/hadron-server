@@ -232,6 +232,54 @@ describe('3-node flow through production deps (§10)', () => {
     ).toBeNull();
   });
 
+  it('a flow routed into an ENCRYPTED memory fails at that hop (PR-532 Codex P2)', async () => {
+    // The launch gate only checks the entry — the guard must also fire on
+    // routed hops, where the run has no session key.
+    const vault = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, name: 'vault',
+        urn: `${ORG_URN}:vault`, class: 'app', appId, isEncrypted: true,
+      },
+    });
+    const secret = await db.node.create({
+      data: {
+        id: generateId(), memoryId: vault.id, loc: 'flow:secret', name: 'secret',
+        content: 'classified', tags: [],
+      },
+    });
+    const deferNode = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'flow:defer', memoryId } },
+      select: { id: true },
+    });
+    await db.edge.create({
+      data: {
+        id: generateId(), memoryId, sourceId: deferNode.id, targetId: secret.id,
+        name: 'next', loc: deriveEdgeLoc('flow:defer', 'next', 'flow:secret'),
+      },
+    });
+
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.4); // low confidence → defer → (routed) vault
+    expect(await executeAppRun(db, run.id, deps)).toBe('failed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect((after.failure as { code?: string }).code).toBe('NODE_LOAD_FAILED');
+    expect((after.failure as { message?: string }).message).toContain('encrypted');
+    expect(after.curNodeUrn).toBe(`${ORG_URN}::vault::flow:secret`); // position preserved for audit
+  });
+
+  it('an extractionSpec writing into __-plumbing fields fails the run loudly (PR-532 Copilot)', async () => {
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:classify', memoryId } },
+      data: { data: { extractionSpec: [{ field: '__aiConfigName' }] } as never },
+    });
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.9);
+    expect(await executeAppRun(db, run.id, deps)).toBe('failed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect((after.failure as { code?: string }).code).toBe('NODE_LOAD_FAILED');
+    expect((after.failure as { message?: string }).message).toContain('__aiConfigName');
+  });
+
   it('a defer-branch flow can still route into another memory later (URN shape sanity)', async () => {
     // Guards composeNodeUrn round-tripping: the checkpointed target URN must
     // be walkable by the next hop's loadFlowNode.

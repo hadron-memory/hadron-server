@@ -157,6 +157,26 @@ describe('mintAppRun — launch gate (cor:acl:050:01)', () => {
     expect(run.status).toBe('PENDING');
   });
 
+  it('rejects an entry node outside the App\'s org at the gate (PR-532 Codex P2)', async () => {
+    const foreignOrg = await db.organization.create({
+      data: { id: generateId(), name: 'foreign-org', urn: 'foreign-org' },
+    });
+    const foreignMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: foreignOrg.id, name: 'pubmem',
+        urn: 'foreign-org:pubmem', class: 'knowledge',
+      },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: foreignMem.id, loc: 'tasks:other', name: 'Other', tags: [] },
+    });
+    // Without the gate this would mint, consume quota, and always fail in
+    // the worker (loadFlowNode is org-scoped).
+    await expect(mint({ entryNodeUrn: 'foreign-org::pubmem::tasks:other' })).rejects.toMatchObject({
+      code: 'ENTRY_NOT_IN_ORG',
+    });
+  });
+
   it('denies NEW launches when the daily token ledger is at its stored limit (PR-493 Codex P2)', async () => {
     // Simulate yesterday's overage: record spend far past the default limit.
     await recordQuotaUsage(db, 'app', appId, 'llm.tokens', 1_000, 5_000);
@@ -461,6 +481,16 @@ describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
     expect(await executeAppRun(db, run.id, d)).toBe('failed');
     const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
     expect((after.failure as { code?: string }).code).toBe('EDGE_CONDITION_ERROR');
+  });
+
+  it('__-keys are stripped from BOTH view sources — a persisted envelope is not a trusted channel (PR-532 Copilot)', async () => {
+    const run = await mint({ eventData: { topic: 'ticks', __aiConfigName: 'plumbing' } });
+    // Simulate a resume from a checkpoint whose envelope carries plumbing.
+    await db.appRun.update({ where: { id: run.id }, data: { data: { __sneak: 1, ok: 2 } } });
+    const d = deps();
+    expect(await executeAppRun(db, run.id, d)).toBe('completed');
+    expect((d.assemble as ReturnType<typeof vi.fn>).mock.calls[0][2]).toEqual({ topic: 'ticks', ok: 2 });
+    expect((d.selectNext as ReturnType<typeof vi.fn>).mock.calls[0][2]).toEqual({ topic: 'ticks', ok: 2 });
   });
 
   it('a mid-flow node that cannot be loaded is an observable failure (D20 analog)', async () => {

@@ -67,7 +67,8 @@ export class RunLaunchDeniedError extends Error {
       | 'POLICY_DENIED'
       | 'APP_NOT_FOUND'
       | 'AGENT_NOT_INSTALLED'
-      | 'ENCRYPTED_MEMORY_UNSUPPORTED',
+      | 'ENCRYPTED_MEMORY_UNSUPPORTED'
+      | 'ENTRY_NOT_IN_ORG',
   ) {
     super(message);
     this.name = 'RunLaunchDeniedError';
@@ -343,12 +344,23 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
     const { id: entryNodeId } = await resolveNodeRef(db, args.entryNodeUrn);
     const entryNode = await db.node.findUnique({
       where: { id: entryNodeId },
-      select: { memory: { select: { isEncrypted: true } } },
+      select: { memory: { select: { isEncrypted: true, organizationId: true } } },
     });
     if (entryNode?.memory.isEncrypted) {
       throw new RunLaunchDeniedError(
         'Headless runs are unavailable on encrypted memories (caller-held keys, D-2026-07-06-B).',
         'ENCRYPTED_MEMORY_UNSUPPORTED',
+      );
+    }
+    // Cross-org gate (PR-532 review, Codex P2): the worker loads flow nodes
+    // scoped to the run's org, so an entry in a FOREIGN org (readable e.g.
+    // via a public/subscribed memory) would mint a run that consumes quota
+    // and then always fails. Reject synchronously at the gate instead —
+    // covers every mint path (schedule/webhook/manual/importNode).
+    if (entryNode && entryNode.memory.organizationId !== args.organizationId) {
+      throw new RunLaunchDeniedError(
+        'The entry node is not in this App\'s organization — headless runs cannot cross orgs (v1).',
+        'ENTRY_NOT_IN_ORG',
       );
     }
   } catch (err) {
@@ -474,19 +486,22 @@ export interface RunExecutionDeps {
   onTerminal?: (run: AppRun) => Promise<void>;
 }
 
-/** Trigger payload + envelope, envelope wins; `__`-keys (trigger plumbing
- *  like `__aiConfigName`) never leak into templates or conditions (D-MN-1). */
+/** Trigger payload + envelope, envelope wins; `__`-keys (plumbing like
+ *  `__aiConfigName`) never leak into templates or conditions (D-MN-1).
+ *  BOTH sources are filtered — a persisted envelope is history, not a
+ *  trusted channel (PR-532 review, Copilot). */
 function mergedView(
   eventData: unknown,
   envelope: Record<string, unknown>,
 ): Record<string, unknown> {
   const view: Record<string, unknown> = {};
-  if (eventData !== null && typeof eventData === 'object' && !Array.isArray(eventData)) {
-    for (const [k, v] of Object.entries(eventData as Record<string, unknown>)) {
+  for (const source of [eventData, envelope]) {
+    if (source === null || typeof source !== 'object' || Array.isArray(source)) continue;
+    for (const [k, v] of Object.entries(source as Record<string, unknown>)) {
       if (!k.startsWith('__')) view[k] = v;
     }
   }
-  return { ...view, ...envelope };
+  return view;
 }
 
 export type RunOutcome = 'completed' | 'failed' | 'skipped' | 'transient';
@@ -749,11 +764,14 @@ async function executeAppRunInner(
 
       // D-MN-5 CHECKPOINT — after this hop's side effects, before the next
       // hop: position + envelope. Guarded so a concurrent cancel is never
-      // overwritten; the next hop's activation check then halts the loop.
-      await db.appRun.updateMany({
+      // overwritten; zero rows matched means the run is no longer RUNNING —
+      // halt here instead of paying for the next hop's checks (PR-532
+      // review, Gemini).
+      const checkpointed = await db.appRun.updateMany({
         where: { id: runId, status: 'RUNNING' },
         data: { curNodeUrn: next.targetUrn, data: envelope as never },
       });
+      if (checkpointed.count === 0) return 'skipped';
       cur = next.targetUrn;
     }
   } catch (err) {

@@ -58,9 +58,19 @@ async function loadFlowNode(db: PrismaClient, nodeUrn: string, organizationId: s
       organizationId,
       deletedAt: null,
     },
-    select: { id: true, urn: true },
+    select: { id: true, urn: true, isEncrypted: true },
   });
   if (!memory) throw new Error(`Flow memory not found for "${nodeUrn}".`);
+  // The launch gate only sees the ENTRY node — a `next` edge could route a
+  // plaintext flow into an encrypted memory mid-flow, where the run has no
+  // session key and assembly would ship ciphertext. Deny routed hops the
+  // same way encrypted entries are denied (PR-532 review, Codex P2;
+  // spec 041 D-2026-07-06-B). Fires on the hop's FIRST touch (loadNodeSpec).
+  if (memory.isEncrypted) {
+    throw new Error(
+      `Headless runs are unavailable on encrypted memories — flow routed into "${nodeUrn}".`,
+    );
+  }
   const node = await db.node.findUnique({
     where: { loc_memoryId: { loc, memoryId: memory.id } },
     select: { id: true, name: true, data: true, deletedAt: true },
@@ -98,6 +108,17 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
           const check = validateExtractionSpec(entries);
           if (!check.ok) {
             throw new Error(`Invalid extractionSpec on "${nodeUrn}": ${check.error.message}`);
+          }
+          // `__`-prefixed names are runner plumbing (D-MN-1) — a node must
+          // not extract into them; mergedView would strip them anyway, so
+          // the extraction would silently vanish. Fail loud instead
+          // (PR-532 review, Copilot).
+          const plumbing = entries.find((e) => e.field.startsWith('__'));
+          if (plumbing) {
+            throw new Error(
+              `Invalid extractionSpec on "${nodeUrn}": field "${plumbing.field}" — ` +
+                `"__"-prefixed names are reserved for runner plumbing.`,
+            );
           }
           extractionSpec = entries;
         }

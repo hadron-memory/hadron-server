@@ -133,7 +133,10 @@ export interface LlmObjectResult {
  * none are `required`.
  */
 function shapeToJsonSchema(shape: string | undefined): Record<string, unknown> {
-  switch ((shape ?? 'string').trim()) {
+  // `shape` crosses a JSON boundary (Node.data) — a non-string value is
+  // malformed data, which degrades to string like any unknown shape
+  // (PR-532 review, Gemini).
+  switch (typeof shape === 'string' ? shape.trim() : 'string') {
     case 'number': return { type: 'number' };
     case 'boolean': return { type: 'boolean' };
     case 'string[]': return { type: 'array', items: { type: 'string' } };
@@ -223,7 +226,11 @@ async function extractViaJsonPrompt(
   fields: ExtractionField[],
 ): Promise<LlmObjectResult> {
   const fieldLines = fields
-    .map((f) => `- "${f.field}" (${(f.shape ?? 'string').trim()})${f.description ? `: ${f.description}` : ''}`)
+    .map((f) => {
+      // Same JSON-boundary defense as shapeToJsonSchema (PR-532 review).
+      const shape = typeof f.shape === 'string' ? f.shape.trim() : 'string';
+      return `- "${f.field}" (${shape})${f.description ? `: ${f.description}` : ''}`;
+    })
     .join('\n');
   const out = await generateText(resolved, {
     ...(req.system ? { system: req.system } : {}),
