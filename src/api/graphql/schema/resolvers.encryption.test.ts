@@ -106,7 +106,21 @@ describe('startAgentSession with encryption', () => {
     );
     const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
     expect(mem?.isEncrypted).toBe(true);
+    // 041/#516: SECRET-mode memories are born class='private' (the only
+    // encryptable class), not 'personal'.
+    expect(mem?.class).toBe('private');
     expect(sessionKeyCache.getByMemoryId(session.memoryId!)).not.toBeNull();
+  });
+
+  it('provisions plaintext USER_ID memories as class=personal (no key)', async () => {
+    const session = await resolvers.Mutation.startAgentSession(
+      {},
+      { agentId: agent.id, externalUserId: 'mm-plain' },
+      appCtx(plaintextApp.id),
+    );
+    const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
+    expect(mem?.isEncrypted).toBe(false);
+    expect(mem?.class).toBe('personal');
   });
 
   it('requires the key on subsequent sessions for an already-encrypted memory', async () => {
@@ -413,6 +427,10 @@ describe('encryptMemory', () => {
       sessionCtx,
     );
 
+    // 041/#516: only class='private' encrypts. A plaintext private memory is
+    // the convert-later target (the SECRET-mode born-encrypted path is separate).
+    await db.memory.update({ where: { id: session.memoryId! }, data: { class: 'private' } });
+
     const key = generateDataKey().raw.toString('base64');
     const encrypted = await resolvers.Mutation.encryptMemory(
       {},
@@ -467,6 +485,9 @@ describe('encryptMemory', () => {
       select: { urn: true },
     });
 
+    // 041/#516: only class='private' encrypts.
+    await db.memory.update({ where: { id: session.memoryId! }, data: { class: 'private' } });
+
     const key = generateDataKey().raw.toString('base64');
     const encrypted = await resolvers.Mutation.encryptMemory(
       {},
@@ -475,6 +496,27 @@ describe('encryptMemory', () => {
     );
     expect(encrypted.isEncrypted).toBe(true);
     expect(encrypted.id).toBe(session.memoryId);
+  });
+
+  it('rejects encrypting a class=personal memory even via an App key (#516 grandfather retired)', async () => {
+    // A plaintext USER_ID memory is class='personal'. Pre-#516 an App key could
+    // grandfather-encrypt it; now 'private' is the only encryptable class.
+    const session = await resolvers.Mutation.startAgentSession(
+      {},
+      { agentId: agent.id, externalUserId: 'mm-personal' },
+      appCtx(plaintextApp.id),
+    );
+    const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
+    expect(mem?.class).toBe('personal');
+
+    const key = generateDataKey().raw.toString('base64');
+    await expect(
+      resolvers.Mutation.encryptMemory(
+        {},
+        { memoryId: session.memoryId!, dataKey: key },
+        appCtx(plaintextApp.id),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 });
 
@@ -519,6 +561,10 @@ describe('linkMemoryToUser with encryption', () => {
     mem = await db.memory.findUnique({ where: { id: anonSession.memoryId! } });
     expect(mem?.isEncrypted).toBe(true);
     expect(mem?.anonymousExpiresAt).toBeNull();
+    // 041/#516: an encrypted promotion lands class='private' owned by the
+    // registered user (the anon scratch row was class='app', userId NULL).
+    expect(mem?.class).toBe('private');
+    expect(mem?.userId).toBeTruthy();
     // #352: anon→user promotion writes the canonical `app-user` marker.
     expect(mem?.urn).toContain(':app-user:');
 

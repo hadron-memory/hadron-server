@@ -1104,6 +1104,10 @@ export const memoryMutations = {
       // If a dataKey is provided and the memory isn't already encrypted,
       // encrypt every node in a single transaction, then flip isEncrypted.
       // This is the anonymous → registered promotion path.
+      // 041 (#516): 'private' is the only encryptable class, so an encrypted
+      // promotion lands the memory as class='private' owned by the registered
+      // user (the anon scratch memory was class='app', userId NULL). The
+      // plaintext branch below leaves the App-scoped class untouched.
       if (dataKey && !memory.isEncrypted) {
         const key = parseDataKey(dataKey);
         const nodes = await ctx.db.node.findMany({
@@ -1131,6 +1135,12 @@ export const memoryMutations = {
               createdBy: user.id,
               anonymousExpiresAt: null,
               isEncrypted: true,
+              // 041 (#516): encrypted ⇒ class='private'; set the owner so the
+              // bidirectional chk_personal_visibility_user (private ⇔ userId)
+              // holds. userMemoryOfAgentId + appId are already set on the anon
+              // row, satisfying chk_memory_personal_agent_id / _class_app_id.
+              class: 'private',
+              userId: user.id,
               updatedBy: ctx.appId,
             },
           });
@@ -1179,12 +1189,13 @@ export const memoryMutations = {
           extensions: { code: 'FORBIDDEN' },
         });
       }
-      // Class gate (D-2026-07-06-B): 'private' is the only class users may
-      // encrypt. EXCEPTION, flagged for review: the pre-041 SECRET-mode App
-      // flow (Tier 2.5) already encrypts the class='personal' memories it
-      // auto-provisions — the App-key path keeps that shipped contract.
-      const classAllowed =
-        memory.class === 'private' || (ctx.appId != null && memory.class === 'personal');
+      // Class gate (D-2026-07-06-B, #516 resolved): 'private' is the ONLY
+      // encryptable class — no exceptions. Tier 2.5's SECRET-mode memories are
+      // now born class='private' (resolvers.mutation.session.ts) and the anon→
+      // registered encrypted promotion lands 'private' (linkMemoryToUser), so
+      // the pre-041 'personal' grandfather is retired and the platform has ONE
+      // answer to "which classes encrypt?".
+      const classAllowed = memory.class === 'private';
       if (!classAllowed) {
         throw new GraphQLError(
           "Only class='private' memories support encryption (D-2026-07-06-B).",

@@ -194,9 +194,14 @@ export const sessionMutations = {
               // Bidirectional CHECK constraint requires class IN
               // (personal,private) ⇔ userId IS NOT NULL.
               userId,
-              class: 'personal',
-              // 035-visibility-enum-cleanup: personal privacy is class-driven;
-              // visibility is NULL (was PERSONAL).
+              // 041 (#516): 'private' is the ONLY encryptable class. In SECRET
+              // mode we birth the memory encrypted, so it must be born 'private'
+              // (owner-only, caller-held key — that IS the private threat model).
+              // Plaintext USER_ID memories stay 'personal'. Both satisfy the
+              // bidirectional CHECK class IN (personal,private) ⇔ userId IS NOT NULL.
+              class: parsedKey !== null ? 'private' : 'personal',
+              // 035-visibility-enum-cleanup: personal/private privacy is
+              // class-driven; visibility is NULL (was PERSONAL).
               visibility: null,
               userMemoryOfAgentId: agentId,
               // 008-agent-installation: personal memories pivot on
