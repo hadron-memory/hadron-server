@@ -2543,11 +2543,21 @@ export const typeDefs = `#graphql
     agentSubscriptions(agentId: ID!): [AgentSubscription!]!
 
     """
-    All nodes accessible by an App (across all subscribed memories).
+    All nodes accessible by an App: the union of every installed agent's
+    system memory (read-only) and its knowledge memoryItems (#524).
 
     Accepts the entity's ID or URN.
+
+    An optional NodeFilter pushes node-level predicates server-side — e.g.
+    filter: { isRunnable: true } to list the App's runnable task nodes (#525).
+    The App's memory scope is authoritative, so the filter's memory-scope
+    fields (memoryIds / memoryClasses) are rejected with BAD_USER_INPUT rather
+    than silently ignored — use findNodes for cross-memory scoping. Only
+    node-level predicates (nodeType, tags, isRunnable, locPrefix, createdBy,
+    updatedAfter/Before, includeDeleted) apply. Unlike findNodes, system-memory
+    nodes are NOT excluded by default.
     """
-    appNodes(appId: ID!, limit: Int): [Node!]!
+    appNodes(appId: ID!, filter: NodeFilter, limit: Int): [Node!]!
 
     """
     Slim, paginated node list for rendering a memory's graph view (issue #466).

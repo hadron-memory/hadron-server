@@ -1004,7 +1004,24 @@ export const nodeQueries = {
 
     appNodes: async (
       _: unknown,
-      { appId, limit }: { appId: string; limit?: number },
+      { appId, filter, limit }: {
+        appId: string;
+        filter?: {
+          // Memory-scope fields — NOT supported by appNodes (the App's scope is
+          // authoritative). Present only so we can reject them explicitly.
+          memoryIds?: string[] | null;
+          memoryClasses?: string[] | null;
+          nodeType?: string | null;
+          tags?: string[] | null;
+          isRunnable?: boolean | null;
+          locPrefix?: string | null;
+          createdBy?: string | null;
+          updatedAfter?: string | null;
+          updatedBefore?: string | null;
+          includeDeleted?: boolean | null;
+        } | null;
+        limit?: number;
+      },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
@@ -1023,21 +1040,68 @@ export const nodeQueries = {
         where: { id: resolvedAppId },
         select: {
           appAgents: {
-            select: { agent: { select: { memoryItems: true } } },
+            select: { agent: { select: { systemMemoryId: true, memoryItems: true } } },
           },
         },
       });
       const memoryIds = [
         ...new Set(
-          (appWithAgents?.appAgents ?? []).flatMap((aa) =>
-            aa.agent.memoryItems.map((m) => m.memoryId),
-          ),
+          (appWithAgents?.appAgents ?? []).flatMap((aa) => [
+            // #524 — the installed agent's system memory is universally
+            // read-only from an App context (schema Agent.systemMemoryId;
+            // folded as READ_ONLY by mcp/access-control.ts). Task nodes are
+            // commonly authored there, so appNodes must include it — matching
+            // the MCP access-map fold (systemMemoryId + memoryItems).
+            ...(aa.agent.systemMemoryId ? [aa.agent.systemMemoryId] : []),
+            ...aa.agent.memoryItems.map((m) => m.memoryId),
+          ]),
         ),
       ];
       if (memoryIds.length === 0) return [];
 
+      // #525 — optional node-level NodeFilter, pushed server-side so callers
+      // (e.g. an App's runnable-task picker) can request `{ isRunnable: true }`
+      // without fetching everything and filtering client-side. The App's memory
+      // scope stays authoritative, and unlike findNodes we do NOT impose the
+      // default `nodeType != 'system'` exclusion — appNodes deliberately
+      // surfaces the system memory (#524).
+      const f = filter ?? {};
+      const badInput = (msg: string) =>
+        new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
+      // #526 review — NodeFilter carries memory-scope fields that appNodes can't
+      // honor (its scope is the App's memories). Reject rather than silently
+      // ignore them, so a caller who assumed they scoped fails fast instead of
+      // getting a surprising superset. Use findNodes for cross-memory scoping.
+      if (f.memoryIds?.length || f.memoryClasses?.length) {
+        throw badInput(
+          'appNodes: filter.memoryIds / filter.memoryClasses are not supported — ' +
+            "the App's installed-agent memories are the authoritative scope. " +
+            'Use findNodes for cross-memory scoping.',
+        );
+      }
+      if (f.updatedAfter && Number.isNaN(Date.parse(f.updatedAfter))) {
+        throw badInput('appNodes filter.updatedAfter must be a valid date string.');
+      }
+      if (f.updatedBefore && Number.isNaN(Date.parse(f.updatedBefore))) {
+        throw badInput('appNodes filter.updatedBefore must be a valid date string.');
+      }
+
       const results = await ctx.db.node.findMany({
-        where: { memoryId: { in: memoryIds }, deletedAt: null },
+        where: {
+          memoryId: { in: memoryIds },
+          ...(f.includeDeleted ? {} : { deletedAt: null }),
+          ...(f.nodeType ? { nodeType: f.nodeType } : {}),
+          ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+          ...(f.tags?.length ? tagsFilter(f.tags) : {}),
+          ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
+          ...(f.createdBy ? { createdBy: f.createdBy } : {}),
+          ...((f.updatedAfter || f.updatedBefore)
+            ? { updatedAt: {
+                ...(f.updatedAfter ? { gte: new Date(f.updatedAfter) } : {}),
+                ...(f.updatedBefore ? { lte: new Date(f.updatedBefore) } : {}),
+              } }
+            : {}),
+        },
         orderBy: { loc: 'asc' },
         take: limit ?? 500,
         include: {
