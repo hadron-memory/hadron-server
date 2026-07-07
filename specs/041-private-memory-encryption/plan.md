@@ -13,12 +13,17 @@ spec-era groundwork: `src/lib/nodeCrypto.ts`, `sessionKeyCache`, the
    a DB dump, a backup, AND the platform operator's own database access
    reveal no private content.
 2. **`class='private'` is the ONLY encryptable class.** Enforced at every
-   encrypt entry point. OFF by default at creation; flip-later is an
-   explicit product decision once experience accumulates.
-   **Known collision (#516):** the shipped SECRET-mode App flow (Tier 2.5)
-   encrypts the `class='personal'` memories it auto-provisions; PR-1
-   grandfathered that App-key path. Design discussion tracked in #516 —
-   resolve before flipping any encryption default.
+   encrypt entry point — no exceptions. OFF by default at creation; flip-later
+   is an explicit product decision once experience accumulates.
+   **#516 RESOLVED (2026-07-06, Holger — Option 1):** the SECRET-mode App flow
+   (Tier 2.5) now *births* its per-user memories as `class='private'` (they are
+   owner-only with a caller-held key — that IS the private threat model), and
+   the anon→registered encrypted promotion (`linkMemoryToUser`) lands `private`
+   too. The `class='personal'` grandfather in `encryptMemory` is retired; a
+   data migration (`20260706220000_encrypted_memory_class_private`) flips any
+   surviving `personal` + encrypted rows to `private` and asserts no other
+   class holds ciphertext. Plaintext USER_ID per-user memories stay `personal`.
+   One rule, no compound clause.
 3. **Consequences accepted, not worked around:** headless runs on encrypted
    memories are UNAVAILABLE (no session, no key — mint should fail loud);
    keyword search (tsv) matches nothing inside encrypted fields; vector
@@ -47,10 +52,14 @@ spec-era groundwork: `src/lib/nodeCrypto.ts`, `sessionKeyCache`, the
 
 ### Server (this spec's PRs)
 
-1. **Class restriction**: `encryptMemory`, `linkMemoryToUser(dataKey)`, and
-   any create-encrypted path reject non-`private` classes (typed
-   BAD_USER_INPUT). Existing encrypted non-private rows: none expected on
-   prod; migration asserts, does not rewrite.
+1. **Class restriction** (#516 Option 1 — shipped): `encryptMemory` rejects
+   non-`private` classes (typed BAD_USER_INPUT); the two App-key create-encrypted
+   paths *produce* `private` — `startAgentSession` (SECRET mode) births the
+   per-user memory as `class='private'` when a `dataKey` is present, and
+   `linkMemoryToUser(dataKey)` promotes the anon scratch memory to
+   `class='private'` + sets the owner. Migration `20260706220000` rewrites any
+   surviving `personal` + encrypted rows to `private` (none expected on prod)
+   and asserts no other class holds ciphertext.
 2. **Passphrase support (UX foundation)**: nobody manages raw 32-byte keys.
    - `Memory.kdfSalt` (bytes, per-memory random) + `Memory.kdfParams`
      (JSON: `{alg: 'scrypt', N, r, p}`) columns — parameters, NOT secrets.

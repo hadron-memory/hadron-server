@@ -360,18 +360,21 @@ export const agentMutations = {
         },
       });
 
-      // FR-029: empty personal Memory at revocation time → hard-delete.
-      const personalMemory = await ctx.db.memory.findFirst({
+      // FR-029: empty per-user Memory at revocation time → hard-delete. The
+      // auto-provisioned memory is class='personal' (plaintext USER_ID mode) or
+      // 'private' (encrypted SECRET mode, 041/#516); scope by userMemoryOfAgentId
+      // so free-standing user memories (agent NULL) never match.
+      const userMemory = await ctx.db.memory.findFirst({
         where: {
           userId,
           userMemoryOfAgentId: agentId,
-          class: 'personal',
+          class: { in: ['personal', 'private'] },
           deletedAt: null,
         },
         include: { _count: { select: { nodes: true } } },
       });
-      if (personalMemory && personalMemory._count.nodes === 0) {
-        await ctx.db.memory.delete({ where: { id: personalMemory.id } });
+      if (userMemory && userMemory._count.nodes === 0) {
+        await ctx.db.memory.delete({ where: { id: userMemory.id } });
       }
 
       return updated;
