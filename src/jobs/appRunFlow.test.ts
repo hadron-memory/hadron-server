@@ -232,6 +232,33 @@ describe('3-node flow through production deps (§10)', () => {
     ).toBeNull();
   });
 
+  it('data.output.writeTo creates a MISSING target node (first live run regression, 2026-07-07)', async () => {
+    // The alert-style shape: terminal node writes to a rolling node that
+    // does not exist yet — the create path must derive a name.
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:act', memoryId } },
+      data: { data: { output: { writeTo: `${ORG_URN}::flowmem::flow:alerts`, mode: 'append' } } as never },
+    });
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.92);
+    expect(await executeAppRun(db, run.id, deps)).toBe('completed');
+    const created = await db.node.findUnique({
+      where: { loc_memoryId: { loc: 'flow:alerts', memoryId } },
+    });
+    expect(created).not.toBeNull();
+    expect(created!.name).toBe('alerts'); // derived from the target loc's last segment
+    expect(created!.content).toBe('done');
+
+    // Second run APPENDS and preserves the existing name.
+    const run2 = await mintFlow();
+    expect(await executeAppRun(db, run2.id, flowDeps(0.92).deps)).toBe('completed');
+    const appended = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'flow:alerts', memoryId } },
+    });
+    expect(appended.name).toBe('alerts');
+    expect(appended.content).toContain('---'); // append separator
+  });
+
   it('a flow routed into an ENCRYPTED memory fails at that hop (PR-532 Codex P2)', async () => {
     // The launch gate only checks the entry — the guard must also fire on
     // routed hops, where the run has no session key.

@@ -196,25 +196,31 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
       }
 
       const stamp = new Date().toISOString().slice(0, 10);
+      // Existing target: update in place (name preserved when undefined);
+      // fresh target: create. Same eager-validation split as importNode.
+      const exists = await db.node.findUnique({
+        where: { loc_memoryId: { loc: targetLoc, memoryId: targetMemoryId } },
+        select: { id: true },
+      });
+      // A FRESH node always needs a name — including a writeTo target that
+      // doesn't exist yet (first live urgent-triage run, 2026-07-07:
+      // "Argument `name` is missing"). Derive it from the target loc's last
+      // segment; updates keep undefined so the existing name is preserved.
+      const createName = spec.writeTo
+        ? (targetLoc.split(':').pop() ?? targetLoc)
+        : `${node.name} — ${stamp}`;
       const written = await writeNodeCore(
         {
           memoryId: targetMemoryId,
           loc: targetLoc,
-          name: spec.writeTo ? undefined : `${node.name} — ${stamp}`,
+          name: exists ? (spec.writeTo ? undefined : createName) : createName,
           content,
           nodeType: 'record',
           data: { appRunId: run.id, generatedAt: new Date().toISOString() },
           reason: `headless run ${run.id} (${run.triggerKind.toLowerCase()})`,
         } as never,
         ctx,
-        // Existing target: update in place (name preserved when undefined);
-        // fresh target: create. Same eager-validation split as importNode.
-        (await db.node.findUnique({
-          where: { loc_memoryId: { loc: targetLoc, memoryId: targetMemoryId } },
-          select: { id: true },
-        }))
-          ? 'update'
-          : 'create',
+        exists ? 'update' : 'create',
       );
       return written.id as string;
     },
