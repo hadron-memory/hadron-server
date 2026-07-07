@@ -3767,7 +3767,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_task',
-    "Run a task — a runnable node (isRunnable=true) — by loose name, without a fully-qualified URN. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. Reuses the action runner: {{arg}} substitution, inlined dependencies, and an action-run usage event. Spec cor:api:060.",
+    "Run a task — a runnable node (isRunnable=true) — by loose name, without a fully-qualified URN. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. By DEFAULT this RENDERS the task — returns the assembled instructions ({{arg}} substitution + inlined dependencies) for YOU to execute. Pass `appRef` to EXECUTE server-side instead (#529): the server mints a MANUAL app run and returns the run id to poll. Spec cor:api:060.",
     {
       task: z
         .string()
@@ -3787,6 +3787,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         .record(z.string(), z.string())
         .optional()
         .describe('Task arguments as key-value pairs ({{key}} substitution).'),
+      appRef: z
+        .string()
+        .optional()
+        .describe(
+          'App (PK or URN) to EXECUTE the task under (#529). When set, the server mints a MANUAL app run for the resolved task and returns the run id (poll the app-run status surface) instead of the rendered prompt. Omit to get the rendered instructions for you to run yourself.',
+        ),
+      runAsSelf: z
+        .boolean()
+        .optional()
+        .describe('Attribute the executed run to the calling user (only with appRef).'),
     },
     async (rawArgs) => {
       // createTestableMcpServer bypasses zod — normalize args defensively.
@@ -3795,6 +3805,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         memory?: unknown;
         urn?: unknown;
         args?: unknown;
+        appRef?: unknown;
+        runAsSelf?: unknown;
       };
       const taskHint = typeof a.task === 'string' ? a.task.trim() : '';
       const memoryHint = typeof a.memory === 'string' ? a.memory.trim() : '';
@@ -3803,6 +3815,44 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         a.args && typeof a.args === 'object' && !Array.isArray(a.args)
           ? (a.args as Record<string, string>)
           : undefined;
+      const appRef = typeof a.appRef === 'string' && a.appRef.trim() ? a.appRef.trim() : undefined;
+      const runAsSelf = a.runAsSelf === true;
+
+      // #529 EXECUTE mode — when appRef is set, delegate to the GraphQL runTask
+      // resolver, which resolves the task the same way and mints a MANUAL app
+      // run via the spec-040 kernel, returning the run id. Reuses one code path
+      // for resolution + mint rather than reimplementing it here.
+      if (appRef) {
+        if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+        const ctx: Context = {
+          db,
+          clientId: auth.clientId ?? undefined,
+          userId: auth.userId ?? undefined,
+          appId: auth.appId ?? undefined,
+          sessionId: auth.sessionId ?? undefined,
+          roles: auth.roles as Context['roles'],
+          organizationId: auth.organizationId ?? undefined,
+        };
+        try {
+          const runId = await resolvers.Mutation.runTask(
+            {},
+            {
+              task: taskHint || undefined,
+              memory: memoryHint || undefined,
+              urn: directUrn || undefined,
+              args,
+              appRef,
+              runAsSelf,
+            },
+            ctx,
+          );
+          return textResult(
+            `Run started: ${runId}\nPoll its status/output via the app-run surface (appRun(ref: "${runId}")).`,
+          );
+        } catch (err) {
+          return textResult(`Could not start run: ${(err as Error).message}`);
+        }
+      }
 
       // URN bypass — run directly, exactly like hadron_run_action (cor:api:060:02).
       if (directUrn) {

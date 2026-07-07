@@ -337,3 +337,27 @@ describe('isRunnable write path (hadron_create_node / hadron_update_node / Graph
     expect(row?.isRunnable).toBe(true);
   });
 });
+
+describe('hadron_run_task — execute mode (#529, appRef)', () => {
+  it('mints a MANUAL app run and returns the run id instead of rendering', async () => {
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'run-task-org' } });
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'rt-app', urn: 'run-task-org::rt-app' },
+    });
+    const urn = nodeUrnOf(fx.alpha, 'tasks:add-note');
+
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
+      urn,
+      appRef: app.id,
+    });
+    expect(text).toContain('Run started:');
+    // Executed, not rendered — the task body must NOT be inlined.
+    expect(text).not.toContain('Add a note here');
+
+    const runs = await db.appRun.findMany();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.entryNodeUrn).toBe(urn);
+    expect(runs[0]!.triggerKind).toBe('MANUAL');
+    expect(runs[0]!.appId).toBe(app.id);
+  });
+});
