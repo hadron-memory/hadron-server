@@ -183,12 +183,29 @@ function restrictToSpec(
  * wrapper, invisible to the runner — to one JSON-mode text completion
  * parsed for the first JSON object in the reply.
  */
+// Native structured-output attempts are hard-capped: a provider that HANGS
+// (rather than erroring) must trip the fallback instead of eating the whole
+// run timeout. Observed live: bedrock claude-sonnet-4-6 generateObject never
+// returned on alpha (2026-07-07) — zero tokens spent, run TIMED_OUT.
+const EXTRACTION_NATIVE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.LLM_EXTRACTION_NATIVE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 45_000;
+})();
+
+/** Providers whose native structured-output path is not trusted yet. */
+const JSON_PROMPT_ONLY_PROVIDERS = new Set(['bedrock', 'glm']);
+
 export async function generateExtraction(
   resolved: ResolvedAiConfig,
   req: LlmRequest,
   fields: ExtractionField[],
 ): Promise<LlmObjectResult> {
   const { provider, model } = resolved.config;
+  // Known-bad native paths skip straight to the JSON-prompt fallback
+  // (bedrock: observed hang; glm: openai-compatible shim, untested).
+  if (JSON_PROMPT_ONLY_PROVIDERS.has(provider)) {
+    return extractViaJsonPrompt(resolved, req, fields);
+  }
   try {
     const out = await aiGenerateObject({
       model: modelFor(resolved),
@@ -196,6 +213,7 @@ export async function generateExtraction(
       prompt: req.prompt,
       schema: extractionSchema(fields),
       ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
+      abortSignal: AbortSignal.timeout(EXTRACTION_NATIVE_TIMEOUT_MS),
     });
     return {
       object: restrictToSpec(out.object, fields),
@@ -206,6 +224,13 @@ export async function generateExtraction(
     };
   } catch (err) {
     if (err instanceof LlmInvocationError) throw err;
+    // Our own abort cap fired: the native path hung. Falling back is the
+    // point — retrying would hit the same hang (and the abort message
+    // contains "timeout", which isTransient would misread as retryable).
+    const name = (err as Error)?.name;
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      return extractViaJsonPrompt(resolved, req, fields);
+    }
     if (isTransient(err)) {
       throw new LlmInvocationError(
         `LLM extraction failed (${provider}/${model}): ${String((err as Error)?.message ?? err)}`,
