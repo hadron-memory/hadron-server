@@ -7,7 +7,13 @@
  * `spec-kits/specs/001-edge-condition-spec/contracts/evaluator-api.md`.
  */
 
-import * as jsonLogic from 'json-logic-js';
+// Default import, NOT `* as`: json-logic-js is CJS, and under real Node ESM
+// (the built image) the namespace form yields `{default: {...}}` with no
+// `.apply` — while vitest's transform interop masks it, so tests pass and
+// production crashes ("jsonLogic.apply is not a function", first hit by the
+// first live multi-node run, 2026-07-07). esModuleInterop makes the default
+// import correct in both environments.
+import jsonLogic from 'json-logic-js';
 import type { EvaluationError } from './errors.js';
 import { validateEdgeCondition } from './validator.js';
 import { preResolveVariables, type MemoryLayerHandle } from './scope-resolver.js';
