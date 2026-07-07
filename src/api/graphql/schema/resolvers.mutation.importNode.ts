@@ -11,15 +11,19 @@
 //   - Conflict = UPDATE IN PLACE: delegation to writeNodeCore mode 'upsert'
 //     (the internal-callers-only mode) — full write invariants apply
 //     (NodeVersion snapshot = undo, encryption, hash, re-embed, git mirror).
-//   - taskUrn post-import hand-off: deferred (2026-07-01 D12).
+//   - taskRef post-import hand-off: implemented #528 — when set, the stored
+//     node is handed to that task via a MANUAL AppRun (async). (Supersedes the
+//     2026-07-01 D12 deferral.)
 //   - No MCP tool in v1 (agent exposure parked with the web-fetch-tool stub).
 
 import { GraphQLError } from 'graphql';
-import { splitNodeUrn } from '../../../lib/urn.js';
+import { splitNodeUrn, composeNodeUrn } from '../../../lib/urn.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { fetchWebPage } from '../../../lib/webFetch.js';
 import { extractArticle } from '../../../lib/articleExtract.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
+import { triggerManualRun } from './resolvers.appRun.js';
 import { type Context, requireMemoryWriteAccess } from './resolvers.helpers.js';
 
 export interface ImportNodeInput {
@@ -37,6 +41,14 @@ export interface ImportNodeInput {
   name?: string | null;
   nodeType?: string | null;
   properties?: Record<string, unknown> | null;
+  // #528 — post-import task run. When `taskRef` is set, the stored node is
+  // handed to that task via a MANUAL AppRun (async; poll appRun(ref:)).
+  /** Task node to run against the imported node — PK or fully-qualified URN. */
+  taskRef?: string | null;
+  /** Extra template args merged into the run's eventData. */
+  taskArgs?: Record<string, unknown> | null;
+  /** App to run under — PK or URN. Falls back to the caller's active App (ctx.appId). */
+  appRef?: string | null;
 }
 
 export const importNodeMutations = {
@@ -163,6 +175,42 @@ export const importNodeMutations = {
       ctx,
       name === undefined ? 'update' : 'upsert',
     );
+
+    // ── #528 — post-import task run ────────────────────────────────────
+    // When a taskRef is supplied, hand the just-stored node to that task via a
+    // MANUAL AppRun (the same kernel behind triggerAppRun / runTask(appRef:)).
+    // The run is async: return FETCH_PENDING + the run id as jobId (poll
+    // appRun(ref:) for status + output). The imported node's URN is passed in
+    // eventData so the task template can target it (e.g. distill-imported-page).
+    if (input.taskRef != null && input.taskRef !== '') {
+      const runAppRef = input.appRef ?? ctx.appId;
+      if (!runAppRef) {
+        throw new GraphQLError(
+          'importNode: `taskRef` requires an App — pass `appRef` or call with an App context.',
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+      // Resolve taskRef (PK or URN) to a fully-qualified node URN for the run
+      // entry, and compose the imported node's URN for the task to target.
+      const { id: taskNodeId } = await resolveNodeRef(ctx.db, input.taskRef);
+      const taskNode = await ctx.db.node.findUniqueOrThrow({
+        where: { id: taskNodeId },
+        select: { loc: true, memory: { select: { urn: true } } },
+      });
+      const entryNodeUrn = composeNodeUrn(taskNode.memory.urn, taskNode.loc);
+      const importedMemory = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: memoryId },
+        select: { urn: true },
+      });
+      const importedNodeUrn = composeNodeUrn(importedMemory.urn, node.loc);
+
+      const run = await triggerManualRun(ctx, {
+        appRef: runAppRef,
+        entryNodeUrn,
+        eventData: { ...(input.taskArgs ?? {}), importedNodeUrn },
+      });
+      return { node, status: 'FETCH_PENDING', jobId: run.id };
+    }
 
     return { node, status: 'STORED', jobId: null };
   },

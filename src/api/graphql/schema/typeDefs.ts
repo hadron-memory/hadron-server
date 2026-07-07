@@ -1530,6 +1530,12 @@ export const typeDefs = `#graphql
     nodeType: String
     "Merged provenance metadata; the server sets properties.url on the url path when absent (properties.title is filled from the extracted title by the write seam)."
     properties: JSON
+    "Task node to run against the imported node once stored (#528) — PK or fully-qualified URN. Presence triggers a MANUAL app run; the result envelope is FETCH_PENDING + jobId (poll appRun(ref:)). The imported node's URN is passed to the task as eventData.importedNodeUrn."
+    taskRef: ID
+    "Extra template args merged into the task run's eventData (only meaningful with taskRef)."
+    taskArgs: JSON
+    "App to run the task under — PK or URN. Falls back to the caller's active App. Only meaningful with taskRef."
+    appRef: ID
   }
 
   """
@@ -2858,9 +2864,14 @@ export const typeDefs = `#graphql
     # Run a task — a runnable node (isRunnable=true) — by loose name without a fully-qualified URN.
     # Give task and/or memory names; the server resolves both from what you can read and runs.
     # Pass a fully-qualified URN to skip resolution and run directly.
-    # Returns the assembled instructions (node content with {{arg}} substitution and referenced nodes).
+    # By default RENDERS the task: returns the assembled instructions (node content
+    # with {{arg}} substitution and referenced nodes) for an LLM agent to execute.
+    # Pass appRef (App PK or URN) to EXECUTE instead (#529): the server mints a
+    # MANUAL app run for the resolved task under that App and returns the run id
+    # (poll appRun(ref:) for status + output). runAsSelf attributes the run to
+    # the caller. Without appRef, behavior is unchanged.
     # Spec cor:api:060.
-    runTask(task: String, memory: String, urn: String, args: JSON): String!
+    runTask(task: String, memory: String, urn: String, args: JSON, appRef: ID, runAsSelf: Boolean): String!
 
     """
     Import external content into a node (#457, sync v1). Source: exactly one

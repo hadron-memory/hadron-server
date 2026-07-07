@@ -88,6 +88,46 @@ function resolveRunAsSelf(ctx: Context, runAsSelf: boolean | null | undefined): 
 }
 
 /**
+ * Mint a MANUAL AppRun for an entry (task) node under an App — the shared
+ * execute path behind the `triggerAppRun` mutation, `runTask(appRef:)` (#529),
+ * and `importNode(taskRef:)` (#528). Keeps the current org-ADMIN gate
+ * (`requireScheduleAdmin`); relaxing it for interactive/import callers is
+ * tracked in #530. Maps a launch denial to a typed GraphQLError.
+ */
+export async function triggerManualRun(
+  ctx: Context,
+  input: {
+    appRef: string;
+    entryNodeUrn: string;
+    eventData?: Record<string, unknown> | null;
+    runAsSelf?: boolean | null;
+    aiConfigName?: string | null;
+  },
+) {
+  const app = await requireScheduleAdmin(ctx, input.appRef);
+  assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+  try {
+    return await mintAppRun(ctx.db, {
+      organizationId: app.organizationId,
+      appId: app.id,
+      userId: resolveRunAsSelf(ctx, input.runAsSelf),
+      triggerKind: 'MANUAL',
+      entryNodeUrn: input.entryNodeUrn,
+      eventData: {
+        ...(input.eventData ?? {}),
+        ...(input.aiConfigName ? { __aiConfigName: input.aiConfigName } : {}),
+      },
+      createdBy: ctx.userId ?? ctx.clientId ?? null,
+    });
+  } catch (err) {
+    if (err instanceof RunLaunchDeniedError) {
+      throw new GraphQLError(err.message, { extensions: { code: err.code } });
+    }
+    throw err;
+  }
+}
+
+/**
  * Resolve an agent ref (PK or URN) and require it INSTALLED in the App — a
  * foreign agent would leak its AI config into the walk (PR-493, Codex P1).
  * Returns the resolved agent id (null when no ref given).
@@ -253,29 +293,7 @@ export const appRunMutations = {
       };
     },
     ctx: Context,
-  ) => {
-    const app = await requireScheduleAdmin(ctx, input.appRef);
-    assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    try {
-      return await mintAppRun(ctx.db, {
-        organizationId: app.organizationId,
-        appId: app.id,
-        userId: resolveRunAsSelf(ctx, input.runAsSelf),
-        triggerKind: 'MANUAL',
-        entryNodeUrn: input.entryNodeUrn,
-        eventData: {
-          ...(input.eventData ?? {}),
-          ...(input.aiConfigName ? { __aiConfigName: input.aiConfigName } : {}),
-        },
-        createdBy: ctx.userId ?? ctx.clientId ?? null,
-      });
-    } catch (err) {
-      if (err instanceof RunLaunchDeniedError) {
-        throw new GraphQLError(err.message, { extensions: { code: err.code } });
-      }
-      throw err;
-    }
-  },
+  ) => triggerManualRun(ctx, input),
 
   /** The kill switch's manual handle (cor:agt:010:02). */
   cancelAppRun: async (_: unknown, { id }: { id: string }, ctx: Context) => {
