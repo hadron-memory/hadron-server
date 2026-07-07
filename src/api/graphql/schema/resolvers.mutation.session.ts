@@ -22,6 +22,7 @@ import {
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
@@ -611,11 +612,15 @@ export const sessionMutations = {
         memory: memoryHint,
         urn: directUrn,
         args: argsInput,
+        appRef,
+        runAsSelf,
       }: {
         task?: string | null;
         memory?: string | null;
         urn?: string | null;
         args?: unknown;
+        appRef?: string | null;
+        runAsSelf?: boolean | null;
       },
       ctx: Context,
     ) => {
@@ -756,9 +761,30 @@ export const sessionMutations = {
         return parts.join('\n\n');
       };
 
+      // #529 — when an `appRef` is supplied, EXECUTE the task instead of merely
+      // rendering it: mint a MANUAL AppRun for the resolved task node under that
+      // App and return the run id (poll `appRun(ref:)` for status + output). The
+      // App-run kernel re-renders the same task via this resolver's assemble
+      // path, so the two modes stay in lockstep. Without `appRef`, behavior is
+      // unchanged — the rendered prompt is returned for an LLM agent to run.
+      const dispatch = async (nodeUrn: string): Promise<string> => {
+        if (!appRef) return loadAndRender(nodeUrn);
+        assertFullyQualifiedUrn(nodeUrn, 'node');
+        const run = await triggerManualRun(ctx, {
+          appRef,
+          entryNodeUrn: nodeUrn,
+          // Pass the ORIGINAL structured args (not stringArgs) so eventData keeps
+          // its JSON shape for audit + downstream consumers — the assemble path
+          // stringifies for Mustache when it renders (#531 review, Copilot).
+          eventData: args,
+          runAsSelf,
+        });
+        return run.id;
+      };
+
       // URN bypass — run directly, no resolution.
       if (u) {
-        return loadAndRender(u);
+        return dispatch(u);
       }
 
       // Resolve memory (required for non-URN path).
@@ -868,14 +894,14 @@ export const sessionMutations = {
 
         // Unique match — run it.
         const nodeUrn = composeNodeUrn(resolvedMemory.urn, matches[0].loc);
-        return loadAndRender(nodeUrn);
+        return dispatch(nodeUrn);
       } else {
         // No task hint — require explicit choice (GraphQL cannot offer a picker,
         // so we error and list the options).
         if (runnableNodes.length === 1) {
           // Exactly one option — run it.
           const nodeUrn = composeNodeUrn(resolvedMemory.urn, runnableNodes[0].loc);
-          return loadAndRender(nodeUrn);
+          return dispatch(nodeUrn);
         }
 
         // Multiple options — error with candidates.

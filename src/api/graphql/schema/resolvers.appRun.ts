@@ -14,7 +14,12 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { nextCronOccurrence } from '../../../jobs/scheduler.js';
 import { parsePolicyLink, explainPolicyChain, type PolicyAction } from '../../../lib/policy/index.js';
-import { assertFullyQualifiedUrn } from '../../../lib/urn.js';
+import {
+  assertFullyQualifiedUrn,
+  splitNodeUrn,
+  normalizeUrnForLookup,
+  legacyMemoryUrnToCanonical,
+} from '../../../lib/urn.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { type Context, requireOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
@@ -85,6 +90,65 @@ function resolveRunAsSelf(ctx: Context, runAsSelf: boolean | null | undefined): 
     });
   }
   return ctx.userId;
+}
+
+/**
+ * Mint a MANUAL AppRun for an entry (task) node under an App — the shared
+ * execute path behind the `triggerAppRun` mutation, `runTask(appRef:)` (#529),
+ * and `importNode(taskRef:)` (#528). Keeps the current org-ADMIN gate
+ * (`requireScheduleAdmin`); relaxing it for interactive/import callers is
+ * tracked in #530. Maps a launch denial to a typed GraphQLError.
+ */
+export async function triggerManualRun(
+  ctx: Context,
+  input: {
+    appRef: string;
+    entryNodeUrn: string;
+    eventData?: Record<string, unknown> | null;
+    runAsSelf?: boolean | null;
+    aiConfigName?: string | null;
+  },
+) {
+  const app = await requireScheduleAdmin(ctx, input.appRef);
+  assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+  // Tenant boundary (#531 review, Copilot): a run resolves its entry node ONLY
+  // within its own org (appRunDeps.loadEntry — cross-org reads are not a run
+  // capability in v1). Reject a cross-org entry URN early with a typed error
+  // rather than minting a run guaranteed to fail in assembly. A not-yet-resolvable
+  // memory is left to the executor's entry-not-found path (don't over-reject).
+  // Resolve the entry memory the same way appRunDeps.loadEntry does (raw +
+  // canonical URN forms) so the org comparison is apples-to-apples.
+  const { memoryUrn } = splitNodeUrn(input.entryNodeUrn);
+  const normalized = normalizeUrnForLookup(memoryUrn);
+  const entryMem = await ctx.db.memory.findFirst({
+    where: { OR: [{ urn: normalized }, { urn: legacyMemoryUrnToCanonical(normalized) }] },
+    select: { organizationId: true },
+  });
+  if (entryMem && entryMem.organizationId !== app.organizationId) {
+    throw new GraphQLError(
+      'The entry node must belong to the same organization as the App.',
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
+  try {
+    return await mintAppRun(ctx.db, {
+      organizationId: app.organizationId,
+      appId: app.id,
+      userId: resolveRunAsSelf(ctx, input.runAsSelf),
+      triggerKind: 'MANUAL',
+      entryNodeUrn: input.entryNodeUrn,
+      eventData: {
+        ...(input.eventData ?? {}),
+        ...(input.aiConfigName ? { __aiConfigName: input.aiConfigName } : {}),
+      },
+      createdBy: ctx.userId ?? ctx.clientId ?? null,
+    });
+  } catch (err) {
+    if (err instanceof RunLaunchDeniedError) {
+      throw new GraphQLError(err.message, { extensions: { code: err.code } });
+    }
+    throw err;
+  }
 }
 
 /**
@@ -253,29 +317,7 @@ export const appRunMutations = {
       };
     },
     ctx: Context,
-  ) => {
-    const app = await requireScheduleAdmin(ctx, input.appRef);
-    assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    try {
-      return await mintAppRun(ctx.db, {
-        organizationId: app.organizationId,
-        appId: app.id,
-        userId: resolveRunAsSelf(ctx, input.runAsSelf),
-        triggerKind: 'MANUAL',
-        entryNodeUrn: input.entryNodeUrn,
-        eventData: {
-          ...(input.eventData ?? {}),
-          ...(input.aiConfigName ? { __aiConfigName: input.aiConfigName } : {}),
-        },
-        createdBy: ctx.userId ?? ctx.clientId ?? null,
-      });
-    } catch (err) {
-      if (err instanceof RunLaunchDeniedError) {
-        throw new GraphQLError(err.message, { extensions: { code: err.code } });
-      }
-      throw err;
-    }
-  },
+  ) => triggerManualRun(ctx, input),
 
   /** The kill switch's manual handle (cor:agt:010:02). */
   cancelAppRun: async (_: unknown, { id }: { id: string }, ctx: Context) => {
