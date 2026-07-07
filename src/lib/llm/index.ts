@@ -14,7 +14,12 @@
  * SageMaker posture: explicit narrow credentials over ambient identity).
  */
 
-import { generateText as aiGenerateText, type LanguageModel } from 'ai';
+import {
+  generateText as aiGenerateText,
+  generateObject as aiGenerateObject,
+  jsonSchema,
+  type LanguageModel,
+} from 'ai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
@@ -101,6 +106,158 @@ function isTransient(err: unknown): boolean {
     (err as { status?: number }).status;
   if (status != null) return status === 429 || status >= 500;
   return /timeout|timed out|econnre|enotfound|eai_again|socket|network|overloaded|rate.?limit/.test(msg);
+}
+
+// ── Structured extraction (plan-multi-node D-MN-2) ──────────────────────────
+
+/** One extraction-spec entry as carried on Node.data.extractionSpec. */
+export interface ExtractionField {
+  field: string;
+  description?: string;
+  shape?: string;
+}
+
+export interface LlmObjectResult {
+  /** Extracted fields, restricted to the declared spec. */
+  object: Record<string, unknown>;
+  tokensIn: number;
+  tokensOut: number;
+  provider: string;
+  model: string;
+}
+
+/**
+ * v1 shape vocabulary (D-MN-2): number / boolean / string[] map to their
+ * JSON-schema types; anything else — including absent — degrades to string,
+ * never throws. Fields are best-effort (the model may not find them), so
+ * none are `required`.
+ */
+function shapeToJsonSchema(shape: string | undefined): Record<string, unknown> {
+  switch ((shape ?? 'string').trim()) {
+    case 'number': return { type: 'number' };
+    case 'boolean': return { type: 'boolean' };
+    case 'string[]': return { type: 'array', items: { type: 'string' } };
+    default: return { type: 'string' };
+  }
+}
+
+function extractionSchema(fields: ExtractionField[]) {
+  const properties: Record<string, unknown> = {};
+  for (const f of fields) {
+    properties[f.field] = {
+      ...shapeToJsonSchema(f.shape),
+      ...(f.description ? { description: f.description } : {}),
+    };
+  }
+  return jsonSchema<Record<string, unknown>>({
+    type: 'object',
+    properties,
+    additionalProperties: false,
+  });
+}
+
+/** Keep only declared fields — the object merges into a persisted envelope. */
+function restrictToSpec(
+  raw: unknown,
+  fields: ExtractionField[],
+): Record<string, unknown> {
+  const obj = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+  const out: Record<string, unknown> = {};
+  for (const f of fields) {
+    if (obj[f.field] !== undefined) out[f.field] = obj[f.field];
+  }
+  return out;
+}
+
+/**
+ * Structured single-shot extraction — the flow walker calls this instead of
+ * `generateText` when the node declares `data.extractionSpec`. Same provider
+ * dispatch, same token accounting, same transient classification.
+ *
+ * Providers without native structured output fall back — inside this
+ * wrapper, invisible to the runner — to one JSON-mode text completion
+ * parsed for the first JSON object in the reply.
+ */
+export async function generateExtraction(
+  resolved: ResolvedAiConfig,
+  req: LlmRequest,
+  fields: ExtractionField[],
+): Promise<LlmObjectResult> {
+  const { provider, model } = resolved.config;
+  try {
+    const out = await aiGenerateObject({
+      model: modelFor(resolved),
+      ...(req.system ? { system: req.system } : {}),
+      prompt: req.prompt,
+      schema: extractionSchema(fields),
+      ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
+    });
+    return {
+      object: restrictToSpec(out.object, fields),
+      tokensIn: out.usage?.inputTokens ?? 0,
+      tokensOut: out.usage?.outputTokens ?? 0,
+      provider,
+      model,
+    };
+  } catch (err) {
+    if (err instanceof LlmInvocationError) throw err;
+    if (isTransient(err)) {
+      throw new LlmInvocationError(
+        `LLM extraction failed (${provider}/${model}): ${String((err as Error)?.message ?? err)}`,
+        provider,
+        true,
+        { cause: err },
+      );
+    }
+    // Non-transient — most likely a provider without native structured
+    // output. One JSON-prompted text completion, then parse.
+    return extractViaJsonPrompt(resolved, req, fields);
+  }
+}
+
+async function extractViaJsonPrompt(
+  resolved: ResolvedAiConfig,
+  req: LlmRequest,
+  fields: ExtractionField[],
+): Promise<LlmObjectResult> {
+  const fieldLines = fields
+    .map((f) => `- "${f.field}" (${(f.shape ?? 'string').trim()})${f.description ? `: ${f.description}` : ''}`)
+    .join('\n');
+  const out = await generateText(resolved, {
+    ...(req.system ? { system: req.system } : {}),
+    prompt:
+      `${req.prompt}\n\n` +
+      `Respond with ONLY a JSON object (no prose, no code fence) carrying these fields:\n${fieldLines}`,
+    ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
+  });
+  const start = out.text.indexOf('{');
+  const end = out.text.lastIndexOf('}');
+  if (start < 0 || end <= start) {
+    throw new LlmInvocationError(
+      `LLM extraction fallback returned no JSON object (${resolved.config.provider}/${resolved.config.model}).`,
+      resolved.config.provider,
+      false,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out.text.slice(start, end + 1));
+  } catch {
+    throw new LlmInvocationError(
+      `LLM extraction fallback returned unparsable JSON (${resolved.config.provider}/${resolved.config.model}).`,
+      resolved.config.provider,
+      false,
+    );
+  }
+  return {
+    object: restrictToSpec(parsed, fields),
+    tokensIn: out.tokensIn,
+    tokensOut: out.tokensOut,
+    provider: out.provider,
+    model: out.model,
+  };
 }
 
 export async function generateText(

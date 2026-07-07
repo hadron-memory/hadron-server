@@ -24,8 +24,16 @@ import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '../lib/policy/index.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
-import { generateText, LlmInvocationError, type LlmResult } from '../lib/llm/index.js';
+import {
+  generateText,
+  LlmInvocationError,
+  type LlmResult,
+  type LlmObjectResult,
+  type ExtractionField,
+} from '../lib/llm/index.js';
 import type { ResolvedAiConfig } from '../lib/aiConfig.js';
+import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
+import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
 export const RUN_REQUESTED_SUBJECT = 'run.requested.v1';
 export const RUN_QUEUE_GROUP = 'run-worker';
@@ -34,6 +42,9 @@ export const RUN_QUEUE_GROUP = 'run-worker';
 const DEFAULT_RUN_TOKEN_BUDGET = intEnv('RUN_DEFAULT_TOKEN_BUDGET', 100_000);
 const DEFAULT_RUN_ACTION_BUDGET = intEnv('RUN_DEFAULT_ACTION_BUDGET', 50);
 const DEFAULT_RUN_TIMEOUT_MS = intEnv('RUN_DEFAULT_TIMEOUT_MS', 120_000);
+// D-MN-3: bound for hops the token/action budgets can't see (a routing-only
+// cycle costs nothing) — budgetActions is the REAL ceiling for LLM hops.
+const MAX_RUN_HOPS = intEnv('RUN_MAX_HOPS', 50);
 const QUOTA_RUNS_PER_DAY_APP = intEnv('QUOTA_RUNS_PER_DAY_APP', 200);
 const QUOTA_RUNS_PER_DAY_ORG = intEnv('QUOTA_RUNS_PER_DAY_ORG', 1_000);
 const QUOTA_TOKENS_PER_DAY_APP = intEnv('QUOTA_TOKENS_PER_DAY_APP', 2_000_000);
@@ -434,14 +445,48 @@ async function publishRunRequested(db: PrismaClient, runId: string): Promise<voi
 
 // ── Execute (plan §4 steps 3–5 + §6 kernel) ─────────────────────────────────
 
+/** What the walker needs to know about a flow node before running it. */
+export interface RunNodeSpec {
+  /** `data.extractionSpec` entries → structured extraction into the envelope. */
+  extractionSpec: ExtractionField[] | null;
+  /** `data.output` declared → this node writes even mid-flow. */
+  hasOutput: boolean;
+}
+
 /** Injected in tests; production uses the real resolvers + LLM. */
 export interface RunExecutionDeps {
-  assemble: (run: AppRun) => Promise<string>;
+  /** Instructions for ONE flow node, templated against the merged view. */
+  assemble: (run: AppRun, nodeUrn: string, view: Record<string, unknown>) => Promise<string>;
+  /** Flow-relevant slice of a node's `data` (extraction spec, output flag). */
+  loadNodeSpec: (run: AppRun, nodeUrn: string) => Promise<RunNodeSpec>;
   llm: (resolved: ResolvedAiConfig, req: { system?: string; prompt: string; maxTokens?: number }) => Promise<LlmResult>;
-  writeOutput: (run: AppRun, text: string) => Promise<string | null>; // returns written node id/urn
+  /** Structured extraction (D-MN-2) — nodes with an extractionSpec use this. */
+  llmObject: (
+    resolved: ResolvedAiConfig,
+    req: { system?: string; prompt: string; maxTokens?: number },
+    fields: ExtractionField[],
+  ) => Promise<LlmObjectResult>;
+  writeOutput: (run: AppRun, nodeUrn: string, text: string) => Promise<string | null>; // returns written node id/urn
+  /** Next routing edge from this node, or null = flow ends (D7). */
+  selectNext: (run: AppRun, nodeUrn: string, view: Record<string, unknown>) => Promise<NextEdgeSelection | null>;
   resolveConfig: (run: AppRun) => Promise<ResolvedAiConfig>;
   /** Fired once after a run reaches a terminal state (callback dispatch etc.). Best-effort. */
   onTerminal?: (run: AppRun) => Promise<void>;
+}
+
+/** Trigger payload + envelope, envelope wins; `__`-keys (trigger plumbing
+ *  like `__aiConfigName`) never leak into templates or conditions (D-MN-1). */
+function mergedView(
+  eventData: unknown,
+  envelope: Record<string, unknown>,
+): Record<string, unknown> {
+  const view: Record<string, unknown> = {};
+  if (eventData !== null && typeof eventData === 'object' && !Array.isArray(eventData)) {
+    for (const [k, v] of Object.entries(eventData as Record<string, unknown>)) {
+      if (!k.startsWith('__')) view[k] = v;
+    }
+  }
+  return { ...view, ...envelope };
 }
 
 export type RunOutcome = 'completed' | 'failed' | 'skipped' | 'transient';
@@ -476,7 +521,12 @@ export async function executeAppRun(
   return outcome;
 }
 
-/** The §4 steps 3–5 sequence: atomic claim → per-action activation checks → LLM → output → finish. */
+/**
+ * The §4 steps 3–5 sequence, per flow hop (plan-multi-node §4): atomic claim
+ * → [per-hop: activation → assemble → LLM → extract → route → write →
+ * checkpoint] → finish. A single-entry node with no routing edges walks
+ * exactly one hop — today's v1 behavior, unchanged.
+ */
 async function executeAppRunInner(
   db: PrismaClient,
   runId: string,
@@ -501,22 +551,20 @@ async function executeAppRunInner(
   };
 
   try {
+    // Per-ATTEMPT wall clock (D-MN-5): recomputed at each claim.
     const deadline = Date.now() + (run.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS);
 
-    // 4. EXECUTE — every action re-checks the activation row + policy +
-    // budget (the kill-switch contract).
-    if (!(await checkActivation(db, runId, 'llm.invoke'))) {
-      return fail('ACTIVATION_DENIED', 'Run cancelled, expired, or llm.invoke denied by policy.');
-    }
+    // D-MN-5 resume: the checkpoint (curNodeUrn + data) written after each
+    // hop makes a bus redelivery continue at the failing hop, never re-run
+    // completed ones. A fresh run has neither → starts at the entry.
+    let cur = run.curNodeUrn ?? run.entryNodeUrn;
+    let envelope: Record<string, unknown> =
+      run.data !== null && typeof run.data === 'object' && !Array.isArray(run.data)
+        ? { ...(run.data as Record<string, unknown>) }
+        : {};
 
-    let instructions: string;
-    try {
-      instructions = await deps.assemble(run);
-    } catch (err) {
-      // Entry lookup/assembly failures are OBSERVABLE failed runs (D20/D15).
-      return fail('ASSEMBLY_FAILED', String((err as Error)?.message ?? err));
-    }
-
+    // AI config is per-run in v1 (trigger override or registry walk) —
+    // resolve once, not per hop.
     let resolved: ResolvedAiConfig;
     try {
       resolved = await deps.resolveConfig(run);
@@ -527,86 +575,187 @@ async function executeAppRunInner(
       throw err;
     }
 
-    const budget = (await db.appRun.findUniqueOrThrow({ where: { id: runId }, select: { budgetTokens: true } }))
-      .budgetTokens;
-    let result: LlmResult;
-    try {
-      result = await deps.llm(resolved, {
-        system:
-          'You are executing a scheduled Hadron task. Follow the task instructions below. ' +
-          'Produce ONLY the requested output document — no preamble, no meta-commentary.',
-        prompt: instructions,
-        ...(budget != null ? { maxTokens: Math.max(1, Math.min(budget, 32_000)) } : {}),
-      });
-    } catch (err) {
-      if (err instanceof LlmInvocationError && err.transient && Date.now() < deadline) {
-        // Bus redelivery is the retry path — reset the claim so the next
-        // delivery can take it (bounded by max_deliver + the timeout reaper).
+    for (let hop = 0; ; hop++) {
+      if (hop >= MAX_RUN_HOPS) {
+        return fail('MAX_HOPS_EXCEEDED', `Flow exceeded ${MAX_RUN_HOPS} hops at "${cur}" (cycle?).`);
+      }
+      if (Date.now() >= deadline) {
         await db.appRun.updateMany({
           where: { id: runId, status: 'RUNNING' },
-          data: { status: 'PENDING' },
+          data: { status: 'TIMED_OUT', finishedAt: new Date(), failure: { code: 'TIMEOUT' } },
         });
-        return 'transient';
+        return 'failed';
       }
-      return fail('LLM_FAILED', String((err as Error)?.message ?? err));
-    }
 
-    // Live decrement: run budget + daily token counters (kill switch stays
-    // truthful even though this v1 kernel makes a single call).
-    const spent = result.tokensIn + result.tokensOut;
-    await db.appRun.updateMany({
-      where: { id: runId },
-      data: { budgetTokens: { decrement: Math.min(spent, budget ?? spent) } },
-    });
-    // Recorded even into overage — tokens are already spent at the provider;
-    // the NEXT launch gate is the enforcement point (PR-493 Codex P2).
-    await recordQuotaUsage(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
-    await recordQuotaUsage(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
+      // 4. EXECUTE — every action re-checks the activation row + policy +
+      // budget (the kill-switch contract). Entering an ADDITIONAL hop
+      // consumes one action (D-MN-3: budgetActions is the LLM-hop ceiling);
+      // the first hop is covered by run.execute at mint — today's behavior.
+      if (!(await checkActivation(db, runId, 'llm.invoke', hop === 0 ? {} : { actionCost: 1 }))) {
+        return fail(
+          'ACTIVATION_DENIED',
+          'Run cancelled, expired, action budget exhausted, or llm.invoke denied by policy.',
+        );
+      }
 
-    if (Date.now() >= deadline) {
+      const view = mergedView(run.eventData, envelope);
+
+      let spec: RunNodeSpec;
+      try {
+        spec = await deps.loadNodeSpec(run, cur);
+      } catch (err) {
+        // A mid-flow node that can't be loaded is the D20 entry-missing
+        // analog: an OBSERVABLE failed run, position preserved on the row.
+        return fail('NODE_LOAD_FAILED', String((err as Error)?.message ?? err));
+      }
+
+      let instructions: string;
+      try {
+        instructions = await deps.assemble(run, cur, view);
+      } catch (err) {
+        // Entry lookup/assembly failures are OBSERVABLE failed runs (D20/D15).
+        return fail('ASSEMBLY_FAILED', String((err as Error)?.message ?? err));
+      }
+
+      const budget = (await db.appRun.findUniqueOrThrow({ where: { id: runId }, select: { budgetTokens: true } }))
+        .budgetTokens;
+      const maxTokens = budget != null ? { maxTokens: Math.max(1, Math.min(budget, 32_000)) } : {};
+      let result: LlmResult;
+      let extracted: Record<string, unknown> | null = null;
+      try {
+        if (spec.extractionSpec && spec.extractionSpec.length > 0) {
+          // D-MN-2(a): one structured call — the object IS this hop's result.
+          const objectResult = await deps.llmObject(
+            resolved,
+            {
+              system:
+                'You are executing one step of a Hadron automation flow. ' +
+                'Extract the requested fields from the task context below.',
+              prompt: instructions,
+              ...maxTokens,
+            },
+            spec.extractionSpec,
+          );
+          extracted = objectResult.object;
+          result = {
+            text: JSON.stringify(objectResult.object, null, 2),
+            tokensIn: objectResult.tokensIn,
+            tokensOut: objectResult.tokensOut,
+            provider: objectResult.provider,
+            model: objectResult.model,
+          };
+        } else {
+          result = await deps.llm(resolved, {
+            system:
+              'You are executing a scheduled Hadron task. Follow the task instructions below. ' +
+              'Produce ONLY the requested output document — no preamble, no meta-commentary.',
+            prompt: instructions,
+            ...maxTokens,
+          });
+        }
+      } catch (err) {
+        if (err instanceof LlmInvocationError && err.transient && Date.now() < deadline) {
+          // Bus redelivery is the retry path — reset the claim so the next
+          // delivery can take it (bounded by max_deliver + the timeout
+          // reaper). The prior hop's checkpoint makes the redelivery RESUME
+          // at this node (D-MN-5) — completed hops never re-run.
+          await db.appRun.updateMany({
+            where: { id: runId, status: 'RUNNING' },
+            data: { status: 'PENDING' },
+          });
+          return 'transient';
+        }
+        return fail('LLM_FAILED', String((err as Error)?.message ?? err));
+      }
+
+      // Live decrement: run budget + daily token counters, per hop — the
+      // kill switch stays truthful across a multi-call flow.
+      const spent = result.tokensIn + result.tokensOut;
+      await db.appRun.updateMany({
+        where: { id: runId },
+        data: { budgetTokens: { decrement: Math.min(spent, budget ?? spent) } },
+      });
+      // Recorded even into overage — tokens are already spent at the provider;
+      // the NEXT launch gate is the enforcement point (PR-493 Codex P2).
+      await recordQuotaUsage(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
+      await recordQuotaUsage(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
+      // One usage event per hop — a failed flow still shows what it spent.
+      await db.usageEvent
+        .create({
+          data: {
+            id: generateId(),
+            type: 'app-run',
+            nodeLoc: cur,
+            appId: run.appId,
+            createdBy: run.userId ?? null,
+            model: result.model,
+            tokensIn: result.tokensIn,
+            tokensOut: result.tokensOut,
+          },
+        })
+        .catch(() => {});
+
+      if (Date.now() >= deadline) {
+        await db.appRun.updateMany({
+          where: { id: runId, status: 'RUNNING' },
+          data: { status: 'TIMED_OUT', finishedAt: new Date(), failure: { code: 'TIMEOUT' } },
+        });
+        return 'failed';
+      }
+
+      if (extracted) envelope = { ...envelope, ...extracted };
+
+      // Route BEFORE writing: the last node keeps today's default
+      // run-record write; interior nodes write only when they declare
+      // data.output (plan §4 — no run-record spam per hop).
+      let next: NextEdgeSelection | null;
+      try {
+        next = await deps.selectNext(run, cur, mergedView(run.eventData, envelope));
+      } catch (err) {
+        if (err instanceof EdgeConditionEvalError) {
+          // An unevaluable condition must not guess a branch (D15-sub).
+          return fail('EDGE_CONDITION_ERROR', err.message);
+        }
+        throw err;
+      }
+
+      let writtenRef: string | null = null;
+      if (spec.hasOutput || next === null) {
+        // Output write — its own activation re-check (memory.write) + action budget.
+        if (!(await checkActivation(db, runId, 'memory.write', { actionCost: 1 }))) {
+          return fail('ACTIVATION_DENIED', 'memory.write denied (policy, cancellation, or action budget).');
+        }
+        try {
+          writtenRef = await deps.writeOutput(run, cur, result.text);
+        } catch (err) {
+          return fail('OUTPUT_WRITE_FAILED', String((err as Error)?.message ?? err));
+        }
+      }
+
+      if (next === null) {
+        // 5. FINISH — guarded for the same concurrent-cancel reason as fail().
+        const finished = await db.appRun.updateMany({
+          where: { id: runId, status: 'RUNNING' },
+          data: {
+            status: 'COMPLETED',
+            finishedAt: new Date(),
+            curNodeUrn: writtenRef ?? cur,
+            data: envelope as never,
+          },
+        });
+        if (finished.count === 0) return 'skipped'; // cancelled at the wire
+        return 'completed';
+      }
+
+      // D-MN-5 CHECKPOINT — after this hop's side effects, before the next
+      // hop: position + envelope. Guarded so a concurrent cancel is never
+      // overwritten; the next hop's activation check then halts the loop.
       await db.appRun.updateMany({
         where: { id: runId, status: 'RUNNING' },
-        data: { status: 'TIMED_OUT', finishedAt: new Date(), failure: { code: 'TIMEOUT' } },
+        data: { curNodeUrn: next.targetUrn, data: envelope as never },
       });
-      return 'failed';
+      cur = next.targetUrn;
     }
-
-    // Output write — its own activation re-check (memory.write) + action budget.
-    if (!(await checkActivation(db, runId, 'memory.write', { actionCost: 1 }))) {
-      return fail('ACTIVATION_DENIED', 'memory.write denied (policy, cancellation, or action budget).');
-    }
-    let writtenRef: string | null = null;
-    try {
-      writtenRef = await deps.writeOutput(run, result.text);
-    } catch (err) {
-      return fail('OUTPUT_WRITE_FAILED', String((err as Error)?.message ?? err));
-    }
-
-    // 5. FINISH — guarded for the same concurrent-cancel reason as fail().
-    const finished = await db.appRun.updateMany({
-      where: { id: runId, status: 'RUNNING' },
-      data: {
-        status: 'COMPLETED',
-        finishedAt: new Date(),
-        curNodeUrn: writtenRef ?? run.entryNodeUrn,
-      },
-    });
-    if (finished.count === 0) return 'skipped'; // cancelled at the wire
-    await db.usageEvent
-      .create({
-        data: {
-          id: generateId(),
-          type: 'app-run',
-          nodeLoc: run.entryNodeUrn,
-          appId: run.appId,
-          createdBy: run.userId ?? null,
-          model: result.model,
-          tokensIn: result.tokensIn,
-          tokensOut: result.tokensOut,
-        },
-      })
-      .catch(() => {});
-    return 'completed';
   } catch (err) {
     // Unexpected infra error: record, don't crash the listener.
     return fail('INTERNAL', String((err as Error)?.message ?? err));
