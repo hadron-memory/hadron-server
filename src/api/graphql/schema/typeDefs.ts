@@ -1574,6 +1574,8 @@ export const typeDefs = `#graphql
     triggerId: ID
     entryNodeUrn: String!
     eventData: JSON
+    "The run envelope (plan-multi-node D-MN-1): fields extracted by flow nodes as the walker advances. eventData stays the immutable trigger payload; on key collision the envelope wins."
+    data: JSON
     policy: JSON
     "Remaining LLM-token budget — live-decremented; zero halts the run."
     budgetTokens: Int
