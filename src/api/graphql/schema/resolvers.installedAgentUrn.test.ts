@@ -8,7 +8,7 @@
  * the author-org segment.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -192,5 +192,69 @@ describe('App.installedAgentUrn — spec 021 US1', () => {
     );
 
     expect(result).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+  });
+
+  // #520 — a single malformed app/agent URN must NOT throw. composeInstalledAgentUrn
+  // throws when a URN isn't exactly <org>::<slug>, and a thrown resolver adds an
+  // errors[] entry that makes graphql-request reject the WHOLE app(ref:)/apps read
+  // (portal 404s the app-detail page). The nullable field fails soft → null instead.
+  it('#520 — returns null (not throws) when the App URN is malformed', async () => {
+    const hadronOrg = await makeOrg('hadronmemory.com');
+    const micromentorOrg = await makeOrg('micromentor.org');
+    const agent = await makeAgent(hadronOrg.id, hadronOrg.urn, 'coding-agent');
+    // A stored app URN with more than <org>::<slug> (2 segments) — the shape
+    // the portal's slugOfUrn bug compounded — makes composeInstalledAgentUrn throw.
+    const badApp = await db.app.create({
+      data: {
+        id: generateId(),
+        organizationId: micromentorOrg.id,
+        name: 'bad-app',
+        urn: 'micromentor.org:coding-app:extra-segment',
+        appAgents: { create: { agentId: agent.id } },
+      },
+    });
+
+    // The resolver intentionally console.warns on the malformed URN — suppress
+    // it to keep test output clean, and assert it fired so the log path is
+    // covered too.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await (resolvers.App as Record<string, Function>).installedAgentUrn(
+      badApp,
+      {},
+      { db } as unknown as Context,
+    );
+    expect(result).toBeNull();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('#520 — returns null when the Agent URN is malformed', async () => {
+    const hadronOrg = await makeOrg('hadronmemory.com');
+    const micromentorOrg = await makeOrg('micromentor.org');
+    // Malformed agent URN (3 segments after the prefix strip).
+    const badAgent = await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: hadronOrg.id,
+        name: 'coding-agent',
+        urn: 'hadronmemory.com:coding-agent:extra',
+      },
+    });
+    const app = await makeApp(
+      micromentorOrg.id,
+      micromentorOrg.urn,
+      'coding-app',
+      badAgent.id,
+    );
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await (resolvers.App as Record<string, Function>).installedAgentUrn(
+      app,
+      {},
+      { db } as unknown as Context,
+    );
+    expect(result).toBeNull();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
