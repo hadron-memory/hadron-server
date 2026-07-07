@@ -1,24 +1,32 @@
 /**
- * Production RunExecutionDeps (spec 040 plan §6) — the seams between the
- * run kernel and the platform:
+ * Production RunExecutionDeps (spec 040 plan §6 + plan-multi-node §4) — the
+ * seams between the run kernel and the platform:
  *
  *  - assemble: delegates to the runTask resolver with a synthesized Context
  *    (the MCP delegation pattern) — placeholder substitution, dependency
  *    inlining, and the usage event come for free, and read authorization
- *    runs under the run's principal.
+ *    runs under the run's principal. Multi-node: called per flow node with
+ *    the merged view (eventData + envelope) as template args, so templates
+ *    and edge conditions never disagree about a field's value (D-MN-1).
+ *  - loadNodeSpec: the flow-relevant slice of a node's data — extraction
+ *    spec (validated against the reserved namespace) + output flag.
+ *  - selectNext: the D7/D-MN-4 edge walk over the shared evaluator.
  *  - resolveConfig: trigger override name → spec-036 registry walk.
- *  - writeOutput: entry node's data.output { writeTo, mode } → node-write
- *    core under the run principal ('replace' default; 'append' folds onto
- *    existing content). No output spec → runs:<runId> in the entry memory.
+ *  - writeOutput: the CURRENT node's data.output { writeTo, mode } →
+ *    node-write core under the run principal ('replace' default; 'append'
+ *    folds onto existing content). No output spec → runs:<runId> beside
+ *    that node.
  */
 
 import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { writeNodeCore } from '../api/graphql/schema/resolvers.mutation.node.js';
 import { resolveAiConfigWithFallback, type ResolvedAiConfig } from '../lib/aiConfig.js';
-import { generateText } from '../lib/llm/index.js';
+import { generateText, generateExtraction, type ExtractionField } from '../lib/llm/index.js';
+import { validateExtractionSpec } from '../lib/edge-conditions/reserved-names.js';
+import { selectNextEdge } from '../lib/runner/selectNextEdge.js';
 import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../lib/urn.js';
-import type { RunExecutionDeps } from './appRuns.js';
+import type { RunExecutionDeps, RunNodeSpec } from './appRuns.js';
 import { dispatchRunCallback } from '../api/webhooks.js';
 
 function runContext(db: PrismaClient, run: AppRun): Context {
@@ -38,8 +46,8 @@ interface OutputSpec {
   mode?: 'replace' | 'append';
 }
 
-async function loadEntry(db: PrismaClient, entryNodeUrn: string, organizationId: string) {
-  const { memoryUrn, loc } = splitNodeUrn(entryNodeUrn);
+async function loadFlowNode(db: PrismaClient, nodeUrn: string, organizationId: string) {
+  const { memoryUrn, loc } = splitNodeUrn(nodeUrn);
   const normalized = normalizeUrnForLookup(memoryUrn);
   // Tenant-scoped: a URN can only resolve inside the run's own organization
   // (PR-493 review, Gemini security) — cross-org reads are not a run
@@ -50,29 +58,80 @@ async function loadEntry(db: PrismaClient, entryNodeUrn: string, organizationId:
       organizationId,
       deletedAt: null,
     },
-    select: { id: true, urn: true },
+    select: { id: true, urn: true, isEncrypted: true },
   });
-  if (!memory) throw new Error(`Entry memory not found for "${entryNodeUrn}".`);
+  if (!memory) throw new Error(`Flow memory not found for "${nodeUrn}".`);
+  // The launch gate only sees the ENTRY node — a `next` edge could route a
+  // plaintext flow into an encrypted memory mid-flow, where the run has no
+  // session key and assembly would ship ciphertext. Deny routed hops the
+  // same way encrypted entries are denied (PR-532 review, Codex P2;
+  // spec 041 D-2026-07-06-B). Fires on the hop's FIRST touch (loadNodeSpec).
+  if (memory.isEncrypted) {
+    throw new Error(
+      `Headless runs are unavailable on encrypted memories — flow routed into "${nodeUrn}".`,
+    );
+  }
   const node = await db.node.findUnique({
     where: { loc_memoryId: { loc, memoryId: memory.id } },
     select: { id: true, name: true, data: true, deletedAt: true },
   });
-  if (!node || node.deletedAt) throw new Error(`Entry node not found: "${entryNodeUrn}".`);
+  if (!node || node.deletedAt) throw new Error(`Flow node not found: "${nodeUrn}".`);
   return { memory, loc, node };
 }
 
 export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
   return {
-    assemble: async (run) => {
-      const args =
-        run.eventData && typeof run.eventData === 'object' && !Array.isArray(run.eventData)
-          ? (run.eventData as Record<string, unknown>)
-          : undefined;
+    assemble: async (run, nodeUrn, view) => {
       return resolvers.Mutation.runTask(
         {},
-        { urn: run.entryNodeUrn, args },
+        { urn: nodeUrn, args: Object.keys(view).length > 0 ? view : undefined },
         runContext(db, run),
       );
+    },
+
+    loadNodeSpec: async (run, nodeUrn): Promise<RunNodeSpec> => {
+      const { node } = await loadFlowNode(db, nodeUrn, run.organizationId);
+      const data =
+        node.data && typeof node.data === 'object' && !Array.isArray(node.data)
+          ? (node.data as Record<string, unknown>)
+          : {};
+      let extractionSpec: ExtractionField[] | null = null;
+      if (Array.isArray(data.extractionSpec)) {
+        const entries = (data.extractionSpec as unknown[]).filter(
+          (e): e is ExtractionField =>
+            e !== null && typeof e === 'object' && typeof (e as ExtractionField).field === 'string',
+        );
+        if (entries.length > 0) {
+          // Save-time validation exists, but a run must not trust history:
+          // a reserved field name (message.data.exception*) fails the run
+          // loudly instead of poisoning the envelope.
+          const check = validateExtractionSpec(entries);
+          if (!check.ok) {
+            throw new Error(`Invalid extractionSpec on "${nodeUrn}": ${check.error.message}`);
+          }
+          // `__`-prefixed names are runner plumbing (D-MN-1) — a node must
+          // not extract into them; mergedView would strip them anyway, so
+          // the extraction would silently vanish. Fail loud instead
+          // (PR-532 review, Copilot).
+          const plumbing = entries.find((e) => e.field.startsWith('__'));
+          if (plumbing) {
+            throw new Error(
+              `Invalid extractionSpec on "${nodeUrn}": field "${plumbing.field}" — ` +
+                `"__"-prefixed names are reserved for runner plumbing.`,
+            );
+          }
+          extractionSpec = entries;
+        }
+      }
+      return { extractionSpec, hasOutput: data.output != null };
+    },
+
+    selectNext: async (run, nodeUrn, view) => {
+      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId);
+      return selectNextEdge(db, {
+        sourceNode: { id: node.id, memoryId: memory.id, loc, urn: nodeUrn },
+        view,
+      });
     },
 
     resolveConfig: async (run): Promise<ResolvedAiConfig> => {
@@ -92,10 +151,12 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
 
     llm: (resolved, req) => generateText(resolved, req),
 
+    llmObject: (resolved, req, fields) => generateExtraction(resolved, req, fields),
+
     onTerminal: (run) => dispatchRunCallback(db, run),
 
-    writeOutput: async (run, text) => {
-      const { memory, loc, node } = await loadEntry(db, run.entryNodeUrn, run.organizationId);
+    writeOutput: async (run, nodeUrn, text) => {
+      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId);
       const spec: OutputSpec =
         node.data && typeof node.data === 'object' && !Array.isArray(node.data)
           ? ((node.data as Record<string, unknown>).output as OutputSpec) ?? {}

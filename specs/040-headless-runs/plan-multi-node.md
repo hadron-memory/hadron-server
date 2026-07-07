@@ -10,6 +10,18 @@ rather than one-shot prompts.
 2026-07-06. Review verdict: sound and buildable; two correctness gaps fixed below
 (D-MN-4 routing-edge filter, D-MN-5 checkpoint/resume) and the bus section (§4a) added.
 
+**IMPLEMENTED 2026-07-07** (branch `feat/multi-node-runs`) — §8 steps 1–5 shipped; step 6
+(portal condition builder) remains. Full suite green (2994 tests). Two places the code
+corrected this plan, recorded inline below: (a) edge ordering follows the SCHEMA's
+`Edge.priority` convention — **lower fires first** (Int, default 0), not the "priority
+DESC" §5 pseudocode; (b) per-hop action accounting keeps the FIRST hop free (covered by
+`run.execute` at mint — preserves v1 single-node behavior bit-for-bit) and charges 1
+action per additional hop, which is exactly how D-MN-3's "budgetActions is the LLM-hop
+ceiling" lands without changing today's runs. Implementation extras: one UsageEvent per
+hop (a failed flow still shows its spend); `resolveConfig` once per run (config is
+per-run in v1); runTask's dependency inlining now SKIPS `next*` routing edges — without
+that filter every hop's prompt would embed the next steps' node content.
+
 ---
 
 ## 1. Grounding — decided design this implements (do not re-decide)

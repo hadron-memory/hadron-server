@@ -2571,6 +2571,12 @@ model AppRun {
   triggerId      String?           @map("trigger_id")
   entryNodeUrn   String            @map("entry_node_urn")
   eventData      Json?             @map("event_data")
+  /// Run envelope (D-2026-05-09-013): the mutable bag of fields extracted
+  /// by flow nodes as the walker advances. Bare field names — conditions
+  /// address them through the evaluator's `message.data.*` scope prefix
+  /// (plan-multi-node D-MN-1). `eventData` stays the immutable trigger
+  /// payload; on key collision the envelope wins.
+  data           Json?
   /// Run-layer allow-list snapshot (the narrowest chain link; plan §4).
   policy         Json?
   /// Remaining LLM tokens — live-decrement kill switch.

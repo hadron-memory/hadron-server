@@ -20,6 +20,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { triggerManualRun } from './resolvers.appRun.js';
@@ -720,6 +721,10 @@ export const sessionMutations = {
 
         const topicSections: string[] = [];
         for (const edge of node.outgoingEdges) {
+          // Flow-routing edges (`next*`, plan-multi-node D-MN-4) are the
+          // walker's rails, not references — inlining the NEXT step's prompt
+          // into this one would pollute every hop of a multi-node flow.
+          if (isRoutingName(routingNameOf(edge, loc))) continue;
           // target can be null for a dangling edge (deleted target row) — skip.
           const target = edge.target;
           if (target?.content) {

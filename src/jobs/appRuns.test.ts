@@ -44,6 +44,9 @@ let userId: string;
 function deps(overrides: Partial<RunExecutionDeps> = {}): RunExecutionDeps {
   return {
     assemble: vi.fn(async () => '# Task\n\nDo the thing.'),
+    // Default: a plain node — no extraction, no output spec (the terminal
+    // default-write still fires), no outgoing routing edge = 1-hop flow.
+    loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false })),
     resolveConfig: vi.fn(async () => ({ config: { provider: 'anthropic', model: 'test' } }) as never),
     llm: vi.fn(async () => ({
       text: 'the briefing',
@@ -52,7 +55,15 @@ function deps(overrides: Partial<RunExecutionDeps> = {}): RunExecutionDeps {
       provider: 'anthropic',
       model: 'test',
     })),
+    llmObject: vi.fn(async () => ({
+      object: { confidence: 0.9 },
+      tokensIn: 80,
+      tokensOut: 20,
+      provider: 'anthropic',
+      model: 'test',
+    })),
     writeOutput: vi.fn(async () => 'node-id-1'),
+    selectNext: vi.fn(async () => null),
     ...overrides,
   };
 }
@@ -144,6 +155,26 @@ describe('mintAppRun — launch gate (cor:acl:050:01)', () => {
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: false } });
     const run = await mint({ entryNodeUrn: 'run-org::vault::tasks:secret' });
     expect(run.status).toBe('PENDING');
+  });
+
+  it('rejects an entry node outside the App\'s org at the gate (PR-532 Codex P2)', async () => {
+    const foreignOrg = await db.organization.create({
+      data: { id: generateId(), name: 'foreign-org', urn: 'foreign-org' },
+    });
+    const foreignMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: foreignOrg.id, name: 'pubmem',
+        urn: 'foreign-org:pubmem', class: 'knowledge',
+      },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: foreignMem.id, loc: 'tasks:other', name: 'Other', tags: [] },
+    });
+    // Without the gate this would mint, consume quota, and always fail in
+    // the worker (loadFlowNode is org-scoped).
+    await expect(mint({ entryNodeUrn: 'foreign-org::pubmem::tasks:other' })).rejects.toMatchObject({
+      code: 'ENTRY_NOT_IN_ORG',
+    });
   });
 
   it('denies NEW launches when the daily token ledger is at its stored limit (PR-493 Codex P2)', async () => {
@@ -295,6 +326,183 @@ describe('executeAppRun — kernel + activation contract (cor:agt:010:02)', () =
     const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
     expect((after.failure as { code?: string }).code).toBe('ACTIVATION_DENIED');
     expect(d.llm).not.toHaveBeenCalled();
+  });
+});
+
+// ───── multi-node flows (plan-multi-node §4/§8) ─────────────────────────────
+
+describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
+  const NODE_A = 'run-org::runmem::tasks:briefing'; // = entryNodeUrn from mint()
+  const NODE_B = 'run-org::runmem::flow:step-b';
+  const NODE_C = 'run-org::runmem::flow:step-c';
+  const hop = (targetUrn: string) => ({ edgeId: generateId(), edgeName: 'next', targetUrn });
+
+  it('walks a 2-hop flow: checkpoint trail, per-hop usage, terminal default write', async () => {
+    const run = await mint();
+    const d = deps({
+      selectNext: vi.fn(async (_run, nodeUrn) => (nodeUrn === NODE_A ? hop(NODE_B) : null)),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('completed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe('COMPLETED');
+    expect(after.curNodeUrn).toBe('node-id-1'); // terminal write ref, as today
+    // Both hops assembled, in flow order, against their own node URNs.
+    expect((d.assemble as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])).toEqual([NODE_A, NODE_B]);
+    // Two LLM calls decrement the token budget twice…
+    expect(after.budgetTokens).toBe((run.budgetTokens ?? 0) - 300);
+    // …the SECOND hop costs one action (D-MN-3) + one for the terminal write.
+    expect(after.budgetActions).toBe((run.budgetActions ?? 0) - 2);
+    // One usage event per hop, honest ledger.
+    expect(await db.usageEvent.count({ where: { type: 'app-run' } })).toBe(2);
+    // Interior node (A) wrote nothing; terminal (B) wrote the default record.
+    expect(d.writeOutput).toHaveBeenCalledTimes(1);
+    expect((d.writeOutput as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe(NODE_B);
+  });
+
+  it('extraction hop: llmObject fills the envelope; the view feeds the next hop (D-MN-1/D-MN-2)', async () => {
+    const run = await mint({
+      eventData: { topic: 'ticks', confidence: 0.1, __aiConfigName: 'plumbing' },
+    });
+    const d = deps({
+      loadNodeSpec: vi.fn(async (_run, nodeUrn) =>
+        nodeUrn === NODE_A
+          ? { extractionSpec: [{ field: 'confidence', shape: 'number' }], hasOutput: false }
+          : { extractionSpec: null, hasOutput: false },
+      ),
+      selectNext: vi.fn(async (_run, nodeUrn) => (nodeUrn === NODE_A ? hop(NODE_B) : null)),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('completed');
+    // Extraction node used the structured surface, not generateText.
+    expect(d.llmObject).toHaveBeenCalledTimes(1);
+    expect(d.llm).toHaveBeenCalledTimes(1); // hop 2 only
+    // Routing view: envelope overrode the trigger hint; __-plumbing stripped.
+    const routingView = (d.selectNext as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(routingView).toEqual({ topic: 'ticks', confidence: 0.9 });
+    // The SAME merged view reached hop 2's template args (D-MN-1).
+    expect((d.assemble as ReturnType<typeof vi.fn>).mock.calls[1][2]).toEqual({
+      topic: 'ticks',
+      confidence: 0.9,
+    });
+    // Envelope persisted on the terminal row — bare fields (D-MN-1).
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.data).toEqual({ confidence: 0.9 });
+  });
+
+  it('an interior node with data.output writes mid-flow', async () => {
+    const run = await mint();
+    const d = deps({
+      loadNodeSpec: vi.fn(async (_run, nodeUrn) => ({
+        extractionSpec: null,
+        hasOutput: nodeUrn === NODE_A, // interior A declares an output spec
+      })),
+      selectNext: vi.fn(async (_run, nodeUrn) => (nodeUrn === NODE_A ? hop(NODE_B) : null)),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('completed');
+    expect((d.writeOutput as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])).toEqual([
+      NODE_A, // declared output, mid-flow
+      NODE_B, // terminal default
+    ]);
+  });
+
+  it('a routing cycle trips MAX_RUN_HOPS into an observable FAILED run (D-MN-3)', async () => {
+    const run = await mint();
+    const d = deps({
+      selectNext: vi.fn(async (_run, nodeUrn) => hop(nodeUrn === NODE_B ? NODE_C : NODE_B)),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('failed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect((after.failure as { code?: string }).code).toBe('MAX_HOPS_EXCEEDED');
+  }, 15_000);
+
+  it('the action budget bounds LLM hops (D-MN-3: hops past the first cost 1 action)', async () => {
+    const run = await mint();
+    await db.appRun.update({ where: { id: run.id }, data: { budgetActions: 0 } });
+    const d = deps({ selectNext: vi.fn(async () => hop(NODE_B)) });
+    expect(await executeAppRun(db, run.id, d)).toBe('failed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect((after.failure as { code?: string }).code).toBe('ACTIVATION_DENIED');
+    expect(d.llm).toHaveBeenCalledTimes(1); // hop 1 ran; hop 2 was denied
+  });
+
+  it('a transient failure mid-flow resumes at the CHECKPOINT, not the entry (D-MN-5)', async () => {
+    const run = await mint();
+    const { LlmInvocationError } = await import('../lib/llm/index.js');
+    // Attempt 1: hop A succeeds, hop B's LLM call is rate-limited.
+    const first = deps({
+      selectNext: vi.fn(async (_run, nodeUrn) => (nodeUrn === NODE_A ? hop(NODE_B) : null)),
+      llm: vi
+        .fn()
+        .mockResolvedValueOnce({ text: 'a-ok', tokensIn: 10, tokensOut: 5, provider: 'anthropic', model: 'test' })
+        .mockRejectedValueOnce(new LlmInvocationError('rate limited', 'anthropic', true)),
+    });
+    expect(await executeAppRun(db, run.id, first)).toBe('transient');
+    const parked = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(parked.status).toBe('PENDING'); // ready for redelivery
+    expect(parked.curNodeUrn).toBe(NODE_B); // the checkpoint: resume HERE
+
+    // Attempt 2 (the redelivery): picks up at B — A never re-runs.
+    const second = deps({
+      selectNext: vi.fn(async () => null),
+    });
+    expect(await executeAppRun(db, run.id, second)).toBe('completed');
+    expect((second.assemble as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])).toEqual([NODE_B]);
+    expect(second.llm).toHaveBeenCalledTimes(1);
+  });
+
+  it('a mid-flow cancel halts at the next hop; the last checkpoint survives', async () => {
+    const run = await mint();
+    const d = deps({
+      selectNext: vi.fn(async (_run, nodeUrn) => (nodeUrn === NODE_A ? hop(NODE_B) : null)),
+      llm: vi
+        .fn()
+        // Hop A completes normally…
+        .mockResolvedValueOnce({ text: 'a-ok', tokensIn: 10, tokensOut: 5, provider: 'anthropic', model: 'test' })
+        // …the kill switch flips while hop B's call is in flight.
+        .mockImplementationOnce(async () => {
+          await db.appRun.update({ where: { id: run.id }, data: { status: 'CANCELLED' } });
+          return { text: 'late', tokensIn: 10, tokensOut: 5, provider: 'anthropic', model: 'test' };
+        }),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('skipped');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe('CANCELLED'); // audit log keeps the cancellation
+    expect(after.curNodeUrn).toBe(NODE_B); // hop-A checkpoint intact
+    expect(d.writeOutput).not.toHaveBeenCalled(); // B's write never happened
+  });
+
+  it('an unevaluable edge condition fails the run loudly (D15-sub)', async () => {
+    const { EdgeConditionEvalError } = await import('../lib/runner/selectNextEdge.js');
+    const run = await mint();
+    const d = deps({
+      selectNext: vi.fn(async () => {
+        throw new EdgeConditionEvalError('unknown operator "frobnicate"', 'edge-1', 'UNKNOWN_OPERATOR');
+      }),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('failed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect((after.failure as { code?: string }).code).toBe('EDGE_CONDITION_ERROR');
+  });
+
+  it('__-keys are stripped from BOTH view sources — a persisted envelope is not a trusted channel (PR-532 Copilot)', async () => {
+    const run = await mint({ eventData: { topic: 'ticks', __aiConfigName: 'plumbing' } });
+    // Simulate a resume from a checkpoint whose envelope carries plumbing.
+    await db.appRun.update({ where: { id: run.id }, data: { data: { __sneak: 1, ok: 2 } } });
+    const d = deps();
+    expect(await executeAppRun(db, run.id, d)).toBe('completed');
+    expect((d.assemble as ReturnType<typeof vi.fn>).mock.calls[0][2]).toEqual({ topic: 'ticks', ok: 2 });
+    expect((d.selectNext as ReturnType<typeof vi.fn>).mock.calls[0][2]).toEqual({ topic: 'ticks', ok: 2 });
+  });
+
+  it('a mid-flow node that cannot be loaded is an observable failure (D20 analog)', async () => {
+    const run = await mint();
+    const d = deps({
+      loadNodeSpec: vi.fn(async () => {
+        throw new Error('Flow node not found: "run-org::runmem::tasks:briefing".');
+      }),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('failed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect((after.failure as { code?: string }).code).toBe('NODE_LOAD_FAILED');
   });
 });
 
