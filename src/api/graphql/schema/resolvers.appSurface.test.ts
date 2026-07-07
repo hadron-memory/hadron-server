@@ -483,6 +483,100 @@ describe('appNodes', () => {
     const nodes = await resolvers.Query.appNodes({}, { appId: app.id }, adminCtx());
     expect(nodes).toEqual([]);
   });
+
+  // #524 — the installed agent's system memory (read-only from an App context)
+  // must be folded in, so task nodes authored there are visible to appNodes.
+  it("includes nodes from the installed agent's system memory", async () => {
+    const sysMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        urn: `${orgId}:juno-system`,
+        name: 'juno System',
+        class: 'system',
+        acceptsUploads: false,
+      },
+    });
+    await db.agent.update({
+      where: { id: agentId },
+      data: { systemMemoryId: sysMem.id },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: sysMem.id,
+        loc: 'tasks:distill',
+        isLink: false,
+        name: 'distill',
+        nodeType: 'task',
+        isRunnable: true,
+        tags: [],
+      },
+    });
+
+    const { app } = await createDbAppWithKey(db, 'app-sysmem', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    const nodes = await resolvers.Query.appNodes({}, { appId: app.id }, adminCtx());
+    const locs = nodes.map((n: { loc: string }) => n.loc);
+    // Both the memoryItem node and the system-memory task node are present.
+    expect(locs).toContain('org.test.node');
+    expect(locs).toContain('tasks:distill');
+  });
+
+  // #525 — the optional NodeFilter narrows to runnable task nodes server-side,
+  // across the App's memoryItems + the installed agent's system memory.
+  it('filter.isRunnable narrows to the runnable task node (incl. system memory)', async () => {
+    const sysMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        urn: `${orgId}:juno-system`,
+        name: 'juno System',
+        class: 'system',
+        acceptsUploads: false,
+      },
+    });
+    await db.agent.update({ where: { id: agentId }, data: { systemMemoryId: sysMem.id } });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: sysMem.id,
+        loc: 'tasks:distill',
+        isLink: false,
+        name: 'distill',
+        nodeType: 'task',
+        isRunnable: true,
+        tags: [],
+      },
+    });
+    // A non-runnable node in the same system memory that must be filtered out.
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: sysMem.id,
+        loc: 'prompts:hello',
+        isLink: false,
+        name: 'hello',
+        nodeType: 'system',
+        tags: [],
+      },
+    });
+
+    const { app } = await createDbAppWithKey(db, 'app-runnable', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+
+    const runnable = await resolvers.Query.appNodes(
+      {},
+      { appId: app.id, filter: { isRunnable: true } },
+      adminCtx(),
+    );
+    const locs = runnable.map((n: { loc: string }) => n.loc);
+    expect(locs).toEqual(['tasks:distill']);
+    // The memoryItem node (org.test.node, not runnable) and the non-runnable
+    // system node are both excluded.
+    expect(locs).not.toContain('org.test.node');
+    expect(locs).not.toContain('prompts:hello');
+  });
 });
 
 // ---------------------------------------------------------------------------
