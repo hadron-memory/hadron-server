@@ -287,7 +287,7 @@ export const agentMutations = {
       // auto-provisioned memory is class='personal' (plaintext USER_ID mode) or
       // 'private' (encrypted SECRET mode, 041/#516); scope by userMemoryOfAgentId
       // so free-standing user memories (agent NULL) never match.
-      const personalMemory = await ctx.db.memory.findFirst({
+      const userMemory = await ctx.db.memory.findFirst({
         where: {
           userId,
           userMemoryOfAgentId: agentId,
@@ -296,8 +296,8 @@ export const agentMutations = {
         },
         include: { _count: { select: { nodes: true } } },
       });
-      if (personalMemory && personalMemory._count.nodes === 0) {
-        await ctx.db.memory.delete({ where: { id: personalMemory.id } });
+      if (userMemory && userMemory._count.nodes === 0) {
+        await ctx.db.memory.delete({ where: { id: userMemory.id } });
       }
 
       return updated;

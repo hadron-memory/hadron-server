@@ -540,6 +540,12 @@ describe('linkMemoryToUser with encryption', () => {
       },
       sessionCtx,
     );
+    // Give the node a plaintext abstract (spec 031: abstract is an encrypted
+    // field) so we can assert the promotion doesn't leak it.
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'note', memoryId: anonSession.memoryId! } },
+      data: { abstract: 'draft summary' },
+    });
 
     // Anonymous memory starts plaintext
     let mem = await db.memory.findUnique({ where: { id: anonSession.memoryId! } });
@@ -568,11 +574,13 @@ describe('linkMemoryToUser with encryption', () => {
     // #352: anon→user promotion writes the canonical `app-user` marker.
     expect(mem?.urn).toContain(':app-user:');
 
-    // The node content is now ciphertext
+    // The node content AND abstract are now ciphertext (spec 031 — the
+    // promotion must not leave the abstract plaintext).
     const note = await db.node.findFirst({
       where: { memoryId: anonSession.memoryId!, loc: 'note' },
     });
     expect(note?.content?.startsWith('enc:v1:')).toBe(true);
+    expect(note?.abstract?.startsWith('enc:v1:')).toBe(true);
   });
 
   it('leaves the memory plaintext when no dataKey is provided', async () => {

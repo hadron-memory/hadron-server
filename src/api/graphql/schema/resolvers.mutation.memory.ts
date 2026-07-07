@@ -1112,18 +1112,22 @@ export const memoryMutations = {
         const key = parseDataKey(dataKey);
         const nodes = await ctx.db.node.findMany({
           where: { memoryId: resolvedMemoryId, deletedAt: null },
-          select: { id: true, content: true, data: true },
+          // abstract encrypts alongside content since spec 031 — selecting only
+          // content+data here would leave abstracts plaintext on a memory marked
+          // encrypted (matches the encryptMemory fix below).
+          select: { id: true, content: true, abstract: true, data: true },
         });
         await ctx.db.$transaction(async (tx) => {
           for (const node of nodes) {
             const encrypted = encryptNodeFieldsWithKey(
-              { content: node.content, data: node.data },
+              { content: node.content, abstract: node.abstract, data: node.data },
               key,
             );
             await tx.node.update({
               where: { id: node.id },
               data: {
                 content: encrypted.content ?? null,
+                abstract: encrypted.abstract ?? null,
                 data: (encrypted.data ?? null) as InputJsonValue,
               },
             });
