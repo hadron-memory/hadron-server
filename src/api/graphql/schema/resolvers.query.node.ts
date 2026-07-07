@@ -1007,6 +1007,10 @@ export const nodeQueries = {
       { appId, filter, limit }: {
         appId: string;
         filter?: {
+          // Memory-scope fields — NOT supported by appNodes (the App's scope is
+          // authoritative). Present only so we can reject them explicitly.
+          memoryIds?: string[] | null;
+          memoryClasses?: string[] | null;
           nodeType?: string | null;
           tags?: string[] | null;
           isRunnable?: boolean | null;
@@ -1058,13 +1062,23 @@ export const nodeQueries = {
       // #525 — optional node-level NodeFilter, pushed server-side so callers
       // (e.g. an App's runnable-task picker) can request `{ isRunnable: true }`
       // without fetching everything and filtering client-side. The App's memory
-      // scope stays authoritative: the filter's memory-scope fields
-      // (memoryIds / memoryClasses) are intentionally ignored, and unlike
-      // findNodes we do NOT impose the default `nodeType != 'system'` exclusion
-      // — appNodes deliberately surfaces the system memory (#524).
+      // scope stays authoritative, and unlike findNodes we do NOT impose the
+      // default `nodeType != 'system'` exclusion — appNodes deliberately
+      // surfaces the system memory (#524).
       const f = filter ?? {};
       const badInput = (msg: string) =>
         new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
+      // #526 review — NodeFilter carries memory-scope fields that appNodes can't
+      // honor (its scope is the App's memories). Reject rather than silently
+      // ignore them, so a caller who assumed they scoped fails fast instead of
+      // getting a surprising superset. Use findNodes for cross-memory scoping.
+      if (f.memoryIds?.length || f.memoryClasses?.length) {
+        throw badInput(
+          'appNodes: filter.memoryIds / filter.memoryClasses are not supported — ' +
+            "the App's installed-agent memories are the authoritative scope. " +
+            'Use findNodes for cross-memory scoping.',
+        );
+      }
       if (f.updatedAfter && Number.isNaN(Date.parse(f.updatedAfter))) {
         throw badInput('appNodes filter.updatedAfter must be a valid date string.');
       }

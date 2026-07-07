@@ -2551,10 +2551,11 @@ export const typeDefs = `#graphql
     An optional NodeFilter pushes node-level predicates server-side — e.g.
     filter: { isRunnable: true } to list the App's runnable task nodes (#525).
     The App's memory scope is authoritative, so the filter's memory-scope
-    fields (memoryIds / memoryClasses) are ignored; only node-level predicates
-    (nodeType, tags, isRunnable, locPrefix, createdBy, updatedAfter/Before,
-    includeDeleted) apply. Unlike findNodes, system-memory nodes are NOT
-    excluded by default.
+    fields (memoryIds / memoryClasses) are rejected with BAD_USER_INPUT rather
+    than silently ignored — use findNodes for cross-memory scoping. Only
+    node-level predicates (nodeType, tags, isRunnable, locPrefix, createdBy,
+    updatedAfter/Before, includeDeleted) apply. Unlike findNodes, system-memory
+    nodes are NOT excluded by default.
     """
     appNodes(appId: ID!, filter: NodeFilter, limit: Int): [Node!]!
 

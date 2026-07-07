@@ -577,6 +577,20 @@ describe('appNodes', () => {
     expect(locs).not.toContain('org.test.node');
     expect(locs).not.toContain('prompts:hello');
   });
+
+  // #526 review — the App's memory scope is authoritative, so the NodeFilter's
+  // memory-scope fields are rejected (fail fast) rather than silently ignored.
+  it('rejects filter.memoryIds / filter.memoryClasses with BAD_USER_INPUT', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-reject-scope', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+
+    await expect(
+      resolvers.Query.appNodes({}, { appId: app.id, filter: { memoryIds: [memoryId] } }, adminCtx()),
+    ).rejects.toThrow(/not supported/);
+    await expect(
+      resolvers.Query.appNodes({}, { appId: app.id, filter: { memoryClasses: ['system'] } }, adminCtx()),
+    ).rejects.toThrow(/not supported/);
+  });
 });
 
 // ---------------------------------------------------------------------------
