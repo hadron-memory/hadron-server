@@ -1576,6 +1576,8 @@ export const typeDefs = `#graphql
     eventData: JSON
     "The run envelope (plan-multi-node D-MN-1): fields extracted by flow nodes as the walker advances. eventData stays the immutable trigger payload; on key collision the envelope wins."
     data: JSON
+    "Per-hop trail (#538): one element per completed hop — [{node, edgeOut, startedAt, finishedAt, tokensSpent}]. edgeOut is the routing edge taken FROM the hop (null on the last). A hop that failed mid-execution has no element; curNodeUrn + failure identify it."
+    hops: JSON
     policy: JSON
     "Remaining LLM-token budget — live-decremented; zero halts the run."
     budgetTokens: Int
