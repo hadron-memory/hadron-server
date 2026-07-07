@@ -483,6 +483,41 @@ describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
     expect((after.failure as { code?: string }).code).toBe('EDGE_CONDITION_ERROR');
   });
 
+  it('persists the walked path — one trail element per completed hop (#538)', async () => {
+    const run = await mint();
+    const d = deps({
+      selectNext: vi.fn(async (_run, nodeUrn) => (nodeUrn === NODE_A ? hop(NODE_B) : null)),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('completed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    const trail = after.hops as Array<Record<string, unknown>>;
+    expect(trail).toHaveLength(2);
+    expect(trail[0]).toMatchObject({ node: NODE_A, edgeOut: 'next', tokensSpent: 150 });
+    expect(trail[1]).toMatchObject({ node: NODE_B, edgeOut: null });
+    expect(typeof trail[0].startedAt).toBe('number');
+    expect(typeof trail[1].finishedAt).toBe('number');
+  });
+
+  it('a transient resume appends each hop exactly once — no duplicate trail elements (#538)', async () => {
+    const run = await mint();
+    const { LlmInvocationError } = await import('../lib/llm/index.js');
+    const first = deps({
+      selectNext: vi.fn(async (_run, nodeUrn) => (nodeUrn === NODE_A ? hop(NODE_B) : null)),
+      llm: vi
+        .fn()
+        .mockResolvedValueOnce({ text: 'a-ok', tokensIn: 10, tokensOut: 5, provider: 'anthropic', model: 'test' })
+        .mockRejectedValueOnce(new LlmInvocationError('rate limited', 'anthropic', true)),
+    });
+    expect(await executeAppRun(db, run.id, first)).toBe('transient');
+    const parked = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect((parked.hops as unknown[]) ?? []).toHaveLength(1); // only hop A completed
+    expect(await executeAppRun(db, run.id, deps({ selectNext: vi.fn(async () => null) }))).toBe('completed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    const trail = after.hops as Array<Record<string, unknown>>;
+    expect(trail).toHaveLength(2); // A once, B once — the failed attempt left no element
+    expect(trail.map((h) => h.node)).toEqual([NODE_A, NODE_B]);
+  });
+
   it('__-keys are stripped from BOTH view sources — a persisted envelope is not a trusted channel (PR-532 Copilot)', async () => {
     const run = await mint({ eventData: { topic: 'ticks', __aiConfigName: 'plumbing' } });
     // Simulate a resume from a checkpoint whose envelope carries plumbing.

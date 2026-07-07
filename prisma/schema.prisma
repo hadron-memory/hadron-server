@@ -2577,6 +2577,13 @@ model AppRun {
   /// (plan-multi-node D-MN-1). `eventData` stays the immutable trigger
   /// payload; on key collision the envelope wins.
   data           Json?
+  /// Per-hop trail (#538): the walked path, one element per COMPLETED hop,
+  /// appended in the same checkpoint/finish UPDATE the runner already
+  /// writes. `[{node, edgeOut, startedAt, finishedAt, tokensSpent}]` —
+  /// edgeOut is the routing edge taken FROM the hop (null on the last).
+  /// Bounded by RUN_MAX_HOPS. A hop that FAILS mid-execution has no
+  /// element; `curNodeUrn` + `failure` identify it.
+  hops           Json?
   /// Run-layer allow-list snapshot (the narrowest chain link; plan §4).
   policy         Json?
   /// Remaining LLM tokens — live-decrement kill switch.

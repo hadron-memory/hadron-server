@@ -577,6 +577,13 @@ async function executeAppRunInner(
       run.data !== null && typeof run.data === 'object' && !Array.isArray(run.data)
         ? { ...(run.data as Record<string, unknown>) }
         : {};
+    // Per-hop trail (#538): one element per COMPLETED hop, persisted in the
+    // same checkpoint/finish UPDATE. Resume loads the prior attempts' trail;
+    // a hop that failed mid-execution left no element, so re-running it
+    // appends exactly once — idempotent by construction.
+    const hops: Array<Record<string, unknown>> = Array.isArray(run.hops)
+      ? [...(run.hops as Array<Record<string, unknown>>)]
+      : [];
 
     // AI config is per-run in v1 (trigger override or registry walk) —
     // resolve once, not per hop.
@@ -594,6 +601,7 @@ async function executeAppRunInner(
       if (hop >= MAX_RUN_HOPS) {
         return fail('MAX_HOPS_EXCEEDED', `Flow exceeded ${MAX_RUN_HOPS} hops at "${cur}" (cycle?).`);
       }
+      const hopStartedAt = Date.now();
       if (Date.now() >= deadline) {
         await db.appRun.updateMany({
           where: { id: runId, status: 'RUNNING' },
@@ -747,6 +755,14 @@ async function executeAppRunInner(
         }
       }
 
+      hops.push({
+        node: cur,
+        edgeOut: next?.edgeName ?? null, // routing edge taken FROM this hop; null on the last (#538)
+        startedAt: hopStartedAt,
+        finishedAt: Date.now(),
+        tokensSpent: spent,
+      });
+
       if (next === null) {
         // 5. FINISH — guarded for the same concurrent-cancel reason as fail().
         const finished = await db.appRun.updateMany({
@@ -756,6 +772,7 @@ async function executeAppRunInner(
             finishedAt: new Date(),
             curNodeUrn: writtenRef ?? cur,
             data: envelope as never,
+            hops: hops as never,
           },
         });
         if (finished.count === 0) return 'skipped'; // cancelled at the wire
@@ -769,7 +786,7 @@ async function executeAppRunInner(
       // review, Gemini).
       const checkpointed = await db.appRun.updateMany({
         where: { id: runId, status: 'RUNNING' },
-        data: { curNodeUrn: next.targetUrn, data: envelope as never },
+        data: { curNodeUrn: next.targetUrn, data: envelope as never, hops: hops as never },
       });
       if (checkpointed.count === 0) return 'skipped';
       cur = next.targetUrn;
