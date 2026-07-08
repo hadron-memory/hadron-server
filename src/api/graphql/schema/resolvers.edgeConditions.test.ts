@@ -94,8 +94,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: SRC_ID,
-        targetNodeId: TGT_ID,
+        sourceRef: SRC_ID,
+        targetRef: TGT_ID,
         name: 'force-profile',
         condition,
       },
@@ -110,8 +110,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: SRC_ID,
-        targetNodeId: TGT_ID,
+        sourceRef: SRC_ID,
+        targetRef: TGT_ID,
         name: 'urgent',
         condition: null,
         priority: 5,
@@ -130,8 +130,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: SRC_ID,
-        targetNodeId: TGT_ID,
+        sourceRef: SRC_ID,
+        targetRef: TGT_ID,
         name: 'routes-to',
         condition: null,
         priority: null,
@@ -165,8 +165,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       mutations.createEdge(
         null,
         {
-          sourceNodeId: SRC_ID,
-          targetNodeId: TGT_ID,
+          sourceRef: SRC_ID,
+          targetRef: TGT_ID,
           name: 'l',
           condition: { cat: ['x', 'y'] },
         },
@@ -187,8 +187,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       mutations.createEdge(
         null,
         {
-          sourceNodeId: SRC_ID,
-          targetNodeId: TGT_ID,
+          sourceRef: SRC_ID,
+          targetRef: TGT_ID,
           name: 'l',
           condition: { var: 'session.foo' },
         },
@@ -208,8 +208,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
       mutations.createEdge(
         null,
         {
-          sourceNodeId: SRC_ID,
-          targetNodeId: TGT_ID,
+          sourceRef: SRC_ID,
+          targetRef: TGT_ID,
           name: 'l',
           condition: { var: 'message.data.exception' },
         },
@@ -229,7 +229,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await expect(
       mutations.createEdge(
         null,
-        { sourceNodeId: SRC_ID, targetNodeId: TGT_ID, name: 'l', condition: huge },
+        { sourceRef: SRC_ID, targetRef: TGT_ID, name: 'l', condition: huge },
         testCtx,
       ),
     ).rejects.toMatchObject({
@@ -246,7 +246,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await expect(
       mutations.createEdge(
         null,
-        { sourceNodeId: SRC_ID, targetNodeId: TGT_ID, name: 'l', condition: nested },
+        { sourceRef: SRC_ID, targetRef: TGT_ID, name: 'l', condition: nested },
         testCtx,
       ),
     ).rejects.toMatchObject({
@@ -261,8 +261,8 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
     await mutations.createEdge(
       null,
       {
-        sourceNodeId: SRC_ID,
-        targetNodeId: TGT_ID,
+        sourceRef: SRC_ID,
+        targetRef: TGT_ID,
         name: 'unconditional',
         condition: null,
       },

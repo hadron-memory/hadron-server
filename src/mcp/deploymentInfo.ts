@@ -31,7 +31,9 @@
 // 0.8.0: headless multi-node runs surface complete — AppRun.data/hops/spawn
 // on GraphQL, appRuns(parentRunId:), AppRunTriggerKind.SPAWN, run tools
 // (hadron_spawn / hadron_child_runs / node tools).
-export const HADRON_SERVER_VERSION = '0.8.0';
+// 0.9.0: #542 — GraphQL surface unified on the <object>Ref convention
+// (runTask nodeRef; updateNodeData/createEdge/deleteNode/moveNode/node ref args).
+export const HADRON_SERVER_VERSION = '0.9.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"
