@@ -25,9 +25,11 @@ import {
   NodeLocConflictError,
   NodeNotFoundError,
   NodeAbstractTooLongError,
+  EdgeNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { resolveEdgeRef } from '../../../lib/entityRef/edgeRef.js';
 import { GraphQLError } from 'graphql';
 import { convertHtmlToMarkdown, convertPdfToMarkdown } from '../../../lib/pdfClient.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -1296,8 +1298,8 @@ export const nodeMutations = {
 
     updateEdge: async (
       _: unknown,
-      { edgeId, name, loc, description, isRunnable, condition, priority, data }: {
-        edgeId: string;
+      { edgeRef, name, loc, description, isRunnable, condition, priority, data }: {
+        edgeRef: string;
         name?: string | null;
         loc?: string | null;
         description?: string | null;
@@ -1336,8 +1338,25 @@ export const nodeMutations = {
       // Non-JS clients that serialize unset args as explicit nulls (the
       // Go CLI's genqlient layer) must omit unset variables instead —
       // tracked as a hadron-cli fix.
+      //
+      // #542: 'edgeRef' is an ID-shape PK OR a fully-qualified edge URN,
+      // resolved by the shared resolveEdgeRef (Tier 2 — previously this path
+      // was PK-only via a bare `where: { id }`). A genuine miss → EDGE_NOT_FOUND
+      // (was an unwrapped Prisma P2025); a malformed relative URN propagates as
+      // UrnNotQualifiedError (spec 022).
+      let resolvedEdgeId: string;
+      try {
+        ({ id: resolvedEdgeId } = await resolveEdgeRef(ctx.db, edgeRef));
+      } catch (e) {
+        if (e instanceof EdgeNotFoundError) {
+          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          });
+        }
+        throw e;
+      }
       return ctx.db.edge.update({
-        where: { id: edgeId },
+        where: { id: resolvedEdgeId },
         data: {
           ...(name !== undefined ? { name: name ?? null } : {}),
           ...(loc != null && loc !== '' ? { loc } : {}),
@@ -1354,11 +1373,25 @@ export const nodeMutations = {
 
     deleteEdge: async (
       _: unknown,
-      { edgeId }: { edgeId: string },
+      { edgeRef }: { edgeRef: string },
       ctx: Context,
     ) => {
       requireRole(ctx, 'CONTRIBUTOR');
-      await ctx.db.edge.delete({ where: { id: edgeId } });
+      // #542: resolve edgeRef (ID or fully-qualified edge URN) via the shared
+      // resolveEdgeRef (Tier 2 — was PK-only). A miss → EDGE_NOT_FOUND instead
+      // of an unwrapped Prisma P2025.
+      let resolvedEdgeId: string;
+      try {
+        ({ id: resolvedEdgeId } = await resolveEdgeRef(ctx.db, edgeRef));
+      } catch (e) {
+        if (e instanceof EdgeNotFoundError) {
+          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          });
+        }
+        throw e;
+      }
+      await ctx.db.edge.delete({ where: { id: resolvedEdgeId } });
       return true;
     },
 
