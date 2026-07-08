@@ -33,6 +33,7 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
 
 interface Fixture {
   admin: { id: string };
+  viewer: { id: string };
   memory: { id: string; urn: string };
   ghost: { id: string; loc: string };
 }
@@ -41,6 +42,10 @@ let fx: Fixture;
 
 function adminAuth(): AuthContext {
   return { userId: fx.admin.id, roles: ['ADMIN'], clientId: `user:${fx.admin.id}` };
+}
+
+function viewerAuth(): AuthContext {
+  return { userId: fx.viewer.id, roles: [], clientId: `user:${fx.viewer.id}` };
 }
 
 beforeEach(async () => {
@@ -54,6 +59,12 @@ beforeEach(async () => {
   });
   await db.orgMember.create({
     data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
+  });
+  // A user with NO access to the memory — used to prove hadron_update_node
+  // gates on write-access before it probes node existence (no membership
+  // oracle).
+  const viewer = await db.user.create({
+    data: { githubId: 9802, githubUsername: 'issue-543-viewer', roles: [] },
   });
 
   const memory = await resolvers.Mutation.createMemory(
@@ -78,7 +89,7 @@ beforeEach(async () => {
     },
   });
 
-  fx = { admin, memory, ghost };
+  fx = { admin, viewer, memory, ghost };
 });
 
 describe('hadron_create_node — resurrects a soft-deleted node (#543)', () => {
@@ -140,5 +151,26 @@ describe('hadron_update_node — soft-deleted node is not-found (#543)', () => {
     // Untouched: still deleted, name unchanged.
     expect(row?.deletedAt).toBeInstanceOf(Date);
     expect(row?.name).toBe('Ghost');
+  });
+
+  it('gates on write-access before probing existence (no membership oracle)', async () => {
+    // A caller without write access must get the SAME response whether the
+    // loc names an existing node or a missing one — otherwise the tool leaks
+    // node existence in memories the caller cannot access (Gemini review).
+    const srv = createTestableMcpServer(viewerAuth());
+
+    const existingLoc = await srv.callToolText('hadron_update_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.ghost.loc}`,
+      name: 'nope',
+    });
+    const missingLoc = await srv.callToolText('hadron_update_node', {
+      urn: `urn:node:${fx.memory.urn}:does-not-exist`,
+      name: 'nope',
+    });
+
+    expect(existingLoc).toMatch(/access denied/i);
+    expect(existingLoc).not.toMatch(/not found/i);
+    // Identical response for both — no existence signal.
+    expect(missingLoc).toBe(existingLoc);
   });
 });

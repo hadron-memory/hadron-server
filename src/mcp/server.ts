@@ -2665,6 +2665,14 @@ export function createMcpServerInstance(
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
 
+      // Auth BEFORE any node-existence probe: returning "not found" for an
+      // existing-but-forbidden node while "access denied" for others would be
+      // a membership oracle (Gemini review). Gate on the resolved memory.id
+      // first — matches hadron_create_node's auth-first ordering.
+      if (!(await canWriteToMemory(db, auth, memory.id))) {
+        return textResult('Write access denied for this memory.');
+      }
+
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
       });
@@ -2675,10 +2683,6 @@ export function createMcpServerInstance(
       // back must recreate it via hadron_create_node (which resurrects).
       if (!existing || existing.deletedAt) {
         return textResult(`Node not found: "${rawUrn}"`);
-      }
-
-      if (!(await canWriteToMemory(db, auth, existing.memoryId))) {
-        return textResult('Write access denied for this memory.');
       }
 
       // Resolve edge targets BEFORE the version snapshot + node update
