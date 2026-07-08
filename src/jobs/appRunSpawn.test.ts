@@ -126,7 +126,11 @@ describe('hadron_spawn — dispatch (D-SP-1/-3/-5)', () => {
         entryNodeUrn: ENTRY, status: 'RUNNING',
       },
     });
-    await expect(spawn3(parent2 as AppRun)).rejects.toThrow(/no children could be spawned/);
+    await expect(spawn3(parent2 as AppRun, { callback: CALLBACK })).rejects.toThrow(/no children could be spawned/);
+    // The config is fully removed — a failed fan-out can never fire a
+    // zero-children callback later (PR-547 review, Gemini).
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: parent2.id } });
+    expect(after.spawn).toBeNull();
   });
 
   it('a second spawn on the same run is rejected (one fan-out per run, v1)', async () => {

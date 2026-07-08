@@ -72,8 +72,11 @@ export const hadronSpawn: RunToolDef = {
     if (itemKey.startsWith('__')) {
       throw new Error('hadron_spawn: "item_key" must not use the reserved "__" prefix.');
     }
-    const callback = typeof args.callback === 'string' ? args.callback : null;
-    const itemCallback = typeof args.item_callback === 'string' ? args.item_callback : null;
+    // '' ≡ absent (PR-547 review, Gemini): an empty string must not persist
+    // as a callback URN and fail at mint time.
+    const callback = typeof args.callback === 'string' && args.callback.length > 0 ? args.callback : null;
+    const itemCallback =
+      typeof args.item_callback === 'string' && args.item_callback.length > 0 ? args.item_callback : null;
 
     // Depth guard (D-SP-7): walk the lineage — trees are legal, bombs are not.
     let depth = 0;
@@ -153,6 +156,10 @@ export const hadronSpawn: RunToolDef = {
         UPDATE app_runs SET spawn = spawn - 'dispatching' WHERE id = ${ctx.run.id}`;
     }
     if (spawned === 0) {
+      // Remove the config entirely — a failed fan-out must never fire a
+      // zero-children callback, even via the crash-stuck-guard clearing
+      // path on the parent's terminal (PR-547 review, Gemini).
+      await ctx.db.$executeRaw`UPDATE app_runs SET spawn = NULL WHERE id = ${ctx.run.id}`;
       // A fan-out that fanned out NOTHING is a malfunction (→ TOOL_FAILED).
       throw new Error(`hadron_spawn: no children could be spawned (${deniedReasons.join('; ')}).`);
     }
