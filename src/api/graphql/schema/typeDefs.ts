@@ -2849,10 +2849,24 @@ export const typeDefs = `#graphql
     # Restore a node to a previous version (creates a new version snapshot first)
     restoreNodeVersion(versionId: ID!): Node!
 
-    # Move a node to a new loc, optionally across memories (keeps same id and
-    # all incoming edge references). 'memoryRef'/'targetMemoryRef' each accept a
-    # memory ID or URN (#542); 'from'/'to' are locs within them.
-    moveNode(from: String!, to: String!, memoryRef: ID!, targetMemoryRef: ID): Node!
+    # Relocate a node (#564). 'sourceRef' is the node's PK or fully-qualified
+    # URN. The destination is EITHER 'targetUrn' (the node's new full URN — new
+    # memory and/or loc) OR 'targetMemoryRef' (a memory ID/URN; the node keeps
+    # its current loc, only its memory changes) — supply exactly one. The node
+    # keeps its id, so all incoming/outgoing edge references stay valid. Fails
+    # loudly with NODE_ALREADY_EXISTS if a live node already occupies the
+    # destination. Requires write access to both the source and destination
+    # memories.
+    moveNode(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID): Node!
+
+    # Clone a node to a new location, returning the NEW node with a fresh id
+    # (#564). Same selector shape as moveNode ('sourceRef' + exactly one of
+    # 'targetUrn' / 'targetMemoryRef'). Copies the source's own fields; outgoing
+    # edges are copied only where they naturally resolve — a live node exists at
+    # the target's loc in the destination memory. Incoming edges are not copied.
+    # Fails loudly if the destination loc is already occupied. Requires read
+    # access to the source memory and write access to the destination.
+    cloneNode(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID): Node!
 
     # Fold one node (source) into another (target), returning the updated
     # target. Per-field strategy: text fields (CONTENT/ABSTRACT/DESCRIPTION)

@@ -15,7 +15,7 @@ import {
   decryptNodeFields,
   getMemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
-import { parseUrnInput } from '../../../lib/urn.js';
+import { parseUrnInput, splitNodeUrn } from '../../../lib/urn.js';
 import {
   validateLoc,
   InvalidLocError,
@@ -53,6 +53,7 @@ import {
   throwOnReservedExtractionSpec,
   requireMemoryWriteAccess,
   type NodeInput,
+  type NodeEdgeInput,
   type CreateNodeInput,
   type UpdateNodeInput,
   type SearchReplaceInNodesInput,
@@ -585,6 +586,80 @@ export async function writeNodeCore(
       });
 
       return finalNode;
+}
+
+/**
+ * #564 — resolve a node by ref (PK or fully-qualified URN) to its full live
+ * row, or throw a typed NODE_NOT_FOUND. Shared by moveNode / cloneNode; a
+ * genuine miss and a soft-deleted row map to the same not-found (no existence
+ * oracle), while a malformed URN propagates as UrnNotQualifiedError (spec 022).
+ */
+async function resolveExistingNode(ctx: Context, ref: string) {
+  let id: string;
+  try {
+    ({ id } = await resolveNodeRef(ctx.db, ref));
+  } catch (e) {
+    if (e instanceof NodeNotFoundError)
+      throw new GraphQLError(`Node not found: "${ref}"`, {
+        extensions: { code: 'NODE_NOT_FOUND', ref },
+      });
+    throw e;
+  }
+  const node = await ctx.db.node.findUnique({ where: { id } });
+  if (!node || node.deletedAt)
+    throw new GraphQLError(`Node not found: "${ref}"`, {
+      extensions: { code: 'NODE_NOT_FOUND', ref },
+    });
+  return node;
+}
+
+/**
+ * #564 — resolve the destination (memory + loc) for moveNode / cloneNode from
+ * the mutually-exclusive `targetUrn` / `targetMemoryRef` args. Exactly one must
+ * be supplied — both OR neither fails loudly (BAD_USER_INPUT):
+ *   - `targetUrn`: the full destination node URN → dest memory + dest loc. It
+ *     may name a not-yet-existing node, so it's split (not resolveNodeRef'd);
+ *     splitNodeUrn self-validates the fully-qualified shape.
+ *   - `targetMemoryRef`: a destination memory (ID or URN) → the node keeps its
+ *     current loc; only its memory changes.
+ * Validates the destination loc shape. Occupancy (the fail-loud conflict) is
+ * the caller's concern.
+ */
+async function resolveRelocationTarget(
+  ctx: Context,
+  source: { loc: string },
+  targetUrn?: string | null,
+  targetMemoryRef?: string | null,
+): Promise<{ destMemoryId: string; destLoc: string }> {
+  const hasUrn = targetUrn != null && targetUrn !== '';
+  const hasMemory = targetMemoryRef != null && targetMemoryRef !== '';
+  if (hasUrn === hasMemory) {
+    throw new GraphQLError(
+      'Specify exactly one of `targetUrn` (full destination node URN) or `targetMemoryRef` (destination memory).',
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
+  let destMemoryId: string;
+  let destLoc: string;
+  if (hasUrn) {
+    const { memoryUrn, loc } = splitNodeUrn(targetUrn as string);
+    destLoc = loc;
+    ({ id: destMemoryId } = await resolveMemoryRef(ctx.db, memoryUrn));
+  } else {
+    ({ id: destMemoryId } = await resolveMemoryRef(ctx.db, targetMemoryRef as string));
+    destLoc = source.loc;
+  }
+  try {
+    validateLoc(destLoc);
+  } catch (e) {
+    if (e instanceof InvalidLocError) {
+      throw new GraphQLError(e.message, {
+        extensions: { code: e.name, loc: e.loc, segment: e.segment },
+      });
+    }
+    throw e;
+  }
+  return { destMemoryId, destLoc };
 }
 
 export const nodeMutations = {
@@ -1424,37 +1499,154 @@ export const nodeMutations = {
 
     // ── Asset upload (spec 004-asset-upload) ───────────────────────────
 
-    moveNode: async (_: unknown, { from: rawFrom, to: rawTo, memoryRef, targetMemoryRef }: { from: string; to: string; memoryRef: string; targetMemoryRef?: string }, ctx: Context) => {
-      const from = parseUrnInput(rawFrom).value;
-      const to = parseUrnInput(rawTo).value;
-      // 007-entity-id-or-urn: memoryRef and targetMemoryRef may be IDs,
-      // bare URNs, or prefixed URNs.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-      const resolvedTargetMemoryId = targetMemoryRef
-        ? (await resolveMemoryRef(ctx.db, targetMemoryRef)).id
-        : undefined;
-      await requireMemoryWriteAccess(ctx, resolvedMemoryId);
-      if (resolvedTargetMemoryId && resolvedTargetMemoryId !== resolvedMemoryId) {
-        await requireMemoryWriteAccess(ctx, resolvedTargetMemoryId);
+    // #564 — relocate a node, identified by `sourceRef` (PK or fully-qualified
+    // URN). The destination is either a full `targetUrn` (new memory + loc) or a
+    // `targetMemoryRef` (same loc, new memory) — exactly one. The node keeps its
+    // stable id, so every incoming/outgoing edge reference stays valid. Fails
+    // loudly (NODE_ALREADY_EXISTS) if a DIFFERENT live node occupies the
+    // destination slot. Requires write access to BOTH memories (review:
+    // entity-ref-args #3).
+    moveNode: async (
+      _: unknown,
+      { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
+      ctx: Context,
+    ) => {
+      const source = await resolveExistingNode(ctx, sourceRef);
+      const { destMemoryId, destLoc } = await resolveRelocationTarget(
+        ctx, source, targetUrn, targetMemoryRef,
+      );
+
+      // The row leaves the source memory and lands in the destination — write
+      // access to both (a same-memory move checks once).
+      await requireMemoryWriteAccess(ctx, source.memoryId);
+      if (destMemoryId !== source.memoryId) {
+        await requireMemoryWriteAccess(ctx, destMemoryId);
       }
-      const destMemoryId = resolvedTargetMemoryId ?? resolvedMemoryId;
-      try {
-        return await ctx.db.node.update({
-          where: { loc_memoryId: { loc: from, memoryId: resolvedMemoryId } },
-          data: { loc: to, memoryId: destMemoryId },
+
+      const isSameSlot = destMemoryId === source.memoryId && destLoc === source.loc;
+
+      return ctx.db.$transaction(async (tx) => {
+        if (!isSameSlot) {
+          // Fail loudly on collision — a DIFFERENT live node already occupies
+          // the destination slot (a soft-deleted occupant is ignored; the move
+          // will land in the freed slot as the unique constraint permits).
+          const occupant = await tx.node.findUnique({
+            where: { loc_memoryId: { loc: destLoc, memoryId: destMemoryId } },
+          });
+          if (occupant && occupant.id !== source.id && !occupant.deletedAt) {
+            throw new GraphQLError(
+              `A live node already occupies loc "${destLoc}" in the destination memory.`,
+              { extensions: { code: 'NODE_ALREADY_EXISTS', loc: destLoc, memoryId: destMemoryId } },
+            );
+          }
+        }
+        // Pre-move NodeVersion snapshot — a loc/memory change is audit-worthy.
+        // Field set matches the canonical snapshot sites (writeNodeCore +
+        // hadron_move_node); update all of them together if Node columns change.
+        await tx.nodeVersion.create({
+          data: {
+            nodeId: source.id,
+            loc: source.loc,
+            name: source.name,
+            alias: source.alias,
+            description: source.description,
+            abstract: source.abstract,
+            abstractOriginHash: source.abstractOriginHash,
+            content: source.content,
+            tags: source.tags as string[],
+            editedBy: ctx.clientId ?? ctx.userId ?? null,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+        });
+        // Move BY ID (stable across moves; keeps every edge reference intact).
+        return tx.node.update({
+          where: { id: source.id },
+          data: { loc: destLoc, memoryId: destMemoryId },
           include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
         });
-      } catch (e) {
-        // Prisma P2025 = "Record to update not found." Wrap so the resolver
-        // surfaces a typed NODE_NOT_FOUND error instead of leaking the raw
-        // ORM message as INTERNAL_SERVER_ERROR (issue #100).
-        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
-          throw new GraphQLError(`Node "${from}" not found in this memory`, {
-            extensions: { code: 'NODE_NOT_FOUND', loc: from, memoryId: resolvedMemoryId },
-          });
-        }
-        throw e;
+      });
+    },
+
+    // #564 — clone a node to a new location, returning the NEW node (fresh id).
+    // `sourceRef` + (`targetUrn` XOR `targetMemoryRef`) mirror moveNode. Copies
+    // the source's own fields; OUTGOING edges are copied only where they
+    // naturally resolve — a live node exists at the target's loc in the
+    // destination memory (same-memory clones keep their sibling edges; a
+    // cross-memory clone keeps only edges whose target also lives there).
+    // Incoming edges are never copied (they reference the source's identity).
+    // Delegates to writeNodeCore('create'), inheriting every single-write
+    // invariant (dest write auth, encryption re-encrypt for the destination,
+    // NodeVersion, abstractOriginHash, re-embed, git mirror) and its fail-loud
+    // NodeLocConflictError when the destination loc is already occupied.
+    cloneNode: async (
+      _: unknown,
+      { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
+      ctx: Context,
+    ) => {
+      const source = await resolveExistingNode(ctx, sourceRef);
+      // Cloning READS the source's content — require read access to the source
+      // memory, or the URN-widened input becomes a cross-tenant exfiltration
+      // path (review:entity-ref-args #3). Denial reads as not-found (no oracle).
+      if (!(await canReadMemory(ctx.db, ctx, source.memoryId))) {
+        throw new GraphQLError(`Node not found: "${sourceRef}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
+        });
       }
+      const { destMemoryId, destLoc } = await resolveRelocationTarget(
+        ctx, source, targetUrn, targetMemoryRef,
+      );
+
+      // Decrypt the source with the SOURCE memory key so writeNodeCore can
+      // re-encrypt the plaintext for the DESTINATION memory. Only content/
+      // abstract are encrypted at rest.
+      const srcEnc = await getMemoryEncryptionInfo(ctx.db, source.memoryId);
+      const srcPlain = { ...source };
+      if (srcEnc.isEncrypted) {
+        if (!sessionKeyCache.getByMemoryId(srcEnc.id)) {
+          throw new GraphQLError(
+            `SESSION_EXPIRED: memory ${srcEnc.id} is encrypted but no active session key is available.`,
+            { extensions: { code: 'SESSION_EXPIRED', memoryId: srcEnc.id } },
+          );
+        }
+        decryptNodeFields(srcPlain, srcEnc);
+      }
+
+      // Outgoing edges that naturally resolve in the destination memory.
+      const outgoing = await ctx.db.edge.findMany({
+        where: { sourceId: source.id, deletedAt: null, target: { deletedAt: null } },
+        include: { target: { select: { loc: true } } },
+      });
+      const edges: NodeEdgeInput[] = [];
+      for (const e of outgoing) {
+        const destTarget = await ctx.db.node.findFirst({
+          where: { loc: e.target.loc, memoryId: destMemoryId, deletedAt: null },
+          select: { id: true },
+        });
+        if (!destTarget) continue; // target doesn't exist at the destination — skip
+        edges.push({
+          targetId: destTarget.id,
+          name: e.name,
+          description: e.description,
+          isRunnable: e.isRunnable,
+        });
+      }
+
+      const input: NodeInput = {
+        memoryId: destMemoryId,
+        loc: destLoc,
+        name: srcPlain.name,
+        nodeType: srcPlain.nodeType,
+        isRunnable: srcPlain.isRunnable,
+        description: srcPlain.description ?? undefined,
+        abstract: srcPlain.abstract ?? undefined,
+        content: srcPlain.content ?? undefined,
+        data: (srcPlain.data as Record<string, unknown> | null) ?? undefined,
+        tags: deserializeTags(srcPlain.tags),
+        properties: (srcPlain.properties as Record<string, unknown> | null) ?? undefined,
+        seq: srcPlain.seq ?? undefined,
+        edges,
+      };
+      return writeNodeCore(input, ctx, 'create');
     },
 
     // Fold a source node into a target node, returning the updated target.
