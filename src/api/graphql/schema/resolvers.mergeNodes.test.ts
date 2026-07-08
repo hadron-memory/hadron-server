@@ -167,6 +167,52 @@ describe('mergeNodes — edges', () => {
     expect(await db.edge.count({ where: { OR: [{ sourceId: tgt.id }, { targetId: tgt.id }] } })).toBe(2);
   });
 
+  it('recomputes a re-homed edge loc from its new endpoints (#568 Q2)', async () => {
+    const src = await makeNode('src');
+    const tgt = await makeNode('tgt');
+    const other = await makeNode('other');
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: src.id, targetId: other.id, loc: 'src:rel:other', name: 'rel' },
+    });
+    await merge({ source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true });
+    const moved = await db.edge.findFirstOrThrow({ where: { sourceId: tgt.id, targetId: other.id } });
+    // loc no longer references the merged-away `src`; it reflects the new source.
+    expect(moved.loc).toBe('tgt:rel:other');
+  });
+
+  it('dedupes an equivalent edge B already has, instead of duplicating (#568 Q2)', async () => {
+    const src = await makeNode('src');
+    const tgt = await makeNode('tgt');
+    const other = await makeNode('other');
+    // Both A and B already point at `other` with the SAME name → equivalent.
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: src.id, targetId: other.id, loc: 'src:rel:other', name: 'rel' },
+    });
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: tgt.id, targetId: other.id, loc: 'tgt:rel:other', name: 'rel' },
+    });
+    await merge({ source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true });
+    // B keeps exactly ONE tgt→other:rel edge (A's re-homed duplicate dropped).
+    const tgtToOther = await db.edge.findMany({ where: { sourceId: tgt.id, targetId: other.id } });
+    expect(tgtToOther).toHaveLength(1);
+  });
+
+  it('keeps distinct-name edges to the same target (dedup is per name)', async () => {
+    const src = await makeNode('src');
+    const tgt = await makeNode('tgt');
+    const other = await makeNode('other');
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: src.id, targetId: other.id, loc: 'src:imports:other', name: 'imports' },
+    });
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: tgt.id, targetId: other.id, loc: 'tgt:depends:other', name: 'depends' },
+    });
+    await merge({ source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true });
+    // Different names → not equivalent → both survive on B.
+    const tgtToOther = await db.edge.findMany({ where: { sourceId: tgt.id, targetId: other.id } });
+    expect(tgtToOther.map((e) => e.name).sort()).toEqual(['depends', 'imports']);
+  });
+
   it('does not touch edges when EDGES is not included', async () => {
     const src = await makeNode('src');
     const tgt = await makeNode('tgt');

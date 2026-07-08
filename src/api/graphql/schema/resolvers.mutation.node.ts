@@ -1869,72 +1869,74 @@ export const nodeMutations = {
         if (fields.has('EDGES')) {
           // Spec: cor:api:070:02 (edge transfer + source disposition).
           // Edges reference nodes by id, so transferring the source's
-          // relationships means re-pointing its edge endpoints onto the
-          // target. Collisions on the (loc, memoryId) unique index — an edge
-          // moving into the target's memory that lands on an already-occupied
-          // loc — and self-loops (source↔target collapsing onto target) are
-          // dropped rather than failing the merge. Pre-checked against a
-          // claimed-loc set so we never poison the transaction with a P2002.
+          // relationships means re-pointing its edge endpoints onto the target.
+          // Each re-homed edge's `loc` is RECOMPUTED from its new endpoints
+          // (deriveEdgeLoc = <sourceLoc>:<name>:<targetLoc>) so it (a) stays
+          // consistent with the endpoints rather than referencing the merged-
+          // away source, and (b) DEDUPES against an equivalent edge B already
+          // has: same (new source, name, new target) → same recomputed loc →
+          // collides on the per-memory (loc, memoryId) uniqueness and is
+          // dropped instead of creating a duplicate relationship (#568 Q2).
+          // Self-loops (source↔target collapsing onto B) are dropped too. The
+          // endpoint locs are needed for the recompute, so both are included.
           const srcEdges = await tx.edge.findMany({
             where: { OR: [{ sourceId: source.id }, { targetId: source.id }] },
+            include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
           });
-          // Locs already occupied in the target's memory by edges NOT being
-          // re-pointed here (incoming edges that stay in a foreign memory
-          // can't newly collide — their loc+memoryId are unchanged).
           const movingIds = new Set(srcEdges.map((e) => e.id));
-          const occupied = new Set<string>(
-            (
-              await tx.edge.findMany({
-                where: { memoryId: target.memoryId },
-                select: { id: true, loc: true },
-              })
-            )
-              .filter((e) => !movingIds.has(e.id))
-              .map((e) => e.loc),
-          );
-          // Partition in memory, then issue one deleteMany + up to two
-          // updateMany — instead of an update/delete per edge — so a node with
-          // many relationships doesn't N+1 the merge transaction. Outgoing
-          // edges all become (sourceId=target, memoryId=target.memory);
-          // incoming edges all become (targetId=target). A self-loop
-          // (source↔target) or a loc already taken in the target's memory is
-          // dropped rather than failing the merge.
-          const toDrop: string[] = [];
-          const outgoingIds: string[] = [];
-          const incomingIds: string[] = [];
+          // Every memory a re-homed edge can land in: the target's memory (A's
+          // OUTGOING edges follow their source there) plus each INCOMING edge's
+          // own (possibly foreign) memory (it keeps its memory, only its loc +
+          // targetId change). Seed each memory's occupied-loc set from the
+          // edges NOT moving here — a moving edge can't collide with itself.
+          const landingMemories = new Set<string>([target.memoryId]);
           for (const e of srcEdges) {
+            if (e.targetId === source.id) landingMemories.add(e.memoryId);
+          }
+          const occupied = new Map<string, Set<string>>();
+          for (const mid of landingMemories) occupied.set(mid, new Set());
+          for (const e of await tx.edge.findMany({
+            where: { memoryId: { in: [...landingMemories] } },
+            select: { id: true, memoryId: true, loc: true },
+          })) {
+            if (!movingIds.has(e.id)) occupied.get(e.memoryId)!.add(e.loc);
+          }
+
+          const toDrop: string[] = [];
+          const relocations: Array<{
+            id: string; sourceId: string; targetId: string; memoryId: string; loc: string;
+          }> = [];
+          for (const e of srcEdges) {
+            const isOutgoing = e.sourceId === source.id;
             const newSourceId = e.sourceId === source.id ? target.id : e.sourceId;
             const newTargetId = e.targetId === source.id ? target.id : e.targetId;
             if (newSourceId === newTargetId) {
-              toDrop.push(e.id);
+              toDrop.push(e.id); // self-loop
               continue;
             }
-            const isOutgoing = e.sourceId === source.id;
-            // An outgoing edge follows its source into the target's memory;
-            // an incoming edge keeps its own (foreign) memory.
+            const newSourceLoc = e.sourceId === source.id ? target.loc : e.source.loc;
+            const newTargetLoc = e.targetId === source.id ? target.loc : e.target.loc;
+            // Outgoing follows its source into the target's memory; incoming
+            // keeps its own memory.
             const newMemoryId = isOutgoing ? target.memoryId : e.memoryId;
-            if (newMemoryId === target.memoryId) {
-              if (occupied.has(e.loc)) {
-                toDrop.push(e.id);
-                continue;
-              }
-              occupied.add(e.loc);
+            const newLoc = deriveEdgeLoc(newSourceLoc, e.name, newTargetLoc);
+            const taken = occupied.get(newMemoryId)!;
+            if (taken.has(newLoc)) {
+              toDrop.push(e.id); // duplicate / loc collision — drop, don't fail
+              continue;
             }
-            (isOutgoing ? outgoingIds : incomingIds).push(e.id);
+            taken.add(newLoc);
+            relocations.push({ id: e.id, sourceId: newSourceId, targetId: newTargetId, memoryId: newMemoryId, loc: newLoc });
           }
           if (toDrop.length > 0) {
             await tx.edge.deleteMany({ where: { id: { in: toDrop } } });
           }
-          if (outgoingIds.length > 0) {
-            await tx.edge.updateMany({
-              where: { id: { in: outgoingIds } },
-              data: { sourceId: target.id, memoryId: target.memoryId },
-            });
-          }
-          if (incomingIds.length > 0) {
-            await tx.edge.updateMany({
-              where: { id: { in: incomingIds } },
-              data: { targetId: target.id },
+          // Per-edge update (loc differs per edge, so no single updateMany).
+          // Bounded by the source's edge count — merge is not a hot path.
+          for (const r of relocations) {
+            await tx.edge.update({
+              where: { id: r.id },
+              data: { sourceId: r.sourceId, targetId: r.targetId, memoryId: r.memoryId, loc: r.loc },
             });
           }
         }
