@@ -2551,6 +2551,9 @@ enum AppRunTriggerKind {
   WEBHOOK
   MANUAL
   INTEGRATION
+  /// Fan-out (plan-spawn): child + callback runs minted by hadron_spawn;
+  /// triggerId carries the parent run id.
+  SPAWN
 }
 
 /// One headless run (cor:agt:010:02). Simultaneously the audit record AND —
@@ -2584,6 +2587,12 @@ model AppRun {
   /// Bounded by RUN_MAX_HOPS. A hop that FAILS mid-execution has no
   /// element; `curNodeUrn` + `failure` identify it.
   hops           Json?
+  /// PARENT-side fan-out state (plan-spawn D-SP-1): set by hadron_spawn —
+  /// {processItem, itemKey, callback?, itemCallback?, total, dispatching?,
+  /// callbackFiredAt?}. Its own column, NOT `data`: the parent's envelope
+  /// checkpoint would clobber a mid-hop write there. callbackFiredAt is the
+  /// exactly-once claim (D-SP-4, atomic SQL).
+  spawn          Json?
   /// Run-layer allow-list snapshot (the narrowest chain link; plan §4).
   policy         Json?
   /// Remaining LLM tokens — live-decrement kill switch.
@@ -2605,6 +2614,7 @@ model AppRun {
   @@index([status, publishedAt])
   @@index([appId, createdAt])
   @@index([triggerId, status])
+  @@index([parentRunId]) // spawn completion checks + child listings (plan-spawn)
   @@index([organizationId, createdAt])
   @@map("app_runs")
 }
