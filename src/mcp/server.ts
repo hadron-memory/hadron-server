@@ -3645,12 +3645,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     });
   }
 
-  // Build a canonical node URN (org::memory::loc) from a memory's stored bare
-  // URN (org:memory, single colon — see createMemory) and a node loc, so
-  // loadNodeForRun → splitNodeUrn recovers the same memory URN.
+  // Build a canonical node URN from a memory's stored URN + a node loc, so
+  // loadNodeForRun → splitNodeUrn (and, in execute mode, resolveNodeRef)
+  // recovers the same memory. Delegates to the shared composeNodeUrn, which
+  // canonicalizes BOTH stored shapes — legacy `org:memory` (single colon) and
+  // migrated `org::memory` (canonical). A naive first-colon slice mangled the
+  // latter into `org:::memory::loc`, which resolveNodeRef then rejected, so
+  // execute mode couldn't start runs for canonical-URN memories (Codex #549
+  // review). This is the same composer the GraphQL runTask path uses.
   function nodeUrnFromMem(memUrn: string, loc: string): string {
-    const i = memUrn.indexOf(':');
-    return i < 0 ? `${memUrn}::${loc}` : `${memUrn.slice(0, i)}::${memUrn.slice(i + 1)}::${loc}`;
+    return composeNodeUrn(memUrn, loc);
   }
 
   function runTaskCandidate(mem: RunTaskMem, node: RunTaskNode) {
