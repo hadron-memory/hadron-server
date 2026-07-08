@@ -158,7 +158,9 @@ export const typeDefs = `#graphql
     Reduced-fidelity flag(s); hits are usable. May carry MULTIPLE
     comma-separated codes (e.g. 'no_vector_index,literal_fallback') —
     parse the set, never compare the whole string. Codes: no_vector_index,
-    embedding_unavailable, literal_fallback.
+    embedding_unavailable, literal_fallback, and_relaxed_to_or (a bare
+    multi-term keyword query matched nothing under AND, so it was retried as
+    OR and these hits match ANY term).
     """
     degraded: String
   }

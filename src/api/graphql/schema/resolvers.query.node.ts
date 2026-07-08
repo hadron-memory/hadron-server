@@ -16,7 +16,7 @@ import {
 } from '../../../lib/embedding/index.js';
 import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
-import { BooleanQueryError, literalQuery } from '../../../lib/retrieval/tsquery.js';
+import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
 import type { LexicalField } from '../../../lib/retrieval/provider.js';
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
@@ -744,9 +744,26 @@ export const nodeQueries = {
           includeDeleted: !!f.includeDeleted, sort: lexSort, offset: off, limit: finalLimit,
         };
         try {
-          const ranked = effectiveMode === 'regex'
-            ? await provider.regexSearch({ ...common, pattern: q })
-            : await provider.lexicalSearch({ ...common, query: q });
+          if (effectiveMode === 'regex') {
+            return await hydrateInOrder(await provider.regexSearch({ ...common, pattern: q }), null, null, null);
+          }
+          const ranked = await provider.lexicalSearch({ ...common, query: q });
+          // #496 — a natural-language query implicitly ANDs its terms, so one
+          // word absent from the corpus zeroes the whole result set. When a bare
+          // multi-term conjunction ANDs to zero on the first page, retry with the
+          // terms OR'd and flag it — the agent gets partial recall (hits matching
+          // ANY term) instead of a dead end plus a manual boolean rewrite. Only
+          // when the relaxed query actually finds something; otherwise the terms
+          // genuinely aren't present, so we keep the honest empty result.
+          if (ranked.length === 0 && off === 0) {
+            const orQuery = relaxConjunctionToOr(q);
+            if (orQuery) {
+              const relaxed = await provider.lexicalSearch({ ...common, query: orQuery });
+              if (relaxed.length > 0) {
+                return await hydrateInOrder(relaxed, null, null, 'and_relaxed_to_or');
+              }
+            }
+          }
           return await hydrateInOrder(ranked, null, null, null);
         } catch (e) {
           // keyword only, explicitly: regexSearch never parses the boolean

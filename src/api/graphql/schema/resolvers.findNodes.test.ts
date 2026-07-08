@@ -132,16 +132,47 @@ describe('findNodes — boolean operators (cor:api:090:01)', () => {
     expect(res.hits.map((h: any) => h.node.loc)).toContain('b.bshake');
   });
 
-  it('operator words are UPPERCASE-ONLY — "banana or apple" is a literal AND, not a boolean OR', async () => {
-    // Lowercase 'or' is a plain (stopword-ish) term: the query requires
-    // banana AND apple together, which no fixture satisfies — whereas the
-    // old case-insensitive grammar returned both shakes via boolean OR.
+  it('operator words are UPPERCASE-ONLY — lowercase "banana or apple" is not a boolean OR', async () => {
+    // Lowercase 'or' is a plain (stopword-ish) term, so the STRICT query is
+    // banana AND or AND apple, which no fixture satisfies. That it takes #496
+    // relaxation to surface anything is itself the proof 'or' was not treated
+    // as a boolean operator — a real boolean OR would have matched at the
+    // strict layer, with no relaxation flag.
     const res = await findNodes({ query: 'banana or apple', mode: 'keyword' });
+    expect(res.degraded).toBe('and_relaxed_to_or');
+    // The uppercase form IS the boolean expression — it matches at the strict
+    // layer, unrelaxed.
+    const upper = await findNodes({ query: '(banana OR apple) AND shake', mode: 'keyword' });
+    expect(upper.degraded).toBeNull();
+    expect(upper.hits.map((h: any) => h.node.loc).sort()).toEqual(['b.ashake', 'b.bshake']);
+  });
+
+  it('relaxes a bare conjunction to OR when it ANDs to zero (#496)', async () => {
+    // 'banana' matches two fixtures; 'zucchini' matches none. Under strict AND
+    // the whole query zeroes out; #496 retries as OR and flags the degrade.
+    const res = await findNodes({ query: 'banana zucchini', mode: 'keyword' });
+    expect(res.degraded).toBe('and_relaxed_to_or');
+    expect(res.hits.length).toBeGreaterThan(0);
+    for (const h of res.hits) expect(h.node.name.toLowerCase()).toContain('banana');
+  });
+
+  it('does NOT relax when the strict conjunction already matches (#496)', async () => {
+    const res = await findNodes({ query: 'banana shake', mode: 'keyword' });
+    expect(res.degraded).toBeNull();
+    expect(res.hits.map((h: any) => h.node.loc)).toEqual(['b.bshake']);
+  });
+
+  it('does NOT relax when NO term matches — keeps the honest empty result (#496)', async () => {
+    const res = await findNodes({ query: 'zucchini kohlrabi', mode: 'keyword' });
     expect(res.degraded).toBeNull();
     expect(res.hits).toEqual([]);
-    // The uppercase form is the boolean expression.
-    const upper = await findNodes({ query: '(banana OR apple) AND shake', mode: 'keyword' });
-    expect(upper.hits.map((h: any) => h.node.loc).sort()).toEqual(['b.ashake', 'b.bshake']);
+  });
+
+  it('does NOT relax an explicit boolean query that matches nothing (#496)', async () => {
+    // Explicit AND → the caller meant it; a zero result stays zero, unrelaxed.
+    const res = await findNodes({ query: 'banana AND zucchini', mode: 'keyword' });
+    expect(res.degraded).toBeNull();
+    expect(res.hits).toEqual([]);
   });
 
   it('lowercase "not" does not negate — the "not sure" landmine', async () => {
