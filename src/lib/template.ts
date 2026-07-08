@@ -49,7 +49,7 @@ export async function compileTemplate(
 
   // 2. Load memory's default data node (loc: "data")
   const defaultDataNode = await db.node.findFirst({
-    where: { loc: 'data', memoryId, ...accessFilter },
+    where: { loc: 'data', memoryId, deletedAt: null, ...accessFilter },
     select: { data: true, content: true, memoryId: true },
   });
   if (defaultDataNode) {
@@ -81,7 +81,7 @@ export async function compileTemplate(
 
   for (const ref of refs) {
     const refNode = await db.node.findFirst({
-      where: { loc: ref, memoryId, ...accessFilter },
+      where: { loc: ref, memoryId, deletedAt: null, ...accessFilter },
       select: { data: true, content: true, memoryId: true },
     });
     if (refNode) {
@@ -102,7 +102,7 @@ export async function compileTemplate(
 
   for (const partialLoc of partialRefs) {
     const partialNode = await db.node.findFirst({
-      where: { loc: partialLoc, memoryId, ...accessFilter },
+      where: { loc: partialLoc, memoryId, deletedAt: null, ...accessFilter },
       select: { content: true, data: true, memoryId: true },
     });
     if (partialNode) {
