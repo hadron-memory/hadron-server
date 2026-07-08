@@ -612,6 +612,24 @@ export const typeResolvers = {
     lastUsedAt: (k: { lastUsedAt?: Date | string | null }) => toISO(k.lastUsedAt ?? null),
     revokedAt: (k: { revokedAt?: Date | string | null }) => toISO(k.revokedAt ?? null),
   },
+  // #562: the current request's principal. `principalType`/`appId`/`agentId`
+  // resolve from the source object the Query.authContext resolver returns;
+  // `user` and `apiKey` are loaded lazily from the ids it threaded so the
+  // fields cost nothing when the client doesn't select them. `user` is the
+  // full User type, so it inherits the same PII field-gating as `me` (the
+  // viewer IS the user here, so name/email are visible to them).
+  AuthContext: {
+    user: (
+      src: { userId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => (src.userId ? ctx.db.user.findUnique({ where: { id: src.userId } }) : null),
+    apiKey: (
+      src: { apiKeyId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => (src.apiKeyId ? ctx.db.userApiKey.findUnique({ where: { id: src.apiKeyId } }) : null),
+  },
   // #384: a member's org role is itself gated. Visible only to the member
   // themselves, platform admins, and co-members whose own role in that org is
   // ADMIN/OWNER. Withheld (null) otherwise — so a READER/CONTRIBUTOR member

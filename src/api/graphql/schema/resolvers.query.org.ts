@@ -266,6 +266,24 @@ export const orgQueries = {
       return ctx.db.user.findUnique({ where: { id: ctx.userId } });
     },
 
+    // #562: expose the request's already-resolved AuthContext (cor:aut:020:02)
+    // read-only. Current-request only — there is no token argument, so this is
+    // never an oracle. A credential that didn't resolve leaves both appId and
+    // userId unset; we return null identically for revoked / never-existed /
+    // malformed (no reason-leak). The `user` and `apiKey` fields resolve lazily
+    // on the AuthContext type (resolvers.types.ts) from the ids threaded here.
+    authContext: async (_: unknown, __: unknown, ctx: Context) => {
+      const principalType = ctx.appId ? 'APP' : ctx.userId ? 'USER' : null;
+      if (!principalType) return null;
+      return {
+        principalType,
+        userId: ctx.userId ?? null,
+        appId: ctx.appId ?? null,
+        agentId: null, // reserved — no agent-credential principal today
+        apiKeyId: ctx.apiKeyId ?? null,
+      };
+    },
+
     // #473 — the uniform paginated organization list; replaces organizations
     // (admin, all) + myOrganizations (memberships). Members get their member
     // orgs (App-key callers their own App's org); platform ADMIN/OWNER keep

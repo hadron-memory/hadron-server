@@ -46,6 +46,7 @@ export interface Context {
   sessionId?: string;      // Session.id — set when operating inside an active session
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
+  apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.
