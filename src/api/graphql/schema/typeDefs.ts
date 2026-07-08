@@ -2886,10 +2886,12 @@ export const typeDefs = `#graphql
     # instead, or they will clear stored conditions/data on update.
     # #322/#542: sourceRef/targetRef each accept an ID-shape PK (preferred —
     # immutable, so the edge survives a later move/rename) OR a fully-qualified
-    # node URN. Resolved via resolveNodeRef.
+    # node URN. Resolved via resolveNodeRef. edgeRef (update/delete) likewise
+    # accepts an edge PK or a fully-qualified edge URN, resolved via
+    # resolveEdgeRef (#542 Tier 2).
     createEdge(sourceRef: ID!, targetRef: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
-    updateEdge(edgeId: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
-    deleteEdge(edgeId: ID!): Boolean!
+    updateEdge(edgeRef: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
+    deleteEdge(edgeRef: ID!): Boolean!
 
     # Run a task — a runnable node (isRunnable=true) — identified by a single
     # nodeRef (a node PK or a fully-qualified node URN, org::memory::loc),

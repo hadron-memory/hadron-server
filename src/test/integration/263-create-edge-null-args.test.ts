@@ -18,6 +18,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
+import { composeEdgeUrn } from '../../lib/urn.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 
 let nodeA: { id: string };
@@ -143,7 +144,7 @@ describe('createEdge with explicit-null args (CLI shape, #263)', () => {
     );
     await resolvers.Mutation.updateEdge(
       {},
-      { edgeId: edge.id, name: 'renamed', condition: null, priority: null, data: null },
+      { edgeRef: edge.id, name: 'renamed', condition: null, priority: null, data: null },
       adminCtx(),
     );
     const stored = await db.edge.findUniqueOrThrow({ where: { id: edge.id } });
@@ -155,5 +156,66 @@ describe('createEdge with explicit-null args (CLI shape, #263)', () => {
     // omit the variable (hadron-cli genqlient fix tracked separately).
     expect(stored.condition).toBeNull();
     expect(stored.data).toBeNull();
+  });
+});
+
+// #542 Tier 2 — updateEdge/deleteEdge resolve `edgeRef` via resolveEdgeRef, so
+// a fully-qualified edge URN works, not just a PK (previously `where: { id }`).
+describe('updateEdge/deleteEdge accept an edge PK or URN (#542 Tier 2)', () => {
+  it('updateEdge resolves a fully-qualified edge URN', async () => {
+    const edge = await resolvers.Mutation.createEdge(
+      {},
+      { sourceRef: nodeA.id, targetRef: nodeB.id, name: 'cites' },
+      adminCtx(),
+    );
+    const edgeUrn = composeEdgeUrn(memUrn, edge.loc);
+    const updated = await resolvers.Mutation.updateEdge(
+      {},
+      { edgeRef: edgeUrn, description: 'set via urn' },
+      adminCtx(),
+    );
+    expect(updated.id).toBe(edge.id);
+    expect(updated.description).toBe('set via urn');
+  });
+
+  it('deleteEdge resolves a fully-qualified edge URN', async () => {
+    const edge = await resolvers.Mutation.createEdge(
+      {},
+      { sourceRef: nodeA.id, targetRef: nodeB.id, name: 'documents' },
+      adminCtx(),
+    );
+    const edgeUrn = composeEdgeUrn(memUrn, edge.loc);
+    const ok = await resolvers.Mutation.deleteEdge({}, { edgeRef: edgeUrn }, adminCtx());
+    expect(ok).toBe(true);
+    expect(await db.edge.findUnique({ where: { id: edge.id } })).toBeNull();
+  });
+
+  it('a missing edge ref surfaces EDGE_NOT_FOUND (not an unwrapped Prisma error)', async () => {
+    await expect(
+      resolvers.Mutation.deleteEdge({}, { edgeRef: 'f'.repeat(32) }, adminCtx()),
+    ).rejects.toMatchObject({ extensions: { code: 'EDGE_NOT_FOUND' } });
+  });
+
+  it('gates on memory write access — a CONTRIBUTOR non-member cannot edit/delete by URN (Codex #554)', async () => {
+    const edge = await resolvers.Mutation.createEdge(
+      {},
+      { sourceRef: nodeA.id, targetRef: nodeB.id, name: 'gated' },
+      adminCtx(),
+    );
+    const edgeUrn = composeEdgeUrn(memUrn, edge.loc);
+    // Passes the global CONTRIBUTOR role gate but is NOT a member of the edge's
+    // org/memory (CONTRIBUTOR is not an ADMIN/OWNER bypass role), so the new
+    // requireMemoryWriteAccess check must reject.
+    const outsider: Context = { db, roles: ['CONTRIBUTOR'], userId: 'contrib-outsider-263' };
+    await expect(
+      resolvers.Mutation.updateEdge({}, { edgeRef: edgeUrn, description: 'hijack' }, outsider),
+    ).rejects.toThrow();
+    await expect(
+      resolvers.Mutation.deleteEdge({}, { edgeRef: edgeUrn }, outsider),
+    ).rejects.toThrow();
+    // The edge is untouched.
+    const still = await db.edge.findUnique({ where: { id: edge.id } });
+    expect(still).not.toBeNull();
+    expect(still?.description ?? null).toBeNull();
   });
 });

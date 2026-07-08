@@ -13,6 +13,9 @@ import { resolvers, type Context } from './resolvers.js';
 // refs so resolution takes the bare-PK lookup path.
 const SRC_ID = 'a'.repeat(32);
 const TGT_ID = 'b'.repeat(32);
+// #542 Tier 2: updateEdge/deleteEdge resolve edgeRef via resolveEdgeRef, which
+// takes an ID-shape ref — use a 32-hex id so the PK path (edge.findFirst) fires.
+const EDGE_ID = 'e'.repeat(32);
 
 // Build a minimal mock that mirrors the parts of PrismaClient the
 // createEdge / updateEdge resolvers touch.
@@ -51,13 +54,21 @@ function mockDb() {
     },
     edge: {
       create: vi.fn().mockImplementation(async ({ data }: { data: unknown }) => ({
-        id: 'edge-1',
+        id: EDGE_ID,
         ...(data as Record<string, unknown>),
       })),
       update: vi.fn().mockImplementation(async ({ where, data }: { where: { id: string }; data: unknown }) => ({
         id: where.id,
         ...(data as Record<string, unknown>),
       })),
+      // #542 Tier 2: resolveEdgeRef's PK path does a findFirst (deletedAt: null +
+      // memory-liveness). Echo the requested id so update/delete resolve it.
+      findFirst: vi.fn().mockImplementation(async ({ where }: { where: { id?: string } }) => ({
+        id: where?.id ?? EDGE_ID,
+      })),
+      // Codex #554: update/delete now re-read the edge's memoryId to gate on
+      // requireMemoryWriteAccess (the ADMIN+appId ctx short-circuits the check).
+      findUnique: vi.fn().mockResolvedValue({ memoryId: 'mem-1' }),
     },
   };
 }
@@ -147,7 +158,7 @@ describe('GraphQL Mutation.createEdge — condition validation', () => {
   it('updateEdge nulls: priority omitted (unset), condition/data forwarded as clear (#263)', async () => {
     await mutations.updateEdge(
       null,
-      { edgeId: 'edge-1', name: 'renamed', condition: null, priority: null, data: null },
+      { edgeRef: EDGE_ID, name: 'renamed', condition: null, priority: null, data: null },
       testCtx,
     );
     const calls = (testCtx.db.edge.update as ReturnType<typeof vi.fn>).mock.calls;
@@ -283,7 +294,7 @@ describe('GraphQL Mutation.updateEdge — condition validation', () => {
     const condition = { '==': [{ var: 'memory.stage' }, 'growth'] };
     await mutations.updateEdge(
       null,
-      { edgeId: 'edge-1', condition },
+      { edgeRef: EDGE_ID, condition },
       testCtx,
     );
     const calls = (testCtx.db.edge.update as ReturnType<typeof vi.fn>).mock.calls;
@@ -293,7 +304,7 @@ describe('GraphQL Mutation.updateEdge — condition validation', () => {
   it('clears condition when explicit null is supplied', async () => {
     await mutations.updateEdge(
       null,
-      { edgeId: 'edge-1', condition: null },
+      { edgeRef: EDGE_ID, condition: null },
       testCtx,
     );
     const calls = (testCtx.db.edge.update as ReturnType<typeof vi.fn>).mock.calls;
@@ -303,7 +314,7 @@ describe('GraphQL Mutation.updateEdge — condition validation', () => {
   it('does not touch condition when omitted', async () => {
     await mutations.updateEdge(
       null,
-      { edgeId: 'edge-1', name: 'new-label' },
+      { edgeRef: EDGE_ID, name: 'new-label' },
       testCtx,
     );
     const calls = (testCtx.db.edge.update as ReturnType<typeof vi.fn>).mock.calls;
@@ -314,7 +325,7 @@ describe('GraphQL Mutation.updateEdge — condition validation', () => {
     await expect(
       mutations.updateEdge(
         null,
-        { edgeId: 'edge-1', condition: { map: [[1, 2, 3]] } },
+        { edgeRef: EDGE_ID, condition: { map: [[1, 2, 3]] } },
         testCtx,
       ),
     ).rejects.toMatchObject({
