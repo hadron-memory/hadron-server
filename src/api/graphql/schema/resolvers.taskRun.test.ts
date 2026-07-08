@@ -103,7 +103,7 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
     expect(await db.appRun.count()).toBe(0);
   });
 
-  it('appRef path keeps the admin gate (#530): a non-admin is rejected', async () => {
+  it('a caller with no App relationship (and not org-admin) is rejected (#530)', async () => {
     const plain = await db.user.create({ data: { githubId: 9702, githubUsername: 'tr-plain' } });
     await db.orgMember.create({
       data: { organizationId: orgId, userId: plain.id, role: 'READER' },
@@ -115,6 +115,54 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
         { db, roles: [], userId: plain.id },
       ),
     ).rejects.toThrow();
+    expect(await db.appRun.count()).toBe(0);
+  });
+
+  it('#530: a non-admin AppMember can trigger an interactive run', async () => {
+    const member = await db.user.create({ data: { githubId: 9703, githubUsername: 'tr-member' } });
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+    const runId = await resolvers.Mutation.runTask(
+      {},
+      { nodeRef: taskUrn, appRef: app.id },
+      { db, roles: [], userId: member.id },
+    );
+    const run = await db.appRun.findUniqueOrThrow({ where: { id: runId } });
+    expect(run.appId).toBe(app.id);
+    expect(run.triggerKind).toBe('MANUAL');
+  });
+
+  it('#530: a non-admin with an active AgentSubscription to an App agent can trigger', async () => {
+    // Install an agent in the App, then subscribe a plain user to it.
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: orgId, urn: 'tr-org::sub-agent', name: 'sub-agent' },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const subscriber = await db.user.create({ data: { githubId: 9704, githubUsername: 'tr-sub' } });
+    await db.agentSubscription.create({
+      data: { agentId: agent.id, userId: subscriber.id, activatedAt: new Date() },
+    });
+    const runId = await resolvers.Mutation.runTask(
+      {},
+      { nodeRef: taskUrn, appRef: app.id },
+      { db, roles: [], userId: subscriber.id },
+    );
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).appId).toBe(app.id);
+  });
+
+  it('#530: a revoked AgentSubscription does NOT authorize a trigger', async () => {
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: orgId, urn: 'tr-org::rev-agent', name: 'rev-agent' },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const exSub = await db.user.create({ data: { githubId: 9705, githubUsername: 'tr-exsub' } });
+    // Was active, now revoked → the active predicate (revokedAt: null) excludes it.
+    await db.agentSubscription.create({
+      data: { agentId: agent.id, userId: exSub.id, activatedAt: new Date(), revokedAt: new Date() },
+    });
+    await expect(
+      resolvers.Mutation.runTask({}, { nodeRef: taskUrn, appRef: app.id }, { db, roles: [], userId: exSub.id }),
+    ).rejects.toThrow();
+    expect(await db.appRun.count()).toBe(0);
   });
 
   it('rejects a cross-org entry node — tenant boundary (#531 review)', async () => {
@@ -247,6 +295,38 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
     expect(await db.node.findFirst({ where: { memoryId: targetMemoryId, loc: 'clip:nonrunnable' } })).toBeNull();
   });
 
+  it('#533: a denied task hand-off (cross-org App) writes no node', async () => {
+    // The run's launch prerequisites (App liveness, same-org entry boundary,
+    // interactive gate) are now validated BEFORE writeNodeCore, so a hand-off
+    // that can't launch never leaves an orphaned imported node.
+    const orgB = await db.organization.create({
+      data: { id: generateId(), name: 'tr-org-imp', urn: 'tr-org-imp' },
+    });
+    const appB = await db.app.create({
+      data: { id: generateId(), organizationId: orgB.id, name: 'tr-app-imp', urn: 'tr-org-imp::tr-app-imp' },
+    });
+    // taskUrn is in tr-org; appB is in tr-org-imp → cross-org, denied pre-write.
+    await expect(
+      resolvers.Mutation.importNode(
+        {},
+        {
+          input: {
+            memoryId: targetMemoryId,
+            loc: 'clip:denied',
+            content: '# X',
+            contentType: 'text/markdown',
+            taskRef: taskUrn,
+            appRef: appB.id,
+          },
+        },
+        adminCtx(),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    // No orphaned node, no run.
+    expect(await db.node.findFirst({ where: { memoryId: targetMemoryId, loc: 'clip:denied' } })).toBeNull();
+    expect(await db.appRun.count()).toBe(0);
+  });
+
   it('runAsSelf on a personal-memory import; app-only on a knowledge import', async () => {
     // Knowledge target (the default fixture memory) → app-only, no user.
     const know = await resolvers.Mutation.importNode(
@@ -275,6 +355,33 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
       adminCtx(),
     );
     expect((await db.appRun.findUniqueOrThrow({ where: { id: res.jobId! } })).userId).toBe(adminId);
+  });
+
+  it('#566: owner-only import whose on-behalf-of user lacks an App relationship is denied pre-write (no orphan)', async () => {
+    // Personal (owner-only) target ⇒ runAsSelf=true ⇒ the run is on-behalf-of
+    // the importing user, whom mintAppRun requires to have a live App
+    // relationship. Here the owner passes the trigger gate but is NOT an
+    // AppMember/subscriber, so assertManualRunAllowed must reject PRE-write —
+    // otherwise the node is written then the mint fails, orphaning it.
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: orgId, urn: 'tr-org::pa2', name: 'pa2' },
+    });
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, urn: 'tr-org::p-mem2', name: 'p2',
+        class: 'personal', userId: adminId, appId: app.id, userMemoryOfAgentId: agent.id,
+      },
+    });
+    // NB: no AppMember / subscription for adminId → no on-behalf-of relationship.
+    await expect(
+      resolvers.Mutation.importNode(
+        {},
+        { input: { memoryId: personal.id, loc: 'clip:orphan', content: '# Z', contentType: 'text/markdown', taskRef: taskUrn, appRef: app.id } },
+        adminCtx(),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'RELATIONSHIP_MISSING' } });
+    expect(await db.node.findFirst({ where: { memoryId: personal.id, loc: 'clip:orphan' } })).toBeNull();
+    expect(await db.appRun.count()).toBe(0);
   });
 
   it('without taskRef stays STORED (backward compatible)', async () => {

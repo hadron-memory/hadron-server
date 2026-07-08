@@ -23,7 +23,7 @@ import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { fetchWebPage } from '../../../lib/webFetch.js';
 import { extractArticle } from '../../../lib/articleExtract.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
-import { triggerManualRun } from './resolvers.appRun.js';
+import { assertManualRunAllowed, mintManualRun } from './resolvers.appRun.js';
 import { type Context, requireMemoryWriteAccess } from './resolvers.helpers.js';
 
 export interface ImportNodeInput {
@@ -110,7 +110,12 @@ export const importNodeMutations = {
     // fetch/write, so a bad taskRef / missing App / non-runnable task fails
     // fast without a wasted 30s fetch or an orphaned node (#531 review). The
     // run itself is minted after the write (it needs the stored node's URN).
-    let taskRun: { entryNodeUrn: string; appRef: string } | null = null;
+    let taskRun: {
+      entryNodeUrn: string;
+      app: { id: string; organizationId: string };
+      runAsSelf: boolean;
+      importedMemoryUrn: string;
+    } | null = null;
     if (input.taskRef != null && input.taskRef !== '') {
       const runAppRef = input.appRef ?? ctx.appId;
       if (!runAppRef) {
@@ -129,10 +134,28 @@ export const importNodeMutations = {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
-      taskRun = {
-        entryNodeUrn: composeNodeUrn(taskNode.memory.urn, taskNode.loc),
-        appRef: runAppRef,
-      };
+      const entryNodeUrn = composeNodeUrn(taskNode.memory.urn, taskNode.loc);
+      // Attribute the run to the importing user ONLY when the target is
+      // owner-only (personal/private) — there the run needs the user's identity
+      // to read the imported node and write back. For knowledge/app targets the
+      // app can already read it, so run app-only. Resolve the class HERE
+      // (pre-write) so the runAsSelf value used by the assert matches the mint
+      // (#566 review): otherwise an org admin who isn't an AppMember passes the
+      // pre-write check but fails at mint with RELATIONSHIP_MISSING → orphan.
+      const importedMemory = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: memoryId },
+        select: { urn: true, class: true },
+      });
+      const ownerOnly = importedMemory.class === 'personal' || importedMemory.class === 'private';
+      const runAsSelf = ownerOnly && !!ctx.userId;
+      // #533 — validate the run's full launch prerequisites (interactive gate
+      // #530, App liveness, same-org entry boundary, and the on-behalf-of
+      // relationship when runAsSelf) BEFORE the fetch/write, so a denied hand-off
+      // never leaves an orphaned imported node. The run is minted after the
+      // write (it needs the stored node's URN) via mintManualRun — WITHOUT
+      // re-running the gate. mintAppRun's dynamic quota check stays at mint time.
+      const app = await assertManualRunAllowed(ctx, { entryNodeUrn, appRef: runAppRef, runAsSelf });
+      taskRun = { entryNodeUrn, app, runAsSelf, importedMemoryUrn: importedMemory.urn };
     }
 
     // ── Acquire content ────────────────────────────────────────────────
@@ -206,29 +229,19 @@ export const importNodeMutations = {
     );
 
     // ── #528 — post-import task run ────────────────────────────────────
-    // Preconditions were validated pre-write above; now that the node exists,
-    // hand it to the task via a MANUAL AppRun (the same kernel behind
-    // triggerAppRun / runTask(appRef:)). Async: return FETCH_PENDING + the run
-    // id as jobId (poll appRun(ref:) for status + output). The imported node's
-    // URN is passed in eventData so the task can target it (e.g. distill).
+    // The full launch prerequisites (auth gate, App, cross-org, on-behalf-of
+    // relationship) were validated pre-write via assertManualRunAllowed; now
+    // that the node exists, mint the run directly against the pre-resolved App
+    // (mintManualRun — no re-running the gate, #566). Async: return
+    // FETCH_PENDING + the run id as jobId (poll appRun(ref:) for status +
+    // output). The imported node's URN is passed in eventData so the task can
+    // target it (e.g. distill).
     if (taskRun) {
-      const importedMemory = await ctx.db.memory.findUniqueOrThrow({
-        where: { id: memoryId },
-        select: { urn: true, class: true },
-      });
-      const importedNodeUrn = composeNodeUrn(importedMemory.urn, node.loc);
-
-      // Attribute the run to the importing user ONLY when the target is
-      // owner-only (personal/private) — there the run needs the user's identity
-      // to read the imported node and write back (#531 review, Gemini). For
-      // knowledge/app targets the app can already read it, so run app-only and
-      // avoid imposing the on-behalf-of App-relationship requirement.
-      const ownerOnly = importedMemory.class === 'personal' || importedMemory.class === 'private';
-      const run = await triggerManualRun(ctx, {
-        appRef: taskRun.appRef,
+      const importedNodeUrn = composeNodeUrn(taskRun.importedMemoryUrn, node.loc);
+      const run = await mintManualRun(ctx, taskRun.app, {
         entryNodeUrn: taskRun.entryNodeUrn,
         eventData: { ...(input.taskArgs ?? {}), importedNodeUrn },
-        runAsSelf: ownerOnly && !!ctx.userId,
+        runAsSelf: taskRun.runAsSelf,
       });
       return { node, status: 'FETCH_PENDING', jobId: run.id };
     }
