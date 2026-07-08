@@ -324,11 +324,20 @@ describe('Mutation.deleteNode access control', () => {
 // Mutation: moveNode
 // ---------------------------------------------------------------------------
 
-describe('Mutation.moveNode access control', () => {
-  it('App with write access can move', async () => {
+describe('Mutation.moveNode access control (#564 sourceRef/targetUrn)', () => {
+  // targetUrn is the full destination node URN: <memoryUrn>:<loc>. graphA's
+  // stored urn is `org-a:org-a/repo`, graphB's `org-b:org-b/repo`.
+  const targetInA = (loc: string) => `org-a:org-a/repo:${loc}`;
+  const targetInB = (loc: string) => `org-b:org-b/repo:${loc}`;
+  const nodeAId = () =>
+    db.node.findFirstOrThrow({ where: { loc: 'org-a.repo.nodeA', memoryId: graphA.id }, select: { id: true } }).then((n) => n.id);
+  const nodeBId = () =>
+    db.node.findFirstOrThrow({ where: { loc: 'org-b.repo.nodeB', memoryId: graphB.id }, select: { id: true } }).then((n) => n.id);
+
+  it('App with write access can move (by node id)', async () => {
     const node = await resolvers.Mutation.moveNode(
       null,
-      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedNode', memoryRef: graphA.id },
+      { sourceRef: await nodeAId(), targetUrn: targetInA('org-a.repo.movedNode') },
       ctx({ appId: appContributor.id }),
     );
     expect(node.loc).toBe('org-a.repo.movedNode');
@@ -338,42 +347,31 @@ describe('Mutation.moveNode access control', () => {
     await expect(
       resolvers.Mutation.moveNode(
         null,
-        { from: 'org-b.repo.nodeB', to: 'org-b.repo.moved', memoryRef: graphB.id },
+        { sourceRef: await nodeBId(), targetUrn: targetInB('org-b.repo.moved') },
         ctx({ appId: appContributor.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
-  // 007-entity-id-or-urn: moveNode accepts memoryId as ID or URN.
-  it('accepts a URN as memoryId input', async () => {
-    const memoryRow = await db.memory.findUniqueOrThrow({
-      where: { id: graphA.id },
-      select: { urn: true },
-    });
+  // 007-entity-id-or-urn: sourceRef accepts a fully-qualified URN, not just a PK.
+  it('accepts a URN as sourceRef input', async () => {
     const node = await resolvers.Mutation.moveNode(
       null,
-      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedByUrn', memoryRef: memoryRow.urn },
+      { sourceRef: 'org-a:org-a/repo:org-a.repo.nodeA', targetUrn: targetInA('org-a.repo.movedByUrn') },
       ctx({ appId: appContributor.id }),
     );
     expect(node.loc).toBe('org-a.repo.movedByUrn');
   });
 
-  // #100: Prisma P2025 must be wrapped as a typed NODE_NOT_FOUND error
-  // rather than leaking as INTERNAL_SERVER_ERROR with raw ORM message.
-  it('throws NODE_NOT_FOUND when source loc does not exist', async () => {
+  it('throws NODE_NOT_FOUND when the source node does not exist', async () => {
     await expect(
       resolvers.Mutation.moveNode(
         null,
-        { from: 'org-a.repo.doesNotExist', to: 'org-a.repo.target', memoryRef: graphA.id },
+        { sourceRef: 'org-a:org-a/repo:org-a.repo.doesNotExist', targetUrn: targetInA('org-a.repo.target') },
         ctx({ appId: appContributor.id }),
       ),
     ).rejects.toMatchObject({
-      message: expect.stringContaining('not found'),
-      extensions: {
-        code: 'NODE_NOT_FOUND',
-        loc: 'org-a.repo.doesNotExist',
-        memoryId: graphA.id,
-      },
+      extensions: { code: 'NODE_NOT_FOUND' },
     });
   });
 });
