@@ -23,6 +23,8 @@ import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -36,10 +38,8 @@ import {
 import {
   type Context,
   requireOrgRole,
-  getAccessibleMemoryIds,
   SESSION_INCLUDE,
   getExchangeRefreshToken,
-  rankByHint,
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
@@ -609,26 +609,26 @@ export const sessionMutations = {
     runTask: async (
       _: unknown,
       {
-        task: taskHint,
-        memory: memoryHint,
-        urn: directUrn,
+        nodeRef,
         args: argsInput,
         appRef,
         runAsSelf,
       }: {
-        task?: string | null;
-        memory?: string | null;
-        urn?: string | null;
+        nodeRef: string;
         args?: unknown;
         appRef?: string | null;
         runAsSelf?: boolean | null;
       },
       ctx: Context,
     ) => {
+      // #542 — the task node is identified by a single `nodeRef` (ID or a
+      // fully-qualified node URN), resolved by the shared `resolveNodeRef`
+      // (spec 007) exactly like every other `<object>Ref` arg. The loose
+      // `task`/`memory` hint-matching + candidate-listing UX lives in the MCP
+      // `hadron_run_task` tool (spec cor:api:060), which resolves to a concrete
+      // node before delegating here — the GraphQL surface takes a definite ref.
+      const ref = typeof nodeRef === 'string' ? nodeRef.trim() : '';
       // Normalize inputs defensively.
-      const t = typeof taskHint === 'string' ? taskHint.trim() : '';
-      const m = typeof memoryHint === 'string' ? memoryHint.trim() : '';
-      const u = typeof directUrn === 'string' ? directUrn.trim() : '';
       const args =
         argsInput && typeof argsInput === 'object' && !Array.isArray(argsInput)
           ? (argsInput as Record<string, unknown>)
@@ -787,138 +787,37 @@ export const sessionMutations = {
         return run.id;
       };
 
-      // URN bypass — run directly, no resolution.
-      if (u) {
-        return dispatch(u);
-      }
-
-      // Resolve memory (required for non-URN path).
-      const accessibleMemoryIdsList = await getAccessibleMemoryIds(ctx);
-      const accessibleMemoryIds = accessibleMemoryIdsList ?? [];
-      if (accessibleMemoryIds.length === 0) {
-        throw new GraphQLError('No memories you can read.', {
-          extensions: { code: 'FORBIDDEN' },
+      if (!ref) {
+        throw new GraphQLError('nodeRef is required.', {
+          extensions: { code: 'BAD_USER_INPUT' },
         });
       }
 
-      let resolvedMemory: { id: string; urn: string; name: string } | null =
-        null;
-
-      if (m) {
-        // Memory hint supplied — resolve by name/urn. #352 review: strip any
-        // `hrn:`/`urn:` scheme prefix via parseUrnInput BEFORE normalizing so
-        // `legacyMemoryUrnToCanonical` receives a bare value (its precondition)
-        // — mirrors the runTask URN-lookup site above. parseUrnInput passes a
-        // plain name through untouched (type 'unknown'), so name-hint lookups
-        // still fall through to the `name contains` branch below. Without this,
-        // a prefixed URN yields a malformed candidate that matches no row.
-        const normalizedM = normalizeUrnForLookup(parseUrnInput(m.trim()).value);
-        // #352: shared marker-aware helper (see the URN-lookup site above).
-        const canonicalM = legacyMemoryUrnToCanonical(normalizedM);
-
-        const candidates = await ctx.db.memory.findMany({
-          where: {
-            id: { in: accessibleMemoryIds },
-            deletedAt: null,
-            OR: [
-              { name: { contains: m, mode: 'insensitive' } },
-              { urn: normalizedM },
-              { urn: canonicalM },
-            ],
-          },
-          select: { id: true, urn: true, name: true },
-        });
-
-        if (candidates.length === 0) {
-          throw new GraphQLError(`No memory matching "${m}".`, {
-            extensions: { code: 'NOT_FOUND' },
-          });
+      // Resolve the ref (ID or fully-qualified node URN) to a definite node.
+      // No `contextMemoryId` at the API boundary (spec 022 FR-007a) — a bare
+      // loc without a memory rejects as UrnNotQualifiedError.
+      let resolvedNodeId: string;
+      try {
+        ({ id: resolvedNodeId } = await resolveNodeRef(ctx.db, ref));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError || e instanceof UrnNotQualifiedError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'NOT_FOUND' } });
         }
-
-        if (candidates.length > 1) {
-          throw new GraphQLError(
-            `Multiple memories match "${m}": ${candidates.map((c) => c.name).join(', ')}. Narrow the hint.`,
-            { extensions: { code: 'AMBIGUOUS' } },
-          );
-        }
-
-        resolvedMemory = candidates[0];
-      } else {
-        // No memory hint — use the first accessible memory (the resolver does not have
-        // access to "active memory" from the MCP session, so we use a default).
-        // For better UX, the caller should provide a memory hint or use the MCP tool.
-        const mem = await ctx.db.memory.findFirst({
-          where: { id: { in: accessibleMemoryIds }, deletedAt: null },
-          select: { id: true, urn: true, name: true },
-        });
-
-        if (!mem) {
-          throw new GraphQLError('No accessible memory found.', {
-            extensions: { code: 'NOT_FOUND' },
-          });
-        }
-
-        resolvedMemory = mem;
+        throw e;
       }
 
-      // Load runnable nodes in the resolved memory.
-      const runnableNodes = await ctx.db.node.findMany({
-        where: { memoryId: resolvedMemory.id, isRunnable: true, deletedAt: null },
-        select: {
-          id: true,
-          loc: true,
-          name: true,
-          alias: true,
-          description: true,
-        },
+      // Compose the canonical node URN and hand off to the shared dispatch,
+      // which enforces read access (canReadMemory) and renders or executes.
+      const resolved = await ctx.db.node.findUnique({
+        where: { id: resolvedNodeId },
+        select: { loc: true, memory: { select: { urn: true } } },
       });
-
-      if (runnableNodes.length === 0) {
-        throw new GraphQLError(`No runnable tasks in ${resolvedMemory.name}.`, {
+      if (!resolved) {
+        throw new GraphQLError(`Node "${ref}" not found.`, {
           extensions: { code: 'NOT_FOUND' },
         });
       }
-
-      if (t) {
-        // Task hint supplied — rank and resolve.
-        const matches = rankByHint(runnableNodes, t);
-
-        if (matches.length === 0) {
-          throw new GraphQLError(
-            `No runnable task matching "${t}" in ${resolvedMemory.name}.`,
-            { extensions: { code: 'NOT_FOUND' } },
-          );
-        }
-
-        if (matches.length > 1) {
-          throw new GraphQLError(
-            `Multiple tasks match "${t}" in ${resolvedMemory.name}: ${matches.map((n) => n.name).join(', ')}. Narrow the hint.`,
-            { extensions: { code: 'AMBIGUOUS' } },
-          );
-        }
-
-        // Unique match — run it.
-        const nodeUrn = composeNodeUrn(resolvedMemory.urn, matches[0].loc);
-        return dispatch(nodeUrn);
-      } else {
-        // No task hint — require explicit choice (GraphQL cannot offer a picker,
-        // so we error and list the options).
-        if (runnableNodes.length === 1) {
-          // Exactly one option — run it.
-          const nodeUrn = composeNodeUrn(resolvedMemory.urn, runnableNodes[0].loc);
-          return dispatch(nodeUrn);
-        }
-
-        // Multiple options — error with candidates.
-        const candidates = runnableNodes
-          .slice(0, 25)
-          .map((n) => `- ${n.name}${n.description ? ` (${n.description})` : ''}`)
-          .join('\n');
-        throw new GraphQLError(
-          `Multiple runnable tasks in ${resolvedMemory.name}. Specify a task hint or use MCP tool for interactive selection:\n${candidates}`,
-          { extensions: { code: 'AMBIGUOUS' } },
-        );
-      }
+      return dispatch(composeNodeUrn(resolved.memory.urn, resolved.loc));
     },
 };
 

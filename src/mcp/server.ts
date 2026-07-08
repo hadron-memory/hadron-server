@@ -3645,12 +3645,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     });
   }
 
-  // Build a canonical node URN (org::memory::loc) from a memory's stored bare
-  // URN (org:memory, single colon — see createMemory) and a node loc, so
-  // loadNodeForRun → splitNodeUrn recovers the same memory URN.
+  // Build a canonical node URN from a memory's stored URN + a node loc, so
+  // loadNodeForRun → splitNodeUrn (and, in execute mode, resolveNodeRef)
+  // recovers the same memory. Delegates to the shared composeNodeUrn, which
+  // canonicalizes BOTH stored shapes — legacy `org:memory` (single colon) and
+  // migrated `org::memory` (canonical). A naive first-colon slice mangled the
+  // latter into `org:::memory::loc`, which resolveNodeRef then rejected, so
+  // execute mode couldn't start runs for canonical-URN memories (Codex #549
+  // review). This is the same composer the GraphQL runTask path uses.
   function nodeUrnFromMem(memUrn: string, loc: string): string {
-    const i = memUrn.indexOf(':');
-    return i < 0 ? `${memUrn}::${loc}` : `${memUrn.slice(0, i)}::${memUrn.slice(i + 1)}::${loc}`;
+    return composeNodeUrn(memUrn, loc);
   }
 
   function runTaskCandidate(mem: RunTaskMem, node: RunTaskNode) {
@@ -3667,7 +3671,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   async function presentAndRun(
     candidates: Array<{ urn: string; label: string; description: string | null }>,
     header: string,
-    args?: Record<string, string>,
+    run: (nodeUrn: string) => Promise<ToolText>,
   ): Promise<ToolText> {
     if (candidates.length > RUN_TASK_PICK_CAP) {
       return textResult(
@@ -3681,9 +3685,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           header,
         );
         if (choice === null) return textResult('No task selected — nothing run.');
-        const loaded = await loadNodeForRun(choice);
-        if ('error' in loaded) return textResult(loaded.error);
-        return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+        return run(choice);
       } catch {
         // Transport can't service the picker — fall back to the list relay.
       }
@@ -3838,47 +3840,46 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const appRef = typeof a.appRef === 'string' && a.appRef.trim() ? a.appRef.trim() : undefined;
       const runAsSelf = a.runAsSelf === true;
 
-      // #529 EXECUTE mode — when appRef is set, delegate to the GraphQL runTask
-      // resolver, which resolves the task the same way and mints a MANUAL app
-      // run via the spec-040 kernel, returning the run id. Reuses one code path
-      // for resolution + mint rather than reimplementing it here.
-      if (appRef) {
+      // Single run chokepoint: MCP resolves the task to a concrete node URN via
+      // its own fuzzy-match + interactive picker (below), then this runs it.
+      // #542 — in EXECUTE mode (appRef set) delegate to the GraphQL runTask
+      // resolver with the resolved `nodeRef`, which mints a MANUAL app run via
+      // the spec-040 kernel and returns the run id (#529). Without appRef,
+      // RENDER the assembled prompt like hadron_run_action. Both modes now share
+      // MCP's resolution UX — execute mode gets the picker too.
+      const runOrRender = async (nodeUrn: string): Promise<ToolText> => {
         if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
-        const ctx: Context = {
-          db,
-          clientId: auth.clientId ?? undefined,
-          userId: auth.userId ?? undefined,
-          appId: auth.appId ?? undefined,
-          sessionId: auth.sessionId ?? undefined,
-          roles: auth.roles as Context['roles'],
-          organizationId: auth.organizationId ?? undefined,
-        };
-        try {
-          const runId = await resolvers.Mutation.runTask(
-            {},
-            {
-              task: taskHint || undefined,
-              memory: memoryHint || undefined,
-              urn: directUrn || undefined,
-              args,
-              appRef,
-              runAsSelf,
-            },
-            ctx,
-          );
-          return textResult(
-            `Run started: ${runId}\nPoll its status/output via the app-run surface (appRun(ref: "${runId}")).`,
-          );
-        } catch (err) {
-          return textResult(`Could not start run: ${(err as Error).message}`);
+        if (appRef) {
+          const ctx: Context = {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          };
+          try {
+            const runId = await resolvers.Mutation.runTask(
+              {},
+              { nodeRef: nodeUrn, args, appRef, runAsSelf },
+              ctx,
+            );
+            return textResult(
+              `Run started: ${runId}\nPoll its status/output via the app-run surface (appRun(ref: "${runId}")).`,
+            );
+          } catch (err) {
+            return textResult(`Could not start run: ${(err as Error).message}`);
+          }
         }
-      }
+        const loaded = await loadNodeForRun(nodeUrn);
+        if ('error' in loaded) return textResult(loaded.error);
+        return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+      };
 
       // URN bypass — run directly, exactly like hadron_run_action (cor:api:060:02).
       if (directUrn) {
-        const loaded = await loadNodeForRun(directUrn);
-        if ('error' in loaded) return textResult(loaded.error);
-        return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+        return runOrRender(directUrn);
       }
 
       if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
@@ -3892,15 +3893,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (taskHint) {
         const matches = rankByHint(runnable, taskHint);
         if (matches.length === 1) {
-          const loaded = await loadNodeForRun(nodeUrnFromMem(memory.urn, matches[0].loc));
-          if ('error' in loaded) return textResult(loaded.error);
-          return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+          return runOrRender(nodeUrnFromMem(memory.urn, matches[0].loc));
         }
         if (matches.length > 1) {
           return presentAndRun(
             matches.map((n) => runTaskCandidate(memory, n)),
             `Multiple tasks match "${taskHint}" in ${memory.name} — pick one:`,
-            args,
+            runOrRender,
           );
         }
         // Miss in the resolved memory — widen, but never auto-run elsewhere.
@@ -3911,21 +3910,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return presentAndRun(
           wide.map((w) => runTaskCandidate(w.mem, w.node)),
           `No match in ${memory.name}, but "${taskHint}" matches runnable tasks in other memories — pick one:`,
-          args,
+          runOrRender,
         );
       }
 
       // No task hint — offer the memory's runnable tasks.
       if (runnable.length === 0) return textResult(`No runnable tasks in ${memory.name}.`);
       if (runnable.length === 1) {
-        const loaded = await loadNodeForRun(nodeUrnFromMem(memory.urn, runnable[0].loc));
-        if ('error' in loaded) return textResult(loaded.error);
-        return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+        return runOrRender(nodeUrnFromMem(memory.urn, runnable[0].loc));
       }
       return presentAndRun(
         runnable.map((n) => runTaskCandidate(memory, n)),
         `Tasks in ${memory.name} — pick one to run:`,
-        args,
+        runOrRender,
       );
     },
   );

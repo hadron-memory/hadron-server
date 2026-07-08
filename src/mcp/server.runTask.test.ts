@@ -356,8 +356,47 @@ describe('hadron_run_task — execute mode (#529, appRef)', () => {
 
     const runs = await db.appRun.findMany();
     expect(runs).toHaveLength(1);
-    expect(runs[0]!.entryNodeUrn).toBe(urn);
+    // #542 — the resolver canonicalizes the ref (composeNodeUrn → `hrn:node:`
+    // prefixed form) before minting, so every run stores the same canonical
+    // entryNodeUrn regardless of the input ref shape. Previously only the
+    // fuzzy-resolution paths did this; the URN bypass passed the raw string.
+    expect(runs[0]!.entryNodeUrn).toContain(urn);
     expect(runs[0]!.triggerKind).toBe('MANUAL');
     expect(runs[0]!.appId).toBe(app.id);
+  });
+
+  it('starts a run via the task+memory hint path for a CANONICAL (org::mem) memory URN', async () => {
+    // Codex #549 review: a memory row whose stored urn is the canonical
+    // double-colon form (as migrations produce) must still be runnable in
+    // execute mode. The hint path composes the nodeRef from memory.urn — a
+    // naive first-colon slice would mangle `org::mem` into `org:::mem::loc`
+    // and resolveNodeRef would reject it, so no run could start.
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'run-task-org' } });
+    const canon = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        name: 'Canon',
+        urn: 'run-task-org::canon', // canonical double-colon, not the createMemory single-colon
+        class: 'knowledge',
+      },
+    });
+    await mkNode(canon.id, 'tasks:ship', 'Ship it', { isRunnable: true, content: 'ship' });
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'canon-app', urn: 'run-task-org::canon-app' },
+    });
+
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
+      task: 'Ship it',
+      memory: 'Canon',
+      appRef: app.id,
+    });
+    expect(text).toContain('Run started:');
+
+    const runs = await db.appRun.findMany();
+    expect(runs).toHaveLength(1);
+    // Resolved + canonicalized to the same node — not a malformed triple-colon.
+    expect(runs[0]!.entryNodeUrn).not.toContain(':::');
+    expect(runs[0]!.entryNodeUrn).toContain('run-task-org::canon::tasks:ship');
   });
 });
