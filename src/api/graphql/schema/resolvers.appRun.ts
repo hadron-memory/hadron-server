@@ -94,31 +94,77 @@ function resolveRunAsSelf(ctx: Context, runAsSelf: boolean | null | undefined): 
 }
 
 /**
- * Mint a MANUAL AppRun for an entry (task) node under an App — the shared
- * execute path behind the `triggerAppRun` mutation, `runTask(appRef:)` (#529),
- * and `importNode(taskRef:)` (#528). Keeps the current org-ADMIN gate
- * (`requireScheduleAdmin`); relaxing it for interactive/import callers is
- * tracked in #530. Maps a launch denial to a typed GraphQLError.
+ * Interactive / import MANUAL-run gate (#530, cor:acl). Ad-hoc runs
+ * (`triggerAppRun`, `runTask(appRef:)`, `importNode(taskRef:)`) are the
+ * end-user features these paths exist for, so — unlike schedules and webhooks,
+ * which keep the stricter org-ADMIN gate (`requireScheduleAdmin`) — a run may be
+ * triggered by anyone with a real relationship to the App:
+ *   - a platform admin, or the App acting under its own key (`ctx.appId`),
+ *   - an org ADMIN of the App's org,
+ *   - an AppMember of the App, or
+ *   - a user with an active AgentSubscription to one of the App's agents.
+ * `mintAppRun` re-verifies the on-behalf-of *user* at launch (appRuns.ts); this
+ * authorizes the *triggering caller*.
  */
-export async function triggerManualRun(
+async function requireManualRunAccess(ctx: Context, appRef: string) {
+  const { id } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findFirst({
+    where: { id, deletedAt: null },
+    select: { id: true, organizationId: true },
+  });
+  if (!app) {
+    throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+  }
+  // Platform admin, or the App triggering under its own key.
+  if (isPlatformAdmin(ctx) || ctx.appId === app.id) return app;
+  // A user with a live relationship to the App: AppMember, or an active
+  // subscriber to one of its agents (mirrors mintAppRun's on-behalf-of check).
+  if (ctx.userId) {
+    const member = await ctx.db.appMember.findFirst({
+      where: { appId: app.id, userId: ctx.userId },
+      select: { userId: true },
+    });
+    if (member) return app;
+    const sub = await ctx.db.agentSubscription.findFirst({
+      where: {
+        userId: ctx.userId,
+        revokedAt: null,
+        agent: { appAgents: { some: { appId: app.id } } },
+      },
+      select: { userId: true },
+    });
+    if (sub) return app;
+  }
+  // Otherwise fall back to the org-ADMIN gate: admits org admins who aren't
+  // AppMembers, and yields the standard typed Forbidden for callers with no
+  // relationship at all.
+  await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+  return app;
+}
+
+/**
+ * Validate that this caller may launch a MANUAL run for `entryNodeUrn` under
+ * `appRef`, WITHOUT minting it: the interactive gate (#530), the App's liveness,
+ * runAsSelf feasibility, and the same-org entry-node boundary (#531). Returns
+ * the resolved App. Split out so a caller with a side effect to protect —
+ * importNode's write (#533) — can fail on these prerequisites BEFORE the write,
+ * then mint after. (mintAppRun's dynamic quota / on-behalf-of re-checks still
+ * run at mint time.)
+ */
+export async function assertManualRunAllowed(
   ctx: Context,
-  input: {
-    appRef: string;
-    entryNodeUrn: string;
-    eventData?: Record<string, unknown> | null;
-    runAsSelf?: boolean | null;
-    aiConfigName?: string | null;
-  },
-) {
-  const app = await requireScheduleAdmin(ctx, input.appRef);
+  input: { appRef: string; entryNodeUrn: string; runAsSelf?: boolean | null },
+): Promise<{ id: string; organizationId: string }> {
+  const app = await requireManualRunAccess(ctx, input.appRef);
   assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+  // runAsSelf REQUIRES an authenticated user — surface it here (pre-write) too.
+  resolveRunAsSelf(ctx, input.runAsSelf);
   // Tenant boundary (#531 review, Copilot): a run resolves its entry node ONLY
   // within its own org (appRunDeps.loadEntry — cross-org reads are not a run
-  // capability in v1). Reject a cross-org entry URN early with a typed error
-  // rather than minting a run guaranteed to fail in assembly. A not-yet-resolvable
-  // memory is left to the executor's entry-not-found path (don't over-reject).
-  // Resolve the entry memory the same way appRunDeps.loadEntry does (raw +
-  // canonical URN forms) so the org comparison is apples-to-apples.
+  // capability in v1). Reject a cross-org entry URN early rather than minting a
+  // run guaranteed to fail in assembly. A not-yet-resolvable memory is left to
+  // the executor's entry-not-found path (don't over-reject). Resolve the entry
+  // memory the same way appRunDeps.loadEntry does (raw + canonical URN forms).
   const { memoryUrn } = splitNodeUrn(input.entryNodeUrn);
   const normalized = normalizeUrnForLookup(memoryUrn);
   const entryMem = await ctx.db.memory.findFirst({
@@ -131,6 +177,26 @@ export async function triggerManualRun(
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
+  return app;
+}
+
+/**
+ * Mint a MANUAL AppRun for an entry (task) node under an App — the shared
+ * execute path behind the `triggerAppRun` mutation, `runTask(appRef:)` (#529),
+ * and `importNode(taskRef:)` (#528). Authorized by the interactive gate (#530).
+ * Maps a launch denial to a typed GraphQLError.
+ */
+export async function triggerManualRun(
+  ctx: Context,
+  input: {
+    appRef: string;
+    entryNodeUrn: string;
+    eventData?: Record<string, unknown> | null;
+    runAsSelf?: boolean | null;
+    aiConfigName?: string | null;
+  },
+) {
+  const app = await assertManualRunAllowed(ctx, input);
   try {
     return await mintAppRun(ctx.db, {
       organizationId: app.organizationId,

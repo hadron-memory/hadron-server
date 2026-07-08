@@ -23,7 +23,7 @@ import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { fetchWebPage } from '../../../lib/webFetch.js';
 import { extractArticle } from '../../../lib/articleExtract.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
-import { triggerManualRun } from './resolvers.appRun.js';
+import { triggerManualRun, assertManualRunAllowed } from './resolvers.appRun.js';
 import { type Context, requireMemoryWriteAccess } from './resolvers.helpers.js';
 
 export interface ImportNodeInput {
@@ -133,6 +133,15 @@ export const importNodeMutations = {
         entryNodeUrn: composeNodeUrn(taskNode.memory.urn, taskNode.loc),
         appRef: runAppRef,
       };
+      // #533 — validate the run's launch prerequisites (interactive gate #530,
+      // App liveness, same-org entry boundary) BEFORE the fetch/write, so a
+      // denied hand-off never leaves an orphaned imported node. The run itself
+      // is minted after the write (it needs the stored node's URN); mintAppRun's
+      // dynamic quota / on-behalf-of re-checks stay there.
+      await assertManualRunAllowed(ctx, {
+        entryNodeUrn: taskRun.entryNodeUrn,
+        appRef: taskRun.appRef,
+      });
     }
 
     // ── Acquire content ────────────────────────────────────────────────
