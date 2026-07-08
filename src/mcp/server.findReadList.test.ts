@@ -838,3 +838,77 @@ describe('PR-482 — hadron_find_nodes literal fallback notes', () => {
     expect(text).toContain('[degraded:literal_fallback]');
   });
 });
+
+// #498 — explicit multi-memory scope on hadron_find_nodes: memoryUrns (a set)
+// and allMemories (everything accessible), so the stemmed cross-memory
+// "does anyone know about X?" probe has an unambiguous surface.
+describe('#498 — hadron_find_nodes multi-memory scope', () => {
+  async function twoMemoriesWithKeyword() {
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'truth-org' } });
+    const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
+    const a = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'alpha' }, ctx);
+    const b = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'beta' }, ctx);
+    await db.node.create({
+      data: { id: generateId(), memoryId: a.id, loc: 'zeb:a', name: 'Zebraxyz in alpha', tags: [] },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: b.id, loc: 'zeb:b', name: 'Zebraxyz in beta', tags: [] },
+    });
+    return { a, b };
+  }
+
+  it('allMemories: true finds keyword hits across every accessible memory', async () => {
+    const { a, b } = await twoMemoriesWithKeyword();
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', { query: 'zebraxyz', allMemories: true });
+    expect(text).toContain('zeb:a');
+    expect(text).toContain('zeb:b');
+    expect(a.id && b.id).toBeTruthy();
+  });
+
+  it('memoryUrns scopes to the given set (both), excluding others', async () => {
+    const { a, b } = await twoMemoriesWithKeyword();
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: 'zebraxyz',
+      memoryUrns: [a.urn, b.urn],
+    });
+    expect(text).toContain('zeb:a');
+    expect(text).toContain('zeb:b');
+  });
+
+  it('memoryUrn (single) scopes to just that memory', async () => {
+    const { a } = await twoMemoriesWithKeyword();
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', { query: 'zebraxyz', memoryUrn: a.urn });
+    expect(text).toContain('zeb:a');
+    expect(text).not.toContain('zeb:b');
+  });
+
+  it('rejects combining memory selectors (memoryUrn + allMemories)', async () => {
+    const { a } = await twoMemoriesWithKeyword();
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: 'zebraxyz',
+      memoryUrn: a.urn,
+      allMemories: true,
+    });
+    expect(text).toMatch(/only one memory scope/i);
+    expect(text).not.toContain('zeb:a');
+  });
+
+  it('memoryUrns gates each entry by read access (denied set member → not found)', async () => {
+    const { a } = await twoMemoriesWithKeyword();
+    // A second org's memory the viewer can't read.
+    const org2 = await db.organization.create({ data: { id: generateId(), name: 'other-org', urn: 'other-org' } });
+    const foreign = await db.memory.create({
+      data: { id: generateId(), organizationId: org2.id, urn: 'other-org::secret', name: 'secret', class: 'knowledge' },
+    });
+    const srv = createTestableMcpServer(viewerAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: 'zebraxyz',
+      memoryUrns: [a.urn, foreign.urn],
+    });
+    expect(text).toMatch(/not found or invalid/i);
+  });
+});
