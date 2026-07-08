@@ -8,10 +8,18 @@
  * handle and run principal.
  */
 
+import type { PrismaClient, AppRun } from '../../../generated/prisma/index.js';
+import type { Context } from '../../../api/graphql/schema/resolvers.js';
+
 /** What a tool handler may touch. Built by the kernel per hop. */
 export interface RunToolContext {
   /** Append an author-visible line to the current hop's trail (#539). */
   log: (message: string) => void;
+  db: PrismaClient;
+  run: AppRun;
+  /** The run principal (D-2026-07-04-C): Context{appId, userId?} — class
+   *  gates apply unchanged inside every handler. */
+  principal: Context;
 }
 
 export interface RunToolDef {

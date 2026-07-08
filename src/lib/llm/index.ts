@@ -317,6 +317,20 @@ export interface LlmToolLoopResult extends LlmResult {
   toolCalls: ToolCallRecord[];
 }
 
+/** Unverified provider for the tool loop (D-TL-8) — typed, not string-matched
+ *  (PR-545 review, Copilot). Always non-transient: a tools-node must never
+ *  silently run without its tools. */
+export class NoToolSupportError extends LlmInvocationError {
+  constructor(provider: string) {
+    super(
+      `Provider "${provider}" is not verified for the run tool loop (NO_TOOL_SUPPORT).`,
+      provider,
+      false,
+    );
+    this.name = 'NoToolSupportError';
+  }
+}
+
 /** The D-TL-3 gate said no: policy, cancellation, or exhausted action budget. */
 export class ToolDeniedError extends Error {
   constructor(readonly tool: string) {
@@ -369,11 +383,7 @@ export async function generateWithTools(
   if (!TOOL_LOOP_PROVIDERS.has(provider)) {
     // Loud, non-transient: silently running a tools-node WITHOUT its tools
     // would change semantics (D-TL-8).
-    throw new LlmInvocationError(
-      `Provider "${provider}" is not verified for the run tool loop (NO_TOOL_SUPPORT).`,
-      provider,
-      false,
-    );
+    throw new NoToolSupportError(provider);
   }
 
   const toolCalls: ToolCallRecord[] = [];

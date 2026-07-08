@@ -32,7 +32,10 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
 }));
 
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
-import { makeProdRunDeps } from './appRunDeps.js';
+import { makeProdRunDeps, runContext } from './appRunDeps.js';
+import { resolveRunTools, hadronCreateNode, hadronUpdateNode, hadronReadNode } from '../lib/runner/tools/index.js';
+import { ToolDeniedError } from '../lib/llm/index.js';
+import type { AppRun } from '../generated/prisma/index.js';
 
 const ORG_URN = 'flow-int-org';
 const MEM_URN = `${ORG_URN}:flowmem`;
@@ -305,6 +308,152 @@ describe('3-node flow through production deps (§10)', () => {
     const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
     expect((after.failure as { code?: string }).code).toBe('NODE_LOAD_FAILED');
     expect((after.failure as { message?: string }).message).toContain('__aiConfigName');
+  });
+
+  it('a tools flow CREATES a real node under the run principal (plan-tools phases 2+3, §7 fixture)', async () => {
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:act', memoryId } },
+      data: { data: { tools: ['hadron_create_node'] } as never },
+    });
+    const run = await mintFlow();
+    const taskUrn = `${ORG_URN}::flowmem::tasks:investigate-outage`;
+    const { deps } = flowDeps(0.92);
+    // Simulate the LLM's tool decision; everything below the decision is REAL:
+    // registry resolution, the activation gate, the handler, writeNodeCore.
+    deps.llmTools = async (r, _resolved, _req, toolNames, opts) => {
+      const { tools } = resolveRunTools(toolNames);
+      const create = tools.find((t) => t.name === 'hadron_create_node')!;
+      if (!(await opts.onToolCall(create.name, create.cost))) throw new ToolDeniedError(create.name);
+      const started = Date.now();
+      await create.execute(
+        { log: opts.log, db, run: r, principal: runContext(db, r) },
+        { urn: taskUrn, name: 'Investigate outage', content: 'Check MCP endpoint logs.', seq: 3, tags: ['urgent'] },
+      );
+      opts.log('task node created');
+      return {
+        text: 'created the task node', tokensIn: 50, tokensOut: 20, provider: 'anthropic', model: 'test',
+        toolCalls: [{ name: 'hadron_create_node', ok: true, ms: Date.now() - started }],
+      };
+    };
+    expect(await executeAppRun(db, run.id, deps)).toBe('completed');
+    const created = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'tasks:investigate-outage', memoryId } },
+    });
+    expect(created.name).toBe('Investigate outage');
+    expect(created.seq).toBe(3); // full arg parity — seq lands (Holger review)
+    expect(created.tags).toEqual(['urgent']);
+    expect(created.createdBy).toBe(`run:${run.id}`); // the run principal signed it
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    const trail = after.hops as Array<Record<string, unknown>>;
+    expect(trail[1].toolCalls).toMatchObject([{ name: 'hadron_create_node', ok: true }]);
+    expect(trail[1].logs).toEqual(['task node created']);
+  });
+
+  it('a policy chain lacking tool.hadron_create_node halts the tool call BEFORE the node exists (§7 fixture)', async () => {
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:act', memoryId } },
+      data: { data: { tools: ['hadron_create_node'] } as never },
+    });
+    // App layer allows everything EXCEPT the tool.
+    await db.app.update({
+      where: { id: appId },
+      data: { policy: { allow: ['run.execute', 'llm.invoke', 'memory.read', 'memory.write'] } },
+    });
+    const run = await mintFlow();
+    const taskUrn = `${ORG_URN}::flowmem::tasks:should-not-exist`;
+    const { deps } = flowDeps(0.92);
+    deps.llmTools = async (r, _resolved, _req, toolNames, opts) => {
+      const { tools } = resolveRunTools(toolNames);
+      const create = tools.find((t) => t.name === 'hadron_create_node')!;
+      if (!(await opts.onToolCall(create.name, create.cost))) throw new ToolDeniedError(create.name);
+      await create.execute({ log: opts.log, db, run: r, principal: runContext(db, r) }, { urn: taskUrn, name: 'x' });
+      return { text: 'x', tokensIn: 1, tokensOut: 1, provider: 'anthropic', model: 'test', toolCalls: [] };
+    };
+    expect(await executeAppRun(db, run.id, deps)).toBe('failed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect((after.failure as { code?: string }).code).toBe('ACTIVATION_DENIED');
+    expect(
+      await db.node.findUnique({ where: { loc_memoryId: { loc: 'tasks:should-not-exist', memoryId } } }),
+    ).toBeNull(); // denied BEFORE the side effect
+  });
+
+  it('loadNodeSpec fails loud on unknown tools and on tools×extraction (D-TL-5/-6)', async () => {
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:classify', memoryId } },
+      data: { data: { tools: ['hadron_teleport'] } as never },
+    });
+    const r1 = await mintFlow();
+    expect(await executeAppRun(db, r1.id, flowDeps(0.9).deps)).toBe('failed');
+    const f1 = await db.appRun.findUniqueOrThrow({ where: { id: r1.id } });
+    expect((f1.failure as { code?: string }).code).toBe('NODE_LOAD_FAILED');
+    expect((f1.failure as { message?: string }).message).toContain('hadron_teleport');
+
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:classify', memoryId } },
+      data: {
+        data: {
+          tools: ['hadron_log'],
+          extractionSpec: [{ field: 'confidence', shape: 'number' }],
+        } as never,
+      },
+    });
+    const r2 = await mintFlow();
+    expect(await executeAppRun(db, r2.id, flowDeps(0.9).deps)).toBe('failed');
+    const f2 = await db.appRun.findUniqueOrThrow({ where: { id: r2.id } });
+    expect((f2.failure as { message?: string }).message).toContain('D-TL-5');
+  });
+
+  it('node-tool handlers: duplicate-create rejected, update merges data shallowly, class gates hold (phase 3)', async () => {
+    const run = await mintFlow();
+    const r = (await db.appRun.findUniqueOrThrow({ where: { id: run.id } })) as AppRun;
+    const toolCtx = { log: vi.fn(), db, run: r, principal: runContext(db, r) };
+    const urn = `${ORG_URN}::flowmem::notes:standup`;
+
+    await hadronCreateNode.execute(toolCtx, {
+      urn, name: 'Standup note', content: 'first', data: { a: 1, b: 2 }, seq: 7,
+    });
+    // Create on an occupied loc must point authors at update, not clobber.
+    await expect(hadronCreateNode.execute(toolCtx, { urn, name: 'again' })).rejects.toThrow(/already exists/);
+
+    // Shallow data merge: patch wins, unmentioned keys survive, name preserved.
+    await hadronUpdateNode.execute(toolCtx, { urn, content: 'second', data: { b: 9 } });
+    const node = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'notes:standup', memoryId } },
+    });
+    expect(node.name).toBe('Standup note');
+    expect(node.content).toBe('second');
+    expect(node.data).toEqual({ a: 1, b: 9 });
+    expect(node.seq).toBe(7);
+
+    // Read round-trips under the principal.
+    const read = (await hadronReadNode.execute(toolCtx, { urn })) as { content: string };
+    expect(read.content).toBe('second');
+
+    // Class gates (D-2026-07-04-C): the run has NO on-behalf-of user, so a
+    // personal-class memory is untouchable even inside the same org.
+    const owner = await db.user.create({
+      data: { githubId: 7777, githubUsername: 'flow-owner', roles: ['READER'] },
+    });
+    await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, name: 'diary',
+        urn: `${ORG_URN}:diary`, class: 'personal', userId: owner.id,
+      },
+    });
+    await expect(
+      hadronCreateNode.execute(toolCtx, { urn: `${ORG_URN}::diary::notes:x`, name: 'x' }),
+    ).rejects.toThrow();
+
+    // Encrypted memories are denied on every tool touch, read included.
+    await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, name: 'vault2',
+        urn: `${ORG_URN}:vault2`, class: 'app', appId, isEncrypted: true,
+      },
+    });
+    await expect(
+      hadronReadNode.execute(toolCtx, { urn: `${ORG_URN}::vault2::notes:x` }),
+    ).rejects.toThrow(/encrypted/);
   });
 
   it('a defer-branch flow can still route into another memory later (URN shape sanity)', async () => {

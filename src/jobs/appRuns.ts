@@ -27,10 +27,15 @@ import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/ai
 import {
   generateText,
   LlmInvocationError,
+  NoToolSupportError,
+  ToolDeniedError,
+  ToolExecutionError,
   type LlmResult,
   type LlmObjectResult,
+  type LlmToolLoopResult,
   type ExtractionField,
 } from '../lib/llm/index.js';
+import { AuthorFailError } from '../lib/runner/tools/types.js';
 import type { ResolvedAiConfig } from '../lib/aiConfig.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
@@ -463,6 +468,9 @@ export interface RunNodeSpec {
   extractionSpec: ExtractionField[] | null;
   /** `data.output` declared → this node writes even mid-flow. */
   hasOutput: boolean;
+  /** `data.tools` names → the hop runs the tool loop (plan-tools D-TL-1).
+   *  Mutually exclusive with extractionSpec (D-TL-5, enforced at load). */
+  tools?: string[] | null;
 }
 
 /** Injected in tests; production uses the real resolvers + LLM. */
@@ -478,6 +486,19 @@ export interface RunExecutionDeps {
     req: { system?: string; prompt: string; maxTokens?: number },
     fields: ExtractionField[],
   ) => Promise<LlmObjectResult>;
+  /** Tool loop (plan-tools phase 2) — nodes with `data.tools` use this. The
+   *  kernel supplies the per-call governance gate (D-TL-3) and the hop-trail
+   *  log sink; production resolves names → defs and runs generateWithTools. */
+  llmTools: (
+    run: AppRun,
+    resolved: ResolvedAiConfig,
+    req: { system?: string; prompt: string; maxTokens?: number },
+    toolNames: string[],
+    opts: {
+      onToolCall: (name: string, cost: 0 | 1) => Promise<boolean>;
+      log: (message: string) => void;
+    },
+  ) => Promise<LlmToolLoopResult>;
   writeOutput: (run: AppRun, nodeUrn: string, text: string) => Promise<string | null>; // returns written node id/urn
   /** Next routing edge from this node, or null = flow ends (D7). */
   selectNext: (run: AppRun, nodeUrn: string, view: Record<string, unknown>) => Promise<NextEdgeSelection | null>;
@@ -645,8 +666,39 @@ async function executeAppRunInner(
       const maxTokens = budget != null ? { maxTokens: Math.max(1, Math.min(budget, 32_000)) } : {};
       let result: LlmResult;
       let extracted: Record<string, unknown> | null = null;
+      let toolCalls: LlmToolLoopResult['toolCalls'] | null = null;
+      const hopLogs: string[] = []; // hadron_log sink → this hop's trail element
       try {
-        if (spec.extractionSpec && spec.extractionSpec.length > 0) {
+        if (spec.tools && spec.tools.length > 0) {
+          // plan-tools phase 2: the bounded tool loop. Every call passes the
+          // activation gate (D-TL-3) — the kill switch bites MID-hop.
+          const loopResult = await deps.llmTools(
+            run,
+            resolved,
+            {
+              system:
+                'You are executing one step of a Hadron automation flow. ' +
+                'Use the available tools as the step instructions direct, ' +
+                'then reply with a concise result of what you did.',
+              prompt: instructions,
+              ...maxTokens,
+            },
+            spec.tools,
+            {
+              onToolCall: (name, cost) =>
+                checkActivation(db, runId, `tool.${name}`, cost > 0 ? { actionCost: cost } : {}),
+              log: (message) => hopLogs.push(message),
+            },
+          );
+          toolCalls = loopResult.toolCalls;
+          result = {
+            text: loopResult.text,
+            tokensIn: loopResult.tokensIn,
+            tokensOut: loopResult.tokensOut,
+            provider: loopResult.provider,
+            model: loopResult.model,
+          };
+        } else if (spec.extractionSpec && spec.extractionSpec.length > 0) {
           // D-MN-2(a): one structured call — the object IS this hop's result.
           const objectResult = await deps.llmObject(
             resolved,
@@ -677,16 +729,30 @@ async function executeAppRunInner(
           });
         }
       } catch (err) {
+        // Tool-loop terminal errors (plan-tools D-TL-6) — never retried:
+        if (err instanceof AuthorFailError) {
+          return fail('AUTHOR_FAIL', err.message); // the author's deliberate abort
+        }
+        if (err instanceof ToolDeniedError) {
+          return fail('ACTIVATION_DENIED', err.message); // gate said no, mid-hop
+        }
+        if (err instanceof ToolExecutionError) {
+          return fail('TOOL_FAILED', err.message); // handler threw (D21)
+        }
         if (err instanceof LlmInvocationError && err.transient && Date.now() < deadline) {
           // Bus redelivery is the retry path — reset the claim so the next
           // delivery can take it (bounded by max_deliver + the timeout
           // reaper). The prior hop's checkpoint makes the redelivery RESUME
-          // at this node (D-MN-5) — completed hops never re-run.
+          // at this node (D-MN-5) — completed hops never re-run. (Tool hops
+          // reach here ONLY while no side-effecting call ran — D-TL-6.)
           await db.appRun.updateMany({
             where: { id: runId, status: 'RUNNING' },
             data: { status: 'PENDING' },
           });
           return 'transient';
+        }
+        if (err instanceof NoToolSupportError) {
+          return fail('NO_TOOL_SUPPORT', err.message); // unverified provider (D-TL-8)
         }
         return fail('LLM_FAILED', String((err as Error)?.message ?? err));
       }
@@ -761,6 +827,10 @@ async function executeAppRunInner(
         startedAt: hopStartedAt,
         finishedAt: Date.now(),
         tokensSpent: spent,
+        // Tool-hop audit (plan-tools D-TL-7): what the LLM called + the
+        // author's hadron_log lines. Omitted entirely on non-tool hops.
+        ...(toolCalls && toolCalls.length > 0 ? { toolCalls } : {}),
+        ...(hopLogs.length > 0 ? { logs: hopLogs } : {}),
       });
 
       if (next === null) {

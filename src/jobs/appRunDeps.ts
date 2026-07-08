@@ -22,14 +22,16 @@ import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { writeNodeCore } from '../api/graphql/schema/resolvers.mutation.node.js';
 import { resolveAiConfigWithFallback, type ResolvedAiConfig } from '../lib/aiConfig.js';
-import { generateText, generateExtraction, type ExtractionField } from '../lib/llm/index.js';
+import { generateText, generateExtraction, generateWithTools, type ExtractionField } from '../lib/llm/index.js';
 import { validateExtractionSpec } from '../lib/edge-conditions/reserved-names.js';
 import { selectNextEdge } from '../lib/runner/selectNextEdge.js';
-import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../lib/urn.js';
+import { loadFlowNode, resolveFlowMemory } from '../lib/runner/loadFlowNode.js';
+import { resolveRunTools } from '../lib/runner/tools/index.js';
+import { splitNodeUrn } from '../lib/urn.js';
 import type { RunExecutionDeps, RunNodeSpec } from './appRuns.js';
 import { dispatchRunCallback } from '../api/webhooks.js';
 
-function runContext(db: PrismaClient, run: AppRun): Context {
+export function runContext(db: PrismaClient, run: AppRun): Context {
   // The run principal (cor:agt:010:01): App + optional on-behalf-of user.
   // No roles — a run never carries platform-admin authority.
   return {
@@ -46,38 +48,8 @@ interface OutputSpec {
   mode?: 'replace' | 'append';
 }
 
-async function loadFlowNode(db: PrismaClient, nodeUrn: string, organizationId: string) {
-  const { memoryUrn, loc } = splitNodeUrn(nodeUrn);
-  const normalized = normalizeUrnForLookup(memoryUrn);
-  // Tenant-scoped: a URN can only resolve inside the run's own organization
-  // (PR-493 review, Gemini security) — cross-org reads are not a run
-  // capability in v1 regardless of URN knowledge.
-  const memory = await db.memory.findFirst({
-    where: {
-      OR: [{ urn: normalized }, { urn: legacyMemoryUrnToCanonical(normalized) }],
-      organizationId,
-      deletedAt: null,
-    },
-    select: { id: true, urn: true, isEncrypted: true },
-  });
-  if (!memory) throw new Error(`Flow memory not found for "${nodeUrn}".`);
-  // The launch gate only sees the ENTRY node — a `next` edge could route a
-  // plaintext flow into an encrypted memory mid-flow, where the run has no
-  // session key and assembly would ship ciphertext. Deny routed hops the
-  // same way encrypted entries are denied (PR-532 review, Codex P2;
-  // spec 041 D-2026-07-06-B). Fires on the hop's FIRST touch (loadNodeSpec).
-  if (memory.isEncrypted) {
-    throw new Error(
-      `Headless runs are unavailable on encrypted memories — flow routed into "${nodeUrn}".`,
-    );
-  }
-  const node = await db.node.findUnique({
-    where: { loc_memoryId: { loc, memoryId: memory.id } },
-    select: { id: true, name: true, data: true, deletedAt: true },
-  });
-  if (!node || node.deletedAt) throw new Error(`Flow node not found: "${nodeUrn}".`);
-  return { memory, loc, node };
-}
+// loadFlowNode / resolveFlowMemory moved to src/lib/runner/loadFlowNode.ts
+// (shared with the run tools) — same tenant-scoping + encrypted-memory guards.
 
 export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
   return {
@@ -123,7 +95,26 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
           extractionSpec = entries;
         }
       }
-      return { extractionSpec, hasOutput: data.output != null };
+      let tools: string[] | null = null;
+      if (Array.isArray(data.tools)) {
+        const names = (data.tools as unknown[]).filter((t): t is string => typeof t === 'string');
+        if (names.length > 0) {
+          // Unknown names fail the hop LOUD before any LLM call (D-TL-6).
+          const { unknown } = resolveRunTools(names);
+          if (unknown.length > 0) {
+            throw new Error(`Unknown tool(s) on "${nodeUrn}": ${unknown.join(', ')}.`);
+          }
+          tools = names;
+        }
+      }
+      // D-TL-5: tools × extraction are mutually exclusive per node (v1).
+      if (tools && extractionSpec) {
+        throw new Error(
+          `Node "${nodeUrn}" declares BOTH data.tools and data.extractionSpec — ` +
+            `v1 supports one per node (plan-tools D-TL-5).`,
+        );
+      }
+      return { extractionSpec, hasOutput: data.output != null, tools };
     },
 
     selectNext: async (run, nodeUrn, view) => {
@@ -153,6 +144,14 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
 
     llmObject: (resolved, req, fields) => generateExtraction(resolved, req, fields),
 
+    llmTools: (run, resolved, req, toolNames, opts) => {
+      const { tools } = resolveRunTools(toolNames); // names validated at loadNodeSpec
+      return generateWithTools(resolved, req, tools, {
+        onToolCall: opts.onToolCall,
+        toolCtx: { log: opts.log, db, run, principal: runContext(db, run) },
+      });
+    },
+
     onTerminal: (run) => dispatchRunCallback(db, run),
 
     writeOutput: async (run, nodeUrn, text) => {
@@ -167,16 +166,11 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
       let targetLoc: string;
       if (spec.writeTo) {
         const split = splitNodeUrn(spec.writeTo);
-        const normalized = normalizeUrnForLookup(split.memoryUrn);
-        const targetMemory = await db.memory.findFirst({
-          where: {
-            OR: [{ urn: normalized }, { urn: legacyMemoryUrnToCanonical(normalized) }],
-            organizationId: run.organizationId, // tenant-scoped (PR-493)
-            deletedAt: null,
-          },
-          select: { id: true },
-        });
-        if (!targetMemory) throw new Error(`Output memory not found for "${spec.writeTo}".`);
+        // Shared guards (tenant scope + encrypted-memory denial) — a writeTo
+        // into an encrypted memory is denied like every other flow touch.
+        const targetMemory = await resolveFlowMemory(
+          db, split.memoryUrn, run.organizationId, spec.writeTo,
+        );
         targetMemoryId = targetMemory.id;
         targetLoc = split.loc;
       } else {
