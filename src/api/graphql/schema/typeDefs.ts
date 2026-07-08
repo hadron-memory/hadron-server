@@ -1578,6 +1578,8 @@ export const typeDefs = `#graphql
     data: JSON
     "Per-hop trail (#538): one element per completed hop — [{node, edgeOut, startedAt, finishedAt, tokensSpent}]. edgeOut is the routing edge taken FROM the hop (null on the last). A hop that failed mid-execution has no element; curNodeUrn + failure identify it."
     hops: JSON
+    "Fan-out state (plan-spawn, #548): set on runs that called hadron_spawn — {processItem, itemKey, callback?, itemCallback?, total, callbackFiredAt?, callbackError?}. callbackError records a callback mint that was denied (quota/policy) — the digest that never came."
+    spawn: JSON
     policy: JSON
     "Remaining LLM-token budget — live-decremented; zero halts the run."
     budgetTokens: Int
@@ -2760,7 +2762,7 @@ export const typeDefs = `#graphql
     # Spec 040 — the run audit surface (what ran, why, what it cost).
     "One run by ID (runs are URN-less, like AiServiceConfig)."
     appRun(ref: ID!): AppRun
-    appRuns(appRef: String, orgRef: String, status: AppRunStatus, limit: Int, offset: Int): AppRunsPage!
+    appRuns(appRef: String, orgRef: String, status: AppRunStatus, parentRunId: ID, limit: Int, offset: Int): AppRunsPage!
     agentSchedules(appRef: String!, limit: Int, offset: Int): AgentSchedulesPage!
     agentWebhooks(appRef: String!, limit: Int, offset: Int): AgentWebhooksPage!
     "The ticket ledger: minted, consumed-by-which-run, expired (org-ADMIN)."
