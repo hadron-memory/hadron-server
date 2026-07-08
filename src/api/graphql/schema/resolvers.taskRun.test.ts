@@ -138,7 +138,9 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
     });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const subscriber = await db.user.create({ data: { githubId: 9704, githubUsername: 'tr-sub' } });
-    await db.agentSubscription.create({ data: { agentId: agent.id, userId: subscriber.id } });
+    await db.agentSubscription.create({
+      data: { agentId: agent.id, userId: subscriber.id, activatedAt: new Date() },
+    });
     const runId = await resolvers.Mutation.runTask(
       {},
       { nodeRef: taskUrn, appRef: app.id },
@@ -153,8 +155,9 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
     });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const exSub = await db.user.create({ data: { githubId: 9705, githubUsername: 'tr-exsub' } });
+    // Was active, now revoked → the active predicate (revokedAt: null) excludes it.
     await db.agentSubscription.create({
-      data: { agentId: agent.id, userId: exSub.id, revokedAt: new Date() },
+      data: { agentId: agent.id, userId: exSub.id, activatedAt: new Date(), revokedAt: new Date() },
     });
     await expect(
       resolvers.Mutation.runTask({}, { nodeRef: taskUrn, appRef: app.id }, { db, roles: [], userId: exSub.id }),
@@ -352,6 +355,33 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
       adminCtx(),
     );
     expect((await db.appRun.findUniqueOrThrow({ where: { id: res.jobId! } })).userId).toBe(adminId);
+  });
+
+  it('#566: owner-only import whose on-behalf-of user lacks an App relationship is denied pre-write (no orphan)', async () => {
+    // Personal (owner-only) target ⇒ runAsSelf=true ⇒ the run is on-behalf-of
+    // the importing user, whom mintAppRun requires to have a live App
+    // relationship. Here the owner passes the trigger gate but is NOT an
+    // AppMember/subscriber, so assertManualRunAllowed must reject PRE-write —
+    // otherwise the node is written then the mint fails, orphaning it.
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: orgId, urn: 'tr-org::pa2', name: 'pa2' },
+    });
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, urn: 'tr-org::p-mem2', name: 'p2',
+        class: 'personal', userId: adminId, appId: app.id, userMemoryOfAgentId: agent.id,
+      },
+    });
+    // NB: no AppMember / subscription for adminId → no on-behalf-of relationship.
+    await expect(
+      resolvers.Mutation.importNode(
+        {},
+        { input: { memoryId: personal.id, loc: 'clip:orphan', content: '# Z', contentType: 'text/markdown', taskRef: taskUrn, appRef: app.id } },
+        adminCtx(),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'RELATIONSHIP_MISSING' } });
+    expect(await db.node.findFirst({ where: { memoryId: personal.id, loc: 'clip:orphan' } })).toBeNull();
+    expect(await db.appRun.count()).toBe(0);
   });
 
   it('without taskRef stays STORED (backward compatible)', async () => {

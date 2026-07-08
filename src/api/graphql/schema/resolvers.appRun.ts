@@ -106,6 +106,38 @@ function resolveRunAsSelf(ctx: Context, runAsSelf: boolean | null | undefined): 
  * `mintAppRun` re-verifies the on-behalf-of *user* at launch (appRuns.ts); this
  * authorizes the *triggering caller*.
  */
+/**
+ * True if `userId` has a live relationship with the App: an AppMember, or an
+ * ACTIVE AgentSubscription to one of the App's agents. Active is the data-model
+ * predicate (activatedAt set, not revoked, not expired) — not merely
+ * `revokedAt: null` — so a not-yet-activated or expired subscription does NOT
+ * authorize a run (Codex/Copilot #566). Shared by the trigger gate and the
+ * runAsSelf on-behalf-of pre-check so both agree with mintAppRun.
+ */
+async function hasAppRelationship(
+  db: Context['db'],
+  appId: string,
+  userId: string,
+): Promise<boolean> {
+  const member = await db.appMember.findFirst({
+    where: { appId, userId },
+    select: { userId: true },
+  });
+  if (member) return true;
+  const now = new Date();
+  const sub = await db.agentSubscription.findFirst({
+    where: {
+      userId,
+      activatedAt: { not: null },
+      revokedAt: null,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+      agent: { appAgents: { some: { appId } } },
+    },
+    select: { userId: true },
+  });
+  return !!sub;
+}
+
 async function requireManualRunAccess(ctx: Context, appRef: string) {
   const { id } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findFirst({
@@ -117,24 +149,8 @@ async function requireManualRunAccess(ctx: Context, appRef: string) {
   }
   // Platform admin, or the App triggering under its own key.
   if (isPlatformAdmin(ctx) || ctx.appId === app.id) return app;
-  // A user with a live relationship to the App: AppMember, or an active
-  // subscriber to one of its agents (mirrors mintAppRun's on-behalf-of check).
-  if (ctx.userId) {
-    const member = await ctx.db.appMember.findFirst({
-      where: { appId: app.id, userId: ctx.userId },
-      select: { userId: true },
-    });
-    if (member) return app;
-    const sub = await ctx.db.agentSubscription.findFirst({
-      where: {
-        userId: ctx.userId,
-        revokedAt: null,
-        agent: { appAgents: { some: { appId: app.id } } },
-      },
-      select: { userId: true },
-    });
-    if (sub) return app;
-  }
+  // A user with a live relationship to the App (AppMember or active subscriber).
+  if (ctx.userId && (await hasAppRelationship(ctx.db, app.id, ctx.userId))) return app;
   // Otherwise fall back to the org-ADMIN gate: admits org admins who aren't
   // AppMembers, and yields the standard typed Forbidden for callers with no
   // relationship at all.
@@ -158,7 +174,18 @@ export async function assertManualRunAllowed(
   const app = await requireManualRunAccess(ctx, input.appRef);
   assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
   // runAsSelf REQUIRES an authenticated user — surface it here (pre-write) too.
-  resolveRunAsSelf(ctx, input.runAsSelf);
+  const onBehalfOf = resolveRunAsSelf(ctx, input.runAsSelf);
+  // When the run is on-behalf-of a user, mintAppRun re-verifies THAT user's live
+  // App relationship at launch. Mirror it here so an authorized trigger-er who
+  // lacks the on-behalf-of relationship (e.g. an org admin who isn't an
+  // AppMember, importing into an owner-only memory) fails pre-write instead of
+  // after the side effect (#566 review). Same predicate + error as mintAppRun.
+  if (onBehalfOf && !(await hasAppRelationship(ctx.db, app.id, onBehalfOf))) {
+    throw new GraphQLError(
+      'The on-behalf-of user has no live relationship with this App.',
+      { extensions: { code: 'RELATIONSHIP_MISSING' } },
+    );
+  }
   // Tenant boundary (#531 review, Copilot): a run resolves its entry node ONLY
   // within its own org (appRunDeps.loadEntry — cross-org reads are not a run
   // capability in v1). Reject a cross-org entry URN early rather than minting a
@@ -186,17 +213,23 @@ export async function assertManualRunAllowed(
  * and `importNode(taskRef:)` (#528). Authorized by the interactive gate (#530).
  * Maps a launch denial to a typed GraphQLError.
  */
-export async function triggerManualRun(
+/**
+ * Mint a MANUAL run for an ALREADY-VALIDATED app (the object returned by
+ * assertManualRunAllowed). Maps a launch denial to a typed GraphQLError. Split
+ * from triggerManualRun so a caller that already asserted pre-write (importNode,
+ * #533) can mint post-write WITHOUT re-running the gate — no double validation
+ * (Copilot #566).
+ */
+export async function mintManualRun(
   ctx: Context,
+  app: { id: string; organizationId: string },
   input: {
-    appRef: string;
     entryNodeUrn: string;
     eventData?: Record<string, unknown> | null;
     runAsSelf?: boolean | null;
     aiConfigName?: string | null;
   },
 ) {
-  const app = await assertManualRunAllowed(ctx, input);
   try {
     return await mintAppRun(ctx.db, {
       organizationId: app.organizationId,
@@ -216,6 +249,20 @@ export async function triggerManualRun(
     }
     throw err;
   }
+}
+
+export async function triggerManualRun(
+  ctx: Context,
+  input: {
+    appRef: string;
+    entryNodeUrn: string;
+    eventData?: Record<string, unknown> | null;
+    runAsSelf?: boolean | null;
+    aiConfigName?: string | null;
+  },
+) {
+  const app = await assertManualRunAllowed(ctx, input);
+  return mintManualRun(ctx, app, input);
 }
 
 /**
