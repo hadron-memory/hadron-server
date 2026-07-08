@@ -2432,6 +2432,15 @@ export function createMcpServerInstance(
 
       const existing = await db.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
 
+      // Issue #543 — hadron_create_node is create-or-update (upsert). When the
+      // target loc holds a SOFT-DELETED node, writing to it must resurrect the
+      // row (clear deletedAt/deletedBy), matching the GraphQL createNode
+      // contract (resolvers.mutation.node.ts `isResurrect`). Without this the
+      // update branch below writes the new fields but leaves the row flagged
+      // deleted — the "worst of both worlds": findable nowhere, yet still
+      // feeding compiled reads only via stale paths.
+      const isResurrect = !!existing?.deletedAt;
+
       // Spec 031 — length-cap + trim-then-check the abstract before write.
       let normalizedAbstract: string | null;
       try {
@@ -2528,6 +2537,8 @@ export function createMcpServerInstance(
           ...(nodeData !== undefined ? { data: storedData as any } : {}),
           ...(llmModel ? { llmModel } : {}),
           ...(aiAgent ? { aiAgent } : {}),
+          // Resurrect a soft-deleted node on write (#543).
+          ...(isResurrect ? { deletedAt: null, deletedBy: null } : {}),
         } as any,
       });
 
@@ -2654,15 +2665,24 @@ export function createMcpServerInstance(
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
 
+      // Auth BEFORE any node-existence probe: returning "not found" for an
+      // existing-but-forbidden node while "access denied" for others would be
+      // a membership oracle (Gemini review). Gate on the resolved memory.id
+      // first — matches hadron_create_node's auth-first ordering.
+      if (!(await canWriteToMemory(db, auth, memory.id))) {
+        return textResult('Write access denied for this memory.');
+      }
+
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
       });
-      if (!existing) {
+      // A soft-deleted node is treated as not-found here (#543), mirroring the
+      // GraphQL update-mode contract (resolvers.mutation.node.ts) and every MCP
+      // read/find/list path, which all exclude deletedAt. hadron_update_node is
+      // a partial update, not a resurrect — a caller who wants a deleted loc
+      // back must recreate it via hadron_create_node (which resurrects).
+      if (!existing || existing.deletedAt) {
         return textResult(`Node not found: "${rawUrn}"`);
-      }
-
-      if (!(await canWriteToMemory(db, auth, existing.memoryId))) {
-        return textResult('Write access denied for this memory.');
       }
 
       // Resolve edge targets BEFORE the version snapshot + node update
