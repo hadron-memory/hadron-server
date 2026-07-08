@@ -585,12 +585,12 @@ describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
   });
 
   it('an unverified tool-loop provider maps to NO_TOOL_SUPPORT (D-TL-8)', async () => {
-    const { LlmInvocationError } = await import('../lib/llm/index.js');
+    const { NoToolSupportError } = await import('../lib/llm/index.js');
     const run = await mint();
     const d = deps({
       loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: ['hadron_log'] })),
       llmTools: vi.fn(async () => {
-        throw new LlmInvocationError('Provider "glm" is not verified for the run tool loop (NO_TOOL_SUPPORT).', 'glm', false);
+        throw new NoToolSupportError('glm');
       }),
     });
     expect(await executeAppRun(db, run.id, d)).toBe('failed');

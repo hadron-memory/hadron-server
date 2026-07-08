@@ -78,10 +78,19 @@ export const hadronReadNode: RunToolDef = {
   cost: 0, // reads are budget-free (D-TL-2)
   execute: async (ctx, args) => {
     const urn = String(args.urn ?? '');
-    const { memory, node } = await loadFlowNode(ctx.db, urn, ctx.run.organizationId);
+    // Auth BEFORE the node fetch — an unauthorized caller must not be able
+    // to probe node existence via error-message differences (PR-545 review,
+    // Copilot). Memory resolution leaks nothing beyond org scoping.
+    const { memoryUrn, loc } = splitNodeUrn(urn);
+    const memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn);
     if (!(await canReadMemory(ctx.db, principalAuth(ctx), memory.id))) {
       throw new Error(`Memory not readable for "${urn}" under the run principal.`);
     }
+    const node = await ctx.db.node.findUnique({
+      where: { loc_memoryId: { loc, memoryId: memory.id } },
+      select: { name: true, content: true, data: true, deletedAt: true },
+    });
+    if (!node || node.deletedAt) throw new Error(`Flow node not found: "${urn}".`);
     return { urn, name: node.name, content: node.content, data: node.data };
   },
 };
@@ -102,25 +111,30 @@ export const hadronCreateNode: RunToolDef = {
     const urn = String(args.urn ?? '');
     const { memoryUrn, loc } = splitNodeUrn(urn);
     const memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn);
-    const existing = await ctx.db.node.findUnique({
-      where: { loc_memoryId: { loc, memoryId: memory.id } },
-      select: { id: true, deletedAt: true },
-    });
-    if (existing && !existing.deletedAt) {
-      throw new Error(`Node already exists at "${urn}" — use hadron_update_node.`);
+    // No pre-existence probe (PR-545 review, Copilot): writeNodeCore's own
+    // create gate rejects live-loc collisions (NodeLocConflictError) and
+    // resurrects soft-deleted ones — duplicating the check here would run
+    // before its auth and leak node existence in unwritable memories.
+    try {
+      const written = await writeNodeCore(
+        {
+          memoryId: memory.id,
+          loc,
+          nodeType: 'record',
+          ...pickWriteFields(args),
+          reason: `run tool hadron_create_node (run ${ctx.run.id})`,
+        } as never,
+        ctx.principal,
+        'create',
+      );
+      return { created: true, urn, id: written.id };
+    } catch (err) {
+      const code = (err as { extensions?: { code?: string } }).extensions?.code;
+      if (code === 'NodeLocConflictError') {
+        throw new Error(`Node already exists at "${urn}" — use hadron_update_node.`);
+      }
+      throw err;
     }
-    const written = await writeNodeCore(
-      {
-        memoryId: memory.id,
-        loc,
-        nodeType: 'record',
-        ...pickWriteFields(args),
-        reason: `run tool hadron_create_node (run ${ctx.run.id})`,
-      } as never,
-      ctx.principal,
-      'create',
-    );
-    return { created: true, urn, id: written.id };
   },
 };
 
@@ -140,6 +154,12 @@ export const hadronUpdateNode: RunToolDef = {
     const { memory, loc, node } = await loadFlowNode(ctx.db, urn, ctx.run.organizationId);
     const fields = pickWriteFields(args);
     if (fields.data !== undefined) {
+      // The model controls this input — validate before spreading (PR-545
+      // review, Copilot): null/array/scalar `data` is a loud tool error,
+      // not a surprising merge.
+      if (fields.data === null || typeof fields.data !== 'object' || Array.isArray(fields.data)) {
+        throw new Error(`hadron_update_node: "data" must be a plain object (got ${Array.isArray(fields.data) ? 'array' : typeof fields.data}).`);
+      }
       // Shallow merge, patch wins — hadron_update_node_data semantics.
       const existing =
         node.data !== null && typeof node.data === 'object' && !Array.isArray(node.data)

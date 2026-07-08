@@ -27,6 +27,7 @@ import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/ai
 import {
   generateText,
   LlmInvocationError,
+  NoToolSupportError,
   ToolDeniedError,
   ToolExecutionError,
   type LlmResult,
@@ -750,7 +751,7 @@ async function executeAppRunInner(
           });
           return 'transient';
         }
-        if (err instanceof LlmInvocationError && err.message.includes('NO_TOOL_SUPPORT')) {
+        if (err instanceof NoToolSupportError) {
           return fail('NO_TOOL_SUPPORT', err.message); // unverified provider (D-TL-8)
         }
         return fail('LLM_FAILED', String((err as Error)?.message ?? err));
