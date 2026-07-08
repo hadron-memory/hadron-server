@@ -26,6 +26,7 @@ import {
   loadEdgeEndpointNode,
   loadMemoryUrn,
   defaultAiConfigOf,
+  isOrgMemberOrAdmin,
   safeCanonicalUrn,
   AGENT_INCLUDE,
   APP_INCLUDE,
@@ -36,6 +37,7 @@ import {
   readPrimaryAgentField,
   assetUrn,
 } from './resolvers.helpers.js';
+import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 
 // #481 (Codex review): normalize a STORED memory urn to canonical form before
 // composing node/edge URNs. Legacy single-colon role-marker urns (e.g.
@@ -754,44 +756,63 @@ export const typeResolvers = {
         where: { importedAgentId: a.id },
         orderBy: { position: 'asc' },
       }),
-    // #551 — no field-level admin gate. Reaching an Agent object already means
-    // the object-level read gate admitted the caller (agent(ref:) / publicAgents
-    // / resolveUrn): a PUBLIC agent is readable by anyone, a non-public one only
-    // by a member of its org. So every field below is visible to exactly that
-    // audience — a PUBLIC agent exposes its full install topology to any caller;
-    // a non-public agent exposes it to any member (not just ADMIN/OWNER, which
-    // is what the removed gate required). The gate lived here before there was a
-    // top-level agent read surface (Agent was only reachable by nesting under an
-    // org the caller already belonged to as ADMIN); the object gate now subsumes
-    // it. apps / appAgents that reference OTHER orgs' Apps are still filtered to
-    // live rows only.
-    apps: async (a: { id: string }, _: unknown, ctx: Context) =>
-      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. List Apps
-      // that have this Agent installed.
-      ctx.db.app.findMany({
+    // #551 — the Agent's OWN definition (systemPrompt / systemMemoryId /
+    // memoryItems / imports / importedBy, above) is public on a PUBLIC agent:
+    // reaching the Agent object means the object-level read gate already
+    // admitted the caller (PUBLIC → anyone; non-public → members), and the
+    // agent's own content is what a marketplace listing publishes.
+    //
+    // The "who USES this agent" fields below are different: they surface OTHER
+    // tenants' data, so they are NOT public. `apps` / `appAgents` return full
+    // `App` objects whose own field resolvers (App.keys / App.members) assume
+    // the outer org gate already ran — so returning a foreign org's App here
+    // would leak its key previews + member list (PR #552 review). Scope them to
+    // Apps in orgs the CALLER belongs to (platform ADMIN/OWNER → all): a
+    // non-member gets [], and no cross-org App object is ever exposed.
+    apps: async (a: { id: string }, _: unknown, ctx: Context) => {
+      const where: Record<string, unknown> = {
+        appAgents: { some: { agentId: a.id } },
+        deletedAt: null,
+      };
+      if (!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) {
+        const orgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+        if (orgIds.length === 0) return [];
+        where.organizationId = { in: orgIds };
+      }
+      return ctx.db.app.findMany({ where, orderBy: { createdAt: 'asc' } });
+    },
+    // Adoption count — the agent's owning-org view only (a bare number, but
+    // still "who uses this"); non-members get 0.
+    appCount: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
+      if (!(await isOrgMemberOrAdmin(ctx, a.organizationId))) return 0;
+      return ctx.db.app.count({
         where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
-        orderBy: { createdAt: 'asc' },
-      }),
-    appCount: async (a: { id: string }, _: unknown, ctx: Context) =>
-      ctx.db.app.count({
-        where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
-      }),
+      });
+    },
     // 023-app-shape US1: the AppAgent join rows where this Agent is installed.
-    appAgents: async (a: { id: string }, _: unknown, ctx: Context) =>
-      ctx.db.appAgent.findMany({
-        where: {
-          agentId: a.id,
-          app: { deletedAt: null },
-          agent: { deletedAt: null },
-        },
+    // Same caller-org scope as `apps` (each join row eager-loads its `app`).
+    appAgents: async (a: { id: string }, _: unknown, ctx: Context) => {
+      const appWhere: Record<string, unknown> = { deletedAt: null };
+      if (!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) {
+        const orgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+        if (orgIds.length === 0) return [];
+        appWhere.organizationId = { in: orgIds };
+      }
+      return ctx.db.appAgent.findMany({
+        where: { agentId: a.id, app: appWhere, agent: { deletedAt: null } },
         orderBy: { createdAt: 'asc' },
         include: { app: true, agent: { include: AGENT_INCLUDE } },
-      }),
-    orgGrants: async (a: { id: string }, _: unknown, ctx: Context) =>
-      ctx.db.agentOrgGrant.findMany({
+      });
+    },
+    // The agent's customer list (which orgs were granted it) — owning-org view
+    // only; non-members get [].
+    orgGrants: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
+      if (!(await isOrgMemberOrAdmin(ctx, a.organizationId))) return [];
+      return ctx.db.agentOrgGrant.findMany({
         where: { agentId: a.id },
         orderBy: { createdAt: 'asc' },
-      }),
+      });
+    },
     // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
     urn: (a: { urn?: string | null }) => {

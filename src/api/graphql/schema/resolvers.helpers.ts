@@ -161,6 +161,24 @@ export function isPlatformAdmin(ctx: Context): boolean {
   return !!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'));
 }
 
+/**
+ * Boolean form of the org-membership gate (`requireOrgRole` throws; this
+ * returns a boolean). True for a platform ADMIN/OWNER, or a live (non-revoked)
+ * member of `orgId` at any role. Used where no-access must degrade gracefully
+ * rather than throw Forbidden — the Agent "who uses this agent" fields
+ * (`appCount` / `orgGrants`) that are scoped to the agent's owning org (#551).
+ * `findFirst` + `deletedAt: null` so a revoked membership no longer authorizes
+ * (matches `requireOrgRole`).
+ */
+export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<boolean> {
+  if (isPlatformAdmin(ctx)) return true;
+  if (!ctx.userId) return false;
+  const member = await ctx.db.orgMember.findFirst({
+    where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
+  });
+  return !!member;
+}
+
 /** Row shape shared by the masked mappers below (no key material leaves). */
 export interface AiServiceConfigRow {
   id: string;

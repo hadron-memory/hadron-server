@@ -1172,21 +1172,24 @@ export const typeDefs = `#graphql
     Apps that have this Agent installed (via the AppAgent join). After
     spec 023-app-shape, an App can install multiple Agents; this list
     contains every App where THIS Agent is one of the installed ones.
-    #551: no separate field gate — visible to whoever the object-level read
-    gate already admitted (anyone for a PUBLIC agent, members for a non-public
-    one), so a PUBLIC agent exposes its full install topology.
+    #551: these are OTHER tenants' App objects (whose keys/members are not
+    re-gated at the field level), so — unlike the Agent's own fields — this is
+    NOT public on a PUBLIC agent. Scoped to Apps in orgs the CALLER belongs to
+    (platform ADMIN/OWNER: all); a non-member gets an empty list.
     """
     apps: [App!]!
     """
     023-app-shape: the AppAgent join rows where this Agent is installed.
-    Use App.appAgents to get the join rows from the App side. #551: visible
-    to whoever can read the Agent object (see apps).
+    Use App.appAgents to get the join rows from the App side. #551: same
+    caller-org scope as apps — never exposes a foreign org's App.
     """
     appAgents: [AppAgent!]!
+    "Adoption count. #551: the agent owning-org members' view (0 otherwise)."
     appCount: Int!
     """
-    Org grants for this Agent. #551: visible to whoever can read the Agent
-    object (anyone for a PUBLIC agent, members for a non-public one).
+    Org grants for this Agent (which orgs were granted it). #551: the agent's
+    customer list — visible to members of the Agent's owning org only (empty
+    otherwise), regardless of the agent's PUBLIC visibility.
     """
     orgGrants: [AgentOrgGrant!]!
     createdAt: String!

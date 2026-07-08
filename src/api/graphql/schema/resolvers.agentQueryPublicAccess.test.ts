@@ -9,9 +9,12 @@
  *     member-scoped agents() so the widening is explicit (not a filter value).
  *   - resolveUrn's agent branch resolves a PUBLIC agent for any caller (share
  *     links), otherwise falls back to membership.
- *   - Slim public projection: a non-member reading a PUBLIC agent sees
- *     discovery fields only — systemPrompt / systemMemoryId / memoryItems /
- *     imports / importedBy are member/admin-gated (null / []).
+ *   - Field exposure (PR #552 review): the Agent's OWN definition
+ *     (systemPrompt / memoryItems / imports / importedBy) is public on a PUBLIC
+ *     agent, but the "who uses this agent" fields (apps / appAgents / orgGrants
+ *     / appCount) are NOT — apps/appAgents return other tenants' App objects
+ *     (whose keys/members aren't re-gated), so they are scoped to the caller's
+ *     own orgs; appCount/orgGrants to the agent's owning-org members.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -147,25 +150,22 @@ describe('resolveUrn — agent branch honors PUBLIC (issue #551)', () => {
   });
 });
 
-describe('Agent fields — no field-level admin gate; object gate is the only gate (issue #551)', () => {
-  // Previously apps / appAgents / orgGrants returned [] unless the caller was
-  // org ADMIN/OWNER. Now the object-level read gate is the only gate, so any
-  // member — and any caller who can read a PUBLIC agent — sees them.
-  it('apps / appAgents / orgGrants are visible to a READER member (was ADMIN-only)', async () => {
+describe('Agent field exposure — own definition public, "who uses it" scoped (issue #551 / PR #552 review)', () => {
+  it('apps / appAgents / orgGrants / appCount are visible to a READER member (was ADMIN-only)', async () => {
     const app = await db.app.create({
       data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:app`, name: 'App A' },
     });
     await db.appAgent.create({ data: { appId: app.id, agentId: pubAgentA.id } });
     await db.agentOrgGrant.create({ data: { orgId: orgA.id, agentId: pubAgentA.id } });
-    const parent = { id: pubAgentA.id };
-    // member is only a READER of orgA — previously an empty list, now full.
+    const parent = { id: pubAgentA.id, organizationId: orgA.id };
+    // member is only a READER of orgA — previously ADMIN-only, now member-level.
     expect((await A.apps(parent, {}, asMember())).map((x: any) => x.id)).toEqual([app.id]);
     expect((await A.appAgents(parent, {}, asMember()))).toHaveLength(1);
     expect((await A.orgGrants(parent, {}, asMember()))).toHaveLength(1);
     expect(await A.appCount(parent, {}, asMember())).toBe(1);
   });
 
-  it('a non-member reading a PUBLIC agent sees its full install topology + imports', async () => {
+  it("a non-member reading a PUBLIC agent sees the agent's OWN definition (imports) but NOT who uses it", async () => {
     const app = await db.app.create({
       data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:app2`, name: 'App A2' },
     });
@@ -181,12 +181,31 @@ describe('Agent fields — no field-level admin gate; object gate is the only ga
         agentOrgGrantOrgId: orgA.id, agentOrgGrantAgentId: dep.id,
       },
     });
-    const parent = { id: pubAgentA.id };
-    // stranger obtained the PUBLIC agent object → every field resolves.
-    expect((await A.apps(parent, {}, asStranger()))).toHaveLength(1);
-    expect((await A.appAgents(parent, {}, asStranger()))).toHaveLength(1);
-    expect((await A.orgGrants(parent, {}, asStranger()))).toHaveLength(1);
+    const parent = { id: pubAgentA.id, organizationId: orgA.id };
+    // Own definition (imports) is public …
     expect((await A.imports(parent, {}, asStranger())).map((i: any) => i.importedAgentId)).toEqual([dep.id]);
+    // … but the "who uses it" fields never leak other tenants' Apps / grants.
+    expect(await A.apps(parent, {}, asStranger())).toEqual([]);
+    expect(await A.appAgents(parent, {}, asStranger())).toEqual([]);
+    expect(await A.orgGrants(parent, {}, asStranger())).toEqual([]);
+    expect(await A.appCount(parent, {}, asStranger())).toBe(0);
+    // Same for an unauthenticated caller.
+    expect(await A.apps(parent, {}, asAnon())).toEqual([]);
+  });
+
+  it('apps never returns a FOREIGN org\'s App, even to a member of the agent\'s org (no App-key leak)', async () => {
+    // orgB installs the PUBLIC agent into orgB's App (cross-org marketplace).
+    const foreignApp = await db.app.create({
+      data: { id: generateId(), organizationId: orgB.id, urn: `${orgB.urn}:fapp`, name: 'Foreign App' },
+    });
+    await db.appAgent.create({ data: { appId: foreignApp.id, agentId: pubAgentA.id } });
+    const parent = { id: pubAgentA.id, organizationId: orgA.id };
+    // member belongs to orgA only → the orgB App (with its keys/members) is
+    // filtered out; they see none of it through the agent.
+    expect(await A.apps(parent, {}, asMember())).toEqual([]);
+    expect(await A.appAgents(parent, {}, asMember())).toEqual([]);
+    // A platform admin sees all installers.
+    expect((await A.apps(parent, {}, asAdmin())).map((x: any) => x.id)).toEqual([foreignApp.id]);
   });
 });
 
