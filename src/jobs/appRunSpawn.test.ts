@@ -232,6 +232,31 @@ describe('spawn completion — callbacks (D-SP-4)', () => {
   });
 });
 
+describe('appRuns(parentRunId:) — the run-tree filter (#548)', () => {
+  it('returns exactly one fan-out\'s children (+ its coordination runs), org-scoped', async () => {
+    const { resolvers } = await import('../api/graphql/schema/resolvers.js');
+    const admin = await db.user.create({
+      data: { githubId: 5548, githubUsername: 'spawn-admin', roles: ['READER'] },
+    });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: admin.id, role: 'ADMIN' } });
+    const ctx = { db, userId: admin.id, roles: ['READER'] } as never;
+
+    const parentA = await mintParent();
+    await spawn3(parentA, { callback: CALLBACK });
+    const parentB = await mintParent();
+    await spawn3(parentB);
+    for (const k of await children(parentA.id)) await executeAppRun(db, k.id, deps());
+
+    const page = (await resolvers.Query.appRuns(
+      {},
+      { appRef: appId, parentRunId: parentA.id },
+      ctx,
+    )) as { items: Array<{ parentRunId: string | null }>; total: number };
+    expect(page.total).toBe(4); // 3 children + the callback run
+    expect(page.items.every((r) => r.parentRunId === parentA.id)).toBe(true);
+  });
+});
+
 describe('hadron_child_runs (D-SP-6)', () => {
   it('lists children with outcomes, excludes coordination runs, defaults to own parent', async () => {
     const parent = await mintParent();

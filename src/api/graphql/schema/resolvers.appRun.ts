@@ -578,12 +578,14 @@ export const appRunQueries = {
       appRef,
       orgRef,
       status,
+      parentRunId,
       limit,
       offset,
     }: {
       appRef?: string | null;
       orgRef?: string | null;
       status?: string | null;
+      parentRunId?: string | null;
       limit?: number | null;
       offset?: number | null;
     },
@@ -620,6 +622,11 @@ export const appRunQueries = {
       organizationId,
       ...(appId ? { appId } : {}),
       ...(status ? { status: status as never } : {}),
+      // Fan-out children of one parent (#548; index from PR-547). Rides the
+      // same org/app authorization — the org scope already applies above.
+      // Explicit null = top-level runs only; omitted = no filter (PR-550
+      // review, Gemini).
+      ...(parentRunId !== undefined ? { parentRunId } : {}),
     };
     const take = Math.min(Math.max(limit ?? 50, 1), 200);
     const [items, total] = await Promise.all([

@@ -21,3 +21,18 @@ describe('Portal #478 — AppRun envelope exposed in GraphQL schema', () => {
     expect(appRunBlock).toMatch(/\n\s*data:\s*JSON\b/);
   });
 });
+
+describe('#548 — fan-out state exposed in GraphQL schema', () => {
+  it('declares spawn: JSON on the AppRun type', () => {
+    // The envelope test's `[^}]*` block-match truncates at the first `}`
+    // inside a docstring; the spawn field sits AFTER one. Match the type
+    // block up to its closing brace at column 2 instead.
+    const appRunBlock = typeDefs.match(/type AppRun \{[\s\S]*?\n {2}\}/)?.[0];
+    expect(appRunBlock).toBeDefined();
+    expect(appRunBlock).toMatch(/\n\s*spawn:\s*JSON\b/);
+  });
+
+  it('appRuns accepts a parentRunId filter', () => {
+    expect(typeDefs).toMatch(/appRuns\([^)]*parentRunId:\s*ID[^)]*\)/);
+  });
+});
