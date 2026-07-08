@@ -2865,9 +2865,12 @@ export const typeDefs = `#graphql
     updateEdge(edgeId: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeId: ID!): Boolean!
 
-    # Run a task — a runnable node (isRunnable=true) — by loose name without a fully-qualified URN.
-    # Give task and/or memory names; the server resolves both from what you can read and runs.
-    # Pass a fully-qualified URN to skip resolution and run directly.
+    # Run a task — a runnable node (isRunnable=true) — identified by a single
+    # nodeRef (a node PK or a fully-qualified node URN, org::memory::loc),
+    # resolved by the shared resolveNodeRef (#542). A bare loc without a memory
+    # is rejected — pass a full URN or an ID. For loose-name matching and
+    # interactive task selection use the MCP hadron_run_task tool, which
+    # resolves to a concrete nodeRef before calling this.
     # By default RENDERS the task: returns the assembled instructions (node content
     # with {{arg}} substitution and referenced nodes) for an LLM agent to execute.
     # Pass appRef (App PK or URN) to EXECUTE instead (#529): the server mints a
@@ -2875,7 +2878,7 @@ export const typeDefs = `#graphql
     # (poll appRun(ref:) for status + output). runAsSelf attributes the run to
     # the caller. Without appRef, behavior is unchanged.
     # Spec cor:api:060.
-    runTask(task: String, memory: String, urn: String, args: JSON, appRef: ID, runAsSelf: Boolean): String!
+    runTask(nodeRef: String!, args: JSON, appRef: ID, runAsSelf: Boolean): String!
 
     """
     Import external content into a node (#457, sync v1). Source: exactly one

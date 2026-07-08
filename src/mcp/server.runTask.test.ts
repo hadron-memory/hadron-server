@@ -356,7 +356,11 @@ describe('hadron_run_task — execute mode (#529, appRef)', () => {
 
     const runs = await db.appRun.findMany();
     expect(runs).toHaveLength(1);
-    expect(runs[0]!.entryNodeUrn).toBe(urn);
+    // #542 — the resolver canonicalizes the ref (composeNodeUrn → `hrn:node:`
+    // prefixed form) before minting, so every run stores the same canonical
+    // entryNodeUrn regardless of the input ref shape. Previously only the
+    // fuzzy-resolution paths did this; the URN bypass passed the raw string.
+    expect(runs[0]!.entryNodeUrn).toContain(urn);
     expect(runs[0]!.triggerKind).toBe('MANUAL');
     expect(runs[0]!.appId).toBe(app.id);
   });

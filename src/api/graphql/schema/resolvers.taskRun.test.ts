@@ -81,7 +81,7 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
   it('returns the run id and creates a PENDING AppRun for the task', async () => {
     const runId = await resolvers.Mutation.runTask(
       {},
-      { urn: taskUrn, appRef: app.id },
+      { nodeRef: taskUrn, appRef: app.id },
       adminCtx(),
     );
     expect(typeof runId).toBe('string');
@@ -95,7 +95,7 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
   it('without appRef renders the prompt (backward compatible)', async () => {
     const rendered = await resolvers.Mutation.runTask(
       {},
-      { urn: taskUrn },
+      { nodeRef: taskUrn },
       adminCtx(),
     );
     // The rendered template, not a run id.
@@ -111,7 +111,7 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
     await expect(
       resolvers.Mutation.runTask(
         {},
-        { urn: taskUrn, appRef: app.id },
+        { nodeRef: taskUrn, appRef: app.id },
         { db, roles: [], userId: plain.id },
       ),
     ).rejects.toThrow();
@@ -130,7 +130,7 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
     const crossUrn = composeNodeUrn(memB.urn, 'tasks:x');
     // App is in tr-org; task is in tr-org-b → rejected before mint.
     await expect(
-      resolvers.Mutation.runTask({}, { urn: crossUrn, appRef: app.id }, adminCtx()),
+      resolvers.Mutation.runTask({}, { nodeRef: crossUrn, appRef: app.id }, adminCtx()),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(await db.appRun.count()).toBe(0);
   });
@@ -138,7 +138,7 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
   it('passes structured args through to eventData (not stringified) — #531 review', async () => {
     const runId = await resolvers.Mutation.runTask(
       {},
-      { urn: taskUrn, appRef: app.id, args: { count: 3, tag: 'x' } },
+      { nodeRef: taskUrn, appRef: app.id, args: { count: 3, tag: 'x' } },
       adminCtx(),
     );
     const run = await db.appRun.findUniqueOrThrow({ where: { id: runId } });

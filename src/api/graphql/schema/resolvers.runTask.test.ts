@@ -27,6 +27,7 @@ interface Mem {
 interface Fixture {
   admin: { id: string };
   alpha: Mem;
+  deployNodeId: string;
 }
 
 let fx: Fixture;
@@ -105,15 +106,16 @@ beforeEach(async () => {
   fx = {
     admin,
     alpha: mem,
+    deployNodeId: taskNode.id,
   };
 });
 
-describe('GraphQL runTask mutation', () => {
-  it('runs a task by exact name when the memory is specified', async () => {
+describe('GraphQL runTask mutation (#542 — nodeRef)', () => {
+  it('runs a task by full node URN', async () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
     const result = await resolvers.Mutation.runTask(
       {},
-      { task: 'Deploy App', memory: 'Alpha' },
+      { nodeRef: nodeUrnOf(fx.alpha, 'tasks:deploy') },
       ctx,
     );
     expect(result).toContain('# Node: Deploy App');
@@ -122,8 +124,14 @@ describe('GraphQL runTask mutation', () => {
     expect(result).toContain('Release Notes');
   });
 
+  it('runs a task by node ID (PK)', async () => {
+    const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
+    const result = await resolvers.Mutation.runTask({}, { nodeRef: fx.deployNodeId }, ctx);
+    expect(result).toContain('# Node: Deploy App');
+    expect(result).toContain('Run: npm run deploy');
+  });
+
   it('runs a task with Mustache template compilation', async () => {
-    // Create a node with a Mustache template
     await db.node.create({
       data: {
         id: generateId(),
@@ -140,14 +148,13 @@ describe('GraphQL runTask mutation', () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
     const result = await resolvers.Mutation.runTask(
       {},
-      { task: 'Greet user', memory: 'Alpha', args: { name: 'Alice', title: 'awesome' } },
+      { nodeRef: nodeUrnOf(fx.alpha, 'tasks:greet'), args: { name: 'Alice', title: 'awesome' } },
       ctx,
     );
     expect(result).toContain('Say hello to Alice! You are awesome.');
   });
 
   it('runs a task with conditional Mustache template', async () => {
-    // Create a node with conditional template logic
     await db.node.create({
       data: {
         id: generateId(),
@@ -162,101 +169,55 @@ describe('GraphQL runTask mutation', () => {
     });
 
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
+    const urn = nodeUrnOf(fx.alpha, 'tasks:conditional');
 
     // With admin=1 (truthy)
     const resultAdmin = await resolvers.Mutation.runTask(
       {},
-      { task: 'Conditional task', memory: 'Alpha', args: { admin: '1' } },
+      { nodeRef: urn, args: { admin: '1' } },
       ctx,
     );
     expect(resultAdmin).toContain('Admin actions available');
 
     // Without admin parameter (falsy - treated as undefined)
-    const resultUser = await resolvers.Mutation.runTask(
-      {},
-      { task: 'Conditional task', memory: 'Alpha' },
-      ctx,
-    );
+    const resultUser = await resolvers.Mutation.runTask({}, { nodeRef: urn }, ctx);
     expect(resultUser).toContain('User actions only');
   });
 
-  it('runs a task by full URN without memory resolution', async () => {
-    const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
-    const urn = nodeUrnOf(fx.alpha, 'tasks:deploy');
-    const result = await resolvers.Mutation.runTask({}, { urn }, ctx);
-    expect(result).toContain('# Node: Deploy App');
-    expect(result).toContain('Run: npm run deploy');
-  });
-
-  it('rejects an invalid URN', async () => {
+  it('rejects an unqualified nodeRef (bare loc without a memory)', async () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
     try {
-      await resolvers.Mutation.runTask({}, { urn: 'not-a-urn' }, ctx);
+      await resolvers.Mutation.runTask({}, { nodeRef: 'tasks:deploy' }, ctx);
       expect.fail('Expected an error');
     } catch (e) {
       expect(e).toBeInstanceOf(GraphQLError);
-      expect((e as GraphQLError).extensions.code).toBe('UrnNotQualifiedError');
+      expect((e as GraphQLError).extensions.code).toBe('NOT_FOUND');
     }
   });
 
-  it('errors when no task matches the hint', async () => {
+  it('errors when the referenced node does not exist', async () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
     try {
       await resolvers.Mutation.runTask(
         {},
-        { task: 'Nonexistent', memory: 'Alpha' },
+        { nodeRef: nodeUrnOf(fx.alpha, 'tasks:nonexistent') },
         ctx,
       );
       expect.fail('Expected an error');
     } catch (e) {
       expect(e).toBeInstanceOf(GraphQLError);
       expect((e as GraphQLError).extensions.code).toBe('NOT_FOUND');
-      expect((e as GraphQLError).message).toContain('No runnable task');
     }
   });
 
-  it('errors when the memory is not found', async () => {
+  it('rejects an empty nodeRef', async () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
     try {
-      await resolvers.Mutation.runTask(
-        {},
-        { task: 'Deploy App', memory: 'Nonexistent' },
-        ctx,
-      );
+      await resolvers.Mutation.runTask({}, { nodeRef: '  ' }, ctx);
       expect.fail('Expected an error');
     } catch (e) {
       expect(e).toBeInstanceOf(GraphQLError);
-      expect((e as GraphQLError).extensions.code).toBe('NOT_FOUND');
-      expect((e as GraphQLError).message).toContain('No memory matching');
-    }
-  });
-
-  it('only matches runnable nodes (isRunnable=true)', async () => {
-    // Create a task that is not runnable
-    await db.node.create({
-      data: {
-        id: generateId(),
-        memoryId: fx.alpha.id,
-        loc: 'tasks:notes',
-        name: 'Task Notes',
-        nodeType: 'task',
-        content: 'Just a note',
-        isRunnable: false,
-        tags: [],
-      },
-    });
-
-    const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
-    try {
-      await resolvers.Mutation.runTask(
-        {},
-        { task: 'Task Notes', memory: 'Alpha' },
-        ctx,
-      );
-      expect.fail('Expected an error');
-    } catch (e) {
-      expect(e).toBeInstanceOf(GraphQLError);
-      expect((e as GraphQLError).extensions.code).toBe('NOT_FOUND');
+      expect((e as GraphQLError).extensions.code).toBe('BAD_USER_INPUT');
     }
   });
 
@@ -264,12 +225,11 @@ describe('GraphQL runTask mutation', () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
     await resolvers.Mutation.runTask(
       {},
-      { task: 'Deploy App', memory: 'Alpha' },
+      { nodeRef: nodeUrnOf(fx.alpha, 'tasks:deploy') },
       ctx,
     );
 
-    // Check that a usage event was recorded (fire-and-forget, so it may not be instant).
-    // Give it a moment to settle.
+    // Fire-and-forget usage event — give it a moment to settle.
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const event = await db.usageEvent.findFirst({

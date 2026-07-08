@@ -56,7 +56,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     assemble: async (run, nodeUrn, view) => {
       return resolvers.Mutation.runTask(
         {},
-        { urn: nodeUrn, args: Object.keys(view).length > 0 ? view : undefined },
+        { nodeRef: nodeUrn, args: Object.keys(view).length > 0 ? view : undefined },
         runContext(db, run),
       );
     },
