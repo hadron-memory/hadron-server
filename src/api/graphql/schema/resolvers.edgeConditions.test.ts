@@ -66,6 +66,9 @@ function mockDb() {
       findFirst: vi.fn().mockImplementation(async ({ where }: { where: { id?: string } }) => ({
         id: where?.id ?? EDGE_ID,
       })),
+      // Codex #554: update/delete now re-read the edge's memoryId to gate on
+      // requireMemoryWriteAccess (the ADMIN+appId ctx short-circuits the check).
+      findUnique: vi.fn().mockResolvedValue({ memoryId: 'mem-1' }),
     },
   };
 }

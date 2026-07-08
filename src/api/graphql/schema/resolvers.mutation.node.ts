@@ -1355,6 +1355,21 @@ export const nodeMutations = {
         }
         throw e;
       }
+      // PR-348 parity (Codex #554): the global CONTRIBUTOR gate above is not
+      // memory-scoped. With edgeRef now accepting a cross-memory URN, a
+      // contributor could otherwise update an edge in a memory they can't
+      // write. Gate on write access to the edge's (denormalized) memory —
+      // matching createEdge / deleteNode / moveNode.
+      const edgeMem = await ctx.db.edge.findUnique({
+        where: { id: resolvedEdgeId },
+        select: { memoryId: true },
+      });
+      if (!edgeMem) {
+        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        });
+      }
+      await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
       return ctx.db.edge.update({
         where: { id: resolvedEdgeId },
         data: {
@@ -1391,6 +1406,18 @@ export const nodeMutations = {
         }
         throw e;
       }
+      // PR-348 parity (Codex #554): gate on write access to the edge's memory
+      // before deleting — the global CONTRIBUTOR role gate is not memory-scoped.
+      const edgeMem = await ctx.db.edge.findUnique({
+        where: { id: resolvedEdgeId },
+        select: { memoryId: true },
+      });
+      if (!edgeMem) {
+        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        });
+      }
+      await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
       await ctx.db.edge.delete({ where: { id: resolvedEdgeId } });
       return true;
     },

@@ -195,4 +195,27 @@ describe('updateEdge/deleteEdge accept an edge PK or URN (#542 Tier 2)', () => {
       resolvers.Mutation.deleteEdge({}, { edgeRef: 'f'.repeat(32) }, adminCtx()),
     ).rejects.toMatchObject({ extensions: { code: 'EDGE_NOT_FOUND' } });
   });
+
+  it('gates on memory write access — a CONTRIBUTOR non-member cannot edit/delete by URN (Codex #554)', async () => {
+    const edge = await resolvers.Mutation.createEdge(
+      {},
+      { sourceRef: nodeA.id, targetRef: nodeB.id, name: 'gated' },
+      adminCtx(),
+    );
+    const edgeUrn = composeEdgeUrn(memUrn, edge.loc);
+    // Passes the global CONTRIBUTOR role gate but is NOT a member of the edge's
+    // org/memory (CONTRIBUTOR is not an ADMIN/OWNER bypass role), so the new
+    // requireMemoryWriteAccess check must reject.
+    const outsider: Context = { db, roles: ['CONTRIBUTOR'], userId: 'contrib-outsider-263' };
+    await expect(
+      resolvers.Mutation.updateEdge({}, { edgeRef: edgeUrn, description: 'hijack' }, outsider),
+    ).rejects.toThrow();
+    await expect(
+      resolvers.Mutation.deleteEdge({}, { edgeRef: edgeUrn }, outsider),
+    ).rejects.toThrow();
+    // The edge is untouched.
+    const still = await db.edge.findUnique({ where: { id: edge.id } });
+    expect(still).not.toBeNull();
+    expect(still?.description ?? null).toBeNull();
+  });
 });
