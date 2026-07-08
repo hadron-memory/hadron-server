@@ -7,9 +7,11 @@
 
 import { AuthorFailError, type RunToolDef, type RunToolContext } from './types.js';
 import { NODE_TOOLS } from './nodeTools.js';
+import { SPAWN_TOOLS } from './spawnTools.js';
 
 export { AuthorFailError };
 export { hadronReadNode, hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
+export { hadronSpawn, hadronChildRuns } from './spawnTools.js';
 export type { RunToolDef, RunToolContext };
 
 /** The author's printf — lands on the hop's trail element (D-TL-2). */
@@ -55,7 +57,7 @@ export const hadronFail: RunToolDef = {
 export const ALWAYS_ON_TOOLS: readonly RunToolDef[] = [hadronLog, hadronFail];
 
 const REGISTRY = new Map<string, RunToolDef>(
-  [...ALWAYS_ON_TOOLS, ...NODE_TOOLS].map((t) => [t.name, t]),
+  [...ALWAYS_ON_TOOLS, ...NODE_TOOLS, ...SPAWN_TOOLS].map((t) => [t.name, t]),
 );
 
 /**

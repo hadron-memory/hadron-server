@@ -281,8 +281,10 @@ export interface MintAppRunArgs {
   appId: string;
   agentId?: string | null;
   userId?: string | null;
-  triggerKind: 'SCHEDULE' | 'WEBHOOK' | 'MANUAL' | 'INTEGRATION';
+  triggerKind: 'SCHEDULE' | 'WEBHOOK' | 'MANUAL' | 'INTEGRATION' | 'SPAWN';
   triggerId?: string | null;
+  /** Fan-out lineage (plan-spawn): set on child + callback runs. */
+  parentRunId?: string | null;
   entryNodeUrn: string;
   eventData?: Record<string, unknown> | null;
   policy?: unknown;
@@ -432,6 +434,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       userId: args.userId ?? null,
       triggerKind: args.triggerKind,
       triggerId: args.triggerId ?? null,
+      parentRunId: args.parentRunId ?? null,
       entryNodeUrn: args.entryNodeUrn,
       eventData: (args.eventData ?? undefined) as never,
       // Chain snapshot: `{chain: [...]}` since #510. checkActivation also
@@ -510,8 +513,9 @@ export interface RunExecutionDeps {
 /** Trigger payload + envelope, envelope wins; `__`-keys (plumbing like
  *  `__aiConfigName`) never leak into templates or conditions (D-MN-1).
  *  BOTH sources are filtered — a persisted envelope is history, not a
- *  trusted channel (PR-532 review, Copilot). */
-function mergedView(
+ *  trusted channel (PR-532 review, Copilot). Exported for hadron_spawn:
+ *  children inherit the parent's view as trigger payload (D-SP-3). */
+export function mergedView(
   eventData: unknown,
   envelope: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -553,6 +557,11 @@ export async function executeAppRun(
     } catch (err) {
       console.error(`[run-worker] onTerminal hook failed for ${runId}:`, err);
     }
+    // Spawn lifecycle (plan-spawn): item-callback for this child + the
+    // exactly-once parent-callback claim. Best-effort for the same reason.
+    await handleSpawnCompletion(db, runId).catch((err) =>
+      console.error(`[spawn] completion handling failed for ${runId}:`, err),
+    );
   }
   return outcome;
 }
@@ -911,6 +920,156 @@ async function checkActivation(
   return true;
 }
 
+// ── Spawn lifecycle (plan-spawn D-SP-3/-4) ──────────────────────────────────
+
+export interface SpawnConfig {
+  processItem: string;
+  itemKey: string;
+  callback?: string | null;
+  itemCallback?: string | null;
+  total: number;
+  dispatching?: boolean;
+  callbackFiredAt?: string;
+}
+
+function parseSpawnConfig(raw: unknown): SpawnConfig | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const c = raw as Record<string, unknown>;
+  return typeof c.processItem === 'string' ? (c as unknown as SpawnConfig) : null;
+}
+
+/** Non-callback children of a parent, tallied by status. */
+async function tallyChildren(db: PrismaClient, parentId: string) {
+  const rows = await db.$queryRaw<Array<{ status: string; n: bigint }>>`
+    SELECT status, COUNT(*) AS n FROM app_runs
+    WHERE parent_run_id = ${parentId}
+      AND (event_data->>'__spawnCallback') IS NULL
+    GROUP BY status`;
+  const by: Record<string, number> = {};
+  for (const r of rows) by[r.status] = Number(r.n);
+  return {
+    total: Object.values(by).reduce((a, b) => a + b, 0),
+    completed: by.COMPLETED ?? 0,
+    failed: by.FAILED ?? 0,
+    timedOut: by.TIMED_OUT ?? 0,
+    cancelled: by.CANCELLED ?? 0,
+  };
+}
+
+/**
+ * The exactly-once callback claim (D-SP-4): one atomic UPDATE elects the
+ * firer — it stamps `spawn.callbackFiredAt` iff a callback is configured,
+ * unfired, dispatch has finished, and NO non-callback child is still live.
+ * Concurrent last-child terminals race safely: rowcount 1 wins, 0 walks away.
+ */
+async function tryFireSpawnCallback(db: PrismaClient, parentId: string): Promise<void> {
+  const claimed = await db.$executeRaw`
+    UPDATE app_runs
+    SET spawn = spawn || jsonb_build_object('callbackFiredAt', now()::text)
+    WHERE id = ${parentId}
+      AND spawn IS NOT NULL
+      AND (spawn->>'callback') IS NOT NULL
+      AND (spawn->>'callbackFiredAt') IS NULL
+      AND (spawn->>'dispatching') IS DISTINCT FROM 'true'
+      AND NOT EXISTS (
+        SELECT 1 FROM app_runs c
+        WHERE c.parent_run_id = ${parentId}
+          AND c.status IN ('PENDING', 'RUNNING')
+          AND (c.event_data->>'__spawnCallback') IS NULL
+      )`;
+  if (claimed !== 1) return;
+  const parent = await db.appRun.findUniqueOrThrow({ where: { id: parentId } });
+  const cfg = parseSpawnConfig(parent.spawn)!;
+  const tally = await tallyChildren(db, parentId);
+  try {
+    await mintAppRun(db, {
+      organizationId: parent.organizationId,
+      appId: parent.appId,
+      agentId: parent.agentId,
+      userId: parent.userId,
+      triggerKind: 'SPAWN',
+      triggerId: parentId,
+      parentRunId: parentId, // points at the ORIGINAL parent (D19 / example-3 A′)
+      entryNodeUrn: cfg.callback!,
+      eventData: { parentRunId: parentId, ...tally, __spawnCallback: true },
+      createdBy: `run:${parentId}`,
+    });
+  } catch (err) {
+    // Launch-gate denial (quota/policy) loses the callback — record it on
+    // the parent row so the audit surface shows WHY the digest never came.
+    console.error(`[spawn] callback mint failed for parent ${parentId}:`, err);
+    await db.appRun.updateMany({
+      where: { id: parentId },
+      data: {
+        spawn: {
+          ...(parent.spawn as Record<string, unknown>),
+          callbackFiredAt: new Date().toISOString(),
+          callbackError: String((err as Error)?.message ?? err),
+        } as never,
+      },
+    });
+  }
+}
+
+/**
+ * Called from EVERY site that flips a run to a terminal status with a
+ * guarded count===1 transition (executeAppRun terminals, the sweep's
+ * TIMED_OUT reaper, cancelAppRun) — that guard IS the once-per-child
+ * idempotency for item-callbacks.
+ */
+export async function handleSpawnCompletion(db: PrismaClient, runId: string): Promise<void> {
+  const child = await db.appRun.findUnique({
+    where: { id: runId },
+    select: { id: true, parentRunId: true, eventData: true, status: true, data: true, spawn: true },
+  });
+  if (!child) return;
+
+  // A terminal PARENT clears a crash-stuck dispatching flag (the tool's
+  // finally normally does) and re-checks its own callback.
+  if (child.spawn && (child.spawn as Record<string, unknown>).dispatching === true) {
+    await db.$executeRaw`
+      UPDATE app_runs SET spawn = spawn - 'dispatching'
+      WHERE id = ${runId} AND status IN ('COMPLETED','FAILED','TIMED_OUT','CANCELLED')`;
+    await tryFireSpawnCallback(db, runId);
+  }
+
+  if (!child.parentRunId) return;
+  const ev = child.eventData as Record<string, unknown> | null;
+  if (ev?.__spawnCallback) return; // coordination runs never recurse
+
+  const parent = await db.appRun.findUnique({ where: { id: child.parentRunId } });
+  const cfg = parent ? parseSpawnConfig(parent.spawn) : null;
+  if (!parent || !cfg) return;
+
+  if (cfg.itemCallback) {
+    try {
+      await mintAppRun(db, {
+        organizationId: parent.organizationId,
+        appId: parent.appId,
+        agentId: parent.agentId,
+        userId: parent.userId,
+        triggerKind: 'SPAWN',
+        triggerId: parent.id,
+        parentRunId: parent.id,
+        entryNodeUrn: cfg.itemCallback,
+        eventData: {
+          parentRunId: parent.id,
+          childRunId: child.id,
+          childStatus: child.status,
+          childData: (child.data as Record<string, unknown> | null) ?? null,
+          ...(ev && ev[cfg.itemKey] !== undefined ? { [cfg.itemKey]: ev[cfg.itemKey] } : {}),
+          __spawnCallback: true,
+        },
+        createdBy: `run:${parent.id}`,
+      });
+    } catch (err) {
+      console.error(`[spawn] item-callback mint failed for child ${child.id}:`, err);
+    }
+  }
+
+  await tryFireSpawnCallback(db, parent.id);
+}
+
 // ── Listener + sweep (plan §5) ──────────────────────────────────────────────
 
 export async function startAppRunBusListener(
@@ -971,10 +1130,17 @@ export function startAppRunSweepLoop(
       for (const r of running) {
         const limit = (r.startedAt?.getTime() ?? now) + (r.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS);
         if (now > limit + 5_000) {
-          await db.appRun.updateMany({
+          const reaped = await db.appRun.updateMany({
             where: { id: r.id, status: 'RUNNING' },
             data: { status: 'TIMED_OUT', finishedAt: new Date(), failure: { code: 'TIMEOUT' } },
           });
+          // A reaped child still counts toward its parent's fan-out; the
+          // count===1 guard keeps item-callbacks once-per-child (plan-spawn).
+          if (reaped.count === 1) {
+            await handleSpawnCompletion(db, r.id).catch((err) =>
+              console.error(`[spawn] completion handling failed for reaped ${r.id}:`, err),
+            );
+          }
         }
       }
     } catch (err) {

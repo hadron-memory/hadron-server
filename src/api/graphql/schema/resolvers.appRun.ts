@@ -5,6 +5,7 @@ import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
 import {
   mintAppRun,
+  handleSpawnCompletion,
   RunLaunchDeniedError,
   setQuotaLimit as setQuotaLimitKernel,
   ensureQuotaRowsForScope,
@@ -324,10 +325,17 @@ export const appRunMutations = {
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
     await requireOrgRole(ctx, run.organizationId, 'ADMIN');
-    await ctx.db.appRun.updateMany({
+    const cancelled = await ctx.db.appRun.updateMany({
       where: { id, status: { in: ['PENDING', 'RUNNING'] } },
       data: { status: 'CANCELLED', finishedAt: new Date(), failure: { code: 'CANCELLED' } },
     });
+    if (cancelled.count === 1) {
+      // A cancelled LAST child must still fire its parent's spawn callback —
+      // without this, the fan-out digest waits forever (plan-spawn D-SP-4).
+      await handleSpawnCompletion(ctx.db, id).catch((err) =>
+        console.error(`[spawn] completion handling failed for cancelled ${id}:`, err),
+      );
+    }
     return ctx.db.appRun.findUniqueOrThrow({ where: { id } });
   },
 
