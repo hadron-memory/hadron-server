@@ -100,14 +100,14 @@ describe('generateWithTools', () => {
     expect(out.toolCalls[0]).toMatchObject({ name: 'hadron_log', ok: true });
   });
 
-  it('a provider error is transient ONLY while no tool has executed (D-TL-6 idempotency)', async () => {
+  it('a provider error is transient ONLY while no SIDE-EFFECTING tool has executed (D-TL-6)', async () => {
     // Before any tool ran: transient provider blip → retryable.
     mockedGenerate.mockRejectedValueOnce(Object.assign(new Error('overloaded'), { statusCode: 529 }));
     const e1 = await generateWithTools(resolved, req, [echoTool], { toolCtx: { log: vi.fn() } }).catch((e) => e);
     expect(e1).toBeInstanceOf(LlmInvocationError);
     expect((e1 as LlmInvocationError).transient).toBe(true);
 
-    // After a side-effecting tool ran: the SAME provider blip must be terminal.
+    // After a side-effecting (cost 1) tool ran: the SAME blip must be terminal.
     mockedGenerate.mockImplementationOnce(async (opts: {
       tools: Record<string, { execute: (a: Record<string, unknown>) => Promise<unknown> }>;
     }) => {
@@ -117,6 +117,18 @@ describe('generateWithTools', () => {
     const e2 = await generateWithTools(resolved, req, [echoTool], { toolCtx: { log: vi.fn() } }).catch((e) => e);
     expect(e2).toBeInstanceOf(LlmInvocationError);
     expect((e2 as LlmInvocationError).transient).toBe(false);
+  });
+
+  it('cost-0 tools do NOT forfeit transient retry (PR-540 Gemini): logs/reads are retry-safe', async () => {
+    mockedGenerate.mockImplementationOnce(async (opts: {
+      tools: Record<string, { execute: (a: Record<string, unknown>) => Promise<unknown> }>;
+    }) => {
+      await opts.tools.hadron_log.execute({ message: 'about to act' });
+      throw Object.assign(new Error('overloaded'), { statusCode: 529 });
+    });
+    const err = await generateWithTools(resolved, req, [hadronLog], { toolCtx: { log: vi.fn() } }).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmInvocationError);
+    expect((err as LlmInvocationError).transient).toBe(true); // the log ran, retry stays safe
   });
 
   it('an unverified provider fails loud with NO_TOOL_SUPPORT semantics (D-TL-8)', async () => {

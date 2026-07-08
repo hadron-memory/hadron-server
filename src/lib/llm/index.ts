@@ -22,7 +22,7 @@ import {
   stepCountIs,
   type LanguageModel,
 } from 'ai';
-import type { RunToolDef, RunToolContext } from '../runner/tools/types.js';
+import { AuthorFailError, type RunToolDef, type RunToolContext } from '../runner/tools/types.js';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
@@ -397,9 +397,11 @@ export async function generateWithTools(
             return result;
           } catch (err) {
             toolCalls.push({ name: def.name, ok: false, ms: Date.now() - started });
+            // instanceof, not name-matching: a non-Error rejection with a
+            // spoofed `name` must not ride the passthrough (PR-540 Copilot).
             fatal =
-              (err as Error)?.name === 'AuthorFailError' || err instanceof ToolDeniedError
-                ? (err as Error)
+              err instanceof AuthorFailError || err instanceof ToolDeniedError
+                ? err
                 : new ToolExecutionError(
                     def.name,
                     String((err as Error)?.message ?? err),
@@ -433,13 +435,16 @@ export async function generateWithTools(
   } catch (err) {
     if (fatal) throw fatal; // our terminal errors win over SDK wrapping
     if (err instanceof LlmInvocationError) throw err;
-    // Transient (⇒ bus-redelivery retry) ONLY while no tool has executed:
-    // once a side-effecting call ran, re-running the hop is unsafe (D-TL-6).
-    const anyToolRan = toolCalls.some((c) => c.ok);
+    // Transient (⇒ bus-redelivery retry) ONLY while no SIDE-EFFECTING tool
+    // has executed (D-TL-6, refined per PR-540 Gemini): cost-0 tools are
+    // retry-safe — reads are pure, and hadron_log writes only to the
+    // in-memory hop element, which a transient reset never persisted.
+    const costOf = new Map(toolDefs.map((t) => [t.name, t.cost]));
+    const sideEffectRan = toolCalls.some((c) => c.ok && (costOf.get(c.name) ?? 1) > 0);
     throw new LlmInvocationError(
       `LLM tool loop failed (${provider}/${model}): ${String((err as Error)?.message ?? err)}`,
       provider,
-      isTransient(err) && !anyToolRan,
+      isTransient(err) && !sideEffectRan,
       { cause: err },
     );
   }
