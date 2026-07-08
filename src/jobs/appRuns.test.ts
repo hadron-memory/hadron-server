@@ -62,6 +62,14 @@ function deps(overrides: Partial<RunExecutionDeps> = {}): RunExecutionDeps {
       provider: 'anthropic',
       model: 'test',
     })),
+    llmTools: vi.fn(async () => ({
+      text: 'tooled result',
+      tokensIn: 60,
+      tokensOut: 20,
+      provider: 'anthropic',
+      model: 'test',
+      toolCalls: [{ name: 'hadron_log', ok: true, ms: 1 }],
+    })),
     writeOutput: vi.fn(async () => 'node-id-1'),
     selectNext: vi.fn(async () => null),
     ...overrides,
@@ -516,6 +524,78 @@ describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
     const trail = after.hops as Array<Record<string, unknown>>;
     expect(trail).toHaveLength(2); // A once, B once — the failed attempt left no element
     expect(trail.map((h) => h.node)).toEqual([NODE_A, NODE_B]);
+  });
+
+  it('a tools hop runs the loop, gates each call through the activation row, and lands the audit on the trail (plan-tools phase 2)', async () => {
+    const run = await mint();
+    const d = deps({
+      loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: ['hadron_create_node'] })),
+      llmTools: vi.fn(async (_run, _resolved, _req, toolNames, opts) => {
+        expect(toolNames).toEqual(['hadron_create_node']);
+        // Simulate the loop: one costed call + one author log line.
+        expect(await opts.onToolCall('hadron_create_node', 1)).toBe(true);
+        opts.log('created the task node');
+        return {
+          text: 'done acting', tokensIn: 60, tokensOut: 20, provider: 'anthropic', model: 'test',
+          toolCalls: [{ name: 'hadron_create_node', ok: true, ms: 12 }],
+        };
+      }),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('completed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    // The gated call cost 1 action + 1 for the terminal write.
+    expect(after.budgetActions).toBe((run.budgetActions ?? 0) - 2);
+    const trail = after.hops as Array<Record<string, unknown>>;
+    expect(trail[0].toolCalls).toEqual([{ name: 'hadron_create_node', ok: true, ms: 12 }]);
+    expect(trail[0].logs).toEqual(['created the task node']);
+    expect(d.llm).not.toHaveBeenCalled(); // tool hops use the loop, not plain text
+  });
+
+  it('hadron_fail maps to AUTHOR_FAIL — deliberate, not malfunction (D-TL-6)', async () => {
+    const { AuthorFailError } = await import('../lib/runner/tools/index.js');
+    const run = await mint();
+    const d = deps({
+      loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: ['hadron_log'] })),
+      llmTools: vi.fn(async () => { throw new AuthorFailError('note has no recipient'); }),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('failed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.failure).toMatchObject({ code: 'AUTHOR_FAIL', message: 'note has no recipient' });
+  });
+
+  it('a denied tool call maps to ACTIVATION_DENIED; a handler throw to TOOL_FAILED (D-TL-3/-6)', async () => {
+    const { ToolDeniedError, ToolExecutionError } = await import('../lib/llm/index.js');
+    const r1 = await mint();
+    const d1 = deps({
+      loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: ['hadron_log'] })),
+      llmTools: vi.fn(async () => { throw new ToolDeniedError('hadron_create_node'); }),
+    });
+    expect(await executeAppRun(db, r1.id, d1)).toBe('failed');
+    expect(((await db.appRun.findUniqueOrThrow({ where: { id: r1.id } })).failure as { code?: string }).code)
+      .toBe('ACTIVATION_DENIED');
+
+    const r2 = await mint();
+    const d2 = deps({
+      loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: ['hadron_log'] })),
+      llmTools: vi.fn(async () => { throw new ToolExecutionError('hadron_create_node', 'boom'); }),
+    });
+    expect(await executeAppRun(db, r2.id, d2)).toBe('failed');
+    expect(((await db.appRun.findUniqueOrThrow({ where: { id: r2.id } })).failure as { code?: string }).code)
+      .toBe('TOOL_FAILED');
+  });
+
+  it('an unverified tool-loop provider maps to NO_TOOL_SUPPORT (D-TL-8)', async () => {
+    const { LlmInvocationError } = await import('../lib/llm/index.js');
+    const run = await mint();
+    const d = deps({
+      loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: ['hadron_log'] })),
+      llmTools: vi.fn(async () => {
+        throw new LlmInvocationError('Provider "glm" is not verified for the run tool loop (NO_TOOL_SUPPORT).', 'glm', false);
+      }),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('failed');
+    expect(((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure as { code?: string }).code)
+      .toBe('NO_TOOL_SUPPORT');
   });
 
   it('__-keys are stripped from BOTH view sources — a persisted envelope is not a trusted channel (PR-532 Copilot)', async () => {

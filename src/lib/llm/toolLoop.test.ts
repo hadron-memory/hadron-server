@@ -29,6 +29,8 @@ import { hadronLog, hadronFail, AuthorFailError, type RunToolDef } from '../runn
 const mockedGenerate = aiGenerateText as unknown as ReturnType<typeof vi.fn>;
 
 const resolved = { config: { provider: 'anthropic', model: 'test' } } as never;
+const stubCtx = (log = vi.fn()) => ({ log, db: {} as never, run: {} as never, principal: {} as never });
+
 const req = { prompt: 'do the thing' };
 
 /** Drive each named tool once, then "answer". Mirrors the SDK loop shape. */
@@ -61,7 +63,7 @@ beforeEach(() => {
 describe('generateWithTools', () => {
   it('records tool calls and sums usage across steps (totalUsage over usage)', async () => {
     sdkRunsTools({ name: 'hadron_echo', args: { x: 1 } });
-    const out = await generateWithTools(resolved, req, [echoTool], { toolCtx: { log: vi.fn() } });
+    const out = await generateWithTools(resolved, req, [echoTool], { toolCtx: stubCtx() });
     expect(out.text).toBe('final answer');
     expect(out.tokensIn).toBe(120); // totalUsage, not per-step usage
     expect(out.toolCalls).toMatchObject([{ name: 'hadron_echo', ok: true }]);
@@ -71,7 +73,7 @@ describe('generateWithTools', () => {
     sdkRunsTools({ name: 'hadron_echo', args: {} });
     const gate = vi.fn(async () => false);
     await expect(
-      generateWithTools(resolved, req, [echoTool], { toolCtx: { log: vi.fn() }, onToolCall: gate }),
+      generateWithTools(resolved, req, [echoTool], { toolCtx: stubCtx(), onToolCall: gate }),
     ).rejects.toBeInstanceOf(ToolDeniedError);
     expect(gate).toHaveBeenCalledWith('hadron_echo', 1);
     expect(echoTool.execute).not.toHaveBeenCalled(); // denied BEFORE the side effect
@@ -80,7 +82,7 @@ describe('generateWithTools', () => {
   it('a handler throw becomes ToolExecutionError carrying the tool name (D-TL-6)', async () => {
     const broken: RunToolDef = { ...echoTool, name: 'hadron_broken', execute: async () => { throw new Error('boom'); } };
     sdkRunsTools({ name: 'hadron_broken', args: {} });
-    const err = await generateWithTools(resolved, req, [broken], { toolCtx: { log: vi.fn() } }).catch((e) => e);
+    const err = await generateWithTools(resolved, req, [broken], { toolCtx: stubCtx() }).catch((e) => e);
     expect(err).toBeInstanceOf(ToolExecutionError);
     expect((err as ToolExecutionError).tool).toBe('hadron_broken');
   });
@@ -88,14 +90,14 @@ describe('generateWithTools', () => {
   it('AuthorFailError from hadron_fail passes through un-wrapped (intent, not malfunction)', async () => {
     sdkRunsTools({ name: 'hadron_fail', args: { reason: 'stop here' } });
     await expect(
-      generateWithTools(resolved, req, [hadronFail], { toolCtx: { log: vi.fn() } }),
+      generateWithTools(resolved, req, [hadronFail], { toolCtx: stubCtx() }),
     ).rejects.toBeInstanceOf(AuthorFailError);
   });
 
   it('hadron_log writes through the tool context to the trail sink', async () => {
     sdkRunsTools({ name: 'hadron_log', args: { message: 'took the urgent branch' } });
     const log = vi.fn();
-    const out = await generateWithTools(resolved, req, [hadronLog], { toolCtx: { log } });
+    const out = await generateWithTools(resolved, req, [hadronLog], { toolCtx: stubCtx(log) });
     expect(log).toHaveBeenCalledWith('took the urgent branch');
     expect(out.toolCalls[0]).toMatchObject({ name: 'hadron_log', ok: true });
   });
@@ -103,7 +105,7 @@ describe('generateWithTools', () => {
   it('a provider error is transient ONLY while no SIDE-EFFECTING tool has executed (D-TL-6)', async () => {
     // Before any tool ran: transient provider blip → retryable.
     mockedGenerate.mockRejectedValueOnce(Object.assign(new Error('overloaded'), { statusCode: 529 }));
-    const e1 = await generateWithTools(resolved, req, [echoTool], { toolCtx: { log: vi.fn() } }).catch((e) => e);
+    const e1 = await generateWithTools(resolved, req, [echoTool], { toolCtx: stubCtx() }).catch((e) => e);
     expect(e1).toBeInstanceOf(LlmInvocationError);
     expect((e1 as LlmInvocationError).transient).toBe(true);
 
@@ -114,7 +116,7 @@ describe('generateWithTools', () => {
       await opts.tools.hadron_echo.execute({});
       throw Object.assign(new Error('overloaded'), { statusCode: 529 });
     });
-    const e2 = await generateWithTools(resolved, req, [echoTool], { toolCtx: { log: vi.fn() } }).catch((e) => e);
+    const e2 = await generateWithTools(resolved, req, [echoTool], { toolCtx: stubCtx() }).catch((e) => e);
     expect(e2).toBeInstanceOf(LlmInvocationError);
     expect((e2 as LlmInvocationError).transient).toBe(false);
   });
@@ -126,14 +128,14 @@ describe('generateWithTools', () => {
       await opts.tools.hadron_log.execute({ message: 'about to act' });
       throw Object.assign(new Error('overloaded'), { statusCode: 529 });
     });
-    const err = await generateWithTools(resolved, req, [hadronLog], { toolCtx: { log: vi.fn() } }).catch((e) => e);
+    const err = await generateWithTools(resolved, req, [hadronLog], { toolCtx: stubCtx() }).catch((e) => e);
     expect(err).toBeInstanceOf(LlmInvocationError);
     expect((err as LlmInvocationError).transient).toBe(true); // the log ran, retry stays safe
   });
 
   it('an unverified provider fails loud with NO_TOOL_SUPPORT semantics (D-TL-8)', async () => {
     const glm = { config: { provider: 'glm', model: 'test' } } as never;
-    const err = await generateWithTools(glm, req, [echoTool], { toolCtx: { log: vi.fn() } }).catch((e) => e);
+    const err = await generateWithTools(glm, req, [echoTool], { toolCtx: stubCtx() }).catch((e) => e);
     expect(err).toBeInstanceOf(LlmInvocationError);
     expect((err as Error).message).toContain('NO_TOOL_SUPPORT');
     expect((err as LlmInvocationError).transient).toBe(false);
@@ -142,7 +144,7 @@ describe('generateWithTools', () => {
 
   it('passes the step cap through stopWhen (D-TL-4)', async () => {
     sdkRunsTools();
-    await generateWithTools(resolved, req, [echoTool], { toolCtx: { log: vi.fn() }, stepCap: 3 });
+    await generateWithTools(resolved, req, [echoTool], { toolCtx: stubCtx(), stepCap: 3 });
     expect(mockedGenerate.mock.calls[0][0].stopWhen).toEqual({ kind: 'stepCountIs', n: 3 });
   });
 });
