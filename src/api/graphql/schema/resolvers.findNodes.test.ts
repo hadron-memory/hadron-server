@@ -61,6 +61,45 @@ describe('findNodes — lexical ranking (cor:rag:010:02)', () => {
   });
 });
 
+describe('findNodes — minScore relevance floor (#497)', () => {
+  it('drops keyword hits scoring below the floor, keeps the strong ones', async () => {
+    await mkNode(graph.id, { loc: 'm.strong', name: 'banana banana banana' });
+    await mkNode(graph.id, {
+      loc: 'm.weak',
+      name: 'Grocery list',
+      content: 'a long note that mentions banana just once, buried far in. ' + 'lorem ipsum. '.repeat(60),
+    });
+    const unfiltered = await findNodes({ query: 'banana', mode: 'keyword' });
+    expect(unfiltered.hits.length).toBe(2);
+    const weakScore = unfiltered.hits.find((h: any) => h.node.loc === 'm.weak').score;
+    const strongScore = unfiltered.hits.find((h: any) => h.node.loc === 'm.strong').score;
+    expect(strongScore).toBeGreaterThan(weakScore);
+
+    // A floor between the two scores keeps only the strong hit.
+    const floored = await findNodes({
+      query: 'banana',
+      mode: 'keyword',
+      minScore: (weakScore + strongScore) / 2,
+    });
+    expect(floored.hits.map((h: any) => h.node.loc)).toEqual(['m.strong']);
+  });
+
+  it('a NaN / non-finite minScore is ignored (no floor applied)', async () => {
+    await mkNode(graph.id, { loc: 'm.a', name: 'banana one' });
+    await mkNode(graph.id, { loc: 'm.b', name: 'banana two' });
+    const res = await findNodes({ query: 'banana', mode: 'keyword', minScore: Number.NaN });
+    expect(res.hits.length).toBe(2);
+  });
+
+  it('minScore never filters the unscored no-query browse list', async () => {
+    await mkNode(graph.id, { loc: 'l.a', name: 'alpha' });
+    await mkNode(graph.id, { loc: 'l.b', name: 'beta' });
+    const res = await findNodes({ minScore: 999 });
+    expect(res.hits.length).toBe(2);
+    expect(res.hits.every((h: any) => h.score === null)).toBe(true);
+  });
+});
+
 describe('findNodes — boolean operators (cor:api:090:01)', () => {
   beforeEach(async () => {
     await mkNode(graph.id, { loc: 'b.bshake', name: 'Banana shake recipe' });

@@ -1272,7 +1272,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_find_nodes',
-    'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Scope with `parentRel` (a subtree), `memoryUrn` (one memory), or `memoryUrns` (a set); pass `allMemories: true` to search EVERY memory you can read — the stemmed, ranked org-wide "does anyone know about X?" probe (this is the right tool for cross-memory concept/content questions; hadron_search matches literal substrings only). Soft-deleted nodes are excluded.',
+    'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Scope with `parentRel` (a subtree), `memoryUrn` (one memory), or `memoryUrns` (a set); pass `allMemories: true` to search EVERY memory you can read — the stemmed, ranked org-wide "does anyone know about X?" probe (this is the right tool for cross-memory concept/content questions; hadron_search matches literal substrings only). Each scored hit shows its score as a percentage of the top hit; when many hits sit in a narrow band the result carries a [weak_results] note, meaning the ranking found nothing clearly relevant — treat that as "the answer is probably not here" rather than reading the whole list. Use `minScore` to drop weak hits and `limit` to widen the default 10-hit page. Soft-deleted nodes are excluded.',
     {
       query: z.string().describe('For mode:keyword (default) / mode:hybrid — a full-text query: stemmed terms ranked by relevance, with boolean operators `(a OR b) AND c`, quoted phrases, and `-term` / `NOT`. For mode:vector / mode:hybrid — also embedded and matched semantically against the memory\'s vector index. For mode:regex — a POSIX regular expression. Use "*" or "" to list all nodes (survey mode; rejected for mode:vector / mode:hybrid).'),
       mode: z.enum(['keyword', 'vector', 'hybrid', 'regex']).optional().describe('keyword (default): full-text search — stemmed, relevance-ranked, boolean operators, body + abstract indexed. vector: semantic search over the memory\'s vector index (requires vectorIndexEnabled). hybrid: keyword + vector fused by reciprocal-rank fusion (RRF, k=60). regex: POSIX regular-expression match over node text. On a non-indexed memory, mode:hybrid degrades to keyword-only and emits a [degraded:no_vector_index] note. Spec 033 + cor:api:090.'),
@@ -1282,11 +1282,12 @@ export function createMcpServerInstance(
       allMemories: z.boolean().optional().describe('Search across ALL memories you can read — the org-wide "does anyone know about X?" probe (stemmed + relevance-ranked in keyword mode). The explicit, self-documenting form of omitting a memory scope. Mutually exclusive with memoryUrn / memoryUrns.'),
       isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
-      limit: z.number().optional().describe('Max results (default 50)'),
+      limit: z.number().optional().describe('Max results (default 10 for a query; 50 for survey mode "*"/""). Raise it if the top hits do not cover what you need.'),
+      minScore: z.number().optional().describe('Absolute relevance floor: drop hits scoring below this. Scores are NOT comparable across modes — keyword ranks run roughly 0..a-few, vector cosine similarity is 0..1, hybrid is a small RRF fraction — so read the (score …) values in a first unfiltered call, then set a floor for the mode in use. Prefer this (or a narrower query) over reading a long tail of weak hits. Returns fewer hits, never weaker ones; does not apply to survey mode.'),
       expand: z.number().int().min(0).max(3).optional().describe('Append undirected graph neighbors (all edge types) within depth N AFTER the ranked hits, unscored. Default 0 (no expansion). Max 3. Useful for context-stuffing — the ranked nodes plus their immediate graph context in one tool call. Spec 033 FR-020.'),
       granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),
     },
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, brief, limit, expand, granularity }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, brief, limit, minScore, expand, granularity }) => {
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -1494,7 +1495,12 @@ export function createMcpServerInstance(
             },
             expand: expand ?? undefined,
             granularity: granularity ?? undefined,
-            limit: limit ?? 50,
+            // #497 — a query defaults to a tight page (10); an agent iterating
+            // search shouldn't pay 50 full abstracts of context per call. Survey
+            // mode ("*"/"") is a deliberate full listing, so it keeps 50. The
+            // minScore floor never applies to survey (those hits are unscored).
+            limit: limit ?? (isSurvey ? 50 : 10),
+            minScore: isSurvey ? undefined : minScore,
           },
           ctx,
         );
@@ -1574,6 +1580,16 @@ export function createMcpServerInstance(
       const note: string | null = noteLines.length ? noteLines.join('\n') : null;
 
       // ── Node rendering ─────────────────────────────────────────────────────
+      // #497 — the top score of the result set, used to show each hit's score as
+      // a fraction of the best hit. Relative score is mode-independent (it
+      // normalizes within one result set), so an agent can judge "is anything
+      // here actually strong?" without knowing each mode's absolute score scale.
+      // Unscored expand-neighbours carry score null and are excluded.
+      const scores = (result.hits ?? [])
+        .map((h) => h.score)
+        .filter((s): s is number => typeof s === 'number');
+      const topScore = scores.length ? Math.max(...scores) : null;
+
       const renderHit = async (hit: {
         node: {
           id: string;
@@ -1596,10 +1612,15 @@ export function createMcpServerInstance(
         const n = hit.node;
         const urn = await nodeUrn(n.loc, n.memoryId);
         const score = hit.score;
+        // #497: show the score relative to the top hit (mode-independent signal).
+        const relStr =
+          score != null && topScore != null && topScore > 0
+            ? `, ${Math.round((score / topScore) * 100)}% of top`
+            : '';
         // #322: surface the stable PK so callers can reference this node by id.
         const parts = [
           score != null
-            ? `- **${urn}** (id: ${n.id}) — ${n.name}  (score ${score.toFixed(3)})`
+            ? `- **${urn}** (id: ${n.id}) — ${n.name}  (score ${score.toFixed(3)}${relStr})`
             : `- **${urn}** (id: ${n.id}) — ${n.name}`,
         ];
         // Spec 033 FR-023 — `Source: abstract-stale` on a ranked hit whose stored
@@ -1647,8 +1668,31 @@ export function createMcpServerInstance(
         const baseMsg = `No nodes found matching "${safeQuery}".`;
         return textResult(note ? `${note}\n\n${baseMsg}` : baseMsg);
       }
+
+      // #497 — "weak results" heuristic. When several scored hits all sit in a
+      // narrow band just below the top (the weakest is still a large fraction of
+      // the best), the ranking failed to single out a clear match — the classic
+      // "the answer isn't here, but the search dumped 50 plausible-looking rows
+      // anyway" failure. Flag it so an agent can rule the query out without
+      // reading the whole tail. Advisory only: it annotates, never drops (that's
+      // what minScore is for). The band is measured over the shown scored hits,
+      // and relative (fraction of top), so it's sound across every mode.
+      let weakNote: string | null = null;
+      if (scores.length >= 5 && topScore != null && topScore > 0) {
+        const lo = Math.min(...scores);
+        const relLo = lo / topScore;
+        if (relLo >= 0.6) {
+          weakNote =
+            `Note: these ${scores.length} hits sit in a narrow score band ` +
+            `(${lo.toFixed(3)}–${topScore.toFixed(3)}; the weakest is ${Math.round(relLo * 100)}% of the top), ` +
+            `so the ranking did not single out a clear best match — what you're looking for may not be present. ` +
+            `Verify the top hits directly, or try a narrower query / different mode before trusting the full list. [weak_results]`;
+        }
+      }
+
       const body = `Found ${lines.length} node(s):\n\n${lines.join('\n')}`;
-      return textResult(note ? `${note}\n\n${body}` : body);
+      const notes = [note, weakNote].filter(Boolean).join('\n\n');
+      return textResult(notes ? `${notes}\n\n${body}` : body);
     },
   );
 
