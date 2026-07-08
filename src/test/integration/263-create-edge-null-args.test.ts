@@ -59,8 +59,8 @@ describe('createEdge endpoint refs accept PK or URN (#322)', () => {
     const edge = await resolvers.Mutation.createEdge(
       {},
       {
-        sourceNodeId: `urn:node:${memUrn}:a`,
-        targetNodeId: `urn:node:${memUrn}:b`,
+        sourceRef: `urn:node:${memUrn}:a`,
+        targetRef: `urn:node:${memUrn}:b`,
         name: 'routes-to',
       },
       adminCtx(),
@@ -72,7 +72,7 @@ describe('createEdge endpoint refs accept PK or URN (#322)', () => {
   it('accepts a mix of PK source + URN target', async () => {
     const edge = await resolvers.Mutation.createEdge(
       {},
-      { sourceNodeId: nodeA.id, targetNodeId: `urn:node:${memUrn}:b`, name: 'mixed' },
+      { sourceRef: nodeA.id, targetRef: `urn:node:${memUrn}:b`, name: 'mixed' },
       adminCtx(),
     );
     expect(edge.sourceId).toBe(nodeA.id);
@@ -83,7 +83,7 @@ describe('createEdge endpoint refs accept PK or URN (#322)', () => {
     await expect(
       resolvers.Mutation.createEdge(
         {},
-        { sourceNodeId: `urn:node:${memUrn}:nope`, targetNodeId: nodeB.id, name: 'x' },
+        { sourceRef: `urn:node:${memUrn}:nope`, targetRef: nodeB.id, name: 'x' },
         adminCtx(),
       ),
     ).rejects.toThrow(/Source node not found/);
@@ -97,7 +97,7 @@ describe('createEdge endpoint refs accept PK or URN (#322)', () => {
     await expect(
       resolvers.Mutation.createEdge(
         {},
-        { sourceNodeId: nodeA.id, targetNodeId: nodeB.id, name: 'nope' },
+        { sourceRef: nodeA.id, targetRef: nodeB.id, name: 'nope' },
         outsider,
       ),
     ).rejects.toThrow(/no write access/);
@@ -110,8 +110,8 @@ describe('createEdge with explicit-null args (CLI shape, #263)', () => {
     const edge = await resolvers.Mutation.createEdge(
       {},
       {
-        sourceNodeId: nodeA.id,
-        targetNodeId: nodeB.id,
+        sourceRef: nodeA.id,
+        targetRef: nodeB.id,
         name: 'routes-to',
         condition: null,
         priority: null,
@@ -132,8 +132,8 @@ describe('createEdge with explicit-null args (CLI shape, #263)', () => {
     const edge = await resolvers.Mutation.createEdge(
       {},
       {
-        sourceNodeId: nodeA.id,
-        targetNodeId: nodeB.id,
+        sourceRef: nodeA.id,
+        targetRef: nodeB.id,
         name: 'routes-to',
         priority: 7,
         condition,

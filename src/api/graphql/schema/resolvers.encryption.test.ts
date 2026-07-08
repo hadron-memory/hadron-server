@@ -243,7 +243,7 @@ describe('createNode with encryption', () => {
     // Merge a patch: overwrites `city`, adds `zip`, preserves `age`.
     const merged = await resolvers.Mutation.updateNodeData(
       {},
-      { nodeId: node.id, data: { city: 'Seattle', zip: '98101' } },
+      { nodeRef: node.id, data: { city: 'Seattle', zip: '98101' } },
       sessionCtx,
     );
     expect(merged.data).toEqual({ age: 42, city: 'Seattle', zip: '98101' });
@@ -340,7 +340,7 @@ describe('createNode with encryption', () => {
     await expect(
       resolvers.Mutation.updateNodeData(
         {},
-        { nodeId: node.id, data: { b: 2 } },
+        { nodeRef: node.id, data: { b: 2 } },
         appCtx(secretApp.id, { roles: ['ADMIN'] }),
       ),
     ).rejects.toThrow(/SESSION_EXPIRED/);

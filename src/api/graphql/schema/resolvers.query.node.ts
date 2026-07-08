@@ -192,7 +192,7 @@ export const nodeQueries = {
     //      across every readable memory with the #335 ambiguity guard.
     node: async (
       _: unknown,
-      { ref, memory: memoryRef, raw }: { ref: string; memory?: string | null; raw?: boolean | null },
+      { ref, memoryRef, raw }: { ref: string; memoryRef?: string | null; raw?: boolean | null },
       ctx: Context,
     ) => {
       const access = await memoryAccessFilter(ctx);

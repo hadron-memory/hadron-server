@@ -2913,7 +2913,7 @@ export function createMcpServerInstance(
       try {
         const node = await resolvers.Mutation.updateNodeData(
           {},
-          { nodeId: rawNodeUrn, data },
+          { nodeRef: rawNodeUrn, data },
           ctx,
         );
         const urn = await nodeUrn(node.loc, node.memoryId);

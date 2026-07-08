@@ -2246,19 +2246,19 @@ export const typeDefs = `#graphql
       1. a primary key (the unambiguous read — the old nodeById),
       2. a fully-qualified node URN (\`hrn:node:<org>::<memory>::<loc>\`,
          legacy \`urn:\` scheme accepted),
-      3. a bare loc — scoped by 'memory' (an ID or URN) when given; unscoped,
+      3. a bare loc — scoped by 'memoryRef' (an ID or URN) when given; unscoped,
          it resolves across every readable memory and a cross-memory loc
          collision is REJECTED with extensions.code AMBIGUOUS_NODE_LOC
          (listing the candidate memoryIds) rather than silently returning
          one (#335). An unprefixed 3+-segment ref whose first two segments
          name a readable memory is treated as form 2 (a full URN); pass
-         'memory' to force loc interpretation.
+         'memoryRef' to force loc interpretation.
 
     raw: true skips Mustache template compilation. Soft-deleted nodes do not
     resolve. Access: the caller's readable-memory set (same gate the old
     queries used); denied and missing are both null.
     """
-    node(ref: ID!, memory: ID, raw: Boolean): Node
+    node(ref: ID!, memoryRef: ID, raw: Boolean): Node
 
     # Render one node to a portable, self-contained file (spec cor:api).
     # full: true (default) returns the CANONICAL form — byte-identical to
@@ -2807,28 +2807,32 @@ export const typeDefs = `#graphql
     # top-level keys are written over the node's existing 'data' (the patch
     # wins on key collision); keys the patch doesn't mention are preserved.
     # If the node has no 'data' yet, the supplied JSON becomes its 'data'
-    # verbatim. 'data' must be a JSON object (not an array or scalar). 'nodeId'
+    # verbatim. 'data' must be a JSON object (not an array or scalar). 'nodeRef'
     # is a node ID or fully-qualified URN. Honors the same single-write
     # invariants as updateNode (per-memory write auth, encryption, version
     # history, git mirror). Returns the updated node.
-    updateNodeData(nodeId: ID!, data: JSON!, reason: String): Node!
+    updateNodeData(nodeRef: ID!, data: JSON!, reason: String): Node!
 
     # Bulk search-and-replace text across selected nodes (literal or regex).
     # Honors per-memory write auth, encryption, version history, abstract
     # staleness, and re-embedding. Supports dryRun preview.
     searchReplaceInNodes(input: SearchReplaceInNodesInput!): SearchReplaceResult!
 
-    # Delete a node by loc within a specific memory. Soft-delete by default
-    # (sets deletedAt; the node disappears from reads, matching the
-    # hadron_delete_node MCP tool). Pass hard: true to remove the row entirely
-    # (cascades edges + NodeVersion via FK) — irreversible. #391.
-    deleteNode(loc: String!, memoryId: String!, hard: Boolean): Boolean!
+    # Delete a node identified by 'nodeRef' (a node ID or fully-qualified URN;
+    # #542). Soft-delete by default (sets deletedAt; the node disappears from
+    # reads, matching the hadron_delete_node MCP tool). Pass hard: true to
+    # remove the row entirely (cascades edges + NodeVersion via FK) —
+    # irreversible. #391. A re-delete of an already soft-deleted node is
+    # idempotent (the ref resolves through the tombstone).
+    deleteNode(nodeRef: String!, hard: Boolean): Boolean!
 
     # Restore a node to a previous version (creates a new version snapshot first)
     restoreNodeVersion(versionId: ID!): Node!
 
-    # Move a node to a new loc, optionally across memories (keeps same id and all incoming edge references)
-    moveNode(from: String!, to: String!, memoryId: String!, targetMemoryId: String): Node!
+    # Move a node to a new loc, optionally across memories (keeps same id and
+    # all incoming edge references). 'memoryRef'/'targetMemoryRef' each accept a
+    # memory ID or URN (#542); 'from'/'to' are locs within them.
+    moveNode(from: String!, to: String!, memoryRef: String!, targetMemoryRef: String): Node!
 
     # Fold one node (source) into another (target), returning the updated
     # target. Per-field strategy: text fields (CONTENT/ABSTRACT/DESCRIPTION)
@@ -2860,10 +2864,10 @@ export const typeDefs = `#graphql
     #   non-nullable Int, so null is never a meaningful value for it.
     # Clients that serialize unset args as explicit nulls must omit them
     # instead, or they will clear stored conditions/data on update.
-    # #322: sourceNodeId/targetNodeId each accept an ID-shape PK (preferred —
+    # #322/#542: sourceRef/targetRef each accept an ID-shape PK (preferred —
     # immutable, so the edge survives a later move/rename) OR a fully-qualified
     # node URN. Resolved via resolveNodeRef.
-    createEdge(sourceNodeId: ID!, targetNodeId: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
+    createEdge(sourceRef: ID!, targetRef: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     updateEdge(edgeId: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeId: ID!): Boolean!
 

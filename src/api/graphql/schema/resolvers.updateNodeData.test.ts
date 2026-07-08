@@ -30,8 +30,8 @@ async function makeNode(loc: string, data: unknown | null) {
   });
 }
 
-const call = (nodeId: string, data: unknown, c: Context = ctx()) =>
-  resolvers.Mutation.updateNodeData({}, { nodeId, data } as never, c);
+const call = (nodeRef: string, data: unknown, c: Context = ctx()) =>
+  resolvers.Mutation.updateNodeData({}, { nodeRef, data } as never, c);
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -132,7 +132,7 @@ describe('updateNodeData — auth + versioning', () => {
     const node = await makeNode('n10', { a: 1 });
     await resolvers.Mutation.updateNodeData(
       {},
-      { nodeId: node.id, data: { b: 2 }, reason: 'restore data' } as never,
+      { nodeRef: node.id, data: { b: 2 }, reason: 'restore data' } as never,
       ctx(),
     );
     const versions = await db.nodeVersion.findMany({ where: { nodeId: node.id } });

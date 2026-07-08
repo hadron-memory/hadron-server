@@ -63,8 +63,8 @@ describe('#391 soft-deleted nodes excluded from read resolvers', () => {
   });
 
   it('node(ref: <loc>) returns null for a soft-deleted loc, the node for a live one', async () => {
-    expect(await Q.node(null, { ref: fx.deletedLoc, memory: fx.memoryId }, adminCtx())).toBeNull();
-    expect(await Q.node(null, { ref: fx.liveLoc, memory: fx.memoryId }, adminCtx())).not.toBeNull();
+    expect(await Q.node(null, { ref: fx.deletedLoc, memoryRef: fx.memoryId }, adminCtx())).toBeNull();
+    expect(await Q.node(null, { ref: fx.liveLoc, memoryRef: fx.memoryId }, adminCtx())).not.toBeNull();
   });
 
   it('nodeExport throws NOT_FOUND for a soft-deleted node', async () => {

@@ -668,7 +668,7 @@ export const nodeMutations = {
     // merged plaintext.
     updateNodeData: async (
       _: unknown,
-      { nodeId, data, reason }: { nodeId: string; data: unknown; reason?: string | null },
+      { nodeRef, data, reason }: { nodeRef: string; data: unknown; reason?: string | null },
       ctx: Context,
     ) => {
       // The patch must be a JSON object — the operation merges keys, so an
@@ -685,11 +685,11 @@ export const nodeMutations = {
       // relative URN propagates as UrnNotQualifiedError (spec 022).
       let resolvedId: string;
       try {
-        ({ id: resolvedId } = await resolveNodeRef(ctx.db, nodeId));
+        ({ id: resolvedId } = await resolveNodeRef(ctx.db, nodeRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${nodeId}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: nodeId },
+          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
           });
         }
         throw e;
@@ -703,8 +703,8 @@ export const nodeMutations = {
         select: { id: true, memoryId: true, deletedAt: true },
       });
       if (!meta || meta.deletedAt) {
-        throw new GraphQLError(`Node not found: "${nodeId}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: nodeId },
+        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
         });
       }
       await requireMemoryWriteAccess(ctx, meta.memoryId);
@@ -730,8 +730,8 @@ export const nodeMutations = {
       });
       if (!row) {
         // Lost a race with a concurrent delete between the two reads.
-        throw new GraphQLError(`Node not found: "${nodeId}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: nodeId },
+        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
         });
       }
       const fields: { abstract: null; content: null; data: unknown } = {
@@ -1132,25 +1132,48 @@ export const nodeMutations = {
 
     deleteNode: async (
       _: unknown,
-      { loc: rawLoc, memoryId, hard }: { loc: string; memoryId: string; hard?: boolean | null },
+      { nodeRef, hard }: { nodeRef: string; hard?: boolean | null },
       ctx: Context,
     ) => {
-      const loc = parseUrnInput(rawLoc).value;
-      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-      await requireMemoryWriteAccess(ctx, resolvedMemoryId);
-      const where = { loc_memoryId: { loc, memoryId: resolvedMemoryId } };
+      // #542 — a single 'nodeRef' (ID or fully-qualified URN) identifies the
+      // node, resolved by the shared resolveNodeRef. includeDeleted so a
+      // re-delete of an already soft-deleted node stays idempotent (its ref
+      // still resolves through the tombstone) — the old loc+memoryId path hit
+      // the row directly regardless of deletedAt, so this preserves behavior.
+      let resolvedId: string;
+      try {
+        ({ id: resolvedId } = await resolveNodeRef(ctx.db, nodeRef, undefined, {
+          includeDeleted: true,
+        }));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) {
+          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          });
+        }
+        throw e;
+      }
+      const node = await ctx.db.node.findUnique({
+        where: { id: resolvedId },
+        select: { memoryId: true },
+      });
+      if (!node) {
+        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+        });
+      }
+      await requireMemoryWriteAccess(ctx, node.memoryId);
       try {
         if (hard) {
           // Irreversible row delete; edges + NodeVersion cascade via FK.
-          await ctx.db.node.delete({ where });
+          await ctx.db.node.delete({ where: { id: resolvedId } });
         } else {
           // #391: soft-delete by default, mirroring the hadron_delete_node MCP
           // tool — set deletedAt/deletedBy so the node drops out of every read
           // (nodes/nodeById/node/resolveUrn) but stays recoverable. Attribute to
           // the app for app-key callers (userId/clientId unset), then clientId.
           await ctx.db.node.update({
-            where,
+            where: { id: resolvedId },
             data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null },
           });
         }
@@ -1159,8 +1182,8 @@ export const nodeMutations = {
         // typed NODE_NOT_FOUND instead of leaking as INTERNAL_SERVER_ERROR
         // (mirrors moveNode; issue #100).
         if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
-          throw new GraphQLError(`Node "${loc}" not found in this memory`, {
-            extensions: { code: 'NODE_NOT_FOUND', loc, memoryId: resolvedMemoryId },
+          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
           });
         }
         throw e;
@@ -1172,9 +1195,9 @@ export const nodeMutations = {
 
     createEdge: async (
       _: unknown,
-      { sourceNodeId, targetNodeId, name, loc, description, isRunnable, condition, priority, data }: {
-        sourceNodeId: string;
-        targetNodeId: string;
+      { sourceRef, targetRef, name, loc, description, isRunnable, condition, priority, data }: {
+        sourceRef: string;
+        targetRef: string;
         // GraphQL nullable args: non-JS clients send explicit nulls.
         name?: string | null;
         loc?: string | null;
@@ -1203,17 +1226,17 @@ export const nodeMutations = {
       let resolvedSourceId: string;
       let resolvedTargetId: string;
       try {
-        ({ id: resolvedSourceId } = await resolveNodeRef(ctx.db, sourceNodeId));
+        ({ id: resolvedSourceId } = await resolveNodeRef(ctx.db, sourceRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
-          throw new GraphQLError(`Source node not found: "${sourceNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+          throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
         throw e;
       }
       try {
-        ({ id: resolvedTargetId } = await resolveNodeRef(ctx.db, targetNodeId));
+        ({ id: resolvedTargetId } = await resolveNodeRef(ctx.db, targetRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
-          throw new GraphQLError(`Target node not found: "${targetNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+          throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
         throw e;
       }
       // Spec 037: an edge carries a memory-unique `loc` (its identity + URN
@@ -1223,8 +1246,8 @@ export const nodeMutations = {
         ctx.db.node.findUnique({ where: { id: resolvedSourceId }, select: { loc: true, memoryId: true } }),
         ctx.db.node.findUnique({ where: { id: resolvedTargetId }, select: { loc: true, memoryId: true } }),
       ]);
-      if (!src) throw new GraphQLError(`Source node not found: "${sourceNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
-      if (!tgt) throw new GraphQLError(`Target node not found: "${targetNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+      if (!src) throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+      if (!tgt) throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
 
       // PR-348 review (Gemini, critical): the global CONTRIBUTOR role gate
       // above is not memory-scoped. Mirror the MCP addEdge posture (and the
@@ -1235,7 +1258,7 @@ export const nodeMutations = {
       // miss so it can't be used as a cross-memory existence oracle.
       await requireMemoryWriteAccess(ctx, src.memoryId);
       if (!(await canReadMemory(ctx.db, ctx, tgt.memoryId))) {
-        throw new GraphQLError(`Target node not found: "${targetNodeId}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
       try {
@@ -1341,14 +1364,14 @@ export const nodeMutations = {
 
     // ── Asset upload (spec 004-asset-upload) ───────────────────────────
 
-    moveNode: async (_: unknown, { from: rawFrom, to: rawTo, memoryId, targetMemoryId }: { from: string; to: string; memoryId: string; targetMemoryId?: string }, ctx: Context) => {
+    moveNode: async (_: unknown, { from: rawFrom, to: rawTo, memoryRef, targetMemoryRef }: { from: string; to: string; memoryRef: string; targetMemoryRef?: string }, ctx: Context) => {
       const from = parseUrnInput(rawFrom).value;
       const to = parseUrnInput(rawTo).value;
-      // 007-entity-id-or-urn: memoryId and targetMemoryId may be IDs,
+      // 007-entity-id-or-urn: memoryRef and targetMemoryRef may be IDs,
       // bare URNs, or prefixed URNs.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-      const resolvedTargetMemoryId = targetMemoryId
-        ? (await resolveMemoryRef(ctx.db, targetMemoryId)).id
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+      const resolvedTargetMemoryId = targetMemoryRef
+        ? (await resolveMemoryRef(ctx.db, targetMemoryRef)).id
         : undefined;
       await requireMemoryWriteAccess(ctx, resolvedMemoryId);
       if (resolvedTargetMemoryId && resolvedTargetMemoryId !== resolvedMemoryId) {

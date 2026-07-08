@@ -267,43 +267,53 @@ describe('Mutation.createNode access control', () => {
 
 describe('Mutation.deleteNode access control', () => {
   it('App with write access can delete', async () => {
+    const target = await db.node.findFirstOrThrow({
+      where: { loc: 'org-a.repo.nodeA', memoryId: graphA.id },
+    });
     const result = await resolvers.Mutation.deleteNode(
       null,
-      { loc: 'org-a.repo.nodeA', memoryId: graphA.id },
+      { nodeRef: target.id },
       ctx({ appId: appContributor.id }),
     );
     expect(result).toBe(true);
   });
 
   it('App without write access is rejected', async () => {
+    const target = await db.node.findFirstOrThrow({
+      where: { loc: 'org-a.repo.nodeA', memoryId: graphA.id },
+    });
     await expect(
       resolvers.Mutation.deleteNode(
         null,
-        { loc: 'org-a.repo.nodeA', memoryId: graphA.id },
+        { nodeRef: target.id },
         ctx({ appId: appReader.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
   it('App cannot delete nodes in inaccessible memories', async () => {
+    const target = await db.node.findFirstOrThrow({
+      where: { loc: 'org-b.repo.nodeB', memoryId: graphB.id },
+    });
     await expect(
       resolvers.Mutation.deleteNode(
         null,
-        { loc: 'org-b.repo.nodeB', memoryId: graphB.id },
+        { nodeRef: target.id },
         ctx({ appId: appContributor.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
 
-  // 007-entity-id-or-urn: deleteNode accepts memoryId as ID or URN.
-  it('accepts a URN as memoryId input', async () => {
+  // 007-entity-id-or-urn (#542): deleteNode's nodeRef also accepts a
+  // fully-qualified node URN (`<memory-urn>:<loc>`), not just a bare ID.
+  it('accepts a node URN as nodeRef input', async () => {
     const memoryRow = await db.memory.findUniqueOrThrow({
       where: { id: graphA.id },
       select: { urn: true },
     });
     const result = await resolvers.Mutation.deleteNode(
       null,
-      { loc: 'org-a.repo.nodeA', memoryId: memoryRow.urn },
+      { nodeRef: `${memoryRow.urn}:org-a.repo.nodeA` },
       ctx({ appId: appContributor.id }),
     );
     expect(result).toBe(true);
@@ -318,7 +328,7 @@ describe('Mutation.moveNode access control', () => {
   it('App with write access can move', async () => {
     const node = await resolvers.Mutation.moveNode(
       null,
-      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedNode', memoryId: graphA.id },
+      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedNode', memoryRef: graphA.id },
       ctx({ appId: appContributor.id }),
     );
     expect(node.loc).toBe('org-a.repo.movedNode');
@@ -328,7 +338,7 @@ describe('Mutation.moveNode access control', () => {
     await expect(
       resolvers.Mutation.moveNode(
         null,
-        { from: 'org-b.repo.nodeB', to: 'org-b.repo.moved', memoryId: graphB.id },
+        { from: 'org-b.repo.nodeB', to: 'org-b.repo.moved', memoryRef: graphB.id },
         ctx({ appId: appContributor.id }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -342,7 +352,7 @@ describe('Mutation.moveNode access control', () => {
     });
     const node = await resolvers.Mutation.moveNode(
       null,
-      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedByUrn', memoryId: memoryRow.urn },
+      { from: 'org-a.repo.nodeA', to: 'org-a.repo.movedByUrn', memoryRef: memoryRow.urn },
       ctx({ appId: appContributor.id }),
     );
     expect(node.loc).toBe('org-a.repo.movedByUrn');
@@ -354,7 +364,7 @@ describe('Mutation.moveNode access control', () => {
     await expect(
       resolvers.Mutation.moveNode(
         null,
-        { from: 'org-a.repo.doesNotExist', to: 'org-a.repo.target', memoryId: graphA.id },
+        { from: 'org-a.repo.doesNotExist', to: 'org-a.repo.target', memoryRef: graphA.id },
         ctx({ appId: appContributor.id }),
       ),
     ).rejects.toMatchObject({
@@ -521,9 +531,12 @@ describe('global ADMIN bypass', () => {
   });
 
   it('ADMIN can delete any node', async () => {
+    const target = await db.node.findFirstOrThrow({
+      where: { loc: 'org-b.repo.nodeB', memoryId: graphB.id },
+    });
     const result = await resolvers.Mutation.deleteNode(
       null,
-      { loc: 'org-b.repo.nodeB', memoryId: graphB.id },
+      { nodeRef: target.id },
       ctx({ clientId: 'github:admin', userId: 'admin-id', roles: ['ADMIN'] }),
     );
     expect(result).toBe(true);
