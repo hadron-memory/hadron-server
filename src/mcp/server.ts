@@ -1278,7 +1278,7 @@ export function createMcpServerInstance(
       mode: z.enum(['keyword', 'vector', 'hybrid', 'regex']).optional().describe('keyword (default): full-text search — stemmed, relevance-ranked, boolean operators, body + abstract indexed. vector: semantic search over the memory\'s vector index (requires vectorIndexEnabled). hybrid: keyword + vector fused by reciprocal-rank fusion (RRF, k=60). regex: POSIX regular-expression match over node text. On a non-indexed memory, mode:hybrid degrades to keyword-only and emits a [degraded:no_vector_index] note. Spec 033 + cor:api:090.'),
       parentRel: z.string().optional().describe('Scope search to this subtree'),
       memoryUrn: z.string().optional().describe('Scope search to a single memory (fully-qualified URN). Omit to search all memories you can read — see allMemories.'),
-      memoryUrns: z.array(z.string()).optional().describe('Scope search to this SET of memories (each a fully-qualified memory URN, org::memory) — a targeted multi-memory search. Mutually exclusive with memoryUrn and allMemories.'),
+      memoryUrns: z.array(z.string()).min(1).optional().describe('Scope search to this SET of memories (each a fully-qualified memory URN, org::memory) — a targeted multi-memory search. Must be non-empty (for "everything", use allMemories). Mutually exclusive with memoryUrn and allMemories.'),
       allMemories: z.boolean().optional().describe('Search across ALL memories you can read — the org-wide "does anyone know about X?" probe (stemmed + relevance-ranked in keyword mode). The explicit, self-documenting form of omitting a memory scope. Mutually exclusive with memoryUrn / memoryUrns.'),
       isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
@@ -1402,28 +1402,49 @@ export function createMcpServerInstance(
       // Scope to a SET of memories (#498). Each URN gets the SAME gates as the
       // single-memory path (qualification + canReadMemory + session boundary),
       // so absence and denial stay indistinguishable per the memoryUrn contract.
+      // Dedup + resolve in parallel (#567 review, Gemini); surface the first
+      // failure in input order.
       if (memoryUrns && memoryUrns.length > 0) {
-        const ids: string[] = [];
-        for (const urn of memoryUrns) {
-          try {
-            assertFullyQualifiedUrn(urn, 'memory');
-          } catch (e) {
-            if (e instanceof UrnNotQualifiedError) return textResult(e.message);
-            throw e;
-          }
-          const mem = await resolveMemoryByUrn(urn);
-          if (
-            !mem ||
-            !(await canReadMemory(db, auth, mem.id)) ||
-            (sessionMemoryIds && !sessionMemoryIds.has(mem.id))
-          ) {
-            return textResult(
-              `Memory not found or invalid: '${urn}'. Use hadron_list_memories to see what is available.`,
-            );
-          }
-          ids.push(mem.id);
-        }
-        filterMemoryIds = ids;
+        const resolved = await Promise.all(
+          [...new Set(memoryUrns)].map(async (urn): Promise<{ id: string } | { error: string }> => {
+            try {
+              assertFullyQualifiedUrn(urn, 'memory');
+            } catch (e) {
+              if (e instanceof UrnNotQualifiedError) return { error: e.message };
+              throw e;
+            }
+            const mem = await resolveMemoryByUrn(urn);
+            if (
+              !mem ||
+              !(await canReadMemory(db, auth, mem.id)) ||
+              (sessionMemoryIds && !sessionMemoryIds.has(mem.id))
+            ) {
+              return {
+                error: `Memory not found or invalid: '${urn}'. Use hadron_list_memories to see what is available.`,
+              };
+            }
+            return { id: mem.id };
+          }),
+        );
+        const bad = resolved.find((r): r is { error: string } => 'error' in r);
+        if (bad) return textResult(bad.error);
+        filterMemoryIds = resolved.map((r) => (r as { id: string }).id);
+      }
+
+      // Explicit org-wide scope (#498). Materialize the readable set so
+      // SYSTEM-class memories are included: findNodes hides class='system' on a
+      // scope-less broad search, but explicit ids bypass that (#567 review,
+      // Codex), so a bare undefined here would silently drop the agent's own
+      // system memory despite "every memory you can read". accessibleMemoryIds
+      // is null for see-all admins → materialize every live memory so "all"
+      // really means all. The resolver re-gates whatever ids we pass, so this
+      // cannot broaden beyond the caller's actual reach.
+      if (allMemories) {
+        filterMemoryIds =
+          accessibleMemoryIds ??
+          (
+            await db.memory.findMany({ where: { deletedAt: null }, select: { id: true } })
+          ).map((m) => m.id);
       }
 
       // Scope to subtree if parentRel provided. #188: same BOLA shape as the

@@ -897,6 +897,25 @@ describe('#498 — hadron_find_nodes multi-memory scope', () => {
     expect(text).not.toContain('zeb:a');
   });
 
+  it('allMemories includes system-class memories (explicit ids bypass the broad class filter)', async () => {
+    // #567 review (Codex): a scope-less broad findNodes hides class='system';
+    // allMemories must materialize the readable set so the agent's own system
+    // memory is not silently dropped from an "everything you can read" probe.
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'truth-org' } });
+    const sysMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'truth-org::sys', name: 'sys', class: 'system' },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: sysMem.id, loc: 'sys:z', name: 'Zebraxyz system node', tags: [] },
+    });
+    const srv = createTestableMcpServer(adminAuth());
+    const withAll = await srv.callToolText('hadron_find_nodes', { query: 'zebraxyz', allMemories: true });
+    expect(withAll).toContain('sys:z');
+    // A scope-less broad search (no allMemories) excludes the system memory.
+    const broad = await srv.callToolText('hadron_find_nodes', { query: 'zebraxyz' });
+    expect(broad).not.toContain('sys:z');
+  });
+
   it('memoryUrns gates each entry by read access (denied set member → not found)', async () => {
     const { a } = await twoMemoriesWithKeyword();
     // A second org's memory the viewer can't read.
