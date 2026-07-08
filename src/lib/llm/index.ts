@@ -18,8 +18,11 @@ import {
   generateText as aiGenerateText,
   generateObject as aiGenerateObject,
   jsonSchema,
+  tool as aiTool,
+  stepCountIs,
   type LanguageModel,
 } from 'ai';
+import { AuthorFailError, type RunToolDef, type RunToolContext } from '../runner/tools/types.js';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
@@ -290,6 +293,161 @@ async function extractViaJsonPrompt(
     provider: out.provider,
     model: out.model,
   };
+}
+
+// ── Tool loop (plan-tools §4, phase 1) ──────────────────────────────────────
+
+/** Spike-verified 2026-07-07 (_hs_local/spike-tool-loop.mjs): bedrock tool-
+ *  calling is healthy — the #535 hang is generateObject-specific. glm's
+ *  openai-compatible shim is untested ⇒ excluded (D-TL-8). */
+const TOOL_LOOP_PROVIDERS = new Set(['anthropic', 'openai', 'bedrock']);
+
+const DEFAULT_TOOL_STEP_CAP = (() => {
+  const raw = Number(process.env.RUN_MAX_TOOL_STEPS_PER_HOP);
+  return Number.isFinite(raw) && raw > 0 ? raw : 8; // D-TL-4
+})();
+
+export interface ToolCallRecord {
+  name: string;
+  ok: boolean;
+  ms: number;
+}
+
+export interface LlmToolLoopResult extends LlmResult {
+  toolCalls: ToolCallRecord[];
+}
+
+/** The D-TL-3 gate said no: policy, cancellation, or exhausted action budget. */
+export class ToolDeniedError extends Error {
+  constructor(readonly tool: string) {
+    super(`Tool "${tool}" denied (policy, cancellation, or action budget).`);
+    this.name = 'ToolDeniedError';
+  }
+}
+
+/** A handler threw: terminal TOOL_FAILED, never retried (D-TL-6 — tool side
+ *  effects are not known-idempotent, so redelivery is unsafe). */
+export class ToolExecutionError extends Error {
+  constructor(
+    readonly tool: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(`Tool "${tool}" failed: ${message}`, options);
+    this.name = 'ToolExecutionError';
+  }
+}
+
+export interface ToolLoopOpts {
+  /** Max LLM steps for this hop (D-TL-4). Default RUN_MAX_TOOL_STEPS_PER_HOP (8). */
+  stepCap?: number;
+  /** Per-call governance (D-TL-3): checkActivation('tool.<name>'). False = deny. */
+  onToolCall?: (name: string, cost: 0 | 1) => Promise<boolean>;
+  /** Handler context (trail logging; kernel extends per phase). */
+  toolCtx: RunToolContext;
+}
+
+/**
+ * Bounded multi-step tool loop — the third LLM entry point beside
+ * generateText/generateExtraction: same provider dispatch, same token
+ * accounting (summed across steps), same transient classification for
+ * provider errors raised BEFORE any tool executed.
+ *
+ * Error contract (plan-tools D-TL-6): AuthorFailError and ToolDeniedError
+ * and ToolExecutionError propagate to the caller un-wrapped — the kernel
+ * maps them to AUTHOR_FAIL / ACTIVATION_DENIED / TOOL_FAILED. They are
+ * captured OUTSIDE the SDK's own error wrapping via a closure, so SDK
+ * repackaging can never swallow them.
+ */
+export async function generateWithTools(
+  resolved: ResolvedAiConfig,
+  req: LlmRequest,
+  toolDefs: readonly RunToolDef[],
+  opts: ToolLoopOpts,
+): Promise<LlmToolLoopResult> {
+  const { provider, model } = resolved.config;
+  if (!TOOL_LOOP_PROVIDERS.has(provider)) {
+    // Loud, non-transient: silently running a tools-node WITHOUT its tools
+    // would change semantics (D-TL-8).
+    throw new LlmInvocationError(
+      `Provider "${provider}" is not verified for the run tool loop (NO_TOOL_SUPPORT).`,
+      provider,
+      false,
+    );
+  }
+
+  const toolCalls: ToolCallRecord[] = [];
+  // Our terminal errors, captured before the SDK can wrap them.
+  let fatal: Error | null = null;
+
+  const sdkTools = Object.fromEntries(
+    toolDefs.map((def) => [
+      def.name,
+      aiTool({
+        description: def.description,
+        inputSchema: jsonSchema<Record<string, unknown>>(def.inputSchema as never),
+        execute: async (args: Record<string, unknown>) => {
+          const started = Date.now();
+          try {
+            if (opts.onToolCall && !(await opts.onToolCall(def.name, def.cost))) {
+              throw new ToolDeniedError(def.name);
+            }
+            const result = await def.execute(opts.toolCtx, args ?? {});
+            toolCalls.push({ name: def.name, ok: true, ms: Date.now() - started });
+            return result;
+          } catch (err) {
+            toolCalls.push({ name: def.name, ok: false, ms: Date.now() - started });
+            // instanceof, not name-matching: a non-Error rejection with a
+            // spoofed `name` must not ride the passthrough (PR-540 Copilot).
+            fatal =
+              err instanceof AuthorFailError || err instanceof ToolDeniedError
+                ? err
+                : new ToolExecutionError(
+                    def.name,
+                    String((err as Error)?.message ?? err),
+                    { cause: err },
+                  );
+            throw fatal; // abort the SDK loop
+          }
+        },
+      }),
+    ]),
+  );
+
+  try {
+    const out = await aiGenerateText({
+      model: modelFor(resolved),
+      ...(req.system ? { system: req.system } : {}),
+      prompt: req.prompt,
+      tools: sdkTools,
+      stopWhen: stepCountIs(opts.stepCap ?? DEFAULT_TOOL_STEP_CAP),
+      ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
+    });
+    const usage = out.totalUsage ?? out.usage; // summed across steps (spike-pinned)
+    return {
+      text: out.text,
+      tokensIn: usage?.inputTokens ?? 0,
+      tokensOut: usage?.outputTokens ?? 0,
+      provider,
+      model,
+      toolCalls,
+    };
+  } catch (err) {
+    if (fatal) throw fatal; // our terminal errors win over SDK wrapping
+    if (err instanceof LlmInvocationError) throw err;
+    // Transient (⇒ bus-redelivery retry) ONLY while no SIDE-EFFECTING tool
+    // has executed (D-TL-6, refined per PR-540 Gemini): cost-0 tools are
+    // retry-safe — reads are pure, and hadron_log writes only to the
+    // in-memory hop element, which a transient reset never persisted.
+    const costOf = new Map(toolDefs.map((t) => [t.name, t.cost]));
+    const sideEffectRan = toolCalls.some((c) => c.ok && (costOf.get(c.name) ?? 1) > 0);
+    throw new LlmInvocationError(
+      `LLM tool loop failed (${provider}/${model}): ${String((err as Error)?.message ?? err)}`,
+      provider,
+      isTransient(err) && !sideEffectRan,
+      { cause: err },
+    );
+  }
 }
 
 export async function generateText(
