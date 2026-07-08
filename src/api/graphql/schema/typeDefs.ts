@@ -2824,7 +2824,7 @@ export const typeDefs = `#graphql
     # remove the row entirely (cascades edges + NodeVersion via FK) —
     # irreversible. #391. A re-delete of an already soft-deleted node is
     # idempotent (the ref resolves through the tombstone).
-    deleteNode(nodeRef: String!, hard: Boolean): Boolean!
+    deleteNode(nodeRef: ID!, hard: Boolean): Boolean!
 
     # Restore a node to a previous version (creates a new version snapshot first)
     restoreNodeVersion(versionId: ID!): Node!
@@ -2832,7 +2832,7 @@ export const typeDefs = `#graphql
     # Move a node to a new loc, optionally across memories (keeps same id and
     # all incoming edge references). 'memoryRef'/'targetMemoryRef' each accept a
     # memory ID or URN (#542); 'from'/'to' are locs within them.
-    moveNode(from: String!, to: String!, memoryRef: String!, targetMemoryRef: String): Node!
+    moveNode(from: String!, to: String!, memoryRef: ID!, targetMemoryRef: ID): Node!
 
     # Fold one node (source) into another (target), returning the updated
     # target. Per-field strategy: text fields (CONTENT/ABSTRACT/DESCRIPTION)
