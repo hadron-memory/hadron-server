@@ -10,6 +10,7 @@ export interface AuthContext {
   sessionId?: string;      // Session.id — set when operating inside an active session
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
+  apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (not JWTs)
 }
 
 // App Keys use a distinct prefix so the middleware can route them without
@@ -193,6 +194,11 @@ async function resolveUserApiKey(
     userId: user.id,
     clientId,
     roles: validatedRoles,
+    // The specific credential presented on this request (issue #562). Lets the
+    // authContext query name the exact key (label, keyPreview, lastUsedAt,
+    // revokedAt). JWT-authenticated users have no UserApiKey, so this stays
+    // unset on that path.
+    apiKeyId: userApiKey.id,
   };
 }
 

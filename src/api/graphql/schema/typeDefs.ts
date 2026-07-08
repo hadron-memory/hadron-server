@@ -984,6 +984,45 @@ export const typeDefs = `#graphql
     rawKey: String!
   }
 
+  # The kind of principal a credential resolved to (issue #562). USER covers
+  # both JWT sessions and hdr_user_ personal API keys; APP is an hdr_app_ key.
+  # AGENT is reserved for a future agent-credential principal — no auth path
+  # produces it today.
+  enum PrincipalType {
+    USER
+    APP
+    AGENT
+  }
+
+  # The resolved principal for the credential presented on THIS request
+  # (issue #562). Exposes the AuthContext the server already resolves per
+  # request (cor:aut:020:02) read-only, so any surface (CLI, portal) can
+  # validate a token and name the exact credential without per-client hacks.
+  #
+  # Security posture (held deliberately):
+  #   - Current-request only. There is intentionally no query that takes an
+  #     arbitrary token as an argument — that would be a token oracle. The
+  #     caller must possess the credential, exactly as today.
+  #   - No reason-leak. A credential that does not resolve yields a null
+  #     authContext (Query field), identically for revoked / never-existed /
+  #     malformed. Once a credential HAS resolved (you authenticated as it),
+  #     surfacing active-vs-revoked via apiKey.revokedAt is fine.
+  type AuthContext {
+    # Which kind of credential authenticated this request.
+    principalType: PrincipalType!
+    # The authenticated User — populated for USER principals (JWT or
+    # hdr_user_ key), null for App keys.
+    user: User
+    # App.id — populated for APP principals (hdr_app_ key).
+    appId: ID
+    # Reserved for a future agent-credential principal; always null today.
+    agentId: ID
+    # The specific UserApiKey presented — populated only when the request
+    # authenticated via an hdr_user_ key (its id, label, keyPreview,
+    # createdAt, lastUsedAt, revokedAt). Null for JWT sessions and App keys.
+    apiKey: UserApiKey
+  }
+
   # Returned once at App creation / regenerateAppKey — the raw key is never stored
   type AppCreated {
     app: App!
@@ -2441,6 +2480,16 @@ export const typeDefs = `#graphql
 
     # Current authenticated user
     me: User
+
+    """
+    The resolved principal for the credential on THIS request (issue #562).
+    Credential-type-agnostic: works for personal API keys, JWT sessions, and
+    App keys alike — unlike me, which is null for a valid App credential.
+    Returns null when the presented credential does not resolve (identically
+    for revoked / never-existed / malformed — never a token oracle). See the
+    AuthContext type for the full security posture.
+    """
+    authContext: AuthContext
 
     """
     Uniform paginated organization list (#473) — replaces organizations +
