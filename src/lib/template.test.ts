@@ -2,11 +2,21 @@ import { describe, it, expect, vi } from 'vitest';
 import { compileTemplate } from './template.js';
 
 // Mock PrismaClient
-function mockDb(nodes: Array<{ loc: string; data?: unknown; content?: string }>) {
+function mockDb(
+  nodes: Array<{ loc: string; data?: unknown; content?: string; deletedAt?: Date | null }>,
+) {
   return {
     node: {
       findFirst: vi.fn(async ({ where }: any) => {
-        return nodes.find((n) => n.loc === where.loc) ?? null;
+        return (
+          nodes.find((n) => {
+            if (n.loc !== where.loc) return false;
+            // Honor Prisma's `deletedAt: null` soft-delete filter the same way
+            // the real query would: a row with a non-null deletedAt is excluded.
+            if (where.deletedAt === null && n.deletedAt != null) return false;
+            return true;
+          }) ?? null
+        );
       }),
     },
   } as any;
@@ -148,6 +158,33 @@ describe('compileTemplate', () => {
       mockDb([]),
       {},
     );
+    expect(result).toBe(' rest');
+  });
+
+  // Regression: issue #543 — soft-deleted nodes must not resolve during
+  // compile. `node(ref:)` promises "Soft-deleted nodes do not resolve"; the
+  // Mustache compile path has to honor the same contract.
+  it('ignores a soft-deleted default data node', async () => {
+    const db = mockDb([
+      { loc: 'data', data: { name: 'Ghost' }, deletedAt: new Date('2026-07-07') },
+    ]);
+    const result = await compileTemplate('Hello, {{name}}!', null, 'mem1', db, {});
+    expect(result).toBe('Hello, !');
+  });
+
+  it('ignores a soft-deleted cross-node reference', async () => {
+    const db = mockDb([
+      { loc: 'settings', data: { theme: 'dark' }, deletedAt: new Date('2026-07-07') },
+    ]);
+    const result = await compileTemplate('Theme: {{settings.theme}}', null, 'mem1', db, {});
+    expect(result).toBe('Theme: ');
+  });
+
+  it('ignores a soft-deleted partial', async () => {
+    const db = mockDb([
+      { loc: 'greeting', content: 'Welcome!', deletedAt: new Date('2026-07-07') },
+    ]);
+    const result = await compileTemplate('{{> greeting}} rest', null, 'mem1', db, {});
     expect(result).toBe(' rest');
   });
 
