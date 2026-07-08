@@ -863,11 +863,17 @@ export async function installAgentIntoAppCore(
       extensions: { code: 'APP_UNINSTALLED', appId: resolvedAppId },
     });
   }
-  await requireOrgRole(ctx, app.organizationId, 'ADMIN');
-  // Agent must belong to the same org (same as pre-023 behavior).
+  // #551: installing is a member-level write on the App's org (CONTRIBUTOR+),
+  // not an ADMIN-only action — any org member who can author App config can
+  // install an Agent.
+  await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
   const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-  if (agent.organizationId !== app.organizationId) {
-    throw new GraphQLError('Agent must belong to the same organization as the App.', {
+  // #551: a foreign Agent may be installed cross-org WHEN it is PUBLIC (the
+  // marketplace / AgentOrgGrant path — the grant is auto-provisioned below).
+  // A non-PUBLIC agent still must belong to the App's own org (pre-023
+  // behavior — you can't reach into another org's private agents).
+  if (agent.organizationId !== app.organizationId && agent.visibility !== 'PUBLIC') {
+    throw new GraphQLError('Agent must belong to the same organization as the App, or be PUBLIC.', {
       extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
     });
   }
@@ -935,7 +941,9 @@ export async function uninstallAgentFromAppCore(
   const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appId);
   const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentId);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-  await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+  // #551: symmetric with install — a CONTRIBUTOR+ member of the App's org can
+  // uninstall an Agent (was ADMIN-only).
+  await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
   // Idempotent delete — `deleteMany` returns a count, never throws on
   // absent rows. The (App, Agent, *) memories persist as orphans per
   // spec 023 FR-005.

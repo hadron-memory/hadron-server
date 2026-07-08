@@ -754,49 +754,31 @@ export const typeResolvers = {
         where: { importedAgentId: a.id },
         orderBy: { position: 'asc' },
       }),
-    // Apps that deploy this Agent. Resolvable to ADMIN/OWNER of the
-    // Agent's owning org; everyone else gets an empty list.
-    apps: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) {
-        const member = await ctx.db.orgMember.findFirst({
-          where: {
-            organizationId: a.organizationId,
-            userId: ctx.userId ?? '',
-            deletedAt: null,
-            role: { in: ['ADMIN', 'OWNER'] },
-          },
-        });
-        if (!member) return [];
-      }
+    // #551 — no field-level admin gate. Reaching an Agent object already means
+    // the object-level read gate admitted the caller (agent(ref:) / publicAgents
+    // / resolveUrn): a PUBLIC agent is readable by anyone, a non-public one only
+    // by a member of its org. So every field below is visible to exactly that
+    // audience — a PUBLIC agent exposes its full install topology to any caller;
+    // a non-public agent exposes it to any member (not just ADMIN/OWNER, which
+    // is what the removed gate required). The gate lived here before there was a
+    // top-level agent read surface (Agent was only reachable by nesting under an
+    // org the caller already belonged to as ADMIN); the object gate now subsumes
+    // it. apps / appAgents that reference OTHER orgs' Apps are still filtered to
+    // live rows only.
+    apps: async (a: { id: string }, _: unknown, ctx: Context) =>
       // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. List Apps
       // that have this Agent installed.
-      return ctx.db.app.findMany({
+      ctx.db.app.findMany({
         where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
         orderBy: { createdAt: 'asc' },
-      });
-    },
+      }),
     appCount: async (a: { id: string }, _: unknown, ctx: Context) =>
       ctx.db.app.count({
         where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
       }),
-    // 023-app-shape US1: the AppAgent join rows where this Agent is
-    // installed. ADMIN/OWNER-gated like `apps` — non-admins of the
-    // Agent's owning org see an empty list.
-    appAgents: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) {
-        const member = await ctx.db.orgMember.findFirst({
-          where: {
-            organizationId: a.organizationId,
-            userId: ctx.userId ?? '',
-            deletedAt: null,
-            role: { in: ['ADMIN', 'OWNER'] },
-          },
-        });
-        if (!member) return [];
-      }
-      return ctx.db.appAgent.findMany({
+    // 023-app-shape US1: the AppAgent join rows where this Agent is installed.
+    appAgents: async (a: { id: string }, _: unknown, ctx: Context) =>
+      ctx.db.appAgent.findMany({
         where: {
           agentId: a.id,
           app: { deletedAt: null },
@@ -804,26 +786,12 @@ export const typeResolvers = {
         },
         orderBy: { createdAt: 'asc' },
         include: { app: true, agent: { include: AGENT_INCLUDE } },
-      });
-    },
-    orgGrants: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) {
-        const member = await ctx.db.orgMember.findFirst({
-          where: {
-            organizationId: a.organizationId,
-            userId: ctx.userId ?? '',
-            deletedAt: null,
-            role: { in: ['ADMIN', 'OWNER'] },
-          },
-        });
-        if (!member) return [];
-      }
-      return ctx.db.agentOrgGrant.findMany({
+      }),
+    orgGrants: async (a: { id: string }, _: unknown, ctx: Context) =>
+      ctx.db.agentOrgGrant.findMany({
         where: { agentId: a.id },
         orderBy: { createdAt: 'asc' },
-      });
-    },
+      }),
     // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
     urn: (a: { urn?: string | null }) => {
