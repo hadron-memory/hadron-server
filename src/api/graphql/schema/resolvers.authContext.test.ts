@@ -112,13 +112,20 @@ describe('Query.authContext', () => {
   });
 
   it('surfaces revokedAt once the credential has resolved (active-vs-revoked is fine post-auth)', async () => {
-    const key = await mintKey(user.id, { revokedAt: new Date() });
+    // A request only reaches here with ctx.apiKeyId set because the key was
+    // ACTIVE at auth time — resolveUserApiKey returns {} (unauthenticated)
+    // for an already-revoked key. So model revocation happening *after* the
+    // context is established: authenticate with the active key, then revoke
+    // it in the DB, then resolve apiKey — revokedAt is now observable, which
+    // is fine (you already authenticated as this credential).
+    const key = await mintKey(user.id);
     const src = await authContext(undefined, undefined, {
       db,
       userId: user.id,
       apiKeyId: key.id,
       roles: ['READER'],
     } as Context);
+    await db.userApiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
     const resolvedKey = await acApiKey(src!, undefined, { db } as Context);
     expect(resolvedKey!.revokedAt).not.toBeNull();
   });
