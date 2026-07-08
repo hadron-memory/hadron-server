@@ -27,8 +27,11 @@ import {
 export const agentQueries = {
     // #473 — the uniform single-agent read; the first top-level Agent query
     // (previously reachable only via Organization.agents / App.agents
-    // nesting). Gate mirrors resolveUrn's agent branch: member of the
-    // Agent's org or platform ADMIN/OWNER.
+    // nesting). Gate mirrors resolveUrn's agent branch: a PUBLIC agent
+    // resolves for any caller (#551 — marketplace discovery / share links),
+    // otherwise member of the Agent's org or platform ADMIN/OWNER. Field-level
+    // exposure stays slim for non-members (Agent.systemPrompt / memoryItems /
+    // imports are member-gated).
     agent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       let resolvedId: string;
       try {
@@ -46,8 +49,59 @@ export const agentQueries = {
         include: AGENT_INCLUDE,
       });
       if (!agent || agent.deletedAt) return null;
-      await requireOrgRole(ctx, agent.organizationId, 'READER');
+      // #551: PUBLIC visibility widens the READ gate to everyone (mirrors the
+      // memories PUBLIC carve-out, #362). Non-public falls through to the
+      // membership gate.
+      if (agent.visibility !== 'PUBLIC') {
+        await requireOrgRole(ctx, agent.organizationId, 'READER');
+      }
       return agent;
+    },
+
+    // #551 — the public-agent marketplace slice: ALL live PUBLIC agents,
+    // readable by ANY caller (member or not, authenticated or not), so an org
+    // can discover foreign public agents to subscribe to (008/009
+    // AgentOrgGrant; hadron-portal#486). Deliberately a SEPARATE query from the
+    // member-scoped agents() list so the cross-org widening is an explicit,
+    // bounded surface — never a side effect of a filter value on the default
+    // list (contrast memories(filter: { visibility: PUBLIC })). Field-level
+    // exposure is slim for non-members (Agent.systemPrompt / systemMemoryId /
+    // memoryItems / imports gates). filter.type narrows; filter.visibility is
+    // ignored (the slice is PUBLIC by definition).
+    publicAgents: async (
+      _: unknown,
+      {
+        filter,
+        limit,
+        offset,
+      }: {
+        filter?: { type?: string | null } | null;
+        limit?: number | null;
+        offset?: number | null;
+      },
+      ctx: Context,
+    ) => {
+      const take = clampListTake(limit);
+      const skip = Math.max(0, offset ?? 0);
+      const f = filter ?? {};
+      const where = {
+        visibility: 'PUBLIC' as never,
+        deletedAt: null,
+        ...(f.type ? { type: f.type as never } : {}),
+      };
+      const [total, items] = await Promise.all([
+        ctx.db.agent.count({ where }),
+        take === 0
+          ? Promise.resolve([])
+          : ctx.db.agent.findMany({
+              where,
+              include: AGENT_INCLUDE,
+              orderBy: [{ name: 'asc' }, { id: 'asc' }],
+              skip,
+              take,
+            }),
+      ]);
+      return { items, total };
     },
 
     // #473 — the uniform paginated agent list. Scope: Agents owned by the

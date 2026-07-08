@@ -124,10 +124,15 @@ export const nodeQueries = {
           }
           const agent = await ctx.db.agent.findUnique({
             where: { id },
-            select: { organizationId: true },
+            select: { organizationId: true, visibility: true },
           });
           if (!agent) return null;
-          if (!(await isOrgMember(agent.organizationId))) return null;
+          // #551: a PUBLIC agent resolves for any caller (marketplace share
+          // links), mirroring the agent(ref:) gate; otherwise fall back to the
+          // org-membership check.
+          if (agent.visibility !== 'PUBLIC' && !(await isOrgMember(agent.organizationId))) {
+            return null;
+          }
           return { kind: 'agent', id };
         }
         case 'app': {

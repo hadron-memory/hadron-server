@@ -1172,20 +1172,24 @@ export const typeDefs = `#graphql
     Apps that have this Agent installed (via the AppAgent join). After
     spec 023-app-shape, an App can install multiple Agents; this list
     contains every App where THIS Agent is one of the installed ones.
-    Resolvable to ADMIN/OWNER of the Agent's owning org; non-admins
-    see an empty list.
+    #551: these are OTHER tenants' App objects (whose keys/members are not
+    re-gated at the field level), so — unlike the Agent's own fields — this is
+    NOT public on a PUBLIC agent. Scoped to Apps in orgs the CALLER belongs to
+    (platform ADMIN/OWNER: all); a non-member gets an empty list.
     """
     apps: [App!]!
     """
     023-app-shape: the AppAgent join rows where this Agent is installed.
-    Use App.appAgents to get the join rows from the App side. Resolvable
-    to ADMIN/OWNER of the Agent's owning org.
+    Use App.appAgents to get the join rows from the App side. #551: same
+    caller-org scope as apps — never exposes a foreign org's App.
     """
     appAgents: [AppAgent!]!
+    "Adoption count. #551: the agent owning-org members' view (0 otherwise)."
     appCount: Int!
     """
-    Org grants for this Agent. Resolvable to ADMIN/OWNER of the Agent's
-    owning org only.
+    Org grants for this Agent (which orgs were granted it). #551: the agent's
+    customer list — visible to members of the Agent's owning org only (empty
+    otherwise), regardless of the agent's PUBLIC visibility.
     """
     orgGrants: [AgentOrgGrant!]!
     createdAt: String!
@@ -2542,6 +2546,22 @@ export const typeDefs = `#graphql
     limit: 0 -> count only.
     """
     agents(filter: AgentFilter, orgId: ID, limit: Int, offset: Int): AgentsPage!
+
+    """
+    #551 — the public-agent marketplace slice: every live PUBLIC agent,
+    readable by ANY caller (no membership required), so an org can discover
+    foreign public agents to subscribe to (008/009 AgentOrgGrant;
+    hadron-portal#486). Kept SEPARATE from agents() on purpose: agents() stays
+    bounded to the caller's own orgs, and the cross-org widening is this
+    explicit, paginated surface rather than a value in a filter.
+
+    filter.type narrows by AgentType; filter.visibility is IGNORED (the slice
+    is PUBLIC by definition). Field-level exposure is slim for non-members:
+    systemPrompt / systemMemoryId / memoryItems / imports / importedBy are
+    member/admin-gated (null / [] for outsiders). Name-ascending order
+    (id tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    """
+    publicAgents(filter: AgentFilter, limit: Int, offset: Int): AgentsPage!
     # 005-agent-subscription FR-005: AgentSubscriptions held by the
     # authenticated user. Read-only in v1.
     myAgentSubscriptions: [AgentSubscription!]!
