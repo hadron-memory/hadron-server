@@ -200,6 +200,38 @@ two-layer model without further setup:
   `src/integrations/db/client.ts` keeps these out of the auto-id-injection
   list — add new composite-PK models to `MODELS_WITHOUT_ID` there.
 
+## Authorization invariants
+
+Access-control bugs here are **cross-tenant leaks, not cosmetic**. When a change
+touches a read/list/resolve surface or an auth gate, hold these invariants —
+they are **first-class review criteria**, not "general security" to defer:
+
+- **Reuse the shared access gate; a bespoke per-resolver gate drifts.** Route
+  reads through `getAccessibleMemoryIds` / `memoryAccessFilter` / `requireOrgRole`
+  (or delegate to the resolver that already does). A hand-rolled admin-or-member
+  check falls out of sync with the shared predicates — `effectiveAccess` is the
+  tell (READ ✓ there but `Forbidden` in a per-kind query ⇒ the gate drifted). (#362)
+- **Honor every `visibility` value on every read surface.** If an entity's
+  visibility enum has `PUBLIC`, then `<entity>(ref:)`, the list query, and
+  `resolveUrn` must **all** honor it — the memory and agent surfaces stay in
+  parity rather than each hand-rolling a gate. (#362 / #551)
+- **Relaxing a read gate re-derives the whole field surface it admits.** A
+  GraphQL field that returns **another entity's object** hands the caller that
+  entity's field resolvers, which assume the *outer* query already authorized
+  them and do **not** re-check (`App.keys` / `App.members` don't). So widening a
+  parent's read gate (a `PUBLIC` branch, a cross-org list) silently exposes every
+  nested object reachable through it. Scope such fields to the caller's **own**
+  access (e.g. `getMemberOrgIds`) or return a sanitized projection; never lean on
+  the parent gate to protect a child entity's secrets. Distinguish the entity's
+  OWN data (may be public by design) from OTHER tenants' identity/secrets
+  (never). (#552)
+- **Revoked membership must not authorize.** Use `findFirst` + `deletedAt: null`
+  on the composite-PK `OrgMember` (a `findUnique` can't filter `deletedAt`), per
+  `requireOrgRole`. (PR #475)
+
+The Hadron review flow (`hadronmemory.com::hadron-server::review`) carries the
+runnable checklists for these; the `findings:` branch has the incidents.
+
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
