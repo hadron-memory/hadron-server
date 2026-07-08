@@ -12,6 +12,15 @@ the live multi-node runner (PRs #532/#535/#536/#537/#539) and the alpha flow-lab
 experiment that motivated it ("we will have to add structured tools to make this all
 useful — e.g. creating a Hadron node").
 
+**IMPLEMENTED 2026-07-08.** Phases 0–1: PR #540 (spike: bedrock tool-calling healthy —
+the #535 hang is generateObject-only; registry + hadron_log/hadron_fail +
+generateWithTools). Phases 2–3: PR #545 (kernel wiring, node tools with full MCP arg
+parity; review round added auth-before-probe on reads/creates + typed
+NoToolSupportError). Phase 4 validated live on alpha 0.0.406: the flow-lab urgent-triage
+branch created `triage:tasks:micromentor-search-outage` via hadron_create_node — gated,
+budgeted, on the hop trail. Remaining: phase 5 follow-ups (portal tool-picker note in
+#478, docs #112 addition, CLI surfacing).
+
 ---
 
 ## 1. Grounding — decided design this implements (do not re-decide)
