@@ -1558,7 +1558,7 @@ export const typeDefs = `#graphql
   # ── Spec 040 — headless agent runs (cor:agt:010) ──────────────────────────
 
   enum AppRunStatus { PENDING RUNNING COMPLETED FAILED TIMED_OUT CANCELLED }
-  enum AppRunTriggerKind { SCHEDULE WEBHOOK MANUAL INTEGRATION }
+  enum AppRunTriggerKind { SCHEDULE WEBHOOK MANUAL INTEGRATION SPAWN }
 
   # One headless run — the audit record AND (v1) the activation: policy
   # snapshot, live budgets (zeroing halts the run), lifecycle, trigger

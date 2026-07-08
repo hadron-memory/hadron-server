@@ -624,7 +624,9 @@ export const appRunQueries = {
       ...(status ? { status: status as never } : {}),
       // Fan-out children of one parent (#548; index from PR-547). Rides the
       // same org/app authorization — the org scope already applies above.
-      ...(parentRunId ? { parentRunId } : {}),
+      // Explicit null = top-level runs only; omitted = no filter (PR-550
+      // review, Gemini).
+      ...(parentRunId !== undefined ? { parentRunId } : {}),
     };
     const take = Math.min(Math.max(limit ?? 50, 1), 200);
     const [items, total] = await Promise.all([

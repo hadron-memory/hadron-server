@@ -28,7 +28,10 @@
  * server expose?", not "what release of the hadron-server repo am I
  * talking to?"
  */
-export const HADRON_SERVER_VERSION = '0.7.0';
+// 0.8.0: headless multi-node runs surface complete — AppRun.data/hops/spawn
+// on GraphQL, appRuns(parentRunId:), AppRunTriggerKind.SPAWN, run tools
+// (hadron_spawn / hadron_child_runs / node tools).
+export const HADRON_SERVER_VERSION = '0.8.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"
