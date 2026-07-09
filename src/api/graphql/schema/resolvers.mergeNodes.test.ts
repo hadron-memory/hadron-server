@@ -167,6 +167,77 @@ describe('mergeNodes — edges', () => {
     expect(await db.edge.count({ where: { OR: [{ sourceId: tgt.id }, { targetId: tgt.id }] } })).toBe(2);
   });
 
+  it('recomputes a re-homed edge loc from its new endpoints (#568 Q2)', async () => {
+    const src = await makeNode('src');
+    const tgt = await makeNode('tgt');
+    const other = await makeNode('other');
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: src.id, targetId: other.id, loc: 'src:rel:other', name: 'rel' },
+    });
+    await merge({ source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true });
+    const moved = await db.edge.findFirstOrThrow({ where: { sourceId: tgt.id, targetId: other.id } });
+    // loc no longer references the merged-away `src`; it reflects the new source.
+    expect(moved.loc).toBe('tgt:rel:other');
+  });
+
+  it('dedupes an equivalent edge B already has, instead of duplicating (#568 Q2)', async () => {
+    const src = await makeNode('src');
+    const tgt = await makeNode('tgt');
+    const other = await makeNode('other');
+    // Both A and B already point at `other` with the SAME name → equivalent.
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: src.id, targetId: other.id, loc: 'src:rel:other', name: 'rel' },
+    });
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: tgt.id, targetId: other.id, loc: 'tgt:rel:other', name: 'rel' },
+    });
+    await merge({ source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true });
+    // B keeps exactly ONE tgt→other:rel edge (A's re-homed duplicate dropped).
+    const tgtToOther = await db.edge.findMany({ where: { sourceId: tgt.id, targetId: other.id } });
+    expect(tgtToOther).toHaveLength(1);
+  });
+
+  it('keeps distinct-name edges to the same target (dedup is per name)', async () => {
+    const src = await makeNode('src');
+    const tgt = await makeNode('tgt');
+    const other = await makeNode('other');
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: src.id, targetId: other.id, loc: 'src:imports:other', name: 'imports' },
+    });
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: tgt.id, targetId: other.id, loc: 'tgt:depends:other', name: 'depends' },
+    });
+    await merge({ source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true });
+    // Different names → not equivalent → both survive on B.
+    const tgtToOther = await db.edge.findMany({ where: { sourceId: tgt.id, targetId: other.id } });
+    expect(tgtToOther.map((e) => e.name).sort()).toEqual(['depends', 'imports']);
+  });
+
+  it('handles an in-flight loc collision between two relocating edges (#568 Q2 / two-phase)', async () => {
+    const src = await makeNode('src');
+    const tgt = await makeNode('tgt');
+    const x = await makeNode('x');
+    const y = await makeNode('y');
+    // E1 re-homes to loc `tgt:r:x`. E2's CURRENT loc is authored to be exactly
+    // `tgt:r:x` — so re-pointing E1 before E2 would transiently collide on
+    // (loc, memoryId). The two-phase staging (park on temp locs first) must
+    // make the merge succeed regardless of order.
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: src.id, targetId: x.id, loc: 'src:r:x', name: 'r' },
+    });
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: src.id, targetId: y.id, loc: 'tgt:r:x', name: 'r' },
+    });
+
+    await merge({ source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true });
+
+    const out = await db.edge.findMany({ where: { sourceId: tgt.id }, orderBy: { loc: 'asc' } });
+    expect(out.map((e) => `${e.targetId}@${e.loc}`)).toEqual([
+      `${x.id}@tgt:r:x`,
+      `${y.id}@tgt:r:y`,
+    ]);
+  });
+
   it('does not touch edges when EDGES is not included', async () => {
     const src = await makeNode('src');
     const tgt = await makeNode('tgt');
