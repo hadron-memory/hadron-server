@@ -1355,19 +1355,39 @@ export const typeDefs = `#graphql
     createdAt: String!
   }
 
-  # Microsoft Exchange connection for an organization (OAuth delegated).
+  # A connected email mailbox (identity record). Provider state lives in the
+  # provider capability tool (hadrontool-ms-exchange, #396); mail operations
+  # route through the tool. Mail ops are OWNER-ONLY (only userId may operate
+  # the mailbox); list/delete stay org-ADMIN management operations.
   type ExchangeConnection {
     id: ID!
     organizationId: String!
     userId: String!
     mailboxEmail: String!
     displayName: String
+    # Email provider backing this connection ('ms-exchange' today).
+    provider: String!
     syncEnabled: Boolean!
     syncStatus: SyncStatus!
     lastSyncAt: String
     lastError: String
     createdAt: String!
     updatedAt: String!
+  }
+
+  # Provider-neutral flag state (spec 002) — Graph's tri-state mapped to a
+  # neutral vocabulary so a future Gmail tool can map its own subset.
+  enum EmailFlag {
+    FLAGGED
+    NONE
+    COMPLETE
+  }
+
+  # Result of emailSaveDraft: the provider-side draft (it lives in the
+  # mailbox's Drafts folder, not in any platform table — spec 002 US5).
+  type EmailDraftInfo {
+    draftId: ID!
+    conversationId: ID
   }
 
   type ExchangeMessage {
@@ -3284,6 +3304,38 @@ export const typeDefs = `#graphql
     testExchangeConnection(id: ID!): Boolean!
     exchangeReply(connectionId: ID!, messageId: ID!, body: String!): Boolean!
     exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
+
+    """
+    Save a draft in the mailbox's own Drafts folder (spec 002 US5): either a
+    reply-draft (replyToMessageId) or a fresh draft (to + subject). Owner-only.
+    idempotencyKey makes retries safe (at-least-once callers).
+    """
+    emailSaveDraft(
+      connectionRef: ID!
+      replyToMessageId: ID
+      to: [String!]
+      subject: String
+      bodyHtml: String!
+      idempotencyKey: String
+    ): EmailDraftInfo!
+
+    "Update a provider-side draft's body. Owner-only."
+    emailUpdateDraft(connectionRef: ID!, draftId: ID!, bodyHtml: String!): Boolean!
+
+    "Send a provider-side draft. Owner-only; idempotencyKey makes retries safe."
+    emailSendDraft(connectionRef: ID!, draftId: ID!, idempotencyKey: String): Boolean!
+
+    "Delete a message (provider trash semantics). Owner-only."
+    emailDeleteMessage(connectionRef: ID!, messageId: ID!): Boolean!
+
+    "Mark a message read or unread (default read). Owner-only."
+    emailMarkRead(connectionRef: ID!, messageId: ID!, isRead: Boolean): Boolean!
+
+    "Flag, unflag, or complete a message (default FLAGGED). Owner-only."
+    emailFlagMessage(connectionRef: ID!, messageId: ID!, flag: EmailFlag): Boolean!
+
+    "Set the categories (color labels) on a message. Owner-only."
+    emailCategorizeMessage(connectionRef: ID!, messageId: ID!, categories: [String!]!): Boolean!
 
     # ── Chat API ──────────────────────────────────────────────────────
     """

@@ -2,7 +2,6 @@
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
-import { decryptToken } from '../../../lib/tokenCrypto.js';
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
 import {
   AiServiceConfigNotFoundError,
@@ -998,19 +997,46 @@ export function deriveChatTitle(
 // encryptToken/decryptToken moved to src/lib/tokenCrypto.ts (spec 036) so
 // the AI-config lib and this resolver layer share one implementation.
 
-export async function getExchangeRefreshToken(
+/**
+ * Load an email connection and enforce the shared access gate for MAIL
+ * OPERATIONS (#396, decided 2026-07-08): OWNER-ONLY — only the connection's
+ * owning user may operate the mailbox. Replaces the org-READER
+ * getExchangeRefreshToken gate (tokens now live in the provider tool, and a
+ * mailbox is personal authority, not org-readable). Deliberately ONE
+ * function so the future AgentEmailGrant/assertGrant swap (spec 002 US3)
+ * happens in one place — never hand-roll a per-resolver connection gate.
+ * Connection MANAGEMENT (list, delete) keeps its org-ADMIN gates; those are
+ * administration, not mail operations.
+ */
+export async function requireEmailConnection(
   ctx: Context,
-  connectionId: string,
-): Promise<{ refreshToken: string; connection: any }> {
-  const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({
-    where: { id: connectionId },
+  connectionRef: string,
+): Promise<{
+  id: string;
+  provider: string;
+  toolConnectionId: string;
+  organizationId: string;
+  userId: string;
+  mailboxEmail: string;
+}> {
+  // findFirst (not findUnique) so deletedAt filters in the query — the
+  // revoked-membership pattern (PR #475).
+  const connection = await ctx.db.exchangeConnection.findFirst({
+    where: { id: connectionRef, deletedAt: null },
   });
-  if (connection.deletedAt) throw new Error('Connection not found');
-  await requireOrgRole(ctx, connection.organizationId, 'READER');
-  return {
-    refreshToken: decryptToken(connection.refreshTokenEncrypted),
-    connection,
-  };
+  if (!connection) throw new Error('Connection not found');
+  if (!ctx.userId || ctx.userId !== connection.userId) {
+    // Owner-only: other users (org admins included) and App-key principals
+    // are denied for mail operations.
+    throw new Error('Forbidden');
+  }
+  if (!connection.toolConnectionId) {
+    throw new GraphQLError(
+      'This mailbox connection has not been migrated to the email tool yet — reconnect the mailbox or run the token transfer.',
+      { extensions: { code: 'EMAIL_CONNECTION_NOT_MIGRATED' } },
+    );
+  }
+  return { ...connection, toolConnectionId: connection.toolConnectionId };
 }
 
 // ---------------------------------------------------------------------------

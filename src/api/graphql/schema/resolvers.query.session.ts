@@ -7,10 +7,8 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import {
-  listInboxMessages,
-  listFolders,
-} from '../../../integrations/exchange/exchange.js';
+import { GraphQLError } from 'graphql';
+import { runEmailOperation, type ToolEmailFolder, type ToolEmailMessage } from '../../../lib/emailClient.js';
 import {
   type Context,
   requireRole,
@@ -18,7 +16,7 @@ import {
   getAccessibleMemoryIds,
   sessionScopeFilter,
   SESSION_INCLUDE,
-  getExchangeRefreshToken,
+  requireEmailConnection,
 } from './resolvers.helpers.js';
 
 export const sessionQueries = {
@@ -209,24 +207,51 @@ export const sessionQueries = {
       { connectionId, top, filter }: { connectionId: string; top?: number; filter?: string },
       ctx: Context,
     ) => {
-      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
-      const result = await listInboxMessages(refreshToken, { top: top ?? 25, filter: filter ?? undefined });
-      return result.data.map((m) => ({
+      const connection = await requireEmailConnection(ctx, connectionId);
+      // The legacy `filter` arg carried a raw Graph OData string — a
+      // provider leak the neutral tool surface (spec 002) doesn't accept.
+      // The one shape the portal ever sent is translated; anything else is a
+      // typed error rather than a silently-ignored filter.
+      const normalizedFilter = filter?.trim().toLowerCase();
+      if (normalizedFilter && normalizedFilter !== 'isread eq false') {
+        throw new GraphQLError('Raw provider filters are no longer supported; use unread-only.', {
+          extensions: { code: 'EMAIL_FILTER_UNSUPPORTED', filter },
+        });
+      }
+      const { messages } = await runEmailOperation<{ messages: ToolEmailMessage[] }>(
+        connection.provider,
+        'list-messages',
+        {
+          connectionId: connection.toolConnectionId,
+          top: top ?? 25,
+          ...(normalizedFilter ? { unreadOnly: true } : {}),
+        },
+      );
+      return messages.map((m) => ({
         id: m.id,
         subject: m.subject,
-        from: m.from?.emailAddress?.address ?? null,
-        receivedDateTime: m.receivedDateTime,
+        from: m.from?.address ?? null,
+        receivedDateTime: m.receivedAt,
         isRead: m.isRead,
-        bodyPreview: m.bodyPreview,
+        bodyPreview: m.snippet,
         body: m.body?.content ?? null,
         hasAttachments: m.hasAttachments,
       }));
     },
 
     exchangeFolders: async (_: unknown, { connectionId }: { connectionId: string }, ctx: Context) => {
-      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
-      const result = await listFolders(refreshToken);
-      return result.data;
+      const connection = await requireEmailConnection(ctx, connectionId);
+      const { folders } = await runEmailOperation<{ folders: ToolEmailFolder[] }>(
+        connection.provider,
+        'list-folders',
+        { connectionId: connection.toolConnectionId },
+      );
+      return folders.map((f) => ({
+        id: f.id,
+        displayName: f.name,
+        totalItemCount: f.totalCount,
+        unreadItemCount: f.unreadCount,
+      }));
     },
 };
 

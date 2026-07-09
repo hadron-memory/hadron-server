@@ -29,17 +29,12 @@ import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
-import {
-  listInboxMessages,
-  replyToMessage,
-  moveMessage,
-  extractErrorMessage,
-} from '../../../integrations/exchange/exchange.js';
+import { deleteToolConnection, runEmailOperation } from '../../../lib/emailClient.js';
 import {
   type Context,
   requireOrgRole,
   SESSION_INCLUDE,
-  getExchangeRefreshToken,
+  requireEmailConnection,
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
@@ -564,20 +559,28 @@ export const sessionMutations = {
         where: { id },
         data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
       });
+      // Tear down the provider tool's side (token + Graph subscriptions) —
+      // best-effort; the tool's renewal worker skips dead connections anyway.
+      if (connection.toolConnectionId) {
+        await deleteToolConnection(connection.provider, connection.toolConnectionId);
+      }
       return true;
     },
 
     testExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const { refreshToken } = await getExchangeRefreshToken(ctx, id);
+      const connection = await requireEmailConnection(ctx, id);
       try {
-        await listInboxMessages(refreshToken, { top: 1 });
+        await runEmailOperation(connection.provider, 'list-messages', {
+          connectionId: connection.toolConnectionId,
+          top: 1,
+        });
         await ctx.db.exchangeConnection.update({
           where: { id },
           data: { syncStatus: 'OK', lastError: null, lastSyncAt: new Date() },
         });
         return true;
       } catch (err: unknown) {
-        const errMsg = extractErrorMessage(err);
+        const errMsg = err instanceof Error ? err.message : String(err);
         await ctx.db.exchangeConnection.update({
           where: { id },
           data: { syncStatus: 'ERROR', lastError: errMsg },
@@ -591,8 +594,12 @@ export const sessionMutations = {
       { connectionId, messageId, body }: { connectionId: string; messageId: string; body: string },
       ctx: Context,
     ) => {
-      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
-      await replyToMessage(refreshToken, messageId, body);
+      const connection = await requireEmailConnection(ctx, connectionId);
+      await runEmailOperation(connection.provider, 'reply-to-message', {
+        connectionId: connection.toolConnectionId,
+        messageId,
+        bodyHtml: body,
+      });
       return true;
     },
 
@@ -601,8 +608,148 @@ export const sessionMutations = {
       { connectionId, messageId, folderId }: { connectionId: string; messageId: string; folderId: string },
       ctx: Context,
     ) => {
-      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
-      await moveMessage(refreshToken, messageId, folderId);
+      const connection = await requireEmailConnection(ctx, connectionId);
+      await runEmailOperation(connection.provider, 'move-message', {
+        connectionId: connection.toolConnectionId,
+        messageId,
+        destinationFolderId: folderId,
+      });
+      return true;
+    },
+
+    // ── spec 002 email operations (provider-neutral names) ─────────────
+    // The drafts/flag/read-status capabilities the ms-exchange tool added.
+    // All owner-only via requireEmailConnection; `idempotencyKey` rides
+    // through to the tool's reservation-based replay (at-least-once callers).
+    // The legacy exchange* names above stay as portal-compatible shims until
+    // the portal migrates to this surface (#396 follow-up).
+
+    emailSaveDraft: async (
+      _: unknown,
+      {
+        connectionRef,
+        replyToMessageId,
+        to,
+        subject,
+        bodyHtml,
+        idempotencyKey,
+      }: {
+        connectionRef: string;
+        replyToMessageId?: string | null;
+        to?: string[] | null;
+        subject?: string | null;
+        bodyHtml: string;
+        idempotencyKey?: string | null;
+      },
+      ctx: Context,
+    ) => {
+      const connection = await requireEmailConnection(ctx, connectionRef);
+      return runEmailOperation<{ draftId: string; conversationId: string | null }>(
+        connection.provider,
+        'save-draft',
+        {
+          connectionId: connection.toolConnectionId,
+          ...(replyToMessageId ? { replyToMessageId } : {}),
+          ...(to?.length ? { to } : {}),
+          ...(subject != null ? { subject } : {}),
+          bodyHtml,
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+        },
+      );
+    },
+
+    emailUpdateDraft: async (
+      _: unknown,
+      { connectionRef, draftId, bodyHtml }: { connectionRef: string; draftId: string; bodyHtml: string },
+      ctx: Context,
+    ) => {
+      const connection = await requireEmailConnection(ctx, connectionRef);
+      await runEmailOperation(connection.provider, 'update-draft', {
+        connectionId: connection.toolConnectionId,
+        draftId,
+        bodyHtml,
+      });
+      return true;
+    },
+
+    emailSendDraft: async (
+      _: unknown,
+      {
+        connectionRef,
+        draftId,
+        idempotencyKey,
+      }: { connectionRef: string; draftId: string; idempotencyKey?: string | null },
+      ctx: Context,
+    ) => {
+      const connection = await requireEmailConnection(ctx, connectionRef);
+      await runEmailOperation(connection.provider, 'send-draft', {
+        connectionId: connection.toolConnectionId,
+        draftId,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+      });
+      return true;
+    },
+
+    emailDeleteMessage: async (
+      _: unknown,
+      { connectionRef, messageId }: { connectionRef: string; messageId: string },
+      ctx: Context,
+    ) => {
+      const connection = await requireEmailConnection(ctx, connectionRef);
+      await runEmailOperation(connection.provider, 'delete-message', {
+        connectionId: connection.toolConnectionId,
+        messageId,
+      });
+      return true;
+    },
+
+    emailMarkRead: async (
+      _: unknown,
+      { connectionRef, messageId, isRead }: { connectionRef: string; messageId: string; isRead?: boolean | null },
+      ctx: Context,
+    ) => {
+      const connection = await requireEmailConnection(ctx, connectionRef);
+      await runEmailOperation(connection.provider, 'mark-read', {
+        connectionId: connection.toolConnectionId,
+        messageId,
+        isRead: isRead ?? true,
+      });
+      return true;
+    },
+
+    emailFlagMessage: async (
+      _: unknown,
+      {
+        connectionRef,
+        messageId,
+        flag,
+      }: { connectionRef: string; messageId: string; flag?: 'FLAGGED' | 'NONE' | 'COMPLETE' | null },
+      ctx: Context,
+    ) => {
+      const connection = await requireEmailConnection(ctx, connectionRef);
+      await runEmailOperation(connection.provider, 'flag-message', {
+        connectionId: connection.toolConnectionId,
+        messageId,
+        flag: (flag ?? 'FLAGGED').toLowerCase(),
+      });
+      return true;
+    },
+
+    emailCategorizeMessage: async (
+      _: unknown,
+      {
+        connectionRef,
+        messageId,
+        categories,
+      }: { connectionRef: string; messageId: string; categories: string[] },
+      ctx: Context,
+    ) => {
+      const connection = await requireEmailConnection(ctx, connectionRef);
+      await runEmailOperation(connection.provider, 'categorize-message', {
+        connectionId: connection.toolConnectionId,
+        messageId,
+        categories,
+      });
       return true;
     },
 

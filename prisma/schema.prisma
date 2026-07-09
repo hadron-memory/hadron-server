@@ -1755,9 +1755,10 @@ model PendingSetup {
 }
 
 /// A linked Microsoft Exchange / Outlook mailbox for an
-/// Organization-scoped user. Used by the email-ingestion pipeline to
-/// pull message bodies into memory nodes. `refreshTokenEncrypted` is
-/// AES-256-GCM-encrypted under HADRON_ENCRYPTION_KEY.
+/// A connected email mailbox (identity record). Provider state — refresh
+/// tokens, Graph subscriptions — lives in the provider capability tool
+/// (hadrontool-ms-exchange, #396); mail operations route through
+/// src/lib/emailClient.ts using `toolConnectionId`.
 model ExchangeConnection {
   id                    String     @id @default(cuid())
   organizationId        String     @map("organization_id")
@@ -1766,8 +1767,16 @@ model ExchangeConnection {
   /// unique.
   mailboxEmail          String     @map("mailbox_email")
   displayName           String?    @map("display_name")
-  /// AES-256-GCM-encrypted MS Graph refresh token.
-  refreshTokenEncrypted String     @map("refresh_token_encrypted")
+  /// Email provider backing this connection — the emailClient dispatch key
+  /// (#396: one capability tool per provider; 'ms-exchange' today).
+  provider              String     @default("ms-exchange")
+  /// The provider tool's connection id. NULL only for legacy rows whose
+  /// token hasn't been transferred yet (src/admin/transfer-exchange-tokens.ts).
+  toolConnectionId      String?    @map("tool_connection_id")
+  /// LEGACY (#396): AES-256-GCM-encrypted MS Graph refresh token, kept (NULL
+  /// for new rows) only as the rollback path until the one-time core→tool
+  /// transfer is verified; a follow-up migration drops it.
+  refreshTokenEncrypted String?    @map("refresh_token_encrypted")
   /// Soft toggle — operator can pause sync without removing the
   /// connection.
   syncEnabled           Boolean    @default(true) @map("sync_enabled")

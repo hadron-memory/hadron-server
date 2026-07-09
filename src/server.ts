@@ -55,6 +55,7 @@ import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js'
 import { makeProdRunDeps } from './jobs/appRunDeps.js';
 import { startSchedulerLoop } from './jobs/scheduler.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
+import { mountEmailEventRoutes } from './api/emailEvents.js';
 
 export async function createServer(): Promise<Express> {
   const app = express();
@@ -948,47 +949,60 @@ export async function createServer(): Promise<Express> {
     }
 
     try {
-      const { exchangeMicrosoftCode, fetchMicrosoftProfile } = await import('./integrations/exchange/exchange.js');
+      // #396: core does NOT exchange the code — the provider tool holds the
+      // client secret. Forward the code (with the SAME redirect URI the
+      // authorize URL carried); the tool exchanges it, derives the mailbox
+      // identity (ID-token claims first — personal accounts may fail Graph
+      // /me — then the profile), stores the encrypted refresh token, and
+      // returns the identity. Core stores only that identity.
+      const { getMicrosoftRedirectUri } = await import('./integrations/exchange/auth.js');
+      const { createToolConnection, deleteToolConnection } = await import('./lib/emailClient.js');
 
-      // Exchange code for tokens
-      const tokenRes = await exchangeMicrosoftCode(code);
+      const identity = await createToolConnection('ms-exchange', {
+        code,
+        redirectUri: getMicrosoftRedirectUri(),
+      });
 
-      // Fetch user's Microsoft profile to get their email
-      const profile = await fetchMicrosoftProfile(tokenRes.access_token);
-      const mailboxEmail = profile.mail || profile.userPrincipalName;
-
-      // Encrypt and store the refresh token
-      const { createCipheriv, randomBytes } = await import('crypto');
-      const encKey = Buffer.from(process.env.HADRON_ENCRYPTION_KEY ?? '', 'hex');
-      function encrypt(plaintext: string): string {
-        const iv = randomBytes(12);
-        const cipher = createCipheriv('aes-256-gcm', encKey, iv);
-        const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-        const tag = cipher.getAuthTag();
-        return Buffer.concat([iv, tag, encrypted]).toString('base64');
+      // Reconnecting an existing mailbox mints a NEW tool connection; tear
+      // down the superseded one so it doesn't keep a live token +
+      // subscriptions on the tool side.
+      const existing = await db.exchangeConnection.findUnique({
+        where: {
+          organizationId_mailboxEmail: {
+            organizationId: pending.orgId,
+            mailboxEmail: identity.mailboxEmail,
+          },
+        },
+        select: { toolConnectionId: true, provider: true },
+      });
+      if (existing?.toolConnectionId && existing.toolConnectionId !== identity.id) {
+        await deleteToolConnection(existing.provider, existing.toolConnectionId);
       }
 
-      // Upsert the exchange connection
       await db.exchangeConnection.upsert({
         where: {
           organizationId_mailboxEmail: {
             organizationId: pending.orgId,
-            mailboxEmail,
+            mailboxEmail: identity.mailboxEmail,
           },
         },
         create: {
           organizationId: pending.orgId,
           userId: pending.userId,
-          mailboxEmail,
-          displayName: profile.displayName,
-          refreshTokenEncrypted: encrypt(tokenRes.refresh_token),
+          mailboxEmail: identity.mailboxEmail,
+          displayName: identity.displayName,
+          provider: identity.provider,
+          toolConnectionId: identity.id,
           syncStatus: 'OK',
           lastSyncAt: new Date(),
           createdBy: pending.userId,
         },
         update: {
-          refreshTokenEncrypted: encrypt(tokenRes.refresh_token),
-          displayName: profile.displayName,
+          displayName: identity.displayName,
+          provider: identity.provider,
+          toolConnectionId: identity.id,
+          // The legacy core-held token (if any) is superseded by the tool's.
+          refreshTokenEncrypted: null,
           syncStatus: 'OK',
           lastSyncAt: new Date(),
           lastError: null,
@@ -996,7 +1010,7 @@ export async function createServer(): Promise<Express> {
         },
       });
 
-      console.log(`[microsoft-oauth] Connected Exchange for ${mailboxEmail} → org ${pending.orgId}`);
+      console.log(`[microsoft-oauth] Connected Exchange for ${identity.mailboxEmail} → org ${pending.orgId} (tool connection ${identity.id})`);
 
       const successUrl = new URL(pending.redirect, frontendUrl);
       successUrl.searchParams.set('exchangeConnected', '1');
@@ -1008,78 +1022,16 @@ export async function createServer(): Promise<Express> {
       res.redirect(errorUrl.toString());
     }
   });
-
   // ---------------------------------------------------------------------------
-  // Exchange webhook (Microsoft Graph change notifications)
+  // Email events ingress (tool → core, #396 Phase 4)
   // ---------------------------------------------------------------------------
 
-  app.post('/exchange/webhook', async (req, res) => {
-    // Step 1: Validation handshake — Graph sends a validationToken on subscription creation
-    const validationToken = req.query.validationToken as string | undefined;
-    if (validationToken) {
-      res.set('Content-Type', 'text/plain');
-      res.status(200).send(validationToken);
-      return;
-    }
+  // Normalized email events (email.received / email.sent) arrive here from
+  // the provider capability tools over internal HTTP. The legacy
+  // /exchange/webhook POC route (Graph notifications straight into core) is
+  // gone — Graph now notifies the tool, which normalizes and forwards.
+  mountEmailEventRoutes(app);
 
-    // Step 2: Process notifications — respond 202 quickly, process async
-    res.status(202).json({ ok: true });
-
-    const notifications = req.body?.value as Array<{
-      clientState?: string;
-      resourceData?: { id?: string };
-      resource?: string;
-    }> | undefined;
-
-    if (!notifications?.length) return;
-
-    for (const notification of notifications) {
-      const connectionId = notification.clientState;
-      if (!connectionId) continue;
-
-      try {
-        const connection = await db.exchangeConnection.findUnique({
-          where: { id: connectionId },
-        });
-        if (!connection || connection.deletedAt || !connection.syncEnabled) continue;
-
-        // Decrypt refresh token
-        const { createDecipheriv } = await import('crypto');
-        const keyBuf = Buffer.from(process.env.HADRON_ENCRYPTION_KEY ?? '', 'hex');
-        function decrypt(ciphertext: string): string {
-          const buf = Buffer.from(ciphertext, 'base64');
-          const iv = buf.subarray(0, 12);
-          const tag = buf.subarray(12, 28);
-          const data = buf.subarray(28);
-          const decipher = createDecipheriv('aes-256-gcm', keyBuf, iv);
-          decipher.setAuthTag(tag);
-          return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
-        }
-
-        const refreshToken = decrypt(connection.refreshTokenEncrypted);
-
-        // Import exchange client functions
-        const { getMessage, replyToMessage } = await import('./integrations/exchange/exchange.js');
-
-        // Extract message ID from resource path (e.g. "Users/{id}/Messages/{messageId}")
-        const resourceParts = notification.resource?.split('/') ?? [];
-        const messageId = notification.resourceData?.id ?? resourceParts[resourceParts.length - 1];
-        if (!messageId) continue;
-
-        const msgResult = await getMessage(refreshToken, messageId);
-        const message = msgResult.data;
-        console.log(`[exchange-webhook] New email in ${connection.mailboxEmail}: "${message.subject}" from ${message.from?.emailAddress?.address}`);
-
-        // POC auto-reply: if subject is "Hadron respond test", reply with "Hadron test passed"
-        if (message.subject?.trim().toLowerCase() === 'hadron respond test') {
-          await replyToMessage(refreshToken, messageId, 'Hadron test passed');
-          console.log(`[exchange-webhook] Auto-replied to "${message.subject}" in ${connection.mailboxEmail}`);
-        }
-      } catch (err) {
-        console.error(`[exchange-webhook] Error processing notification for connection ${connectionId}:`, err);
-      }
-    }
-  });
 
   // ---------------------------------------------------------------------------
   // MCP endpoint (Streamable HTTP transport)
