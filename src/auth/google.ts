@@ -109,7 +109,8 @@ export async function verifyGoogleIdToken(
  * (#581 match order):
  *
  *   (a) existing user by googleId → login;
- *   (b) else existing user by email, ONLY when Google verified it → link
+ *   (b) else existing user by email, ONLY when Google verified it AND the
+ *       row is not already linked to a different Google account → link
  *       (set googleId, keep the existing identityProvider);
  *   (c) else create a fresh user (identityProvider GOOGLE).
  *
@@ -136,7 +137,14 @@ export async function resolveGoogleUser(identity: GoogleIdentity) {
 
   if (identity.email && identity.emailVerified) {
     const byEmail = await db.user.findUnique({ where: { email: identity.email } });
-    if (byEmail) {
+    // Link ONLY when the row has no Google identity yet. A different existing
+    // googleId means a DIFFERENT Google account once owned this email (e.g. a
+    // Workspace admin recreated a deleted account with the same address —
+    // same email, new `sub`). Overwriting would hand the old row to the new
+    // account; Google's guidance is that `sub` is the identity, email is not.
+    // Fall through to (c), which creates a fresh, email-less user (the email
+    // stays on — and unique to — the originally linked row).
+    if (byEmail && byEmail.googleId === null) {
       return db.user.update({
         where: { id: byEmail.id },
         data: {
@@ -146,7 +154,20 @@ export async function resolveGoogleUser(identity: GoogleIdentity) {
         },
       });
     }
+    if (byEmail) {
+      return createFreshUser({ ...identity, email: null });
+    }
   }
+
+  return createFreshUser(identity);
+}
+
+/**
+ * Branch (c) of {@link resolveGoogleUser}: create the user, tolerating a
+ * concurrent first-login losing the create race (P2002 on googleId — see
+ * findings:prisma-upsert-not-race-safe) by resolving to the winner's row.
+ */
+async function createFreshUser(identity: GoogleIdentity) {
 
   try {
     return await db.user.create({
@@ -160,9 +181,6 @@ export async function resolveGoogleUser(identity: GoogleIdentity) {
       },
     });
   } catch (err: any) {
-    // P2002: a concurrent first-login won the create race (the upsert-style
-    // cold path is not race-safe — see findings:prisma-upsert-not-race-safe).
-    // The winner's row is ours; re-fetch it.
     if (err?.code === 'P2002') {
       const winner = await db.user.findUnique({ where: { googleId: identity.sub } });
       if (winner) return winner;

@@ -209,6 +209,28 @@ describe('resolveGoogleUser', () => {
     expect(user.email).toBeNull();
   });
 
+  it('(b-refusal) does NOT relink a row already bound to a DIFFERENT Google account', async () => {
+    // Recycled-email takeover: a Workspace admin recreates a deleted account
+    // with the same address — same verified email, new `sub`. The old row's
+    // Google identity must stay put; the new account gets a fresh user.
+    const original = await db.user.create({
+      data: {
+        googleId: 'old-sub-123',
+        email: 'ada@example.com',
+        identityProvider: 'GOOGLE',
+        roles: ['READER'],
+      },
+    });
+    const user = await resolveGoogleUser(identity); // sub differs from old-sub-123
+    expect(user.id).not.toBe(original.id);
+    expect(user.googleId).toBe(identity.sub);
+    // The email stays on (and unique to) the originally linked row.
+    expect(user.email).toBeNull();
+    expect((await db.user.findUnique({ where: { id: original.id } }))!.googleId).toBe(
+      'old-sub-123',
+    );
+  });
+
   it('(c) creates a fresh user with identityProvider GOOGLE and no handle', async () => {
     const user = await resolveGoogleUser(identity);
     expect(user.googleId).toBe(identity.sub);
