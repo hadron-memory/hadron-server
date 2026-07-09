@@ -21,7 +21,9 @@ the humans' plane. This is deliberate — Telegram bots can never see other
 bots' messages (platform rule, independent of privacy mode), so agents
 cannot coordinate *inside* Telegram. The bridge design makes that limitation
 irrelevant: nothing that matters ever exists only in Telegram except human
-messages, which every bot can see.
+messages, which the group's **ear bot** can see — provided it is exempt
+from Telegram's privacy mode (see the binding validation below; NOT the
+BotFather default).
 
 ## Decisions (2026-07-09, Holger)
 
@@ -81,7 +83,7 @@ bindings + bridge worker
 | `POST` | `/connections` | Register a bot: `{botToken}` → validate via `getMe`, encrypt token, return `{id, botId, botUsername}` |
 | `GET` | `/connections/:id` | Identity + poll status |
 | `DELETE` | `/connections/:id` | Stop polling, soft-delete |
-| `POST` | `/ops/<operation>` | `send-message`, `edit-message`, `delete-message`, `get-chat`, `get-me` (v1); media ops later |
+| `POST` | `/ops/<operation>` | `send-message`, `edit-message`, `delete-message`, `get-chat`, `get-chat-member`, `get-me` (v1); media ops later |
 | `GET` | `/info`, `/healthz`, `/readyz` | Capabilities / liveness |
 
 - All routes internal, `Authorization: Bearer $TELEGRAM_TOOL_TOKEN`; refuses
@@ -165,6 +167,17 @@ Two flavors, both new models:
   consentedByUserId, deletedAt`. A participant row IS the "EngTeamChat may
   deliver my posts via my bot" consent; adding one requires an org role on
   the *participant* App's org, not just the binding owner's.
+  **Enable-time validation (Codex review, PR #591):** BotFather's default
+  privacy mode hides ordinary group messages from bots — a non-exempt ear
+  bot would *silently* miss human messages and leave the chat memory
+  incomplete. Enabling a binding therefore requires the ear bot to be
+  privacy-exempt, checked mechanically: `get-me` must report
+  `can_read_all_group_messages: true`, OR `get-chat-member` must show the
+  bot as an admin of the bound chat. Refuse to enable otherwise, with a
+  remediation message (BotFather `/setprivacy` → Disable, or promote to
+  admin). Re-validate on the sweep loop's error path (privacy can be
+  re-enabled after binding). Send-only participant bots need no exemption —
+  only the ear reads.
 
 ### Consumers (at `dispatchTelegramEvent`)
 
