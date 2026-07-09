@@ -27,8 +27,9 @@ Google login vs the Gmail tool.
 Unlike Microsoft (spec 044), LinkedIn is a **textbook OIDC provider** for
 our purposes — closer to Google than any provider so far:
 
-- **Static issuer** (`https://www.linkedin.com/oauth`) — jose's `issuer:`
-  option works as-is; none of Microsoft's per-tenant template validation.
+- **Static issuer** (`https://www.linkedin.com/oauth` — verified against
+  the live discovery document 2026-07-09) — jose's `issuer:` option works
+  as-is; none of Microsoft's per-tenant template validation.
 - **`email_verified` is asserted** in the ID token — the standard Google
   linking gate applies directly; none of Microsoft's nOAuth/`xms_edov`
   machinery.
@@ -113,8 +114,9 @@ Env: `LINKEDIN_CLIENT_ID` / `LINKEDIN_CLIENT_SECRET` (both required
 together; unset ⇒ `/auth/linkedin` answers 503). Register in Doppler
 (dev + prd). No tenant knob — LinkedIn has no Microsoft-style tenancy.
 
-No GraphQL change (provider ids aren't exposed for the other providers
-either).
+No new GraphQL fields — only the legacy `githubId` is exposed on the User
+type (`typeDefs.ts`); the newer provider ids (`googleId`/`appleId`) aren't,
+and `linkedinId` follows the newer pattern.
 
 ### Phase 2 — hadron-portal (separate repo)
 
