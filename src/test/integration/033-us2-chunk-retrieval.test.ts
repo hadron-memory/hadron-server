@@ -319,4 +319,19 @@ describe('US2 — granularity:chunk rejection (PR-225 review)', () => {
     expect(Array.isArray(result.passages)).toBe(true);
     expect((result.passages as unknown[]).length).toBeGreaterThan(0);
   });
+
+  it('minScore floors chunk passages too (#497 / PR-569 review)', async () => {
+    setEmbeddingClientForTests(stubClient({}));
+    await seedNodeWithChunks('floor-chunks', '# A\nbody.\n\n## B\nmore.');
+    const call = (minScore?: number) =>
+      resolvers.Query.findNodes(
+        {},
+        { query: 'anything', filter: { memoryIds: [memUrn] }, mode: 'vector', granularity: 'chunk', minScore },
+        adminCtx(),
+      );
+    // Baseline: passages present.
+    expect(((await call()).passages as unknown[]).length).toBeGreaterThan(0);
+    // A floor above any cosine similarity (which is <= 1) drops them all.
+    expect((await call(2)).passages).toEqual([]);
+  });
 });

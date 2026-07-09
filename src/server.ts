@@ -42,7 +42,7 @@ import {
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
   stageRequestMemoryKeys,
   MemoryUnlockError,
@@ -638,6 +638,44 @@ export async function createServer(): Promise<Express> {
     },
   });
   await apollo.start();
+
+  // #499 — schema discovery for CLI / raw-`hadron api` agents. Apollo
+  // introspection is disabled in production (its default), yet `hadron api
+  // <raw GraphQL>` is the documented fallback for anything the curated CLI
+  // commands don't cover — which is unusable without the schema. Serve the SDL
+  // at a stable route for any AUTHENTICATED principal (an anonymous scraper
+  // still can't enumerate the API). Registered BEFORE the '/graphql' Apollo
+  // mount so this exact path wins over that catch-all `app.use`.
+  let sdlCache: string | null = null;
+  const graphqlSdl = (): string => {
+    if (sdlCache == null) {
+      try {
+        // Round-trip through the type system → validated, canonical SDL.
+        sdlCache = printSchema(buildSchema(typeDefs));
+      } catch {
+        // typeDefs is already valid SDL (Apollo parsed it above); if the
+        // stricter buildSchema ever rejects it, serve the raw source rather
+        // than 500 the discovery route.
+        sdlCache = typeDefs;
+      }
+    }
+    return sdlCache;
+  };
+  app.get('/graphql/schema', async (req, res, next) => {
+    // Express 4 does not catch a rejected async handler, so an unexpected throw
+    // (e.g. resolveAuthContext hitting a DB failure) would hang the request —
+    // forward it to the error middleware instead.
+    try {
+      const auth = await resolveAuthContext(req, db);
+      if (!auth.userId && !auth.appId) {
+        res.status(401).json({ error: 'Authentication required to read the GraphQL schema.' });
+        return;
+      }
+      res.type('text/plain; charset=utf-8').send(graphqlSdl());
+    } catch (err) {
+      next(err);
+    }
+  });
 
   app.use(
     '/graphql',

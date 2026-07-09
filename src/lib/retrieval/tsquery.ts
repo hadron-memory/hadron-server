@@ -195,3 +195,34 @@ export function compileBooleanQuery(input: string, startIndex: number): Compiled
 export function literalQuery(raw: string): string {
   return `"${raw.replace(/"/g, ' ')}"`;
 }
+
+/**
+ * #496 — relax a bare multi-term conjunction to a disjunction (OR). A
+ * natural-language query like `report bad actor` implicitly ANDs every term
+ * (see the grammar note above), so ONE word absent from the corpus zeroes the
+ * whole result set — a dead end that forced the agent to hand-write an OR query.
+ *
+ * Returns an OR-joined query string (`report OR bad OR actor`) ONLY when the
+ * input is a *bare* conjunction of two or more plain terms/phrases — no explicit
+ * operator (AND/OR/NOT), no leading `-`, no parentheses. In every other case the
+ * caller was explicit about boolean intent (or a single term, where OR changes
+ * nothing), so we return `null` and don't second-guess them. Reconstructs from
+ * the same tokenizer the strict query used, so phrases stay quoted and the
+ * relaxed query re-parses cleanly.
+ */
+export function relaxConjunctionToOr(input: string): string | null {
+  let toks: Tok[];
+  try {
+    toks = tokenize(input);
+  } catch {
+    return null; // unterminated quote etc. — not a clean conjunction to relax
+  }
+  const operands: string[] = [];
+  for (const tk of toks) {
+    if (tk.t === 'term') operands.push(tk.v);
+    else if (tk.t === 'phrase') operands.push(`"${tk.v}"`);
+    else return null; // any operator / paren / NOT → explicit intent, leave it
+  }
+  if (operands.length < 2) return null; // single operand: OR is a no-op
+  return operands.join(' OR ');
+}

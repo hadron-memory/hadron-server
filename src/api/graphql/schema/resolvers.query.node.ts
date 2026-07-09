@@ -14,9 +14,9 @@ import {
   getEmbeddingClient,
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
-import { reciprocalRankFusion } from '../../../lib/rrf.js';
+import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
-import { BooleanQueryError, literalQuery } from '../../../lib/retrieval/tsquery.js';
+import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
 import type { LexicalField } from '../../../lib/retrieval/provider.js';
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
@@ -411,10 +411,11 @@ export const nodeQueries = {
     findNodes: async (
       _: unknown,
       {
-        query, mode, filter, fields, sort, expand, granularity, orgId, limit, offset,
+        query, mode, filter, fields, sort, expand, granularity, orgId, limit, offset, minScore,
       }: {
         query?: string | null;
         mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
+        minScore?: number | null;
         filter?: {
           memoryIds?: string[] | null;
           memoryClasses?: string[] | null;
@@ -440,6 +441,15 @@ export const nodeQueries = {
       const f = filter ?? {};
       const finalLimit = limit ?? 50;
       const off = offset ?? 0;
+      // #497 — optional absolute relevance floor. Applied to the ranked scores
+      // before paging (a NaN guard so a bad arg is simply ignored, never throws).
+      // Scores are NOT commensurable across modes, so the meaningful floor scale
+      // differs per mode (keyword ts_rank ≈ 0..a-few; vector cosine ≈ 0..1;
+      // hybrid RRF ≈ small fractions) — documented on the arg. Never applies to
+      // the no-query browse list (those hits are unscored) or expand-neighbours.
+      const scoreFloor = typeof minScore === 'number' && Number.isFinite(minScore) ? minScore : null;
+      const applyFloor = (ranked: { nodeId: string; score: number }[]) =>
+        scoreFloor == null ? ranked : ranked.filter((r) => r.score >= scoreFloor);
       const provider = getRetrievalProvider();
       const badInput = (msg: string) =>
         new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -611,6 +621,7 @@ export const nodeQueries = {
         reason: string | null,
         degraded: string | null,
       ) => {
+        ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
         const rankOrder = new Map(ranked.map((r, i) => [r.nodeId, i]));
         const rows = await ctx.db.node.findMany({
@@ -675,6 +686,10 @@ export const nodeQueries = {
         reason: string | null,
         degraded: string | null,
       ) => {
+        // The lexical provider already applied offset/limit in SQL, so the floor
+        // trims sub-threshold hits from the returned page (it does not backfill
+        // from deeper ranks — a floor returns fewer, never weaker, results).
+        ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
         const rows = await ctx.db.node.findMany({
           where: { id: { in: ranked.map((r) => r.nodeId) } },
@@ -729,9 +744,36 @@ export const nodeQueries = {
           includeDeleted: !!f.includeDeleted, sort: lexSort, offset: off, limit: finalLimit,
         };
         try {
-          const ranked = effectiveMode === 'regex'
-            ? await provider.regexSearch({ ...common, pattern: q })
-            : await provider.lexicalSearch({ ...common, query: q });
+          if (effectiveMode === 'regex') {
+            return await hydrateInOrder(await provider.regexSearch({ ...common, pattern: q }), null, null, null);
+          }
+          const ranked = await provider.lexicalSearch({ ...common, query: q });
+          // #496 — a natural-language query implicitly ANDs its terms, so one
+          // word absent from the corpus zeroes the whole result set. When a bare
+          // multi-term conjunction ANDs to zero, retry with the terms OR'd and
+          // flag it — the agent gets partial recall (hits matching ANY term)
+          // instead of a dead end plus a manual boolean rewrite. Only when the
+          // relaxed query actually finds something; otherwise the terms genuinely
+          // aren't present, so we keep the honest empty result.
+          if (ranked.length === 0) {
+            const orQuery = relaxConjunctionToOr(q);
+            if (orQuery) {
+              // Relax only when the STRICT query is GLOBALLY empty, not when the
+              // caller has merely paged past the end of a matching set (PR-571
+              // review, Gemini). On page 1 an empty `ranked` already proves that;
+              // a deeper page needs a cheap offset-0 probe to distinguish the two
+              // (else page 2+ of a relaxed set would come back empty, unpaginable).
+              const strictGloballyEmpty =
+                off === 0 ||
+                (await provider.lexicalSearch({ ...common, query: q, offset: 0, limit: 1 })).length === 0;
+              if (strictGloballyEmpty) {
+                const relaxed = await provider.lexicalSearch({ ...common, query: orQuery });
+                if (relaxed.length > 0) {
+                  return await hydrateInOrder(relaxed, null, null, 'and_relaxed_to_or');
+                }
+              }
+            }
+          }
           return await hydrateInOrder(ranked, null, null, null);
         } catch (e) {
           // keyword only, explicitly: regexSearch never parses the boolean
@@ -766,13 +808,30 @@ export const nodeQueries = {
       let lexicalDegraded: string | null = null;
       const mergeDegraded = (d: string | null): string | null =>
         [d, lexicalDegraded].filter(Boolean).join(',') || null;
-      const runKeywordRanked = async () => {
+      // `relax` (#496, PR-571 review): only the keyword-ONLY hybrid FALLBACK
+      // (no vector index / embeddings unavailable) opts in, so that path reaches
+      // the same AND→OR relaxation mode:keyword does — otherwise `mode:hybrid`
+      // on a non-indexed memory is strictly weaker than `mode:keyword` for the
+      // same bare query. TRUE hybrid (vector present) does NOT relax: the vector
+      // half already supplies recall, and relaxing would pollute the RRF inputs
+      // and mislabel a vector-found result as `and_relaxed_to_or`.
+      const runKeywordRanked = async (opts: { relax?: boolean } = {}) => {
         const args = {
           db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
           includeDeleted: !!f.includeDeleted, sort: 'relevance' as const, offset: 0, limit: fetchN,
         };
         try {
-          return await provider.lexicalSearch({ ...args, query: q });
+          const strict = await provider.lexicalSearch({ ...args, query: q });
+          if (!opts.relax || strict.length > 0) return strict;
+          const orQuery = relaxConjunctionToOr(q);
+          if (orQuery) {
+            const relaxed = await provider.lexicalSearch({ ...args, query: orQuery });
+            if (relaxed.length > 0) {
+              lexicalDegraded = [lexicalDegraded, 'and_relaxed_to_or'].filter(Boolean).join(',');
+              return relaxed;
+            }
+          }
+          return strict;
         } catch (e) {
           if (e instanceof BooleanQueryError) {
             lexicalDegraded = 'literal_fallback';
@@ -784,13 +843,13 @@ export const nodeQueries = {
 
       if (indexedIds.length === 0) {
         if (effectiveMode === 'hybrid') {
-          return await buildResult(await runKeywordRanked(), null, null, mergeDegraded('no_vector_index'));
+          return await buildResult(await runKeywordRanked({ relax: true }), null, null, mergeDegraded('no_vector_index'));
         }
         return { hits: [], passages: [], total: 0, reason: 'no_vector_index', degraded: null };
       }
       if (!isEmbeddingConfigured()) {
         if (effectiveMode === 'hybrid') {
-          return await buildResult(await runKeywordRanked(), null, null, mergeDegraded('embedding_unavailable'));
+          return await buildResult(await runKeywordRanked({ relax: true }), null, null, mergeDegraded('embedding_unavailable'));
         }
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
@@ -801,7 +860,7 @@ export const nodeQueries = {
       } catch (err) {
         console.warn(`[findNodes] embed() failed in mode:${effectiveMode}; degrading.`, err);
         if (effectiveMode === 'hybrid') {
-          return await buildResult(await runKeywordRanked(), null, null, mergeDegraded('embedding_unavailable'));
+          return await buildResult(await runKeywordRanked({ relax: true }), null, null, mergeDegraded('embedding_unavailable'));
         }
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
@@ -816,7 +875,11 @@ export const nodeQueries = {
           throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
         }
         // Fetch through the offset so paging works (vectorSearchChunks has no offset).
-        const chunkHits = (await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit }))
+        // #497 — apply the minScore floor to the scored passages too (PR-569
+        // review, Codex): filter before paging so a floor drops sub-threshold
+        // chunks rather than silently returning them.
+        const rawChunks = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit });
+        const chunkHits = (scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor))
           .slice(off, off + finalLimit);
         const parents = await ctx.db.node.findMany({
           where: { id: { in: [...new Set(chunkHits.map((c) => c.nodeId))] }, deletedAt: null },
@@ -848,15 +911,19 @@ export const nodeQueries = {
       }
 
       // hybrid — fuse keyword + vector by RRF (keyword already relevance-ranked by FTS).
+      // The hit score is the FUSED RRF score (the value the hit was actually ranked
+      // by), not the raw vector-sim / keyword-rank the pre-#497 code attached — those
+      // aren't commensurable, so mixing them gave a misleading number and no sound
+      // within-result-set relevance signal. The cosine similarity is still carried
+      // separately on `vector.similarity` (simById below).
       const kwRanked = await runKeywordRanked();
-      const fusedIds = reciprocalRankFusion(
+      const fused = reciprocalRankFusionScored(
         [kwRanked.map((r) => r.nodeId), vecHits.map((h) => h.nodeId)],
         (id) => id,
       ).slice(0, fetchN);
       const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
-      const kwScore = new Map(kwRanked.map((r) => [r.nodeId, r.score]));
       return await buildResult(
-        fusedIds.map((id) => ({ nodeId: id, score: simById.get(id) ?? kwScore.get(id) ?? 0 })),
+        fused.map((r) => ({ nodeId: r.item, score: r.score })),
         simById,
         null,
         mergeDegraded(null),

@@ -45,6 +45,25 @@ export function reciprocalRankFusion<T>(
   keyFn: (item: T) => string,
   k: number = RRF_K,
 ): T[] {
+  return reciprocalRankFusionScored(lists, keyFn, k).map((entry) => entry.item);
+}
+
+/**
+ * Like {@link reciprocalRankFusion} but returns each fused item WITH its RRF
+ * score (highest first), so a caller can surface the fused score it was
+ * actually ranked by. Hybrid `findNodes` uses this: the pre-#497 code attached
+ * the raw vector-similarity (or keyword-rank) score to a hybrid hit, which did
+ * NOT match the RRF ordering the hit was ranked by — a misleading number, and
+ * unusable for a within-result-set relevance signal because keyword and vector
+ * scores aren't commensurable. The RRF score IS internally comparable across
+ * every hit in one fused list, which is what makes a relative-score / weak-band
+ * signal sound (#497).
+ */
+export function reciprocalRankFusionScored<T>(
+  lists: ReadonlyArray<ReadonlyArray<T>>,
+  keyFn: (item: T) => string,
+  k: number = RRF_K,
+): Array<{ item: T; score: number }> {
   // Map preserves insertion order; first-seen wins ties.
   const acc = new Map<string, { score: number; item: T; firstSeen: number }>();
   let seq = 0;
@@ -68,5 +87,5 @@ export function reciprocalRankFusion<T>(
       // Stable tiebreak — preserves first-seen across runs.
       return a.firstSeen - b.firstSeen;
     })
-    .map((entry) => entry.item);
+    .map((entry) => ({ item: entry.item, score: entry.score }));
 }

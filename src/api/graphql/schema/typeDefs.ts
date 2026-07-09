@@ -158,7 +158,9 @@ export const typeDefs = `#graphql
     Reduced-fidelity flag(s); hits are usable. May carry MULTIPLE
     comma-separated codes (e.g. 'no_vector_index,literal_fallback') —
     parse the set, never compare the whole string. Codes: no_vector_index,
-    embedding_unavailable, literal_fallback.
+    embedding_unavailable, literal_fallback, and_relaxed_to_or (a bare
+    multi-term keyword query matched nothing under AND, so it was retried as
+    OR and these hits match ANY term).
     """
     degraded: String
   }
@@ -1978,7 +1980,7 @@ export const typeDefs = `#graphql
     DATA
     "Shallow-merge the 'properties' JSON; target wins on key collisions."
     PROPERTIES
-    "Re-point the source's incoming and outgoing edges onto the target. Each re-homed edge's loc is recomputed from its new endpoints; an edge equivalent to one the target already has (same source, name, and target) is dropped rather than duplicated, as are self-loops."
+    "Re-point the source's incoming and outgoing edges onto the target. Each re-homed edge's loc is recomputed from its new endpoints (deriveEdgeLoc); a re-homed edge whose recomputed (loc, memoryId) collides with one the target already holds is dropped rather than duplicated — so an equivalent edge with an endpoint-derived loc is de-duplicated — as are self-loops."
     EDGES
   }
 
@@ -2370,6 +2372,8 @@ export const typeDefs = `#graphql
       orgId: ID
       limit: Int
       offset: Int
+      "Optional absolute relevance floor (cor:api:090 / #497): drop ranked hits whose score is below this value. Scores are NOT comparable across modes, so the meaningful scale differs per mode (keyword ts_rank is roughly 0..a-few; vector cosine similarity is 0..1; hybrid is a small RRF fraction) — pick a floor for the mode in use. Ignored on the no-query browse list (unscored) and never trims expand-neighbours. A floor returns fewer hits, never weaker ones."
+      minScore: Float
     ): FindNodesResult!
 
     """

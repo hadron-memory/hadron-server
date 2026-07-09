@@ -213,6 +213,31 @@ describe('mergeNodes — edges', () => {
     expect(tgtToOther.map((e) => e.name).sort()).toEqual(['depends', 'imports']);
   });
 
+  it('handles an in-flight loc collision between two relocating edges (#568 Q2 / two-phase)', async () => {
+    const src = await makeNode('src');
+    const tgt = await makeNode('tgt');
+    const x = await makeNode('x');
+    const y = await makeNode('y');
+    // E1 re-homes to loc `tgt:r:x`. E2's CURRENT loc is authored to be exactly
+    // `tgt:r:x` — so re-pointing E1 before E2 would transiently collide on
+    // (loc, memoryId). The two-phase staging (park on temp locs first) must
+    // make the merge succeed regardless of order.
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: src.id, targetId: x.id, loc: 'src:r:x', name: 'r' },
+    });
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: src.id, targetId: y.id, loc: 'tgt:r:x', name: 'r' },
+    });
+
+    await merge({ source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true });
+
+    const out = await db.edge.findMany({ where: { sourceId: tgt.id }, orderBy: { loc: 'asc' } });
+    expect(out.map((e) => `${e.targetId}@${e.loc}`)).toEqual([
+      `${x.id}@tgt:r:x`,
+      `${y.id}@tgt:r:y`,
+    ]);
+  });
+
   it('does not touch edges when EDGES is not included', async () => {
     const src = await makeNode('src');
     const tgt = await makeNode('tgt');
