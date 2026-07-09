@@ -206,7 +206,8 @@ export type UrnParseErrorReason =
   | 'invalid-segment-shape'    // a path-segment violates FR-020's internal-`:` count rules
   | 'empty-bare-value'         // formatCanonicalUrn called with empty bareValue (spec 027 FR-005)
   | 'already-prefixed-bare-value' // formatCanonicalUrn bareValue starts with `urn:` (spec 027)
-  | 'org-urn-not-bare';        // an org slug carried a scheme prefix or `:` separator (#376)
+  | 'org-urn-not-bare'         // an org slug carried a scheme prefix or `:` separator (#376)
+  | 'empty-derived-slug';      // a display name slugified to nothing usable (#574)
 
 export class UrnParseError extends Error {
   constructor(
@@ -497,6 +498,8 @@ function messageFor(
       return `formatCanonicalUrn bareValue${cite} starts with a scheme prefix ("hrn:" or "urn:"). Pass the bare value (no "hrn:<type>:" prefix); the wrapper composes the prefix itself.`;
     case 'org-urn-not-bare':
       return `Organization URN "${input}" must be a bare slug — no scheme prefix ("hrn:"/"urn:") and no ":" separator. The Organization.urn field returns the canonical "hrn:org:<slug>" form on read; submit only the bare "<slug>" (e.g. "acme.com").`;
+    case 'empty-derived-slug':
+      return `Cannot derive a URN slug from "${input}" — it has no letters or digits. Choose a name with at least one alphanumeric character.`;
   }
 }
 
@@ -772,6 +775,50 @@ export function validateOrgSlug(slug: string): void {
     throw new UrnParseError(slug, 'org-urn-not-bare', slug);
   }
   validateUserSlug(slug);
+}
+
+/**
+ * Derive a valid, lowercase URN slug atom from a free-form display name (#574).
+ *
+ * Lowercases, replaces every run of non-atom characters with a single hyphen,
+ * and trims leading/trailing punctuation so the result satisfies the FR-016
+ * atom shape (`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`). Dots are preserved — they're
+ * a legal atom character (org slugs like `acme.com` use them).
+ *
+ * Use at EVERY create/rename boundary that turns a NAME into a URN slug. A raw
+ * display name persisted verbatim (`${org.urn}:${name}`) yields case-sensitive,
+ * space-bearing URNs that don't round-trip through `parseUrn` — the source of
+ * the malformed prod rows in #574 (`createMemory` / `cloneMemory` / `createAgent`
+ * all did this; `createApp` already slugified). For an EXPLICIT slug argument
+ * the same call normalizes it, matching `createApp`'s `urn ?? name` handling.
+ *
+ * Slugification only — it does NOT reject reserved words (a derived `system`
+ * stays `system`, unchanged from prior behavior). Callers that must reject
+ * reserved slugs should additionally run {@link validateUserSlug}.
+ *
+ * The result is capped to the FR-017 64-char atom limit (a long display name
+ * would otherwise slugify to an atom `validateAtomShape` rejects, so the "valid
+ * by construction" guarantee would break — PR-587 review, Codex).
+ *
+ * Throws `UrnParseError('empty-derived-slug')` when the name has no usable
+ * character (all punctuation/whitespace) — surface it to the user.
+ */
+export function deriveSlugFromName(name: string): string {
+  let slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[._-]+|[._-]+$/g, '');
+  // FR-017 atom cap. Re-trim trailing punctuation the cut may expose (an atom
+  // must end in a letter/digit). The leading char is already alnum, so a
+  // non-empty slug stays non-empty.
+  if (slug.length > 64) {
+    slug = slug.slice(0, 64).replace(/[._-]+$/g, '');
+  }
+  if (!slug) {
+    throw new UrnParseError(name, 'empty-derived-slug', name);
+  }
+  return slug;
 }
 
 /** URN types that identify a node (vs a memory / agent / app / org / etc.). */

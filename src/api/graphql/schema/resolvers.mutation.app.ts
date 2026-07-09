@@ -34,6 +34,7 @@ import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { deriveSlugFromName } from '../../../lib/urn.js';
 import { parsePolicyLink } from '../../../lib/policy/index.js';
 import { GraphQLError } from 'graphql';
 import {
@@ -138,13 +139,8 @@ export const appMutations = {
       const org = await ctx.db.organization.findUniqueOrThrow({
         where: { id: resolvedOrgId }, select: { urn: true },
       });
-      const slug = (urn ?? name)
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, '-')
-        .replace(/^-+|-+$/g, '');
-      if (!slug) throw new Error('App URN slug cannot be empty');
-      const appUrn = `${org.urn}:${slug}`;
+      // #574: shared slugify (was an inline copy of this same transform).
+      const appUrn = `${org.urn}:${deriveSlugFromName(urn ?? name)}`;
 
       // 009-install-agent-flow: agentId is required (typeDef gate). Resolve
       // the Agent (resolveAgentRef rejects soft-deleted Agents with
@@ -406,13 +402,7 @@ export const appMutations = {
         const org = await ctx.db.organization.findUniqueOrThrow({
           where: { id: app.organizationId }, select: { urn: true },
         });
-        const slug = urn
-          .trim()
-          .toLowerCase()
-          .replace(/[^a-z0-9_-]+/g, '-')
-          .replace(/^-+|-+$/g, '');
-        if (!slug) throw new Error('App URN slug cannot be empty');
-        newUrn = `${org.urn}:${slug}`;
+        newUrn = `${org.urn}:${deriveSlugFromName(urn)}`; // #574: shared slugify
       }
       // 036-ai-service-config: the legacy aiProvider/aiModel/aiApiKey args
       // maintain the App's 'default' registry config. Explicit null
