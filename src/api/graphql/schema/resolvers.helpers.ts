@@ -4,6 +4,7 @@
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
 import { runEmailOperation } from '../../../lib/emailClient.js';
+import { scopeForOperation } from '../../../lib/emailOperationScopes.js';
 import {
   AiServiceConfigNotFoundError,
   AiConfigValidationError,
@@ -999,19 +1000,32 @@ export function deriveChatTitle(
 // the AI-config lib and this resolver layer share one implementation.
 
 /**
- * Load an email connection and enforce the shared access gate for MAIL
- * OPERATIONS (#396, decided 2026-07-08): OWNER-ONLY — only the connection's
- * owning user may operate the mailbox. Replaces the org-READER
- * getExchangeRefreshToken gate (tokens now live in the provider tool, and a
- * mailbox is personal authority, not org-readable). Deliberately ONE
- * function so the future AgentEmailGrant/assertGrant swap (spec 002 US3)
- * happens in one place — never hand-roll a per-resolver connection gate.
- * Connection MANAGEMENT (list, delete) keeps its org-ADMIN gates; those are
- * administration, not mail operations.
+ * Load an email connection and enforce the shared access gate for a MAIL/
+ * CALENDAR OPERATION. The ONE place connection-operation authorization lives —
+ * never hand-roll a per-resolver connection gate. Connection MANAGEMENT (list,
+ * delete) keeps its org-ADMIN gates; those are administration, not operations.
+ *
+ * Two principal contexts (#396 owner-only + spec-042 Track B / #593 delegation):
+ *
+ * - **Interactive owner** (`ctx.appId` absent, `ctx.userId === owner`) → allowed
+ *   for every operation. This is the only allow-all path.
+ * - **App / headless-run context** (`ctx.appId` set) → FAIL-CLOSED: requires a
+ *   live `ConnectionGrant` to this App (`ctx.appId`) whose scopes cover the
+ *   operation, **even when the run is on-behalf-of the owner**. The scope table
+ *   is authoritative in every autonomous context, so the mailbox stays
+ *   scope-bounded regardless of `run.userId` provenance (Option B, Holger
+ *   2026-07-09). An operation with no scope mapping is owner-only (a grantee can
+ *   never satisfy it).
+ * - Everyone else (non-owner user, App with no covering grant) → Forbidden.
+ *
+ * Grantee is the App install (`granteeAppId`), never the Agent — one Agent in
+ * two Apps/orgs is two trust contexts. Cross-org delegation is intended: the
+ * grant row is the sole authority, so NO same-org check is added here.
  */
 export async function requireEmailConnection(
   ctx: Context,
   connectionRef: string,
+  operation: string,
 ): Promise<{
   id: string;
   provider: string;
@@ -1037,12 +1051,34 @@ export async function requireEmailConnection(
       mailboxEmail: true,
     },
   });
+  // Soft-deleted / non-existent connections fail first (before any auth
+  // branch) so absence and denial stay indistinguishable.
   if (!connection) throw new Error('Connection not found');
-  if (!ctx.userId || ctx.userId !== connection.userId) {
-    // Owner-only: other users (org admins included) and App-key principals
-    // are denied for mail operations.
+
+  if (ctx.appId) {
+    // App / headless-run context — a covering grant is mandatory (fail-closed),
+    // even for an on-behalf-of-owner run. Unmapped operation ⇒ owner-only ⇒ deny.
+    const scope = scopeForOperation(operation);
+    if (!scope) throw new Error('Forbidden');
+    const grant = await ctx.db.connectionGrant.findFirst({
+      where: {
+        connectionId: connection.id,
+        granteeAppId: ctx.appId,
+        deletedAt: null,
+        scopes: { has: scope },
+        // Enforce expiry in the query (TOCTOU-safe). The OR is mandatory — a
+        // bare `gt` would silently drop perpetual (null-expiry) grants.
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      select: { id: true },
+    });
+    if (!grant) throw new Error('Forbidden');
+  } else if (!ctx.userId || ctx.userId !== connection.userId) {
+    // Pure user principal that isn't the owner (org admins included) → denied.
     throw new Error('Forbidden');
   }
+  // else: interactive owner (no appId, userId === owner) — allowed for all ops.
+
   if (!connection.toolConnectionId) {
     throw new GraphQLError(
       'This mailbox connection has not been migrated to the email tool yet — reconnect the mailbox or run the token transfer.',
@@ -1065,7 +1101,7 @@ export async function runOwnedEmailOperation<T = Record<string, unknown>>(
   operation: string,
   input: Record<string, unknown> = {},
 ): Promise<T> {
-  const connection = await requireEmailConnection(ctx, connectionRef);
+  const connection = await requireEmailConnection(ctx, connectionRef, operation);
   // connectionId is set AFTER the spread so no input field can override the
   // routed tool connection id (PR-573 Copilot review).
   return runEmailOperation<T>(connection.provider, operation, {

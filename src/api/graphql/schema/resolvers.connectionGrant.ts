@@ -1,0 +1,187 @@
+// connectionGrant resolvers — user→App scoped delegation on user-owned
+// connections (spec-042 Track B, #593). Owner-only management surface; the
+// enforcement gate lives in requireEmailConnection (resolvers.helpers.ts).
+import { GraphQLError } from 'graphql';
+import { type Context, clampListTake, toISO, safeCanonicalUrn } from './resolvers.helpers.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { generateId } from '../../../lib/id.js';
+import {
+  CONNECTION_GRANT_SCOPES,
+  isConnectionGrantScope,
+} from '../../../lib/emailOperationScopes.js';
+
+const badInput = (message: string) =>
+  new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
+
+// What each grant query selects — the grantee App is projected to SCALARS
+// (id/urn/name), never returned as an `App` object, so its `keys`/`members`
+// field resolvers are unreachable through a (possibly cross-org) grant — the
+// #552 nested-field-leak invariant.
+const GRANT_SELECT = {
+  id: true,
+  connectionId: true,
+  granteeAppId: true,
+  scopes: true,
+  expiresAt: true,
+  createdAt: true,
+  granteeApp: { select: { urn: true, name: true } },
+} as const;
+
+type GrantRow = {
+  id: string;
+  connectionId: string;
+  granteeAppId: string;
+  scopes: string[];
+  expiresAt: Date | null;
+  createdAt: Date;
+  granteeApp: { urn: string; name: string } | null;
+};
+
+/** Flatten a selected grant row into the GraphQL ConnectionGrant shape. */
+function projectGrant(g: GrantRow) {
+  return {
+    id: g.id,
+    connectionId: g.connectionId,
+    granteeAppId: g.granteeAppId,
+    granteeAppUrn: g.granteeApp ? safeCanonicalUrn('app', g.granteeApp.urn) : null,
+    granteeAppName: g.granteeApp?.name ?? null,
+    scopes: g.scopes,
+    expiresAt: toISO(g.expiresAt),
+    createdAt: toISO(g.createdAt),
+  };
+}
+
+/**
+ * Owner-only management gate: the caller must be the connection's owning USER
+ * (no org-admin bypass, no App-key path — grant management is personal
+ * authority). Returns the connection's id + owner. A missing/soft-deleted
+ * connection and a non-owner both surface identically as the caller's choice
+ * (create throws; list/read return empty) so neither leaks existence.
+ */
+async function loadOwnedConnection(
+  ctx: Context,
+  connectionRef: string,
+): Promise<{ id: string; userId: string } | null> {
+  if (!ctx.userId) return null;
+  const conn = await ctx.db.exchangeConnection.findFirst({
+    where: { id: connectionRef, deletedAt: null },
+    select: { id: true, userId: true },
+  });
+  if (!conn || conn.userId !== ctx.userId) return null;
+  return conn;
+}
+
+export const connectionGrantQueries = {
+  // cor:api:120 find-one — owner-scoped; a grant the caller didn't create
+  // resolves to null (no existence oracle).
+  connectionGrant: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    if (!ctx.userId) return null;
+    const grant = (await ctx.db.connectionGrant.findFirst({
+      where: { id: ref, deletedAt: null, grantedByUserId: ctx.userId },
+      select: GRANT_SELECT,
+    })) as GrantRow | null;
+    return grant ? projectGrant(grant) : null;
+  },
+
+  // cor:api:120 find-many — the caller's own grants. Optional connectionRef
+  // narrows to one connection; because the filter is always pinned to
+  // grantedByUserId, a connection the caller doesn't own yields an empty page
+  // (no oracle) without a separate ownership probe.
+  connectionGrants: async (
+    _: unknown,
+    { connectionRef, limit, offset }: { connectionRef?: string | null; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => {
+    if (!ctx.userId) return { items: [], total: 0 };
+    const where = {
+      grantedByUserId: ctx.userId,
+      deletedAt: null,
+      ...(connectionRef ? { connectionId: connectionRef } : {}),
+    };
+    const take = clampListTake(limit);
+    const skip = offset ?? 0;
+    const [rows, total] = await Promise.all([
+      ctx.db.connectionGrant.findMany({ where, select: GRANT_SELECT, orderBy: { createdAt: 'desc' }, take, skip }),
+      ctx.db.connectionGrant.count({ where }),
+    ]);
+    return { items: (rows as GrantRow[]).map(projectGrant), total };
+  },
+};
+
+export const connectionGrantMutations = {
+  // Owner-only create. Validates scope allow-list, grantee App existence (live),
+  // and a future expiry. grantedByUserId := the owner.
+  createConnectionGrant: async (
+    _: unknown,
+    {
+      connectionRef,
+      appRef,
+      scopes,
+      expiresAt,
+    }: { connectionRef: string; appRef: string; scopes: string[]; expiresAt?: string | null },
+    ctx: Context,
+  ) => {
+    const conn = await loadOwnedConnection(ctx, connectionRef);
+    // Owner-only: absence and denial are indistinguishable (no existence oracle).
+    if (!conn) throw new GraphQLError('Connection not found', { extensions: { code: 'NOT_FOUND' } });
+
+    if (!Array.isArray(scopes) || scopes.length === 0) {
+      throw badInput('At least one scope is required.');
+    }
+    const unknown = scopes.filter((s) => !isConnectionGrantScope(s));
+    if (unknown.length > 0) {
+      throw badInput(
+        `Unknown scope(s): ${unknown.join(', ')}. Valid scopes: ${CONNECTION_GRANT_SCOPES.join(', ')}.`,
+      );
+    }
+    const scopeSet = [...new Set(scopes)];
+
+    let granteeAppId: string;
+    try {
+      ({ id: granteeAppId } = await resolveAppRef(ctx.db, appRef));
+    } catch (e) {
+      if (e instanceof AppNotFoundError) throw badInput(`Grantee App not found: '${appRef}'.`);
+      throw e;
+    }
+
+    let expiry: Date | null = null;
+    if (expiresAt != null) {
+      const d = new Date(expiresAt);
+      if (Number.isNaN(d.getTime())) throw badInput('expiresAt is not a valid date.');
+      if (d.getTime() <= Date.now()) throw badInput('expiresAt must be in the future.');
+      expiry = d;
+    }
+
+    const grant = (await ctx.db.connectionGrant.create({
+      data: {
+        id: generateId(),
+        connectionId: conn.id,
+        granteeAppId,
+        grantedByUserId: ctx.userId!,
+        scopes: scopeSet,
+        expiresAt: expiry,
+        createdBy: ctx.userId ?? ctx.clientId ?? null,
+      },
+      select: GRANT_SELECT,
+    })) as GrantRow;
+    return projectGrant(grant);
+  },
+
+  // Owner-only revoke → soft delete. findFirst + deletedAt:null (never
+  // findUnique), gated on the caller being the grantor/owner.
+  revokeConnectionGrant: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    if (!ctx.userId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+    const grant = await ctx.db.connectionGrant.findFirst({
+      where: { id: ref, deletedAt: null, grantedByUserId: ctx.userId },
+      select: { id: true },
+    });
+    // A grant the caller didn't create (or doesn't exist) is indistinguishable.
+    if (!grant) throw new GraphQLError('Grant not found', { extensions: { code: 'NOT_FOUND' } });
+    await ctx.db.connectionGrant.update({
+      where: { id: grant.id },
+      data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+    });
+    return true;
+  },
+};
