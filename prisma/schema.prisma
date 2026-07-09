@@ -135,9 +135,9 @@ enum SyncStatus {
 }
 
 /// How a User authenticated. APP is reserved for users provisioned
-/// via App-scoped flows (e.g. chatbot `createAppUser`); GOOGLE /
-/// MICROSOFT are reserved for future SSO. v1 ships GITHUB and EMAIL
-/// only.
+/// via App-scoped flows (e.g. chatbot `createAppUser`); GOOGLE landed
+/// with Sign-in-with-Google (#581); MICROSOFT is reserved for future
+/// SSO.
 enum IdentityProvider {
   GITHUB
   EMAIL
@@ -339,6 +339,10 @@ model User {
   githubId         Int?              @unique @map("github_id")
   /// GitHub login.
   githubUsername   String?           @unique @map("github_username")
+  /// Google account id — the OIDC `sub` claim (#581). A string of digits,
+  /// but stored as text: Google documents it as an opaque string and it
+  /// can exceed 2^53.
+  googleId         String?           @unique @map("google_id")
   identityProvider IdentityProvider? @map("identity_provider")
   // 005-agent-subscription discovery (2026-04-30): R-5 in research.md
   // proposed dropping `externalId`, but the implementation found that
