@@ -20,6 +20,12 @@ import {
   exchangeGoogleCode,
   verifyGoogleIdToken,
   resolveGoogleUser,
+  isAppleConfigured,
+  buildAppleAuthUrl,
+  exchangeAppleCode,
+  verifyAppleIdToken,
+  parseAppleUserField,
+  resolveAppleUser,
 } from './auth/index.js';
 import {
   issueLoginCode,
@@ -504,6 +510,175 @@ export async function createServer(): Promise<Express> {
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('Google OAuth callback error:', err);
+      res.status(500).json({ error: 'OAuth authentication failed' });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Apple OAuth (Sign in with Apple, #584) — sibling of the Google pair above;
+  // see the GitHub handlers for the shared-machinery rationale. Apple-specific:
+  // the callback is a POST (response_mode=form_post is forced by the `name
+  // email` scopes) carrying code/state/user as urlencoded form fields, and the
+  // user's name arrives in the `user` field on the FIRST authorization only.
+  // Own pendingStates map so a state minted for one provider can never be
+  // replayed against another's callback.
+  // ---------------------------------------------------------------------------
+
+  const pendingAppleStates = new Map<
+    string,
+    { redirect: string; returnTo?: string; clientState?: string; expiresAt: number }
+  >();
+
+  app.get('/auth/apple', (req, res) => {
+    // All four vars are required together (client id for the authorize URL,
+    // team id + key id + private key for the token-call client secret) — a
+    // half-configured deployment must fail loud here, not 500 mid-callback.
+    if (!isAppleConfigured()) {
+      res.status(503).json({ error: 'Apple login is not configured on this server' });
+      return;
+    }
+
+    const redirect = (req.query.redirect as string) || '/';
+
+    let returnTo: string | undefined;
+    const candidate = req.query.return_to;
+    if (candidate !== undefined) {
+      if (!isServerLocalPath(candidate)) {
+        res.status(400).json({
+          error: 'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
+        });
+        return;
+      }
+      returnTo = candidate;
+    }
+
+    const now = Date.now();
+    for (const [s, p] of pendingAppleStates) {
+      if (p.expiresAt < now) pendingAppleStates.delete(s);
+    }
+
+    const clientStateRaw = req.query.client_state;
+    const clientState = typeof clientStateRaw === 'string' && clientStateRaw !== ''
+      ? clientStateRaw
+      : undefined;
+
+    // #477 session-fixation binding, mandatory on the portal-handoff path —
+    // same contract as /auth/github and /auth/google (Codex #504 P2).
+    if (!returnTo && !clientState) {
+      res.status(400).json({
+        error: 'client_state is required — start login via the portal (/auth/start/apple), not the backend URL directly.',
+      });
+      return;
+    }
+
+    const state = crypto.randomBytes(16).toString('hex');
+    pendingAppleStates.set(state, {
+      redirect,
+      returnTo,
+      clientState,
+      expiresAt: now + 10 * 60 * 1000,
+    });
+    res.redirect(buildAppleAuthUrl(state));
+  });
+
+  // POST, not GET: Apple form_posts the result cross-site. The state lives in
+  // the server-side pendingAppleStates map (keyed by the body's `state`), NOT
+  // in a cookie — which is load-bearing: SameSite=Lax cookies are not sent on
+  // a cross-site POST, so a cookie-based state check here would always fail.
+  // Don't "fix" this into cookies. The route-scoped urlencoded parser is
+  // needed because the app only mounts JSON parsers globally.
+  app.post('/auth/apple/callback', express.urlencoded({ extended: false }), async (req, res) => {
+    // typeof guards, not a cast: repeated form fields (`code=a&code=b`) parse
+    // to arrays, which would slip past a bare truthiness check and 500 inside
+    // the exchange. Non-string shapes collapse to the same 400 as absent
+    // fields (mirrors POST /auth/session).
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const code = typeof body.code === 'string' ? body.code : '';
+    const state = typeof body.state === 'string' ? body.state : '';
+    const userField = body.user;
+
+    if (!code || !state) {
+      res.status(400).json({ error: 'Missing code or state' });
+      return;
+    }
+
+    const pending = pendingAppleStates.get(state);
+    pendingAppleStates.delete(state);
+
+    if (!pending || pending.expiresAt < Date.now()) {
+      res.status(400).json({ error: 'Invalid or expired state' });
+      return;
+    }
+
+    try {
+      // Identity comes from the VERIFIED ID-token claims (issuer, audience,
+      // signature against Apple's JWKS) — never a bare decode.
+      const idToken = await exchangeAppleCode(code);
+      const identity = await verifyAppleIdToken(idToken);
+
+      // First-authorization-only name capture; null on every later login.
+      const name = parseAppleUserField(userField);
+
+      // Match order per #584: by appleId → by verified email (link) → create.
+      const user = await resolveAppleUser(identity, name);
+
+      // Provision personal workspace for new users — same block as the
+      // GitHub/Google callbacks, including the concurrent-provision P2002
+      // tolerance.
+      let isNew = !(await hasPersonalWorkspace(db, user.id));
+      if (isNew) {
+        try {
+          await provisionPersonalWorkspace(
+            db,
+            user.id,
+            user.name ?? user.email ?? 'My Workspace',
+          );
+        } catch (err: any) {
+          if (err?.code === 'P2002') {
+            isNew = false;
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      // Same claim shape POST /auth/session rebuilds from the user row.
+      const jwt = await signJwt({
+        sub: user.id,
+        roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+        ...(user.email ? { email: user.email } : {}),
+      });
+
+      // Spec 025 FR-007 Option-C — cookie maxAge derived from the JWT exp so
+      // both expire together (see the GitHub callback for the full rationale).
+      if (pending.returnTo) {
+        const { exp } = decodeJwt(jwt);
+        const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
+        res.cookie('hadron_token', jwt, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'lax',
+          maxAge,
+          path: '/',
+        });
+        res.redirect(pending.returnTo);
+        return;
+      }
+
+      // #477 Sink 1: single-use handoff code; the JWT never rides a URL.
+      const handoffCode = await issueLoginCode({
+        userId: user.id,
+        redirect: isNew ? '/app/setup' : pending.redirect,
+        isNew,
+        clientState: pending.clientState ?? null,
+      });
+      const frontendUrl =
+        process.env.FRONTEND_URL || 'http://localhost:5173';
+      const callbackUrl = new URL('/auth/callback', frontendUrl);
+      callbackUrl.searchParams.set('code', handoffCode);
+      res.redirect(callbackUrl.toString());
+    } catch (err) {
+      console.error('Apple OAuth callback error:', err);
       res.status(500).json({ error: 'OAuth authentication failed' });
     }
   });
