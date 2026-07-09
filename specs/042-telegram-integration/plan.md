@@ -42,7 +42,18 @@ messages, which every bot can see.
 5. **The bridge is core infrastructure, not App behavior.** A deterministic
    worker sweeps binding rows; the owning App only configures them. No model
    invocation per mirrored message; the bridge survives paused runs.
-6. **No grant system in this spec.** Telegram connections are App-owned;
+6. **The tool is Hadron-blind — no core DB tables, no core API.** (Holger,
+   2026-07-10.) Shared tables would couple migrations across independently
+   deployed repos and, worse, bypass authorization entirely — Hadron's
+   access control lives in application code (the shared gates), so direct
+   table reads have no gate to drift from. And the GraphQL API is out too:
+   an API caller needs a principal, and any principal the tool could hold
+   is ambient authority. The only tool→core channel is the normalized
+   events ingress; the only core→tool channel is `/ops/*`. Implementation
+   rule: when an op is tempted to query core for context ("which node maps
+   to this message?"), **invert it** — core passes the context in the
+   request; ops stay self-contained.
+7. **No grant system in this spec.** Telegram connections are App-owned;
    "send via my bot" consent is a chat-binding participant row, not a
    `ConnectionGrant`. User→App resource delegation (`ConnectionGrant`) is
    **Track B**, a parallel spec that unlocks the mailbox/calendar stories —
