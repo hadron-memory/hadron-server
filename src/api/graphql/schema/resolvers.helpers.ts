@@ -2,8 +2,8 @@
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
-import { decryptToken } from '../../../lib/tokenCrypto.js';
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
+import { runEmailOperation } from '../../../lib/emailClient.js';
 import {
   AiServiceConfigNotFoundError,
   AiConfigValidationError,
@@ -998,19 +998,80 @@ export function deriveChatTitle(
 // encryptToken/decryptToken moved to src/lib/tokenCrypto.ts (spec 036) so
 // the AI-config lib and this resolver layer share one implementation.
 
-export async function getExchangeRefreshToken(
+/**
+ * Load an email connection and enforce the shared access gate for MAIL
+ * OPERATIONS (#396, decided 2026-07-08): OWNER-ONLY — only the connection's
+ * owning user may operate the mailbox. Replaces the org-READER
+ * getExchangeRefreshToken gate (tokens now live in the provider tool, and a
+ * mailbox is personal authority, not org-readable). Deliberately ONE
+ * function so the future AgentEmailGrant/assertGrant swap (spec 002 US3)
+ * happens in one place — never hand-roll a per-resolver connection gate.
+ * Connection MANAGEMENT (list, delete) keeps its org-ADMIN gates; those are
+ * administration, not mail operations.
+ */
+export async function requireEmailConnection(
   ctx: Context,
-  connectionId: string,
-): Promise<{ refreshToken: string; connection: any }> {
-  const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({
-    where: { id: connectionId },
+  connectionRef: string,
+): Promise<{
+  id: string;
+  provider: string;
+  toolConnectionId: string;
+  organizationId: string;
+  userId: string;
+  mailboxEmail: string;
+}> {
+  // findFirst (not findUnique) so deletedAt filters in the query — the
+  // revoked-membership pattern (PR #475). The `select` is load-bearing: it
+  // keeps the legacy encrypted-token column out of the returned object, so
+  // the declared type IS the runtime shape and no caller can accidentally
+  // serialize a secret (CLAUDE.md authorization invariants: sanitized
+  // projection, never the raw row).
+  const connection = await ctx.db.exchangeConnection.findFirst({
+    where: { id: connectionRef, deletedAt: null },
+    select: {
+      id: true,
+      provider: true,
+      toolConnectionId: true,
+      organizationId: true,
+      userId: true,
+      mailboxEmail: true,
+    },
   });
-  if (connection.deletedAt) throw new Error('Connection not found');
-  await requireOrgRole(ctx, connection.organizationId, 'READER');
-  return {
-    refreshToken: decryptToken(connection.refreshTokenEncrypted),
-    connection,
-  };
+  if (!connection) throw new Error('Connection not found');
+  if (!ctx.userId || ctx.userId !== connection.userId) {
+    // Owner-only: other users (org admins included) and App-key principals
+    // are denied for mail operations.
+    throw new Error('Forbidden');
+  }
+  if (!connection.toolConnectionId) {
+    throw new GraphQLError(
+      'This mailbox connection has not been migrated to the email tool yet — reconnect the mailbox or run the token transfer.',
+      { extensions: { code: 'EMAIL_CONNECTION_NOT_MIGRATED' } },
+    );
+  }
+  return { ...connection, toolConnectionId: connection.toolConnectionId };
+}
+
+/**
+ * The one way a resolver runs a mail operation: owner-only gate, then the
+ * spec-002 operation on the provider tool with the TOOL's connection id (a
+ * copy-paste that passed core's row id instead would 404 only in prod —
+ * tests mock the client). Extra input fields (messageId, bodyHtml,
+ * idempotencyKey, …) merge over the routed connectionId.
+ */
+export async function runOwnedEmailOperation<T = Record<string, unknown>>(
+  ctx: Context,
+  connectionRef: string,
+  operation: string,
+  input: Record<string, unknown> = {},
+): Promise<T> {
+  const connection = await requireEmailConnection(ctx, connectionRef);
+  // connectionId is set AFTER the spread so no input field can override the
+  // routed tool connection id (PR-573 Copilot review).
+  return runEmailOperation<T>(connection.provider, operation, {
+    ...input,
+    connectionId: connection.toolConnectionId,
+  });
 }
 
 // ---------------------------------------------------------------------------

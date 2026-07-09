@@ -29,17 +29,12 @@ import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
-import {
-  listInboxMessages,
-  replyToMessage,
-  moveMessage,
-  extractErrorMessage,
-} from '../../../integrations/exchange/exchange.js';
+import { deleteToolConnection } from '../../../lib/emailClient.js';
 import {
   type Context,
   requireOrgRole,
   SESSION_INCLUDE,
-  getExchangeRefreshToken,
+  runOwnedEmailOperation,
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
@@ -564,20 +559,25 @@ export const sessionMutations = {
         where: { id },
         data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
       });
+      // Tear down the provider tool's side (token + Graph subscriptions) —
+      // best-effort fire-and-forget (deleteToolConnection never throws); the
+      // soft-delete above already committed and must not wait on the tool.
+      if (connection.toolConnectionId) {
+        void deleteToolConnection(connection.provider, connection.toolConnectionId);
+      }
       return true;
     },
 
     testExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const { refreshToken } = await getExchangeRefreshToken(ctx, id);
       try {
-        await listInboxMessages(refreshToken, { top: 1 });
+        await runOwnedEmailOperation(ctx, id, 'list-messages', { top: 1 });
         await ctx.db.exchangeConnection.update({
           where: { id },
           data: { syncStatus: 'OK', lastError: null, lastSyncAt: new Date() },
         });
         return true;
       } catch (err: unknown) {
-        const errMsg = extractErrorMessage(err);
+        const errMsg = err instanceof Error ? err.message : String(err);
         await ctx.db.exchangeConnection.update({
           where: { id },
           data: { syncStatus: 'ERROR', lastError: errMsg },
@@ -591,8 +591,10 @@ export const sessionMutations = {
       { connectionId, messageId, body }: { connectionId: string; messageId: string; body: string },
       ctx: Context,
     ) => {
-      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
-      await replyToMessage(refreshToken, messageId, body);
+      await runOwnedEmailOperation(ctx, connectionId, 'reply-to-message', {
+        messageId,
+        bodyHtml: body,
+      });
       return true;
     },
 
@@ -601,8 +603,129 @@ export const sessionMutations = {
       { connectionId, messageId, folderId }: { connectionId: string; messageId: string; folderId: string },
       ctx: Context,
     ) => {
-      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
-      await moveMessage(refreshToken, messageId, folderId);
+      await runOwnedEmailOperation(ctx, connectionId, 'move-message', {
+        messageId,
+        destinationFolderId: folderId,
+      });
+      return true;
+    },
+
+    // ── spec 002 email operations (provider-neutral names) ─────────────
+    // The drafts/flag/read-status capabilities the ms-exchange tool added.
+    // All owner-only via requireEmailConnection; `idempotencyKey` rides
+    // through to the tool's reservation-based replay (at-least-once callers).
+    // The legacy exchange* names above stay as portal-compatible shims until
+    // the portal migrates to this surface (#396 follow-up).
+
+    emailSaveDraft: async (
+      _: unknown,
+      {
+        connectionRef,
+        replyToMessageId,
+        to,
+        subject,
+        bodyHtml,
+        idempotencyKey,
+      }: {
+        connectionRef: string;
+        replyToMessageId?: string | null;
+        to?: string[] | null;
+        subject?: string | null;
+        bodyHtml: string;
+        idempotencyKey?: string | null;
+      },
+      ctx: Context,
+    ) => {
+      return runOwnedEmailOperation<{ draftId: string; conversationId: string | null }>(
+        ctx,
+        connectionRef,
+        'save-draft',
+        {
+          // JSON.stringify drops undefined values, so plain fields suffice.
+          replyToMessageId: replyToMessageId ?? undefined,
+          to: to?.length ? to : undefined,
+          subject: subject ?? undefined,
+          bodyHtml,
+          idempotencyKey: idempotencyKey ?? undefined,
+        },
+      );
+    },
+
+    emailUpdateDraft: async (
+      _: unknown,
+      { connectionRef, draftId, bodyHtml }: { connectionRef: string; draftId: string; bodyHtml: string },
+      ctx: Context,
+    ) => {
+      await runOwnedEmailOperation(ctx, connectionRef, 'update-draft', { draftId, bodyHtml });
+      return true;
+    },
+
+    emailSendDraft: async (
+      _: unknown,
+      {
+        connectionRef,
+        draftId,
+        idempotencyKey,
+      }: { connectionRef: string; draftId: string; idempotencyKey?: string | null },
+      ctx: Context,
+    ) => {
+      await runOwnedEmailOperation(ctx, connectionRef, 'send-draft', {
+        draftId,
+        idempotencyKey: idempotencyKey ?? undefined,
+      });
+      return true;
+    },
+
+    emailDeleteMessage: async (
+      _: unknown,
+      { connectionRef, messageId }: { connectionRef: string; messageId: string },
+      ctx: Context,
+    ) => {
+      await runOwnedEmailOperation(ctx, connectionRef, 'delete-message', { messageId });
+      return true;
+    },
+
+    emailMarkRead: async (
+      _: unknown,
+      { connectionRef, messageId, isRead }: { connectionRef: string; messageId: string; isRead?: boolean | null },
+      ctx: Context,
+    ) => {
+      await runOwnedEmailOperation(ctx, connectionRef, 'mark-read', {
+        messageId,
+        isRead: isRead ?? true,
+      });
+      return true;
+    },
+
+    emailFlagMessage: async (
+      _: unknown,
+      {
+        connectionRef,
+        messageId,
+        flag,
+      }: { connectionRef: string; messageId: string; flag?: 'FLAGGED' | 'NONE' | 'COMPLETE' | null },
+      ctx: Context,
+    ) => {
+      await runOwnedEmailOperation(ctx, connectionRef, 'flag-message', {
+        messageId,
+        flag: (flag ?? 'FLAGGED').toLowerCase(),
+      });
+      return true;
+    },
+
+    emailCategorizeMessage: async (
+      _: unknown,
+      {
+        connectionRef,
+        messageId,
+        categories,
+      }: { connectionRef: string; messageId: string; categories: string[] },
+      ctx: Context,
+    ) => {
+      await runOwnedEmailOperation(ctx, connectionRef, 'categorize-message', {
+        messageId,
+        categories,
+      });
       return true;
     },
 

@@ -7,10 +7,8 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import {
-  listInboxMessages,
-  listFolders,
-} from '../../../integrations/exchange/exchange.js';
+import { GraphQLError } from 'graphql';
+import { type ToolEmailFolder, type ToolEmailMessage } from '../../../lib/emailClient.js';
 import {
   type Context,
   requireRole,
@@ -18,7 +16,7 @@ import {
   getAccessibleMemoryIds,
   sessionScopeFilter,
   SESSION_INCLUDE,
-  getExchangeRefreshToken,
+  runOwnedEmailOperation,
 } from './resolvers.helpers.js';
 
 export const sessionQueries = {
@@ -206,27 +204,60 @@ export const sessionQueries = {
 
     exchangeMessages: async (
       _: unknown,
-      { connectionId, top, filter }: { connectionId: string; top?: number; filter?: string },
+      {
+        connectionId,
+        top,
+        filter,
+        unreadOnly,
+      }: { connectionId: string; top?: number; filter?: string; unreadOnly?: boolean },
       ctx: Context,
     ) => {
-      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
-      const result = await listInboxMessages(refreshToken, { top: top ?? 25, filter: filter ?? undefined });
-      return result.data.map((m) => ({
+      // The legacy `filter` arg carried a raw Graph OData string — a
+      // provider leak the neutral tool surface (spec 002) doesn't accept.
+      // `unreadOnly` is the supported concept; the one legacy shape ever sent
+      // still translates, anything else is a typed error rather than a
+      // silently-ignored filter.
+      const normalizedFilter = filter?.replace(/\s+/g, ' ').trim().toLowerCase();
+      if (normalizedFilter && normalizedFilter !== 'isread eq false') {
+        throw new GraphQLError('Raw provider filters are no longer supported; use unreadOnly.', {
+          extensions: { code: 'EMAIL_FILTER_UNSUPPORTED', filter },
+        });
+      }
+      const { messages } = await runOwnedEmailOperation<{ messages: ToolEmailMessage[] }>(
+        ctx,
+        connectionId,
+        'list-messages',
+        {
+          // The tool caps top at 100 — clamp instead of surfacing a
+          // validation error on a previously-unbounded GraphQL arg.
+          top: Math.max(1, Math.min(top ?? 25, 100)),
+          unreadOnly: unreadOnly || !!normalizedFilter || undefined,
+        },
+      );
+      return messages.map((m) => ({
         id: m.id,
         subject: m.subject,
-        from: m.from?.emailAddress?.address ?? null,
-        receivedDateTime: m.receivedDateTime,
+        from: m.from?.address ?? null,
+        receivedDateTime: m.receivedAt,
         isRead: m.isRead,
-        bodyPreview: m.bodyPreview,
+        bodyPreview: m.snippet,
         body: m.body?.content ?? null,
         hasAttachments: m.hasAttachments,
       }));
     },
 
     exchangeFolders: async (_: unknown, { connectionId }: { connectionId: string }, ctx: Context) => {
-      const { refreshToken } = await getExchangeRefreshToken(ctx, connectionId);
-      const result = await listFolders(refreshToken);
-      return result.data;
+      const { folders } = await runOwnedEmailOperation<{ folders: ToolEmailFolder[] }>(
+        ctx,
+        connectionId,
+        'list-folders',
+      );
+      return folders.map((f) => ({
+        id: f.id,
+        displayName: f.name,
+        totalItemCount: f.totalCount,
+        unreadItemCount: f.unreadCount,
+      }));
     },
 };
 
