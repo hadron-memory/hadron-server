@@ -20,17 +20,36 @@ separation as Google login vs the Gmail tool (#580) and Exchange (#396):
 the existing `hadrontool-ms-exchange` app registration is a **different
 client in a different trust tier**; do not reuse it for login.
 
+## Route + env namespace: `microsoft-login`, not `microsoft`
+
+The obvious `/auth/microsoft` namespace is **already taken**: the Exchange
+mailbox OAuth flow (#396) owns `GET /auth/microsoft`,
+`GET /auth/microsoft/callback`, and `POST /auth/microsoft/start`
+(`src/server.ts` ~1180–1290) **and** the `MICROSOFT_CLIENT_ID` env var
+(`src/integrations/exchange/auth.ts`). Renaming the live Exchange routes is
+rejected — they're a working prod flow with redirect URIs registered on the
+Entra side. Login therefore gets its own namespace throughout:
+
+- routes `GET /auth/microsoft-login` + `GET /auth/microsoft-login/callback`,
+- env `MICROSOFT_LOGIN_CLIENT_ID` / `MICROSOFT_LOGIN_CLIENT_SECRET` /
+  `MICROSOFT_LOGIN_TENANT`.
+
+The portal start route stays `/auth/start/microsoft` (no collision in the
+portal's namespace). The split also makes the two-registrations requirement
+structural: the login client and the Exchange client can never share
+credentials by accident. (Caught by Codex review on PR #595.)
+
 ## Shape — near-verbatim sibling of the Google pair
 
 The Google flow is the closest template (GET callback with query params —
 none of Apple's form_post machinery):
 
-- `GET /auth/microsoft` — 503 when unconfigured; `return_to` validated by
-  `isServerLocalPath`; `client_state` mandatory on the portal-handoff path
+- `GET /auth/microsoft-login` — 503 when unconfigured; `return_to` validated
+  by `isServerLocalPath`; `client_state` mandatory on the portal-handoff path
   (#477 / Codex #504 P2); own `pendingMicrosoftStates` map (state minted for
   one provider must never replay against another's callback); 10-min expiry
   with prune-on-hit.
-- `GET /auth/microsoft/callback` — code→token exchange, verify ID token,
+- `GET /auth/microsoft-login/callback` — code→token exchange, verify ID token,
   `resolveMicrosoftUser`, personal-workspace provisioning with P2002
   tolerance, same JWT claim shape, Option-C `hadron_token` cookie on the
   `returnTo` branch, single-use handoff code otherwise.
@@ -54,7 +73,7 @@ These are the only parts that are not a mechanical copy:
 ### 1. Multi-tenant issuer validation (the real work)
 
 Endpoints (Microsoft identity platform v2.0), with `{tenant}` from
-`MICROSOFT_TENANT` (default `common`):
+`MICROSOFT_LOGIN_TENANT` (default `common`):
 
 - authorize: `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize`
 - token: `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
@@ -66,7 +85,7 @@ With `common`, the ID token's `iss` is **per-tenant**
 `audience` (our client id) only, then manually enforce:
 
 - `payload.tid` is a UUID (regex),
-- `payload.iss === `https://login.microsoftonline.com/${payload.tid}/v2.0``,
+- ``payload.iss === `https://login.microsoftonline.com/${payload.tid}/v2.0` ``,
 - `payload.sub` is a non-empty string.
 
 Fail closed — any mismatch throws, exactly like the Google verifier. Pin all
@@ -115,14 +134,17 @@ registration step).
 | `prisma/migrations/<ts>_user_microsoft_id/migration.sql` | Hand-typed timestamp; `ADD COLUMN "microsoft_id" TEXT` + unique index only (simpler than the Apple migration — no `ALTER TYPE`). |
 | `src/auth/microsoft.ts` (new) | `buildMicrosoftAuthUrl`, `exchangeMicrosoftCode`, `verifyMicrosoftIdToken` (injectable `getKey` for tests), `resolveMicrosoftUser` + private `createFreshUser`. Scopes: `openid email profile`. |
 | `src/auth/microsoft.test.ts` (new) | Mirror `google.test.ts`: URL shape (login-only scopes, BASE_URL-derived redirect_uri), verifier (bad signature / audience / issuer-tid mismatch throw; `xms_edov` + MSA-tenant gates fail closed), the three resolve branches + refusal cases, P2002 winner. Local JWKS via jose — no network. |
-| `src/server.ts` | `pendingMicrosoftStates` + the `GET /auth/microsoft` / `GET /auth/microsoft/callback` pair, copied from the Google pair. |
+| `src/server.ts` | `pendingMicrosoftStates` + the `GET /auth/microsoft-login` / `GET /auth/microsoft-login/callback` pair, copied from the Google pair (the bare `/auth/microsoft` namespace belongs to the Exchange flow — see above). |
 | `CLAUDE.md` | Env-table row for the three vars. |
 
-Env: `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` (both required
-together; unset ⇒ `/auth/microsoft` answers 503) + `MICROSOFT_TENANT`
-(default `common`). Register in Doppler (dev + prd).
+Env: `MICROSOFT_LOGIN_CLIENT_ID` / `MICROSOFT_LOGIN_CLIENT_SECRET` (both
+required together; unset ⇒ `/auth/microsoft-login` answers 503) +
+`MICROSOFT_LOGIN_TENANT` (default `common`). Register in Doppler (dev + prd).
+`MICROSOFT_CLIENT_ID`/`MICROSOFT_CLIENT_SECRET` remain the Exchange flow's.
 
-No GraphQL change — `googleId`/`appleId` aren't exposed either.
+No new GraphQL fields — only the legacy `githubId` is exposed on the User
+type; the newer provider ids (`googleId`/`appleId`) aren't, and
+`microsoftId` follows the newer pattern.
 
 ### Phase 2 — hadron-portal (separate repo)
 
@@ -136,16 +158,16 @@ batching Google + Apple + Microsoft portal wiring into one portal PR.
 
 1. New app registration in a **login-only** tenant/registration (not the
    ms-exchange one). Supported account types per the tenant decision below.
-2. Web platform redirect URIs: `${BASE_URL}/auth/microsoft/callback` (prod)
-   + `http://localhost:4000/auth/microsoft/callback` (Entra allows plain
-   http for localhost — no tunnel needed, unlike Apple).
+2. Web platform redirect URIs: `${BASE_URL}/auth/microsoft-login/callback`
+   (prod) + `http://localhost:4000/auth/microsoft-login/callback` (Entra
+   allows plain http for localhost — no tunnel needed, unlike Apple).
 3. ID-token **optional claims**: `email`, `xms_edov`.
 4. Client secret → Doppler; note the expiry date (delta 4 above).
 
 ## Open decisions (Holger)
 
 1. **Supported account types / tenant.** Recommend `common` (work/school +
-   personal), env-overridable via `MICROSOFT_TENANT` for single-tenant
+   personal), env-overridable via `MICROSOFT_LOGIN_TENANT` for single-tenant
    deploys. `consumers`-only would dodge the whole nOAuth surface but shuts
    out the business audience, which seems wrong for Hadron.
 2. **Email-linking gate.** Recommend the `xms_edov` ∨ MSA-tenant gate above.
