@@ -95,7 +95,12 @@ export async function verifyGoogleIdToken(
   }
   return {
     sub: payload.sub,
-    email: typeof payload.email === 'string' ? payload.email : null,
+    // Lowercase-canonical, matching the magic-link flow (src/auth/email.ts
+    // stores email.toLowerCase()): Postgres text uniqueness is case-sensitive,
+    // so a raw `Ada@Example.com` claim would miss the existing `ada@…` row and
+    // fork a second account instead of linking. Normalized here — the single
+    // producer of GoogleIdentity — so lookup, link, and create all agree.
+    email: typeof payload.email === 'string' ? payload.email.toLowerCase() : null,
     // Google sends a boolean, but fail closed on anything else (a string
     // "true" from a misbehaving proxy must not authorize account linking).
     emailVerified: payload.email_verified === true,

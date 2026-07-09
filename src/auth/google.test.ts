@@ -141,6 +141,19 @@ describe('verifyGoogleIdToken', () => {
     await expect(verifyGoogleIdToken(token, getKey)).rejects.toThrow(/sub/);
   });
 
+  it('lowercases the email claim (parity with the magic-link flow)', async () => {
+    // The magic-link flow stores email.toLowerCase(); a raw mixed-case Google
+    // claim would miss that row on the case-sensitive unique and fork a
+    // second account instead of linking (Codex/Copilot review on PR #582).
+    const token = await mintIdToken({
+      sub: '42',
+      email: 'Ada@Example.COM',
+      email_verified: true,
+    });
+    const identity = await verifyGoogleIdToken(token, getKey);
+    expect(identity.email).toBe('ada@example.com');
+  });
+
   it('fails closed on a non-boolean email_verified', async () => {
     // A string "true" must NOT authorize account linking.
     const token = await mintIdToken({
