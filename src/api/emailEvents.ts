@@ -13,10 +13,10 @@
  *
  * v1 has no consuming agent yet: dispatch resolves the connection, logs, and
  * acks. It is the single seam where consumers attach later — per-connection
- * AgentWebhook delivery (agent-pong#1 prerequisite 2) and/or a spec-039 bus
- * publish — WITHOUT touching the tool. The transport is HTTP now and wraps
- * behind a NATS subject later (D-2026-06-17-004 posture: a missing broker
- * never breaks the path).
+ * AgentWebhook delivery and/or a spec-039 bus publish (consumer roadmap on
+ * hadron-server#396) — WITHOUT touching the tool. The transport is HTTP now
+ * and wraps behind a NATS subject later (D-2026-06-17-004 posture: a missing
+ * broker never breaks the path).
  */
 import type { Express, Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
@@ -71,7 +71,7 @@ export async function dispatchEmailEvent(event: InboundEmailEvent): Promise<void
     `[email-events] ${event.event} in ${connection.mailboxEmail} (connection ${connection.id}, folder ${event.folder}): "${event.message.subject ?? ''}"`,
   );
   // Future consumers attach here (per-connection AgentWebhook delivery /
-  // spec-039 bus publish) — agent-pong#1 prerequisite 2.
+  // spec-039 bus publish) — consumer roadmap on hadron-server#396.
 }
 
 /** Mount the internal ingress route. */
