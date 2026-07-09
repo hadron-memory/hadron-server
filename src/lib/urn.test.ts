@@ -602,6 +602,39 @@ describe('validateUserSlug', () => {
       expect(() => validateUserSlug(word)).toThrow(UrnParseError);
     }
   });
+
+  // #575: slugs are lowercase-canonical at create/rename (URN lookups are
+  // case-sensitive, so uppercase is a retrieval footgun).
+  it('accepts lowercase slugs (incl. digits, dots, hyphens, underscores)', () => {
+    for (const ok of ['acme', 'flow-lab', 'a.b.c', 'foo_bar', 'x9']) {
+      expect(() => validateUserSlug(ok)).not.toThrow();
+    }
+  });
+
+  it('rejects an uppercase slug as slug-not-lowercase (#575)', () => {
+    for (const bad of ['Acme', 'Flow-Lab', 'fooBar', 'ABC']) {
+      try {
+        validateUserSlug(bad);
+        throw new Error(`should have thrown for ${bad}`);
+      } catch (e) {
+        expect(e).toBeInstanceOf(UrnParseError);
+        expect((e as UrnParseError).reason).toBe('slug-not-lowercase');
+        // Message suggests the lowercased form.
+        expect((e as UrnParseError).message).toContain(bad.toLowerCase());
+      }
+    }
+  });
+
+  it('a reserved word wins over the case check — "Agent" stays reserved-word-slug (#575)', () => {
+    // Ordering guard: the case-insensitive reserved check runs before the
+    // lowercase check, so a reserved word reports as reserved regardless of case.
+    try {
+      validateUserSlug('Agent');
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect((e as UrnParseError).reason).toBe('reserved-word-slug');
+    }
+  });
 });
 
 // #376: org slugs are stored BARE; a scheme-prefixed or colon-bearing value
@@ -632,6 +665,28 @@ describe('validateOrgSlug', () => {
   it('still enforces charset and reserved-word rules from validateUserSlug', () => {
     expect(() => validateOrgSlug('bad space')).toThrow(UrnParseError);
     expect(() => validateOrgSlug('agent')).toThrow(UrnParseError); // reserved
+  });
+
+  it('inherits the lowercase-only rule from validateUserSlug (#575)', () => {
+    expect(() => validateOrgSlug('acme.com')).not.toThrow();
+    try {
+      validateOrgSlug('Acme.com');
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect((e as UrnParseError).reason).toBe('slug-not-lowercase');
+    }
+  });
+});
+
+// #575: create/rename rejects uppercase slugs, but the PARSE path stays
+// case-lenient so any pre-existing uppercase URN still resolves (Postel's law).
+describe('parse path is case-lenient for uppercase slugs (#575)', () => {
+  it('parses an uppercase URN without throwing', () => {
+    expect(parseUrnInput('hrn:org:Acme')).toEqual({ type: 'org', value: 'Acme' });
+    expect(parseUrnInput('urn:agent:hadronmemory.com:Flow-Lab')).toEqual({
+      type: 'agent',
+      value: 'hadronmemory.com:Flow-Lab',
+    });
   });
 });
 

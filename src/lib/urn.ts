@@ -200,6 +200,7 @@ export type UrnParseErrorReason =
   | 'trailing-double-colon'    // URN ends with `::`
   | 'reserved-word-slug'       // a slug equals a reserved word per FR-019
   | 'invalid-charset'          // a slug violates FR-016's charset
+  | 'slug-not-lowercase'       // a NEW slug contains uppercase (create/rename only; #575)
   | 'slug-too-long'            // a slug exceeds FR-017's 64-char limit
   | 'loc-segment-rejected'     // URN contains a `loc:` segment per FR-021
   | 'invalid-segment-shape'    // a path-segment violates FR-020's internal-`:` count rules
@@ -482,6 +483,8 @@ function messageFor(
       return `Slug${cite} is a reserved word and cannot be used. Reserved words are URN type names (agent, app, memory, …) and memory role markers (system, app-user, priv, …). Pick a different name.`;
     case 'invalid-charset':
       return `Slug${cite} contains characters outside the allowed set. Slugs may use letters, digits, dots, underscores, and hyphens; they must start and end with a letter or digit.`;
+    case 'slug-not-lowercase':
+      return `Slug "${input}" must be lowercase. URN lookups are case-sensitive, so "${input}" and "${input.toLowerCase()}" would be distinct entities — use "${input.toLowerCase()}".`;
     case 'slug-too-long':
       return `Slug${cite} exceeds the 64-character limit. Pick a shorter name.`;
     case 'loc-segment-rejected':
@@ -687,6 +690,11 @@ function validatePathSegment(input: string, segment: string): void {
  * Parse-time slug-atom shape check: FR-016 charset + FR-017 length only.
  * Reserved-word rejection is FR-019 and lives in `validateUserSlug`.
  *
+ * Deliberately case-LENIENT (the charset allows `A-Z`): this runs on the
+ * read/parse path, so tightening it to lowercase-only would make any existing
+ * uppercase URN fail to resolve. The lowercase-only rule (#575) is enforced at
+ * the CREATE/RENAME boundary in `validateUserSlug` instead — do not move it here.
+ *
  * `input` is the full URN being parsed; preserved in the thrown
  * `UrnParseError.input` so callers can recover the original URN that
  * failed. The `offendingSegment` field carries the atom-level detail.
@@ -716,14 +724,29 @@ function validateAtomShape(input: string, atom: string): void {
  * `system`, `app-user`, etc. — at parse time those words may be legitimate
  * structurally (role markers at the final segment of a memory URN); at
  * entity-create time they are unconditionally rejected.
+ *
+ * #575: a NEW slug must also be **lowercase**. URN lookups are case-sensitive
+ * (`normalizeUrnForLookup` collapses `::`→`:` but does NOT lowercase), so an
+ * uppercase slug would make `Acme` and `acme` distinct entities and force
+ * callers to remember exact casing. This is a CREATE/RENAME-only rule — the
+ * parse path (`validateAtomShape` / `validatePathSegment`) stays case-lenient
+ * so any pre-existing uppercase URN still resolves (Postel's law; mirrors the
+ * reserved-word split, where parse is lenient and create is strict).
  */
 export function validateUserSlug(slug: string): void {
   // At entity-create time the "input" being validated IS the slug; pass
   // it as both `input` and `offendingSegment` so error.input has the slug
   // for callers logging the create attempt.
   validateAtomShape(slug, slug);
+  // Reserved-word check first (case-insensitive), so a reserved word like
+  // `Agent` still reports `reserved-word-slug` rather than the case error.
   if (RESERVED_SLUGS.has(slug.toLowerCase())) {
     throw new UrnParseError(slug, 'reserved-word-slug', slug);
+  }
+  // #575 — lowercase-canonical. validateAtomShape's charset is deliberately
+  // case-lenient (read path); enforce the case rule only here, at create/rename.
+  if (/[A-Z]/.test(slug)) {
+    throw new UrnParseError(slug, 'slug-not-lowercase', slug);
   }
 }
 
