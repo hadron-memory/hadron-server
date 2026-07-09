@@ -29,12 +29,12 @@ import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
-import { deleteToolConnection, runEmailOperation } from '../../../lib/emailClient.js';
+import { deleteToolConnection } from '../../../lib/emailClient.js';
 import {
   type Context,
   requireOrgRole,
   SESSION_INCLUDE,
-  requireEmailConnection,
+  runOwnedEmailOperation,
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
@@ -560,20 +560,17 @@ export const sessionMutations = {
         data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
       });
       // Tear down the provider tool's side (token + Graph subscriptions) —
-      // best-effort; the tool's renewal worker skips dead connections anyway.
+      // best-effort fire-and-forget (deleteToolConnection never throws); the
+      // soft-delete above already committed and must not wait on the tool.
       if (connection.toolConnectionId) {
-        await deleteToolConnection(connection.provider, connection.toolConnectionId);
+        void deleteToolConnection(connection.provider, connection.toolConnectionId);
       }
       return true;
     },
 
     testExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const connection = await requireEmailConnection(ctx, id);
       try {
-        await runEmailOperation(connection.provider, 'list-messages', {
-          connectionId: connection.toolConnectionId,
-          top: 1,
-        });
+        await runOwnedEmailOperation(ctx, id, 'list-messages', { top: 1 });
         await ctx.db.exchangeConnection.update({
           where: { id },
           data: { syncStatus: 'OK', lastError: null, lastSyncAt: new Date() },
@@ -594,9 +591,7 @@ export const sessionMutations = {
       { connectionId, messageId, body }: { connectionId: string; messageId: string; body: string },
       ctx: Context,
     ) => {
-      const connection = await requireEmailConnection(ctx, connectionId);
-      await runEmailOperation(connection.provider, 'reply-to-message', {
-        connectionId: connection.toolConnectionId,
+      await runOwnedEmailOperation(ctx, connectionId, 'reply-to-message', {
         messageId,
         bodyHtml: body,
       });
@@ -608,9 +603,7 @@ export const sessionMutations = {
       { connectionId, messageId, folderId }: { connectionId: string; messageId: string; folderId: string },
       ctx: Context,
     ) => {
-      const connection = await requireEmailConnection(ctx, connectionId);
-      await runEmailOperation(connection.provider, 'move-message', {
-        connectionId: connection.toolConnectionId,
+      await runOwnedEmailOperation(ctx, connectionId, 'move-message', {
         messageId,
         destinationFolderId: folderId,
       });
@@ -643,17 +636,17 @@ export const sessionMutations = {
       },
       ctx: Context,
     ) => {
-      const connection = await requireEmailConnection(ctx, connectionRef);
-      return runEmailOperation<{ draftId: string; conversationId: string | null }>(
-        connection.provider,
+      return runOwnedEmailOperation<{ draftId: string; conversationId: string | null }>(
+        ctx,
+        connectionRef,
         'save-draft',
         {
-          connectionId: connection.toolConnectionId,
-          ...(replyToMessageId ? { replyToMessageId } : {}),
-          ...(to?.length ? { to } : {}),
-          ...(subject != null ? { subject } : {}),
+          // JSON.stringify drops undefined values, so plain fields suffice.
+          replyToMessageId: replyToMessageId ?? undefined,
+          to: to?.length ? to : undefined,
+          subject: subject ?? undefined,
           bodyHtml,
-          ...(idempotencyKey ? { idempotencyKey } : {}),
+          idempotencyKey: idempotencyKey ?? undefined,
         },
       );
     },
@@ -663,12 +656,7 @@ export const sessionMutations = {
       { connectionRef, draftId, bodyHtml }: { connectionRef: string; draftId: string; bodyHtml: string },
       ctx: Context,
     ) => {
-      const connection = await requireEmailConnection(ctx, connectionRef);
-      await runEmailOperation(connection.provider, 'update-draft', {
-        connectionId: connection.toolConnectionId,
-        draftId,
-        bodyHtml,
-      });
+      await runOwnedEmailOperation(ctx, connectionRef, 'update-draft', { draftId, bodyHtml });
       return true;
     },
 
@@ -681,11 +669,9 @@ export const sessionMutations = {
       }: { connectionRef: string; draftId: string; idempotencyKey?: string | null },
       ctx: Context,
     ) => {
-      const connection = await requireEmailConnection(ctx, connectionRef);
-      await runEmailOperation(connection.provider, 'send-draft', {
-        connectionId: connection.toolConnectionId,
+      await runOwnedEmailOperation(ctx, connectionRef, 'send-draft', {
         draftId,
-        ...(idempotencyKey ? { idempotencyKey } : {}),
+        idempotencyKey: idempotencyKey ?? undefined,
       });
       return true;
     },
@@ -695,11 +681,7 @@ export const sessionMutations = {
       { connectionRef, messageId }: { connectionRef: string; messageId: string },
       ctx: Context,
     ) => {
-      const connection = await requireEmailConnection(ctx, connectionRef);
-      await runEmailOperation(connection.provider, 'delete-message', {
-        connectionId: connection.toolConnectionId,
-        messageId,
-      });
+      await runOwnedEmailOperation(ctx, connectionRef, 'delete-message', { messageId });
       return true;
     },
 
@@ -708,9 +690,7 @@ export const sessionMutations = {
       { connectionRef, messageId, isRead }: { connectionRef: string; messageId: string; isRead?: boolean | null },
       ctx: Context,
     ) => {
-      const connection = await requireEmailConnection(ctx, connectionRef);
-      await runEmailOperation(connection.provider, 'mark-read', {
-        connectionId: connection.toolConnectionId,
+      await runOwnedEmailOperation(ctx, connectionRef, 'mark-read', {
         messageId,
         isRead: isRead ?? true,
       });
@@ -726,9 +706,7 @@ export const sessionMutations = {
       }: { connectionRef: string; messageId: string; flag?: 'FLAGGED' | 'NONE' | 'COMPLETE' | null },
       ctx: Context,
     ) => {
-      const connection = await requireEmailConnection(ctx, connectionRef);
-      await runEmailOperation(connection.provider, 'flag-message', {
-        connectionId: connection.toolConnectionId,
+      await runOwnedEmailOperation(ctx, connectionRef, 'flag-message', {
         messageId,
         flag: (flag ?? 'FLAGGED').toLowerCase(),
       });
@@ -744,9 +722,7 @@ export const sessionMutations = {
       }: { connectionRef: string; messageId: string; categories: string[] },
       ctx: Context,
     ) => {
-      const connection = await requireEmailConnection(ctx, connectionRef);
-      await runEmailOperation(connection.provider, 'categorize-message', {
-        connectionId: connection.toolConnectionId,
+      await runOwnedEmailOperation(ctx, connectionRef, 'categorize-message', {
         messageId,
         categories,
       });

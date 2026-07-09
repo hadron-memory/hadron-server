@@ -57,6 +57,7 @@ async function postToTool<T>(provider: string, path: string, body: unknown): Pro
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
   let res: Response;
+  let payload: Record<string, unknown> | null;
   try {
     res = await fetch(`${baseUrl}${path}`, {
       method: 'POST',
@@ -67,6 +68,14 @@ async function postToTool<T>(provider: string, path: string, body: unknown): Pro
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+    // The body read stays INSIDE the timeout window — a tool that sends
+    // headers and then stalls mid-body must abort too, not hang the resolver.
+    try {
+      payload = (await res.json()) as Record<string, unknown> | null;
+    } catch (err) {
+      if (controller.signal.aborted) throw err; // timed out mid-body → outer catch
+      payload = null; // malformed/empty body — surfaced via the !payload path below
+    }
   } catch (err) {
     const timedOut = controller.signal.aborted;
     throw new GraphQLError(timedOut ? 'Email service timed out.' : 'Email service is unreachable.', {
@@ -75,8 +84,6 @@ async function postToTool<T>(provider: string, path: string, body: unknown): Pro
   } finally {
     clearTimeout(timer);
   }
-
-  const payload = (await res.json().catch(() => null)) as Record<string, unknown> | null;
 
   if (!res.ok) {
     // The tool's typed spec-002 error body: { error: <code>, message, ...fields }.
@@ -149,28 +156,46 @@ export interface ToolConnectionIdentity {
  * Create a connection on the provider tool from an OAuth authorization code
  * (the tool holds the client secret and derives the mailbox identity), or —
  * the one-time migration path — from a raw refresh token core still holds.
+ * The identity is shape-validated: it becomes a DB unique key and an
+ * ownership anchor, so a buggy tool response must fail loudly here, never
+ * propagate an empty mailboxEmail into the connection upsert.
  */
 export async function createToolConnection(
   provider: string,
   input:
     | { code: string; redirectUri: string }
-    | { refreshToken: string; mailboxEmail: string; displayName?: string | null },
+    | { refreshToken: string; mailboxEmail: string; displayName?: string },
 ): Promise<ToolConnectionIdentity> {
-  return postToTool<ToolConnectionIdentity>(provider, '/connections', input);
+  const identity = await postToTool<ToolConnectionIdentity>(provider, '/connections', input);
+  if (
+    typeof identity.id !== 'string' ||
+    identity.id === '' ||
+    typeof identity.mailboxEmail !== 'string' ||
+    identity.mailboxEmail.trim() === ''
+  ) {
+    throw new GraphQLError('Email service returned an invalid connection identity.', {
+      extensions: { code: 'EMAIL_TOOL_ERROR', provider },
+    });
+  }
+  return identity;
 }
 
-/** Best-effort disconnect on the provider tool (subscription teardown + soft delete). */
+/**
+ * Best-effort disconnect on the provider tool (subscription teardown + soft
+ * delete). NEVER throws — the caller's DB effect has already committed (or a
+ * fresh connection superseded this one), so a misconfigured provider or an
+ * unreachable tool must log, not fail the surrounding operation. Callers
+ * therefore fire-and-forget (`void deleteToolConnection(...)`).
+ */
 export async function deleteToolConnection(provider: string, toolConnectionId: string): Promise<void> {
-  const { baseUrl, token } = toolFor(provider);
   try {
+    const { baseUrl, token } = toolFor(provider);
     await fetch(`${baseUrl}/connections/${encodeURIComponent(toolConnectionId)}`, {
       method: 'DELETE',
       headers: token ? { authorization: `Bearer ${token}` } : {},
       signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
   } catch (err) {
-    // Disconnect is best-effort: the core row is soft-deleted regardless, and
-    // the tool's renewal worker skips dead connections. Log, don't fail.
     console.error(`[emailClient] tool disconnect failed for ${provider}/${toolConnectionId}:`, err);
   }
 }

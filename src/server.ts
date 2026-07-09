@@ -56,6 +56,8 @@ import { makeProdRunDeps } from './jobs/appRunDeps.js';
 import { startSchedulerLoop } from './jobs/scheduler.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
+import { createToolConnection, deleteToolConnection, subscribeToolFolder } from './lib/emailClient.js';
+import { buildMicrosoftAuthUrl, getMicrosoftRedirectUri } from './integrations/exchange/auth.js';
 
 export async function createServer(): Promise<Express> {
   const app = express();
@@ -882,7 +884,6 @@ export async function createServer(): Promise<Express> {
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
 
-    const { buildMicrosoftAuthUrl } = await import('./integrations/exchange/exchange.js');
     res.redirect(buildMicrosoftAuthUrl(state));
   });
 
@@ -948,24 +949,24 @@ export async function createServer(): Promise<Express> {
       return;
     }
 
+    // #396: core does NOT exchange the code — the provider tool holds the
+    // client secret. Forward the code (with the SAME redirect URI the
+    // authorize URL carried); the tool exchanges it, derives the mailbox
+    // identity (ID-token claims first — personal accounts may fail Graph
+    // /me — then the profile), stores the encrypted refresh token, and
+    // returns the identity (shape-validated by emailClient). Core stores
+    // only that identity.
+    let identity: Awaited<ReturnType<typeof createToolConnection>> | undefined;
     try {
-      // #396: core does NOT exchange the code — the provider tool holds the
-      // client secret. Forward the code (with the SAME redirect URI the
-      // authorize URL carried); the tool exchanges it, derives the mailbox
-      // identity (ID-token claims first — personal accounts may fail Graph
-      // /me — then the profile), stores the encrypted refresh token, and
-      // returns the identity. Core stores only that identity.
-      const { getMicrosoftRedirectUri } = await import('./integrations/exchange/auth.js');
-      const { createToolConnection, deleteToolConnection } = await import('./lib/emailClient.js');
-
-      const identity = await createToolConnection('ms-exchange', {
+      identity = await createToolConnection('ms-exchange', {
         code,
         redirectUri: getMicrosoftRedirectUri(),
       });
 
       // Reconnecting an existing mailbox mints a NEW tool connection; tear
       // down the superseded one so it doesn't keep a live token +
-      // subscriptions on the tool side.
+      // subscriptions on the tool side. Fire-and-forget (never throws) —
+      // the browser redirect must not wait on the tool.
       const existing = await db.exchangeConnection.findUnique({
         where: {
           organizationId_mailboxEmail: {
@@ -976,7 +977,7 @@ export async function createServer(): Promise<Express> {
         select: { toolConnectionId: true, provider: true },
       });
       if (existing?.toolConnectionId && existing.toolConnectionId !== identity.id) {
-        await deleteToolConnection(existing.provider, existing.toolConnectionId);
+        void deleteToolConnection(existing.provider, existing.toolConnectionId);
       }
 
       await db.exchangeConnection.upsert({
@@ -1001,6 +1002,16 @@ export async function createServer(): Promise<Express> {
           displayName: identity.displayName,
           provider: identity.provider,
           toolConnectionId: identity.id,
+          // Reconnect transfers OWNERSHIP: mail operations are owner-only,
+          // and the initiator just proved control of the mailbox via OAuth
+          // (and passed the #506 org-ADMIN gate). Without this, a reconnect
+          // by a different user would strand the row on the old owner.
+          userId: pending.userId,
+          // A reconnect also REVIVES a previously-disconnected row —
+          // otherwise the flow reports success while the row stays
+          // soft-deleted and invisible.
+          deletedAt: null,
+          deletedBy: null,
           // The legacy core-held token (if any) is superseded by the tool's.
           refreshTokenEncrypted: null,
           syncStatus: 'OK',
@@ -1010,6 +1021,16 @@ export async function createServer(): Promise<Express> {
         },
       });
 
+      // Subscribe the inbox to provider change notifications (the event
+      // plane). Best-effort: until the tool's public webhook route +
+      // WEBHOOK_BASE_URL are configured this fails, and the connection is
+      // still fully usable for request/reply operations.
+      subscribeToolFolder(identity.provider, identity.id, 'inbox').catch((err) => {
+        console.log(
+          `[microsoft-oauth] inbox subscription not created for ${identity!.mailboxEmail} (event plane off?): ${err instanceof Error ? err.message : err}`,
+        );
+      });
+
       console.log(`[microsoft-oauth] Connected Exchange for ${identity.mailboxEmail} → org ${pending.orgId} (tool connection ${identity.id})`);
 
       const successUrl = new URL(pending.redirect, frontendUrl);
@@ -1017,6 +1038,12 @@ export async function createServer(): Promise<Express> {
       res.redirect(successUrl.toString());
     } catch (err) {
       console.error('[microsoft-oauth] Callback error:', err);
+      // If the tool already minted a connection but core failed to record it,
+      // tear the orphan down — otherwise every failed attempt leaks a live
+      // refresh token + auto-renewing subscriptions with no core record.
+      if (identity) {
+        void deleteToolConnection(identity.provider, identity.id);
+      }
       const errorUrl = new URL(pending.redirect, frontendUrl);
       errorUrl.searchParams.set('exchangeError', err instanceof Error ? err.message : 'Microsoft authentication failed');
       res.redirect(errorUrl.toString());

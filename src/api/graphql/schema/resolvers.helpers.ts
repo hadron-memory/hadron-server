@@ -3,6 +3,7 @@
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
+import { runEmailOperation } from '../../../lib/emailClient.js';
 import {
   AiServiceConfigNotFoundError,
   AiConfigValidationError,
@@ -1020,9 +1021,21 @@ export async function requireEmailConnection(
   mailboxEmail: string;
 }> {
   // findFirst (not findUnique) so deletedAt filters in the query — the
-  // revoked-membership pattern (PR #475).
+  // revoked-membership pattern (PR #475). The `select` is load-bearing: it
+  // keeps the legacy encrypted-token column out of the returned object, so
+  // the declared type IS the runtime shape and no caller can accidentally
+  // serialize a secret (CLAUDE.md authorization invariants: sanitized
+  // projection, never the raw row).
   const connection = await ctx.db.exchangeConnection.findFirst({
     where: { id: connectionRef, deletedAt: null },
+    select: {
+      id: true,
+      provider: true,
+      toolConnectionId: true,
+      organizationId: true,
+      userId: true,
+      mailboxEmail: true,
+    },
   });
   if (!connection) throw new Error('Connection not found');
   if (!ctx.userId || ctx.userId !== connection.userId) {
@@ -1037,6 +1050,26 @@ export async function requireEmailConnection(
     );
   }
   return { ...connection, toolConnectionId: connection.toolConnectionId };
+}
+
+/**
+ * The one way a resolver runs a mail operation: owner-only gate, then the
+ * spec-002 operation on the provider tool with the TOOL's connection id (a
+ * copy-paste that passed core's row id instead would 404 only in prod —
+ * tests mock the client). Extra input fields (messageId, bodyHtml,
+ * idempotencyKey, …) merge over the routed connectionId.
+ */
+export async function runOwnedEmailOperation<T = Record<string, unknown>>(
+  ctx: Context,
+  connectionRef: string,
+  operation: string,
+  input: Record<string, unknown> = {},
+): Promise<T> {
+  const connection = await requireEmailConnection(ctx, connectionRef);
+  return runEmailOperation<T>(connection.provider, operation, {
+    connectionId: connection.toolConnectionId,
+    ...input,
+  });
 }
 
 // ---------------------------------------------------------------------------

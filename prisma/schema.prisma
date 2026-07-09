@@ -1754,7 +1754,6 @@ model PendingSetup {
   @@map("pending_setups")
 }
 
-/// A linked Microsoft Exchange / Outlook mailbox for an
 /// A connected email mailbox (identity record). Provider state — refresh
 /// tokens, Graph subscriptions — lives in the provider capability tool
 /// (hadrontool-ms-exchange, #396); mail operations route through
@@ -1771,7 +1770,7 @@ model ExchangeConnection {
   /// (#396: one capability tool per provider; 'ms-exchange' today).
   provider              String     @default("ms-exchange")
   /// The provider tool's connection id. NULL only for legacy rows whose
-  /// token hasn't been transferred yet (src/admin/transfer-exchange-tokens.ts).
+  /// token hasn't been transferred yet (scripts/admin-transfer-exchange-tokens.ts).
   toolConnectionId      String?    @map("tool_connection_id")
   /// LEGACY (#396): AES-256-GCM-encrypted MS Graph refresh token, kept (NULL
   /// for new rows) only as the rollback path until the one-time core→tool
@@ -1801,6 +1800,9 @@ model ExchangeConnection {
 
   @@unique([organizationId, mailboxEmail])
   @@index([userId])
+  // The email-events ingress resolves connections by the tool's id on every
+  // inbound email — this lookup must be indexed (#396 Phase 4).
+  @@index([toolConnectionId])
   @@map("exchange_connections")
 }
 

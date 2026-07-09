@@ -2570,7 +2570,13 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     exchangeConnections(orgId: ID!): [ExchangeConnection!]!
-    exchangeMessages(connectionId: ID!, top: Int, filter: String): [ExchangeMessage!]!
+    exchangeMessages(
+      connectionId: ID!
+      top: Int
+      "Deprecated: raw provider filters are gone; only 'isRead eq false' still translates. Use unreadOnly."
+      filter: String
+      unreadOnly: Boolean
+    ): [ExchangeMessage!]!
     exchangeFolders(connectionId: ID!): [ExchangeFolder!]!
 
     """

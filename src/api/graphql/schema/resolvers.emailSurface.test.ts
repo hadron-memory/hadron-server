@@ -155,6 +155,20 @@ describe('owner-only mail-operation gate (#396)', () => {
   });
 });
 
+describe('list-messages arg mapping', () => {
+  it('supports the first-class unreadOnly arg and clamps top to the tool cap', async () => {
+    await run(`query { exchangeMessages(connectionId: "${connectionId}", unreadOnly: true, top: 500) { id } }`, {
+      userId: owner.id,
+      roles: ['READER'],
+    });
+    expect(vi.mocked(runEmailOperation)).toHaveBeenCalledWith(
+      'ms-exchange',
+      'list-messages',
+      expect.objectContaining({ unreadOnly: true, top: 100 }),
+    );
+  });
+});
+
 describe('spec 002 email mutations', () => {
   it('emailSaveDraft routes a reply-draft with the idempotency key', async () => {
     vi.mocked(runEmailOperation).mockResolvedValueOnce({ draftId: 'd-1', conversationId: 'c-1' });

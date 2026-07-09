@@ -8,7 +8,7 @@ import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
-import { runEmailOperation, type ToolEmailFolder, type ToolEmailMessage } from '../../../lib/emailClient.js';
+import { type ToolEmailFolder, type ToolEmailMessage } from '../../../lib/emailClient.js';
 import {
   type Context,
   requireRole,
@@ -16,7 +16,7 @@ import {
   getAccessibleMemoryIds,
   sessionScopeFilter,
   SESSION_INCLUDE,
-  requireEmailConnection,
+  runOwnedEmailOperation,
 } from './resolvers.helpers.js';
 
 export const sessionQueries = {
@@ -204,27 +204,34 @@ export const sessionQueries = {
 
     exchangeMessages: async (
       _: unknown,
-      { connectionId, top, filter }: { connectionId: string; top?: number; filter?: string },
+      {
+        connectionId,
+        top,
+        filter,
+        unreadOnly,
+      }: { connectionId: string; top?: number; filter?: string; unreadOnly?: boolean },
       ctx: Context,
     ) => {
-      const connection = await requireEmailConnection(ctx, connectionId);
       // The legacy `filter` arg carried a raw Graph OData string — a
       // provider leak the neutral tool surface (spec 002) doesn't accept.
-      // The one shape the portal ever sent is translated; anything else is a
-      // typed error rather than a silently-ignored filter.
-      const normalizedFilter = filter?.trim().toLowerCase();
+      // `unreadOnly` is the supported concept; the one legacy shape ever sent
+      // still translates, anything else is a typed error rather than a
+      // silently-ignored filter.
+      const normalizedFilter = filter?.replace(/\s+/g, ' ').trim().toLowerCase();
       if (normalizedFilter && normalizedFilter !== 'isread eq false') {
-        throw new GraphQLError('Raw provider filters are no longer supported; use unread-only.', {
+        throw new GraphQLError('Raw provider filters are no longer supported; use unreadOnly.', {
           extensions: { code: 'EMAIL_FILTER_UNSUPPORTED', filter },
         });
       }
-      const { messages } = await runEmailOperation<{ messages: ToolEmailMessage[] }>(
-        connection.provider,
+      const { messages } = await runOwnedEmailOperation<{ messages: ToolEmailMessage[] }>(
+        ctx,
+        connectionId,
         'list-messages',
         {
-          connectionId: connection.toolConnectionId,
-          top: top ?? 25,
-          ...(normalizedFilter ? { unreadOnly: true } : {}),
+          // The tool caps top at 100 — clamp instead of surfacing a
+          // validation error on a previously-unbounded GraphQL arg.
+          top: Math.max(1, Math.min(top ?? 25, 100)),
+          unreadOnly: unreadOnly || !!normalizedFilter || undefined,
         },
       );
       return messages.map((m) => ({
@@ -240,11 +247,10 @@ export const sessionQueries = {
     },
 
     exchangeFolders: async (_: unknown, { connectionId }: { connectionId: string }, ctx: Context) => {
-      const connection = await requireEmailConnection(ctx, connectionId);
-      const { folders } = await runEmailOperation<{ folders: ToolEmailFolder[] }>(
-        connection.provider,
+      const { folders } = await runOwnedEmailOperation<{ folders: ToolEmailFolder[] }>(
+        ctx,
+        connectionId,
         'list-folders',
-        { connectionId: connection.toolConnectionId },
       );
       return folders.map((f) => ({
         id: f.id,

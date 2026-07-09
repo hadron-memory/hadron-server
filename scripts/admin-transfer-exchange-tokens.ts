@@ -21,7 +21,7 @@
  */
 import { PrismaClient } from '../src/generated/prisma/index.js';
 import { decryptToken } from '../src/lib/tokenCrypto.js';
-import { createToolConnection } from '../src/lib/emailClient.js';
+import { createToolConnection, subscribeToolFolder } from '../src/lib/emailClient.js';
 
 const dryRun = process.argv.includes('--dry-run');
 
@@ -51,13 +51,19 @@ async function main(): Promise<void> {
         const identity = await createToolConnection(row.provider, {
           refreshToken,
           mailboxEmail: row.mailboxEmail,
-          displayName: row.displayName,
+          // The tool's schema takes an OPTIONAL string — null would fail zod.
+          displayName: row.displayName ?? undefined,
         });
         await db.exchangeConnection.update({
           where: { id: row.id },
           data: { toolConnectionId: identity.id },
         });
         console.log(`transferred ${row.mailboxEmail} (${row.id}) → tool connection ${identity.id}`);
+        // Event plane: best-effort inbox subscription (fails harmlessly until
+        // the tool's public webhook route + WEBHOOK_BASE_URL are configured).
+        await subscribeToolFolder(row.provider, identity.id, 'inbox').catch((err) => {
+          console.log(`  (inbox subscription not created: ${err instanceof Error ? err.message : err})`);
+        });
         ok += 1;
       } catch (err) {
         console.error(`FAILED ${row.mailboxEmail} (${row.id}):`, err instanceof Error ? err.message : err);

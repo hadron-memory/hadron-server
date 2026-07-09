@@ -18,30 +18,22 @@
  * behind a NATS subject later (D-2026-06-17-004 posture: a missing broker
  * never breaks the path).
  */
-import { timingSafeEqual } from 'crypto';
 import type { Express, Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
+import { safeEqual } from '../lib/constantTime.js';
+import type { ToolEmailMessage } from '../lib/emailClient.js';
 
-/** Normalized event payload the tools send (mirrors the tool's EmailEvent). */
+/**
+ * Normalized event payload the tools send. The message is the SAME
+ * provider-neutral shape the pull path uses (derived from ToolEmailMessage,
+ * not re-declared) so the two surfaces cannot drift apart silently.
+ */
 export interface InboundEmailEvent {
   event: 'email.received' | 'email.sent';
   connectionId: string;
   folder: string;
-  message: {
-    id: string;
-    conversationId: string | null;
-    subject: string | null;
-    from: { name: string | null; address: string } | null;
-    receivedAt: string;
-    snippet: string;
-  } & Record<string, unknown>;
-}
-
-/** Constant-time bearer comparison. */
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
+  message: Pick<ToolEmailMessage, 'id' | 'conversationId' | 'subject' | 'from' | 'receivedAt' | 'snippet'> &
+    Record<string, unknown>;
 }
 
 /** Shallow shape check — the tool is trusted, but a malformed body must not crash dispatch. */
@@ -64,12 +56,15 @@ function isInboundEmailEvent(body: unknown): body is InboundEmailEvent {
  * or a foreign tool) — never an error back to the tool.
  */
 export async function dispatchEmailEvent(event: InboundEmailEvent): Promise<void> {
+  // syncEnabled preserves the operator's soft-pause contract the legacy
+  // /exchange/webhook route enforced: a paused connection's events are
+  // dropped here so future consumers can never inherit a missing gate.
   const connection = await db.exchangeConnection.findFirst({
-    where: { toolConnectionId: event.connectionId, deletedAt: null },
+    where: { toolConnectionId: event.connectionId, deletedAt: null, syncEnabled: true },
     select: { id: true, organizationId: true, userId: true, mailboxEmail: true },
   });
   if (!connection) {
-    console.log(`[email-events] ${event.event} for unknown tool connection ${event.connectionId} — dropped`);
+    console.log(`[email-events] ${event.event} for unknown or paused tool connection ${event.connectionId} — dropped`);
     return;
   }
   console.log(
