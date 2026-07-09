@@ -17,7 +17,18 @@ import { createServer } from '../../server.js';
 let server: Server;
 let baseUrl: string;
 
+const APPLE_ENV_VARS = [
+  'APPLE_CLIENT_ID',
+  'APPLE_TEAM_ID',
+  'APPLE_KEY_ID',
+  'APPLE_PRIVATE_KEY',
+] as const;
+// Restore (not delete) in afterAll so a runner that already carries Apple env
+// vars isn't clobbered for later test files.
+const savedEnv: Partial<Record<(typeof APPLE_ENV_VARS)[number], string | undefined>> = {};
+
 beforeAll(async () => {
+  for (const v of APPLE_ENV_VARS) savedEnv[v] = process.env[v];
   process.env.APPLE_CLIENT_ID = 'com.hadronmemory.signin';
   process.env.APPLE_TEAM_ID = 'TEAMID9999';
   process.env.APPLE_KEY_ID = 'KEYID88888';
@@ -30,10 +41,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  delete process.env.APPLE_CLIENT_ID;
-  delete process.env.APPLE_TEAM_ID;
-  delete process.env.APPLE_KEY_ID;
-  delete process.env.APPLE_PRIVATE_KEY;
+  for (const v of APPLE_ENV_VARS) {
+    if (savedEnv[v] === undefined) delete process.env[v];
+    else process.env[v] = savedEnv[v];
+  }
   await new Promise<void>((resolve, reject) => {
     server.close((err) => (err ? reject(err) : resolve()));
   });
@@ -129,6 +140,20 @@ describe('POST /auth/apple/callback — pre-exchange guards', () => {
 
   it('rejects a callback with missing code or state', async () => {
     const res = await postCallback({});
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/Missing code or state/);
+  });
+
+  it('rejects array-shaped fields (repeated form keys) with 400, not a 500 (Copilot review)', async () => {
+    // `code=a&code=b` parses to an array under extended:false; a bare
+    // truthiness guard would pass it into the token exchange.
+    const res = await fetch(`${baseUrl}/auth/apple/callback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `code=a&code=b&state=${'f'.repeat(32)}`,
+      redirect: 'manual',
+    });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/Missing code or state/);

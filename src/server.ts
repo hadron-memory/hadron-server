@@ -588,11 +588,14 @@ export async function createServer(): Promise<Express> {
   // Don't "fix" this into cookies. The route-scoped urlencoded parser is
   // needed because the app only mounts JSON parsers globally.
   app.post('/auth/apple/callback', express.urlencoded({ extended: false }), async (req, res) => {
-    const { code, state, user: userField } = (req.body ?? {}) as {
-      code?: string;
-      state?: string;
-      user?: string;
-    };
+    // typeof guards, not a cast: repeated form fields (`code=a&code=b`) parse
+    // to arrays, which would slip past a bare truthiness check and 500 inside
+    // the exchange. Non-string shapes collapse to the same 400 as absent
+    // fields (mirrors POST /auth/session).
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const code = typeof body.code === 'string' ? body.code : '';
+    const state = typeof body.state === 'string' ? body.state : '';
+    const userField = body.user;
 
     if (!code || !state) {
       res.status(400).json({ error: 'Missing code or state' });
