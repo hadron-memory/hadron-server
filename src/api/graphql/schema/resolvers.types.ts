@@ -741,6 +741,10 @@ export const typeResolvers = {
     createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,
     updatedAt: (c: { updatedAt: Date | string }) => toISO(c.updatedAt)!,
   },
+  SlackConnection: {
+    createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,
+    updatedAt: (c: { updatedAt: Date | string }) => toISO(c.updatedAt)!,
+  },
   Agent: {
     createdAt: (b: { createdAt: Date | string }) => toISO(b.createdAt)!,
     // 036-ai-service-config: registry-backed reads of the Agent's

@@ -108,6 +108,14 @@ export async function setup() {
       ON ai_service_configs (agent_id, name) WHERE agent_id IS NOT NULL;
   `);
 
+  // 043-slack-integration: one LIVE Slack connection per (org, workspace) —
+  // PARTIAL unique (Prisma can't express the WHERE), so a soft-deleted row
+  // never blocks re-registration. Synced with prisma/post-push.sql.
+  await client.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS slack_connections_org_team_active_uniq
+      ON slack_connections (organization_id, team_id) WHERE deleted_at IS NULL;
+  `);
+
   // 325-user-urn: case-insensitive handle uniqueness (handle is the
   // hrn:user:<handle> slug; lowercase-canonical). Functional index — Prisma's
   // plain @unique is case-sensitive and can't express this.

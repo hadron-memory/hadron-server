@@ -129,6 +129,13 @@ ALTER TABLE memories
   ADD CONSTRAINT chk_memory_chunk_overlap_valid
   CHECK (chunk_overlap IS NULL OR (chunk_overlap >= 0 AND (chunk_tokens IS NULL OR chunk_overlap < chunk_tokens)));
 
+-- ─── 043-slack-integration ──────────────────────────────────────────────
+-- One LIVE Slack connection per (org, workspace): PARTIAL unique so a
+-- soft-deleted row never blocks re-registration (Prisma can't model the
+-- WHERE clause). Synced with the 043 migration and src/test/globalSetup.ts.
+CREATE UNIQUE INDEX IF NOT EXISTS slack_connections_org_team_active_uniq
+  ON slack_connections (organization_id, team_id) WHERE deleted_at IS NULL;
+
 -- ─── 036-ai-service-config ──────────────────────────────────────────────
 -- A config belongs to exactly one owner (HadronServer / Organization /
 -- App / Agent). Synced with the 036 migration and src/test/globalSetup.ts.

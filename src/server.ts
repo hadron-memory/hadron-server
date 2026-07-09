@@ -66,6 +66,7 @@ import { makeProdRunDeps } from './jobs/appRunDeps.js';
 import { startSchedulerLoop } from './jobs/scheduler.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
+import { mountSlackEventRoutes } from './api/slackEvents.js';
 import { createToolConnection, deleteToolConnection, subscribeToolFolder } from './lib/emailClient.js';
 import { buildMicrosoftAuthUrl, getMicrosoftRedirectUri } from './integrations/exchange/auth.js';
 
@@ -1424,6 +1425,12 @@ export async function createServer(): Promise<Express> {
   // /exchange/webhook POC route (Graph notifications straight into core) is
   // gone — Graph now notifies the tool, which normalizes and forwards.
   mountEmailEventRoutes(app);
+
+  // Normalized Slack events (slack.command / slack.interaction /
+  // slack.message.received / slack.gap) arrive here from hadrontool-slack
+  // (spec 043 Phase 2) — same CORE_EVENTS_TOKEN contract; dispatch dedupes
+  // on (connectionId, envelopeId) because the tool's inbox is at-least-once.
+  mountSlackEventRoutes(app);
 
 
   // ---------------------------------------------------------------------------
