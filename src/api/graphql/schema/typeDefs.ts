@@ -2350,6 +2350,8 @@ export const typeDefs = `#graphql
       orgId: ID
       limit: Int
       offset: Int
+      "Optional absolute relevance floor (cor:api:090 / #497): drop ranked hits whose score is below this value. Scores are NOT comparable across modes, so the meaningful scale differs per mode (keyword ts_rank is roughly 0..a-few; vector cosine similarity is 0..1; hybrid is a small RRF fraction) — pick a floor for the mode in use. Ignored on the no-query browse list (unscored) and never trims expand-neighbours. A floor returns fewer hits, never weaker ones."
+      minScore: Float
     ): FindNodesResult!
 
     """

@@ -14,7 +14,7 @@ import {
   getEmbeddingClient,
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
-import { reciprocalRankFusion } from '../../../lib/rrf.js';
+import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { BooleanQueryError, literalQuery } from '../../../lib/retrieval/tsquery.js';
 import type { LexicalField } from '../../../lib/retrieval/provider.js';
@@ -411,10 +411,11 @@ export const nodeQueries = {
     findNodes: async (
       _: unknown,
       {
-        query, mode, filter, fields, sort, expand, granularity, orgId, limit, offset,
+        query, mode, filter, fields, sort, expand, granularity, orgId, limit, offset, minScore,
       }: {
         query?: string | null;
         mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
+        minScore?: number | null;
         filter?: {
           memoryIds?: string[] | null;
           memoryClasses?: string[] | null;
@@ -440,6 +441,15 @@ export const nodeQueries = {
       const f = filter ?? {};
       const finalLimit = limit ?? 50;
       const off = offset ?? 0;
+      // #497 — optional absolute relevance floor. Applied to the ranked scores
+      // before paging (a NaN guard so a bad arg is simply ignored, never throws).
+      // Scores are NOT commensurable across modes, so the meaningful floor scale
+      // differs per mode (keyword ts_rank ≈ 0..a-few; vector cosine ≈ 0..1;
+      // hybrid RRF ≈ small fractions) — documented on the arg. Never applies to
+      // the no-query browse list (those hits are unscored) or expand-neighbours.
+      const scoreFloor = typeof minScore === 'number' && Number.isFinite(minScore) ? minScore : null;
+      const applyFloor = (ranked: { nodeId: string; score: number }[]) =>
+        scoreFloor == null ? ranked : ranked.filter((r) => r.score >= scoreFloor);
       const provider = getRetrievalProvider();
       const badInput = (msg: string) =>
         new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -611,6 +621,7 @@ export const nodeQueries = {
         reason: string | null,
         degraded: string | null,
       ) => {
+        ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
         const rankOrder = new Map(ranked.map((r, i) => [r.nodeId, i]));
         const rows = await ctx.db.node.findMany({
@@ -675,6 +686,10 @@ export const nodeQueries = {
         reason: string | null,
         degraded: string | null,
       ) => {
+        // The lexical provider already applied offset/limit in SQL, so the floor
+        // trims sub-threshold hits from the returned page (it does not backfill
+        // from deeper ranks — a floor returns fewer, never weaker, results).
+        ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
         const rows = await ctx.db.node.findMany({
           where: { id: { in: ranked.map((r) => r.nodeId) } },
@@ -816,7 +831,11 @@ export const nodeQueries = {
           throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
         }
         // Fetch through the offset so paging works (vectorSearchChunks has no offset).
-        const chunkHits = (await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit }))
+        // #497 — apply the minScore floor to the scored passages too (PR-569
+        // review, Codex): filter before paging so a floor drops sub-threshold
+        // chunks rather than silently returning them.
+        const rawChunks = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit });
+        const chunkHits = (scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor))
           .slice(off, off + finalLimit);
         const parents = await ctx.db.node.findMany({
           where: { id: { in: [...new Set(chunkHits.map((c) => c.nodeId))] }, deletedAt: null },
@@ -848,15 +867,19 @@ export const nodeQueries = {
       }
 
       // hybrid — fuse keyword + vector by RRF (keyword already relevance-ranked by FTS).
+      // The hit score is the FUSED RRF score (the value the hit was actually ranked
+      // by), not the raw vector-sim / keyword-rank the pre-#497 code attached — those
+      // aren't commensurable, so mixing them gave a misleading number and no sound
+      // within-result-set relevance signal. The cosine similarity is still carried
+      // separately on `vector.similarity` (simById below).
       const kwRanked = await runKeywordRanked();
-      const fusedIds = reciprocalRankFusion(
+      const fused = reciprocalRankFusionScored(
         [kwRanked.map((r) => r.nodeId), vecHits.map((h) => h.nodeId)],
         (id) => id,
       ).slice(0, fetchN);
       const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
-      const kwScore = new Map(kwRanked.map((r) => [r.nodeId, r.score]));
       return await buildResult(
-        fusedIds.map((id) => ({ nodeId: id, score: simById.get(id) ?? kwScore.get(id) ?? 0 })),
+        fused.map((r) => ({ nodeId: r.item, score: r.score })),
         simById,
         null,
         mergeDegraded(null),
