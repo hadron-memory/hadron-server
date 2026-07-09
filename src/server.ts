@@ -658,13 +658,20 @@ export async function createServer(): Promise<Express> {
     }
     return sdlCache;
   };
-  app.get('/graphql/schema', async (req, res) => {
-    const auth = await resolveAuthContext(req, db);
-    if (!auth.userId && !auth.appId) {
-      res.status(401).json({ error: 'Authentication required to read the GraphQL schema.' });
-      return;
+  app.get('/graphql/schema', async (req, res, next) => {
+    // Express 4 does not catch a rejected async handler, so an unexpected throw
+    // (e.g. resolveAuthContext hitting a DB failure) would hang the request —
+    // forward it to the error middleware instead.
+    try {
+      const auth = await resolveAuthContext(req, db);
+      if (!auth.userId && !auth.appId) {
+        res.status(401).json({ error: 'Authentication required to read the GraphQL schema.' });
+        return;
+      }
+      res.type('text/plain; charset=utf-8').send(graphqlSdl());
+    } catch (err) {
+      next(err);
     }
-    res.type('text/plain; charset=utf-8').send(graphqlSdl());
   });
 
   app.use(
