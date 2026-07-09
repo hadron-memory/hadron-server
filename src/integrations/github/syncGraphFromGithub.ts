@@ -93,11 +93,14 @@ export const syncGraphFromGithub = async (
     }> = [];
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       const upsertedIds: string[] = [];
+      // File frontmatter ids already claimed in THIS run — a second file
+      // carrying the same id (a copied file) must not be treated as a move
+      // of the first; it gets a fresh id instead.
+      const claimedFileIds = new Set<string>();
 
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
         const name = node.name!;
-        const nodeId = node.id ?? generateId();
         const update = {
           loc,
           name,
@@ -118,14 +121,71 @@ export const syncGraphFromGithub = async (
           tags: serializeTags(node.tags ?? []) as string[],
           ownerRepo,
         };
-        await tx.node.upsert({
-          where: { loc_memoryId: { loc, memoryId: graph.id } },
-          create: { id: nodeId, memoryId: graph.id, ...update },
-          update,
-        });
-        upsertedIds.push(nodeId);
+
+        // Identity is ID-FIRST (repo wins): a file that kept its frontmatter
+        // id but changed its path is a MOVE of the existing node. The old
+        // loc-keyed upsert treated that as a create and crashed the whole
+        // memory's sync with P2002 on the id unique. Three id shapes:
+        //   - id matches a row in THIS memory → update in place (the move)
+        //   - id belongs to ANOTHER memory (file copied across repos) or was
+        //     already claimed by an earlier file this run → never steal it;
+        //     fall through to the loc-keyed upsert with a fresh id
+        //   - no id / unknown id → loc-keyed upsert as before
+        const fileId = node.id && !claimedFileIds.has(node.id) ? node.id : null;
+        const byId = fileId
+          ? await tx.node.findUnique({ where: { id: fileId }, select: { id: true, memoryId: true, loc: true } })
+          : null;
+        if (node.id) claimedFileIds.add(node.id);
+
+        let rowId: string;
+        if (byId && byId.memoryId === graph.id) {
+          if (byId.loc !== loc) {
+            // Moving into a loc another row currently holds: repo-wins — the
+            // occupant is stale at that loc (it either moves later this run
+            // via its own file, or the notIn deletion pass removes it). Park
+            // it out of the way so the move can't collide.
+            const occupant = await tx.node.findUnique({
+              where: { loc_memoryId: { loc, memoryId: graph.id } },
+              select: { id: true },
+            });
+            if (occupant && occupant.id !== byId.id) {
+              await tx.node.update({
+                where: { id: occupant.id },
+                data: { loc: `${loc}~displaced-${occupant.id}` },
+              });
+              console.warn(
+                `[syncGraphFromGithub] "${graphName}": move of ${byId.id} to occupied loc "${loc}" displaced node ${occupant.id}`,
+              );
+            }
+            console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
+          }
+          await tx.node.update({ where: { id: byId.id }, data: update });
+          rowId = byId.id;
+        } else {
+          if (byId) {
+            console.warn(
+              `[syncGraphFromGithub] "${graphName}" loc "${loc}": frontmatter id ${node.id} belongs to another memory — minting a fresh id`,
+            );
+          }
+          // Fresh id when the file's id is unusable: owned by another memory
+          // (byId) or already claimed by an earlier file this run (!fileId).
+          const idUnusable = byId !== null || (!!node.id && fileId === null);
+          const createId = idUnusable ? generateId() : (node.id ?? generateId());
+          const row = await tx.node.upsert({
+            where: { loc_memoryId: { loc, memoryId: graph.id } },
+            create: { id: createId, memoryId: graph.id, ...update },
+            update,
+            select: { id: true },
+          });
+          // The SURVIVING id: the update path keeps the existing row's id,
+          // which may differ from the file's — recording the file id here
+          // would make the notIn deletion pass below delete the row we just
+          // updated.
+          rowId = row.id;
+        }
+        upsertedIds.push(rowId);
         pendingEmbeds.push({
-          nodeId,
+          nodeId: rowId,
           plaintext: { content: node.content ?? null, abstract: node.abstract ?? null },
         });
 
@@ -133,7 +193,7 @@ export const syncGraphFromGithub = async (
         // Spec 037: the promoted Edge lives in its SOURCE node's memory (which
         // may differ from this repo's memory for cross-repo edges); derive its
         // loc from the source loc + name + this node's (target) loc.
-        const pending = await tx.pendingEdge.findMany({ where: { targetId: nodeId } });
+        const pending = await tx.pendingEdge.findMany({ where: { targetId: rowId } });
         for (const p of pending) {
           const pSrc = await tx.node.findUnique({
             where: { id: p.sourceId },

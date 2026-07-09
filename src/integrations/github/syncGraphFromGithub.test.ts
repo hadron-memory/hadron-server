@@ -253,3 +253,100 @@ describe('syncGraphFromGithub', () => {
     expect(edges[0].name).toBe('depends on');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Move-aware identity (the startup-sync P2002 regression): a file that kept
+// its frontmatter id but changed its path is a MOVE, a foreign-memory id is
+// never stolen, a duplicated id within one repo mints a fresh id, and the
+// repo-wins deletion pass keys on the SURVIVING row id.
+// ---------------------------------------------------------------------------
+describe('move-aware identity', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+
+  it('treats a same-id file at a new path as a move (no P2002, loc updated)', async () => {
+    const nodeId = 'aaaa111100000000000000000000000001';
+    await db.node.create({
+      data: { id: nodeId, memoryId: dbGraphId, loc: 'tasks:create-platform-spec', name: 'old', ownerRepo: 'test/repo' },
+    });
+
+    const dir = join(repoRoot(), 'tasks', 'add-platform-spec');
+    mkdirSync(dir, { recursive: true });
+    writeNodeFiles(dir, { id: nodeId, name: 'renamed task' });
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    const rows = await db.node.findMany({ where: { memoryId: dbGraphId } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(nodeId);
+    expect(rows[0].loc).toBe('tasks:add-platform-spec');
+    expect(rows[0].name).toBe('renamed task');
+  });
+
+  it('never steals a foreign memory\'s node id — mints a fresh id instead', async () => {
+    const foreignId = 'bbbb222200000000000000000000000002';
+    const { graph: otherGraph } = await createDbOrgAndGraph(db, {
+      orgName: 'other-org',
+      graphName: 'other/repo',
+    });
+    await db.node.create({
+      data: { id: foreignId, memoryId: otherGraph.id, loc: 'shared:create-task', name: 'foreign' },
+    });
+
+    const dir = join(repoRoot(), 'copied');
+    mkdirSync(dir, { recursive: true });
+    writeNodeFiles(dir, { id: foreignId, name: 'copied node' });
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    // The foreign node is untouched…
+    const foreign = await db.node.findUniqueOrThrow({ where: { id: foreignId } });
+    expect(foreign.memoryId).toBe(otherGraph.id);
+    expect(foreign.loc).toBe('shared:create-task');
+    // …and the copied file became a NEW node with a fresh id.
+    const copied = await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'copied' } });
+    expect(copied).not.toBeNull();
+    expect(copied!.id).not.toBe(foreignId);
+  });
+
+  it('a duplicated frontmatter id within one repo yields two nodes (second gets a fresh id)', async () => {
+    const dupId = 'cccc333300000000000000000000000003';
+    const dirA = join(repoRoot(), 'a-first');
+    const dirB = join(repoRoot(), 'b-second');
+    mkdirSync(dirA, { recursive: true });
+    mkdirSync(dirB, { recursive: true });
+    writeNodeFiles(dirA, { id: dupId, name: 'first' });
+    writeNodeFiles(dirB, { id: dupId, name: 'second copy' });
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    const rows = await db.node.findMany({ where: { memoryId: dbGraphId }, orderBy: { loc: 'asc' } });
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r: { loc: string }) => r.loc)).toEqual(['a-first', 'b-second']);
+    expect(rows.filter((r: { id: string }) => r.id === dupId)).toHaveLength(1);
+  });
+
+  it('keys the repo-wins deletion pass on the SURVIVING row id when the file id differs', async () => {
+    const survivingId = 'dddd444400000000000000000000000004';
+    await db.node.create({
+      data: { id: survivingId, memoryId: dbGraphId, loc: 'keep', name: 'existing', ownerRepo: 'test/repo' },
+    });
+
+    // Same loc, DIFFERENT frontmatter id: the loc-keyed update keeps the
+    // existing row (and its id). Recording the file id in upsertedIds would
+    // make the notIn deletion pass delete the row we just updated.
+    const dir = join(repoRoot(), 'keep');
+    mkdirSync(dir, { recursive: true });
+    writeNodeFiles(dir, { id: 'eeee555500000000000000000000000005', name: 'updated' });
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    const rows = await db.node.findMany({ where: { memoryId: dbGraphId } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(survivingId);
+    expect(rows[0].name).toBe('updated');
+  });
+});
