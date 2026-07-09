@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import {
   parseUrnInput, formatUrn, formatCanonicalUrn, validateUrnType,
   parseUrn, toParserCanonical, isParserCanonical,
-  validateUserSlug, validateOrgSlug, parseFor, UrnParseError,
+  validateUserSlug, validateOrgSlug, deriveSlugFromName, parseFor, UrnParseError,
   composeInstalledAgentUrn,
   assertFullyQualifiedUrn, UrnNotQualifiedError,
   splitNodeUrn,
@@ -687,6 +687,50 @@ describe('parse path is case-lenient for uppercase slugs (#575)', () => {
       type: 'agent',
       value: 'hadronmemory.com:Flow-Lab',
     });
+  });
+});
+
+// #574: display names slugify to a valid, lowercase URN atom before they're
+// composed into a URN, so no create/rename path persists a raw name.
+describe('deriveSlugFromName (#574)', () => {
+  it.each([
+    ['Flow Lab', 'flow-lab'],
+    ['Acme', 'acme'],
+    ['  Multiple   Spaces  ', 'multiple-spaces'],
+    ['Juno Knowledge', 'juno-knowledge'],
+    ['under_score-and-dash', 'under_score-and-dash'],
+    ['v1.2.3', 'v1.2.3'], // dots are a legal atom char — preserved
+    ['Trailing punctuation!!!', 'trailing-punctuation'],
+    ['--leading-dashes', 'leading-dashes'],
+    ['MiXeD CaSe 123', 'mixed-case-123'],
+  ])('slugifies %j → %j', (name, expected) => {
+    expect(deriveSlugFromName(name)).toBe(expected);
+  });
+
+  it('the derived slug always satisfies the create-time slug rules', () => {
+    // Round-trip invariant: whatever comes out is lowercase + charset-legal, so
+    // validateUserSlug accepts it (barring reserved words, which slugify keeps).
+    for (const name of ['Flow Lab', 'Acme', 'v1.2', 'a  b  c', 'Wild!! Name??']) {
+      expect(() => validateUserSlug(deriveSlugFromName(name))).not.toThrow();
+    }
+  });
+
+  it('throws empty-derived-slug when nothing usable remains', () => {
+    for (const bad of ['', '   ', '!!!', '---', '...']) {
+      try {
+        deriveSlugFromName(bad);
+        throw new Error(`should have thrown for ${JSON.stringify(bad)}`);
+      } catch (e) {
+        expect(e).toBeInstanceOf(UrnParseError);
+        expect((e as UrnParseError).reason).toBe('empty-derived-slug');
+      }
+    }
+  });
+
+  it('does NOT reject a reserved word — slugify is not validation', () => {
+    // A name like "System" derives to "system"; rejecting reserved slugs is the
+    // caller's job (validateUserSlug), matching createApp's prior behavior.
+    expect(deriveSlugFromName('System')).toBe('system');
   });
 });
 

@@ -21,6 +21,7 @@ import {
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { deriveSlugFromName } from '../../../lib/urn.js';
 import { generateId } from '../../../lib/id.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -48,7 +49,10 @@ export const agentMutations = {
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId }, select: { urn: true } });
-      const agentUrn = `${org.urn}:${name}`;
+      // #574: slugify the display name — a raw name would persist a
+      // case-sensitive / space-bearing URN (and the system memory URN derives
+      // from this one, so it inherits the clean slug).
+      const agentUrn = `${org.urn}:${deriveSlugFromName(name)}`;
       // Check for existing agent with the same URN
       const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
       if (existing) {
@@ -159,7 +163,7 @@ export const agentMutations = {
       let newUrn: string | undefined;
       if (urn !== undefined) {
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: agent.organizationId }, select: { urn: true } });
-        newUrn = `${org.urn}:${urn}`;
+        newUrn = `${org.urn}:${deriveSlugFromName(urn)}`; // #574: slugify the explicit rename slug
       }
 
       // ── systemMemoryId: first-attach is allowed, but unset/change are not.

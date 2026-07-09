@@ -50,7 +50,7 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
-import { agentSlugFromUrn } from '../../../lib/urn.js';
+import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
@@ -320,7 +320,9 @@ export const memoryMutations = {
       }
 
       const memOrg = await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId }, select: { urn: true } });
-      const memoryUrn = `${memOrg.urn}:${name}`;
+      // #574: slugify the display name — a raw name would persist a
+      // case-sensitive / space-bearing URN that can't round-trip through parseUrn.
+      const memoryUrn = `${memOrg.urn}:${deriveSlugFromName(name)}`;
       // Check for existing memory with the same URN
       const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
       if (existing) {
@@ -479,7 +481,6 @@ export const memoryMutations = {
       let newUrn: string | undefined;
       if (urn !== undefined || (newOrgId && newOrgId !== memory.organizationId)) {
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: effectiveOrgId }, select: { urn: true } });
-        const slug = urn ?? memory.urn.split(':').slice(1).join(':');
         // Guard: a memory slug must be BARE — not a full or embedded URN. The
         // portal settings form once mis-derived the slug from a canonical
         // `hrn:memory:<org>::<slug>` and sent `memory:<org>::<slug>`, which
@@ -487,7 +488,7 @@ export const memoryMutations = {
         // (the prod /app/orgs outage). Reject a client-supplied slug carrying a
         // scheme prefix, a URN type marker at the start, or a `::` hierarchy
         // separator BEFORE the write, so a bad value can never be persisted.
-        // (The org-transfer fallback above derives the slug from the stored,
+        // (The org-transfer fallback below derives the slug from the stored,
         // already-valid URN, so it's only the client `urn` arg we validate.)
         if (urn !== undefined && /^(hrn|urn|memory|agent|app|node|org):|::/.test(urn)) {
           throw new GraphQLError(
@@ -495,6 +496,9 @@ export const memoryMutations = {
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
+        // #574: slugify an explicit client slug (lowercase, illegal chars → '-');
+        // the org-transfer fallback reuses the stored URN's already-valid slug.
+        const slug = urn !== undefined ? deriveSlugFromName(urn) : memory.urn.split(':').slice(1).join(':');
         newUrn = `${org.urn}:${slug}`;
       }
 
@@ -749,7 +753,7 @@ export const memoryMutations = {
         where: { id: source.organizationId },
         select: { urn: true },
       });
-      const newUrn = `${org.urn}:${name}`;
+      const newUrn = `${org.urn}:${deriveSlugFromName(name)}`; // #574: slugify, don't persist the raw name
       // URN collision handling matches createMemory: a soft-deleted holder
       // is hard-deleted, a live one is an error.
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
