@@ -1066,9 +1066,11 @@ export async function runOwnedEmailOperation<T = Record<string, unknown>>(
   input: Record<string, unknown> = {},
 ): Promise<T> {
   const connection = await requireEmailConnection(ctx, connectionRef);
+  // connectionId is set AFTER the spread so no input field can override the
+  // routed tool connection id (PR-573 Copilot review).
   return runEmailOperation<T>(connection.provider, operation, {
-    connectionId: connection.toolConnectionId,
     ...input,
+    connectionId: connection.toolConnectionId,
   });
 }
 

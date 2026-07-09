@@ -90,8 +90,12 @@ async function postToTool<T>(provider: string, path: string, body: unknown): Pro
     // Surface the stable code so GraphQL/MCP clients react to the contract,
     // not to HTTP statuses.
     const emailErrorCode = typeof payload?.error === 'string' ? payload.error : undefined;
+    // Cap the propagated message — a misbehaving tool/proxy must not inflate
+    // GraphQL responses (mirrors pdfClient's detail.slice pattern).
     const message =
-      typeof payload?.message === 'string' ? payload.message : `Email service error (${res.status}).`;
+      typeof payload?.message === 'string'
+        ? payload.message.slice(0, 500)
+        : `Email service error (${res.status}).`;
     throw new GraphQLError(message, {
       extensions: {
         code: 'EMAIL_TOOL_ERROR',
@@ -171,7 +175,8 @@ export async function createToolConnection(
     typeof identity.id !== 'string' ||
     identity.id === '' ||
     typeof identity.mailboxEmail !== 'string' ||
-    identity.mailboxEmail.trim() === ''
+    identity.mailboxEmail.trim() === '' ||
+    identity.provider !== provider
   ) {
     throw new GraphQLError('Email service returned an invalid connection identity.', {
       extensions: { code: 'EMAIL_TOOL_ERROR', provider },
