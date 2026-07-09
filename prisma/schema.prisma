@@ -388,6 +388,7 @@ model User {
   receivedMemberInvitations OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
   pendingSetup              PendingSetup?
   exchangeConnections       ExchangeConnection[]
+  connectionGrantsByUser    ConnectionGrant[]          @relation("ConnectionGrantsByUser")
   externalApp               App?                       @relation(fields: [externalAppId], references: [id], onDelete: SetNull)
   sessions                  Session[]                  @relation("SessionUser")
   ownedMemories             Memory[]                   @relation("UserMemoriesOwned")
@@ -1811,7 +1812,54 @@ model ExchangeConnection {
   // The email-events ingress resolves connections by the tool's id on every
   // inbound email — this lookup must be indexed (#396 Phase 4).
   @@index([toolConnectionId])
+  connectionGrants ConnectionGrant[]
   @@map("exchange_connections")
+}
+
+/// User→App scoped delegation on a user-owned connection (spec-042 Track B,
+/// #593; supersedes the deferred AgentEmailGrant). Lets a connection's OWNER
+/// grant a specific App install scoped access (e.g. `mail.read`) to their
+/// mailbox/calendar. Enforced in `requireEmailConnection` (owner OR live grant
+/// covering the operation's scope).
+///
+/// - Grantee is the App INSTALL (`granteeAppId`), never the Agent — one Agent
+///   in two Apps/orgs is two trust contexts (the Juno fixture).
+/// - Owner-only create/revoke, no org-admin bypass. Revoke is a SOFT delete;
+///   liveness lookups use `findFirst` + `deletedAt: null` (never `findUnique`).
+/// - Cross-org is intended: connection org and grantee-App org may differ; the
+///   grant row is the sole authority.
+/// - Multiple live grants per (connection, App) are valid — union-of-scopes —
+///   so there is deliberately no unique constraint on the pair.
+model ConnectionGrant {
+  id              String    @id @default(cuid())
+  connectionId    String    @map("connection_id")
+  /// The App install this grant delegates to (the grantee = `ctx.appId`).
+  granteeAppId    String    @map("grantee_app_id")
+  /// The connection owner who created the grant (owner-only create).
+  grantedByUserId String    @map("granted_by_user_id")
+  /// Operation scopes covered — subset of {mail.read, mail.send,
+  /// calendar.freebusy, calendar.read}. See src/lib/emailOperationScopes.ts.
+  scopes          String[]  @default([])
+  /// Optional expiry; NULL = perpetual until revoked.
+  expiresAt       DateTime? @map("expires_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  createdBy       String?   @map("created_by")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  updatedBy       String?   @map("updated_by")
+  deletedAt       DateTime? @map("deleted_at")
+  deletedBy       String?   @map("deleted_by")
+
+  connection ExchangeConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  granteeApp App                @relation("AppConnectionGrants", fields: [granteeAppId], references: [id], onDelete: Cascade)
+  grantedBy  User               @relation("ConnectionGrantsByUser", fields: [grantedByUserId], references: [id], onDelete: Cascade)
+
+  // Composite on the gate's hot lookup (connectionId + granteeAppId). The
+  // connectionId-leading order still serves the ExchangeConnection cascade
+  // delete, so no separate single-column index is needed (PR-599 review).
+  @@index([connectionId, granteeAppId])
+  @@index([granteeAppId])
+  @@index([grantedByUserId])
+  @@map("connection_grants")
 }
 
 /// Pre-launch waitlist signup capture from the marketing site. Holds
@@ -1962,6 +2010,7 @@ model App {
   usageEvents      UsageEvent[]
   pendingSetups    PendingSetup[]
   aiServiceConfigs AiServiceConfig[]
+  connectionGrants ConnectionGrant[] @relation("AppConnectionGrants")
 
   @@index([organizationId])
   // Spec 021 FR-027: keep `urn` lookups index-served. The DB-level

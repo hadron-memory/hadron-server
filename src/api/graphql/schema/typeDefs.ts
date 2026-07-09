@@ -1747,6 +1747,33 @@ export const typeDefs = `#graphql
     aiConfigName: String
   }
 
+  """
+  A user-owned connection's scoped delegation to an App install (spec-042 Track
+  B, #593). The connection OWNER grants a specific App scoped access to their
+  mailbox/calendar; the enforcement gate is requireEmailConnection. The grantee
+  App is exposed as SCALARS only (never a nested App object), so a cross-org
+  grant can't reach the App keys/members. Token material is never exposed.
+  """
+  type ConnectionGrant {
+    id: ID!
+    connectionId: ID!
+    "The App install this grant delegates to."
+    granteeAppId: ID!
+    "Canonical URN of the grantee App (hrn:app:<org>::<slug>), or null if unresolvable."
+    granteeAppUrn: String
+    granteeAppName: String
+    "Covered scopes: mail.read, mail.send, calendar.freebusy, calendar.read."
+    scopes: [String!]!
+    "ISO-8601 expiry, or null for perpetual (until revoked)."
+    expiresAt: String
+    createdAt: String!
+  }
+
+  type ConnectionGrantsPage {
+    items: [ConnectionGrant!]!
+    total: Int!
+  }
+
   "Webhook trigger (D-2026-05-02). The secret is NEVER exposed here — the URL is returned once at create/rotate."
   type AgentWebhook {
     id: ID!
@@ -2866,6 +2893,11 @@ export const typeDefs = `#graphql
     agentWebhooks(appRef: String!, limit: Int, offset: Int): AgentWebhooksPage!
     "The ticket ledger: minted, consumed-by-which-run, expired (org-ADMIN)."
     actionTickets(orgRef: String!, limit: Int, offset: Int): ActionTicketsPage!
+    # Spec 042 Track B (#593) — connection delegation grants, owner-scoped.
+    "One connection grant the caller created, by ID; null if not theirs (no existence oracle)."
+    connectionGrant(ref: ID!): ConnectionGrant
+    "The caller's own connection grants; connectionRef narrows to one connection."
+    connectionGrants(connectionRef: String, limit: Int, offset: Int): ConnectionGrantsPage!
     "Usage-vs-limit counters for an org (+ one app when appRef given). Org-ADMIN. Rows materialize on first view, seeded with platform defaults (#510)."
     quotaCounters(orgRef: String!, appRef: String): [QuotaCounter!]!
     "Explain the standing policy chain (org / user / app) for one action - which layer denies it (#510, cor:acl:040:02). Org-ADMIN on the app's org."
@@ -3028,6 +3060,16 @@ export const typeDefs = `#graphql
     "New secret + token; the old URL dies immediately."
     rotateAgentWebhook(id: ID!): AgentWebhookCredentials!
     deleteAgentWebhook(id: ID!): Boolean!
+
+    # Spec 042 Track B (#593) — user->App connection delegation. Owner-only.
+    """
+    Grant an App install scoped access to a connection you OWN. scopes must be a
+    subset of {mail.read, mail.send, calendar.freebusy, calendar.read}; expiresAt
+    (ISO-8601) is optional and must be in the future. appRef is a PK or App URN.
+    """
+    createConnectionGrant(connectionRef: String!, appRef: String!, scopes: [String!]!, expiresAt: String): ConnectionGrant!
+    "Revoke a connection grant you created (soft delete). Owner-only."
+    revokeConnectionGrant(ref: ID!): Boolean!
     "Mint comm.outbound tickets into the org ledger (org-ADMIN; cor:acl:050:04)."
     mintActionTickets(input: MintActionTicketsInput!): Int!
     "Set the stored (enforced) quota limit for a scope x action (#510) - the operator dial that previously required psql. Org-ADMIN."
