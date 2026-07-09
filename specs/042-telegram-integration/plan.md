@@ -258,6 +258,17 @@ mapping, forum-topic `threadId`. Acceptance: the EngTeamChat scenario —
 two agents + two humans, agents coordinating in the chat memory, humans in
 Telegram, per-agent bot identities outbound.
 
+> **Sequencing update (2026-07-09, Holger — spec 043 decision 8):** the
+> bridge core lands **provider-neutral in spec 043 Phase 5** (Slack first —
+> Micromentor, the pilot customer, lives in Slack): `ChatBinding` /
+> `ChatParticipant` models + the seq-cursor sweep worker, with
+> provider-dispatched sends. This phase then becomes the **Telegram adapter**
+> on those shared models — the participant `sendViaConnectionId` dispatch,
+> the privacy-exemption validation, and forum-topic `threadId` mapping —
+> not a Telegram-only build. Read `TelegramChatBinding` /
+> `TelegramChatParticipant` above as the Telegram-flavored instance of the
+> neutral models (`provider: 'telegram'`).
+
 **Track B (parallel, separate spec) — `ConnectionGrant`**: user→App scoped
 delegation on user-owned connections. `(connectionId, granteeAppId, scopes[],
 grantedByUserId, expiresAt?, deletedAt)`; **grantee is the App (install),
