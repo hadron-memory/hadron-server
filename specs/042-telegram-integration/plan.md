@@ -93,14 +93,25 @@ bindings + bridge worker
   `connection_unauthorized` (revoked token → connection marked ERROR),
   `provider_rate_limited` (Telegram 429; honor `retry_after`),
   `not_found`, `validation_error`.
-- **Rate limiting is the tool's job**: per-chat outbound queue (~1 msg/s per
-  chat, ~20/min per group); the queue + 429 backoff live tool-side so core
-  callers never implement retry.
+- **Send ops are synchronous — success means Telegram confirmed.** The tool
+  paces per-chat (~1 msg/s per chat, ~20/min per group) and absorbs short
+  429s *within* the request, but never acks an undelivered message (no
+  durable tool-side queue; a tool crash loses nothing core hasn't already
+  confirmed). On saturation it returns `provider_rate_limited` +
+  `retryAfter`; **durable retry belongs to core's sweep worker**, which
+  holds the cursor and replays with the same `idempotencyKey`. (Gemini
+  review on PR #591, comment 2.)
 - **Poll worker**: one `getUpdates` long-poll loop per active connection
   (30s timeout, `offset = lastUpdateId + 1` persisted per connection —
   cursor doubles as dedupe). Normalizes updates and POSTs to
-  `CORE_EVENTS_URL` (same forwarder seam as ms-exchange; delivery failure
-  logged, never fatal; NATS-wrappable later).
+  `CORE_EVENTS_URL`. **The cursor advances only after a 2xx from core** —
+  unlike Graph, `getUpdates` deletes acknowledged updates server-side, so
+  the tool is the last stop; a failed forward must NOT advance (retry next
+  tick — Telegram's 24h server-side queue is the durable buffer). Bounded
+  per-batch retries with dead-letter logging so one poison event can't
+  wedge the stream; a core outage longer than 24h loses updates (accepted).
+  (Gemini review on PR #591, comment 4 — the ms-exchange "logged, never
+  fatal" posture does not transfer.)
 - Normalized events: `telegram.message.received` (`{connectionId, chatId,
   messageThreadId?, from: {telegramUserId, username?, displayName},
   messageId, replyToMessageId?, text, kind: 'dm'|'group', receivedAt}`) and
@@ -158,10 +169,15 @@ Two flavors, both new models:
 ### Consumers (at `dispatchTelegramEvent`)
 
 1. **DM → chat node** (live-session Apps): resolve App (connection) + user
-   (binding); write a `message` node into the App's per-user DM chat
-   (`chats:dm-<user-handle>:messages` in the App's memory) with
-   `data: {author: <handle>, identity: 'human', source: 'telegram',
-   telegram: {chatId, messageId}}`. hadron-client's existing channel watcher
+   (binding); write a `message` node under the App's per-user DM
+   message-parent (`chats:dm-<user-handle>:messages` in the App's memory)
+   with `data: {author: <handle>, identity: 'human', source: 'telegram',
+   telegram: {chatId, messageId}}`. **Telegram-sourced message locs are
+   deterministic**: `…:messages:tg-<messageId>` (not the chat protocol's
+   timestamp-handle form) — a redelivered update (poll retry before the
+   cursor persists, at-least-once ingress) upserts the same node instead of
+   duplicating. (Gemini review on PR #591, comment 1 — applies to consumer
+   3's group messages identically.) hadron-client's existing channel watcher
    delivers it into a live Claude Code session **unchanged** — zero client
    work.
 2. **DM → AppRun** (headless Apps): if the App has no watcher and is
@@ -181,7 +197,11 @@ Two flavors, both new models:
 ### Outbound mirror (core worker)
 
 DB-backed sweep loop (D-2026-06-17-004 posture; NATS upgrade later): per
-enabled binding, list message nodes with `seq > seqCursor`, skip
+enabled binding, list message nodes with `seq > seqCursor` — deliberately
+the same server-assigned-`seq` contract `hadron chat read --since` relies
+on (message nodes always get a seq; message lists are append-only in
+practice; if that contract ever breaks, the chat protocol itself breaks
+first) — skip
 `data.source === 'telegram'` (loop prevention — the other direction is safe
 by construction: Telegram never delivers a bot its own sends, and bots can't
 see other bots), and for each node:
