@@ -831,7 +831,11 @@ export const nodeQueries = {
           throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
         }
         // Fetch through the offset so paging works (vectorSearchChunks has no offset).
-        const chunkHits = (await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit }))
+        // #497 — apply the minScore floor to the scored passages too (PR-569
+        // review, Codex): filter before paging so a floor drops sub-threshold
+        // chunks rather than silently returning them.
+        const rawChunks = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit });
+        const chunkHits = (scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor))
           .slice(off, off + finalLimit);
         const parents = await ctx.db.node.findMany({
           where: { id: { in: [...new Set(chunkHits.map((c) => c.nodeId))] }, deletedAt: null },

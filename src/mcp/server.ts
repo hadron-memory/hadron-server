@@ -1588,7 +1588,9 @@ export function createMcpServerInstance(
       const scores = (result.hits ?? [])
         .map((h) => h.score)
         .filter((s): s is number => typeof s === 'number');
-      const topScore = scores.length ? Math.max(...scores) : null;
+      // Reduce, not Math.max(...scores): `limit` is caller-controlled, so a huge
+      // page would spread too many args into Math.max and throw RangeError.
+      const topScore = scores.length ? scores.reduce((m, s) => (s > m ? s : m), -Infinity) : null;
 
       const renderHit = async (hit: {
         node: {
@@ -1679,7 +1681,7 @@ export function createMcpServerInstance(
       // and relative (fraction of top), so it's sound across every mode.
       let weakNote: string | null = null;
       if (scores.length >= 5 && topScore != null && topScore > 0) {
-        const lo = Math.min(...scores);
+        const lo = scores.reduce((m, s) => (s < m ? s : m), Infinity); // reduce, not spread (see topScore)
         const relLo = lo / topScore;
         if (relLo >= 0.6) {
           weakNote =
