@@ -1958,7 +1958,7 @@ export const typeDefs = `#graphql
     DATA
     "Shallow-merge the 'properties' JSON; target wins on key collisions."
     PROPERTIES
-    "Re-point the source's incoming and outgoing edges onto the target. Each re-homed edge's loc is recomputed from its new endpoints; an edge equivalent to one the target already has (same source, name, and target) is dropped rather than duplicated, as are self-loops."
+    "Re-point the source's incoming and outgoing edges onto the target. Each re-homed edge's loc is recomputed from its new endpoints (deriveEdgeLoc); a re-homed edge whose recomputed (loc, memoryId) collides with one the target already holds is dropped rather than duplicated — so an equivalent edge with an endpoint-derived loc is de-duplicated — as are self-loops."
     EDGES
   }
 
