@@ -144,6 +144,13 @@ describe('createSlackConnection', () => {
 });
 
 describe('deleteSlackConnection', () => {
+  it('answers NOT_FOUND (not Forbidden) to an outsider — no id-probing disclosure', async () => {
+    const connection = await createConnection();
+    await expect(
+      resolvers.Mutation.deleteSlackConnection({}, { ref: connection.id }, ctxFor(outsider.id)),
+    ).rejects.toThrow(/not found/);
+  });
+
   it('soft-deletes and tears down the tool side (org ADMIN only)', async () => {
     const connection = await createConnection();
     await expect(
@@ -187,5 +194,9 @@ describe('slackConnections', () => {
 
     const countOnly = await resolvers.Query.slackConnections({}, { limit: 0 }, ctxFor(member.id));
     expect(countOnly).toEqual({ items: [], total: 1 });
+
+    // Malformed offsets clamp instead of crashing Prisma.
+    const negative = await resolvers.Query.slackConnections({}, { offset: -5 }, ctxFor(member.id));
+    expect(negative.items).toHaveLength(1);
   });
 });

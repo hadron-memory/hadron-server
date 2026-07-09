@@ -83,20 +83,30 @@ function isUniqueViolation(err: unknown): boolean {
   return (err as { code?: string } | null)?.code === 'P2002';
 }
 
+/** Receipts only need to outlive the tool's bounded retry window; keep a generous day. */
+const RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Fraction of dispatches that also sweep old receipts (opportunistic GC). */
+const RECEIPT_PRUNE_PROBABILITY = 0.01;
+
+/** Delete receipts older than `olderThan`; returns the pruned count. */
+export async function pruneSlackEventReceipts(olderThan: Date): Promise<number> {
+  const { count } = await db.slackEventReceipt.deleteMany({ where: { createdAt: { lt: olderThan } } });
+  return count;
+}
+
 /**
- * Record the envelope receipt; false ⇒ duplicate delivery (already
- * dispatched once) and the event must be dropped silently.
+ * The receipt table is insert-only on the happy path, so it would grow
+ * without bound (PR #600 review) — an occasional dispatch sweeps expired
+ * rows instead of a dedicated cron. Fire-and-forget by design.
  */
-async function recordReceipt(event: InboundSlackEvent): Promise<boolean> {
-  try {
-    await db.slackEventReceipt.create({
-      data: { connectionId: event.connectionId, envelopeId: event.envelopeId },
-    });
-    return true;
-  } catch (err) {
-    if (isUniqueViolation(err)) return false;
-    throw err;
-  }
+function pruneReceiptsOpportunistically(): void {
+  if (Math.random() >= RECEIPT_PRUNE_PROBABILITY) return;
+  pruneSlackEventReceipts(new Date(Date.now() - RECEIPT_TTL_MS))
+    .then((count) => {
+      if (count > 0) console.log(`[slack-events] pruned ${count} expired event receipts`);
+    })
+    .catch((err) => console.error('[slack-events] receipt prune failed:', err));
 }
 
 /**
@@ -127,22 +137,32 @@ async function handleSlackCommand(
  * disconnect, or a foreign tool) — never an error back to the tool.
  */
 export async function dispatchSlackEvent(event: InboundSlackEvent): Promise<void> {
-  const fresh = await recordReceipt(event);
-  if (!fresh) {
+  // Dedupe order is CHECK → route → RECORD: the receipt marks COMPLETED
+  // dispatch. Recording first would swallow the event forever when the
+  // process dies mid-route (no thrown error to release the receipt — the
+  // tool's retry would read as a duplicate; PR #600 review, Gemini high +
+  // Codex P2). The cost is the honest at-least-once one: a crash between
+  // routing and recording re-runs the consumer on retry — consumers are
+  // idempotent per the spec-043 contract (and two concurrent deliveries of
+  // one envelope may both route for the same reason; the unique key merely
+  // collapses their receipts).
+  const existing = await db.slackEventReceipt.findFirst({
+    where: { connectionId: event.connectionId, envelopeId: event.envelopeId },
+    select: { id: true },
+  });
+  if (existing) {
     console.log(`[slack-events] duplicate envelope ${event.envelopeId} for tool connection ${event.connectionId} — dropped`);
     return;
   }
+  await routeSlackEvent(event);
   try {
-    await routeSlackEvent(event);
+    await db.slackEventReceipt.create({
+      data: { connectionId: event.connectionId, envelopeId: event.envelopeId },
+    });
   } catch (err) {
-    // Release the receipt so the tool's retry re-processes instead of being
-    // swallowed as a duplicate — the receipt marks COMPLETED dispatch, not
-    // attempted dispatch.
-    await db.slackEventReceipt
-      .deleteMany({ where: { connectionId: event.connectionId, envelopeId: event.envelopeId } })
-      .catch(() => {});
-    throw err;
+    if (!isUniqueViolation(err)) throw err;
   }
+  pruneReceiptsOpportunistically();
 }
 
 /** Route a deduped event to its per-kind consumer. */

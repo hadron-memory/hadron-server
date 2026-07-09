@@ -19,7 +19,12 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { runSlackOperation } from '../lib/slackClient.js';
-import { mountSlackEventRoutes, dispatchSlackEvent, type InboundSlackEvent } from './slackEvents.js';
+import {
+  mountSlackEventRoutes,
+  dispatchSlackEvent,
+  pruneSlackEventReceipts,
+  type InboundSlackEvent,
+} from './slackEvents.js';
 
 vi.mock('../lib/slackClient.js', () => ({
   runSlackOperation: vi.fn().mockResolvedValue({ ok: true }),
@@ -157,10 +162,22 @@ describe('dispatchSlackEvent', () => {
     expect(await db.slackEventReceipt.count()).toBe(1);
   });
 
-  it('releases the receipt when routing itself crashes, so a retry re-processes', async () => {
-    // No seeded connection + a DB-level crash is hard to fake here; instead
-    // verify the contract via the gap event whose consumer is a pure log —
-    // sanity that a clean dispatch KEEPS its receipt…
+  it('records the receipt only AFTER routing — a crash mid-route leaves none, so a retry re-processes', async () => {
+    // Pin the order (PR #600 review, Gemini high + Codex P2): when the
+    // consumer runs, no receipt may exist yet. Receipt-first would swallow
+    // the event forever if the process died mid-route.
+    await seedConnection();
+    let receiptsAtRouteTime = -1;
+    vi.mocked(runSlackOperation).mockImplementationOnce(async () => {
+      receiptsAtRouteTime = await db.slackEventReceipt.count();
+      return { ok: true };
+    });
+    await dispatchSlackEvent(commandEvent({ envelopeId: 'env-order' }));
+    expect(receiptsAtRouteTime).toBe(0);
+    expect(await db.slackEventReceipt.count()).toBe(1);
+  });
+
+  it('completes dispatch (clean gap consumer) and keeps the receipt', async () => {
     await seedConnection();
     await dispatchSlackEvent({
       event: 'slack.gap',
@@ -170,6 +187,17 @@ describe('dispatchSlackEvent', () => {
       reconnectedAt: '2026-07-09T10:00:00Z',
     });
     expect(await db.slackEventReceipt.count()).toBe(1);
+  });
+
+  it('pruneSlackEventReceipts sweeps only expired rows', async () => {
+    await db.slackEventReceipt.create({
+      data: { connectionId: 'c1', envelopeId: 'old', createdAt: new Date('2026-07-01T00:00:00Z') },
+    });
+    await db.slackEventReceipt.create({ data: { connectionId: 'c1', envelopeId: 'fresh' } });
+    const pruned = await pruneSlackEventReceipts(new Date('2026-07-08T00:00:00Z'));
+    expect(pruned).toBe(1);
+    const remaining = await db.slackEventReceipt.findMany();
+    expect(remaining.map((r) => r.envelopeId)).toEqual(['fresh']);
   });
 
   it('message.received acks without a consumer (Phase 3 attaches there)', async () => {

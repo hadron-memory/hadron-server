@@ -43,7 +43,7 @@ export const slackQueries = {
             where,
             orderBy: [{ teamName: 'asc' }, { id: 'asc' }],
             take,
-            skip: offset ?? 0,
+            skip: Math.max(0, offset ?? 0),
           }),
       ctx.db.slackConnection.count({ where }),
     ]);

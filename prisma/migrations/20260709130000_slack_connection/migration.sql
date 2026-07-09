@@ -30,8 +30,9 @@ CREATE TABLE "slack_event_receipts" (
     CONSTRAINT "slack_event_receipts_pkey" PRIMARY KEY ("id")
 );
 
--- CreateIndex
-CREATE INDEX "slack_connections_tool_connection_id_idx" ON "slack_connections"("tool_connection_id");
+-- CreateIndex: the events-ingress routing key must be 1:1 (unique), or
+-- dispatch becomes ambiguous across orgs.
+CREATE UNIQUE INDEX "slack_connections_tool_connection_id_key" ON "slack_connections"("tool_connection_id");
 
 -- CreateIndex
 CREATE INDEX "slack_connections_default_app_id_idx" ON "slack_connections"("default_app_id");

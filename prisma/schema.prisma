@@ -1861,6 +1861,8 @@ model ConnectionGrant {
   @@index([granteeAppId])
   @@index([grantedByUserId])
   @@map("connection_grants")
+}
+
 /// One Slack workspace install of the Hadron Slack app (spec 043).
 /// Org-owned at WORKSPACE granularity (decision 1) — unlike the App-owned
 /// TelegramConnection design and the user-owned ExchangeConnection.
@@ -1909,8 +1911,11 @@ model SlackConnection {
   // re-registration forever — the apps_urn_active_uniq precedent.
   @@index([organizationId, teamId])
   // The slack-events ingress resolves connections by the tool's id on every
-  // inbound event — this lookup must be indexed (the #396 Phase-4 posture).
-  @@index([toolConnectionId])
+  // inbound event — the routing key must be 1:1, so this is UNIQUE (PR #600
+  // review): two rows sharing a tool id would make dispatch ambiguous and
+  // risk cross-org misdelivery. Every registration mints a fresh tool id,
+  // so soft-deleted history rows never collide.
+  @@unique([toolConnectionId])
   @@index([defaultAppId])
   @@map("slack_connections")
 }
