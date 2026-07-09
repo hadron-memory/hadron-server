@@ -3,10 +3,11 @@
 Status: **planned** (design converged 2026-07-09, Holger + Claude). Decision
 record: `hrn:node:hadronmemory.com::hadron-server::reference:hadrontool-slack`.
 Pattern precedent: `hadrontool-telegram` (spec 042, #592) — this is the fourth
-application of the capability-tool pattern. 043 builds the command *surface*
-first (two user-initiated capabilities), then ships the chat *bridge* —
-which 042 designed for Telegram — on Slack first, on provider-neutral core
-models (decision 8).
+application of the capability-tool pattern. 043 covers the command *surface*
+(search + task-run) and the chat *bridge* — which 042 designed for Telegram —
+on provider-neutral core models (decisions 8–9). **The bridge is the priority
+and ships first** (Phase 3, right after the plumbing); search and task-run
+follow in Phases 4–5.
 
 ## Goal
 
@@ -73,10 +74,12 @@ the plumbing (Phase 3).
 5. **The tool is Hadron-blind** (standing capability-tool boundary, 042 #6 —
    now four-for-four). No core tables, no core API. Tool→core = the
    normalized events ingress only; core→tool = `/ops/*` only. Neither
-   capability lives in the tool: the tool acks Slack within the 3-second
-   window, forwards a normalized event, and later delivers whatever message
-   core tells it to. When an op needs Hadron context, core passes it in —
-   invert, don't query.
+   capability lives in the tool: the tool **persists the envelope, acks
+   Slack within the 3-second window, then forwards** the normalized event
+   (see the socket worker below — an ack without a durable record would
+   silently drop commands on a crash, since Slack never retries an acked
+   envelope), and later delivers whatever message core tells it to. When an
+   op needs Hadron context, core passes it in — invert, don't query.
 6. **Sender binding is mandatory, token-bind v1.** Slack workspaces are
    membership-gated (unlike publicly discoverable Telegram bots), but Hadron
    is multi-tenant: a `slackUserId` proves nothing about Hadron identity.
@@ -105,9 +108,13 @@ the plumbing (Phase 3).
      Slack; the participant row carries a display identity instead.
    - **Loop prevention must be explicit.** Slack bots DO receive their own
      and other bots' messages (unlike Telegram's platform rule) — the
-     inbound consumer skips events carrying the connection's own `bot_id`,
-     plus the `data.source: 'slack'` provenance skip. 042's "safe by
-     construction" sentence does not transfer.
+     inbound consumer skips events carrying the connection's own bot
+     identity, plus the `data.source: 'slack'` provenance skip. NB: Slack
+     issues a bot TWO distinct ids — the `bot_id` (`B…`) carried on bot
+     message events and the bot's user id (`U…`) from `auth.test` — so the
+     connection stores **both** (`botId` + `botUserId`) and the filter
+     matches either. 042's "safe by construction" sentence does not
+     transfer.
    - **Durability needs reconnect backfill.** Socket Mode has no server-side
      queue (Telegram's `getUpdates` buffers 24h); on reconnect the tool
      emits a gap event and core re-sweeps bound channels via `get-history`.
@@ -151,7 +158,7 @@ bindings + command dispatcher + AppRun trigger
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/connections` | Register a workspace install: `{botToken, appToken}` → validate live (`auth.test` + `apps.connections.open` dry-run), encrypt both, return `{id, teamId, teamName, botUserId}` |
+| `POST` | `/connections` | Register a workspace install: `{botToken, appToken}` → validate live (`auth.test` + `apps.connections.open` dry-run), encrypt both, return `{id, teamId, teamName, botUserId, botId}` (both bot ids — see the loop-prevention note in decision 8) |
 | `GET` | `/connections/:id` | Identity + socket status |
 | `DELETE` | `/connections/:id` | Close socket, soft-delete |
 | `POST` | `/ops/<operation>` | v1 ops below |
@@ -187,13 +194,20 @@ bindings + command dispatcher + AppRun trigger
   `not_found`, `validation_error`.
 - **Socket worker**: one Socket Mode client per active connection
   (`apps.connections.open`, reconnect/refresh handled by the library).
-  Envelope handling: **ack immediately** (inside Slack's 3s window), then
-  forward the normalized event to `CORE_EVENTS_URL`. Unlike 042's poll
-  cursor, the ack-then-forward order is forced by Slack's 3s deadline —
-  so delivery to core is at-least-once with bounded retries + dead-letter
-  logging, and **core's consumers must be idempotent per
-  (connectionId, envelopeId)**. `CORE_EVENTS_URL` unset ⇒ log + drop
-  (deliberate, not an outage — the 042 posture).
+  Envelope handling: **persist, ack, forward** — the normalized event is
+  written to a tool-side `EventInbox` row FIRST, then the envelope is acked
+  (inside Slack's 3s window), then a drainer delivers inbox rows to
+  `CORE_EVENTS_URL` with bounded retries + dead-letter marking. Slack never
+  redelivers an acked envelope, so an ack without a durable record would
+  silently drop slash commands on a tool crash or core outage (Codex review
+  on PR #594) — the inbox is the durable buffer that Telegram's 24h
+  server-side queue provided for free in 042. Delivered rows are deleted;
+  dead-lettered rows are kept for inspection. Delivery to core is therefore
+  at-least-once, and **core's consumers must be idempotent per
+  (connectionId, envelopeId)**. (Bridge `message.received` events get
+  second-layer coverage from the gap backfill; commands/interactions have
+  only the inbox — which is why it exists.) `CORE_EVENTS_URL` unset ⇒ log +
+  drop, no inbox writes (deliberate, not an outage — the 042 posture).
 - **Normalized events**: `slack.command` (`{connectionId, teamId, channelId,
   threadTs?, slackUserId, command, text, responseUrl, triggerId,
   envelopeId}`), `slack.interaction` (`{connectionId, teamId, channelId,
@@ -206,21 +220,29 @@ bindings + command dispatcher + AppRun trigger
   triggers the `get-history` backfill for that connection's bindings).
 
 Tool data model (own Prisma/Postgres, mirroring 042): `Connection`
-(encrypted botToken + appToken, teamId, teamName, botUserId, status) +
-`IdempotencyRecord`. No cursor column — Socket Mode has no poll offset.
+(encrypted botToken + appToken, teamId, teamName, botUserId, botId,
+status), `IdempotencyRecord`, and `EventInbox` (`connectionId, envelopeId
+unique, payload, attempts, status pending|dead, createdAt` — the
+persist-before-ack buffer above). No cursor column — Socket Mode has no
+poll offset.
 
 **Slack app manifest** (checked into the repo as `manifest.yml`): Socket
 Mode on, slash command `/hadron`, interactivity on, message events
 (`message.channels`, `message.groups`) for the bridge, bot scopes
 `commands`, `chat:write`, `chat:write.customize` (per-agent identity),
-`users:read`, `channels:history`, `groups:history`, `channels:read`
+`users:read`, `channels:history`, `groups:history`, `channels:read`,
+`groups:read` (`conversations.info` on a private channel requires it — the
+enable-time membership check would otherwise fail exactly where
+`groups:history` already granted mirroring; Codex review on PR #594)
 (+ `users:read.email` reserved for the later auto-match). One manifest,
 N workspace installs.
 
 ### Core: connection + ingress + dispatch
 
 - **`SlackConnection`** (new model): `id, organizationId, teamId,
-  defaultAppId, toolConnectionId, teamName, botUserId, status, deletedAt`.
+  defaultAppId, toolConnectionId, teamName, botUserId, botId, status,
+  deletedAt` (both bot ids — `bot_id` is what bot message events carry,
+  `botUserId` is the bot's `U…` id; the loop filter needs the pair).
   Org-owned, workspace-granularity (decision 1). CRUD requires admin/owner
   org role (`requireOrgRole`, `findFirst + deletedAt: null` per the auth
   invariants). `defaultAppId` names the Hadron App that serves commands
@@ -290,10 +312,12 @@ Telegram reuses them as the second adapter**:
   (provider-scoped), channelId, threadId?, memoryId, messagesLoc, seqCursor
   (outbound), lastMirroredTs? (inbound backfill cursor), enabled,
   deletedAt`. CRUD requires admin/owner org role on the owning App's org.
-- **`ChatParticipant`**: `(bindingId, appId), displayName?, avatarUrl?,
-  sendViaConnectionId? (telegram-only; null on slack), consentedByUserId,
-  deletedAt`. Adding one requires an org role on the *participant* App's
-  org (the 042 consent posture).
+- **`ChatParticipant`**: `(bindingId, appId), authorHandle, displayName?,
+  avatarUrl?, sendViaConnectionId? (telegram-only; null on slack),
+  consentedByUserId, deletedAt`. `authorHandle` is the chat-protocol handle
+  the outbound mirror matches against message nodes' `data.author`. Adding
+  a row requires an org role on the *participant* App's org (the 042
+  consent posture).
 
 **Enable-time validation**: the connection's bot must be a member of the
 channel (`get-channel-info`) — the Slack analog of 042's privacy-exemption
@@ -302,9 +326,14 @@ scoped, the bot sees everything in the channel. Re-check on the sweep's
 error path (the bot can be kicked after binding).
 
 **Inbound (humans → chat memory)**: `slack.message.received` resolves the
-binding by `(connectionId, channelId, threadTs?)`; skip messages carrying
-the connection's own `botId` (explicit loop prevention — Slack bots see
-their own sends) and `data.source: 'slack'` provenance; write message nodes
+binding **most-specific-first**: an enabled row matching `(connectionId,
+channelId, threadId = threadTs)` wins; otherwise fall back to the
+channel-wide row (`threadId IS NULL`) — so thread replies inside a bound
+channel still mirror when no thread-specific binding exists (Gemini +
+Codex review on PR #594); no match ⇒ drop. Skip messages carrying the
+connection's own bot identity (event `bot_id` = connection `botId` OR
+sender = `botUserId` — explicit loop prevention, Slack bots see their own
+sends) and `data.source: 'slack'` provenance; write message nodes
 with **deterministic locs** `…:messages:slack-<channelId>-<ts>` and
 `data: {author, identity: 'human', source: 'slack', slack: {channelId,
 ts}}` — at-least-once ingress upserts idempotently (the 042 `tg-<messageId>`
@@ -314,16 +343,29 @@ edge when the parent message's node is known.
 **Gap recovery**: on `slack.gap`, core sweeps each enabled binding on that
 connection with `/ops/get-history {channelId, oldest: lastMirroredTs}` and
 runs the missed messages through the same idempotent inbound consumer.
-This is the durability story Socket Mode doesn't give for free.
+The sweep is **sequential per connection, not fanned out** —
+`conversations.history` is one of Slack's tighter-budget methods, and a
+reconnect on a connection with many bindings would trip rate limits if
+fired in parallel (Gemini review on PR #594); the tool paces `get-history`
+per connection and returns `provider_rate_limited` + `retryAfterSeconds`
+on saturation, which the sweep honors before the next binding. This is
+the durability story Socket Mode doesn't give for free.
 
 **Outbound mirror**: same DB-backed sweep loop as 042 (D-2026-06-17-004
 posture) — per enabled binding, message nodes with `seq > seqCursor`, skip
 `data.source === 'slack'`, post via `send-message` with `sender:
 {displayName, avatarUrl}` from the author's participant row (falling back
 to `**<author> (<role>):**` prefix text when no participant row exists).
-`reply` edges → `threadTs`; store the returned `ts` back into the node's
-`data.slack` for future reply mapping. Advance `seqCursor` only after
-confirmed (or terminally-failed) delivery.
+**Participant resolution rides on the message node's `data.author` handle**
+(the chat-protocol contract `hadron chat post` already honors); the
+participant row carries the handle(s) it answers for. Message-writing
+paths that today omit an author — `processChatResponse` writes only
+`data.role: 'assistant'` (Gemini review on PR #594) — must record the
+author identity at creation time, or their nodes permanently fall back to
+the prefix form; fixing that write path is a Phase-3 task. `reply` edges →
+`threadTs`; store the returned `ts` back into the node's `data.slack` for
+future reply mapping. Advance `seqCursor` only after confirmed (or
+terminally-failed) delivery.
 
 ## Phases
 
@@ -331,8 +373,9 @@ confirmed (or terminally-failed) delivery.
 hadrontool-telegram): config/logger/db/crypto/auth-middleware/respond funnel
 carry over nearly verbatim; implement `POST /connections` (live validation),
 the v1 ops incl. the neutral `choices[]` → Block Kit renderer, per-channel
-pacing + 429 backoff, the Socket Mode worker (ack-then-forward, bounded
-retry + dead-letter), the events forwarder, `/info`, `manifest.yml`. Tests:
+pacing + 429 backoff, the Socket Mode worker (persist-ack-forward via the
+`EventInbox`, bounded retry + dead-letter), the events forwarder, `/info`,
+`manifest.yml`. Tests:
 real HTTP + real Postgres over a fake Slack — `SLACK_API_BASE` override plus
 a fake Socket Mode server (`apps.connections.open` returns a local `ws://`
 URL), the 042 fake-Bot-API pattern extended with a WebSocket.
@@ -352,9 +395,12 @@ reconnect, `get-history` + `get-channel-info` ops, the `sender`
 customize-send, `bridge` in `/info` capabilities. Core side —
 `ChatBinding`/`ChatParticipant` (provider-neutral) + migration,
 `chatBridgeClient.ts` provider dispatch, enable-time membership validation,
-binding CRUD (GraphQL + CLI), the inbound consumer (deterministic locs,
-bot-loop filter, reply mapping), the gap-backfill sweep, and the outbound
-mirror worker. Acceptance: the 042 EngTeamChat scenario, on Slack — two
+binding CRUD (GraphQL + CLI), the inbound consumer (most-specific binding
+resolution, deterministic locs, bot-loop filter on both bot ids, reply
+mapping), the paced gap-backfill sweep, the outbound mirror worker, and
+the author-identity fix in message-writing paths that omit it
+(`processChatResponse` → record the author on assistant message nodes).
+Acceptance: the 042 EngTeamChat scenario, on Slack — two
 agents + two humans, agents coordinating in the chat memory via `hadron
 chat read`/`post` unchanged, humans in a Slack channel, per-agent
 names/avatars outbound. **This phase builds the provider-neutral worker 042

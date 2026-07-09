@@ -259,7 +259,7 @@ two agents + two humans, agents coordinating in the chat memory, humans in
 Telegram, per-agent bot identities outbound.
 
 > **Sequencing update (2026-07-09, Holger — spec 043 decision 8):** the
-> bridge core lands **provider-neutral in spec 043 Phase 5** (Slack first —
+> bridge core lands **provider-neutral in spec 043 Phase 3** (Slack first —
 > Micromentor, the pilot customer, lives in Slack): `ChatBinding` /
 > `ChatParticipant` models + the seq-cursor sweep worker, with
 > provider-dispatched sends. This phase then becomes the **Telegram adapter**
