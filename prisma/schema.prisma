@@ -136,14 +136,15 @@ enum SyncStatus {
 
 /// How a User authenticated. APP is reserved for users provisioned
 /// via App-scoped flows (e.g. chatbot `createAppUser`); GOOGLE landed
-/// with Sign-in-with-Google (#581); MICROSOFT is reserved for future
-/// SSO.
+/// with Sign-in-with-Google (#581), APPLE with Sign-in-with-Apple
+/// (#584); MICROSOFT is reserved for future SSO.
 enum IdentityProvider {
   GITHUB
   EMAIL
   APP
   GOOGLE
   MICROSOFT
+  APPLE
 }
 
 /// App-level policy for whether the App may create new platform Users
@@ -343,6 +344,9 @@ model User {
   /// but stored as text: Google documents it as an opaque string and it
   /// can exceed 2^53.
   googleId         String?           @unique @map("google_id")
+  /// Apple account id — the Sign-in-with-Apple `sub` claim (#584). An
+  /// opaque team-scoped string (e.g. "001234.abcd1234ef….0102").
+  appleId          String?           @unique @map("apple_id")
   identityProvider IdentityProvider? @map("identity_provider")
   // 005-agent-subscription discovery (2026-04-30): R-5 in research.md
   // proposed dropping `externalId`, but the implementation found that

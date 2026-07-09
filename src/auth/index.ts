@@ -14,3 +14,13 @@ export {
   resolveGoogleUser,
   type GoogleIdentity,
 } from './google.js';
+export {
+  isAppleConfigured,
+  buildAppleAuthUrl,
+  mintAppleClientSecret,
+  exchangeAppleCode,
+  verifyAppleIdToken,
+  parseAppleUserField,
+  resolveAppleUser,
+  type AppleIdentity,
+} from './apple.js';
