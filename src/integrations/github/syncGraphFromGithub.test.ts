@@ -328,6 +328,32 @@ describe('move-aware identity', () => {
     expect(rows.filter((r: { id: string }) => r.id === dupId)).toHaveLength(1);
   });
 
+  it('remaps edge endpoints when a replacement id was minted (duplicate-id file keeps its own edges)', async () => {
+    const dupId = 'ffff666600000000000000000000000006';
+    const targetId = 'ffff777700000000000000000000000007';
+    const dirTarget = join(repoRoot(), 'target');
+    const dirA = join(repoRoot(), 'a-first');
+    const dirB = join(repoRoot(), 'b-second');
+    mkdirSync(dirTarget, { recursive: true });
+    mkdirSync(dirA, { recursive: true });
+    mkdirSync(dirB, { recursive: true });
+    writeNodeFiles(dirTarget, { id: targetId, name: 'target' });
+    writeNodeFiles(dirA, { id: dupId, name: 'first' });
+    // The SECOND claimant of dupId gets a fresh row id — its edge must
+    // attach to THAT row, not to the first claimant (PR-576 codex review).
+    writeNodeFiles(dirB, { id: dupId, name: 'second copy', nodes: [{ id: targetId, rel: 'points at' }] });
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    const second = await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc: 'b-second' } });
+    expect(second.id).not.toBe(dupId);
+    const edges = await db.edge.findMany({ where: { memoryId: dbGraphId } });
+    expect(edges).toHaveLength(1);
+    expect(edges[0].sourceId).toBe(second.id);
+    expect(edges[0].targetId).toBe(targetId);
+  });
+
   it('keys the repo-wins deletion pass on the SURVIVING row id when the file id differs', async () => {
     const survivingId = 'dddd444400000000000000000000000004';
     await db.node.create({

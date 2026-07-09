@@ -97,6 +97,14 @@ export const syncGraphFromGithub = async (
       // carrying the same id (a copied file) must not be treated as a move
       // of the first; it gets a fresh id instead.
       const claimedFileIds = new Set<string>();
+      // Edge-endpoint remapping (PR-576 codex review): when a fresh id is
+      // minted for a file (foreign-memory or duplicate frontmatter id), the
+      // edges loadGraphFromFs captured still carry the file's ORIGINAL id.
+      // Sources always resolve by the file's loc (unique per repo); targets
+      // resolve by first-claimant file id, falling back to the raw id for
+      // legitimate cross-repo references.
+      const locToRowId = new Map<string, string>();
+      const fileIdToRowId = new Map<string, string>();
 
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
@@ -184,6 +192,8 @@ export const syncGraphFromGithub = async (
           rowId = row.id;
         }
         upsertedIds.push(rowId);
+        locToRowId.set(loc, rowId);
+        if (node.id && !fileIdToRowId.has(node.id)) fileIdToRowId.set(node.id, rowId);
         pendingEmbeds.push({
           nodeId: rowId,
           plaintext: { content: node.content ?? null, abstract: node.abstract ?? null },
@@ -223,8 +233,13 @@ export const syncGraphFromGithub = async (
       });
 
       for (const edge of edges) {
+        // Resolve endpoints through the remaps: the source is always a file
+        // in this repo (by loc); the target prefers this repo's claimant of
+        // the referenced id, else stays raw (a cross-repo target).
+        const edgeSourceId = locToRowId.get(edge.sourceLoc) ?? edge.sourceId;
+        const edgeTargetId = fileIdToRowId.get(edge.targetId) ?? edge.targetId;
         const targetExists = await tx.node.findUnique({
-          where: { id: edge.targetId },
+          where: { id: edgeTargetId },
           select: { id: true, loc: true },
         });
         if (targetExists) {
@@ -237,8 +252,8 @@ export const syncGraphFromGithub = async (
             create: {
               id: generateId(),
               memoryId: graph.id,
-              sourceId: edge.sourceId,
-              targetId: edge.targetId,
+              sourceId: edgeSourceId,
+              targetId: edgeTargetId,
               loc: edgeLoc,
               name: edge.name,
               description: edge.description ?? null,
@@ -247,14 +262,14 @@ export const syncGraphFromGithub = async (
             update: {},
           });
           await tx.pendingEdge.deleteMany({
-            where: { sourceId: edge.sourceId, targetId: edge.targetId },
+            where: { sourceId: edgeSourceId, targetId: edgeTargetId },
           });
         } else {
           // Target not synced yet — park as a PendingEdge. loc is derived at
           // promotion time (once the target arrives and its loc is known).
           await tx.pendingEdge.upsert({
-            where: { sourceId_targetId: { sourceId: edge.sourceId, targetId: edge.targetId } },
-            create: { id: generateId(), sourceId: edge.sourceId, targetId: edge.targetId, name: edge.name },
+            where: { sourceId_targetId: { sourceId: edgeSourceId, targetId: edgeTargetId } },
+            create: { id: generateId(), sourceId: edgeSourceId, targetId: edgeTargetId, name: edge.name },
             update: { name: edge.name },
           });
           pendingEdgeCount++;
