@@ -20,7 +20,7 @@ CREATE TABLE "connection_grants" (
 );
 
 -- CreateIndex
-CREATE INDEX "connection_grants_connection_id_idx" ON "connection_grants"("connection_id");
+CREATE INDEX "connection_grants_connection_id_grantee_app_id_idx" ON "connection_grants"("connection_id", "grantee_app_id");
 
 -- CreateIndex
 CREATE INDEX "connection_grants_grantee_app_id_idx" ON "connection_grants"("grantee_app_id");

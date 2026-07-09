@@ -1838,7 +1838,7 @@ model ConnectionGrant {
   /// The connection owner who created the grant (owner-only create).
   grantedByUserId String    @map("granted_by_user_id")
   /// Operation scopes covered — subset of {mail.read, mail.send,
-  /// calendar.freebusy, calendar.read}. See src/lib/email/operationScopes.ts.
+  /// calendar.freebusy, calendar.read}. See src/lib/emailOperationScopes.ts.
   scopes          String[]  @default([])
   /// Optional expiry; NULL = perpetual until revoked.
   expiresAt       DateTime? @map("expires_at")
@@ -1853,7 +1853,10 @@ model ConnectionGrant {
   granteeApp App                @relation("AppConnectionGrants", fields: [granteeAppId], references: [id], onDelete: Cascade)
   grantedBy  User               @relation("ConnectionGrantsByUser", fields: [grantedByUserId], references: [id], onDelete: Cascade)
 
-  @@index([connectionId])
+  // Composite on the gate's hot lookup (connectionId + granteeAppId). The
+  // connectionId-leading order still serves the ExchangeConnection cascade
+  // delete, so no separate single-column index is needed (PR-599 review).
+  @@index([connectionId, granteeAppId])
   @@index([granteeAppId])
   @@index([grantedByUserId])
   @@map("connection_grants")

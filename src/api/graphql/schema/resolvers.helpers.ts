@@ -1065,6 +1065,11 @@ export async function requireEmailConnection(
         connectionId: connection.id,
         granteeAppId: ctx.appId,
         deletedAt: null,
+        // The grantee App must still be a live install. App-key auth rejects a
+        // DELETED App but NOT an uninstalled one, so an old key for a
+        // soft-uninstalled App would otherwise keep authorizing via a live grant
+        // — uninstalling must drop delegated authority (PR-599 review, Codex).
+        granteeApp: { deletedAt: null, uninstalledAt: null },
         scopes: { has: scope },
         // Enforce expiry in the query (TOCTOU-safe). The OR is mandatory — a
         // bare `gt` would silently drop perpetual (null-expiry) grants.

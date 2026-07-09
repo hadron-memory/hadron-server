@@ -53,17 +53,24 @@ function projectGrant(g: GrantRow) {
 }
 
 /**
- * Owner-only management gate: the caller must be the connection's owning USER
- * (no org-admin bypass, no App-key path — grant management is personal
- * authority). Returns the connection's id + owner. A missing/soft-deleted
- * connection and a non-owner both surface identically as the caller's choice
+ * Owner-only management gate: the caller must be an INTERACTIVE user
+ * (`ctx.userId` set, `ctx.appId` ABSENT) who owns the connection — no
+ * org-admin bypass, and crucially no App-key / on-behalf-of-run path.
+ *
+ * The `ctx.appId` exclusion is load-bearing: without it, a run on-behalf-of the
+ * owner (which carries both `userId === owner` AND `appId`) could call
+ * `createConnectionGrant` to bootstrap its OWN mailbox access — defeating the
+ * whole fail-closed gate (PR-599 review, Copilot). Grant management is personal
+ * authority exercised interactively, never by an autonomous principal.
+ *
+ * A missing/soft-deleted connection and a non-owner both surface identically
  * (create throws; list/read return empty) so neither leaks existence.
  */
 async function loadOwnedConnection(
   ctx: Context,
   connectionRef: string,
 ): Promise<{ id: string; userId: string } | null> {
-  if (!ctx.userId) return null;
+  if (!ctx.userId || ctx.appId) return null;
   const conn = await ctx.db.exchangeConnection.findFirst({
     where: { id: connectionRef, deletedAt: null },
     select: { id: true, userId: true },
@@ -72,11 +79,17 @@ async function loadOwnedConnection(
   return conn;
 }
 
+/** True for an interactive user principal — the only context allowed to MANAGE
+ * grants (create/list/revoke). An App-key / on-behalf-of context is excluded. */
+function isInteractiveUser(ctx: Context): boolean {
+  return !!ctx.userId && !ctx.appId;
+}
+
 export const connectionGrantQueries = {
   // cor:api:120 find-one — owner-scoped; a grant the caller didn't create
   // resolves to null (no existence oracle).
   connectionGrant: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-    if (!ctx.userId) return null;
+    if (!isInteractiveUser(ctx)) return null;
     const grant = (await ctx.db.connectionGrant.findFirst({
       where: { id: ref, deletedAt: null, grantedByUserId: ctx.userId },
       select: GRANT_SELECT,
@@ -93,14 +106,15 @@ export const connectionGrantQueries = {
     { connectionRef, limit, offset }: { connectionRef?: string | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    if (!ctx.userId) return { items: [], total: 0 };
+    if (!isInteractiveUser(ctx)) return { items: [], total: 0 };
     const where = {
       grantedByUserId: ctx.userId,
       deletedAt: null,
       ...(connectionRef ? { connectionId: connectionRef } : {}),
     };
     const take = clampListTake(limit);
-    const skip = offset ?? 0;
+    // Clamp: a negative offset makes Prisma's skip throw → 500 (PR-599 review).
+    const skip = Math.max(0, offset ?? 0);
     const [rows, total] = await Promise.all([
       ctx.db.connectionGrant.findMany({ where, select: GRANT_SELECT, orderBy: { createdAt: 'desc' }, take, skip }),
       ctx.db.connectionGrant.count({ where }),
@@ -147,6 +161,13 @@ export const connectionGrantMutations = {
 
     let expiry: Date | null = null;
     if (expiresAt != null) {
+      // Require an explicit UTC `Z` or numeric offset — a timezone-naive string
+      // (`2026-01-01T00:00:00`) parses in the SERVER's local zone, so the stored
+      // instant would drift from what the caller meant (PR-599 review).
+      const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$/;
+      if (!ISO_8601.test(expiresAt)) {
+        throw badInput('expiresAt must be an ISO-8601 timestamp with a timezone (e.g. 2026-01-01T00:00:00Z).');
+      }
       const d = new Date(expiresAt);
       if (Number.isNaN(d.getTime())) throw badInput('expiresAt is not a valid date.');
       if (d.getTime() <= Date.now()) throw badInput('expiresAt must be in the future.');
@@ -171,7 +192,8 @@ export const connectionGrantMutations = {
   // Owner-only revoke → soft delete. findFirst + deletedAt:null (never
   // findUnique), gated on the caller being the grantor/owner.
   revokeConnectionGrant: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-    if (!ctx.userId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+    // Interactive owner only — no App-key / on-behalf-of path (see loadOwnedConnection).
+    if (!isInteractiveUser(ctx)) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
     const grant = await ctx.db.connectionGrant.findFirst({
       where: { id: ref, deletedAt: null, grantedByUserId: ctx.userId },
       select: { id: true },

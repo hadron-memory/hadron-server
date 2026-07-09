@@ -161,6 +161,13 @@ describe('#593 gate — requireEmailConnection(ctx, connId, operation)', () => {
     await mkGrant({ connectionId: connId, granteeAppId: grantedApp, scopes: ['mail.read'] });
     await expect(gate(appCtx(grantedApp), connId, 'list-messages')).rejects.toThrow('Connection not found');
   });
+
+  it('a grant to an UNINSTALLED App no longer authorizes (uninstall drops delegation)', async () => {
+    await mkGrant({ connectionId: connId, granteeAppId: grantedApp, scopes: ['mail.read'] });
+    await expect(gate(appCtx(grantedApp), connId, 'list-messages')).resolves.toMatchObject({ id: connId });
+    await db.app.update({ where: { id: grantedApp }, data: { uninstalledAt: new Date() } });
+    await expect(gate(appCtx(grantedApp), connId, 'list-messages')).rejects.toThrow('Forbidden');
+  });
 });
 
 describe('#593 management surface (GraphQL, owner-only)', () => {
@@ -194,6 +201,30 @@ describe('#593 management surface (GraphQL, owner-only)', () => {
   it('a non-owner cannot create a grant on a connection they do not own', async () => {
     const r = await gql(CREATE, { userId: stranger, roles: [] }, { c: connId, a: grantedApp, s: ['mail.read'] });
     expect(r.errors?.[0].message).toMatch(/not found/i); // no existence oracle
+  });
+
+  it('an App / on-behalf-of-OWNER context CANNOT manage grants (no self-bootstrap)', async () => {
+    // Both userId=owner AND appId set — an autonomous context must not be able
+    // to grant itself mailbox access, or Option B is defeated.
+    const created = await gql(CREATE, { userId: owner, appId: grantedApp, roles: [] }, { c: connId, a: grantedApp, s: ['mail.read'] });
+    expect(created.errors?.[0].message).toMatch(/not found/i);
+    // And it cannot revoke, either.
+    const grant = await mkGrant({ connectionId: connId, granteeAppId: grantedApp, scopes: ['mail.read'] });
+    const REVOKE = `mutation($r: ID!) { revokeConnectionGrant(ref: $r) }`;
+    const revoked = await gql(REVOKE, { userId: owner, appId: grantedApp, roles: [] }, { r: grant.id });
+    expect(revoked.errors?.[0].message).toMatch(/forbidden/i);
+    // The grant is untouched → the gate still (correctly) denies the App anyway
+    // because App-context ops need a grant AND this App has one; that's fine —
+    // the point is management was refused.
+    const still = await db.connectionGrant.findFirst({ where: { id: grant.id, deletedAt: null } });
+    expect(still).not.toBeNull();
+  });
+
+  it('rejects a timezone-naive expiresAt (must carry Z or an offset)', async () => {
+    const naive = await gql(CREATE, ownerCtx(), { c: connId, a: grantedApp, s: ['mail.read'], e: '2999-01-01T00:00:00' });
+    expect(naive.errors?.[0].message).toMatch(/ISO-8601 timestamp with a timezone/);
+    const ok = await gql(CREATE, ownerCtx(), { c: connId, a: grantedApp, s: ['mail.read'], e: '2999-01-01T00:00:00Z' });
+    expect(ok.errors).toBeUndefined();
   });
 
   it('list is owner-scoped — a stranger sees an empty page (BOLA)', async () => {
