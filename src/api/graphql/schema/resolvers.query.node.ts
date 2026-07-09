@@ -750,17 +750,27 @@ export const nodeQueries = {
           const ranked = await provider.lexicalSearch({ ...common, query: q });
           // #496 — a natural-language query implicitly ANDs its terms, so one
           // word absent from the corpus zeroes the whole result set. When a bare
-          // multi-term conjunction ANDs to zero on the first page, retry with the
-          // terms OR'd and flag it — the agent gets partial recall (hits matching
-          // ANY term) instead of a dead end plus a manual boolean rewrite. Only
-          // when the relaxed query actually finds something; otherwise the terms
-          // genuinely aren't present, so we keep the honest empty result.
-          if (ranked.length === 0 && off === 0) {
+          // multi-term conjunction ANDs to zero, retry with the terms OR'd and
+          // flag it — the agent gets partial recall (hits matching ANY term)
+          // instead of a dead end plus a manual boolean rewrite. Only when the
+          // relaxed query actually finds something; otherwise the terms genuinely
+          // aren't present, so we keep the honest empty result.
+          if (ranked.length === 0) {
             const orQuery = relaxConjunctionToOr(q);
             if (orQuery) {
-              const relaxed = await provider.lexicalSearch({ ...common, query: orQuery });
-              if (relaxed.length > 0) {
-                return await hydrateInOrder(relaxed, null, null, 'and_relaxed_to_or');
+              // Relax only when the STRICT query is GLOBALLY empty, not when the
+              // caller has merely paged past the end of a matching set (PR-571
+              // review, Gemini). On page 1 an empty `ranked` already proves that;
+              // a deeper page needs a cheap offset-0 probe to distinguish the two
+              // (else page 2+ of a relaxed set would come back empty, unpaginable).
+              const strictGloballyEmpty =
+                off === 0 ||
+                (await provider.lexicalSearch({ ...common, query: q, offset: 0, limit: 1 })).length === 0;
+              if (strictGloballyEmpty) {
+                const relaxed = await provider.lexicalSearch({ ...common, query: orQuery });
+                if (relaxed.length > 0) {
+                  return await hydrateInOrder(relaxed, null, null, 'and_relaxed_to_or');
+                }
               }
             }
           }
@@ -798,13 +808,30 @@ export const nodeQueries = {
       let lexicalDegraded: string | null = null;
       const mergeDegraded = (d: string | null): string | null =>
         [d, lexicalDegraded].filter(Boolean).join(',') || null;
-      const runKeywordRanked = async () => {
+      // `relax` (#496, PR-571 review): only the keyword-ONLY hybrid FALLBACK
+      // (no vector index / embeddings unavailable) opts in, so that path reaches
+      // the same AND→OR relaxation mode:keyword does — otherwise `mode:hybrid`
+      // on a non-indexed memory is strictly weaker than `mode:keyword` for the
+      // same bare query. TRUE hybrid (vector present) does NOT relax: the vector
+      // half already supplies recall, and relaxing would pollute the RRF inputs
+      // and mislabel a vector-found result as `and_relaxed_to_or`.
+      const runKeywordRanked = async (opts: { relax?: boolean } = {}) => {
         const args = {
           db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
           includeDeleted: !!f.includeDeleted, sort: 'relevance' as const, offset: 0, limit: fetchN,
         };
         try {
-          return await provider.lexicalSearch({ ...args, query: q });
+          const strict = await provider.lexicalSearch({ ...args, query: q });
+          if (!opts.relax || strict.length > 0) return strict;
+          const orQuery = relaxConjunctionToOr(q);
+          if (orQuery) {
+            const relaxed = await provider.lexicalSearch({ ...args, query: orQuery });
+            if (relaxed.length > 0) {
+              lexicalDegraded = [lexicalDegraded, 'and_relaxed_to_or'].filter(Boolean).join(',');
+              return relaxed;
+            }
+          }
+          return strict;
         } catch (e) {
           if (e instanceof BooleanQueryError) {
             lexicalDegraded = 'literal_fallback';
@@ -816,13 +843,13 @@ export const nodeQueries = {
 
       if (indexedIds.length === 0) {
         if (effectiveMode === 'hybrid') {
-          return await buildResult(await runKeywordRanked(), null, null, mergeDegraded('no_vector_index'));
+          return await buildResult(await runKeywordRanked({ relax: true }), null, null, mergeDegraded('no_vector_index'));
         }
         return { hits: [], passages: [], total: 0, reason: 'no_vector_index', degraded: null };
       }
       if (!isEmbeddingConfigured()) {
         if (effectiveMode === 'hybrid') {
-          return await buildResult(await runKeywordRanked(), null, null, mergeDegraded('embedding_unavailable'));
+          return await buildResult(await runKeywordRanked({ relax: true }), null, null, mergeDegraded('embedding_unavailable'));
         }
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
@@ -833,7 +860,7 @@ export const nodeQueries = {
       } catch (err) {
         console.warn(`[findNodes] embed() failed in mode:${effectiveMode}; degrading.`, err);
         if (effectiveMode === 'hybrid') {
-          return await buildResult(await runKeywordRanked(), null, null, mergeDegraded('embedding_unavailable'));
+          return await buildResult(await runKeywordRanked({ relax: true }), null, null, mergeDegraded('embedding_unavailable'));
         }
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
