@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { compileBooleanQuery, literalQuery, BooleanQueryError } from './tsquery.js';
+import { compileBooleanQuery, literalQuery, BooleanQueryError, relaxConjunctionToOr } from './tsquery.js';
 
 describe('compileBooleanQuery', () => {
   it('compiles a single term to a bound plainto_tsquery', () => {
@@ -106,5 +106,42 @@ describe('compileBooleanQuery', () => {
     ])('quote/whitespace-only input still throws Empty query at compile: %j', (input) => {
       expect(() => compileBooleanQuery(literalQuery(input), 1)).toThrow(BooleanQueryError);
     });
+  });
+});
+
+describe('relaxConjunctionToOr (#496)', () => {
+  it('relaxes a bare multi-term conjunction to OR', () => {
+    expect(relaxConjunctionToOr('report bad actor')).toBe('report OR bad OR actor');
+  });
+
+  it('re-quotes phrases and keeps them as single operands', () => {
+    expect(relaxConjunctionToOr('"bad actor" report')).toBe('"bad actor" OR report');
+  });
+
+  it('returns null for a single term (OR would be a no-op)', () => {
+    expect(relaxConjunctionToOr('report')).toBeNull();
+    expect(relaxConjunctionToOr('"bad actor"')).toBeNull();
+  });
+
+  it.each([
+    'report OR flag',
+    'report AND actor',
+    'report NOT actor',
+    '-report actor',
+    '(report OR flag) actor',
+  ])('returns null when the query already has explicit boolean intent: %s', (q) => {
+    expect(relaxConjunctionToOr(q)).toBeNull();
+  });
+
+  it('returns null for unparseable input (unterminated quote)', () => {
+    expect(relaxConjunctionToOr('report "bad actor')).toBeNull();
+  });
+
+  it('the relaxed query re-parses cleanly (OR of leaves)', () => {
+    const relaxed = relaxConjunctionToOr('report bad actor')!;
+    const compiled = compileBooleanQuery(relaxed, 1);
+    expect(compiled.params).toEqual(['report', 'bad', 'actor']);
+    expect(compiled.sql).toContain('||');
+    expect(compiled.sql).not.toContain('&&');
   });
 });

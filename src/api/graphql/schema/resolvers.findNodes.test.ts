@@ -132,16 +132,79 @@ describe('findNodes — boolean operators (cor:api:090:01)', () => {
     expect(res.hits.map((h: any) => h.node.loc)).toContain('b.bshake');
   });
 
-  it('operator words are UPPERCASE-ONLY — "banana or apple" is a literal AND, not a boolean OR', async () => {
-    // Lowercase 'or' is a plain (stopword-ish) term: the query requires
-    // banana AND apple together, which no fixture satisfies — whereas the
-    // old case-insensitive grammar returned both shakes via boolean OR.
+  it('operator words are UPPERCASE-ONLY — lowercase "banana or apple" is not a boolean OR', async () => {
+    // Lowercase 'or' is a plain (stopword-ish) term, so the STRICT query is
+    // banana AND or AND apple, which no fixture satisfies. That it takes #496
+    // relaxation to surface anything is itself the proof 'or' was not treated
+    // as a boolean operator — a real boolean OR would have matched at the
+    // strict layer, with no relaxation flag.
     const res = await findNodes({ query: 'banana or apple', mode: 'keyword' });
+    expect(res.degraded).toBe('and_relaxed_to_or');
+    // The uppercase form IS the boolean expression — it matches at the strict
+    // layer, unrelaxed.
+    const upper = await findNodes({ query: '(banana OR apple) AND shake', mode: 'keyword' });
+    expect(upper.degraded).toBeNull();
+    expect(upper.hits.map((h: any) => h.node.loc).sort()).toEqual(['b.ashake', 'b.bshake']);
+  });
+
+  it('relaxes a bare conjunction to OR when it ANDs to zero (#496)', async () => {
+    // 'banana' matches two fixtures; 'zucchini' matches none. Under strict AND
+    // the whole query zeroes out; #496 retries as OR and flags the degrade.
+    const res = await findNodes({ query: 'banana zucchini', mode: 'keyword' });
+    expect(res.degraded).toBe('and_relaxed_to_or');
+    expect(res.hits.length).toBeGreaterThan(0);
+    for (const h of res.hits) expect(h.node.name.toLowerCase()).toContain('banana');
+  });
+
+  it('relaxed results paginate — a deeper page still relaxes (#496, PR-571 review)', async () => {
+    // 'banana OR zucchini' matches b.bshake + b.bread (2 hits). The strict
+    // 'banana zucchini' is globally empty, so page 2 (offset 1) must still relax
+    // and return the second relaxed hit, not an empty page.
+    const p1 = await findNodes({ query: 'banana zucchini', mode: 'keyword', limit: 1, offset: 0 });
+    const p2 = await findNodes({ query: 'banana zucchini', mode: 'keyword', limit: 1, offset: 1 });
+    expect(p1.degraded).toBe('and_relaxed_to_or');
+    expect(p2.degraded).toBe('and_relaxed_to_or');
+    expect(p1.hits.length).toBe(1);
+    expect(p2.hits.length).toBe(1);
+    // Distinct nodes across the two relaxed pages.
+    expect(p1.hits[0].node.loc).not.toBe(p2.hits[0].node.loc);
+  });
+
+  it('does NOT relax a page merely past the end of a matching set (#496, PR-571 review)', async () => {
+    // 'banana shake' strictly matches exactly b.bshake. Requesting offset 1 is
+    // past the end of a MATCHING query — it must return empty, NOT relax to OR.
+    const res = await findNodes({ query: 'banana shake', mode: 'keyword', limit: 5, offset: 1 });
     expect(res.degraded).toBeNull();
     expect(res.hits).toEqual([]);
-    // The uppercase form is the boolean expression.
-    const upper = await findNodes({ query: '(banana OR apple) AND shake', mode: 'keyword' });
-    expect(upper.hits.map((h: any) => h.node.loc).sort()).toEqual(['b.ashake', 'b.bshake']);
+  });
+
+  it('hybrid keyword-only fallback also relaxes AND-to-zero (#496, PR-571 review)', async () => {
+    // The memory has no vector index, so mode:hybrid degrades to keyword-only.
+    // That fallback must reach the same relaxation mode:keyword does, or hybrid
+    // would be strictly weaker for a bare query. Both flags surface.
+    const res = await findNodes({ query: 'banana zucchini', mode: 'hybrid' });
+    expect(res.degraded).toBe('no_vector_index,and_relaxed_to_or');
+    expect(res.hits.length).toBeGreaterThan(0);
+    for (const h of res.hits) expect(h.node.name.toLowerCase()).toContain('banana');
+  });
+
+  it('does NOT relax when the strict conjunction already matches (#496)', async () => {
+    const res = await findNodes({ query: 'banana shake', mode: 'keyword' });
+    expect(res.degraded).toBeNull();
+    expect(res.hits.map((h: any) => h.node.loc)).toEqual(['b.bshake']);
+  });
+
+  it('does NOT relax when NO term matches — keeps the honest empty result (#496)', async () => {
+    const res = await findNodes({ query: 'zucchini kohlrabi', mode: 'keyword' });
+    expect(res.degraded).toBeNull();
+    expect(res.hits).toEqual([]);
+  });
+
+  it('does NOT relax an explicit boolean query that matches nothing (#496)', async () => {
+    // Explicit AND → the caller meant it; a zero result stays zero, unrelaxed.
+    const res = await findNodes({ query: 'banana AND zucchini', mode: 'keyword' });
+    expect(res.degraded).toBeNull();
+    expect(res.hits).toEqual([]);
   });
 
   it('lowercase "not" does not negate — the "not sure" landmine', async () => {
