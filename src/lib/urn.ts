@@ -796,15 +796,25 @@ export function validateOrgSlug(slug: string): void {
  * stays `system`, unchanged from prior behavior). Callers that must reject
  * reserved slugs should additionally run {@link validateUserSlug}.
  *
+ * The result is capped to the FR-017 64-char atom limit (a long display name
+ * would otherwise slugify to an atom `validateAtomShape` rejects, so the "valid
+ * by construction" guarantee would break — PR-587 review, Codex).
+ *
  * Throws `UrnParseError('empty-derived-slug')` when the name has no usable
  * character (all punctuation/whitespace) — surface it to the user.
  */
 export function deriveSlugFromName(name: string): string {
-  const slug = name
+  let slug = name
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^[._-]+|[._-]+$/g, '');
+  // FR-017 atom cap. Re-trim trailing punctuation the cut may expose (an atom
+  // must end in a letter/digit). The leading char is already alnum, so a
+  // non-empty slug stays non-empty.
+  if (slug.length > 64) {
+    slug = slug.slice(0, 64).replace(/[._-]+$/g, '');
+  }
   if (!slug) {
     throw new UrnParseError(name, 'empty-derived-slug', name);
   }

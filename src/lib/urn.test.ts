@@ -732,6 +732,21 @@ describe('deriveSlugFromName (#574)', () => {
     // caller's job (validateUserSlug), matching createApp's prior behavior.
     expect(deriveSlugFromName('System')).toBe('system');
   });
+
+  it('caps the slug at the 64-char atom limit and re-trims (#587 review)', () => {
+    const long = 'a'.repeat(100);
+    const slug = deriveSlugFromName(long);
+    expect(slug.length).toBe(64);
+    // The capped slug must still satisfy the create-time atom rules (round-trip).
+    expect(() => validateUserSlug(slug)).not.toThrow();
+
+    // A cut that would land on trailing punctuation gets trimmed back to alnum.
+    const trailing = 'x'.repeat(63) + '---tail';
+    const s2 = deriveSlugFromName(trailing);
+    expect(s2.length).toBe(63); // the 64th char was '-', trimmed
+    expect(s2.endsWith('x')).toBe(true);
+    expect(() => validateUserSlug(s2)).not.toThrow();
+  });
 });
 
 // #352: every shape stored in Memory.urn must canonicalize to a form that
