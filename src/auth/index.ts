@@ -7,3 +7,10 @@ export {
   type GitHubUser,
 } from './github.js';
 export { sendMagicLink, verifyMagicLink } from './email.js';
+export {
+  buildGoogleAuthUrl,
+  exchangeGoogleCode,
+  verifyGoogleIdToken,
+  resolveGoogleUser,
+  type GoogleIdentity,
+} from './google.js';

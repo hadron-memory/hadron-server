@@ -16,6 +16,10 @@ import {
   verifyJwt,
   sendMagicLink,
   verifyMagicLink,
+  buildGoogleAuthUrl,
+  exchangeGoogleCode,
+  verifyGoogleIdToken,
+  resolveGoogleUser,
 } from './auth/index.js';
 import {
   issueLoginCode,
@@ -351,6 +355,155 @@ export async function createServer(): Promise<Express> {
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('OAuth callback error:', err);
+      res.status(500).json({ error: 'OAuth authentication failed' });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Google OAuth (Sign-in-with-Google, #581) — near-verbatim sibling of the
+  // GitHub pair above; see those handlers for the rationale comments. Own
+  // pendingStates map so a state minted for one provider can never be replayed
+  // against the other's callback, and so the GitHub machinery stays untouched.
+  // ---------------------------------------------------------------------------
+
+  const pendingGoogleStates = new Map<
+    string,
+    { redirect: string; returnTo?: string; clientState?: string; expiresAt: number }
+  >();
+
+  app.get('/auth/google', (req, res) => {
+    // Fail loud and early when the deployment doesn't carry the Google OAuth
+    // client — a 302 built with an undefined client_id would send the user to
+    // a Google error page instead.
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+      res.status(503).json({ error: 'Google login is not configured on this server' });
+      return;
+    }
+
+    const redirect = (req.query.redirect as string) || '/';
+
+    let returnTo: string | undefined;
+    const candidate = req.query.return_to;
+    if (candidate !== undefined) {
+      if (!isServerLocalPath(candidate)) {
+        res.status(400).json({
+          error: 'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
+        });
+        return;
+      }
+      returnTo = candidate;
+    }
+
+    const now = Date.now();
+    for (const [s, p] of pendingGoogleStates) {
+      if (p.expiresAt < now) pendingGoogleStates.delete(s);
+    }
+
+    const clientStateRaw = req.query.client_state;
+    const clientState = typeof clientStateRaw === 'string' && clientStateRaw !== ''
+      ? clientStateRaw
+      : undefined;
+
+    // #477 session-fixation binding, mandatory on the portal-handoff path —
+    // same contract as /auth/github (Codex #504 P2).
+    if (!returnTo && !clientState) {
+      res.status(400).json({
+        error: 'client_state is required — start login via the portal (/auth/start/google), not the backend URL directly.',
+      });
+      return;
+    }
+
+    const state = crypto.randomBytes(16).toString('hex');
+    pendingGoogleStates.set(state, {
+      redirect,
+      returnTo,
+      clientState,
+      expiresAt: now + 10 * 60 * 1000,
+    });
+    res.redirect(buildGoogleAuthUrl(state));
+  });
+
+  app.get('/auth/google/callback', async (req, res) => {
+    const { code, state } = req.query as { code?: string; state?: string };
+
+    if (!code || !state) {
+      res.status(400).json({ error: 'Missing code or state' });
+      return;
+    }
+
+    const pending = pendingGoogleStates.get(state);
+    pendingGoogleStates.delete(state);
+
+    if (!pending || pending.expiresAt < Date.now()) {
+      res.status(400).json({ error: 'Invalid or expired state' });
+      return;
+    }
+
+    try {
+      // Identity comes from the VERIFIED ID-token claims (issuer, audience,
+      // signature against Google's JWKS) — never a bare decode.
+      const idToken = await exchangeGoogleCode(code);
+      const identity = await verifyGoogleIdToken(idToken);
+
+      // Match order per #581: by googleId → by verified email (link) → create.
+      const user = await resolveGoogleUser(identity);
+
+      // Provision personal workspace for new users — same block as the GitHub
+      // callback, including the concurrent-provision P2002 tolerance.
+      let isNew = !(await hasPersonalWorkspace(db, user.id));
+      if (isNew) {
+        try {
+          await provisionPersonalWorkspace(
+            db,
+            user.id,
+            user.name ?? user.email ?? 'My Workspace',
+          );
+        } catch (err: any) {
+          if (err?.code === 'P2002') {
+            isNew = false;
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      // Same claim shape POST /auth/session rebuilds from the user row.
+      const jwt = await signJwt({
+        sub: user.id,
+        roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+        ...(user.email ? { email: user.email } : {}),
+      });
+
+      // Spec 025 FR-007 Option-C — cookie maxAge derived from the JWT exp so
+      // both expire together (see the GitHub callback for the full rationale).
+      if (pending.returnTo) {
+        const { exp } = decodeJwt(jwt);
+        const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
+        res.cookie('hadron_token', jwt, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'lax',
+          maxAge,
+          path: '/',
+        });
+        res.redirect(pending.returnTo);
+        return;
+      }
+
+      // #477 Sink 1: single-use handoff code; the JWT never rides a URL.
+      const handoffCode = await issueLoginCode({
+        userId: user.id,
+        redirect: isNew ? '/app/setup' : pending.redirect,
+        isNew,
+        clientState: pending.clientState ?? null,
+      });
+      const frontendUrl =
+        process.env.FRONTEND_URL || 'http://localhost:5173';
+      const callbackUrl = new URL('/auth/callback', frontendUrl);
+      callbackUrl.searchParams.set('code', handoffCode);
+      res.redirect(callbackUrl.toString());
+    } catch (err) {
+      console.error('Google OAuth callback error:', err);
       res.status(500).json({ error: 'OAuth authentication failed' });
     }
   });
