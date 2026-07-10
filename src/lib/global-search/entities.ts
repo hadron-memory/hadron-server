@@ -154,13 +154,21 @@ async function searchOrganizations(ctx: AdapterCtx): Promise<GlobalSearchHit[]> 
   if (preds.length === 0) return [];
   if (principal.orgIds !== null && principal.orgIds.length === 0) return [];
 
+  // #609: `isVisible` is a listing-visibility flag — a hidden org
+  // (`isVisible === false`, e.g. an un-activated personal org) must not surface
+  // in discovery for anyone, platform admins included. Non-admin callers
+  // (`orgIds !== null`) are already confined to their own memberships. For an
+  // admin (`orgIds === null`) widen to every LISTABLE org (`isVisible` true or
+  // null — Prisma `not: false` includes nulls) PLUS the admin's own member orgs
+  // (viewerOrgIds), instead of the previous unrestricted `{}`.
+  const orgScope: Prisma.OrganizationWhereInput =
+    principal.orgIds !== null
+      ? { id: { in: principal.orgIds } }
+      : { OR: [{ isVisible: { not: false } }, { id: { in: principal.viewerOrgIds } }] };
+
   const rows = await ctx.db.organization.findMany({
     where: {
-      AND: [
-        principal.orgIds !== null ? { id: { in: principal.orgIds } } : {},
-        { deletedAt: null },
-        { OR: preds },
-      ],
+      AND: [orgScope, { deletedAt: null }, { OR: preds }],
     } as Prisma.OrganizationWhereInput,
     select: { id: true, urn: true, name: true },
     take: ctx.cap,

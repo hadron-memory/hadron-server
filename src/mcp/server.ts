@@ -813,16 +813,16 @@ export function createMcpServerInstance(
       // rationale there. App-Key callers (no userId) get no org-read → [].
       const isPlatformAdmin = !!auth.roles?.includes('ADMIN') || !!auth.roles?.includes('OWNER');
       const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
-      const orgIds = isPlatformAdmin
-        ? null
-        : auth.userId
-          ? await getMemberOrgIds(db, auth.userId)
-          : [];
+      // The caller's own member orgs (admin or not) — the org allow-list for
+      // non-admins, and the #609 hidden-org carve-out for admins.
+      const memberOrgIds = auth.userId ? await getMemberOrgIds(db, auth.userId) : [];
+      const orgIds = isPlatformAdmin ? null : memberOrgIds;
       const principal: SearchPrincipal = {
         viewerUserId: auth.userId ?? null,
         isPlatformAdmin,
         accessibleMemoryIds,
         orgIds,
+        viewerOrgIds: memberOrgIds,
       };
 
       const { hits, degraded } = await globalSearch(

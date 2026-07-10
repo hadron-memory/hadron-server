@@ -256,6 +256,9 @@ export const orgQueries = {
         isPlatformAdmin,
         accessibleMemoryIds,
         orgIds,
+        // #609: the caller's OWN member orgs — the Organization slice uses this
+        // so an admin still finds a hidden org they belong to.
+        viewerOrgIds: callerOrgIds,
         orgScopeId,
       };
       return runGlobalSearch(ctx.db, { query, entityTypes, fields, limit, offset }, principal);
