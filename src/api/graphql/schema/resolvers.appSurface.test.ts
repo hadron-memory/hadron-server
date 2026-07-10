@@ -473,14 +473,14 @@ describe('appNodes', () => {
   it('returns nodes from memories accessible via App.agent_id', async () => {
     const { app } = await createDbAppWithKey(db, 'app-nodes', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId } });
-    const nodes = await resolvers.Query.appNodes({}, { appId: app.id }, adminCtx());
+    const nodes = await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx());
     expect(nodes.length).toBe(1);
     expect(nodes[0].loc).toBe('org.test.node');
   });
 
   it('returns empty when the App is orphan (agent_id IS NULL)', async () => {
     const { app } = await createDbAppWithKey(db, 'app-no-membership', orgId);
-    const nodes = await resolvers.Query.appNodes({}, { appId: app.id }, adminCtx());
+    const nodes = await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx());
     expect(nodes).toEqual([]);
   });
 
@@ -516,7 +516,7 @@ describe('appNodes', () => {
 
     const { app } = await createDbAppWithKey(db, 'app-sysmem', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId } });
-    const nodes = await resolvers.Query.appNodes({}, { appId: app.id }, adminCtx());
+    const nodes = await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx());
     const locs = nodes.map((n: { loc: string }) => n.loc);
     // Both the memoryItem node and the system-memory task node are present.
     expect(locs).toContain('org.test.node');
@@ -567,7 +567,7 @@ describe('appNodes', () => {
 
     const runnable = await resolvers.Query.appNodes(
       {},
-      { appId: app.id, filter: { isRunnable: true } },
+      { appRef: app.id, filter: { isRunnable: true } },
       adminCtx(),
     );
     const locs = runnable.map((n: { loc: string }) => n.loc);
@@ -585,10 +585,10 @@ describe('appNodes', () => {
     await db.appAgent.create({ data: { appId: app.id, agentId } });
 
     await expect(
-      resolvers.Query.appNodes({}, { appId: app.id, filter: { memoryIds: [memoryId] } }, adminCtx()),
+      resolvers.Query.appNodes({}, { appRef: app.id, filter: { memoryIds: [memoryId] } }, adminCtx()),
     ).rejects.toThrow(/not supported/);
     await expect(
-      resolvers.Query.appNodes({}, { appId: app.id, filter: { memoryClasses: ['system'] } }, adminCtx()),
+      resolvers.Query.appNodes({}, { appRef: app.id, filter: { memoryClasses: ['system'] } }, adminCtx()),
     ).rejects.toThrow(/not supported/);
   });
 });
@@ -604,7 +604,7 @@ describe('appAIConfig', () => {
       { orgId, agentId, name: 'No AI Config' },
       adminCtx(),
     );
-    const cfg = await resolvers.Query.appAIConfig({}, { appId: created.id }, adminCtx());
+    const cfg = await resolvers.Query.appAIConfig({}, { appRef: created.id }, adminCtx());
     expect(cfg).toBeNull();
   });
 
@@ -621,7 +621,7 @@ describe('appAIConfig', () => {
       },
       adminCtx(),
     );
-    const cfg = await resolvers.Query.appAIConfig({}, { appId: created.id }, adminCtx());
+    const cfg = await resolvers.Query.appAIConfig({}, { appRef: created.id }, adminCtx());
     expect(cfg).not.toBeNull();
     expect(cfg!.provider).toBe('anthropic');
     expect(cfg!.model).toBe('claude-sonnet-4-20250514');
@@ -638,7 +638,7 @@ describe('appAIConfig', () => {
       data: { githubId: 9999, githubUsername: 'other', roles: ['READER'] },
     });
     await expect(
-      resolvers.Query.appAIConfig({}, { appId: created.id }, ctx({ userId: otherUser.id })),
+      resolvers.Query.appAIConfig({}, { appRef: created.id }, ctx({ userId: otherUser.id })),
     ).rejects.toThrow();
   });
 });
@@ -650,7 +650,7 @@ describe('appAIConfig', () => {
 describe('appKeys', () => {
   it('returns active AppKey rows for the App', async () => {
     const { app } = await createDbAppWithKey(db, 'app-keys', orgId);
-    const keys = await resolvers.Query.appKeys({}, { appId: app.id }, adminCtx());
+    const keys = await resolvers.Query.appKeys({}, { appRef: app.id }, adminCtx());
     expect(keys.length).toBe(1);
     expect(keys[0].appId).toBe(app.id);
     expect(keys[0].revokedAt).toBeNull();
@@ -659,7 +659,7 @@ describe('appKeys', () => {
   it('omits revoked keys', async () => {
     const { app, appKey } = await createDbAppWithKey(db, 'app-revoked', orgId);
     await db.appKey.update({ where: { id: appKey.id }, data: { revokedAt: new Date() } });
-    const keys = await resolvers.Query.appKeys({}, { appId: app.id }, adminCtx());
+    const keys = await resolvers.Query.appKeys({}, { appRef: app.id }, adminCtx());
     expect(keys).toEqual([]);
   });
 });
@@ -812,7 +812,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
     expect(remaining.map((r) => r.agentId)).toEqual([secondAgentId]);
   });
 
-  it('createAppKey accepts a URN as appId', async () => {
+  it('createAppKey accepts a URN as appRef', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       { orgId, agentId, name: 'urn-createkey' },
@@ -846,7 +846,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
     expect(result.rawKey).toMatch(/^hdr_app_[0-9a-f]{64}$/);
   });
 
-  it('appNodes / appAIConfig / appKeys accept URN as appId', async () => {
+  it('appNodes / appAIConfig / appKeys accept URN as appRef', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       { orgId, agentId, name: 'urn-reads', aiProvider: 'anthropic', aiModel: 'claude-opus-4-6', aiApiKey: 'sk-test' },
@@ -857,14 +857,14 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
       select: { urn: true },
     });
     // appNodes — empty, but the call should succeed.
-    const nodes = await resolvers.Query.appNodes({}, { appId: stored.urn }, adminCtx());
+    const nodes = await resolvers.Query.appNodes({}, { appRef: stored.urn }, adminCtx());
     expect(Array.isArray(nodes)).toBe(true);
 
-    const cfg = await resolvers.Query.appAIConfig({}, { appId: stored.urn }, adminCtx());
+    const cfg = await resolvers.Query.appAIConfig({}, { appRef: stored.urn }, adminCtx());
     expect(cfg?.provider).toBe('anthropic');
     expect(cfg?.apiKey).toBe('sk-test');
 
-    const keys = await resolvers.Query.appKeys({}, { appId: stored.urn }, adminCtx());
+    const keys = await resolvers.Query.appKeys({}, { appRef: stored.urn }, adminCtx());
     expect(Array.isArray(keys)).toBe(true);
   });
 });

@@ -153,7 +153,7 @@ describe('resolveAIConfig precedence (US1)', () => {
 
     const resolved = await resolvers.Query.resolveAIConfig(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(admin.id),
     );
     expect(resolved.ownerType).toBe('APP');
@@ -167,7 +167,7 @@ describe('resolveAIConfig precedence (US1)', () => {
 
     const viaAgent = await resolvers.Query.resolveAIConfig(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(admin.id),
     );
     expect(viaAgent.ownerType).toBe('AGENT');
@@ -176,7 +176,7 @@ describe('resolveAIConfig precedence (US1)', () => {
     await db.aiServiceConfig.deleteMany({ where: { agentId: agent.id } });
     const viaOrg = await resolvers.Query.resolveAIConfig(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(admin.id),
     );
     expect(viaOrg.ownerType).toBe('ORGANIZATION');
@@ -185,7 +185,7 @@ describe('resolveAIConfig precedence (US1)', () => {
     await db.aiServiceConfig.deleteMany({ where: { organizationId: org.id } });
     const viaHost = await resolvers.Query.resolveAIConfig(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(admin.id),
     );
     expect(viaHost.ownerType).toBe('HADRON_SERVER');
@@ -197,7 +197,7 @@ describe('resolveAIConfig precedence (US1)', () => {
     await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-agent' });
     const resolved = await resolvers.Query.resolveAIConfig(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(admin.id),
     );
     expect(resolved.ownerType).toBe('AGENT');
@@ -207,7 +207,7 @@ describe('resolveAIConfig precedence (US1)', () => {
     await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org' });
     const resolved = await resolvers.Query.resolveAIConfig(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       ctxFor(admin.id),
     );
     expect(resolved.ownerType).toBe('ORGANIZATION');
@@ -222,7 +222,7 @@ describe('resolveAIConfig precedence (US1)', () => {
     await createConfig({ organizationId: otherOrg.id }, 'default', { apiKey: 'sk-builder-org' });
     const resolved = await resolvers.Query.resolveAIConfig(
       {},
-      { appId: app.id, agentId: foreignAgent.id },
+      { appRef: app.id, agentRef: foreignAgent.id },
       ctxFor(admin.id),
     );
     expect(resolved.apiKey).toBe('sk-install-org');
@@ -232,28 +232,28 @@ describe('resolveAIConfig precedence (US1)', () => {
     await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-default' });
     const fallback = await resolvers.Query.resolveAIConfig(
       {},
-      { name: 'fast', agentId: agent.id },
+      { name: 'fast', agentRef: agent.id },
       ctxFor(admin.id),
     );
     expect(fallback.name).toBe('default');
 
     await db.aiServiceConfig.deleteMany({});
     await expect(
-      resolvers.Query.resolveAIConfig({}, { name: 'fast', agentId: agent.id }, ctxFor(admin.id)),
+      resolvers.Query.resolveAIConfig({}, { name: 'fast', agentRef: agent.id }, ctxFor(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'NoAiConfigAvailableError' } });
   });
 
   it('a resolvable config without a key is unusable (typed error, no key material)', async () => {
     await createConfig({ agentId: agent.id }, 'default', { apiKey: null });
     await expect(
-      resolvers.Query.resolveAIConfig({}, { agentId: agent.id }, ctxFor(admin.id)),
+      resolvers.Query.resolveAIConfig({}, { agentRef: agent.id }, ctxFor(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'NoAiConfigAvailableError' } });
   });
 
   it('denies non-admins of the effective org, and host-only contexts to non-platform-admins', async () => {
     await createConfig({ agentId: agent.id }, 'default');
     await expect(
-      resolvers.Query.resolveAIConfig({}, { agentId: agent.id }, ctxFor(outsider.id)),
+      resolvers.Query.resolveAIConfig({}, { agentRef: agent.id }, ctxFor(outsider.id)),
     ).rejects.toThrow(/Forbidden/);
     await expect(
       resolvers.Query.resolveAIConfig({}, {}, ctxFor(admin.id)),
@@ -294,7 +294,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
 
     const list = await resolvers.Query.resolveAiServiceConfigs(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(member.id),
     );
 
@@ -326,7 +326,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
 
     const list = await resolvers.Query.resolveAiServiceConfigs(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(member.id),
     );
     const names = list.map((c) => c.name);
@@ -339,7 +339,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     await createConfig({ agentId: agent.id }, 'off', { apiKey: 'sk-off', enabled: false });
     const list = await resolvers.Query.resolveAiServiceConfigs(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(member.id),
     );
     expect(list.map((c) => c.name)).toEqual(['on']);
@@ -353,7 +353,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
 
     const list = await resolvers.Query.resolveAiServiceConfigs(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(member.id),
     );
     const names = list.map((c) => c.name);
@@ -366,7 +366,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     // `member` holds no org role at all — App membership alone grants the read.
     const list = await resolvers.Query.resolveAiServiceConfigs(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(member.id),
     );
     expect(list.map((c) => c.name)).toEqual(['default']);
@@ -379,13 +379,13 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     await expect(
       resolvers.Query.resolveAiServiceConfigs(
         {},
-        { appId: app.id, agentId: agent.id },
+        { appRef: app.id, agentRef: agent.id },
         ctxFor(admin.id),
       ),
     ).rejects.toThrow();
     // `outsider` is unrelated entirely.
     await expect(
-      resolvers.Query.resolveAiServiceConfigs({}, { agentId: agent.id }, ctxFor(outsider.id)),
+      resolvers.Query.resolveAiServiceConfigs({}, { agentRef: agent.id }, ctxFor(outsider.id)),
     ).rejects.toThrow();
   });
 
@@ -408,7 +408,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     await expect(
       resolvers.Query.resolveAiServiceConfigs(
         {},
-        { appId: app.id, agentId: agent.id },
+        { appRef: app.id, agentRef: agent.id },
         ctxFor(otherMember.id),
       ),
     ).rejects.toThrow();
@@ -425,7 +425,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     await expect(
       resolvers.Query.resolveAiServiceConfigs(
         {},
-        { appId: app.id, agentId: unrelated.id },
+        { appRef: app.id, agentRef: unrelated.id },
         ctxFor(member.id),
       ),
     ).rejects.toThrow();
@@ -436,7 +436,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     // non-admins must supply an App so the org is always the install org.
     await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-agent' });
     await expect(
-      resolvers.Query.resolveAiServiceConfigs({}, { agentId: agent.id }, ctxFor(member.id)),
+      resolvers.Query.resolveAiServiceConfigs({}, { agentRef: agent.id }, ctxFor(member.id)),
     ).rejects.toThrow();
   });
 
@@ -634,10 +634,10 @@ describe('AiServiceConfig CRUD (US2)', () => {
 describe('legacy surface shims (US3)', () => {
   it('fresh-migration state: legacy reads report "not configured" without errors', async () => {
     expect(
-      await resolvers.Query.agentAIConfig({}, { agentId: agent.id }, ctxFor(admin.id)),
+      await resolvers.Query.agentAIConfig({}, { agentRef: agent.id }, ctxFor(admin.id)),
     ).toBeNull();
     expect(
-      await resolvers.Query.appAIConfig({}, { appId: app.id }, ctxFor(admin.id)),
+      await resolvers.Query.appAIConfig({}, { appRef: app.id }, ctxFor(admin.id)),
     ).toBeNull();
     const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
     expect(await resolvers.Agent.hasAiApiKey(agentRow, {}, ctxFor(admin.id))).toBe(false);
@@ -661,13 +661,13 @@ describe('legacy surface shims (US3)', () => {
       { agentId: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
       ctxFor(admin.id),
     );
-    const cfg = await resolvers.Query.agentAIConfig({}, { agentId: agent.id }, ctxFor(admin.id));
+    const cfg = await resolvers.Query.agentAIConfig({}, { agentRef: agent.id }, ctxFor(admin.id));
     expect(cfg?.model).toBe('claude-haiku-4-5-20251001');
     expect(cfg?.apiKey).toBe('sk-legacy');
 
     // Auth: outsider denied (same gate as before).
     await expect(
-      resolvers.Query.agentAIConfig({}, { agentId: agent.id }, ctxFor(outsider.id)),
+      resolvers.Query.agentAIConfig({}, { agentRef: agent.id }, ctxFor(outsider.id)),
     ).rejects.toThrow(/Forbidden/);
   });
 
@@ -713,13 +713,13 @@ describe('legacy surface shims (US3)', () => {
     );
     const resolved = await resolvers.Query.resolveAIConfig(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       ctxFor(admin.id),
     );
     expect(resolved.ownerType).toBe('APP');
     expect(resolved.apiKey).toBe('sk-app-override');
     // appAIConfig keeps its single-entity contract (App row only).
-    const appCfg = await resolvers.Query.appAIConfig({}, { appId: app.id }, ctxFor(admin.id));
+    const appCfg = await resolvers.Query.appAIConfig({}, { appRef: app.id }, ctxFor(admin.id));
     expect(appCfg?.apiKey).toBe('sk-app-override');
   });
 });
@@ -738,7 +738,7 @@ describe('consumer name references (US4)', () => {
     });
     const resolved = await resolvers.Query.resolveAIConfig(
       {},
-      { name: 'fast', agentId: agent.id },
+      { name: 'fast', agentRef: agent.id },
       ctxFor(admin.id),
     );
     expect(resolved.name).toBe('fast');
@@ -750,7 +750,7 @@ describe('consumer name references (US4)', () => {
     await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-default' });
     const resolved = await resolvers.Query.resolveAIConfig(
       {},
-      { name: 'frontier', appId: app.id, agentId: agent.id },
+      { name: 'frontier', appRef: app.id, agentRef: agent.id },
       ctxFor(admin.id),
     );
     expect(resolved.name).toBe('default');
@@ -762,7 +762,7 @@ describe('consumer name references (US4)', () => {
     try {
       await resolvers.Query.resolveAIConfig(
         {},
-        { name: 'frontier', agentId: agent.id },
+        { name: 'frontier', agentRef: agent.id },
         ctxFor(admin.id),
       );
     } catch (e) {

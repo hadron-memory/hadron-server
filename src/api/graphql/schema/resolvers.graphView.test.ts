@@ -42,7 +42,7 @@ describe('memoryNodes (#466)', () => {
     await mkNode('n.c');
     await mkNode('n.gone', { deletedAt: new Date() });
 
-    const page = await memoryNodes({ memoryId: mem.id });
+    const page = await memoryNodes({ memoryRef: mem.id });
     expect(page.total).toBe(3); // soft-deleted excluded
     expect(page.nodes.map((n: any) => n.loc)).toEqual(['n.a', 'n.b', 'n.c']); // loc-ordered
 
@@ -56,8 +56,8 @@ describe('memoryNodes (#466)', () => {
     expect(page.nodes[1]).toMatchObject({ loc: 'n.b', seq: null, isRunnable: null, description: null });
 
     // Stable offset paging over the loc-ordered list.
-    const p1 = await memoryNodes({ memoryId: mem.id, limit: 2, offset: 0 });
-    const p2 = await memoryNodes({ memoryId: mem.id, limit: 2, offset: 2 });
+    const p1 = await memoryNodes({ memoryRef: mem.id, limit: 2, offset: 0 });
+    const p2 = await memoryNodes({ memoryRef: mem.id, limit: 2, offset: 2 });
     expect(p1.nodes.map((n: any) => n.loc)).toEqual(['n.a', 'n.b']);
     expect(p2.nodes.map((n: any) => n.loc)).toEqual(['n.c']);
     expect([p1.total, p2.total]).toEqual([3, 3]);
@@ -65,13 +65,13 @@ describe('memoryNodes (#466)', () => {
 
   it('accepts a memory URN', async () => {
     await mkNode('u.a');
-    expect((await memoryNodes({ memoryId: mem.urn })).total).toBe(1);
+    expect((await memoryNodes({ memoryRef: mem.urn })).total).toBe(1);
   });
 
   it('limit: 0 returns an empty page with just the total (cheap node count)', async () => {
     await mkNode('c.a');
     await mkNode('c.b');
-    const page = await memoryNodes({ memoryId: mem.id, limit: 0 });
+    const page = await memoryNodes({ memoryRef: mem.id, limit: 0 });
     expect(page.nodes).toEqual([]);
     expect(page.total).toBe(2); // count still returned — the limit-0 count pattern
   });
@@ -81,7 +81,7 @@ describe('memoryNodes (#466)', () => {
     const other = await createDbOrgAndGraph(db, { orgName: 'gv-other', graphName: 'gvo/graph' });
     const stranger = await db.user.create({ data: { githubId: 6200, githubUsername: 'gv-stranger', roles: [] } });
     await db.orgMember.create({ data: { organizationId: other.org.id, userId: stranger.id, role: 'READER' } });
-    const page = await memoryNodes({ memoryId: mem.id }, ctx({ userId: stranger.id, roles: [] }));
+    const page = await memoryNodes({ memoryRef: mem.id }, ctx({ userId: stranger.id, roles: [] }));
     expect(page).toEqual({ nodes: [], total: 0 });
   });
 
@@ -96,13 +96,13 @@ describe('memoryNodes (#466)', () => {
     await db.node.create({ data: { id: generateId(), memoryId: personal.id, loc: 'p.a', name: 'p.a', tags: [] } });
 
     // Owner → sees the node.
-    expect((await memoryNodes({ memoryId: personal.id }, ctx({ userId: owner.id }))).total).toBe(1);
+    expect((await memoryNodes({ memoryRef: personal.id }, ctx({ userId: owner.id }))).total).toBe(1);
     // Another user → empty (owner-only).
     const otherUser = await db.user.create({ data: { githubId: 6301, githubUsername: 'gv-otheru', roles: [] } });
-    expect(await memoryNodes({ memoryId: personal.id }, ctx({ userId: otherUser.id }))).toEqual({ nodes: [], total: 0 });
+    expect(await memoryNodes({ memoryRef: personal.id }, ctx({ userId: otherUser.id }))).toEqual({ nodes: [], total: 0 });
     // Platform admin → ALSO empty (admins don't see other users' personal/private).
     const adminU = await db.user.create({ data: { githubId: 6302, githubUsername: 'gv-adminu', roles: ['ADMIN'] } });
-    expect(await memoryNodes({ memoryId: personal.id }, ctx({ userId: adminU.id, roles: ['ADMIN'] }))).toEqual({ nodes: [], total: 0 });
+    expect(await memoryNodes({ memoryRef: personal.id }, ctx({ userId: adminU.id, roles: ['ADMIN'] }))).toEqual({ nodes: [], total: 0 });
   });
 });
 
@@ -115,17 +115,17 @@ describe('memoryEdges (#466)', () => {
     await mkEdge('edge.2', b.id, c.id, { name: 'rel2' });
     await mkEdge('edge.gone', a.id, c.id, { deletedAt: new Date() });
 
-    const page = await memoryEdges({ memoryId: mem.id });
+    const page = await memoryEdges({ memoryRef: mem.id });
     expect(page.total).toBe(2); // soft-deleted excluded
     expect(page.edges.map((e: any) => e.loc)).toEqual(['edge.1', 'edge.2']);
     expect(page.edges[0]).toEqual({ id: expect.any(String), loc: 'edge.1', name: 'rel1', sourceId: a.id, targetId: b.id });
 
-    const p2 = await memoryEdges({ memoryId: mem.id, limit: 1, offset: 1 });
+    const p2 = await memoryEdges({ memoryRef: mem.id, limit: 1, offset: 1 });
     expect(p2.edges.map((e: any) => e.loc)).toEqual(['edge.2']);
     expect(p2.total).toBe(2);
 
     // limit: 0 → empty page, total still returned (cheap edge count).
-    const countOnly = await memoryEdges({ memoryId: mem.id, limit: 0 });
+    const countOnly = await memoryEdges({ memoryRef: mem.id, limit: 0 });
     expect(countOnly.edges).toEqual([]);
     expect(countOnly.total).toBe(2);
   });
@@ -142,7 +142,7 @@ describe('memoryEdges (#466)', () => {
     await mkEdge('edge.dead-source', gone.id, b.id); // source soft-deleted → dropped
     await db.node.update({ where: { id: gone.id }, data: { deletedAt: new Date() } });
 
-    const page = await memoryEdges({ memoryId: mem.id });
+    const page = await memoryEdges({ memoryRef: mem.id });
     expect(page.edges.map((e: any) => e.loc)).toEqual(['edge.live']);
     expect(page.total).toBe(1); // count matches the returned (live-endpoint) set
   });
@@ -152,7 +152,7 @@ describe('memoryEdges (#466)', () => {
     const b = await mkNode('x.b');
     await mkEdge('edge.x', a.id, b.id);
     const stranger = await db.user.create({ data: { githubId: 6201, githubUsername: 'gv-stranger2', roles: [] } });
-    const page = await memoryEdges({ memoryId: mem.id }, ctx({ userId: stranger.id, roles: [] }));
+    const page = await memoryEdges({ memoryRef: mem.id }, ctx({ userId: stranger.id, roles: [] }));
     expect(page).toEqual({ edges: [], total: 0 });
   });
 });

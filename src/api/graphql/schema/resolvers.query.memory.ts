@@ -36,10 +36,10 @@ function clampGraphTake(limit?: number | null): number {
  * disclosure (same posture as memoryUsageSummary). Uses the scoped
  * getAccessibleMemoryIds point-read so it stays an indexed check.
  */
-async function resolveReadableMemoryId(ctx: Context, memoryId: string): Promise<string | null> {
+async function resolveReadableMemoryId(ctx: Context, memoryRef: string): Promise<string | null> {
   let resolvedId: string;
   try {
-    ({ id: resolvedId } = await resolveMemoryRef(ctx.db, memoryId));
+    ({ id: resolvedId } = await resolveMemoryRef(ctx.db, memoryRef));
   } catch (e) {
     // Only a genuine miss collapses to an empty page (no existence disclosure).
     // A malformed URN or an unexpected DB/runtime error must propagate rather
@@ -53,10 +53,10 @@ async function resolveReadableMemoryId(ctx: Context, memoryId: string): Promise<
 }
 
 export const memoryQueries = {
-    memoryUsageSummary: async (_: unknown, { memoryId }: { memoryId: string }, ctx: Context) => {
+    memoryUsageSummary: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
-      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
 
       // Access control (#250, extended from usageEvents): deny a memory the
       // caller can't read with [] (no existence leak), mirroring usageEvents
@@ -295,10 +295,10 @@ export const memoryQueries = {
     // the payload is a fraction of the full node fragment.
     memoryNodes: async (
       _: unknown,
-      { memoryId, limit, offset }: { memoryId: string; limit?: number | null; offset?: number | null },
+      { memoryRef, limit, offset }: { memoryRef: string; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
-      const resolvedId = await resolveReadableMemoryId(ctx, memoryId);
+      const resolvedId = await resolveReadableMemoryId(ctx, memoryRef);
       if (!resolvedId) return { nodes: [], total: 0 };
 
       const take = clampGraphTake(limit);
@@ -365,10 +365,10 @@ export const memoryQueries = {
     // dropped client-side as a dangling endpoint.
     memoryEdges: async (
       _: unknown,
-      { memoryId, limit, offset }: { memoryId: string; limit?: number | null; offset?: number | null },
+      { memoryRef, limit, offset }: { memoryRef: string; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
-      const resolvedId = await resolveReadableMemoryId(ctx, memoryId);
+      const resolvedId = await resolveReadableMemoryId(ctx, memoryRef);
       if (!resolvedId) return { edges: [], total: 0 };
 
       const take = clampGraphTake(limit);

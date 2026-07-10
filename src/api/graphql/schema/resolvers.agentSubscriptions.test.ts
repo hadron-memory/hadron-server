@@ -87,7 +87,7 @@ describe('Query.agentSubscriptions', () => {
   it('returns the agent\'s subscriptions to an org-admin caller (input by ID)', async () => {
     const subs = await resolvers.Query.agentSubscriptions(
       null,
-      { agentId: agent.id },
+      { agentRef: agent.id },
       adminCtx(),
     );
     expect(subs).toHaveLength(2);
@@ -101,7 +101,7 @@ describe('Query.agentSubscriptions', () => {
   it('accepts a URN as agentId input', async () => {
     const subs = await resolvers.Query.agentSubscriptions(
       null,
-      { agentId: agent.urn },
+      { agentRef: agent.urn },
       adminCtx(),
     );
     expect(subs).toHaveLength(2);
@@ -110,7 +110,7 @@ describe('Query.agentSubscriptions', () => {
   it('accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
     const subs = await resolvers.Query.agentSubscriptions(
       null,
-      { agentId: `urn:agent:${agent.urn}` },
+      { agentRef: `urn:agent:${agent.urn}` },
       adminCtx(),
     );
     expect(subs).toHaveLength(2);
@@ -120,7 +120,7 @@ describe('Query.agentSubscriptions', () => {
     await expect(
       resolvers.Query.agentSubscriptions(
         null,
-        { agentId: agent.id },
+        { agentRef: agent.id },
         outsiderCtx(),
       ),
     ).rejects.toThrow();
@@ -131,7 +131,7 @@ describe('Query.agentSubscriptions', () => {
       resolvers.Query.agentSubscriptions(
         null,
         // 25-char cuid-shaped string that doesn't exist in DB.
-        { agentId: 'cnonexistentnonexistent12' },
+        { agentRef: 'cnonexistentnonexistent12' },
         adminCtx(),
       ),
     ).rejects.toThrow();

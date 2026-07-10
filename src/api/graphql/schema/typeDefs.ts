@@ -2502,7 +2502,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    memoryUsageSummary(memoryId: ID!): [UsageSummaryEntry!]!
+    memoryUsageSummary(memoryRef: ID!): [UsageSummaryEntry!]!
 
     # Sessions, most recent first
     sessions(type: String, repo: String, customerId: String, limit: Int, offset: Int): [Session!]!
@@ -2678,7 +2678,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    agentSubscriptions(agentId: ID!): [AgentSubscription!]!
+    agentSubscriptions(agentRef: ID!): [AgentSubscription!]!
 
     """
     All nodes accessible by an App: the union of every installed agent's
@@ -2695,7 +2695,7 @@ export const typeDefs = `#graphql
     updatedAfter/Before, includeDeleted) apply. Unlike findNodes, system-memory
     nodes are NOT excluded by default.
     """
-    appNodes(appId: ID!, filter: NodeFilter, limit: Int): [Node!]!
+    appNodes(appRef: ID!, filter: NodeFilter, limit: Int): [Node!]!
 
     """
     Slim, paginated node list for rendering a memory's graph view (issue #466).
@@ -2712,7 +2712,7 @@ export const typeDefs = `#graphql
     this memory" node count. Deterministic loc-ascending order so offset paging
     never drops/duplicates.
     """
-    memoryNodes(memoryId: ID!, limit: Int, offset: Int): GraphNodesPage!
+    memoryNodes(memoryRef: ID!, limit: Int, offset: Int): GraphNodesPage!
 
     """
     Slim, paginated edge list for a memory's graph view (issue #466) — phase two
@@ -2723,21 +2723,21 @@ export const typeDefs = `#graphql
     which the client drops as a dangling endpoint. Same access gate, paging, and
     deterministic loc-ascending order as memoryNodes.
     """
-    memoryEdges(memoryId: ID!, limit: Int, offset: Int): GraphEdgesPage!
+    memoryEdges(memoryRef: ID!, limit: Int, offset: Int): GraphEdgesPage!
 
     """
     Decrypted AI config for an App (org ADMIN of the App's org).
 
     Accepts the entity's ID or URN.
     """
-    appAIConfig(appId: ID!): AppAIConfig
+    appAIConfig(appRef: ID!): AppAIConfig
 
     """
     List keys for an App (org ADMIN of the App's org).
 
     Accepts the entity's ID or URN.
     """
-    appKeys(appId: ID!): [AppKey!]!
+    appKeys(appRef: ID!): [AppKey!]!
 
     """
     025-oauth-for-mcp FR-004: list the calling User's API keys (active
@@ -2757,7 +2757,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    agentAIConfig(agentId: ID!): AgentAIConfig
+    agentAIConfig(agentRef: ID!): AgentAIConfig
 
     """
     The uniform single-config read (#473). 'ref' is the config's ID —
@@ -2802,7 +2802,7 @@ export const typeDefs = `#graphql
 
     appId/agentId accept the entity's ID or URN.
     """
-    resolveAIConfig(name: String, appId: ID, agentId: ID): ResolvedAiConfig!
+    resolveAIConfig(name: String, appRef: ID, agentRef: ID): ResolvedAiConfig!
 
     """
     036-ai-service-config: the MASKED set of configs RESOLVABLE in an
@@ -2826,7 +2826,7 @@ export const typeDefs = `#graphql
 
     appId/agentId accept the entity's ID or URN.
     """
-    resolveAiServiceConfigs(appId: ID, agentId: ID): [AiServiceConfig!]!
+    resolveAiServiceConfigs(appRef: ID, agentRef: ID): [AiServiceConfig!]!
 
     """
     Saved chats for the current user in their personal memory for an
@@ -2834,7 +2834,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    myChats(agentId: ID!, limit: Int, offset: Int): [Chat!]!
+    myChats(agentRef: ID!, limit: Int, offset: Int): [Chat!]!
 
     # Message history for a saved chat. Returns plain role/content pairs
     # suitable for feeding back into an LLM.
