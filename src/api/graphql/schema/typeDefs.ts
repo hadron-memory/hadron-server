@@ -1377,6 +1377,37 @@ export const typeDefs = `#graphql
     updatedAt: String!
   }
 
+  # One Slack workspace install of the Hadron Slack app (spec 043).
+  # Org-owned, workspace granularity: defaultAppId names the Hadron App that
+  # serves /hadron commands from this workspace. The bot + app tokens live
+  # ENCRYPTED IN THE TOOL (hadrontool-slack) — they are write-only inputs on
+  # createSlackConnection and no field here ever returns them.
+  type SlackConnection {
+    id: ID!
+    organizationId: String!
+    defaultAppId: String!
+    "Slack provider backing this connection ('slack' today)."
+    provider: String!
+    "Slack workspace (team) id, e.g. T0123456789."
+    teamId: String!
+    teamName: String!
+    "The bot's Slack USER id (U…) — the sender on messages it posts."
+    botUserId: String!
+    "The bot's BOT id (B…) — what bot message events carry. Distinct from botUserId; the bridge loop filter needs both."
+    botId: String!
+    "'ACTIVE' or 'ERROR' (the tool's connection-status vocabulary)."
+    status: String!
+    lastError: String
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  # Uniform paginated list shape (cor:api:120).
+  type SlackConnectionsPage {
+    items: [SlackConnection!]!
+    total: Int!
+  }
+
   # Provider-neutral flag state (spec 002) — Graph's tri-state mapped to a
   # neutral vocabulary so a future Gmail tool can map its own subset.
   enum EmailFlag {
@@ -2601,6 +2632,22 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     exchangeConnections(orgId: ID!): [ExchangeConnection!]!
+
+    """
+    Fetch one Slack connection by id (spec 043). Returns null when the row
+    does not exist OR the caller is not a member of its org — no existence
+    disclosure.
+    """
+    slackConnection(ref: ID!): SlackConnection
+
+    """
+    Uniform paginated Slack-connection list (cor:api:120). Default scope:
+    the caller's member orgs. orgId follows cor:api:100:01 (member -> that
+    org, non-member -> empty page, no disclosure, no admin bypass).
+    Team-name-ascending order (id tiebreak); limit default 50 / cap 200;
+    limit: 0 -> count only.
+    """
+    slackConnections(orgId: ID, limit: Int, offset: Int): SlackConnectionsPage!
     exchangeMessages(
       connectionId: ID!
       top: Int
@@ -3354,6 +3401,17 @@ export const typeDefs = `#graphql
     # Exchange integration (connection created via OAuth at /auth/microsoft)
     deleteExchangeConnection(id: ID!): Boolean!
     testExchangeConnection(id: ID!): Boolean!
+
+    """
+    Register a Slack workspace install (spec 043). orgRef/appRef accept ID
+    or URN (cor:api:140); the App must belong to the org. Both tokens are
+    validated live by the tool and stored encrypted THERE — core keeps
+    identity only, and no field ever returns a token. Requires org
+    ADMIN/OWNER.
+    """
+    createSlackConnection(orgRef: ID!, appRef: ID!, botToken: String!, appToken: String!): SlackConnection!
+    "Soft-delete a Slack connection (org ADMIN/OWNER); tears down the tool side best-effort."
+    deleteSlackConnection(ref: ID!): Boolean!
     exchangeReply(connectionId: ID!, messageId: ID!, body: String!): Boolean!
     exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
 

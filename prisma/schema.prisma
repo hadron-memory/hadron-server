@@ -450,6 +450,7 @@ model Organization {
 
   invitations         UserInvitation[]     @relation("OrgInvitations")
   exchangeConnections ExchangeConnection[]
+  slackConnections    SlackConnection[]
   apps                App[]
   agentOrgGrants      AgentOrgGrant[]
   aiServiceConfigs    AiServiceConfig[]
@@ -1862,6 +1863,80 @@ model ConnectionGrant {
   @@map("connection_grants")
 }
 
+/// One Slack workspace install of the Hadron Slack app (spec 043).
+/// Org-owned at WORKSPACE granularity (decision 1) — unlike the App-owned
+/// TelegramConnection design and the user-owned ExchangeConnection.
+/// `defaultAppId` names the Hadron App that serves /hadron commands from
+/// this workspace; per-channel App overrides are a later binding table.
+/// The tokens live ENCRYPTED IN THE TOOL (hadrontool-slack) — core stores
+/// identity only, and no token ever appears in a GraphQL field.
+model SlackConnection {
+  id             String @id @default(cuid())
+  organizationId String @map("organization_id")
+  /// The Hadron App that serves commands from this workspace.
+  defaultAppId   String @map("default_app_id")
+  /// The slackClient dispatch key ('slack' today).
+  provider       String @default("slack")
+  /// The provider tool's connection id — the ops-call handle and the
+  /// events-ingress resolution key.
+  toolConnectionId String @map("tool_connection_id")
+  /// Slack workspace (team) id, e.g. "T0123456789".
+  teamId   String @map("team_id")
+  teamName String @map("team_name")
+  /// The bot's Slack USER id ("U…") — the sender on messages it posts.
+  botUserId String @map("bot_user_id")
+  /// The bot's BOT id ("B…") — what bot message EVENTS carry as `bot_id`.
+  /// Distinct from botUserId; the bridge loop filter needs BOTH (spec 043
+  /// decision 8, PR #594 review). Don't "simplify" to one column.
+  botId String @map("bot_id")
+  /// 'ACTIVE' | 'ERROR' — mirrors the tool's connection-status vocabulary
+  /// (there is no sync loop here, so SyncStatus does not apply).
+  status String @default("ACTIVE")
+  /// Error message from the last permanent provider failure.
+  lastError String?   @map("last_error")
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  deletedBy String?   @map("deleted_by")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  defaultApp   App          @relation(fields: [defaultAppId], references: [id], onDelete: Cascade)
+
+  // One LIVE connection per (org, workspace) — enforced by the PARTIAL
+  // unique index `slack_connections_org_team_active_uniq WHERE deleted_at
+  // IS NULL` (raw SQL: the 043 migration + prisma/post-push.sql +
+  // src/test/globalSetup.ts, which must stay in sync). Prisma's @@unique
+  // would be non-partial and make a soft-deleted row block workspace
+  // re-registration forever — the apps_urn_active_uniq precedent.
+  @@index([organizationId, teamId])
+  // The slack-events ingress resolves connections by the tool's id on every
+  // inbound event — the routing key must be 1:1, so this is UNIQUE (PR #600
+  // review): two rows sharing a tool id would make dispatch ambiguous and
+  // risk cross-org misdelivery. Every registration mints a fresh tool id,
+  // so soft-deleted history rows never collide.
+  @@unique([toolConnectionId])
+  @@index([defaultAppId])
+  @@map("slack_connections")
+}
+
+/// Envelope-dedupe receipts for the at-least-once Slack events ingress
+/// (spec 043 decision 5): the tool's persist-before-ack inbox may deliver
+/// an event more than once (a crash between core's 2xx and the tool's row
+/// delete), so dispatch INSERTs here first and drops duplicates on
+/// conflict. `connectionId` is the TOOL's connection id — dedupe runs
+/// before resolution, so no FK by design.
+model SlackEventReceipt {
+  id           String   @id @default(cuid())
+  connectionId String   @map("connection_id")
+  envelopeId   String   @map("envelope_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([connectionId, envelopeId])
+  @@index([createdAt])
+  @@map("slack_event_receipts")
+}
+
 /// Pre-launch waitlist signup capture from the marketing site. Holds
 /// an email plus an optional free-form "what features would you most
 /// want?" answer. Not connected to User (signups happen before the
@@ -2011,6 +2086,7 @@ model App {
   pendingSetups    PendingSetup[]
   aiServiceConfigs AiServiceConfig[]
   connectionGrants ConnectionGrant[] @relation("AppConnectionGrants")
+  slackConnections SlackConnection[]
 
   @@index([organizationId])
   // Spec 021 FR-027: keep `urn` lookups index-served. The DB-level
