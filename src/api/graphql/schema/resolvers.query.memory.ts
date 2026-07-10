@@ -30,7 +30,7 @@ function clampGraphTake(limit?: number | null): number {
 }
 
 /**
- * Resolve a memoryId (ID or URN) to its id IFF the caller may read it; returns
+ * Resolve a memory ref (ID or URN) to its id IFF the caller may read it; returns
  * null when the ref does not resolve OR the caller lacks read access — so the
  * graph-view queries return an empty page with no org/memory existence
  * disclosure (same posture as memoryUsageSummary). Uses the scoped

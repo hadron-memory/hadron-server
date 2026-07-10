@@ -114,7 +114,7 @@ describe('memoryUsageSummary', () => {
     expect(result).toEqual([]);
   });
 
-  it('rejects an unknown memoryId with MEMORY_NOT_FOUND', async () => {
+  it('rejects an unknown memoryRef with MEMORY_NOT_FOUND', async () => {
     await expect(
       resolvers.Query.memoryUsageSummary(null, { memoryRef: 'cnonexistentnonexistent12' }, ctx()),
     ).rejects.toThrow(/MEMORY_NOT_FOUND/);

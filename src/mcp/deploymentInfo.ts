@@ -33,7 +33,11 @@
 // (hadron_spawn / hadron_child_runs / node tools).
 // 0.9.0: #542 — GraphQL surface unified on the <object>Ref convention
 // (runTask nodeRef; updateNodeData/createEdge/deleteNode/moveNode/node ref args).
-export const HADRON_SERVER_VERSION = '0.9.0';
+// 0.10.0: #598 — read surface finished on the <object>Ref convention
+// (agentAIConfig/memoryNodes/memoryEdges/memoryUsageSummary/agentSubscriptions/
+// appNodes/appAIConfig/appKeys/myChats/resolveAIConfig/resolveAiServiceConfigs
+// <entity>Id args renamed to <entity>Ref — a caller-visible rename).
+export const HADRON_SERVER_VERSION = '0.10.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"

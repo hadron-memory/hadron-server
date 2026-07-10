@@ -2704,7 +2704,7 @@ export const typeDefs = `#graphql
     fraction of the full node fragment. The graph view loads this to completion
     (page by page) and renders nodes, THEN loads memoryEdges to draw the links.
 
-    memoryId accepts the memory's ID or URN; a memory the caller can't read
+    memoryRef accepts the memory's ID or URN; a memory the caller can't read
     returns an empty page (total 0, no existence disclosure). Paged via limit
     (default 1000, hard-capped 2000) + offset; total is the memory's full node
     count so the client can show "N of M" and know when it has paged them all.
