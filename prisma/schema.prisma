@@ -419,8 +419,18 @@ model Organization {
   /// "micromentor.org". Serves as the namespace for all resources
   /// owned by this org (URN prefix).
   urn                          String    @unique
-  /// Whether this org appears in public listings. `false` for
-  /// auto-created personal orgs.
+  /// Listing visibility for the org as an entity: whether it is surfaced in
+  /// an org list / switcher / discovery — for its own member(s) AND everyone
+  /// else. `false` hides the org from EVERY user's listing (the owner's own
+  /// list, other users, and platform admins alike); it is never shown while
+  /// hidden. It does NOT gate resource read access — a member still resolves
+  /// and reads the org directly (visibility is not membership). An
+  /// auto-created personal org starts `false` (invisible to all) so a
+  /// brand-new user with only their personal org is never shown org UI
+  /// ("consumer mode"). It flips to `true` when the user activates org mode —
+  /// creating another org, or converting their personal org into a real one
+  /// to onboard coworkers — after which it lists normally. Genuine per-org
+  /// state, not derivable from the user's org count.
   isVisible                    Boolean?  @map("is_visible")
   /// GitHub App installation id. Used to mint ephemeral tokens
   /// (1-hour expiry) for memory git-sync against repos within this

@@ -311,7 +311,19 @@ export const orgQueries = {
         !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
       let where: Record<string, unknown>;
       if (isPlatformAdmin && !filter?.memberOnly) {
-        where = { deletedAt: null };
+        // #609: `isVisible` is a listing-visibility flag — a hidden org
+        // (`isVisible === false`, e.g. an un-activated personal org) must not
+        // surface in ANY user's org listing, platform admins included. Admin
+        // reach is every listable org (`isVisible` true or null — Prisma
+        // `not: false` includes nulls) PLUS the admin's own memberships (so a
+        // converted/hidden org they belong to still resolves for them). This is
+        // a listing filter, NOT an access gate: members still read hidden orgs
+        // directly via `organization(ref:)`.
+        const memberOrgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+        where = {
+          deletedAt: null,
+          OR: [{ isVisible: { not: false } }, { id: { in: memberOrgIds } }],
+        };
       } else {
         // Membership scope — for non-admins (unchanged default) and for any
         // caller with filter.memberOnly (a no-op for non-admins, whose default
