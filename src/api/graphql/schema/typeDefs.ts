@@ -2800,7 +2800,7 @@ export const typeDefs = `#graphql
     Auth: org ADMIN of the effective context org, or platform
     ADMIN/OWNER (required when no app/agent context is given).
 
-    appId/agentId accept the entity's ID or URN.
+    appRef/agentRef accept the entity's ID or URN.
     """
     resolveAIConfig(name: String, appRef: ID, agentRef: ID): ResolvedAiConfig!
 
@@ -2818,13 +2818,13 @@ export const typeDefs = `#graphql
     material (hasApiKey + apiKeyPreview only).
 
     Auth: scoped to one App's chat context. A non-admin caller MUST pass an
-    appId, be a member of that App, and (when an agentId is given) the Agent
+    appRef, be a member of that App, and (when an agentRef is given) the Agent
     must be installed in that App. Because the result is masked (no key
     material), App membership — not org admin — is the bar, unlike
     resolveAIConfig and the aiServiceConfigs management list. Platform
-    ADMIN/OWNER are always allowed and may omit appId.
+    ADMIN/OWNER are always allowed and may omit appRef.
 
-    appId/agentId accept the entity's ID or URN.
+    appRef/agentRef accept the entity's ID or URN.
     """
     resolveAiServiceConfigs(appRef: ID, agentRef: ID): [AiServiceConfig!]!
 

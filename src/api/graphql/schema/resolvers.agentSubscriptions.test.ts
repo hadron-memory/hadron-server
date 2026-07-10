@@ -97,8 +97,8 @@ describe('Query.agentSubscriptions', () => {
     );
   });
 
-  // 007-entity-id-or-urn: agentId accepts ID or URN.
-  it('accepts a URN as agentId input', async () => {
+  // 007-entity-id-or-urn: agentRef accepts ID or URN.
+  it('accepts a URN as agentRef input', async () => {
     const subs = await resolvers.Query.agentSubscriptions(
       null,
       { agentRef: agent.urn },
@@ -107,7 +107,7 @@ describe('Query.agentSubscriptions', () => {
     expect(subs).toHaveLength(2);
   });
 
-  it('accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
+  it('accepts a prefixed URN (urn:agent:...) as agentRef input', async () => {
     const subs = await resolvers.Query.agentSubscriptions(
       null,
       { agentRef: `urn:agent:${agent.urn}` },

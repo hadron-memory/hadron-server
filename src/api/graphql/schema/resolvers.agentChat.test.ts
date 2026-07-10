@@ -205,7 +205,7 @@ describe('Agent AI config', () => {
 
   // 007-entity-id-or-urn: updateAgentAIConfig + clearAgentAIConfig
   // accept agentId as ID or URN.
-  it('updateAgentAIConfig accepts a URN as agentRef input', async () => {
+  it('updateAgentAIConfig accepts a URN as agentId input', async () => {
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },
@@ -222,7 +222,7 @@ describe('Agent AI config', () => {
     expect(viaUrnConfig.provider).toBe('anthropic');
   });
 
-  it('updateAgentAIConfig accepts a prefixed URN (urn:agent:...) as agentRef input', async () => {
+  it('updateAgentAIConfig accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },
@@ -235,7 +235,7 @@ describe('Agent AI config', () => {
     expect(updated.id).toBe(agent.id);
   });
 
-  it('clearAgentAIConfig accepts a URN as agentRef input', async () => {
+  it('clearAgentAIConfig accepts a URN as agentId input', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
       { agentId: agent.id, provider: 'anthropic', apiKey: 'sk', model: 'claude-opus-4-6' },
@@ -369,8 +369,8 @@ describe('startChat (JWT user)', () => {
     );
   });
 
-  // 007-entity-id-or-urn: startChat accepts agentRef as ID or URN.
-  it('accepts a URN as agentRef input', async () => {
+  // 007-entity-id-or-urn: startChat accepts agentId as ID or URN.
+  it('accepts a URN as agentId input', async () => {
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },
@@ -388,7 +388,7 @@ describe('startChat (JWT user)', () => {
     expect(mem).not.toBeNull();
   });
 
-  it('accepts a prefixed URN (urn:agent:...) as agentRef input', async () => {
+  it('accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },

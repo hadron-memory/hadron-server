@@ -812,7 +812,7 @@ describe('007-entity-id-or-urn — App ops accept ID or URN', () => {
     expect(remaining.map((r) => r.agentId)).toEqual([secondAgentId]);
   });
 
-  it('createAppKey accepts a URN as appRef', async () => {
+  it('createAppKey accepts a URN as appId', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       { orgId, agentId, name: 'urn-createkey' },
