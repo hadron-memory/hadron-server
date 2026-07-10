@@ -216,7 +216,7 @@ describe('cloneMemory', () => {
 
     const clone = await resolvers.Mutation.cloneMemory(
       {},
-      { id: 'urn:memory:org-a::src-mem', name: 'clone-mem' },
+      { ref: 'urn:memory:org-a::src-mem', targetUrn: 'org-a::clone-mem' },
       adminCtx(),
     );
 
@@ -313,7 +313,7 @@ describe('cloneMemory', () => {
     await expect(
       resolvers.Mutation.cloneMemory(
         {},
-        { id: 'org-a::src-mem', name: 'clone-mem' },
+        { ref: 'org-a::src-mem', targetUrn: 'org-a::clone-mem' },
         { db, roles: [], userId: member.id } as Context,
       ),
     ).rejects.toThrow();
@@ -342,12 +342,12 @@ describe('cloneMemory', () => {
 
     // A platform admin who is not the owner is rejected (matches deleteMemory).
     await expect(
-      resolvers.Mutation.cloneMemory({}, { id: personal.id, name: 'notes-2' }, adminCtx()),
+      resolvers.Mutation.cloneMemory({}, { ref: personal.id, targetUrn: 'org-a::notes-2' }, adminCtx()),
     ).rejects.toThrow(/only the owner/);
 
     const clone = await resolvers.Mutation.cloneMemory(
       {},
-      { id: personal.id, name: 'notes-2' },
+      { ref: personal.id, targetUrn: 'org-a::notes-2' },
       { db, roles: [], userId: owner.id } as Context,
     );
     expect(clone.class).toBe('personal');
@@ -366,7 +366,7 @@ describe('cloneMemory', () => {
     });
     const clone = await resolvers.Mutation.cloneMemory(
       {},
-      { id: 'org-a::team-mem', name: 'team-mem-2' },
+      { ref: 'org-a::team-mem', targetUrn: 'org-a::team-mem-2' },
       adminCtx(),
     );
     expect(clone.class).toBe('group');
@@ -385,7 +385,7 @@ describe('cloneMemory', () => {
       visibility: null,
     });
     await expect(
-      resolvers.Mutation.cloneMemory({}, { id: 'org-a::sys-mem', name: 'x' }, adminCtx()),
+      resolvers.Mutation.cloneMemory({}, { ref: 'org-a::sys-mem', targetUrn: 'org-a::sys-clone' }, adminCtx()),
     ).rejects.toThrow(/class='system'/);
   });
 
@@ -394,7 +394,7 @@ describe('cloneMemory', () => {
     await expect(
       resolvers.Mutation.cloneMemory(
         {},
-        { id: 'org-a::src-mem', name: 'x' },
+        { ref: 'org-a::src-mem', targetUrn: 'org-a::enc-clone' },
         adminCtx(),
       ),
     ).rejects.toThrow(/encrypted/);
@@ -404,15 +404,114 @@ describe('cloneMemory', () => {
     await createSourceMemory();
     await resolvers.Mutation.cloneMemory(
       {},
-      { id: 'org-a::src-mem', name: 'clone-mem' },
+      { ref: 'org-a::src-mem', targetUrn: 'org-a::clone-mem' },
       adminCtx(),
     );
     await expect(
       resolvers.Mutation.cloneMemory(
         {},
-        { id: 'org-a::src-mem', name: 'clone-mem' },
+        { ref: 'org-a::src-mem', targetUrn: 'org-a::clone-mem' },
         adminCtx(),
       ),
     ).rejects.toThrow(/already exists/);
+  });
+
+  // ── #604: cross-org clone ────────────────────────────────────────────────
+  describe('cross-org clone', () => {
+    let orgB: { id: string; urn: string };
+
+    beforeEach(async () => {
+      orgB = await db.organization.create({
+        data: { id: generateId(), name: 'org-b', urn: 'org-b' },
+      });
+    });
+
+    it('clones into another org when the caller is a non-reader member there', async () => {
+      await createSourceMemory();
+      await db.orgMember.create({
+        data: { organizationId: orgB.id, userId: adminUser.id, role: 'CONTRIBUTOR' },
+      });
+      const clone = await resolvers.Mutation.cloneMemory(
+        {},
+        { ref: 'org-a::src-mem', targetUrn: 'org-b::src-clone' },
+        // roles: [] so the source gate resolves via the org-a ADMIN membership,
+        // not a global-role bypass — the target gate is the real test here.
+        { db, roles: [], userId: adminUser.id } as Context,
+      );
+      expect(clone.organizationId).toBe(orgB.id);
+      expect(clone.urn).toBe('org-b:src-clone');
+      expect(clone.name).toBe('src-clone');
+    });
+
+    it('rejects a reader-only member of the target org', async () => {
+      await createSourceMemory();
+      await db.orgMember.create({
+        data: { organizationId: orgB.id, userId: adminUser.id, role: 'READER' },
+      });
+      await expect(
+        resolvers.Mutation.cloneMemory(
+          {},
+          { ref: 'org-a::src-mem', targetUrn: 'org-b::src-clone' },
+          { db, roles: [], userId: adminUser.id } as Context,
+        ),
+      ).rejects.toThrow(/non-reader membership/);
+    });
+
+    it('rejects a non-member of the target org (no global-role bypass)', async () => {
+      await createSourceMemory();
+      // adminUser has NO membership in org-b; even global ADMIN roles must not
+      // authorize dropping a memory into an org they don't belong to.
+      await expect(
+        resolvers.Mutation.cloneMemory(
+          {},
+          { ref: 'org-a::src-mem', targetUrn: 'org-b::src-clone' },
+          adminCtx(),
+        ),
+      ).rejects.toThrow(/non-reader membership/);
+    });
+
+    it('personal source clones cross-org, staying owner-owned', async () => {
+      const owner = await db.user.create({
+        data: { githubId: 9004, githubUsername: 'cross-owner' },
+      });
+      await db.orgMember.create({
+        data: { organizationId: org.id, userId: owner.id, role: 'READER' },
+      });
+      await db.orgMember.create({
+        data: { organizationId: orgB.id, userId: owner.id, role: 'CONTRIBUTOR' },
+      });
+      const personal = await db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: org.id,
+          urn: 'org-a:x-notes',
+          name: 'x-notes',
+          class: 'personal',
+          userId: owner.id,
+        },
+      });
+      await db.node.create({
+        data: { id: generateId(), memoryId: personal.id, loc: 'n1', name: 'N1' },
+      });
+      const clone = await resolvers.Mutation.cloneMemory(
+        {},
+        { ref: personal.id, targetUrn: 'org-b::x-notes' },
+        { db, roles: [], userId: owner.id } as Context,
+      );
+      expect(clone.organizationId).toBe(orgB.id);
+      expect(clone.class).toBe('personal');
+      expect(clone.userId).toBe(owner.id);
+    });
+
+    it('rejects a relative (not fully-qualified) targetUrn', async () => {
+      await createSourceMemory();
+      await expect(
+        resolvers.Mutation.cloneMemory(
+          {},
+          { ref: 'org-a::src-mem', targetUrn: 'just-a-slug' },
+          adminCtx(),
+        ),
+      ).rejects.toThrow();
+    });
   });
 });

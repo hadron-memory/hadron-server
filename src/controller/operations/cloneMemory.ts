@@ -104,6 +104,12 @@ export interface CloneMemoryArgs {
   name: string;
   /** Pre-computed `<org.urn>:<name>` for the clone (caller checks collisions). */
   newUrn: string;
+  /**
+   * Org the clone lands in. Same as the source's org for an in-org clone, or a
+   * DIFFERENT org for a cross-org clone (#604) — the caller resolves it from
+   * `newUrn`'s org segment and authorizes the target org before we get here.
+   */
+  targetOrganizationId: string;
   /** Owner for personal/private clones (chk_personal_visibility_user). */
   ownerUserId: string | null;
   /** Bootstrap this user as the group-class clone's first owner member. */
@@ -138,7 +144,10 @@ export async function cloneMemoryGraph(
       await tx.memory.create({
         data: {
           id: memoryId,
-          organizationId: source.organizationId,
+          // #604: the clone lands in the caller-resolved target org, which may
+          // differ from the source's (cross-org clone). Same-org clones pass
+          // the source's own org id here, so this is a no-op for them.
+          organizationId: args.targetOrganizationId,
           urn: args.newUrn,
           name: args.name,
           shortDescription: source.shortDescription,

@@ -50,7 +50,14 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
-import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
+import {
+  agentSlugFromUrn,
+  deriveSlugFromName,
+  assertFullyQualifiedUrn,
+  parseUrn,
+  validateUserSlug,
+  hasSchemePrefix,
+} from '../../../lib/urn.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
@@ -700,16 +707,18 @@ export const memoryMutations = {
 
     cloneMemory: async (
       _: unknown,
-      { id, name }: { id: string; name: string },
+      { ref, targetUrn }: { ref: string; targetUrn: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
-      const { id: sourceId } = await resolveMemoryRef(ctx.db, id);
+      // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN
+      // (conventions:ref-param-naming — bare `ref` since the memory is the
+      // obvious entity).
+      const { id: sourceId } = await resolveMemoryRef(ctx.db, ref);
       const source = await ctx.db.memory.findUniqueOrThrow({ where: { id: sourceId } });
 
-      // Class-aware authz mirrors deleteMemory: personal/private are
-      // owner-only; org-shared classes gate on org ADMIN. Authz runs first
-      // so unauthorized callers can't probe class/encryption state.
+      // Source-side authz mirrors deleteMemory: personal/private are
+      // owner-only; org-shared classes gate on the SOURCE org's ADMIN. Authz
+      // runs first so unauthorized callers can't probe class/encryption state.
       if (source.class === 'personal' || source.class === 'private') {
         if (!ctx.userId || source.userId !== ctx.userId) {
           throw new GraphQLError(
@@ -749,11 +758,61 @@ export const memoryMutations = {
         );
       }
 
-      const org = await ctx.db.organization.findUniqueOrThrow({
-        where: { id: source.organizationId },
+      // #604: the destination is a fully-qualified target URN — it encodes the
+      // clone's org AND slug, so a clone can land in a DIFFERENT org. Require a
+      // `<org>::<slug>` shape (exactly two hierarchy segments); deeper per-user
+      // shapes aren't valid clone destinations.
+      assertFullyQualifiedUrn(targetUrn, 'memory');
+      // parseUrn requires a scheme prefix; assertFullyQualifiedUrn accepts the
+      // bare canonical form (`<org>::<slug>`), so prefix bare input before the
+      // structured parse.
+      const prefixedTarget = hasSchemePrefix(targetUrn) ? targetUrn : `hrn:memory:${targetUrn}`;
+      const parsedTarget = parseUrn(prefixedTarget); // typed throw on bad grammar
+      if (parsedTarget.pathSegments.length !== 2) {
+        throw new GraphQLError(
+          `cloneMemory targetUrn must be a fully-qualified "<org>::<slug>" memory URN (got "${targetUrn}").`,
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+      const [targetOrgSlug, targetSlug] = parsedTarget.pathSegments;
+      // Reject uppercase / reserved-word slugs at the CREATE boundary (the
+      // parser is case-lenient on read; a new slug must be lowercase + legal).
+      validateUserSlug(targetSlug);
+
+      // Resolve + confirm the target org exists (throws OrganizationNotFound).
+      const { id: targetOrgId } = await resolveOrgRef(ctx.db, `hrn:org:${targetOrgSlug}`);
+      const targetOrg = await ctx.db.organization.findUniqueOrThrow({
+        where: { id: targetOrgId },
         select: { urn: true },
       });
-      const newUrn = `${org.urn}:${deriveSlugFromName(name)}`; // #574: slugify, don't persist the raw name
+
+      // Cross-org gate (#604): dropping a memory into a DIFFERENT org requires
+      // the caller to be an ACTUAL member of the target org whose role is not
+      // READER. findFirst + deletedAt:null so a revoked membership can't
+      // authorize (findings:revoked-membership-auth-gates); no global-role
+      // bypass — "member and not read-only" means real membership.
+      if (targetOrgId !== source.organizationId) {
+        if (!ctx.userId) {
+          throw new GraphQLError(
+            'Cloning into another organization requires an authenticated user.',
+            { extensions: { code: 'UNAUTHENTICATED' } },
+          );
+        }
+        const membership = await ctx.db.orgMember.findFirst({
+          where: { organizationId: targetOrgId, userId: ctx.userId, deletedAt: null },
+        });
+        if (!membership || membership.role === 'READER') {
+          throw new GraphQLError(
+            'Forbidden: cloning into an organization requires a non-reader membership there.',
+            { extensions: { code: 'FORBIDDEN' } },
+          );
+        }
+      }
+
+      const newUrn = `${targetOrg.urn}:${targetSlug}`;
+      // The clone's display name is derived from the target slug (the arg that
+      // named it), matching the URN the caller asked for.
+      const name = targetSlug;
       // URN collision handling matches createMemory: a soft-deleted holder
       // is hard-deleted, a live one is an error.
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
@@ -770,6 +829,7 @@ export const memoryMutations = {
         sourceMemoryId: source.id,
         name,
         newUrn,
+        targetOrganizationId: targetOrgId,
         // chk_personal_visibility_user: owner set iff personal/private.
         ownerUserId: isUserOwned ? ctx.userId! : null,
         groupOwnerUserId: source.class === 'group' ? (ctx.userId ?? null) : null,

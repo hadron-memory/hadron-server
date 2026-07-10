@@ -3239,24 +3239,30 @@ export const typeDefs = `#graphql
     deleteMemory(id: ID!): Boolean!
 
     """
-    Clone a Memory into a new Memory (same org) named \`name\`.
+    Clone a Memory into a new Memory at \`targetUrn\`.
 
-    Accepts the source's ID or URN. Copies the Memory row plus all live
-    Nodes, Edges, and PendingEdges; references to the source memory's URN
-    inside node content/abstract (canonical and legacy spellings) are
-    rewritten to the clone's URN. Vector-index config carries over and the
-    clone's nodes are stamped for re-embedding.
+    \`ref\` accepts the source's ID or URN. \`targetUrn\` is a fully-qualified
+    "org::slug" memory URN naming the clone; its org segment MAY differ from
+    the source's, cloning the memory into another organization. The clone's
+    display name is derived from the target slug.
+
+    Copies the Memory row plus all live Nodes, Edges, and PendingEdges;
+    references to the source memory's URN inside node content/abstract
+    (canonical and legacy spellings) are rewritten to the clone's URN.
+    Vector-index config carries over and the clone's nodes are stamped for
+    re-embedding.
 
     NOT copied: version history, subscriptions, shares, group members
     (the caller is bootstrapped as a group clone's first owner), sessions,
     licenses, log entries, assets, and git-sync config (the clone starts
     DB-only).
 
-    Authorization mirrors deleteMemory: personal/private → owner only;
-    knowledge/group → org ADMIN. system/app-class sources and encrypted
-    memories are rejected.
+    Authorization: the SOURCE side mirrors deleteMemory (personal/private →
+    owner only; knowledge/group → source-org ADMIN). When \`targetUrn\` names a
+    DIFFERENT org, the caller must additionally be a non-reader member of that
+    target org. system/app-class sources and encrypted memories are rejected.
     """
-    cloneMemory(id: ID!, name: String!): Memory!
+    cloneMemory(ref: ID!, targetUrn: String!): Memory!
 
     """
     Set encrypted source token for non-GitHub-App repos.
