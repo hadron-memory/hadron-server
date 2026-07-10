@@ -41,6 +41,7 @@ import {
 import {
   type Context,
   ROLE_ORDER,
+  requireRole,
   requireOrgRole,
   getAccessibleMemoryIds,
   memoryAccessFilter,
@@ -1066,7 +1067,33 @@ export const nodeQueries = {
       });
     },
 
-    nodeVersions: async (_: unknown, { nodeId, limit }: { nodeId: string; limit?: number }, ctx: Context) => {
+    nodeVersions: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
+      requireRole(ctx, 'READER');
+      // cor:api:140 / 007-entity-id-or-urn: nodeRef may be an ID or a fully-
+      // qualified node URN. A genuine miss collapses to [] (no existence
+      // disclosure); a malformed / unqualified URN propagates — mirrors
+      // memoryUsageSummary / resolveReadableMemoryId.
+      let nodeId: string;
+      try {
+        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) return [];
+        throw e;
+      }
+      // Access control (#602): gate on the node's memory. This resolver
+      // previously had NO gate — any authenticated caller could read any
+      // tenant's node version history. getAccessibleMemoryIds encodes the
+      // principal + memory-class rules (spec 034); a memory the caller can't
+      // read yields [] (no existence leak), matching memoryUsageSummary. The
+      // scoped point-read keeps it an indexed check.
+      const node = await ctx.db.node.findUnique({
+        where: { id: nodeId },
+        select: { memoryId: true },
+      });
+      if (!node) return [];
+      const accessible = await getAccessibleMemoryIds(ctx, node.memoryId);
+      if (accessible !== null && !accessible.includes(node.memoryId)) return [];
+
       return ctx.db.nodeVersion.findMany({
         where: { nodeId },
         orderBy: { createdAt: 'desc' },

@@ -2525,8 +2525,14 @@ export const typeDefs = `#graphql
     #                 nodeUsage but access-scoped); not existence-checked.
     usageEvents(type: String, memoryId: ID, nodeId: ID, limit: Int, offset: Int): [UsageEvent!]!
 
-    # Version history for a node
-    nodeVersions(nodeId: ID!, limit: Int): [NodeVersion!]!
+    """
+    Version history for a node, most recent first.
+
+    Accepts the node's ID or URN. Access-gated on the node's memory: a node
+    whose memory the caller can't read returns an empty list (no existence
+    disclosure).
+    """
+    nodeVersions(nodeRef: ID!, limit: Int): [NodeVersion!]!
 
     """
     Aggregated usage counts per node and type for a memory.
