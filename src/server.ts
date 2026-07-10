@@ -40,7 +40,7 @@ import { mountOAuthRoutes } from './auth/oauth.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
-import { UrnNotQualifiedError } from './lib/urn.js';
+import { UrnNotQualifiedError, UrnParseError } from './lib/urn.js';
 import { normalizeHandleOrNull } from './lib/userHandle.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
@@ -960,6 +960,23 @@ export async function createServer(): Promise<Express> {
             code: 'URN_NOT_QUALIFIED',
             offendingValue: original.offendingValue,
             expectedType: original.expectedType,
+          },
+        };
+      }
+      // A malformed-grammar / bad-slug URN is caller error, not a server
+      // fault. parseUrn / validateUserSlug (create boundaries, e.g.
+      // cloneMemory's targetUrn) throw UrnParseError; without this branch it
+      // would surface as INTERNAL_SERVER_ERROR. Mirrors the qualification
+      // handler above so every resolver gets a typed BAD_USER_INPUT.
+      if (original instanceof UrnParseError) {
+        return {
+          ...formattedError,
+          message: original.message,
+          extensions: {
+            ...formattedError.extensions,
+            code: 'BAD_USER_INPUT',
+            reason: original.reason,
+            offendingValue: original.offendingSegment,
           },
         };
       }
