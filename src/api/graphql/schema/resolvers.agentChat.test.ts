@@ -147,7 +147,7 @@ describe('Agent AI config', () => {
     );
     const cfg = await resolvers.Query.agentAIConfig(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       adminCtx(),
     );
     expect(cfg?.provider).toBe('anthropic');
@@ -155,8 +155,8 @@ describe('Agent AI config', () => {
     expect(cfg?.model).toBe('claude-opus-4-6');
   });
 
-  // 007-entity-id-or-urn: agentAIConfig accepts agentId as ID or URN.
-  it('agentAIConfig accepts a URN as agentId input', async () => {
+  // 007-entity-id-or-urn: agentAIConfig accepts agentRef as ID or URN.
+  it('agentAIConfig accepts a URN as agentRef input', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
       { agentId: agent.id, provider: 'anthropic', apiKey: 'sk-ant-urn', model: 'claude-opus-4-6' },
@@ -168,13 +168,13 @@ describe('Agent AI config', () => {
     });
     const cfg = await resolvers.Query.agentAIConfig(
       {},
-      { agentId: stored.urn },
+      { agentRef: stored.urn },
       adminCtx(),
     );
     expect(cfg?.apiKey).toBe('sk-ant-urn');
   });
 
-  it('agentAIConfig accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
+  it('agentAIConfig accepts a prefixed URN (urn:agent:...) as agentRef input', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
       { agentId: agent.id, provider: 'anthropic', apiKey: 'sk-ant-prefix', model: 'claude-opus-4-6' },
@@ -186,7 +186,7 @@ describe('Agent AI config', () => {
     });
     const cfg = await resolvers.Query.agentAIConfig(
       {},
-      { agentId: `urn:agent:${stored.urn}` },
+      { agentRef: `urn:agent:${stored.urn}` },
       adminCtx(),
     );
     expect(cfg?.apiKey).toBe('sk-ant-prefix');
@@ -199,7 +199,7 @@ describe('Agent AI config', () => {
       adminCtx(),
     );
     await expect(
-      resolvers.Query.agentAIConfig({}, { agentId: agent.id }, userCtx(otherUser.id)),
+      resolvers.Query.agentAIConfig({}, { agentRef: agent.id }, userCtx(otherUser.id)),
     ).rejects.toThrow('Forbidden');
   });
 
@@ -427,7 +427,7 @@ describe('myChats', () => {
 
     const adminChats = await resolvers.Query.myChats(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       userCtx(adminUser.id),
     );
     expect(adminChats.length).toBe(2);
@@ -435,7 +435,7 @@ describe('myChats', () => {
 
     const otherChats = await resolvers.Query.myChats(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       userCtx(otherUser.id),
     );
     expect(otherChats.length).toBe(1);
@@ -445,14 +445,14 @@ describe('myChats', () => {
   it('returns an empty list when the user has no memory for the agent yet', async () => {
     const result = await resolvers.Query.myChats(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       userCtx(adminUser.id),
     );
     expect(result).toEqual([]);
   });
 
-  // 007-entity-id-or-urn: myChats accepts agentId as ID or URN.
-  it('accepts a URN as agentId input', async () => {
+  // 007-entity-id-or-urn: myChats accepts agentRef as ID or URN.
+  it('accepts a URN as agentRef input', async () => {
     const c1 = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
@@ -460,13 +460,13 @@ describe('myChats', () => {
     });
     const chats = await resolvers.Query.myChats(
       {},
-      { agentId: stored.urn },
+      { agentRef: stored.urn },
       userCtx(adminUser.id),
     );
     expect(chats.map((c) => c.loc)).toEqual([c1.chatId]);
   });
 
-  it('accepts a prefixed URN (urn:agent:...) as agentId input', async () => {
+  it('accepts a prefixed URN (urn:agent:...) as agentRef input', async () => {
     const c1 = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
@@ -474,7 +474,7 @@ describe('myChats', () => {
     });
     const chats = await resolvers.Query.myChats(
       {},
-      { agentId: `urn:agent:${stored.urn}` },
+      { agentRef: `urn:agent:${stored.urn}` },
       userCtx(adminUser.id),
     );
     expect(chats.map((c) => c.loc)).toEqual([c1.chatId]);
@@ -494,7 +494,7 @@ describe('myChats', () => {
 
     const chats = await resolvers.Query.myChats(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       userCtx(adminUser.id),
     );
     expect(chats[0].title).toBe('What is the half-life of francium-223?');
@@ -519,7 +519,7 @@ describe('myChats', () => {
 
     const chats = await resolvers.Query.myChats(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       userCtx(adminUser.id),
     );
     expect(chats[0].title).toBe('Francium decay research');
@@ -539,7 +539,7 @@ describe('myChats', () => {
 
     const chats = await resolvers.Query.myChats(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       userCtx(adminUser.id),
     );
     expect(chats[0].loc).toBe(c1.chatId);
@@ -810,7 +810,7 @@ describe('chat ownership mutations', () => {
     // And myChats shouldn't return it
     const chats = await resolvers.Query.myChats(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       userCtx(adminUser.id),
     );
     expect(chats.find((c) => c.loc === start.chatId)).toBeUndefined();
@@ -920,7 +920,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
 
     // adminUser sees: own private + both shared (both are in app-class memory).
     const adminList = await resolvers.Query.myChats(
-      {}, { agentId: agent.id }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id }, userCtx(adminUser.id),
     );
     const adminLocs = new Set(adminList.map((c) => c.loc));
     expect(adminLocs.has(adminPriv.chatId)).toBe(true);
@@ -930,7 +930,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
 
     // otherUser sees: own private + both shared. NOT adminUser's private.
     const otherList = await resolvers.Query.myChats(
-      {}, { agentId: agent.id }, userCtx(otherUser.id),
+      {}, { agentRef: agent.id }, userCtx(otherUser.id),
     );
     const otherLocs = new Set(otherList.map((c) => c.loc));
     expect(otherLocs.has(otherPriv.chatId)).toBe(true);

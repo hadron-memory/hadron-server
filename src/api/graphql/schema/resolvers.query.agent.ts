@@ -155,10 +155,10 @@ export const agentQueries = {
       return { items, total };
     },
 
-    agentAIConfig: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
+    agentAIConfig: async (_: unknown, { agentRef }: { agentRef: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       // Org ADMIN on the agent's org can read the decrypted key.
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
@@ -240,7 +240,7 @@ export const agentQueries = {
 
     resolveAIConfig: async (
       _: unknown,
-      { name, appId, agentId }: { name?: string | null; appId?: string | null; agentId?: string | null },
+      { name, appRef, agentRef }: { name?: string | null; appRef?: string | null; agentRef?: string | null },
       ctx: Context,
     ) => {
       try {
@@ -249,14 +249,14 @@ export const agentQueries = {
         let resolvedAppId: string | null = null;
         let resolvedAgentId: string | null = null;
         let effectiveOrgId: string | null = null;
-        if (appId) {
-          const { id } = await resolveAppRef(ctx.db, appId);
+        if (appRef) {
+          const { id } = await resolveAppRef(ctx.db, appRef);
           resolvedAppId = id;
           const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
           effectiveOrgId = app.organizationId;
         }
-        if (agentId) {
-          const { id } = await resolveAgentRef(ctx.db, agentId);
+        if (agentRef) {
+          const { id } = await resolveAgentRef(ctx.db, agentRef);
           resolvedAgentId = id;
           if (!effectiveOrgId) {
             const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
@@ -302,14 +302,14 @@ export const agentQueries = {
 
     resolveAiServiceConfigs: async (
       _: unknown,
-      { appId, agentId }: { appId?: string | null; agentId?: string | null },
+      { appRef, agentRef }: { appRef?: string | null; agentRef?: string | null },
       ctx: Context,
     ) => {
       try {
-        // 007-entity-id-or-urn: appId/agentId may be ID or URN. A ref that
+        // 007-entity-id-or-urn: appRef/agentRef may be ID or URN. A ref that
         // doesn't resolve to a row simply contributes nothing to the walk.
-        const resolvedAppId = appId ? (await resolveAppRef(ctx.db, appId)).id : null;
-        const resolvedAgentId = agentId ? (await resolveAgentRef(ctx.db, agentId)).id : null;
+        const resolvedAppId = appRef ? (await resolveAppRef(ctx.db, appRef)).id : null;
+        const resolvedAgentId = agentRef ? (await resolveAgentRef(ctx.db, agentRef)).id : null;
         // Masked picker: ALL App members may list the configs their chat
         // context can resolve (not just org admins — no key material leaves).
         await requireAiConfigPickerAccess(ctx, resolvedAppId, resolvedAgentId);
@@ -335,11 +335,11 @@ export const agentQueries = {
     // Authorized for ADMIN/OWNER of the Agent's owning org.
     agentSubscriptions: async (
       _: unknown,
-      { agentId }: { agentId: string },
+      { agentRef }: { agentRef: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
       return ctx.db.agentSubscription.findMany({

@@ -85,9 +85,9 @@ export const appQueries = {
       });
     },
 
-    appAIConfig: async (_: unknown, { appId }: { appId: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+    appAIConfig: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       // Org-scoped auth: ADMIN of the App's org (or platform ADMIN) sees the
       // decrypted key.
@@ -108,9 +108,9 @@ export const appQueries = {
       };
     },
 
-    appKeys: async (_: unknown, { appId }: { appId: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+    appKeys: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) {

@@ -81,7 +81,7 @@ beforeEach(async () => {
 
 describe('memoryUsageSummary', () => {
   it('returns grouped counts per (nodeLoc, type) — collision-proof (input by ID)', async () => {
-    const result = await resolvers.Query.memoryUsageSummary(null, { memoryId: memory.id }, ctx());
+    const result = await resolvers.Query.memoryUsageSummary(null, { memoryRef: memory.id }, ctx());
     expect(result).toHaveLength(3);
 
     const sorted = [...result].sort((a, b) =>
@@ -96,27 +96,27 @@ describe('memoryUsageSummary', () => {
     ]);
   });
 
-  // 007-entity-id-or-urn: memoryUsageSummary accepts memoryId as ID or URN.
-  it('accepts a URN as memoryId input — identical effect to ID input', async () => {
-    const result = await resolvers.Query.memoryUsageSummary(null, { memoryId: memory.urn }, ctx());
+  // 007-entity-id-or-urn: memoryUsageSummary accepts memoryRef as ID or URN.
+  it('accepts a URN as memoryRef input — identical effect to ID input', async () => {
+    const result = await resolvers.Query.memoryUsageSummary(null, { memoryRef: memory.urn }, ctx());
     expect(result).toHaveLength(3);
     const totalCount = result.reduce((sum, r) => sum + r.count, 0);
     expect(totalCount).toBe(4); // 2 + 1 + 1, NOT 5 (otherMemory alpha excluded)
   });
 
-  it('accepts a prefixed URN (urn:memory:...) as memoryId input', async () => {
-    const result = await resolvers.Query.memoryUsageSummary(null, { memoryId: `urn:memory:${memory.urn}` }, ctx());
+  it('accepts a prefixed URN (urn:memory:...) as memoryRef input', async () => {
+    const result = await resolvers.Query.memoryUsageSummary(null, { memoryRef: `urn:memory:${memory.urn}` }, ctx());
     expect(result).toHaveLength(3);
   });
 
   it('returns an empty array for a memory with no nodes', async () => {
-    const result = await resolvers.Query.memoryUsageSummary(null, { memoryId: emptyMemory.id }, ctx());
+    const result = await resolvers.Query.memoryUsageSummary(null, { memoryRef: emptyMemory.id }, ctx());
     expect(result).toEqual([]);
   });
 
-  it('rejects an unknown memoryId with MEMORY_NOT_FOUND', async () => {
+  it('rejects an unknown memoryRef with MEMORY_NOT_FOUND', async () => {
     await expect(
-      resolvers.Query.memoryUsageSummary(null, { memoryId: 'cnonexistentnonexistent12' }, ctx()),
+      resolvers.Query.memoryUsageSummary(null, { memoryRef: 'cnonexistentnonexistent12' }, ctx()),
     ).rejects.toThrow(/MEMORY_NOT_FOUND/);
   });
 
@@ -130,7 +130,7 @@ describe('memoryUsageSummary', () => {
     await db.usageEvent.create({
       data: { id: generateId(), type: 'read', nodeLoc: null, nodeId: ghost.id },
     });
-    const result = await resolvers.Query.memoryUsageSummary(null, { memoryId: memory.id }, ctx());
+    const result = await resolvers.Query.memoryUsageSummary(null, { memoryRef: memory.id }, ctx());
     expect(result.every((r) => r.nodeLoc !== null)).toBe(true);
     // Unchanged from the baseline: alpha(read/write), beta(read) — ghost excluded.
     expect(result).toHaveLength(3);
@@ -140,21 +140,21 @@ describe('memoryUsageSummary', () => {
 describe('memoryUsageSummary access control (#250)', () => {
   it('an org member can read their memory\'s summary', async () => {
     const result = await resolvers.Query.memoryUsageSummary(
-      null, { memoryId: memory.id }, { db, userId: userMember.id, roles: ['READER'] } as Context,
+      null, { memoryRef: memory.id }, { db, userId: userMember.id, roles: ['READER'] } as Context,
     );
     expect(result).toHaveLength(3);
   });
 
   it('a non-member is denied with [] (no existence leak)', async () => {
     const result = await resolvers.Query.memoryUsageSummary(
-      null, { memoryId: memory.id }, { db, userId: userOutsider.id, roles: ['READER'] } as Context,
+      null, { memoryRef: memory.id }, { db, userId: userOutsider.id, roles: ['READER'] } as Context,
     );
     expect(result).toEqual([]);
   });
 
   it('a caller with no role is rejected by the READER gate', async () => {
     await expect(
-      resolvers.Query.memoryUsageSummary(null, { memoryId: memory.id }, { db, roles: [] } as Context),
+      resolvers.Query.memoryUsageSummary(null, { memoryRef: memory.id }, { db, roles: [] } as Context),
     ).rejects.toThrow('Forbidden');
   });
 });

@@ -12,12 +12,12 @@ import {
 export const chatQueries = {
     myChats: async (
       _: unknown,
-      { agentId, limit, offset }: { agentId: string; limit?: number; offset?: number },
+      { agentRef, limit, offset }: { agentRef: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
 
       // Spec 017 — collect the memories the caller may read chats from:
       //  - the caller's own personal memory for this agent (private chats)

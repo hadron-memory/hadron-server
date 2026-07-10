@@ -2533,7 +2533,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    memoryUsageSummary(memoryId: ID!): [UsageSummaryEntry!]!
+    memoryUsageSummary(memoryRef: ID!): [UsageSummaryEntry!]!
 
     # Sessions, most recent first
     sessions(type: String, repo: String, customerId: String, limit: Int, offset: Int): [Session!]!
@@ -2725,7 +2725,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    agentSubscriptions(agentId: ID!): [AgentSubscription!]!
+    agentSubscriptions(agentRef: ID!): [AgentSubscription!]!
 
     """
     All nodes accessible by an App: the union of every installed agent's
@@ -2742,7 +2742,7 @@ export const typeDefs = `#graphql
     updatedAfter/Before, includeDeleted) apply. Unlike findNodes, system-memory
     nodes are NOT excluded by default.
     """
-    appNodes(appId: ID!, filter: NodeFilter, limit: Int): [Node!]!
+    appNodes(appRef: ID!, filter: NodeFilter, limit: Int): [Node!]!
 
     """
     Slim, paginated node list for rendering a memory's graph view (issue #466).
@@ -2751,7 +2751,7 @@ export const typeDefs = `#graphql
     fraction of the full node fragment. The graph view loads this to completion
     (page by page) and renders nodes, THEN loads memoryEdges to draw the links.
 
-    memoryId accepts the memory's ID or URN; a memory the caller can't read
+    memoryRef accepts the memory's ID or URN; a memory the caller can't read
     returns an empty page (total 0, no existence disclosure). Paged via limit
     (default 1000, hard-capped 2000) + offset; total is the memory's full node
     count so the client can show "N of M" and know when it has paged them all.
@@ -2759,7 +2759,7 @@ export const typeDefs = `#graphql
     this memory" node count. Deterministic loc-ascending order so offset paging
     never drops/duplicates.
     """
-    memoryNodes(memoryId: ID!, limit: Int, offset: Int): GraphNodesPage!
+    memoryNodes(memoryRef: ID!, limit: Int, offset: Int): GraphNodesPage!
 
     """
     Slim, paginated edge list for a memory's graph view (issue #466) — phase two
@@ -2770,21 +2770,21 @@ export const typeDefs = `#graphql
     which the client drops as a dangling endpoint. Same access gate, paging, and
     deterministic loc-ascending order as memoryNodes.
     """
-    memoryEdges(memoryId: ID!, limit: Int, offset: Int): GraphEdgesPage!
+    memoryEdges(memoryRef: ID!, limit: Int, offset: Int): GraphEdgesPage!
 
     """
     Decrypted AI config for an App (org ADMIN of the App's org).
 
     Accepts the entity's ID or URN.
     """
-    appAIConfig(appId: ID!): AppAIConfig
+    appAIConfig(appRef: ID!): AppAIConfig
 
     """
     List keys for an App (org ADMIN of the App's org).
 
     Accepts the entity's ID or URN.
     """
-    appKeys(appId: ID!): [AppKey!]!
+    appKeys(appRef: ID!): [AppKey!]!
 
     """
     025-oauth-for-mcp FR-004: list the calling User's API keys (active
@@ -2804,7 +2804,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    agentAIConfig(agentId: ID!): AgentAIConfig
+    agentAIConfig(agentRef: ID!): AgentAIConfig
 
     """
     The uniform single-config read (#473). 'ref' is the config's ID —
@@ -2847,9 +2847,9 @@ export const typeDefs = `#graphql
     Auth: org ADMIN of the effective context org, or platform
     ADMIN/OWNER (required when no app/agent context is given).
 
-    appId/agentId accept the entity's ID or URN.
+    appRef/agentRef accept the entity's ID or URN.
     """
-    resolveAIConfig(name: String, appId: ID, agentId: ID): ResolvedAiConfig!
+    resolveAIConfig(name: String, appRef: ID, agentRef: ID): ResolvedAiConfig!
 
     """
     036-ai-service-config: the MASKED set of configs RESOLVABLE in an
@@ -2865,15 +2865,15 @@ export const typeDefs = `#graphql
     material (hasApiKey + apiKeyPreview only).
 
     Auth: scoped to one App's chat context. A non-admin caller MUST pass an
-    appId, be a member of that App, and (when an agentId is given) the Agent
+    appRef, be a member of that App, and (when an agentRef is given) the Agent
     must be installed in that App. Because the result is masked (no key
     material), App membership — not org admin — is the bar, unlike
     resolveAIConfig and the aiServiceConfigs management list. Platform
-    ADMIN/OWNER are always allowed and may omit appId.
+    ADMIN/OWNER are always allowed and may omit appRef.
 
-    appId/agentId accept the entity's ID or URN.
+    appRef/agentRef accept the entity's ID or URN.
     """
-    resolveAiServiceConfigs(appId: ID, agentId: ID): [AiServiceConfig!]!
+    resolveAiServiceConfigs(appRef: ID, agentRef: ID): [AiServiceConfig!]!
 
     """
     Saved chats for the current user in their personal memory for an
@@ -2881,7 +2881,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    myChats(agentId: ID!, limit: Int, offset: Int): [Chat!]!
+    myChats(agentRef: ID!, limit: Int, offset: Int): [Chat!]!
 
     # Message history for a saved chat. Returns plain role/content pairs
     # suitable for feeding back into an LLM.

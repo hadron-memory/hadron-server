@@ -1076,8 +1076,8 @@ export const nodeQueries = {
 
     appNodes: async (
       _: unknown,
-      { appId, filter, limit }: {
-        appId: string;
+      { appRef, filter, limit }: {
+        appRef: string;
         filter?: {
           // Memory-scope fields — NOT supported by appNodes (the App's scope is
           // authoritative). Present only so we can reject them explicitly.
@@ -1096,8 +1096,8 @@ export const nodeQueries = {
       },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       // Org-scoped auth: anyone with org membership at READER+ on the App's
       // org may read its accessible nodes; platform ADMIN/OWNER bypasses.
