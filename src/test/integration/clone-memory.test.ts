@@ -503,6 +503,66 @@ describe('cloneMemory', () => {
       expect(clone.userId).toBe(owner.id);
     });
 
+    it('drops edges to external nodes on a cross-org clone (no cross-tenant leak)', async () => {
+      const source = await createSourceMemory();
+      await db.orgMember.create({
+        data: { organizationId: orgB.id, userId: adminUser.id, role: 'CONTRIBUTOR' },
+      });
+      const guide = await db.node.create({
+        data: { id: generateId(), memoryId: source.id, loc: 'guide', name: 'Guide' },
+      });
+      const internalTarget = await db.node.create({
+        data: { id: generateId(), memoryId: source.id, loc: 'target', name: 'Target' },
+      });
+      // External node in ANOTHER org-a memory — an outgoing edge to it must not
+      // survive a clone into org-b.
+      const otherMem = await db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: org.id,
+          urn: 'org-a:foreign',
+          name: 'foreign',
+          class: 'knowledge',
+          visibility: 'ORGANIZATION',
+        },
+      });
+      const external = await db.node.create({
+        data: { id: generateId(), memoryId: otherMem.id, loc: 'x', name: 'X' },
+      });
+      await db.edge.create({
+        data: {
+          memoryId: source.id,
+          sourceId: guide.id,
+          targetId: internalTarget.id,
+          loc: deriveEdgeLoc(guide.loc, 'routes-to', internalTarget.loc),
+          name: 'routes-to',
+        },
+      });
+      await db.edge.create({
+        data: {
+          memoryId: source.id,
+          sourceId: guide.id,
+          targetId: external.id,
+          loc: deriveEdgeLoc(guide.loc, 'see-also', external.loc),
+          name: 'see-also',
+        },
+      });
+
+      const clone = await resolvers.Mutation.cloneMemory(
+        {},
+        { ref: 'org-a::src-mem', targetUrn: 'org-b::src-clone' },
+        { db, roles: [], userId: adminUser.id } as Context,
+      );
+      const cloneNodes = await db.node.findMany({ where: { memoryId: clone.id } });
+      const cloneEdges = await db.edge.findMany({
+        where: { sourceId: { in: cloneNodes.map((n) => n.id) } },
+      });
+      // Only the internal edge survives; the external target is dropped.
+      expect(cloneEdges.map((e) => e.name)).toEqual(['routes-to']);
+      // And no cloned edge references the foreign node id.
+      expect(cloneEdges.some((e) => e.targetId === external.id)).toBe(false);
+    });
+
     it('rejects a relative (not fully-qualified) targetUrn', async () => {
       await createSourceMemory();
       await expect(

@@ -241,9 +241,20 @@ export async function cloneMemoryGraph(
       // Clone every live edge whose SOURCE lives in this memory. Targets:
       //   - live internal node → remapped to its clone
       //   - soft-deleted internal node → edge skipped
-      //   - external node (cross-memory edge) → original target kept
+      //   - external node (cross-memory edge) → original target kept for a
+      //     SAME-org clone; DROPPED for a cross-org clone (see below)
       // Incoming edges from other memories' nodes are NOT cloned — that
       // would add outgoing edges to nodes the clone doesn't own.
+      //
+      // #604 cross-org leak (Codex P1): a preserved external target points at
+      // a node in the SOURCE (or a third) memory, which lives in the source
+      // org. On a cross-org clone the clone is readable by the TARGET org, and
+      // Edge.target lazily loads the FK without re-checking the target node's
+      // memory — so keeping the raw external id would let a target-org reader
+      // traverse into a node they may not be allowed to read. Drop external
+      // targets on cross-org clones. Same-org clones keep prior behavior (the
+      // source already exposed that edge within the same org).
+      const isCrossOrg = args.targetOrganizationId !== source.organizationId;
       const edges = await tx.edge.findMany({
         where: { deletedAt: null, sourceId: { in: [...idMap.keys()] } },
       });
@@ -267,7 +278,12 @@ export async function cloneMemoryGraph(
       const edgeRows: Prisma.EdgeCreateManyInput[] = [];
       for (const e of edges) {
         const newTarget = idMap.get(e.targetId);
-        if (!newTarget && deletedInternalTargetIds.has(e.targetId)) continue;
+        if (!newTarget) {
+          // Target isn't a live internal node of the source: a soft-deleted
+          // internal node (always skip), or an external cross-memory node —
+          // which we also skip on a cross-org clone to avoid the leak above.
+          if (deletedInternalTargetIds.has(e.targetId) || isCrossOrg) continue;
+        }
         edgeRows.push({
           id: generateId(),
           // Spec 037: edge identity is (loc, memoryId). The clone preserves
