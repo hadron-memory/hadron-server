@@ -223,14 +223,24 @@ export const meteringMutations = {
   /**
    * Mint credits for an org (positive `grant` row). PLATFORM ADMIN ONLY —
    * this creates money; org admins must not self-grant. Payment-processor
-   * top-ups land here in a later phase with sourceType 'payment'.
+   * top-ups (hadrontool-billing) land here with sourceType 'stripe-checkout'
+   * + the Checkout session id: (sourceType, sourceId) is ledger-unique and
+   * the mutation is IDEMPOTENT on it — a webhook redelivery returns the
+   * existing grant instead of double-crediting.
    */
   grantCredits: async (
     _: unknown,
     {
       input,
     }: {
-      input: { orgRef: string; amountMicroCents: string; expiresAt?: string | null; note?: string | null };
+      input: {
+        orgRef: string;
+        amountMicroCents: string;
+        expiresAt?: string | null;
+        sourceType?: string | null;
+        sourceId?: string | null;
+        note?: string | null;
+      };
     },
     ctx: Context,
   ) => {
@@ -241,11 +251,18 @@ export const meteringMutations = {
     if (expiresAt && Number.isNaN(expiresAt.getTime())) {
       throw badInput('expiresAt is not a valid date.');
     }
+    // The pair travels together: a sourceId without a type (or vice versa)
+    // would silently lose idempotency protection.
+    if (!!input.sourceType !== !!input.sourceId) {
+      throw badInput('sourceType and sourceId must be provided together.');
+    }
     try {
       const entry = await grantCredits(ctx.db, {
         organizationId: orgId,
         amountMicroCents: amount,
         expiresAt,
+        sourceType: input.sourceType ?? null,
+        sourceId: input.sourceId ?? null,
         note: input.note ?? null,
         createdBy: ctx.userId ?? null,
       });

@@ -243,26 +243,52 @@ export interface GrantCreditsParams {
   amountMicroCents: bigint;
   /** Policy field only in Phase 0 (FR-005). */
   expiresAt?: Date | null;
+  /**
+   * Idempotency + provenance pair: e.g. ('stripe-checkout', <session id>).
+   * (sourceType, sourceId) is UNIQUE across the ledger — re-granting the
+   * same pair returns the EXISTING row instead of double-crediting, which
+   * is what makes at-least-once payment webhooks safe (hadrontool-billing).
+   */
+  sourceType?: string | null;
+  sourceId?: string | null;
   note?: string | null;
   createdBy?: string | null;
 }
 
-/** Append a positive `grant` row. Throws InvalidLedgerAmountError on <= 0. */
+/**
+ * Append a positive `grant` row. Throws InvalidLedgerAmountError on <= 0.
+ * Idempotent on (sourceType, sourceId): a duplicate pair returns the
+ * already-existing entry (never a second credit). Rows without a source
+ * are unaffected (Postgres treats NULLs as distinct in unique indexes).
+ */
 export async function grantCredits(db: PrismaClient, params: GrantCreditsParams) {
   if (params.amountMicroCents <= 0n) {
     throw new InvalidLedgerAmountError('grantCredits requires a positive amountMicroCents.');
   }
-  return db.creditLedgerEntry.create({
-    data: {
-      id: generateId(),
-      organizationId: params.organizationId,
-      kind: 'grant',
-      amountMicroCents: params.amountMicroCents,
-      expiresAt: params.expiresAt ?? null,
-      note: params.note ?? null,
-      createdBy: params.createdBy ?? null,
-    },
-  });
+  try {
+    return await db.creditLedgerEntry.create({
+      data: {
+        id: generateId(),
+        organizationId: params.organizationId,
+        kind: 'grant',
+        amountMicroCents: params.amountMicroCents,
+        expiresAt: params.expiresAt ?? null,
+        sourceType: params.sourceType ?? null,
+        sourceId: params.sourceId ?? null,
+        note: params.note ?? null,
+        createdBy: params.createdBy ?? null,
+      },
+    });
+  } catch (err) {
+    // Unique (sourceType, sourceId) hit ⇒ this grant already landed
+    // (webhook redelivery). Return the existing row — idempotent success.
+    if ((err as { code?: string }).code === 'P2002' && params.sourceType && params.sourceId) {
+      return db.creditLedgerEntry.findFirstOrThrow({
+        where: { sourceType: params.sourceType, sourceId: params.sourceId },
+      });
+    }
+    throw err;
+  }
 }
 
 export interface DebitCreditsParams {

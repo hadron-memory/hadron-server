@@ -250,6 +250,38 @@ describe('credit ledger primitives', () => {
     ]);
   });
 
+  it('is idempotent on (sourceType, sourceId) — webhook redelivery never double-credits', async () => {
+    const first = await grantCredits(db, {
+      organizationId: orgId,
+      amountMicroCents: 2_000_000_000n, // a $20 pack
+      sourceType: 'stripe-checkout',
+      sourceId: 'cs_test_123',
+    });
+    const replay = await grantCredits(db, {
+      organizationId: orgId,
+      amountMicroCents: 2_000_000_000n,
+      sourceType: 'stripe-checkout',
+      sourceId: 'cs_test_123',
+    });
+    expect(replay.id).toBe(first.id);
+    expect(await db.creditLedgerEntry.count()).toBe(1);
+    expect(await creditBalance(db, orgId)).toBe(2_000_000_000n);
+    // A different session id is a NEW grant.
+    await grantCredits(db, {
+      organizationId: orgId,
+      amountMicroCents: 2_000_000_000n,
+      sourceType: 'stripe-checkout',
+      sourceId: 'cs_test_456',
+    });
+    expect(await creditBalance(db, orgId)).toBe(4_000_000_000n);
+  });
+
+  it('source-less grants are never deduped against each other', async () => {
+    await grantCredits(db, { organizationId: orgId, amountMicroCents: 100n });
+    await grantCredits(db, { organizationId: orgId, amountMicroCents: 100n });
+    expect(await db.creditLedgerEntry.count()).toBe(2);
+  });
+
   it('rejects non-positive amounts', async () => {
     await expect(
       grantCredits(db, { organizationId: orgId, amountMicroCents: 0n }),

@@ -3052,6 +3052,10 @@ model CreditLedgerEntry {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([organizationId, createdAt])
+  // Idempotency for at-least-once payment webhooks (hadrontool-billing):
+  // one ledger row per (sourceType, sourceId); NULL-source rows unaffected
+  // (Postgres unique treats NULLs as distinct).
+  @@unique([sourceType, sourceId])
   @@map("credit_ledger_entries")
 }
 

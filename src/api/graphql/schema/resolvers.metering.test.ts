@@ -159,6 +159,30 @@ describe('grantCredits', () => {
     });
     expect(res.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
   });
+
+  it('is idempotent on (sourceType, sourceId) through GraphQL', async () => {
+    const input = {
+      orgRef: orgId,
+      amountMicroCents: '2000000000',
+      sourceType: 'stripe-checkout',
+      sourceId: 'cs_gql_1',
+    };
+    const first = await gql(GRANT, platformCtx(), { input });
+    const replay = await gql(GRANT, platformCtx(), { input });
+    expect(first.errors).toBeUndefined();
+    expect(replay.errors).toBeUndefined();
+    expect((replay.data as Record<string, Record<string, string>>).grantCredits.id).toBe(
+      (first.data as Record<string, Record<string, string>>).grantCredits.id,
+    );
+    expect(await db.creditLedgerEntry.count()).toBe(1);
+  });
+
+  it('rejects a sourceId without a sourceType (and vice versa)', async () => {
+    const res = await gql(GRANT, platformCtx(), {
+      input: { orgRef: orgId, amountMicroCents: '100', sourceId: 'cs_orphan' },
+    });
+    expect(res.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+  });
 });
 
 describe('ledger reads', () => {

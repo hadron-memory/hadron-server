@@ -639,6 +639,12 @@ export const typeDefs = `#graphql
     amountMicroCents: String!
     # Grant expiry policy field (no enforcement in Phase 0).
     expiresAt: String
+    # Idempotency + provenance pair (both or neither), e.g.
+    # ('stripe-checkout', <session id>). (sourceType, sourceId) is unique
+    # across the ledger - re-granting the same pair returns the EXISTING
+    # entry instead of double-crediting (at-least-once webhook safety).
+    sourceType: String
+    sourceId: String
     note: String
   }
 
