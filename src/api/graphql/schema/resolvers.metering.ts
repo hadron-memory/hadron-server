@@ -17,6 +17,7 @@ import {
   clearPriceCache,
   creditBalance,
   grantCredits,
+  IdempotencyConflictError,
   InvalidLedgerAmountError,
   PRICE_TIER_DEFAULT,
   PRICE_TIER_MAX,
@@ -269,6 +270,12 @@ export const meteringMutations = {
       return projectLedgerEntry(entry);
     } catch (err) {
       if (err instanceof InvalidLedgerAmountError) throw badInput(err.message);
+      // Mismatched replay of an existing (sourceType, sourceId): a typed,
+      // NON-retryable error — callers (hadrontool-billing) must stop
+      // redelivering and reconcile manually (PR-624 review, Gemini high).
+      if (err instanceof IdempotencyConflictError) {
+        throw new GraphQLError(err.message, { extensions: { code: 'IDEMPOTENCY_CONFLICT' } });
+      }
       throw err;
     }
   },
