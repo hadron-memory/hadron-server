@@ -1818,7 +1818,7 @@ export const typeDefs = `#graphql
     actions: [String!]!
     "ISO-8601 expiry, or null for perpetual (until revoked)."
     expiresAt: String
-    createdAt: String
+    createdAt: String!
   }
 
   type PrincipalGrantsPage {
