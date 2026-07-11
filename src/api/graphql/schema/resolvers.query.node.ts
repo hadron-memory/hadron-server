@@ -1113,6 +1113,27 @@ export const nodeQueries = {
       return versions.filter((v) => canRead(v.memoryId ?? node.memoryId));
     },
 
+    // #617 (Display) — a single snapshot by id, so the portal doesn't filter
+    // the list client-side. Access-gated like nodeVersions: read on the node's
+    // current memory AND on the snapshot's own memory (per-snapshot gating —
+    // a moved node keeps its id, so a snapshot may live in a memory the caller
+    // can't read). Any miss collapses to null (no existence disclosure).
+    nodeVersion: async (_: unknown, { versionId }: { versionId: string }, ctx: Context) => {
+      requireRole(ctx, 'READER');
+      const version = await ctx.db.nodeVersion.findUnique({ where: { id: versionId } });
+      if (!version) return null;
+      const node = await ctx.db.node.findUnique({
+        where: { id: version.nodeId },
+        select: { memoryId: true },
+      });
+      if (!node) return null;
+      const accessible = await getAccessibleMemoryIds(ctx);
+      const canRead = (memId: string) => accessible === null || accessible.includes(memId);
+      if (!canRead(node.memoryId)) return null;
+      if (!canRead(version.memoryId ?? node.memoryId)) return null;
+      return version;
+    },
+
     appNodes: async (
       _: unknown,
       { appRef, filter, limit }: {

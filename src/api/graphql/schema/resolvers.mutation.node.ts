@@ -2116,52 +2116,72 @@ export const nodeMutations = {
       return nodes.length;
     },
 
-    restoreNodeVersion: async (_: unknown, { versionId }: { versionId: string }, ctx: Context) => {
+    restoreNodeVersion: async (
+      _: unknown,
+      { versionId, truncate = false }: { versionId: string; truncate?: boolean },
+      ctx: Context,
+    ) => {
       const version = await ctx.db.nodeVersion.findUniqueOrThrow({ where: { id: versionId } });
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
 
-      // Snapshot current state before restoring. Spec 031 — `abstract`
-      // must be captured here too; without it, a round-trip restore (then
-      // restoring this snapshot) silently drops abstract. Spec 032 — same
-      // for `abstractOriginHash`.
-      await ctx.db.nodeVersion.create({
-        data: {
-          id: generateId(),
-          nodeId: node.id,
-          memoryId: node.memoryId,
-          loc: node.loc,
-          name: node.name,
-          alias: node.alias,
-          description: node.description,
-          abstract: node.abstract,
-          abstractOriginHash: node.abstractOriginHash,
-          content: node.content,
-          tags: node.tags as string[],
-          editedBy: ctx.clientId ?? ctx.userId ?? null,
-          createdBy: ctx.userId ?? ctx.clientId ?? null,
-        },
-      });
+      // Restore (+ optional truncate) in one transaction (#617) so the portal
+      // never sequences restore + N deletes and can't half-apply on a crash.
+      const restored = await ctx.db.$transaction(async (tx) => {
+        if (truncate) {
+          // #617 truncate: collapse the history so the selected version becomes
+          // the new baseline. Delete every snapshot NEWER than the selected one
+          // (createdAt strictly greater — EXCLUSIVE of the selected row, which
+          // is kept), and skip the pre-restore snapshot. Ties on createdAt are
+          // kept (never deletes the selected row); an over-keep is safe.
+          await tx.nodeVersion.deleteMany({
+            where: { nodeId: node.id, createdAt: { gt: version.createdAt } },
+          });
+        } else {
+          // Non-destructive default: snapshot current state before restoring so
+          // the restore itself is undoable. Spec 031 — `abstract` must be
+          // captured here too; without it, a round-trip restore (then restoring
+          // this snapshot) silently drops abstract. Spec 032 — same for
+          // `abstractOriginHash`.
+          await tx.nodeVersion.create({
+            data: {
+              id: generateId(),
+              nodeId: node.id,
+              memoryId: node.memoryId,
+              loc: node.loc,
+              name: node.name,
+              alias: node.alias,
+              description: node.description,
+              abstract: node.abstract,
+              abstractOriginHash: node.abstractOriginHash,
+              content: node.content,
+              tags: node.tags as string[],
+              editedBy: ctx.clientId ?? ctx.userId ?? null,
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+          });
+        }
 
-      // Restore the node to the version's state. Spec 031 — `abstract`
-      // is part of the restored state; without it, restoring a version
-      // that had a non-null abstract leaves the node's current abstract
-      // unchanged (and vice versa). Spec 032 — `abstractOriginHash`
-      // applied verbatim per plan D4 (no recomputation on restore;
-      // legacy null hashes short-circuit the staleness check via the
-      // NOT NULL guard in hadron_get_node).
-      const restored = await ctx.db.node.update({
-        where: { id: node.id },
-        data: {
-          name: version.name,
-          alias: version.alias,
-          description: version.description,
-          abstract: version.abstract,
-          abstractOriginHash: version.abstractOriginHash,
-          content: version.content,
-          tags: version.tags as string[],
-        },
-        include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+        // Restore the node to the version's state. Spec 031 — `abstract`
+        // is part of the restored state; without it, restoring a version
+        // that had a non-null abstract leaves the node's current abstract
+        // unchanged (and vice versa). Spec 032 — `abstractOriginHash`
+        // applied verbatim per plan D4 (no recomputation on restore;
+        // legacy null hashes short-circuit the staleness check via the
+        // NOT NULL guard in hadron_get_node).
+        return tx.node.update({
+          where: { id: node.id },
+          data: {
+            name: version.name,
+            alias: version.alias,
+            description: version.description,
+            abstract: version.abstract,
+            abstractOriginHash: version.abstractOriginHash,
+            content: version.content,
+            tags: version.tags as string[],
+          },
+          include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+        });
       });
       // 033 — re-embed the restored content (version snapshots are plaintext on
       // non-encrypted memories; ciphertext snapshots are handled by embedNode's
@@ -2172,6 +2192,45 @@ export const nodeMutations = {
         plaintext: { content: version.content, abstract: version.abstract },
       });
       return restored;
+    },
+
+    // #617 — delete a single snapshot. Write-gated on the node's CURRENT memory
+    // (as restoreNodeVersion) — the memory you own the live node in, even if the
+    // snapshot was captured in another memory before a move.
+    deleteNodeVersion: async (_: unknown, { versionId }: { versionId: string }, ctx: Context) => {
+      const version = await ctx.db.nodeVersion.findUnique({ where: { id: versionId } });
+      if (!version) {
+        throw new GraphQLError('Node version not found', {
+          extensions: { code: 'NOT_FOUND', versionId },
+        });
+      }
+      const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
+      await requireMemoryWriteAccess(ctx, node.memoryId);
+      await ctx.db.nodeVersion.delete({ where: { id: versionId } });
+      return true;
+    },
+
+    // #617 — delete ALL snapshots for a node, returning the count deleted. Write-
+    // gated on the node's current memory. nodeRef is a PK or fully-qualified URN.
+    clearNodeHistory: async (_: unknown, { nodeRef }: { nodeRef: string }, ctx: Context) => {
+      let nodeId: string;
+      try {
+        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) {
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND', nodeRef },
+          });
+        }
+        throw e;
+      }
+      const node = await ctx.db.node.findUniqueOrThrow({
+        where: { id: nodeId },
+        select: { memoryId: true },
+      });
+      await requireMemoryWriteAccess(ctx, node.memoryId);
+      const { count } = await ctx.db.nodeVersion.deleteMany({ where: { nodeId } });
+      return count;
     },
 
 };

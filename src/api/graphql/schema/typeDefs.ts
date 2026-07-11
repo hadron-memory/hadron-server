@@ -2535,6 +2535,18 @@ export const typeDefs = `#graphql
     nodeVersions(nodeRef: ID!, limit: Int): [NodeVersion!]!
 
     """
+    A single node-version snapshot by its id (#617 Display).
+
+    Access-gated on the snapshot's node memory (read): null when the version
+    does not exist OR the caller cannot read the node's current memory OR the
+    memory the snapshot was captured in (per-snapshot gating mirrors
+    nodeVersions — a moved node keeps its id, so a snapshot may belong to a
+    memory the caller cannot read). Null, never an error, so there is no
+    existence disclosure.
+    """
+    nodeVersion(versionId: ID!): NodeVersion
+
+    """
     Aggregated usage counts per node and type for a memory.
 
     Accepts the entity's ID or URN.
@@ -3010,8 +3022,28 @@ export const typeDefs = `#graphql
     # idempotent (the ref resolves through the tombstone).
     deleteNode(nodeRef: ID!, hard: Boolean): Boolean!
 
-    # Restore a node to a previous version (creates a new version snapshot first)
-    restoreNodeVersion(versionId: ID!): Node!
+    # Restore a node to a previous version (#617).
+    #
+    # Default (truncate: false): snapshots the CURRENT node state into history
+    # first, then restores the node's fields to the version — non-destructive,
+    # the restore itself becomes undoable.
+    #
+    # truncate: true: restores the node's fields to the version AND deletes
+    # every NodeVersion NEWER than the selected one (createdAt strictly greater),
+    # WITHOUT creating a pre-restore snapshot. Boundary is EXCLUSIVE of the
+    # selected row: the selected version is KEPT and becomes the new baseline
+    # (the most-recent snapshot afterward); its era and older survive. Restore +
+    # truncate run in one transaction (atomic).
+    restoreNodeVersion(versionId: ID!, truncate: Boolean = false): Node!
+
+    # Delete a single node-version snapshot by id (#617). Auth: the node's memory
+    # write access (as restoreNodeVersion). Throws NOT_FOUND for an unknown id.
+    deleteNodeVersion(versionId: ID!): Boolean!
+
+    # Delete ALL NodeVersion rows for a node, returning the count deleted (#617).
+    # 'nodeRef' is the node's PK or fully-qualified URN. Auth: the node's memory
+    # write access. An unknown ref throws NODE_NOT_FOUND.
+    clearNodeHistory(nodeRef: ID!): Int!
 
     # Relocate a node (#564). 'sourceRef' is the node's PK or fully-qualified
     # URN. The destination is EITHER 'targetUrn' (the node's new full URN — new
