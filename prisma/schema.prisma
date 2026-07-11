@@ -423,8 +423,10 @@ model Organization {
   /// an org list / switcher / discovery — for its own member(s) AND everyone
   /// else. `false` hides the org from EVERY user's listing (the owner's own
   /// list, other users, and platform admins alike); it is never shown while
-  /// hidden. It does NOT gate resource read access — a member still resolves
-  /// and reads the org directly (visibility is not membership). An
+  /// hidden. A hidden org is invisible to non-members — not listed, not
+  /// searchable, and not resolvable by ref, even for a platform admin. It does
+  /// NOT gate a MEMBER's read: a member still resolves and reads their org
+  /// directly regardless of `isVisible` (visibility is not membership). An
   /// auto-created personal org starts `false` (invisible to all) so a
   /// brand-new user with only their personal org is never shown org UI
   /// ("consumer mode"). It flips to `true` when the user activates org mode —
