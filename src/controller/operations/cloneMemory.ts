@@ -1,6 +1,7 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
+import { jsonOrDbNull } from '../../lib/nodeVersionSnapshot.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 
 /**
@@ -93,10 +94,7 @@ export function rewriteMemoryUrnRefs(
   return out;
 }
 
-/** Json-column value for createMany: Prisma rejects raw `null` on Json? columns. */
-function jsonOrDbNull(v: Prisma.JsonValue | null) {
-  return v === null ? Prisma.DbNull : (v as Prisma.InputJsonValue);
-}
+
 
 export interface CloneMemoryArgs {
   sourceMemoryId: string;

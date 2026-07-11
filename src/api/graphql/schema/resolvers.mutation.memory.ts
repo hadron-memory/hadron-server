@@ -1,5 +1,6 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import { editorFromAuth } from '../../../lib/nodeVersionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
 import { deleteMemoryVectors } from '../../../services/embedding/vectors.js';
@@ -147,7 +148,7 @@ export const memoryMutations = {
         }
       }
 
-      const actorId = ctx.userId ?? ctx.clientId ?? null;
+      const editor = editorFromAuth(ctx);
 
       // EDGES transfer can mutate edges whose denormalized memory is neither
       // source nor target (incoming cross-memory edges). Require write access
@@ -183,7 +184,7 @@ export const memoryMutations = {
           targetMemoryId: targetMem.id,
           fields,
           deleteSourceMem,
-          actorId,
+          editor,
         });
       } catch (e) {
         // Surface the same typed error mergeNodes does, with the offending loc.

@@ -2,6 +2,14 @@
 import { generateId } from '../../../lib/id.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
+  buildNodeVersionSnapshot,
+  editorFromAuth,
+  diffNodeChanges,
+  restorableNodeFields,
+  jsonOrDbNull,
+  REV_LABEL_MAX_LEN,
+} from '../../../lib/nodeVersionSnapshot.js';
+import {
   buildReplacer,
   replaceInTags,
   SearchReplaceInvalidPatternError,
@@ -48,6 +56,7 @@ import {
 } from '../../../lib/nodeMerge.js';
 import {
   type Context,
+  getAccessibleMemoryIds,
   requireRole,
   throwOnInvalidCondition,
   throwOnReservedExtractionSpec,
@@ -294,26 +303,20 @@ export async function writeNodeCore(
       }
 
       if (existing) {
+        // Snapshot the PRE-edit state (#620: shared builder — editedBy holds
+        // the user PK, the #88 `reason` rationale lands in revLabel, and
+        // `changes` records which fields this update is about to modify).
+        // Tags need the serialized form for a faithful compare; other input
+        // fields map 1:1 onto node columns.
+        const supplied: Record<string, unknown> = { ...input };
+        if (input.tags !== undefined) {
+          supplied.tags = serializeTags(input.tags ?? []);
+        }
         await ctx.db.nodeVersion.create({
-          data: {
-            nodeId: existing.id,
-            memoryId: existing.memoryId,
-            loc: existing.loc,
-            name: existing.name,
-            alias: existing.alias,
-            description: existing.description,
-            abstract: existing.abstract,
-            // Spec 032 — snapshot captures the hash so restoreNodeVersion
-            // round-trips it.
-            abstractOriginHash: existing.abstractOriginHash,
-            content: existing.content,
-            tags: existing.tags as string[],
-            // #88: an explicit `reason` carries the edit rationale into history
-            // (same column hadron_update_node's `reason` populates); fall back
-            // to the caller identity when none is given.
-            editedBy: input.reason ?? ctx.clientId ?? ctx.userId ?? null,
-            createdBy: ctx.userId ?? ctx.clientId ?? null,
-          },
+          data: buildNodeVersionSnapshot(existing, editorFromAuth(ctx), {
+            revLabel: input.reason,
+            changes: diffNodeChanges(existing, supplied),
+          }),
         });
       }
 
@@ -1098,22 +1101,13 @@ export const nodeMutations = {
       await ctx.db.$transaction(async (tx) => {
         for (const p of plans) {
           const raw = p.raw;
+          // #88: the bulk-edit rationale rides in revLabel (#620); `changes`
+          // is exactly the field set the replace pass rewrote on this node.
           await tx.nodeVersion.create({
-            data: {
-              nodeId: raw.id,
-              memoryId: raw.memoryId,
-              loc: raw.loc,
-              name: raw.name,
-              alias: raw.alias,
-              description: raw.description,
-              abstract: raw.abstract,
-              abstractOriginHash: raw.abstractOriginHash,
-              content: raw.content,
-              tags: raw.tags as string[],
-              // #88: carry the bulk-edit rationale into each node's history.
-              editedBy: input.reason ?? ctx.clientId ?? ctx.userId ?? null,
-              createdBy: ctx.userId ?? ctx.clientId ?? null,
-            },
+            data: buildNodeVersionSnapshot(raw, editorFromAuth(ctx), {
+              revLabel: input.reason,
+              changes: Object.keys(p.changed),
+            }),
           });
 
           const data: Record<string, unknown> = {};
@@ -1543,25 +1537,13 @@ export const nodeMutations = {
           }
         }
         // Pre-move NodeVersion snapshot — a loc/memory change is audit-worthy.
-        // Field set matches the canonical snapshot sites (writeNodeCore +
-        // hadron_move_node); update all of them together if Node columns change.
+        // The snapshot belongs to the SOURCE memory (#602): the node is about
+        // to leave it, and this snapshot's content lived there (the builder
+        // stamps source.memoryId).
         await tx.nodeVersion.create({
-          data: {
-            nodeId: source.id,
-            // Pre-move snapshot belongs to the SOURCE memory (#602): the node
-            // is about to leave it, and this snapshot's content lived there.
-            memoryId: source.memoryId,
-            loc: source.loc,
-            name: source.name,
-            alias: source.alias,
-            description: source.description,
-            abstract: source.abstract,
-            abstractOriginHash: source.abstractOriginHash,
-            content: source.content,
-            tags: source.tags as string[],
-            editedBy: ctx.clientId ?? ctx.userId ?? null,
-            createdBy: ctx.userId ?? ctx.clientId ?? null,
-          },
+          data: buildNodeVersionSnapshot(source, editorFromAuth(ctx), {
+            changes: diffNodeChanges(source, { loc: destLoc, memoryId: destMemoryId }),
+          }),
         });
         // Move BY ID (stable across moves; keeps every edge reference intact).
         return tx.node.update({
@@ -1852,20 +1834,11 @@ export const nodeMutations = {
       //    source delete ──────────────────────────────────────────────────
       await ctx.db.$transaction(async (tx) => {
         await tx.nodeVersion.create({
-          data: {
-            nodeId: target.id,
-            memoryId: target.memoryId,
-            loc: target.loc,
-            name: target.name,
-            alias: target.alias,
-            description: target.description,
-            abstract: target.abstract,
-            abstractOriginHash: target.abstractOriginHash,
-            content: target.content,
-            tags: target.tags as string[],
-            editedBy: ctx.clientId ?? ctx.userId ?? null,
-            createdBy: ctx.userId ?? ctx.clientId ?? null,
-          },
+          data: buildNodeVersionSnapshot(target, editorFromAuth(ctx), {
+            // Plaintext field names the merge folds into the target — the
+            // node columns the update below writes.
+            changes: Object.keys(changed),
+          }),
         });
 
         if (Object.keys(changed).length > 0) {
@@ -2125,6 +2098,10 @@ export const nodeMutations = {
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
 
+      // #620 — the restored field set (legacy-sentinel-aware), shared by the
+      // pre-restore snapshot's `changes` diff and the write-back.
+      const restoreFields = restorableNodeFields(version);
+
       // Restore (+ optional truncate) in one transaction (#617) so the portal
       // never sequences restore + N deletes and can't half-apply on a crash.
       const restored = await ctx.db.$transaction(async (tx) => {
@@ -2142,22 +2119,16 @@ export const nodeMutations = {
           // the restore itself is undoable. Spec 031 — `abstract` must be
           // captured here too; without it, a round-trip restore (then restoring
           // this snapshot) silently drops abstract. Spec 032 — same for
-          // `abstractOriginHash`.
+          // `abstractOriginHash`. #620 — `changes` records which fields the
+          // restore is about to rewrite; restorableNodeFields is the single
+          // home for the restored field set + the legacy sentinel, shared
+          // with the write-back below.
           await tx.nodeVersion.create({
             data: {
               id: generateId(),
-              nodeId: node.id,
-              memoryId: node.memoryId,
-              loc: node.loc,
-              name: node.name,
-              alias: node.alias,
-              description: node.description,
-              abstract: node.abstract,
-              abstractOriginHash: node.abstractOriginHash,
-              content: node.content,
-              tags: node.tags as string[],
-              editedBy: ctx.clientId ?? ctx.userId ?? null,
-              createdBy: ctx.userId ?? ctx.clientId ?? null,
+              ...buildNodeVersionSnapshot(node, editorFromAuth(ctx), {
+                changes: diffNodeChanges(node, restoreFields),
+              }),
             },
           });
         }
@@ -2168,18 +2139,21 @@ export const nodeMutations = {
         // unchanged (and vice versa). Spec 032 — `abstractOriginHash`
         // applied verbatim per plan D4 (no recomputation on restore;
         // legacy null hashes short-circuit the staleness check via the
-        // NOT NULL guard in hadron_get_node).
+        // NOT NULL guard in hadron_get_node). #620 — the full curated
+        // subset restores verbatim too, but ONLY for snapshots that
+        // captured it: a NULL nodeType marks a legacy pre-#620 row, and
+        // restoring its uncaptured fields would wipe the live values to
+        // NULL rather than "restore" anything.
+        const writeData: Record<string, unknown> = { ...restoreFields };
+        if ('properties' in writeData) {
+          writeData.properties = jsonOrDbNull(writeData.properties as never);
+        }
+        if ('data' in writeData) {
+          writeData.data = jsonOrDbNull(writeData.data as never);
+        }
         return tx.node.update({
           where: { id: node.id },
-          data: {
-            name: version.name,
-            alias: version.alias,
-            description: version.description,
-            abstract: version.abstract,
-            abstractOriginHash: version.abstractOriginHash,
-            content: version.content,
-            tags: version.tags as string[],
-          },
+          data: writeData,
           include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
         });
       });
@@ -2208,6 +2182,50 @@ export const nodeMutations = {
       await requireMemoryWriteAccess(ctx, node.memoryId);
       await ctx.db.nodeVersion.delete({ where: { id: versionId } });
       return true;
+    },
+
+    // #620 — set or clear the user-facing label on a version snapshot
+    // (NodeVersion.revLabel). Write-gated on the node's CURRENT memory (as
+    // deleteNodeVersion) — but unlike the Boolean-returning prune mutations,
+    // this one RETURNS the full snapshot, so it must also enforce the read
+    // gates of the nodeVersion query: the per-snapshot memory gate (#602 —
+    // a moved node's history can hold snapshots captured in a memory the
+    // caller can't read) and the soft-deleted-node collapse (#618). Every
+    // miss is the same NOT_FOUND (no existence disclosure).
+    updateNodeVersion: async (
+      _: unknown,
+      { versionId, revLabel }: { versionId: string; revLabel?: string | null },
+      ctx: Context,
+    ) => {
+      const notFound = () =>
+        new GraphQLError('Node version not found', {
+          extensions: { code: 'NOT_FOUND', versionId },
+        });
+      const version = await ctx.db.nodeVersion.findUnique({ where: { id: versionId } });
+      if (!version) throw notFound();
+      const node = await ctx.db.node.findUnique({
+        where: { id: version.nodeId },
+        select: { memoryId: true, deletedAt: true },
+      });
+      if (!node || node.deletedAt) throw notFound();
+      const accessible = await getAccessibleMemoryIds(ctx);
+      const canRead = (memId: string) => accessible === null || accessible.includes(memId);
+      if (!canRead(node.memoryId) || !canRead(version.memoryId ?? node.memoryId)) {
+        throw notFound();
+      }
+      await requireMemoryWriteAccess(ctx, node.memoryId);
+      // Omit = preserve (the repo-wide partial-update contract); null = clear.
+      if (revLabel === undefined) return version;
+      if (revLabel != null && revLabel.length > REV_LABEL_MAX_LEN) {
+        throw new GraphQLError(
+          `revLabel exceeds the ${REV_LABEL_MAX_LEN}-character cap.`,
+          { extensions: { code: 'BAD_USER_INPUT', max: REV_LABEL_MAX_LEN } },
+        );
+      }
+      return ctx.db.nodeVersion.update({
+        where: { id: versionId },
+        data: { revLabel },
+      });
     },
 
     // #617 — delete ALL snapshots for a node, returning the count deleted. Write-

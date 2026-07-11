@@ -6,7 +6,10 @@ export default defineConfig({
     // Each test file runs in its own subprocess so the PrismaClient singleton
     // (created at module load time) is fresh per file and sees the env vars below.
     // fileParallelism: false prevents concurrent DB access from parallel test files.
-    exclude: ['dist/**', 'node_modules/**'],
+    // .claude/worktrees holds sibling agent worktrees — full repo copies whose
+    // test files would otherwise be collected into THIS run (and race on the
+    // shared hadron_test DB; see findings:parallel-vitest-shared-test-db).
+    exclude: ['dist/**', 'node_modules/**', '.claude/**'],
     pool: 'forks',
     fileParallelism: false,
     // CHECK constraints declared in migrations don't survive `prisma db push`

@@ -12,6 +12,7 @@ import {
   legacyMemoryUrnToCanonical,
 } from '../../../lib/urn.js';
 import { userUrn } from '../../../lib/userHandle.js';
+import { isId } from '../../../lib/entityRef/shape.js';
 import {
   canSeeUserPersonalFields,
   canSeeOrgMemberRole,
@@ -46,6 +47,81 @@ import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 // to the non-parseable raw fallback. Mirrors Memory.urn's two-branch logic.
 const canonicalStoredMemoryUrn = (urn: string): string =>
   urn.includes('::') ? urn : legacyMemoryUrnToCanonical(urn);
+
+/**
+ * Resolve one editor/approver candidate string to public identifiers:
+ * 'github:<login>' matches the linked GitHub username case-insensitively;
+ * 'email:<addr>' matches the account email case-insensitively; 'app:<id>'
+ * is a non-user principal by construction (zero I/O); 'user:<id>' and a
+ * bare ID-shaped value (isId — legacy reasons/commit messages never match)
+ * look up the User PK. Returns { handle, urn } — never name/email/any PII.
+ */
+async function lookupVersionEditorCandidate(
+  ctx: Context,
+  cand: string,
+): Promise<{ handle: string; urn: string | null } | null> {
+  let user: { handle: string | null } | null = null;
+  if (cand.startsWith('app:')) {
+    return null; // App-key principal — can never be a user.
+  } else if (cand.startsWith('github:')) {
+    const login = cand.slice('github:'.length);
+    if (!login) return null;
+    user = await ctx.db.user.findFirst({
+      where: { githubUsername: { equals: login, mode: 'insensitive' }, deletedAt: null },
+      select: { handle: true },
+    });
+  } else if (cand.startsWith('email:')) {
+    const addr = cand.slice('email:'.length);
+    if (!addr) return null;
+    user = await ctx.db.user.findFirst({
+      where: { email: { equals: addr, mode: 'insensitive' }, deletedAt: null },
+      select: { handle: true },
+    });
+  } else {
+    const id = cand.startsWith('user:') ? cand.slice('user:'.length) : cand;
+    if (!isId(id)) return null; // shared ID-shape predicate (entityRef/shape)
+    user = await ctx.db.user.findFirst({
+      where: { id, deletedAt: null },
+      select: { handle: true },
+    });
+  }
+  if (!user?.handle) return null;
+  return { handle: user.handle, urn: userUrn(user.handle) };
+}
+
+/**
+ * Resolve a version editor/approver candidate list (#617/#619/#620): first
+ * candidate that resolves to a live, handle-bearing user wins. A node's
+ * history overwhelmingly repeats the same few editor strings, so lookups are
+ * memoized per request on the Context (same pattern as loadMemoryUrn /
+ * loadEdgeEndpointNode) — a 50-row history costs one query per DISTINCT
+ * candidate, negative results included.
+ */
+function resolveVersionEditor(
+  ctx: Context,
+  candidates: Array<string | null | undefined>,
+): Promise<{ handle: string; urn: string | null } | null> {
+  const cache = (ctx.versionEditorCache ??= new Map<
+    string,
+    Promise<{ handle: string; urn: string | null } | null>
+  >());
+  const lookup = (cand: string) => {
+    let pending = cache.get(cand);
+    if (!pending) {
+      pending = lookupVersionEditorCandidate(ctx, cand);
+      cache.set(cand, pending);
+    }
+    return pending;
+  };
+  return (async () => {
+    for (const cand of candidates) {
+      if (!cand) continue;
+      const hit = await lookup(cand);
+      if (hit) return hit;
+    }
+    return null;
+  })();
+}
 
 export const typeResolvers = {
   Node: {
@@ -128,22 +204,31 @@ export const typeResolvers = {
   },
   NodeVersion: {
     createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
-    // #617 — resolve editedBy (captured as `ctx.clientId ?? ctx.userId`, i.e. a
-    // User id OR an app/client id) to the editor's PUBLIC identifiers only:
-    // handle + urn, never name/email. A non-user principal, a deleted user, or a
-    // handle-less user all resolve to null (the portal falls back to the raw
-    // editedBy string). handle/urn are the same public identifiers the `users`
-    // search exposes and the caller already holds the raw id, so no per-caller
-    // visibility gate is needed (and none could leak PII — none is returned).
-    editedByUser: async (nv: { editedBy?: string | null }, _: unknown, ctx: Context) => {
-      if (!nv.editedBy) return null;
-      const user = await ctx.db.user.findFirst({
-        where: { id: nv.editedBy, deletedAt: null },
-        select: { handle: true },
-      });
-      if (!user?.handle) return null;
-      return { handle: user.handle, urn: userUrn(user.handle) };
-    },
+    // Prisma reads a NULL scalar list as [] already; belt-and-suspenders for
+    // rows that arrive from raw queries (#620 legacy rows).
+    changes: (nv: { changes?: string[] | null }) => nv.changes ?? [],
+    // #617/#619/#620 — resolve the version's editor to PUBLIC identifiers
+    // only: handle + urn, never name/email. Candidates in preference order:
+    //   1. editedBy — post-#620 this holds ONLY a User id;
+    //   2. createdBy — legacy rows captured `userId ?? clientId` here (user
+    //      preferred), which resolves history the #620 migration couldn't
+    //      backfill (#619);
+    //   3. editedByInfo — identity-string forms: 'github:<login>' resolves
+    //      via the linked GitHub username (case-insensitive), 'email:<addr>'
+    //      via the account email, 'user:<id>' by PK (#619).
+    // A non-resolving principal, a deleted user, or a handle-less user all
+    // yield null (the portal falls back to the raw strings). handle/urn are
+    // the same public identifiers the `users` search exposes, so no
+    // per-caller visibility gate is needed (and no PII can leak — none is
+    // returned).
+    editedByUser: async (
+      nv: { editedBy?: string | null; createdBy?: string | null; editedByInfo?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => resolveVersionEditor(ctx, [nv.editedBy, nv.createdBy, nv.editedByInfo]),
+    // #620 — same public-identifier resolution for the (reserved) approver.
+    approvedByUser: async (nv: { approvedBy?: string | null }, _: unknown, ctx: Context) =>
+      resolveVersionEditor(ctx, [nv.approvedBy]),
   },
   Asset: {
     uploadedAt: (a: { uploadedAt: Date | string }) => toISO(a.uploadedAt)!,

@@ -1,6 +1,10 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
+  buildNodeVersionSnapshot,
+  type SnapshotEditor,
+} from '../../lib/nodeVersionSnapshot.js';
+import {
   mergeNodeFields,
   type NodeMergeField,
 } from '../../lib/nodeMerge.js';
@@ -82,8 +86,9 @@ export interface MergeMemoryArgs {
   fields: Set<NodeMergeField>;
   /** Soft-delete the (now-empty) source memory when true. */
   deleteSourceMem: boolean;
-  /** Audit attribution for version/edit/update columns. */
-  actorId: string | null;
+  /** Audit attribution for version/edit/update columns (#620: user PK vs
+   *  fallback principal info are captured separately). */
+  editor: SnapshotEditor;
   /** Nodes folded / edges drained per inner transaction. Test seam; defaults to MERGE_BATCH_SIZE. */
   batchSize?: number;
   /** Source nodes scanned per classify+relocate page. Test seam; defaults to CLASSIFY_PAGE. */
@@ -104,7 +109,8 @@ export async function mergeMemoryGraph(
   db: PrismaClient,
   args: MergeMemoryArgs,
 ): Promise<MergeMemoryResult> {
-  const { sourceMemoryId, targetMemoryId, fields, deleteSourceMem, actorId } = args;
+  const { sourceMemoryId, targetMemoryId, fields, deleteSourceMem, editor } = args;
+  const actorId = editor.userId ?? editor.info ?? null;
   // Clamp to >= 1: a zero/negative batchSize (the test seam is public) would
   // never advance the fold loop and spin forever.
   const batchSize = Math.max(1, Math.floor(args.batchSize ?? MERGE_BATCH_SIZE));
@@ -215,20 +221,9 @@ export async function mergeMemoryGraph(
           throw e;
         }
         await tx.nodeVersion.create({
-          data: {
-            nodeId: tgt.id,
-            memoryId: tgt.memoryId,
-            loc: tgt.loc,
-            name: tgt.name,
-            alias: tgt.alias,
-            description: tgt.description,
-            abstract: tgt.abstract,
-            abstractOriginHash: tgt.abstractOriginHash,
-            content: tgt.content,
-            tags: tgt.tags as string[],
-            editedBy: actorId,
-            createdBy: actorId,
-          },
+          data: buildNodeVersionSnapshot(tgt, editor, {
+            changes: Object.keys(merged.changed),
+          }),
         });
         if (Object.keys(merged.changed).length > 0) {
           const writeData: Record<string, unknown> = { ...merged.changed, updatedBy: actorId };

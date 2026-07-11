@@ -568,16 +568,51 @@ export const typeDefs = `#graphql
     name: String!
     alias: String
     description: String
+    "Paragraph summary at capture (spec 031)."
+    abstract: String
     content: String
     tags: [String!]!
-    "Raw editor id at capture: a User id OR an app/client principal id (opaque). Use editedByUser to resolve the user case."
+    # ── #620: full curated-subset snapshot fields. Null on LEGACY rows
+    # captured before the columns existed (nodeType doubles as the legacy
+    # sentinel — it is non-null on every post-#620 snapshot).
+    nodeType: String
+    isLink: Boolean
+    properties: JSON
+    data: JSON
+    seq: Int
+    isRunnable: Boolean
+    llmModel: String
+    aiAgent: String
+    "The editing User id, when a user is known (#620). Use editedByUser for resolution."
     editedBy: String
     """
-    The editor resolved to a user (handle + URN), when editedBy is a user id.
-    Null for app/client principals, deleted users, or handle-less users — the
-    portal falls back to the raw editedBy string. Public identifiers only (#617).
+    What is known about the editor when no User id is available (#620):
+    'github:<login>' / 'email:<addr>' / 'user:<id>' identity strings, or
+    'app:<App.id>' for App-key principals. (Legacy free-form #88 reasons /
+    commit messages that squatted in editedBy were migrated to revLabel.)
+    """
+    editedByInfo: String
+    """
+    The editor resolved to a user (handle + URN) — from editedBy as a User id,
+    the createdBy fallback (#619), or an identity-string form of editedByInfo
+    ('github:<login>' resolves via the user's linked GitHub username). Null when
+    nothing resolves — the portal falls back to the raw strings. Public
+    identifiers only (#617).
     """
     editedByUser: NodeVersionEditor
+    "User-settable label for this version (#620, 500-char cap) — set via updateNodeVersion; also captures the 'reason' supplied with the edit that took this snapshot (legacy reasons were migrated here)."
+    revLabel: String
+    """
+    Which node fields the edit that took this snapshot changed, e.g.
+    ["abstract","tags"] (#620). The snapshot is the PRE-edit state, so this
+    describes the delta between this snapshot and the state that replaced it.
+    Empty for legacy rows.
+    """
+    changes: [String!]!
+    "Reserved (#620): User id that approved this version. No write surface yet."
+    approvedBy: String
+    "approvedBy resolved to public identifiers (handle + URN), like editedByUser."
+    approvedByUser: NodeVersionEditor
     createdAt: String!
   }
 
@@ -1530,9 +1565,10 @@ export const typeDefs = `#graphql
     edges: [NodeEdgeInput!]
     """
     Why this change was made — recorded on the version-history snapshot
-    (NodeVersion.editedBy), mirroring hadron_update_node's reason arg so CLI
-    and MCP edits leave equally-traceable history. Only an update snapshots a
-    prior version, so reason has no effect on a pure create.
+    (NodeVersion.revLabel, #620; historically it squatted in editedBy),
+    mirroring hadron_update_node's reason arg so CLI and MCP edits leave
+    equally-traceable history. Only an update snapshots a prior version, so
+    reason has no effect on a pure create.
     """
     reason: String
   }
@@ -1614,8 +1650,9 @@ export const typeDefs = `#graphql
     edges: [NodeEdgeInput!]
     """
     Why this change was made — recorded on the version-history snapshot
-    (NodeVersion.editedBy), mirroring hadron_update_node's reason arg so CLI
-    and MCP edits leave equally-traceable history.
+    (NodeVersion.revLabel, #620; historically it squatted in editedBy),
+    mirroring hadron_update_node's reason arg so CLI and MCP edits leave
+    equally-traceable history.
     """
     reason: String
   }
@@ -2021,7 +2058,8 @@ export const typeDefs = `#graphql
     dryRun: Boolean = false
     """
     Why this change was made — recorded on each changed node's version-history
-    snapshot (NodeVersion.editedBy), mirroring hadron_update_node's reason arg.
+    snapshot (NodeVersion.revLabel, #620; historically it squatted in
+    editedBy), mirroring hadron_update_node's reason arg.
     """
     reason: String
   }
@@ -3083,6 +3121,14 @@ export const typeDefs = `#graphql
     # Delete a single node-version snapshot by id (#617). Auth: the node's memory
     # write access (as restoreNodeVersion). Throws NOT_FOUND for an unknown id.
     deleteNodeVersion(versionId: ID!): Boolean!
+
+    # Set or clear the user-facing label on a version snapshot (#620,
+    # NodeVersion.revLabel, 500-char cap). Omit revLabel to preserve; pass
+    # null to clear. Auth: the node's memory write access (as
+    # deleteNodeVersion) PLUS the nodeVersion query's read gates — it returns
+    # the full snapshot, so a soft-deleted node or a snapshot captured in an
+    # unreadable memory answers the same NOT_FOUND as an unknown id.
+    updateNodeVersion(versionId: ID!, revLabel: String): NodeVersion!
 
     # Delete ALL NodeVersion rows for a node, returning the count deleted (#617).
     # 'nodeRef' is the node's PK or fully-qualified URN. Auth: the node's memory
