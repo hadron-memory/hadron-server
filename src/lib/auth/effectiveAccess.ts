@@ -45,8 +45,6 @@ import {
   FULL,
   type GrantWithCaps as InternalGrant,
   type Subject,
-  type ResourceKind,
-  type AccessSource,
   type EffectiveAccessResult,
 } from '@hadron-memory/access-control';
 import { composeNodeUrn } from '../urn.js';
