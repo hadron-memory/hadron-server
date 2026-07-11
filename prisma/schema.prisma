@@ -1778,7 +1778,7 @@ model NodeRevision {
   /// abstract edits.
   abstract           String?
   /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
-  /// version capture. Restored verbatim by `restoreNodeRevision`;
+  /// revision capture. Restored verbatim by `restoreNodeRevision`;
   /// legacy revisions (pre-spec) have NULL here, which short-circuits
   /// the staleness check on the live row after restore (no false
   /// positives).
@@ -1814,7 +1814,7 @@ model NodeRevision {
   /// / "user:<id>" (AuthContext.clientId) and "app:<App.id>" (App-key
   /// principals).
   editedByInfo       String?  @map("edited_by_info")
-  /// #620: user-settable label for this version (updateNodeRevision
+  /// #620: user-settable label for this revision (updateNodeRevision
   /// mutation; REV_LABEL_MAX_LEN cap). Also captures the #88 `reason`
   /// arg at snapshot time — the edit rationale that previously squatted
   /// in `editedBy` (legacy reasons were migrated here).
