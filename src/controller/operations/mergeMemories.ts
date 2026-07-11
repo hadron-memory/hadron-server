@@ -2,6 +2,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
+  createNodeRevision,
   type SnapshotEditor,
 } from '../../lib/nodeRevisionSnapshot.js';
 import {
@@ -220,11 +221,12 @@ export async function mergeMemoryGraph(
           if (e instanceof NodeAbstractTooLongError) (e as AbstractTooLongAtLoc).loc = tgt.loc;
           throw e;
         }
-        await tx.nodeRevision.create({
-          data: buildNodeRevisionSnapshot(tgt, editor, {
+        await createNodeRevision(
+          tx,
+          buildNodeRevisionSnapshot(tgt, editor, {
             changes: Object.keys(merged.changed),
           }),
-        });
+        );
         if (Object.keys(merged.changed).length > 0) {
           const writeData: Record<string, unknown> = { ...merged.changed, updatedBy: actorId };
           if (merged.abstractChanged) {

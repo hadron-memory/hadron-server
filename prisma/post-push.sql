@@ -129,6 +129,13 @@ ALTER TABLE memories
   ADD CONSTRAINT chk_memory_chunk_overlap_valid
   CHECK (chunk_overlap IS NULL OR (chunk_overlap >= 0 AND (chunk_tokens IS NULL OR chunk_overlap < chunk_tokens)));
 
+-- #621: per-node revision-history cap must be >= 1.
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_max_rev_count_positive;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_max_rev_count_positive
+  CHECK (max_rev_count >= 1);
+
 -- ─── 043-slack-integration ──────────────────────────────────────────────
 -- One LIVE Slack connection per (org, workspace): PARTIAL unique so a
 -- soft-deleted row never blocks re-registration (Prisma can't model the

@@ -3,6 +3,7 @@ import { generateId } from '../../../lib/id.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
+  createNodeRevision,
   editorFromAuth,
   diffNodeChanges,
   restorableNodeFields,
@@ -312,12 +313,13 @@ export async function writeNodeCore(
         if (input.tags !== undefined) {
           supplied.tags = serializeTags(input.tags ?? []);
         }
-        await ctx.db.nodeRevision.create({
-          data: buildNodeRevisionSnapshot(existing, editorFromAuth(ctx), {
+        await createNodeRevision(
+          ctx.db,
+          buildNodeRevisionSnapshot(existing, editorFromAuth(ctx), {
             revLabel: input.reason,
             changes: diffNodeChanges(existing, supplied),
           }),
-        });
+        );
       }
 
       // Tags partial-update semantics (hadron-cli#37). A create always
@@ -1103,12 +1105,13 @@ export const nodeMutations = {
           const raw = p.raw;
           // #88: the bulk-edit rationale rides in revLabel (#620); `changes`
           // is exactly the field set the replace pass rewrote on this node.
-          await tx.nodeRevision.create({
-            data: buildNodeRevisionSnapshot(raw, editorFromAuth(ctx), {
+          await createNodeRevision(
+            tx,
+            buildNodeRevisionSnapshot(raw, editorFromAuth(ctx), {
               revLabel: input.reason,
               changes: Object.keys(p.changed),
             }),
-          });
+          );
 
           const data: Record<string, unknown> = {};
           // Encrypt content/abstract for encrypted memories before persisting.
@@ -1540,11 +1543,12 @@ export const nodeMutations = {
         // The snapshot belongs to the SOURCE memory (#602): the node is about
         // to leave it, and this snapshot's content lived there (the builder
         // stamps source.memoryId).
-        await tx.nodeRevision.create({
-          data: buildNodeRevisionSnapshot(source, editorFromAuth(ctx), {
+        await createNodeRevision(
+          tx,
+          buildNodeRevisionSnapshot(source, editorFromAuth(ctx), {
             changes: diffNodeChanges(source, { loc: destLoc, memoryId: destMemoryId }),
           }),
-        });
+        );
         // Move BY ID (stable across moves; keeps every edge reference intact).
         return tx.node.update({
           where: { id: source.id },
@@ -1833,13 +1837,14 @@ export const nodeMutations = {
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       await ctx.db.$transaction(async (tx) => {
-        await tx.nodeRevision.create({
-          data: buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
+        await createNodeRevision(
+          tx,
+          buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
             // Plaintext field names the merge folds into the target — the
             // node columns the update below writes.
             changes: Object.keys(changed),
           }),
-        });
+        );
 
         if (Object.keys(changed).length > 0) {
           await tx.node.update({ where: { id: target.id }, data: writeData });
@@ -2123,13 +2128,11 @@ export const nodeMutations = {
           // restore is about to rewrite; restorableNodeFields is the single
           // home for the restored field set + the legacy sentinel, shared
           // with the write-back below.
-          await tx.nodeRevision.create({
-            data: {
-              id: generateId(),
-              ...buildNodeRevisionSnapshot(node, editorFromAuth(ctx), {
-                changes: diffNodeChanges(node, restoreFields),
-              }),
-            },
+          await createNodeRevision(tx, {
+            id: generateId(),
+            ...buildNodeRevisionSnapshot(node, editorFromAuth(ctx), {
+              changes: diffNodeChanges(node, restoreFields),
+            }),
           });
         }
 

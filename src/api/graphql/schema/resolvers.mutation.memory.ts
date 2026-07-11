@@ -237,6 +237,7 @@ export const memoryMutations = {
         memoryClass,
         vectorIndexEnabled,
         embeddingSource,
+        maxRevCount,
       }: {
         orgId: string; name: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
@@ -248,6 +249,8 @@ export const memoryMutations = {
         // guards below coalesce it to the class default).
         vectorIndexEnabled?: boolean | null;
         embeddingSource?: 'abstract' | 'contentChunks' | 'both' | null;
+        // #621 — per-node revision cap; omitted ⇒ column default (10).
+        maxRevCount?: number | null;
         // GraphQL passes the full MemoryClass enum; the resolver
         // allowlists the user-creatable values below. Spec 034 added
         // `personal`/`private` as owner-only, user-creatable classes
@@ -259,6 +262,15 @@ export const memoryMutations = {
     ) => {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+
+      // #621 — friendly guard mirroring chk_memory_max_rev_count_positive.
+      // Explicit `null` is rejected (there is no "null" cap — omit the arg to
+      // get the default); only `undefined` (omitted) or a concrete >= 1 passes.
+      if (maxRevCount === null || (maxRevCount !== undefined && maxRevCount < 1)) {
+        throw new GraphQLError('maxRevCount must be at least 1.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
 
       // 023-app-shape US4 + 034-memory-class-access: user-creatable classes are
       // `knowledge` (default), `group`, and the owner-owned `personal`/`private`
@@ -405,6 +417,8 @@ export const memoryMutations = {
               : requestedClass === 'knowledge'
                 ? { embeddingSource: 'contentChunks' as const }
                 : {}),
+            // #621 — per-node revision cap; omitted/null ⇒ column default (10).
+            ...(maxRevCount != null ? { maxRevCount } : {}),
             // Owner-owned personal/private set the creator as the owner
             // (free-standing: app_id / userMemoryOfAgentId stay NULL). All other
             // classes MUST have userId NULL (chk_personal_visibility_user /
@@ -467,6 +481,7 @@ export const memoryMutations = {
         chunkTokens,
         chunkOverlap,
         forceFixedSize,
+        maxRevCount,
       }: {
         id: string; name?: string; urn?: string; organizationId?: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
@@ -479,6 +494,7 @@ export const memoryMutations = {
         chunkTokens?: number | null;
         chunkOverlap?: number | null;
         forceFixedSize?: boolean;
+        maxRevCount?: number | null;
       },
       ctx: Context,
     ) => {
@@ -487,6 +503,14 @@ export const memoryMutations = {
       // If transferring to a new org, require ADMIN on the target org too
       if (newOrgId && newOrgId !== memory.organizationId) {
         await requireOrgRole(ctx, newOrgId, 'ADMIN');
+      }
+      // #621 — friendly guard mirroring chk_memory_max_rev_count_positive.
+      // The column is NOT NULL, so explicit `null` is rejected (omit the arg to
+      // leave the cap unchanged); only `undefined` (omitted) or >= 1 passes.
+      if (maxRevCount === null || (maxRevCount !== undefined && maxRevCount < 1)) {
+        throw new GraphQLError('maxRevCount must be at least 1.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
       }
       // Rebuild URN if slug or org changed
       const effectiveOrgId = newOrgId ?? memory.organizationId;
@@ -610,6 +634,9 @@ export const memoryMutations = {
           ...(chunkTokens !== undefined ? { chunkTokens } : {}),
           ...(chunkOverlap !== undefined ? { chunkOverlap } : {}),
           ...(forceFixedSize !== undefined ? { forceFixedSize } : {}),
+          // #621 — per-node revision cap. `null` is guarded out above (column
+          // is NOT NULL); only a concrete >= 1 value is written.
+          ...(maxRevCount != null ? { maxRevCount } : {}),
         },
         include: MEMORY_INCLUDE,
       });

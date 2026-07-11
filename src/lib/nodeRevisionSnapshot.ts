@@ -18,6 +18,7 @@
  */
 
 import { Prisma } from '../generated/prisma/index.js';
+import type { PrismaClient } from '../generated/prisma/index.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -124,6 +125,78 @@ export function buildNodeRevisionSnapshot(
     changes: opts?.changes ?? [],
     createdBy: editor.userId ?? editor.info ?? null,
   };
+}
+
+/**
+ * Column default for `Memory.maxRevCount` (#621) — the per-node cap on
+ * retained NodeRevision rows. Also the fallback when the snapshot's memory row
+ * can't be read (defensive; every snapshot stamps a real memoryId).
+ */
+export const DEFAULT_MAX_REV_COUNT = 10;
+
+/**
+ * Create a NodeRevision and prune the node's history to `Memory.maxRevCount`
+ * (#621). Every revision-write site goes through here (not a bare
+ * `nodeRevision.create`) so the cap is enforced in ONE place. After the insert,
+ * any revisions beyond the newest `maxRevCount` for this node are deleted.
+ *
+ * `db` may be the base client or a transaction client (both satisfy the Pick).
+ * The cap is read from the snapshot's memory — the memory the node lived in at
+ * capture (#602); for a move that's the source memory, which is correct (the
+ * pre-move history belonged there).
+ */
+export async function createNodeRevision(
+  db: Pick<PrismaClient, 'nodeRevision' | 'memory'>,
+  data: Prisma.NodeRevisionUncheckedCreateInput,
+): Promise<void> {
+  await db.nodeRevision.create({ data });
+
+  // The cap is per (node, memory). A node MOVED across memories keeps its id
+  // and carries revisions from each memory it lived in (moveNode snapshots the
+  // SOURCE memory); maxRevCount lives on Memory. So this memory's cap must only
+  // ever prune ITS OWN snapshots of the node — never another memory's retained
+  // history (#621 review, Codex P2). A legacy NULL-memory snapshot has nothing
+  // to scope to, so we skip pruning for it.
+  const memoryId = data.memoryId;
+  if (!memoryId) return;
+
+  const max =
+    (
+      await db.memory.findUnique({
+        where: { id: memoryId },
+        select: { maxRevCount: true },
+      })
+    )?.maxRevCount ?? DEFAULT_MAX_REV_COUNT;
+  // Defensive: chk_memory_max_rev_count_positive enforces >= 1 at the DB.
+  if (max < 1) return;
+
+  // Cutoff = the `max`-th newest revision of this node in this memory
+  // (createdAt desc, id as a deterministic tiebreak for same-ms rows). A single
+  // range delete then removes everything older, so the prune stays O(1) in
+  // query parameters even against a huge pre-cap / cap-lowered history — no
+  // `id IN (…thousands…)` list that could blow the parameter limit (#621
+  // review, Copilot).
+  const cutoff = (
+    await db.nodeRevision.findMany({
+      where: { nodeId: data.nodeId, memoryId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: max - 1,
+      take: 1,
+      select: { id: true, createdAt: true },
+    })
+  )[0];
+  if (!cutoff) return; // fewer than `max` rows for this memory → nothing to prune
+
+  await db.nodeRevision.deleteMany({
+    where: {
+      nodeId: data.nodeId,
+      memoryId,
+      OR: [
+        { createdAt: { lt: cutoff.createdAt } },
+        { createdAt: cutoff.createdAt, id: { lt: cutoff.id } },
+      ],
+    },
+  });
 }
 
 /**
