@@ -405,6 +405,8 @@ model User {
   authHandoffCodes          AuthHandoffCode[]
   // #620: revisions this user approved (NodeRevision.approvedBy).
   approvedNodeRevisions      NodeRevision[]              @relation("NodeRevisionApprover")
+  // 046-usage-metering: billing attribution back-relation.
+  usageEvents               UsageEvent[]
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -469,6 +471,9 @@ model Organization {
   invitations         UserInvitation[]     @relation("OrgInvitations")
   exchangeConnections ExchangeConnection[]
   slackConnections    SlackConnection[]
+  // 046-usage-metering: billing back-relations.
+  usageEvents         UsageEvent[]
+  creditLedgerEntries CreditLedgerEntry[]
   apps                App[]
   agentOrgGrants      AgentOrgGrant[]
   aiServiceConfigs    AiServiceConfig[]
@@ -1188,6 +1193,24 @@ model UsageEvent {
   tokensIn   Int?      @map("tokens_in")
   /// Output tokens generated.
   tokensOut  Int?      @map("tokens_out")
+  // ── 046-usage-metering (billing Phase 0) ──────────────────────────────
+  /// The on-behalf-of user (billing attribution). Nullable — pure-App
+  /// service runs have no user. Distinct from the audit `createdBy` string.
+  userId         String? @map("user_id")
+  /// The billable organization. Set on every metered event so ledger
+  /// attribution never needs a join through App.
+  organizationId String? @map("organization_id")
+  /// LLM provider that served the call — `model` alone is ambiguous
+  /// across providers (e.g. claude via anthropic vs bedrock).
+  provider       String?
+  /// AiConfigOwnerType of the API key that served the call
+  /// (HADRON_SERVER | ORGANIZATION | APP | AGENT). Only HADRON_SERVER
+  /// spend is platform-paid and thus debitable; BYOK is observability-only.
+  keyOwnerType   String? @map("key_owner_type")
+  /// Provider cost snapshot in micro-cents (1e-8 USD), computed from the
+  /// ModelPrice row effective at event time. NULL = no price known (or the
+  /// event carries no tokens). Never recomputed — prices change (FR-003).
+  costMicroCents BigInt? @map("cost_micro_cents")
   createdAt  DateTime  @default(now()) @map("created_at")
   createdBy  String?   @map("created_by")
   updatedAt  DateTime? @updatedAt @map("updated_at")
@@ -1195,15 +1218,19 @@ model UsageEvent {
   deletedAt  DateTime? @map("deleted_at")
   deletedBy  String?   @map("deleted_by")
 
-  node    Node?    @relation(fields: [nodeId], references: [id], onDelete: SetNull)
-  session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
-  app     App?     @relation(fields: [appId], references: [id], onDelete: SetNull)
+  node         Node?         @relation(fields: [nodeId], references: [id], onDelete: SetNull)
+  session      Session?      @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  app          App?          @relation(fields: [appId], references: [id], onDelete: SetNull)
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
 
   @@index([nodeLoc])
   @@index([type])
   @@index([createdAt])
   @@index([sessionId])
   @@index([appId])
+  @@index([userId])
+  @@index([organizationId, createdAt])
   @@map("usage_events")
 }
 
@@ -2943,6 +2970,63 @@ model ActionTicket {
 
   @@index([organizationId, action, consumedAt])
   @@map("action_tickets")
+}
+
+/// Provider price row for one (provider, model) pair — the rate source for
+/// UsageEvent.costMicroCents (spec 046 FR-002/FR-003). Effective-dated:
+/// lookup takes the latest `effectiveAt <= eventTime`; price changes append
+/// a new row, never mutate an old one (historical costs stay auditable).
+/// Prices are in micro-cents (1e-8 USD) per MILLION tokens — e.g. $3/MTok
+/// input = 30_000_000. Operator-managed via `setModelPrice` (platform
+/// admin); an absent pair means "no cost computed", never a blocked call.
+/// String columns, no enums — validation lives in src/lib/metering.
+model ModelPrice {
+  id                       String    @id
+  provider                 String
+  model                    String
+  /// Micro-cents per 1M input tokens.
+  inputMicroCentsPerMTok   BigInt    @map("input_micro_cents_per_mtok")
+  /// Micro-cents per 1M output tokens.
+  outputMicroCentsPerMTok  BigInt    @map("output_micro_cents_per_mtok")
+  /// Row applies to events at/after this instant (until a later row).
+  effectiveAt              DateTime  @map("effective_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  createdBy                String?   @map("created_by")
+
+  @@unique([provider, model, effectiveAt])
+  @@index([provider, model])
+  @@map("model_prices")
+}
+
+/// Append-only monetary ledger for an organization's AI credits (spec 046
+/// FR-005). Signed amounts: grants +, debits −, adjustments ±; balance is
+/// SUM(amountMicroCents). Rows are NEVER mutated, deleted, or reset — this
+/// is the durable billing record (unlike QuotaCounter's daily counters).
+/// `expiresAt` on grants is stored policy only in Phase 0 (jurisdictions
+/// restrict prepaid expiry — see the spec's legal notes); FIFO expiry
+/// enforcement is a later phase. Automatic usage debits are gated by
+/// BILLING_DEBIT_ENABLED and apply only to platform-key spend (FR-004/006).
+model CreditLedgerEntry {
+  id              String    @id
+  organizationId  String    @map("organization_id")
+  /// 'grant' | 'debit' | 'adjustment' (validated in src/lib/metering).
+  kind            String
+  /// Signed micro-cents (1e-8 USD). Grants positive, debits negative.
+  amountMicroCents BigInt   @map("amount_micro_cents")
+  /// Grant expiry policy field (no enforcement in Phase 0).
+  expiresAt       DateTime? @map("expires_at")
+  /// Provenance: e.g. ('usage-event', <UsageEvent.id>), ('admin', <userId>),
+  /// later ('payment', <processor ref>).
+  sourceType      String?   @map("source_type")
+  sourceId        String?   @map("source_id")
+  note            String?
+  createdAt       DateTime  @default(now()) @map("created_at")
+  createdBy       String?   @map("created_by")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@map("credit_ledger_entries")
 }
 
 /// Webhook trigger (D-2026-05-02, spec 040 plan §8) — per-kind table like

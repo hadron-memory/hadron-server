@@ -24,6 +24,7 @@ import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
+import { recordLlmUsage } from '../lib/metering/index.js';
 import {
   generateText,
   LlmInvocationError,
@@ -778,20 +779,21 @@ async function executeAppRunInner(
       await recordQuotaUsage(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
       await recordQuotaUsage(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
       // One usage event per hop — a failed flow still shows what it spent.
-      await db.usageEvent
-        .create({
-          data: {
-            id: generateId(),
-            type: 'app-run',
-            nodeLoc: cur,
-            appId: run.appId,
-            createdBy: run.userId ?? null,
-            model: result.model,
-            tokensIn: result.tokensIn,
-            tokensOut: result.tokensOut,
-          },
-        })
-        .catch(() => {});
+      // Spec 046: recordLlmUsage enriches with attribution (user + org),
+      // the cost snapshot, and BYOK classification; it is throw-safe.
+      await recordLlmUsage(db, {
+        type: 'app-run',
+        nodeLoc: cur,
+        appId: run.appId,
+        userId: run.userId ?? null,
+        organizationId: run.organizationId,
+        provider: result.provider,
+        model: result.model,
+        tokensIn: result.tokensIn,
+        tokensOut: result.tokensOut,
+        keyOwnerType: resolved.ownerType,
+        createdBy: run.userId ?? null,
+      });
 
       if (Date.now() >= deadline) {
         await db.appRun.updateMany({

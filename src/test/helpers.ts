@@ -27,6 +27,9 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.aiServiceConfig.deleteMany();
   await db.hadronServer.deleteMany();
   await db.usageEvent.deleteMany();
+  // Spec 046 — usage metering (prices are FK-free; ledger FKs org only).
+  await db.modelPrice.deleteMany();
+  await db.creditLedgerEntry.deleteMany();
   // Spec 043 — Slack integration (receipts have no FK; connections FK org + app).
   await db.slackEventReceipt.deleteMany();
   await db.slackConnection.deleteMany();

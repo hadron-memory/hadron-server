@@ -21,6 +21,7 @@ import {
   deleteNodeChunkVectors,
 } from '../services/embedding/vectors.js';
 import { chunkNode } from '../lib/chunking.js';
+import { recordLlmUsage } from '../lib/metering/index.js';
 
 export interface EmbedPlaintext {
   content?: string | null;
@@ -52,6 +53,7 @@ export async function embedNode(
     where: { id: nodeId },
     select: {
       id: true,
+      loc: true,
       abstract: true,
       content: true,
       deletedAt: true,
@@ -60,6 +62,8 @@ export async function embedNode(
       memory: {
         select: {
           id: true,
+          // 046-usage-metering: billable org for the embedding usage event.
+          organizationId: true,
           vectorIndexEnabled: true,
           embeddingSource: true,
           isEncrypted: true,
@@ -87,6 +91,11 @@ export async function embedNode(
   // 033 US2 — content-chunks ships now (alongside `both`).
   const wantChunks =
     memory.embeddingSource === 'contentChunks' || memory.embeddingSource === 'both';
+
+  // 046-usage-metering (FR-007): what this call actually sent to the
+  // embedding endpoint, for the usage event written on success.
+  let embeddedChars = 0;
+  let usedClient: EmbeddingClient | null = null;
 
   try {
     if (wantAbstract) {
@@ -120,6 +129,8 @@ export async function embedNode(
         if (!vec) {
           throw new Error('Embedding client returned no vector.');
         }
+        embeddedChars += abstractText.length;
+        usedClient = c;
         // Latest-wins guard on the UPSERT (not just the clear): re-check
         // `embeddingPendingAt` in the DB right before writing. PR-219
         // review (Gemini high) — without this, two concurrent
@@ -176,6 +187,8 @@ export async function embedNode(
               `Embedding client returned ${vectors.length} vectors for ${chunks.length} chunks.`,
             );
           }
+          embeddedChars += chunks.reduce((sum, ch) => sum + ch.text.length, 0);
+          usedClient = c;
           // Same latest-wins guard before the upsert.
           const fresh = await db.node.findUnique({
             where: { id: nodeId },
@@ -207,6 +220,24 @@ export async function embedNode(
     // Latest-wins: only clear the marker if no newer write re-stamped it while
     // we were embedding (optimistic guard on the captured embeddingPendingAt).
     const cleared = await clearMarkers(db, nodeId, capturedPendingAt);
+    if (cleared && usedClient && embeddedChars > 0) {
+      // 046-usage-metering (FR-007): one event per embedded node. tokensIn is
+      // the standard ~4-chars/token ESTIMATE (the endpoint returns no usage);
+      // exactness isn't required — this is observability parity, and the
+      // (provider, model) pair is typically unpriced (infra-shaped cost).
+      // Embedding infra is host-configured (EMBEDDING_* env) ⇒ platform key.
+      await recordLlmUsage(db, {
+        type: 'embedding',
+        nodeLoc: node.loc,
+        nodeId,
+        organizationId: memory.organizationId,
+        provider: usedClient.provider,
+        model: usedClient.model,
+        tokensIn: Math.ceil(embeddedChars / 4),
+        tokensOut: 0,
+        keyOwnerType: 'HADRON_SERVER',
+      });
+    }
     return cleared ? 'embedded' : 'skipped';
   } catch (err) {
     // Same latest-wins guard on the failure path (PR-219 review, Gemini high):

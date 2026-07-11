@@ -547,6 +547,16 @@ export const typeDefs = `#graphql
     model: String
     tokensIn: Int
     tokensOut: Int
+    # 046-usage-metering: billing attribution + cost snapshot.
+    userId: String
+    organizationId: String
+    provider: String
+    # Owner level of the API key that served the call
+    # (HADRON_SERVER means platform-paid; anything else is BYOK).
+    keyOwnerType: String
+    # Provider cost snapshot in micro-cents (1e-8 USD), as a base-10
+    # integer string. Null when the (provider, model) pair is unpriced.
+    costMicroCents: String
     createdAt: String!
   }
 
@@ -559,6 +569,67 @@ export const typeDefs = `#graphql
   type NodeRevisionEditor {
     handle: String
     urn: String
+  }
+
+  # 046-usage-metering: effective-dated provider rate row. Prices are
+  # micro-cents (1e-8 USD) per MILLION tokens, as base-10 integer strings.
+  type ModelPrice {
+    id: ID!
+    provider: String!
+    model: String!
+    inputMicroCentsPerMTok: String!
+    outputMicroCentsPerMTok: String!
+    effectiveAt: String!
+    createdAt: String!
+    createdBy: String
+  }
+
+  type ModelPriceList {
+    items: [ModelPrice!]!
+    total: Int!
+  }
+
+  # 046-usage-metering: append-only org credit ledger row. Signed
+  # micro-cents as a base-10 integer string (grants +, debits -).
+  type CreditLedgerEntry {
+    id: ID!
+    organizationId: ID!
+    kind: String!
+    amountMicroCents: String!
+    expiresAt: String
+    sourceType: String
+    sourceId: String
+    note: String
+    createdAt: String!
+    createdBy: String
+  }
+
+  type CreditLedgerEntryList {
+    items: [CreditLedgerEntry!]!
+    total: Int!
+  }
+
+  type CreditBalance {
+    organizationId: ID!
+    balanceMicroCents: String!
+  }
+
+  input SetModelPriceInput {
+    provider: String!
+    model: String!
+    inputMicroCentsPerMTok: String!
+    outputMicroCentsPerMTok: String!
+    # Defaults to now. Appends a new effective-dated row - never mutates.
+    effectiveAt: String
+  }
+
+  input GrantCreditsInput {
+    orgRef: String!
+    # Positive micro-cents, base-10 integer string.
+    amountMicroCents: String!
+    # Grant expiry policy field (no enforcement in Phase 0).
+    expiresAt: String
+    note: String
   }
 
   type NodeRevision {
@@ -3049,6 +3120,14 @@ export const typeDefs = `#graphql
     quotaCounters(orgRef: String!, appRef: String): [QuotaCounter!]!
     "Explain the standing policy chain (org / user / app) for one action - which layer denies it (#510, cor:acl:040:02). Org-ADMIN on the app's org."
     effectiveActionPolicy(appRef: String!, action: String!, userRef: String): EffectiveActionPolicy!
+    "One provider rate row by id (spec 046). Authenticated read - rates are not a secret."
+    modelPrice(ref: ID!): ModelPrice
+    "Provider rate rows, newest effective first, optional provider/model filter (spec 046). Authenticated read."
+    modelPrices(provider: String, model: String, limit: Int, offset: Int): ModelPriceList!
+    "One org's append-only credit-ledger page, newest first (spec 046). Org-ADMIN."
+    creditLedgerEntries(orgRef: String!, limit: Int, offset: Int): CreditLedgerEntryList!
+    "One org's credit balance - SUM over the append-only ledger (spec 046). Org-ADMIN."
+    creditBalance(orgRef: String!): CreditBalance!
   }
 
   """
@@ -3254,6 +3333,10 @@ export const typeDefs = `#graphql
     mintActionTickets(input: MintActionTicketsInput!): Int!
     "Set the stored (enforced) quota limit for a scope x action (#510) - the operator dial that previously required psql. Org-ADMIN."
     setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
+    "Append an effective-dated provider rate row (spec 046). PLATFORM ADMIN - org admins must never set the prices they are billed at."
+    setModelPrice(input: SetModelPriceInput!): ModelPrice!
+    "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN ONLY (self-grant risk); processor top-ups land here later."
+    grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!
     "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."
     updateMyPolicy(policy: JSON): User!
 
