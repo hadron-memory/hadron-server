@@ -7,7 +7,9 @@
  *   - a memory-read gate (previously ABSENT — any authenticated caller could
  *     read any tenant's node version history). A node whose memory the caller
  *     can't read returns [], and an unknown ref returns [] too (no existence
- *     disclosure), mirroring memoryUsageSummary.
+ *     disclosure), mirroring memoryUsageSummary. Per-SNAPSHOT gating closes the
+ *     moved-node leak (Codex P1): a node moved across memories keeps its id, so
+ *     its history can hold snapshots captured in a memory the caller can't read.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -39,12 +41,12 @@ beforeEach(async () => {
   node = await db.node.create({
     data: { id: generateId(), memoryId: memory.id, loc: 'guide', name: 'Guide' },
   });
-  // Three snapshots for this node.
+  // Three snapshots for this node, all captured while it lived in `memory`.
   await db.nodeVersion.createMany({
     data: [
-      { id: generateId(), nodeId: node.id, loc: 'guide', name: 'v1' },
-      { id: generateId(), nodeId: node.id, loc: 'guide', name: 'v2' },
-      { id: generateId(), nodeId: node.id, loc: 'guide', name: 'v3' },
+      { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v1' },
+      { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v2' },
+      { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v3' },
     ],
   });
 
@@ -85,6 +87,17 @@ describe('nodeVersions', () => {
     );
     expect(result).toEqual([]);
   });
+
+  it('includes a legacy NULL-memoryId snapshot (falls back to the current memory)', async () => {
+    await db.nodeVersion.create({
+      data: { id: generateId(), nodeId: node.id, memoryId: null, loc: 'guide', name: 'legacy' },
+    });
+    const result = await resolvers.Query.nodeVersions(
+      null, { nodeRef: node.id }, { db, userId: userMember.id, roles: ['READER'] } as Context,
+    );
+    // 3 stamped-in-`memory` + the legacy NULL row = 4 (member can read `memory`).
+    expect(result).toHaveLength(4);
+  });
 });
 
 describe('nodeVersions access control (#602)', () => {
@@ -106,5 +119,48 @@ describe('nodeVersions access control (#602)', () => {
     await expect(
       resolvers.Query.nodeVersions(null, { nodeRef: node.id }, { db, roles: [] } as Context),
     ).rejects.toThrow('Forbidden');
+  });
+
+  // Codex P1: a node moved from a restricted memory into a readable one keeps
+  // its stable id, so its pre-move snapshots would leak without per-snapshot
+  // gating. The reader can read the node's CURRENT memory but not the memory a
+  // historical snapshot was captured in.
+  it('drops snapshots captured in a memory the caller cannot read (moved-node leak)', async () => {
+    const otherOrg = await db.organization.create({
+      data: { id: generateId(), name: 'nv-other', urn: 'nv-other' },
+    });
+    const restrictedMem = await db.memory.create({
+      data: { id: generateId(), organizationId: otherOrg.id, urn: 'nv-other:secret', name: 'secret', class: 'knowledge' },
+    });
+    // A snapshot for `node` (current memory = `memory`) captured while it lived
+    // in the restricted memory of another org.
+    await db.nodeVersion.create({
+      data: { id: generateId(), nodeId: node.id, memoryId: restrictedMem.id, loc: 'guide', name: 'secret-era' },
+    });
+
+    // userMember can read `memory` but is NOT a member of otherOrg.
+    const result = await resolvers.Query.nodeVersions(
+      null, { nodeRef: node.id }, { db, userId: userMember.id, roles: ['READER'] } as Context,
+    );
+    // Only the 3 snapshots from the readable `memory` — the restricted one is dropped.
+    expect(result).toHaveLength(3);
+    expect(result.every((v) => v.memoryId !== restrictedMem.id)).toBe(true);
+  });
+
+  it('moveNode stamps the SOURCE memory on the pre-move snapshot', async () => {
+    const dest = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:dest`, name: 'dest', class: 'knowledge' },
+    });
+    const mover = await db.node.create({
+      data: { id: generateId(), memoryId: memory.id, loc: 'movable', name: 'Movable' },
+    });
+    await resolvers.Mutation.moveNode(
+      null, { sourceRef: mover.id, targetMemoryRef: dest.id }, adminCtx(),
+    );
+    // Live node now lives in dest; the pre-move snapshot records the SOURCE memory.
+    const moved = await db.node.findUniqueOrThrow({ where: { id: mover.id } });
+    expect(moved.memoryId).toBe(dest.id);
+    const snap = await db.nodeVersion.findFirstOrThrow({ where: { nodeId: mover.id } });
+    expect(snap.memoryId).toBe(memory.id);
   });
 });

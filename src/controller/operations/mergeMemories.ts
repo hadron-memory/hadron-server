@@ -217,6 +217,7 @@ export async function mergeMemoryGraph(
         await tx.nodeVersion.create({
           data: {
             nodeId: tgt.id,
+            memoryId: tgt.memoryId,
             loc: tgt.loc,
             name: tgt.name,
             alias: tgt.alias,

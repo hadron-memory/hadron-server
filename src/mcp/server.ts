@@ -2872,6 +2872,7 @@ export function createMcpServerInstance(
         data: {
           id: generateId(),
           nodeId: existing.id,
+          memoryId: existing.memoryId,
           loc: existing.loc,
           name: existing.name,
           alias: existing.alias,
@@ -3467,6 +3468,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           data: {
             id: generateId(),
             nodeId: existing.id,
+            // Pre-move snapshot belongs to the SOURCE memory (#602).
+            memoryId: existing.memoryId,
             loc: existing.loc,
             name: existing.name,
             alias: existing.alias,

@@ -1715,6 +1715,14 @@ model EmailVerificationToken {
 model NodeVersion {
   id                 String   @id @default(cuid())
   nodeId             String   @map("node_id")
+  /// Memory this snapshot's content belonged to at capture time. A node
+  /// can be MOVED across memories (moveNode keeps the stable id), so gating
+  /// version history by the node's CURRENT memory alone would leak snapshots
+  /// captured while the node lived in a memory the caller can't read (#602 /
+  /// Codex P1). Every snapshot site stamps this; nullable only for legacy
+  /// rows predating the column (backfilled to the node's current memory —
+  /// the read gate treats NULL as the current memory).
+  memoryId           String?  @map("memory_id")
   loc                String
   name               String
   alias              String?
