@@ -767,8 +767,11 @@ model Asset {
   /// Optional; agent- or user-provided.
   description String?
   uploadedAt  DateTime        @default(now()) @map("uploaded_at")
-  /// fk to User.id — who uploaded.
-  uploadedBy  String          @map("uploaded_by")
+  /// fk to User.id — who uploaded. NULL when the asset was created
+  /// server-side by an app run with no on-behalf-of user
+  /// (hadron_store_file); the run id is recorded on the asset's
+  /// reference node and in the audit log.
+  uploadedBy  String?         @map("uploaded_by")
   /// Soft-delete marker. Janitor sweeps R2 object + hard-deletes
   /// after 24h.
   deletedAt   DateTime?       @map("deleted_at")

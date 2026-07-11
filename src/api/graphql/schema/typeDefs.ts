@@ -2328,7 +2328,8 @@ export const typeDefs = `#graphql
     scanStatus:  AssetScanStatus!
     description: String
     uploadedAt:  String!
-    uploadedBy:  ID!
+    """Uploader (User id). Null when the asset was created server-side by an app run (hadron_store_file)."""
+    uploadedBy:  ID
     deletedAt:   String
     """The asset's URN: <memory.urn>:assets:<asset.id>."""
     urn:         String!
