@@ -237,32 +237,92 @@ export class InvalidLedgerAmountError extends Error {
   }
 }
 
+/**
+ * A (sourceType, sourceId) replay whose org or amount DISAGREES with the
+ * stored grant. This is never normal webhook redelivery (a Stripe session's
+ * metadata is immutable) — it signals a caller bug or tampering, so it must
+ * surface loudly instead of silently returning the mismatched row
+ * (PR-624 review, Gemini high).
+ */
+export class IdempotencyConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'IdempotencyConflictError';
+  }
+}
+
 export interface GrantCreditsParams {
   organizationId: string;
   /** Positive micro-cents. */
   amountMicroCents: bigint;
   /** Policy field only in Phase 0 (FR-005). */
   expiresAt?: Date | null;
+  /**
+   * Idempotency + provenance pair: e.g. ('stripe-checkout', <session id>).
+   * (sourceType, sourceId) is UNIQUE across the ledger — re-granting the
+   * same pair returns the EXISTING row instead of double-crediting, which
+   * is what makes at-least-once payment webhooks safe (hadrontool-billing).
+   */
+  sourceType?: string | null;
+  sourceId?: string | null;
   note?: string | null;
   createdBy?: string | null;
 }
 
-/** Append a positive `grant` row. Throws InvalidLedgerAmountError on <= 0. */
+/**
+ * Append a positive `grant` row. Throws InvalidLedgerAmountError on <= 0
+ * and on a half-provided source pair (an orphan sourceId would silently
+ * lose the unique-constraint protection — PR-624 review, Gemini medium).
+ * Idempotent on (sourceType, sourceId): a duplicate pair returns the
+ * already-existing entry (never a second credit) — but ONLY when org and
+ * amount agree; a disagreeing replay throws IdempotencyConflictError.
+ * Rows without a source are unaffected (Postgres treats NULLs as distinct
+ * in unique indexes).
+ */
 export async function grantCredits(db: PrismaClient, params: GrantCreditsParams) {
   if (params.amountMicroCents <= 0n) {
     throw new InvalidLedgerAmountError('grantCredits requires a positive amountMicroCents.');
   }
-  return db.creditLedgerEntry.create({
-    data: {
-      id: generateId(),
-      organizationId: params.organizationId,
-      kind: 'grant',
-      amountMicroCents: params.amountMicroCents,
-      expiresAt: params.expiresAt ?? null,
-      note: params.note ?? null,
-      createdBy: params.createdBy ?? null,
-    },
-  });
+  if (!!params.sourceType !== !!params.sourceId) {
+    throw new InvalidLedgerAmountError('sourceType and sourceId must be provided together.');
+  }
+  try {
+    return await db.creditLedgerEntry.create({
+      data: {
+        id: generateId(),
+        organizationId: params.organizationId,
+        kind: 'grant',
+        amountMicroCents: params.amountMicroCents,
+        expiresAt: params.expiresAt ?? null,
+        sourceType: params.sourceType ?? null,
+        sourceId: params.sourceId ?? null,
+        note: params.note ?? null,
+        createdBy: params.createdBy ?? null,
+      },
+    });
+  } catch (err) {
+    // Unique (sourceType, sourceId) hit ⇒ this grant already landed
+    // (webhook redelivery). Idempotent success ONLY for a true replay —
+    // a mismatched org/amount is a conflict, never silently absorbed.
+    if ((err as { code?: string }).code === 'P2002' && params.sourceType && params.sourceId) {
+      const existing = await db.creditLedgerEntry.findFirstOrThrow({
+        where: { sourceType: params.sourceType, sourceId: params.sourceId },
+      });
+      if (
+        existing.organizationId !== params.organizationId ||
+        existing.amountMicroCents !== params.amountMicroCents
+      ) {
+        throw new IdempotencyConflictError(
+          `Grant (${params.sourceType}, ${params.sourceId}) already exists as ledger entry ` +
+            `${existing.id} with org ${existing.organizationId} / amount ` +
+            `${existing.amountMicroCents} — refusing the mismatched replay ` +
+            `(org ${params.organizationId} / amount ${params.amountMicroCents}).`,
+        );
+      }
+      return existing;
+    }
+    throw err;
+  }
 }
 
 export interface DebitCreditsParams {

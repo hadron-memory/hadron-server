@@ -19,6 +19,7 @@ import {
   debitCredits,
   getAiModelPrice,
   grantCredits,
+  IdempotencyConflictError,
   InvalidLedgerAmountError,
   recordLlmUsage,
 } from './index.js';
@@ -248,6 +249,87 @@ describe('credit ledger primitives', () => {
       ['grant', 500_000n],
       ['debit', -125_000n],
     ]);
+  });
+
+  it('is idempotent on (sourceType, sourceId) — webhook redelivery never double-credits', async () => {
+    const first = await grantCredits(db, {
+      organizationId: orgId,
+      amountMicroCents: 2_000_000_000n, // a $20 pack
+      sourceType: 'stripe-checkout',
+      sourceId: 'cs_test_123',
+    });
+    const replay = await grantCredits(db, {
+      organizationId: orgId,
+      amountMicroCents: 2_000_000_000n,
+      sourceType: 'stripe-checkout',
+      sourceId: 'cs_test_123',
+    });
+    expect(replay.id).toBe(first.id);
+    expect(await db.creditLedgerEntry.count()).toBe(1);
+    expect(await creditBalance(db, orgId)).toBe(2_000_000_000n);
+    // A different session id is a NEW grant.
+    await grantCredits(db, {
+      organizationId: orgId,
+      amountMicroCents: 2_000_000_000n,
+      sourceType: 'stripe-checkout',
+      sourceId: 'cs_test_456',
+    });
+    expect(await creditBalance(db, orgId)).toBe(4_000_000_000n);
+  });
+
+  it('source-less grants are never deduped against each other', async () => {
+    await grantCredits(db, { organizationId: orgId, amountMicroCents: 100n });
+    await grantCredits(db, { organizationId: orgId, amountMicroCents: 100n });
+    expect(await db.creditLedgerEntry.count()).toBe(2);
+  });
+
+  it('throws IdempotencyConflictError on a mismatched replay (never silently absorbs)', async () => {
+    await grantCredits(db, {
+      organizationId: orgId,
+      amountMicroCents: 2_000_000_000n,
+      sourceType: 'stripe-checkout',
+      sourceId: 'cs_conflict',
+    });
+    // Different amount, same source pair — a bug or tampering, not redelivery.
+    await expect(
+      grantCredits(db, {
+        organizationId: orgId,
+        amountMicroCents: 1_000_000_000n,
+        sourceType: 'stripe-checkout',
+        sourceId: 'cs_conflict',
+      }),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
+    // Different org, same source pair — same verdict.
+    const otherOrg = await db.organization.create({
+      data: { id: generateId(), name: 'metering-org-b', urn: 'metering-org-b' },
+    });
+    await expect(
+      grantCredits(db, {
+        organizationId: otherOrg.id,
+        amountMicroCents: 2_000_000_000n,
+        sourceType: 'stripe-checkout',
+        sourceId: 'cs_conflict',
+      }),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
+    // The ledger is untouched by either attempt.
+    expect(await db.creditLedgerEntry.count()).toBe(1);
+  });
+
+  it('rejects an orphan sourceType or sourceId at the service layer', async () => {
+    await expect(
+      grantCredits(db, {
+        organizationId: orgId,
+        amountMicroCents: 100n,
+        sourceType: 'stripe-checkout',
+      }),
+    ).rejects.toBeInstanceOf(InvalidLedgerAmountError);
+    await expect(
+      grantCredits(db, {
+        organizationId: orgId,
+        amountMicroCents: 100n,
+        sourceId: 'cs_orphan',
+      }),
+    ).rejects.toBeInstanceOf(InvalidLedgerAmountError);
   });
 
   it('rejects non-positive amounts', async () => {
