@@ -403,6 +403,8 @@ model User {
   userApiKeys               UserApiKey[]
   authCodes                 AuthCode[]
   authHandoffCodes          AuthHandoffCode[]
+  // #620: versions this user approved (NodeVersion.approvedBy).
+  approvedNodeVersions      NodeVersion[]              @relation("NodeVersionApprover")
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -1756,13 +1758,53 @@ model NodeVersion {
   abstractOriginHash String?  @map("abstract_origin_hash")
   content            String?
   tags               String[]
-  /// Free-form author label (typically a User.id, but may be an
-  /// agent identifier for AI edits).
+  // ─── #620: full curated-subset snapshot of the Node's content fields.
+  // NULL `nodeType` marks a LEGACY row captured before these columns
+  // existed (nodeType is non-null on Node, so every post-#620 snapshot
+  // sets it) — restoreNodeVersion keys on that sentinel to leave the
+  // live node's values for these fields untouched when restoring a
+  // legacy snapshot, instead of wiping them to NULL. Deliberately NOT
+  // versioned: embedding* (operational state), tokens (derived from
+  // content), contentHash + ownerRepo (external-sync provenance), and
+  // the created/updated/deleted audit stamps.
+  nodeType           String?  @map("node_type")
+  isLink             Boolean? @map("is_link")
+  properties         Json?
+  data               Json?
+  seq                Int?
+  isRunnable         Boolean? @map("is_runnable")
+  llmModel           String?  @map("llm_model")
+  aiAgent            String?  @map("ai_agent")
+  /// #620: the User.id of the editor, when a user is known — nothing
+  /// else goes here anymore. Historically this column was overloaded
+  /// (`reason ?? clientId ?? userId`, so it held edit rationales, OAuth
+  /// identity strings like "github:<login>", or a User id); the #620
+  /// migration moved identity strings to `editedByInfo`, rationales to
+  /// `revLabel`, and backfilled from `createdBy` where that held a User id.
   editedBy           String?  @map("edited_by")
+  /// #620: what we know about the editor when no User.id is available.
+  /// Identity-string forms in the wild: "github:<login>" / "email:<addr>"
+  /// / "user:<id>" (AuthContext.clientId) and "app:<App.id>" (App-key
+  /// principals).
+  editedByInfo       String?  @map("edited_by_info")
+  /// #620: user-settable label for this version (updateNodeVersion
+  /// mutation; REV_LABEL_MAX_LEN cap). Also captures the #88 `reason`
+  /// arg at snapshot time — the edit rationale that previously squatted
+  /// in `editedBy` (legacy reasons were migrated here).
+  revLabel           String?  @map("rev_label")
+  /// #620: which node fields the edit that took this snapshot changed
+  /// (e.g. ["abstract","tags"]). The snapshot itself is the PRE-edit
+  /// state, so `changes` describes the delta between this snapshot and
+  /// the state that replaced it. Empty for legacy rows (NULL reads as []).
+  changes            String[]
+  /// #620: reserved — User who approved this version. No write surface
+  /// yet; the approve flow lands later.
+  approvedBy         String?  @map("approved_by")
   createdBy          String?  @map("created_by")
   createdAt          DateTime @default(now()) @map("created_at")
 
-  node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  node           Node  @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  approvedByUser User? @relation("NodeVersionApprover", fields: [approvedBy], references: [id], onDelete: SetNull)
 
   @@index([nodeId, createdAt])
   @@map("node_versions")

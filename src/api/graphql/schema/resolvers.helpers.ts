@@ -56,6 +56,11 @@ export interface Context {
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
   memoryUrnCache?: Map<string, Promise<string | null>>;
+  // Request-scoped memo for NodeVersion.editedByUser / approvedByUser
+  // candidate lookups (#620) — a node's history repeats the same few editor
+  // strings, so each distinct candidate (including misses) is resolved once
+  // per request (lazily created; see resolveVersionEditor).
+  versionEditorCache?: Map<string, Promise<{ handle: string; urn: string | null } | null>>;
 }
 
 /**

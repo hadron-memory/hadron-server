@@ -210,7 +210,7 @@ describe('mergeMemories — batched / resumable (#363)', () => {
       targetMemoryId: tgtMem.id,
       fields: new Set(['CONTENT', 'ABSTRACT', 'DESCRIPTION', 'TAGS', 'DATA', 'PROPERTIES', 'EDGES']),
       deleteSourceMem: false,
-      actorId: actorId(),
+      editor: { userId: actorId() },
       batchSize: 1,
       ...extra,
     });
@@ -293,7 +293,7 @@ describe('mergeMemories — batched / resumable (#363)', () => {
       targetMemoryId: tgtMem.id,
       fields: new Set(['CONTENT', 'EDGES']),
       deleteSourceMem: false,
-      actorId: actorId(),
+      editor: { userId: actorId() },
       batchSize: 1,
       classifyPageSize: 2,
     });

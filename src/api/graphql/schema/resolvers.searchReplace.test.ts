@@ -137,9 +137,10 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     expect(versions[0].content).toBe('cat'); // pre-change snapshot
   });
 
-  // #88: an explicit reason lands in each changed node's version snapshot
-  // (editedBy), matching hadron_update_node's `reason`.
-  it('records an explicit reason in each version snapshot (editedBy)', async () => {
+  // #88/#620: an explicit reason lands in each changed node's version
+  // snapshot as revLabel (it historically squatted in editedBy, which now
+  // carries the editing user's PK); `changes` records the rewritten fields.
+  it('records an explicit reason in each version snapshot (revLabel)', async () => {
     const a = await makeNode('a', { content: 'cat' });
     await call({
       oldText: 'cat',
@@ -149,7 +150,9 @@ describe('searchReplaceInNodes — selection + replacement', () => {
       reason: 'rename across corpus',
     });
     const versions = await db.nodeVersion.findMany({ where: { nodeId: a.id } });
-    expect(versions[0].editedBy).toBe('rename across corpus');
+    expect(versions[0].revLabel).toBe('rename across corpus');
+    expect(versions[0].editedBy).toBe(admin.id);
+    expect(versions[0].changes).toEqual(['content']);
   });
 
   it('supports regex mode with backreferences', async () => {

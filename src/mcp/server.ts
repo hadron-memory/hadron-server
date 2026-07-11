@@ -2,6 +2,11 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
+  buildNodeVersionSnapshot,
+  editorFromAuth,
+  diffNodeChanges,
+} from '../lib/nodeVersionSnapshot.js';
+import {
   parseUrnInput,
   formatCanonicalUrn,
   composeNodeUrn,
@@ -2869,20 +2874,28 @@ export function createMcpServerInstance(
       // `existing` still holds CIPHERTEXT here — versions store the
       // at-rest form, deliberately (the decrypt happens just below).
       await db.nodeVersion.create({
+        // #620 — shared builder: editedBy carries the user PK (when the MCP
+        // caller is a user token), `reason` rides in revLabel, and `changes`
+        // records the fields this update supplies with a different value.
         data: {
           id: generateId(),
-          nodeId: existing.id,
-          memoryId: existing.memoryId,
-          loc: existing.loc,
-          name: existing.name,
-          alias: existing.alias,
-          description: existing.description,
-          abstract: existing.abstract,
-          abstractOriginHash: existing.abstractOriginHash,
-          content: existing.content,
-          tags: existing.tags as string[],
-          editedBy: reason ?? (auth.clientId ?? null),
-          createdBy: auth.clientId ?? null,
+          ...buildNodeVersionSnapshot(existing, editorFromAuth(auth), {
+            revLabel: reason,
+            changes: diffNodeChanges(existing, {
+              name,
+              nodeType,
+              isRunnable,
+              description,
+              abstract: normalizedAbstract,
+              content,
+              seq,
+              tags,
+              properties,
+              data: nodeData,
+              llmModel,
+              aiAgent,
+            }),
+          }),
         },
       }).catch(() => {});
 
@@ -3460,30 +3473,23 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
         // NodeVersion snapshot of the pre-move state — mirrors the
         // pattern hadron_update_node already follows. Loc / name / memoryId
-        // changes are audit-worthy. Spec 031 — `abstract` is included so
-        // version history captures the pre-move state in full. Spec 032
-        // — `abstractOriginHash` joins on the same logic (every snapshot
-        // site must include new columns; spec 031 lesson).
+        // changes are audit-worthy. The snapshot belongs to the SOURCE
+        // memory (#602) — the builder stamps existing.memoryId. #620 —
+        // shared builder; `changes` records the addressing fields the
+        // move rewrites.
+        const newName = toLoc.split(':').pop()!;
         await tx.nodeVersion.create({
           data: {
             id: generateId(),
-            nodeId: existing.id,
-            // Pre-move snapshot belongs to the SOURCE memory (#602).
-            memoryId: existing.memoryId,
-            loc: existing.loc,
-            name: existing.name,
-            alias: existing.alias,
-            description: existing.description,
-            abstract: existing.abstract,
-            abstractOriginHash: existing.abstractOriginHash,
-            content: existing.content,
-            tags: existing.tags as string[],
-            editedBy: auth.clientId ?? null,
-            createdBy: auth.clientId ?? null,
+            ...buildNodeVersionSnapshot(existing, editorFromAuth(auth), {
+              changes: diffNodeChanges(existing, {
+                loc: toLoc,
+                name: newName,
+                memoryId: toMemory.id,
+              }),
+            }),
           },
         });
-
-        const newName = toLoc.split(':').pop()!;
 
         // Move BY ID — see comment above the transaction.
         const moved = await tx.node.update({
