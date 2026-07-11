@@ -56,7 +56,7 @@ const canonicalStoredMemoryUrn = (urn: string): string =>
  * bare ID-shaped value (isId — legacy reasons/commit messages never match)
  * look up the User PK. Returns { handle, urn } — never name/email/any PII.
  */
-async function lookupVersionEditorCandidate(
+async function lookupRevisionEditorCandidate(
   ctx: Context,
   cand: string,
 ): Promise<{ handle: string; urn: string | null } | null> {
@@ -97,18 +97,18 @@ async function lookupVersionEditorCandidate(
  * loadEdgeEndpointNode) — a 50-row history costs one query per DISTINCT
  * candidate, negative results included.
  */
-function resolveVersionEditor(
+function resolveRevisionEditor(
   ctx: Context,
   candidates: Array<string | null | undefined>,
 ): Promise<{ handle: string; urn: string | null } | null> {
-  const cache = (ctx.versionEditorCache ??= new Map<
+  const cache = (ctx.revisionEditorCache ??= new Map<
     string,
     Promise<{ handle: string; urn: string | null } | null>
   >());
   const lookup = (cand: string) => {
     let pending = cache.get(cand);
     if (!pending) {
-      pending = lookupVersionEditorCandidate(ctx, cand);
+      pending = lookupRevisionEditorCandidate(ctx, cand);
       cache.set(cand, pending);
     }
     return pending;
@@ -225,10 +225,10 @@ export const typeResolvers = {
       nv: { editedBy?: string | null; createdBy?: string | null; editedByInfo?: string | null },
       _: unknown,
       ctx: Context,
-    ) => resolveVersionEditor(ctx, [nv.editedBy, nv.createdBy, nv.editedByInfo]),
+    ) => resolveRevisionEditor(ctx, [nv.editedBy, nv.createdBy, nv.editedByInfo]),
     // #620 — same public-identifier resolution for the (reserved) approver.
     approvedByUser: async (nv: { approvedBy?: string | null }, _: unknown, ctx: Context) =>
-      resolveVersionEditor(ctx, [nv.approvedBy]),
+      resolveRevisionEditor(ctx, [nv.approvedBy]),
   },
   Asset: {
     uploadedAt: (a: { uploadedAt: Date | string }) => toISO(a.uploadedAt)!,

@@ -59,8 +59,8 @@ export interface Context {
   // Request-scoped memo for NodeRevision.editedByUser / approvedByUser
   // candidate lookups (#620) — a node's history repeats the same few editor
   // strings, so each distinct candidate (including misses) is resolved once
-  // per request (lazily created; see resolveVersionEditor).
-  versionEditorCache?: Map<string, Promise<{ handle: string; urn: string | null } | null>>;
+  // per request (lazily created; see resolveRevisionEditor).
+  revisionEditorCache?: Map<string, Promise<{ handle: string; urn: string | null } | null>>;
 }
 
 /**
