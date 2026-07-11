@@ -50,7 +50,21 @@ WHERE v."edited_by" IS NOT NULL
     OR v."edited_by" LIKE 'app:%')
   AND NOT EXISTS (SELECT 1 FROM "users" u WHERE u."id" = v."edited_by");
 
--- Data migration, step 1b: every remaining non-User-id edited_by value is a
+-- Data migration, step 1b: remaining non-User-id values that are ID-SHAPED
+-- (UUIDv7-hex or cuid — the two platform ID formats, mirroring
+-- src/lib/entityRef/shape.ts) are opaque principals, not prose: a
+-- hard-deleted user's dangling PK or a legacy app/client principal id
+-- (PR-622 review, Gemini + Codex). They belong in edited_by_info (editor
+-- identity, even if no longer resolvable) — never in the user-facing
+-- rev_label.
+UPDATE "node_versions" v
+SET "edited_by_info" = v."edited_by",
+    "edited_by" = NULL
+WHERE v."edited_by" IS NOT NULL
+  AND (v."edited_by" ~ '^[0-9a-f]{32}$' OR v."edited_by" ~ '^c[a-z0-9]{24}$')
+  AND NOT EXISTS (SELECT 1 FROM "users" u WHERE u."id" = v."edited_by");
+
+-- Data migration, step 1c: every remaining non-User-id edited_by value is a
 -- legacy #88 edit reason or a git commit message → rev_label, the column that
 -- carries the edit rationale going forward (preserved verbatim).
 UPDATE "node_versions" v
@@ -68,3 +82,11 @@ SET "edited_by" = v."created_by"
 WHERE v."edited_by" IS NULL
   AND v."created_by" IS NOT NULL
   AND EXISTS (SELECT 1 FROM "users" u WHERE u."id" = v."created_by");
+
+-- Data migration, step 3: backfill changes to the empty array. The Prisma
+-- model declares `changes String[]` (read as [] when NULL) and GraphQL
+-- exposes [String!]! — backfilling keeps non-Prisma readers consistent
+-- (PR-622 review, Copilot). The column stays nullable to match Prisma's
+-- scalar-list DDL (what `db push` creates on dev/test), avoiding schema
+-- drift between migrated and pushed databases.
+UPDATE "node_versions" SET "changes" = '{}' WHERE "changes" IS NULL;
