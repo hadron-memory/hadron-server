@@ -1191,6 +1191,9 @@ export async function createServer(): Promise<Express> {
     buildAuthUrl: buildMicrosoftAuthUrl,
     getRedirectUri: getMicrosoftRedirectUri,
     logPrefix: 'microsoft-oauth',
+    // Fails safe (503) when unset — previously buildMicrosoftAuthUrl threw
+    // inside the redirect handler AFTER burning the nonce.
+    isConfigured: () => Boolean(process.env.MICROSOFT_CLIENT_ID),
   });
   mountMailboxConnectRoutes(app, {
     provider: 'gmail',

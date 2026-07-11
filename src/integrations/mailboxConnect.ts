@@ -31,11 +31,13 @@ export interface MailboxConnectConfig {
   /** Log prefix, e.g. `microsoft-oauth`. */
   logPrefix: string;
   /**
-   * When provided and false, the start/redirect routes answer 503 instead of
-   * redirecting to a misconfigured provider (#582 posture). Checked BEFORE
-   * the nonce is redeemed so a retry after configuration still works.
+   * When false, the start/redirect routes answer 503 instead of redirecting
+   * to a misconfigured provider (#582 posture). Checked BEFORE the nonce is
+   * redeemed so a retry after configuration still works. Required so every
+   * provider fails the same way — an unset client id must never surface as
+   * an unhandled throw inside the authorize redirect.
    */
-  isConfigured?: () => boolean;
+  isConfigured: () => boolean;
 }
 
 /** Mount the three mailbox-connect routes for one provider. */
@@ -67,7 +69,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       return;
     }
 
-    if (cfg.isConfigured && !cfg.isConfigured()) {
+    if (!cfg.isConfigured()) {
       res.status(503).json({ error: `${cfg.routeName} connections are not configured on this server` });
       return;
     }
@@ -102,7 +104,9 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       return;
     }
 
-    const nonce = await issueExchangeStartNonce({ userId, orgId, redirect });
+    // Provider-bound: this nonce redeems only at THIS provider's authorize
+    // route — the ADMIN approval above is for connecting this provider.
+    const nonce = await issueExchangeStartNonce({ userId, orgId, redirect, provider: cfg.provider });
     res.json({ nonce });
   });
 
@@ -115,14 +119,22 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       res.status(400).json({ error: 'Missing nonce' });
       return;
     }
-    if (cfg.isConfigured && !cfg.isConfigured()) {
+    if (!cfg.isConfigured()) {
       res.status(503).json({ error: `${cfg.routeName} connections are not configured on this server` });
       return;
     }
-    const started = await redeemExchangeStartNonce(nonce);
+    const started = await redeemExchangeStartNonce(nonce, cfg.provider);
     if (!started) {
       res.status(400).json({ error: 'Invalid or expired nonce' });
       return;
+    }
+
+    // Evict expired pending states — abandoned consent screens would
+    // otherwise grow the map unboundedly (the sibling login flows prune the
+    // same way).
+    const now = Date.now();
+    for (const [key, value] of pendingStates) {
+      if (value.expiresAt < now) pendingStates.delete(key);
     }
 
     const state = crypto.randomBytes(16).toString('hex');
@@ -148,6 +160,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     if (oauthError) {
       const errorUrl = new URL('/app/dashboard', frontendUrl);
       errorUrl.searchParams.set('exchangeError', oauthError);
+      errorUrl.searchParams.set('provider', cfg.provider);
       res.redirect(errorUrl.toString());
       return;
     }
@@ -196,6 +209,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       if (!forbidden) console.error(`${cfg.routeName}/callback re-check error:`, err);
       const errorUrl = new URL('/app/dashboard', frontendUrl);
       errorUrl.searchParams.set('exchangeError', forbidden ? 'not_authorized' : 'server_error');
+      errorUrl.searchParams.set('provider', cfg.provider);
       res.redirect(errorUrl.toString());
       return;
     }
@@ -284,8 +298,12 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         `[${cfg.logPrefix}] Connected ${cfg.provider} for ${identity.mailboxEmail} → org ${pending.orgId} (tool connection ${identity.id})`,
       );
 
+      // `exchangeError`/`exchangeConnected` are the pre-#580 portal contract
+      // (Microsoft-era names, kept for compatibility); `provider` tells the
+      // portal WHICH connect flow this outcome belongs to.
       const successUrl = new URL(pending.redirect, frontendUrl);
       successUrl.searchParams.set('exchangeConnected', '1');
+      successUrl.searchParams.set('provider', cfg.provider);
       res.redirect(successUrl.toString());
     } catch (err) {
       console.error(`[${cfg.logPrefix}] Callback error:`, err);
@@ -300,6 +318,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         'exchangeError',
         err instanceof Error ? err.message : 'Mailbox authentication failed',
       );
+      errorUrl.searchParams.set('provider', cfg.provider);
       res.redirect(errorUrl.toString());
     }
   });

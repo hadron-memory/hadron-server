@@ -19,6 +19,9 @@ const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const SCOPES = [
   'openid',
   'email',
+  // Without 'profile' the ID token carries no `name` claim (and userinfo
+  // returns none either) — every connection's displayName would be null.
+  'profile',
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
 ];

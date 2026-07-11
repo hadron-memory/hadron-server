@@ -43,6 +43,9 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanDb(db);
+  // The mailbox-connect routes now 503 when the provider client id is unset
+  // (fails-safe posture); these tests exercise the configured path.
+  process.env.MICROSOFT_CLIENT_ID = 'ms-client-id.test';
   const user = await db.user.create({
     data: { githubId: 47701, githubUsername: 'handoff-int', roles: ['READER'] },
   });

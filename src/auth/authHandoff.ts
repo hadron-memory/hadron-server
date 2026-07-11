@@ -126,8 +126,21 @@ export async function redeemLoginCode(
 export interface IssueExchangeStartArgs {
   userId: string;
   orgId: string;
-  /** Portal-local return path after the Exchange OAuth round-trip. */
+  /** Portal-local return path after the mailbox-connect OAuth round-trip. */
   redirect: string;
+  /**
+   * Email provider the nonce authorizes (`ms-exchange`, `gmail`, …). Baked
+   * into the stored kind so a nonce minted at one provider's start route
+   * cannot be redeemed at another provider's authorize route — the #506
+   * org-ADMIN approval is provider-specific. Omitted ⇒ the legacy unbound
+   * kind (pre-#580 rows; kept so the helpers stay usable standalone).
+   */
+  provider?: string;
+}
+
+/** The stored kind for a mailbox-connect start nonce. */
+function exchangeStartKind(provider?: string): string {
+  return provider ? `exchange_start:${provider}` : 'exchange_start';
 }
 
 /** Mint an `exchange_start` nonce and return the raw opaque value. */
@@ -136,7 +149,7 @@ export async function issueExchangeStartNonce(args: IssueExchangeStartArgs): Pro
   await db.authHandoffCode.create({
     data: {
       codeHash: sha256(rawCode),
-      kind: 'exchange_start',
+      kind: exchangeStartKind(args.provider),
       userId: args.userId,
       orgId: args.orgId,
       redirect: args.redirect,
@@ -152,14 +165,16 @@ export interface RedeemedExchangeStart {
   redirect: string;
 }
 
-/** Redeem an `exchange_start` nonce (atomic single-use + expiry). Returns null
- *  on unknown / expired / already-redeemed. */
+/** Redeem an `exchange_start` nonce (atomic single-use + expiry, bound to
+ *  the provider it was minted for). Returns null on unknown / expired /
+ *  already-redeemed / wrong provider. */
 export async function redeemExchangeStartNonce(
   code: string,
+  provider?: string,
 ): Promise<RedeemedExchangeStart | null> {
   const codeHash = sha256(code);
   const claim = await db.authHandoffCode.updateMany({
-    where: { codeHash, kind: 'exchange_start', redeemedAt: null, expiresAt: { gt: new Date() } },
+    where: { codeHash, kind: exchangeStartKind(provider), redeemedAt: null, expiresAt: { gt: new Date() } },
     data: { redeemedAt: new Date() },
   });
   if (claim.count !== 1) return null;

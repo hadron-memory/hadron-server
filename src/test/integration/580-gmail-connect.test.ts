@@ -116,7 +116,7 @@ describe('GET /auth/gmail', () => {
 
   it('503s while GMAIL_CLIENT_ID is unset — WITHOUT burning the nonce', async () => {
     delete process.env.GMAIL_CLIENT_ID;
-    const nonce = await issueExchangeStartNonce({ userId, orgId, redirect: '/' });
+    const nonce = await issueExchangeStartNonce({ userId, orgId, redirect: '/', provider: 'gmail' });
     const res = await fetch(`${baseUrl}/auth/gmail?nonce=${nonce}`, { redirect: 'manual' });
     expect(res.status).toBe(503);
 
@@ -126,8 +126,14 @@ describe('GET /auth/gmail', () => {
     expect(retry.status).toBe(302);
   });
 
+  it('rejects a nonce minted for a DIFFERENT provider (provider-bound, no cross-redemption)', async () => {
+    const msNonce = await issueExchangeStartNonce({ userId, orgId, redirect: '/', provider: 'ms-exchange' });
+    const res = await fetch(`${baseUrl}/auth/gmail?nonce=${msNonce}`, { redirect: 'manual' });
+    expect(res.status).toBe(400);
+  });
+
   it('redirects to Google consent with the refresh-token prerequisites', async () => {
-    const nonce = await issueExchangeStartNonce({ userId, orgId, redirect: '/app' });
+    const nonce = await issueExchangeStartNonce({ userId, orgId, redirect: '/app', provider: 'gmail' });
     const res = await fetch(`${baseUrl}/auth/gmail?nonce=${nonce}`, { redirect: 'manual' });
     expect(res.status).toBe(302);
 
