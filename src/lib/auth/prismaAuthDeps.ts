@@ -15,7 +15,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import type { AuthDeps } from './resolveMemoryAuthorization.js';
+import type { AuthDeps } from '@hadron-memory/access-control';
 
 export function prismaAuthDeps(db: PrismaClient): AuthDeps {
   return {

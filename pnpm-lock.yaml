@@ -32,6 +32,9 @@ importers:
       '@azure/msal-node':
         specifier: ^5.1.2
         version: 5.1.2
+      '@hadron-memory/access-control':
+        specifier: file:../access-control
+        version: file:../access-control
       '@modelcontextprotocol/sdk':
         specifier: ^1.27.1
         version: 1.27.1(zod@4.3.6)
@@ -703,6 +706,9 @@ packages:
     resolution: {integrity: sha512-mB9oAsNCm9aM3/SOv4YtBMqZbYj10R7dkq8byBqxGY/ncFwhf2oQzMV+LCRlWoDSEBJ3COiR1yeDvMtsoOsuFQ==}
     peerDependencies:
       graphql: ^0.8.0 || ^0.9.0 || ^0.10.0 || ^0.11.0 || ^0.12.0 || ^0.13.0 || ^14.0.0 || ^15.0.0 || ^16.0.0 || ^17.0.0
+
+  '@hadron-memory/access-control@file:../access-control':
+    resolution: {directory: ../access-control, type: directory}
 
   '@hono/node-server@1.19.11':
     resolution: {integrity: sha512-dr8/3zEaB+p0D2n/IUrlPF1HZm586qgJNXK1a9fhg/PzdtkK7Ksd5l312tJX2yBuALqDYBlG20QEbayqPyxn+g==}
@@ -3658,6 +3664,8 @@ snapshots:
   '@graphql-typed-document-node/core@3.2.0(graphql@16.13.1)':
     dependencies:
       graphql: 16.13.1
+
+  '@hadron-memory/access-control@file:../access-control': {}
 
   '@hono/node-server@1.19.11(hono@4.12.8)':
     dependencies:

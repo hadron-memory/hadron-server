@@ -1,6 +1,6 @@
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
 // (split step 3). No behavior change.
-import { isLifecycleActive } from '../../../lib/lifecycle.js';
+import { isLifecycleActive } from '@hadron-memory/access-control';
 import {
   getPrimaryAgent,
   getPrimaryAgentId,

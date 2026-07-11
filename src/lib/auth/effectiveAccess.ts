@@ -33,89 +33,34 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isActiveAgentSubscription } from '../agentSubscription.js';
-import { isLifecycleActive } from '../lifecycle.js';
+// The pure half — grant/capability vocabulary, isPlatformAdmin, and the
+// assemble() roll-up — lives in the shared package so every consumer
+// (server, portal, CLI, clients) renders identical results.
+import {
+  isLifecycleActive,
+  isPlatformAdmin,
+  assemble,
+  READ,
+  WRITE,
+  FULL,
+  type GrantWithCaps as InternalGrant,
+  type Subject,
+  type ResourceKind,
+  type AccessSource,
+  type EffectiveAccessResult,
+} from '@hadron-memory/access-control';
 import { composeNodeUrn } from '../urn.js';
 import { isId } from '../entityRef/shape.js';
 
-// ─── Public types ─────────────────────────────────────────────────────────
-
-export type ResourceKind =
-  | 'memory'
-  | 'node'
-  | 'app'
-  | 'agent'
-  | 'aiServiceConfig'
-  | 'organization'
-  | 'user';
-
-export type AccessSource =
-  | 'PLATFORM_ROLE'
-  | 'ORG_ROLE'
-  | 'MEMORY_PRINCIPAL'
-  | 'MEMORY_MEMBER'
-  | 'MEMORY_SHARE'
-  | 'NODE_INHERITED'
-  | 'APP_MEMBER'
-  | 'AGENT_SUBSCRIPTION'
-  | 'AICONFIG_OWNER'
-  | 'USER_SELF'
-  | 'PUBLIC_VISIBILITY';
-
-export interface AccessGrant {
-  source: AccessSource;
-  /** The role/level this particular grant confers. */
-  role: string;
-  /** Human label for the grant's origin (org/app/memory URN, etc.). */
-  via: string | null;
-}
-
-export interface EffectiveAccessResult {
-  userId: string;
-  resourceUrn: string;
-  resourceKind: ResourceKind;
-  canRead: boolean;
-  canWrite: boolean;
-  canManage: boolean;
-  canDelete: boolean;
-  /** Highest clean role label, or null for capability-based / no access. */
-  role: string | null;
-  /** Strongest-first; empty means no access. */
-  grants: AccessGrant[];
-}
-
-/** Subject whose access we are resolving. */
-export interface Subject {
-  id: string;
-  roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
-}
-
-// ─── Internal grant shape (carries capability bits) ─────────────────────────
-
-interface Caps {
-  read: boolean;
-  write: boolean;
-  manage: boolean;
-  delete: boolean;
-}
-
-interface InternalGrant extends AccessGrant {
-  caps: Caps;
-}
-
-const NONE: Caps = { read: false, write: false, manage: false, delete: false };
-const READ: Caps = { read: true, write: false, manage: false, delete: false };
-const WRITE: Caps = { read: true, write: true, manage: false, delete: false };
-const FULL: Caps = { read: true, write: true, manage: true, delete: true };
-
-function strength(c: Caps): number {
-  return (c.manage ? 8 : 0) + (c.delete ? 4 : 0) + (c.write ? 2 : 0) + (c.read ? 1 : 0);
-}
-
-/** Sources whose `role` is a capability, not a clean role label. */
-const CAPABILITY_SOURCES: ReadonlySet<AccessSource> = new Set<AccessSource>([
-  'AGENT_SUBSCRIPTION',
-  'PUBLIC_VISIBILITY',
-]);
+// Re-export the pure types so existing consumers of this module keep their
+// import surface (the canonical definitions live in the package).
+export type {
+  ResourceKind,
+  AccessSource,
+  AccessGrant,
+  EffectiveAccessResult,
+  Subject,
+} from '@hadron-memory/access-control';
 
 // ─── Resource resolution ────────────────────────────────────────────────────
 
@@ -160,10 +105,6 @@ export type ResolvedResource =
   | { kind: 'user'; user: { id: string; handle: string } };
 
 // ─── Org-role helper ────────────────────────────────────────────────────────
-
-function isPlatformAdmin(roles: Subject['roles']): boolean {
-  return roles.includes('ADMIN') || roles.includes('OWNER');
-}
 
 async function orgMemberRole(
   db: PrismaClient,
@@ -613,43 +554,6 @@ function userGrants(subject: Subject, user: { id: string }): InternalGrant[] {
   }
 
   return grants;
-}
-
-// ─── Assembly ───────────────────────────────────────────────────────────────
-
-function assemble(
-  userId: string,
-  resourceUrn: string,
-  resourceKind: ResourceKind,
-  grants: InternalGrant[],
-): EffectiveAccessResult {
-  // Strongest-first; stable for equal strength.
-  const ordered = [...grants].sort((a, b) => strength(b.caps) - strength(a.caps));
-  const caps = grants.reduce<Caps>(
-    (acc, g) => ({
-      read: acc.read || g.caps.read,
-      write: acc.write || g.caps.write,
-      manage: acc.manage || g.caps.manage,
-      delete: acc.delete || g.caps.delete,
-    }),
-    { ...NONE },
-  );
-
-  const strongest = ordered[0];
-  const role =
-    strongest && !CAPABILITY_SOURCES.has(strongest.source) ? strongest.role : null;
-
-  return {
-    userId,
-    resourceUrn,
-    resourceKind,
-    canRead: caps.read,
-    canWrite: caps.write,
-    canManage: caps.manage,
-    canDelete: caps.delete,
-    role,
-    grants: ordered.map(({ source, role: r, via }) => ({ source, role: r, via })),
-  };
 }
 
 /**
