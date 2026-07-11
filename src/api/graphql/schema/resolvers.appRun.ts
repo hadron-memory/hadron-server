@@ -14,7 +14,7 @@ import { mintWebhookPlatformToken, generateWebhookSecret } from '../../webhooks.
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { nextCronOccurrence } from '../../../jobs/scheduler.js';
-import { parsePolicyLink, explainPolicyChain, type PolicyAction } from '../../../lib/policy/index.js';
+import { parsePolicyLink, explainPolicyChain, type PolicyAction } from '@hadron-memory/access-control';
 import {
   assertFullyQualifiedUrn,
   splitNodeUrn,

@@ -17,7 +17,7 @@
  */
 
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
-import { isLifecycleActive } from '../../lib/lifecycle.js';
+import { isLifecycleActive } from '@hadron-memory/access-control';
 
 export class SelfImportError extends Error {
   constructor() {

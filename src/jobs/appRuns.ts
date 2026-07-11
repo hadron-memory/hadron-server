@@ -21,7 +21,7 @@
 import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 import { getBusClient } from '../lib/bus/index.js';
-import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '../lib/policy/index.js';
+import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
 import {

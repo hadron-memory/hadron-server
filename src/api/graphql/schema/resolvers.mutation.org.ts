@@ -2,7 +2,7 @@
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
-import { parsePolicyLink } from '../../../lib/policy/index.js';
+import { parsePolicyLink } from '@hadron-memory/access-control';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   normalizeHandle,

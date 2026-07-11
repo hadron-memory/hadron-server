@@ -37,7 +37,7 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import {
   resolveMemoryAuthorization,
   type MemoryForAuth,
-} from '../../lib/auth/resolveMemoryAuthorization.js';
+} from '@hadron-memory/access-control';
 import { prismaAuthDeps } from '../../lib/auth/prismaAuthDeps.js';
 
 // ─────────────────────────────────────────────────────────────────────────

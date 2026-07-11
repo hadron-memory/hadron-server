@@ -35,7 +35,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
-import { parsePolicyLink } from '../../../lib/policy/index.js';
+import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import {
   type AppType,

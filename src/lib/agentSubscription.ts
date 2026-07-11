@@ -12,7 +12,7 @@
  * that pre-date 008.
  */
 
-import { isLifecycleActive, type LifecycleLike } from './lifecycle.js';
+import { isLifecycleActive, type LifecycleLike } from '@hadron-memory/access-control';
 
 export function isActiveAgentSubscription(sub: LifecycleLike, now: Date = new Date()): boolean {
   return isLifecycleActive(sub, now);

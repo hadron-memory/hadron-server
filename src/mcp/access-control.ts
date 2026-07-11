@@ -28,7 +28,7 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
-import { isLifecycleActive } from '../lib/lifecycle.js';
+import { isLifecycleActive } from '@hadron-memory/access-control';
 import { isAgentInstalled } from '../lib/appAgent.js';
 import { resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
