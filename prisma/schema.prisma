@@ -430,7 +430,9 @@ model Organization {
   /// ("consumer mode"). It flips to `true` when the user activates org mode —
   /// creating another org, or converting their personal org into a real one
   /// to onboard coworkers — after which it lists normally. Genuine per-org
-  /// state, not derivable from the user's org count.
+  /// state, not derivable from the user's org count. Listable ⟺ an explicit
+  /// `true`; both `false` and unset (`null`) are hidden, matching the
+  /// codebase-wide `isVisible !== true` "hidden/personal" convention.
   isVisible                    Boolean?  @map("is_visible")
   /// GitHub App installation id. Used to mint ephemeral tokens
   /// (1-hour expiry) for memory git-sync against repos within this

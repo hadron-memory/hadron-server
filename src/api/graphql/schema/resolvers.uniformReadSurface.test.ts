@@ -363,16 +363,22 @@ describe('Query.organizations / Query.users — merged list semantics', () => {
     expect(await Q.organizations(null, { limit: 0 }, ctx(member.id))).toMatchObject({ total: 1 });
   });
 
-  it('organizations: a hidden (isVisible=false) org is not listed — even to an admin (#609)', async () => {
-    // A hidden org (e.g. an un-activated personal org) the admin is NOT a
-    // member of must not appear in the admin browse.
+  it('organizations: non-listable (isVisible false OR null) orgs are hidden — even from an admin (#609)', async () => {
+    // Only an explicit `true` is listable. A `false` org (un-activated personal)
+    // and a legacy `null` (unset) org the admin is NOT a member of must both be
+    // excluded from the admin browse.
     const hidden = await db.organization.create({
       data: { id: generateId(), name: 'uni-hidden', urn: `uni-hidden-${Date.now()}`, isVisible: false },
     });
+    const legacyNull = await db.organization.create({
+      data: { id: generateId(), name: 'uni-null', urn: `uni-null-${Date.now()}` }, // isVisible omitted → null
+    });
     const adminCtx = ctx(admin.id, ['ADMIN']);
     const before = await Q.organizations(null, {}, adminCtx);
-    expect(before.total).toBe(2); // only the two listable orgs
-    expect(before.items.map((o: { id: string }) => o.id)).not.toContain(hidden.id);
+    expect(before.total).toBe(2); // only the two isVisible=true orgs
+    const beforeIds = before.items.map((o: { id: string }) => o.id);
+    expect(beforeIds).not.toContain(hidden.id);
+    expect(beforeIds).not.toContain(legacyNull.id);
     // The admin's OWN membership still surfaces a hidden org they belong to.
     await db.orgMember.create({
       data: { id: generateId(), organizationId: hidden.id, userId: admin.id, role: 'READER' },
