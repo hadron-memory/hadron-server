@@ -1752,7 +1752,7 @@ model NodeRevision {
   abstract           String?
   /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
   /// version capture. Restored verbatim by `restoreNodeRevision`;
-  /// legacy versions (pre-spec) have NULL here, which short-circuits
+  /// legacy revisions (pre-spec) have NULL here, which short-circuits
   /// the staleness check on the live row after restore (no false
   /// positives).
   abstractOriginHash String?  @map("abstract_origin_hash")
@@ -1797,7 +1797,7 @@ model NodeRevision {
   /// state, so `changes` describes the delta between this snapshot and
   /// the state that replaced it. Empty for legacy rows (NULL reads as []).
   changes            String[]
-  /// #620: reserved — User who approved this version. No write surface
+  /// #620: reserved — User who approved this revision. No write surface
   /// yet; the approve flow lands later.
   approvedBy         String?  @map("approved_by")
   createdBy          String?  @map("created_by")

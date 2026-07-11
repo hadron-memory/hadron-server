@@ -2094,25 +2094,25 @@ export const nodeMutations = {
       { revisionId, truncate = false }: { revisionId: string; truncate?: boolean },
       ctx: Context,
     ) => {
-      const version = await ctx.db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
-      const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
+      const revision = await ctx.db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
+      const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
 
       // #620 — the restored field set (legacy-sentinel-aware), shared by the
       // pre-restore snapshot's `changes` diff and the write-back.
-      const restoreFields = restorableNodeFields(version);
+      const restoreFields = restorableNodeFields(revision);
 
       // Restore (+ optional truncate) in one transaction (#617) so the portal
       // never sequences restore + N deletes and can't half-apply on a crash.
       const restored = await ctx.db.$transaction(async (tx) => {
         if (truncate) {
-          // #617 truncate: collapse the history so the selected version becomes
+          // #617 truncate: collapse the history so the selected revision becomes
           // the new baseline. Delete every snapshot NEWER than the selected one
           // (createdAt strictly greater — EXCLUSIVE of the selected row, which
           // is kept), and skip the pre-restore snapshot. Ties on createdAt are
           // kept (never deletes the selected row); an over-keep is safe.
           await tx.nodeRevision.deleteMany({
-            where: { nodeId: node.id, createdAt: { gt: version.createdAt } },
+            where: { nodeId: node.id, createdAt: { gt: revision.createdAt } },
           });
         } else {
           // Non-destructive default: snapshot current state before restoring so
@@ -2133,8 +2133,8 @@ export const nodeMutations = {
           });
         }
 
-        // Restore the node to the version's state. Spec 031 — `abstract`
-        // is part of the restored state; without it, restoring a version
+        // Restore the node to the revision's state. Spec 031 — `abstract`
+        // is part of the restored state; without it, restoring a revision
         // that had a non-null abstract leaves the node's current abstract
         // unchanged (and vice versa). Spec 032 — `abstractOriginHash`
         // applied verbatim per plan D4 (no recomputation on restore;
@@ -2163,7 +2163,7 @@ export const nodeMutations = {
       void enqueueNodeEmbedding(ctx.db, {
         nodeId: restored.id,
         memoryId: restored.memoryId,
-        plaintext: { content: version.content, abstract: version.abstract },
+        plaintext: { content: revision.content, abstract: revision.abstract },
       });
       return restored;
     },
@@ -2172,13 +2172,13 @@ export const nodeMutations = {
     // (as restoreNodeRevision) — the memory you own the live node in, even if the
     // snapshot was captured in another memory before a move.
     deleteNodeRevision: async (_: unknown, { revisionId }: { revisionId: string }, ctx: Context) => {
-      const version = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
-      if (!version) {
-        throw new GraphQLError('Node version not found', {
+      const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
+      if (!revision) {
+        throw new GraphQLError('Node revision not found', {
           extensions: { code: 'NOT_FOUND', revisionId },
         });
       }
-      const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
+      const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
       await ctx.db.nodeRevision.delete({ where: { id: revisionId } });
       return true;
@@ -2198,24 +2198,24 @@ export const nodeMutations = {
       ctx: Context,
     ) => {
       const notFound = () =>
-        new GraphQLError('Node version not found', {
+        new GraphQLError('Node revision not found', {
           extensions: { code: 'NOT_FOUND', revisionId },
         });
-      const version = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
-      if (!version) throw notFound();
+      const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
+      if (!revision) throw notFound();
       const node = await ctx.db.node.findUnique({
-        where: { id: version.nodeId },
+        where: { id: revision.nodeId },
         select: { memoryId: true, deletedAt: true },
       });
       if (!node || node.deletedAt) throw notFound();
       const accessible = await getAccessibleMemoryIds(ctx);
       const canRead = (memId: string) => accessible === null || accessible.includes(memId);
-      if (!canRead(node.memoryId) || !canRead(version.memoryId ?? node.memoryId)) {
+      if (!canRead(node.memoryId) || !canRead(revision.memoryId ?? node.memoryId)) {
         throw notFound();
       }
       await requireMemoryWriteAccess(ctx, node.memoryId);
       // Omit = preserve (the repo-wide partial-update contract); null = clear.
-      if (revLabel === undefined) return version;
+      if (revLabel === undefined) return revision;
       if (revLabel != null && revLabel.length > REV_LABEL_MAX_LEN) {
         throw new GraphQLError(
           `revLabel exceeds the ${REV_LABEL_MAX_LEN}-character cap.`,

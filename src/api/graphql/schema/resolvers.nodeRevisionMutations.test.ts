@@ -81,7 +81,7 @@ describe('deleteNodeRevision (#617)', () => {
   it('throws NOT_FOUND for an unknown revisionId', async () => {
     await expect(
       resolvers.Mutation.deleteNodeRevision(null, { revisionId: 'cnope00000000000000000000' }, adminCtx()),
-    ).rejects.toThrow('Node version not found');
+    ).rejects.toThrow('Node revision not found');
   });
 
   it('denies a non-member (no write access)', async () => {
@@ -155,7 +155,7 @@ describe('restoreNodeRevision truncate (#617)', () => {
     expect(all.some((r) => r.name === 'Current' && r.content === 'current body')).toBe(true);
   });
 
-  it('truncate on the NEWEST version deletes nothing newer (selected kept)', async () => {
+  it('truncate on the NEWEST revision deletes nothing newer (selected kept)', async () => {
     await resolvers.Mutation.restoreNodeRevision(null, { revisionId: v3.id, truncate: true }, adminCtx());
     const remaining = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
     // All three kept (none is newer than v3), no pre-restore snapshot.

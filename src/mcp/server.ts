@@ -2869,9 +2869,9 @@ export function createMcpServerInstance(
       }
 
       // Snapshot current state for revision history.
-      // Spec 032 — capture existing.abstractOriginHash so the version
+      // Spec 032 — capture existing.abstractOriginHash so the revision
       // history round-trips the staleness signal. On an encrypted memory
-      // `existing` still holds CIPHERTEXT here — versions store the
+      // `existing` still holds CIPHERTEXT here — revisions store the
       // at-rest form, deliberately (the decrypt happens just below).
       await db.nodeRevision.create({
         // #620 — shared builder: editedBy carries the user PK (when the MCP

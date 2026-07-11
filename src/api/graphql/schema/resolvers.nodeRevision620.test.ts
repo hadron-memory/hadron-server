@@ -80,9 +80,9 @@ describe('updateNode snapshot capture (#620)', () => {
       ctx(),
     );
 
-    const versions = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
-    expect(versions).toHaveLength(1);
-    const v = versions[0];
+    const revisions = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
+    expect(revisions).toHaveLength(1);
+    const v = revisions[0];
     // Pre-edit state, full subset.
     expect(v.content).toBe('v1 body');
     expect(v.abstract).toBe('v1 abs');
@@ -216,11 +216,11 @@ describe('updateNodeRevision (#620 revLabel)', () => {
   });
 
   it('answers NOT_FOUND for a soft-deleted node (read-gate parity, #618)', async () => {
-    const version = await db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
-    await db.node.update({ where: { id: version.nodeId }, data: { deletedAt: new Date() } });
+    const revision = await db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
+    await db.node.update({ where: { id: revision.nodeId }, data: { deletedAt: new Date() } });
     await expect(
       resolvers.Mutation.updateNodeRevision({}, { revisionId, revLabel: 'x' }, ctx()),
-    ).rejects.toThrow('Node version not found');
+    ).rejects.toThrow('Node revision not found');
   });
 
   it('answers NOT_FOUND for a snapshot captured in an unreadable memory (read-gate parity, #602)', async () => {
@@ -232,11 +232,11 @@ describe('updateNodeRevision (#620 revLabel)', () => {
     const restrictedMem = await db.memory.create({
       data: { id: generateId(), organizationId: otherOrg.id, urn: 'nv620-other:secret', name: 'secret', class: 'knowledge' },
     });
-    const version = await db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
+    const revision = await db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
     const secretSnap = await db.nodeRevision.create({
       data: {
         id: generateId(),
-        nodeId: version.nodeId,
+        nodeId: revision.nodeId,
         memoryId: restrictedMem.id,
         loc: 'lbl',
         name: 'secret-era',
@@ -249,13 +249,13 @@ describe('updateNodeRevision (#620 revLabel)', () => {
         {}, { revisionId: secretSnap.id, revLabel: 'x' },
         { db, roles: [], userId: admin.id } as never,
       ),
-    ).rejects.toThrow('Node version not found');
+    ).rejects.toThrow('Node revision not found');
   });
 
   it('throws NOT_FOUND for an unknown revisionId', async () => {
     await expect(
       resolvers.Mutation.updateNodeRevision({}, { revisionId: 'nope', revLabel: 'x' }, ctx()),
-    ).rejects.toThrow('Node version not found');
+    ).rejects.toThrow('Node revision not found');
   });
 
   it('denies a caller without write access to the node memory', async () => {

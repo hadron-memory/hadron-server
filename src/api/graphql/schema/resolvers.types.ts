@@ -90,7 +90,7 @@ async function lookupRevisionEditorCandidate(
 }
 
 /**
- * Resolve a version editor/approver candidate list (#617/#619/#620): first
+ * Resolve a revision editor/approver candidate list (#617/#619/#620): first
  * candidate that resolves to a live, handle-bearing user wins. A node's
  * history overwhelmingly repeats the same few editor strings, so lookups are
  * memoized per request on the Context (same pattern as loadMemoryUrn /
@@ -207,7 +207,7 @@ export const typeResolvers = {
     // Prisma reads a NULL scalar list as [] already; belt-and-suspenders for
     // rows that arrive from raw queries (#620 legacy rows).
     changes: (nv: { changes?: string[] | null }) => nv.changes ?? [],
-    // #617/#619/#620 — resolve the version's editor to PUBLIC identifiers
+    // #617/#619/#620 — resolve the revision's editor to PUBLIC identifiers
     // only: handle + urn, never name/email. Candidates in preference order:
     //   1. editedBy — post-#620 this holds ONLY a User id;
     //   2. createdBy — legacy rows captured `userId ?? clientId` here (user

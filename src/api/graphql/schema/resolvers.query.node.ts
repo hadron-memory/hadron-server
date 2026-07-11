@@ -1100,17 +1100,17 @@ export const nodeQueries = {
       // memoryUsageSummary).
       if (!canRead(node.memoryId)) return [];
 
-      const versions = await ctx.db.nodeRevision.findMany({
+      const revisions = await ctx.db.nodeRevision.findMany({
         where: { nodeId },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 50,
       });
       // Drop snapshots captured while the node lived in a memory the caller
       // can't read. Legacy rows (memoryId NULL) fall back to the node's current
-      // memory, already authorized above. (Filter after take: a >limit-version
+      // memory, already authorized above. (Filter after take: a >limit-revision
       // node spanning inaccessible memories may under-return near the limit —
       // safe, never over-returns.)
-      return versions.filter((v) => canRead(v.memoryId ?? node.memoryId));
+      return revisions.filter((v) => canRead(v.memoryId ?? node.memoryId));
     },
 
     // #617 (Display) — a single snapshot by id, so the portal doesn't filter
@@ -1120,10 +1120,10 @@ export const nodeQueries = {
     // can't read). Any miss collapses to null (no existence disclosure).
     nodeRevision: async (_: unknown, { revisionId }: { revisionId: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
-      const version = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
-      if (!version) return null;
+      const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
+      if (!revision) return null;
       const node = await ctx.db.node.findUnique({
-        where: { id: version.nodeId },
+        where: { id: revision.nodeId },
         select: { memoryId: true, deletedAt: true },
       });
       // A soft-deleted node drops out of every read surface: nodeRevisions
@@ -1134,8 +1134,8 @@ export const nodeQueries = {
       const accessible = await getAccessibleMemoryIds(ctx);
       const canRead = (memId: string) => accessible === null || accessible.includes(memId);
       if (!canRead(node.memoryId)) return null;
-      if (!canRead(version.memoryId ?? node.memoryId)) return null;
-      return version;
+      if (!canRead(revision.memoryId ?? node.memoryId)) return null;
+      return revision;
     },
 
     appNodes: async (

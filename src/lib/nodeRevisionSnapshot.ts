@@ -22,7 +22,7 @@ import { Prisma } from '../generated/prisma/index.js';
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
  * memories `content` / `abstract` / `data` are the AT-REST ciphertext,
- * deliberately (versions store the at-rest form; spec 041).
+ * deliberately (revisions store the at-rest form; spec 041).
  */
 export interface SnapshotSourceNode {
   id: string;
@@ -91,7 +91,7 @@ export const REV_LABEL_MAX_LEN = 500;
  * Build the `data` payload for a `nodeRevision.create` call from the node's
  * PRE-edit state. `changes` names the fields the edit ABOUT to be applied
  * will modify (the delta between this snapshot and the state replacing it);
- * `revLabel` carries the caller-supplied #88 `reason` / version label.
+ * `revLabel` carries the caller-supplied #88 `reason` / revision label.
  */
 export function buildNodeRevisionSnapshot(
   node: SnapshotSourceNode,
@@ -209,7 +209,7 @@ export function diffNodeChanges(
  * so they are omitted entirely. Values are returned RAW (at-rest form); the
  * write site maps `properties`/`data` through jsonOrDbNull.
  */
-export function restorableNodeFields(version: {
+export function restorableNodeFields(revision: {
   name: string;
   alias: string | null;
   description: string | null;
@@ -227,24 +227,24 @@ export function restorableNodeFields(version: {
   aiAgent: string | null;
 }): Record<string, unknown> {
   const base: Record<string, unknown> = {
-    name: version.name,
-    alias: version.alias,
-    description: version.description,
-    abstract: version.abstract,
-    abstractOriginHash: version.abstractOriginHash,
-    content: version.content,
-    tags: (version.tags ?? []) as string[],
+    name: revision.name,
+    alias: revision.alias,
+    description: revision.description,
+    abstract: revision.abstract,
+    abstractOriginHash: revision.abstractOriginHash,
+    content: revision.content,
+    tags: (revision.tags ?? []) as string[],
   };
-  if (version.nodeType == null) return base;
+  if (revision.nodeType == null) return base;
   return {
     ...base,
-    nodeType: version.nodeType,
-    isLink: version.isLink ?? false,
-    properties: version.properties,
-    data: version.data,
-    seq: version.seq,
-    isRunnable: version.isRunnable,
-    llmModel: version.llmModel,
-    aiAgent: version.aiAgent,
+    nodeType: revision.nodeType,
+    isLink: revision.isLink ?? false,
+    properties: revision.properties,
+    data: revision.data,
+    seq: revision.seq,
+    isRunnable: revision.isRunnable,
+    llmModel: revision.llmModel,
+    aiAgent: revision.aiAgent,
   };
 }

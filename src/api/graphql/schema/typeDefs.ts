@@ -551,7 +551,7 @@ export const typeDefs = `#graphql
   }
 
   """
-  A version's editor resolved to PUBLIC IDENTIFIERS ONLY (#617). Deliberately
+  A revision's editor resolved to PUBLIC IDENTIFIERS ONLY (#617). Deliberately
   excludes name / email / any PII — resolving editedBy must never widen the
   disclosure surface. handle + urn are the same public identifiers the users
   search already exposes, so no per-caller visibility gate applies.
@@ -600,7 +600,7 @@ export const typeDefs = `#graphql
     identifiers only (#617).
     """
     editedByUser: NodeRevisionEditor
-    "User-settable label for this version (#620, 500-char cap) — set via updateNodeRevision; also captures the 'reason' supplied with the edit that took this snapshot (legacy reasons were migrated here)."
+    "User-settable label for this revision (#620, 500-char cap) — set via updateNodeRevision; also captures the 'reason' supplied with the edit that took this snapshot (legacy reasons were migrated here)."
     revLabel: String
     """
     Which node fields the edit that took this snapshot changed, e.g.
@@ -609,7 +609,7 @@ export const typeDefs = `#graphql
     Empty for legacy rows.
     """
     changes: [String!]!
-    "Reserved (#620): User id that approved this version. No write surface yet."
+    "Reserved (#620): User id that approved this revision. No write surface yet."
     approvedBy: String
     "approvedBy resolved to public identifiers (handle + URN), like editedByUser."
     approvedByUser: NodeRevisionEditor
@@ -1567,7 +1567,7 @@ export const typeDefs = `#graphql
     Why this change was made — recorded on the revision-history snapshot
     (NodeRevision.revLabel, #620; historically it squatted in editedBy),
     mirroring hadron_update_node's reason arg so CLI and MCP edits leave
-    equally-traceable history. Only an update snapshots a prior version, so
+    equally-traceable history. Only an update snapshots a prior revision, so
     reason has no effect on a pure create.
     """
     reason: String
@@ -2603,7 +2603,7 @@ export const typeDefs = `#graphql
     usageEvents(type: String, memoryId: ID, nodeId: ID, limit: Int, offset: Int): [UsageEvent!]!
 
     """
-    Version history for a node, most recent first.
+    Revision history for a node, most recent first.
 
     Accepts the node's ID or URN. Access-gated on the node's memory: a node
     whose memory the caller can't read returns an empty list (no existence
@@ -2614,7 +2614,7 @@ export const typeDefs = `#graphql
     """
     A single node-revision snapshot by its id (#617 Display).
 
-    Access-gated on the snapshot's node memory (read): null when the version
+    Access-gated on the snapshot's node memory (read): null when the revision
     does not exist OR the caller cannot read the node's current memory OR the
     memory the snapshot was captured in (per-snapshot gating mirrors
     nodeRevisions — a moved node keeps its id, so a snapshot may belong to a
@@ -3087,7 +3087,7 @@ export const typeDefs = `#graphql
     # If the node has no 'data' yet, the supplied JSON becomes its 'data'
     # verbatim. 'data' must be a JSON object (not an array or scalar). 'nodeRef'
     # is a node ID or fully-qualified URN. Honors the same single-write
-    # invariants as updateNode (per-memory write auth, encryption, version
+    # invariants as updateNode (per-memory write auth, encryption, revision
     # history, git mirror). Returns the updated node.
     updateNodeData(nodeRef: ID!, data: JSON!, reason: String): Node!
 
@@ -3107,13 +3107,13 @@ export const typeDefs = `#graphql
     # Restore a node to a previous revision (#617).
     #
     # Default (truncate: false): snapshots the CURRENT node state into history
-    # first, then restores the node's fields to the version — non-destructive,
+    # first, then restores the node's fields to the revision — non-destructive,
     # the restore itself becomes undoable.
     #
-    # truncate: true: restores the node's fields to the version AND deletes
+    # truncate: true: restores the node's fields to the revision AND deletes
     # every NodeRevision NEWER than the selected one (createdAt strictly greater),
     # WITHOUT creating a pre-restore snapshot. Boundary is EXCLUSIVE of the
-    # selected row: the selected version is KEPT and becomes the new baseline
+    # selected row: the selected revision is KEPT and becomes the new baseline
     # (the most-recent snapshot afterward); its era and older survive. Restore +
     # truncate run in one transaction (atomic).
     restoreNodeRevision(revisionId: ID!, truncate: Boolean = false): Node!
