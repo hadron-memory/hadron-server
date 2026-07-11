@@ -1548,6 +1548,50 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  # One registered EXTERNAL MCP server (hadrontool-mcp conduit registry).
+  # Org-owned. Static auth headers are encrypted at rest and WRITE-ONLY:
+  # no field here ever returns them — hasHeaders is all a reader gets.
+  # The row grants nothing by itself; every run-time call walks the policy
+  # chain as 'tool.mcp__<slug>__<tool>' plus the run's action budget.
+  type McpServer {
+    id: ID!
+    organizationId: String!
+    "Run-tool name segment (mcp__<slug>__<tool>); lowercase [a-z0-9-], unique per org, immutable."
+    slug: String!
+    name: String!
+    "Streamable-HTTP MCP endpoint URL."
+    url: String!
+    "Exposed-tool allowlist; empty = every tool the server advertises."
+    toolAllowlist: [String!]!
+    "Whether encrypted static headers are stored (the values are never returned)."
+    hasHeaders: Boolean!
+    "Disabled servers fail run-tool resolution loud, same as an unregistered slug."
+    enabled: Boolean!
+    createdAt: String!
+    createdBy: String
+    updatedAt: String!
+    updatedBy: String
+  }
+
+  # Uniform paginated list shape (cor:api:120).
+  type McpServersPage {
+    items: [McpServer!]!
+    total: Int!
+  }
+
+  # One tool an external MCP server advertises, as admitted by the
+  # registry row (allowlist + name grammar + length cap applied) — what
+  # this query returns IS what a run can declare in data.tools.
+  type McpServerTool {
+    "The tool's name on the external server."
+    name: String!
+    description: String
+    "The run-tool / policy name: mcp__<slug>__<name>."
+    runToolName: String!
+    "The tool's argument JSON Schema, passed through verbatim."
+    inputSchema: JSON
+  }
+
   # Provider-neutral flag state (spec 002) — Graph's tri-state mapped to a
   # neutral vocabulary so a future Gmail tool can map its own subset.
   enum EmailFlag {
@@ -2833,6 +2877,31 @@ export const typeDefs = `#graphql
     limit: 0 -> count only.
     """
     slackConnections(orgId: ID, limit: Int, offset: Int): SlackConnectionsPage!
+
+    """
+    Fetch one registered external MCP server by id. Returns null when the
+    row does not exist OR the caller is not a member of its org — no
+    existence disclosure.
+    """
+    mcpServer(ref: ID!): McpServer
+
+    """
+    Uniform paginated MCP-server list (cor:api:120). Default scope: the
+    caller's member orgs. orgId follows cor:api:100:01 (member -> that
+    org, non-member -> empty page, no disclosure, no admin bypass).
+    Slug-ascending order (id tiebreak); limit default 50 / cap 200;
+    limit: 0 -> count only.
+    """
+    mcpServers(orgId: ID, limit: Int, offset: Int): McpServersPage!
+
+    """
+    Live tools/list passthrough for one registered server (org member) —
+    what authors browse to pick data.tools entries. Applies the same
+    admissibility filter as run-tool materialization. Null when the row
+    does not exist or the caller is not a member of its org; errors with
+    MCP_TOOL_* codes when the conduit or the external server fails.
+    """
+    mcpServerTools(ref: ID!): [McpServerTool!]
     exchangeMessages(
       connectionId: ID!
       top: Int
@@ -3652,6 +3721,42 @@ export const typeDefs = `#graphql
     createSlackConnection(orgRef: ID!, appRef: ID!, botToken: String!, appToken: String!): SlackConnection!
     "Soft-delete a Slack connection (org ADMIN/OWNER); tears down the tool side best-effort."
     deleteSlackConnection(ref: ID!): Boolean!
+
+    """
+    Register an external MCP server (org ADMIN/OWNER). orgRef accepts ID
+    or URN (cor:api:140). headers is a JSON object of static request
+    headers (e.g. Authorization) — encrypted at rest, write-only, never
+    returned. Registration grants nothing by itself: runs still need the
+    policy chain to allow tool.mcp__<slug>__<tool>.
+    """
+    createMcpServer(
+      orgRef: ID!
+      slug: String!
+      name: String!
+      url: String!
+      headers: JSON
+      toolAllowlist: [String!]
+      enabled: Boolean
+    ): McpServer!
+
+    """
+    Update a registered MCP server (org ADMIN/OWNER). The slug is
+    immutable — flow nodes reference it in data.tools names. headers
+    REPLACES the stored object; clearHeaders: true removes it (pass one
+    or the other, not both).
+    """
+    updateMcpServer(
+      ref: ID!
+      name: String
+      url: String
+      headers: JSON
+      clearHeaders: Boolean
+      toolAllowlist: [String!]
+      enabled: Boolean
+    ): McpServer!
+
+    "Hard-delete a registered MCP server (org ADMIN/OWNER); runs referencing its tools fail loud afterwards."
+    deleteMcpServer(ref: ID!): Boolean!
     exchangeReply(connectionId: ID!, messageId: ID!, body: String!): Boolean!
     exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
 

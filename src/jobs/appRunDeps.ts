@@ -27,6 +27,11 @@ import { validateExtractionSpec } from '../lib/edge-conditions/reserved-names.js
 import { selectNextEdge } from '../lib/runner/selectNextEdge.js';
 import { loadFlowNode, resolveFlowMemory } from '../lib/runner/loadFlowNode.js';
 import { resolveRunTools } from '../lib/runner/tools/index.js';
+import {
+  isMcpRunToolName,
+  materializeMcpRunTools,
+  unknownMcpToolNames,
+} from '../lib/runner/tools/mcpTools.js';
 import { splitNodeUrn } from '../lib/urn.js';
 import type { RunExecutionDeps, RunNodeSpec } from './appRuns.js';
 import { dispatchRunCallback } from '../api/webhooks.js';
@@ -100,9 +105,18 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         const names = (data.tools as unknown[]).filter((t): t is string => typeof t === 'string');
         if (names.length > 0) {
           // Unknown names fail the hop LOUD before any LLM call (D-TL-6).
-          const { unknown } = resolveRunTools(names);
-          if (unknown.length > 0) {
-            throw new Error(`Unknown tool(s) on "${nodeUrn}": ${unknown.join(', ')}.`);
+          // `mcp__<slug>__<tool>` names resolve against the run org's
+          // McpServer registry instead of the static builtin registry.
+          const builtin = names.filter((n) => !isMcpRunToolName(n));
+          const { unknown } = resolveRunTools(builtin);
+          const unknownMcp = await unknownMcpToolNames(
+            db,
+            run.organizationId,
+            names.filter(isMcpRunToolName),
+          );
+          const allUnknown = [...unknown, ...unknownMcp];
+          if (allUnknown.length > 0) {
+            throw new Error(`Unknown tool(s) on "${nodeUrn}": ${allUnknown.join(', ')}.`);
           }
           tools = names;
         }
@@ -144,9 +158,14 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
 
     llmObject: (resolved, req, fields) => generateExtraction(resolved, req, fields),
 
-    llmTools: (run, resolved, req, toolNames, opts) => {
-      const { tools } = resolveRunTools(toolNames); // names validated at loadNodeSpec
-      return generateWithTools(resolved, req, tools, {
+    llmTools: async (run, resolved, req, toolNames, opts) => {
+      // Names validated at loadNodeSpec; mcp__ names additionally get a
+      // LIVE tools/list here (defs come from the external server via the
+      // conduit) — a tool that vanished upstream fails the hop loud
+      // rather than silently running without it (D-TL-8 posture).
+      const { tools } = resolveRunTools(toolNames.filter((n) => !isMcpRunToolName(n)));
+      const mcpTools = await materializeMcpRunTools(db, run, toolNames.filter(isMcpRunToolName));
+      return generateWithTools(resolved, req, [...tools, ...mcpTools], {
         onToolCall: opts.onToolCall,
         toolCtx: { log: opts.log, db, run, principal: runContext(db, run) },
       });
