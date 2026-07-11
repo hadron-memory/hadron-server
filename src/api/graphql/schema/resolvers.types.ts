@@ -128,6 +128,22 @@ export const typeResolvers = {
   },
   NodeVersion: {
     createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
+    // #617 — resolve editedBy (captured as `ctx.clientId ?? ctx.userId`, i.e. a
+    // User id OR an app/client id) to the editor's PUBLIC identifiers only:
+    // handle + urn, never name/email. A non-user principal, a deleted user, or a
+    // handle-less user all resolve to null (the portal falls back to the raw
+    // editedBy string). handle/urn are the same public identifiers the `users`
+    // search exposes and the caller already holds the raw id, so no per-caller
+    // visibility gate is needed (and none could leak PII — none is returned).
+    editedByUser: async (nv: { editedBy?: string | null }, _: unknown, ctx: Context) => {
+      if (!nv.editedBy) return null;
+      const user = await ctx.db.user.findFirst({
+        where: { id: nv.editedBy, deletedAt: null },
+        select: { handle: true },
+      });
+      if (!user?.handle) return null;
+      return { handle: user.handle, urn: userUrn(user.handle) };
+    },
   },
   Asset: {
     uploadedAt: (a: { uploadedAt: Date | string }) => toISO(a.uploadedAt)!,
