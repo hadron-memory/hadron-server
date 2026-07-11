@@ -29,6 +29,7 @@ import { slackQueries } from './resolvers.query.slack.js';
 import { nodeMutations } from './resolvers.mutation.node.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
+import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
 import { importNodeMutations } from './resolvers.mutation.importNode.js';
 import { assetMutations } from './resolvers.mutation.asset.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
@@ -54,11 +55,13 @@ export const resolvers = {
     ...slackQueries,
     ...appRunQueries,
     ...connectionGrantQueries,
+    ...principalGrantQueries,
   },
   Mutation: {
     ...nodeMutations,
     ...appRunMutations,
     ...connectionGrantMutations,
+    ...principalGrantMutations,
     ...importNodeMutations,
     ...assetMutations,
     ...memoryMutations,

@@ -389,6 +389,7 @@ model User {
   pendingSetup              PendingSetup?
   exchangeConnections       ExchangeConnection[]
   connectionGrantsByUser    ConnectionGrant[]          @relation("ConnectionGrantsByUser")
+  principalGrants           PrincipalGrant[]           @relation("UserPrincipalGrants")
   externalApp               App?                       @relation(fields: [externalAppId], references: [id], onDelete: SetNull)
   sessions                  Session[]                  @relation("SessionUser")
   ownedMemories             Memory[]                   @relation("UserMemoriesOwned")
@@ -456,6 +457,7 @@ model Organization {
   memories            Memory[]
   agents              Agent[]
   subscriptions       MemorySubscription[]
+  principalGrants     PrincipalGrant[]
   /// Org-layer action-policy link of the conjunctive chain (cor:acl:040:02):
   /// allow-list JSON `{ "allow": ["action", "prefix.*", "*"] }`. NULL = no
   /// restriction (the layer is absent, not deny-all). Snapshotted into
@@ -1883,6 +1885,44 @@ model ConnectionGrant {
   @@index([granteeAppId])
   @@index([grantedByUserId])
   @@map("connection_grants")
+}
+
+/// An individual action grant — the ADDITIVE half of the grant model
+/// (design:grant-model; evaluated by @hadron-memory/access-control as a
+/// PrincipalGrantLike). Hands one principal extra management actions
+/// within one organization WITHOUT changing their OrgMember role: the
+/// gate's effective allow-set is union(role bundle, live grants).
+/// Multiple live grants per (principal, org) are valid = union-of-actions
+/// (no unique constraint — the ConnectionGrant precedent). Revocation is
+/// soft delete; expiry optional (NULL = perpetual). Liveness (deletedAt +
+/// expiresAt) is filtered IN the gate's query, never after it.
+model PrincipalGrant {
+  id             String    @id @default(cuid())
+  /// 'USER' (v1). Reserved for future app/agent principals.
+  principalType  String    @default("USER") @map("principal_type")
+  /// The granted user (v1: principalType='USER').
+  principalId    String    @map("principal_id")
+  organizationId String    @map("organization_id")
+  /// Allowed actions — the access-control matcher grammar: exact
+  /// ('memory.clone'), prefix ('memory.*'), or '*'.
+  actions        String[]  @default([])
+  /// Optional expiry; NULL = perpetual until revoked.
+  expiresAt      DateTime? @map("expires_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
+
+  principal    User         @relation("UserPrincipalGrants", fields: [principalId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Composite on the gate's hot lookup (principal + org); principal-leading
+  // order also serves the User cascade delete.
+  @@index([principalId, organizationId])
+  @@index([organizationId])
+  @@map("principal_grants")
 }
 
 /// One Slack workspace install of the Hadron Slack app (spec 043).
