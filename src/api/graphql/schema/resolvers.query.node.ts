@@ -1124,9 +1124,13 @@ export const nodeQueries = {
       if (!version) return null;
       const node = await ctx.db.node.findUnique({
         where: { id: version.nodeId },
-        select: { memoryId: true },
+        select: { memoryId: true, deletedAt: true },
       });
-      if (!node) return null;
+      // A soft-deleted node drops out of every read surface: nodeVersions
+      // resolves through resolveNodeRef (excludes tombstones) → []. This by-id
+      // read must match, or a retained versionId keeps leaking a deleted node's
+      // history to any reader of its memory (PR #618 review).
+      if (!node || node.deletedAt) return null;
       const accessible = await getAccessibleMemoryIds(ctx);
       const canRead = (memId: string) => accessible === null || accessible.includes(memId);
       if (!canRead(node.memoryId)) return null;

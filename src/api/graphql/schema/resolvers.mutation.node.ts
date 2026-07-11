@@ -2215,7 +2215,11 @@ export const nodeMutations = {
     clearNodeHistory: async (_: unknown, { nodeRef }: { nodeRef: string }, ctx: Context) => {
       let nodeId: string;
       try {
-        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+        // includeDeleted: a soft-deleted node still owns residual history an
+        // owner may want to purge — clearing it is a cleanup op, so it stays
+        // reachable on tombstones (parity with deleteNodeVersion's by-id path;
+        // contrast the READ surfaces, which hide tombstoned history). PR #618.
+        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef, undefined, { includeDeleted: true }));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
           throw new GraphQLError('Node not found', {

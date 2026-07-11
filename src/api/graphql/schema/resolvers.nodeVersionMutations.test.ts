@@ -119,6 +119,15 @@ describe('clearNodeHistory (#617)', () => {
     ).rejects.toThrow('Forbidden');
     expect(await db.nodeVersion.count({ where: { nodeId: node.id } })).toBe(3);
   });
+
+  // Cleanup op: a soft-deleted node still owns residual history an owner can
+  // purge (contrast the read surfaces, which hide tombstoned history).
+  it('clears history for a soft-deleted node (cleanup reachable on tombstones)', async () => {
+    await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
+    const count = await resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, adminCtx());
+    expect(count).toBe(3);
+    expect(await db.nodeVersion.count({ where: { nodeId: node.id } })).toBe(0);
+  });
 });
 
 describe('restoreNodeVersion truncate (#617)', () => {
@@ -168,6 +177,12 @@ describe('nodeVersion query (#617 Display)', () => {
 
   it('returns null for a non-member (no existence leak)', async () => {
     const v = await resolvers.Query.nodeVersion(null, { versionId: v2.id }, outsiderCtx());
+    expect(v).toBeNull();
+  });
+
+  it('returns null when the node is soft-deleted (no tombstoned-history leak)', async () => {
+    await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
+    const v = await resolvers.Query.nodeVersion(null, { versionId: v2.id }, memberCtx());
     expect(v).toBeNull();
   });
 

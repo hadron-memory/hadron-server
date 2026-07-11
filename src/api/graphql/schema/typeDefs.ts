@@ -2541,8 +2541,9 @@ export const typeDefs = `#graphql
     does not exist OR the caller cannot read the node's current memory OR the
     memory the snapshot was captured in (per-snapshot gating mirrors
     nodeVersions — a moved node keeps its id, so a snapshot may belong to a
-    memory the caller cannot read). Null, never an error, so there is no
-    existence disclosure.
+    memory the caller cannot read). A soft-deleted node is also null (its
+    history drops out of every read surface). Null, never an error, so there
+    is no existence disclosure.
     """
     nodeVersion(versionId: ID!): NodeVersion
 
@@ -3042,7 +3043,8 @@ export const typeDefs = `#graphql
 
     # Delete ALL NodeVersion rows for a node, returning the count deleted (#617).
     # 'nodeRef' is the node's PK or fully-qualified URN. Auth: the node's memory
-    # write access. An unknown ref throws NODE_NOT_FOUND.
+    # write access. An unknown ref throws NODE_NOT_FOUND. Reachable on a
+    # soft-deleted node (purging residual history is a cleanup op).
     clearNodeHistory(nodeRef: ID!): Int!
 
     # Relocate a node (#564). 'sourceRef' is the node's PK or fully-qualified
