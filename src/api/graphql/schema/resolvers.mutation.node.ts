@@ -297,6 +297,7 @@ export async function writeNodeCore(
         await ctx.db.nodeVersion.create({
           data: {
             nodeId: existing.id,
+            memoryId: existing.memoryId,
             loc: existing.loc,
             name: existing.name,
             alias: existing.alias,
@@ -1100,6 +1101,7 @@ export const nodeMutations = {
           await tx.nodeVersion.create({
             data: {
               nodeId: raw.id,
+              memoryId: raw.memoryId,
               loc: raw.loc,
               name: raw.name,
               alias: raw.alias,
@@ -1546,6 +1548,9 @@ export const nodeMutations = {
         await tx.nodeVersion.create({
           data: {
             nodeId: source.id,
+            // Pre-move snapshot belongs to the SOURCE memory (#602): the node
+            // is about to leave it, and this snapshot's content lived there.
+            memoryId: source.memoryId,
             loc: source.loc,
             name: source.name,
             alias: source.alias,
@@ -1849,6 +1854,7 @@ export const nodeMutations = {
         await tx.nodeVersion.create({
           data: {
             nodeId: target.id,
+            memoryId: target.memoryId,
             loc: target.loc,
             name: target.name,
             alias: target.alias,
@@ -2123,6 +2129,7 @@ export const nodeMutations = {
         data: {
           id: generateId(),
           nodeId: node.id,
+          memoryId: node.memoryId,
           loc: node.loc,
           name: node.name,
           alias: node.alias,

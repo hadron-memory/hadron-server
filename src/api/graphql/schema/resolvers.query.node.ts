@@ -41,6 +41,7 @@ import {
 import {
   type Context,
   ROLE_ORDER,
+  requireRole,
   requireOrgRole,
   getAccessibleMemoryIds,
   memoryAccessFilter,
@@ -1066,12 +1067,50 @@ export const nodeQueries = {
       });
     },
 
-    nodeVersions: async (_: unknown, { nodeId, limit }: { nodeId: string; limit?: number }, ctx: Context) => {
-      return ctx.db.nodeVersion.findMany({
+    nodeVersions: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
+      requireRole(ctx, 'READER');
+      // cor:api:140 / 007-entity-id-or-urn: nodeRef may be an ID or a fully-
+      // qualified node URN. A genuine miss collapses to [] (no existence
+      // disclosure); a malformed / unqualified URN propagates — mirrors
+      // memoryUsageSummary / resolveReadableMemoryId.
+      let nodeId: string;
+      try {
+        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) return [];
+        throw e;
+      }
+      // Access control (#602): this resolver previously had NO gate — any
+      // authenticated caller could read any tenant's node version history.
+      const node = await ctx.db.node.findUnique({
+        where: { id: nodeId },
+        select: { memoryId: true },
+      });
+      if (!node) return [];
+      // Full accessible-memory set for the principal (null = unrestricted).
+      // getAccessibleMemoryIds encodes the principal + memory-class rules
+      // (spec 034). We gate the node's CURRENT memory AND each snapshot's
+      // memory: a node MOVED across memories keeps its stable id (moveNode),
+      // so its history can hold snapshots captured while it lived in a memory
+      // the caller can't read (#602 / Codex P1) — gating the current memory
+      // alone would leak those.
+      const accessible = await getAccessibleMemoryIds(ctx);
+      const canRead = (memId: string) => accessible === null || accessible.includes(memId);
+      // No read on the current memory ⇒ [] (no existence disclosure, matching
+      // memoryUsageSummary).
+      if (!canRead(node.memoryId)) return [];
+
+      const versions = await ctx.db.nodeVersion.findMany({
         where: { nodeId },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 50,
       });
+      // Drop snapshots captured while the node lived in a memory the caller
+      // can't read. Legacy rows (memoryId NULL) fall back to the node's current
+      // memory, already authorized above. (Filter after take: a >limit-version
+      // node spanning inaccessible memories may under-return near the limit —
+      // safe, never over-returns.)
+      return versions.filter((v) => canRead(v.memoryId ?? node.memoryId));
     },
 
     appNodes: async (
