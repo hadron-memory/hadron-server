@@ -1775,6 +1775,9 @@ export function createMcpServerInstance(
           nodeLoc: loc,
           nodeId: node.id,
           appId: auth.appId ?? null,
+          // 046-usage-metering FR-001: user attribution when the
+          // authenticated principal is a user (createdBy unchanged).
+          userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
           sessionId: null,
         },
@@ -1981,6 +1984,8 @@ export function createMcpServerInstance(
           nodeLoc: n.loc,
           nodeId: n.id,
           appId: auth.appId ?? null,
+          // 046-usage-metering FR-001 (as in hadron_get_node's event).
+          userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
           sessionId: null,
         });
@@ -2712,6 +2717,8 @@ export function createMcpServerInstance(
           nodeLoc: loc,
           nodeId: upserted.id,
           appId: auth.appId ?? null,
+          // 046-usage-metering FR-001 (as in hadron_get_node's event).
+          userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
           sessionId: null,
         },
@@ -2978,6 +2985,8 @@ export function createMcpServerInstance(
           nodeLoc: loc,
           nodeId: existing.id,
           appId: auth.appId ?? null,
+          // 046-usage-metering FR-001 (as in hadron_get_node's event).
+          userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
           sessionId: null,
         },
@@ -3640,6 +3649,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           nodeLoc: loc,
           nodeId: node.id,
           appId: auth.appId ?? null,
+          // 046-usage-metering FR-001 (as in hadron_get_node's event).
+          userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
           sessionId: null,
           actionArgs: (args ?? undefined) as Record<string, string> | undefined,

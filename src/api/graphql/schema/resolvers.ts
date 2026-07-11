@@ -28,6 +28,7 @@ import { slackQueries } from './resolvers.query.slack.js';
 
 import { nodeMutations } from './resolvers.mutation.node.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
+import { meteringMutations, meteringQueries } from './resolvers.metering.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
 import { importNodeMutations } from './resolvers.mutation.importNode.js';
@@ -56,10 +57,12 @@ export const resolvers = {
     ...appRunQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
+    ...meteringQueries,
   },
   Mutation: {
     ...nodeMutations,
     ...appRunMutations,
+    ...meteringMutations,
     ...connectionGrantMutations,
     ...principalGrantMutations,
     ...importNodeMutations,

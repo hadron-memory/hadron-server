@@ -946,6 +946,10 @@ export const typeResolvers = {
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
     createdAt: (ue: { createdAt: Date | string }) => toISO(ue.createdAt)!,
+    // 046-usage-metering: bigint travels as a base-10 integer String
+    // (graphql-js does not serialize bigint to GraphQLString by itself).
+    costMicroCents: (ue: { costMicroCents: bigint | null }) =>
+      ue.costMicroCents != null ? ue.costMicroCents.toString() : null,
   },
 
 };
