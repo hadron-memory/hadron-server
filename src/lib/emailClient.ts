@@ -8,12 +8,15 @@ import { GraphQLError } from 'graphql';
  *
  * PROVIDER DISPATCH: one capability tool per provider (decided 2026-07-08).
  * Every call takes the connection's `provider` and routes to that provider's
- * tool config; v1 knows `ms-exchange` (hadrontool-ms-exchange). Adding Gmail
- * later = a new entry in PROVIDER_TOOLS, no caller changes (spec 002 US4).
+ * tool config: `ms-exchange` (hadrontool-ms-exchange) and `gmail`
+ * (hadrontool-gmail, #580). Adding a provider = a new entry in
+ * PROVIDER_TOOLS, no caller changes (spec 002 US4).
  *
  * Configured by env (per provider):
  *   MS_EXCHANGE_TOOL_URL    e.g. http://hadrontool-ms-exchange:8080 (required)
  *   MS_EXCHANGE_TOOL_TOKEN  shared bearer token (optional; sent when set)
+ *   GMAIL_TOOL_URL          e.g. http://hadrontool-gmail:8080 (required)
+ *   GMAIL_TOOL_TOKEN        shared bearer token (optional; sent when set)
  *
  * Error surface: EMAIL_TOOL_NOT_CONFIGURED / EMAIL_TOOL_UNREACHABLE /
  * EMAIL_TOOL_ERROR as GraphQL extensions.code — plus pass-through of the
@@ -32,6 +35,7 @@ interface ProviderToolConfig {
 
 const PROVIDER_TOOLS: Record<string, ProviderToolConfig> = {
   'ms-exchange': { urlEnv: 'MS_EXCHANGE_TOOL_URL', tokenEnv: 'MS_EXCHANGE_TOOL_TOKEN' },
+  gmail: { urlEnv: 'GMAIL_TOOL_URL', tokenEnv: 'GMAIL_TOOL_TOKEN' },
 };
 
 /** Resolve a provider's tool base URL + token; typed error when unknown/unconfigured. */

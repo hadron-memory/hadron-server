@@ -27,12 +27,7 @@ import {
   parseAppleUserField,
   resolveAppleUser,
 } from './auth/index.js';
-import {
-  issueLoginCode,
-  redeemLoginCode,
-  issueExchangeStartNonce,
-  redeemExchangeStartNonce,
-} from './auth/authHandoff.js';
+import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
 import { resolveAuthContext } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
@@ -67,8 +62,9 @@ import { startSchedulerLoop } from './jobs/scheduler.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
-import { createToolConnection, deleteToolConnection, subscribeToolFolder } from './lib/emailClient.js';
 import { buildMicrosoftAuthUrl, getMicrosoftRedirectUri } from './integrations/exchange/auth.js';
+import { buildGmailAuthUrl, getGmailRedirectUri, isGmailConnectConfigured } from './integrations/gmail/auth.js';
+import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
 
 export async function createServer(): Promise<Express> {
   const app = express();
@@ -1181,258 +1177,32 @@ export async function createServer(): Promise<Express> {
   });
 
   // ---------------------------------------------------------------------------
-  // Microsoft OAuth (Exchange email integration — delegated permissions)
+  // Mailbox-connect OAuth (email capability tools — delegated permissions)
   // ---------------------------------------------------------------------------
 
-  const pendingMsStates = new Map<
-    string,
-    { orgId: string; userId: string; redirect: string; expiresAt: number }
-  >();
-
-  // #477 Sink 2 — Exchange OAuth start. The portal calls this server-to-server
-  // (Bearer-authed, NOT a browser redirect) and gets back a single-use, short-
-  // TTL nonce. The 30-day JWT authenticates the initiating user HERE, over a
-  // header on a server-to-server POST — it never rides in the /auth/microsoft
-  // redirect URL (where it would land in access logs + browser history).
-  app.post('/auth/microsoft/start', async (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      res.status(401).json({ error: 'No token provided' });
-      return;
-    }
-    let userId: string;
-    let roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined;
-    try {
-      const payload = await verifyJwt(authHeader.slice(7));
-      userId = payload.sub;
-      roles = payload.roles;
-    } catch {
-      res.status(401).json({ error: 'Invalid or expired token' });
-      return;
-    }
-
-    const body = (req.body ?? {}) as { orgId?: unknown; redirect?: unknown };
-    const orgId = typeof body.orgId === 'string' ? body.orgId : '';
-    const redirect = typeof body.redirect === 'string' && body.redirect ? body.redirect : '/';
-    if (!orgId) {
-      res.status(400).json({ error: 'orgId is required' });
-      return;
-    }
-
-    // #506: the Bearer JWT authenticates the caller but says nothing about
-    // which org they may act on. Without this gate any authenticated user could
-    // attach their own Microsoft mailbox to an ARBITRARY org (the nonce carries
-    // orgId straight to /auth/microsoft/callback's ExchangeConnection upsert).
-    // Require org ADMIN — the same role deleteExchangeConnection enforces.
-    // requireOrgRole short-circuits for platform ADMIN/OWNER and rejects
-    // revoked (soft-deleted) members.
-    try {
-      await requireOrgRole({ db, userId, roles }, orgId, 'ADMIN');
-    } catch (err) {
-      // Only the explicit authorization failure is a 403 — an unexpected fault
-      // (DB outage, transient Prisma error) must surface as 500, not masquerade
-      // as "not an admin" (PR-509 Copilot review).
-      if (err instanceof Error && err.message === 'Forbidden') {
-        res.status(403).json({ error: 'Forbidden: you must be an admin of this organization.' });
-        return;
-      }
-      console.error('microsoft/start authorization error:', err);
-      res.status(500).json({ error: 'Internal error' });
-      return;
-    }
-
-    const nonce = await issueExchangeStartNonce({ userId, orgId, redirect });
-    res.json({ nonce });
+  // One shared trio per provider (src/integrations/mailboxConnect.ts): the
+  // #477 start-nonce handoff, the authorize redirect, and the callback that
+  // forwards {code, redirectUri} to the provider tool. Microsoft = Exchange
+  // (hadrontool-ms-exchange); Gmail = hadrontool-gmail (#580) — NOT
+  // /auth/google, which is Sign-in-with-Google (#581).
+  mountMailboxConnectRoutes(app, {
+    provider: 'ms-exchange',
+    routeName: 'microsoft',
+    buildAuthUrl: buildMicrosoftAuthUrl,
+    getRedirectUri: getMicrosoftRedirectUri,
+    logPrefix: 'microsoft-oauth',
+  });
+  mountMailboxConnectRoutes(app, {
+    provider: 'gmail',
+    routeName: 'gmail',
+    buildAuthUrl: buildGmailAuthUrl,
+    getRedirectUri: getGmailRedirectUri,
+    logPrefix: 'gmail-oauth',
+    // Fails safe until the mailbox GCP project's client is provisioned —
+    // same posture as Google login (#583).
+    isConfigured: isGmailConnectConfigured,
   });
 
-  app.get('/auth/microsoft', async (req, res) => {
-    // #477 Sink 2: the browser arrives with a single-use nonce (minted by
-    // POST /auth/microsoft/start), not the session JWT. Look it up, discard it,
-    // and proceed with the Microsoft OAuth round-trip.
-    const nonce = req.query.nonce as string | undefined;
-    if (!nonce) {
-      res.status(400).json({ error: 'Missing nonce' });
-      return;
-    }
-    const started = await redeemExchangeStartNonce(nonce);
-    if (!started) {
-      res.status(400).json({ error: 'Invalid or expired nonce' });
-      return;
-    }
-
-    const state = crypto.randomBytes(16).toString('hex');
-    pendingMsStates.set(state, {
-      orgId: started.orgId,
-      userId: started.userId,
-      redirect: started.redirect,
-      expiresAt: Date.now() + 10 * 60 * 1000,
-    });
-
-    res.redirect(buildMicrosoftAuthUrl(state));
-  });
-
-  app.get('/auth/microsoft/callback', async (req, res) => {
-    const { code, state, error: oauthError } = req.query as {
-      code?: string;
-      state?: string;
-      error?: string;
-    };
-
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-
-    if (oauthError) {
-      const errorUrl = new URL('/app/dashboard', frontendUrl);
-      errorUrl.searchParams.set('exchangeError', oauthError);
-      res.redirect(errorUrl.toString());
-      return;
-    }
-
-    if (!code || !state) {
-      res.status(400).json({ error: 'Missing code or state' });
-      return;
-    }
-
-    const pending = pendingMsStates.get(state);
-    pendingMsStates.delete(state);
-
-    if (!pending || pending.expiresAt < Date.now()) {
-      res.status(400).json({ error: 'Invalid or expired state' });
-      return;
-    }
-
-    // #506 defense-in-depth: /auth/microsoft/start already gated on org ADMIN,
-    // but authority can narrow during the OAuth round-trip (the ~2-min nonce
-    // window — e.g. the user's membership is revoked). Re-verify before writing
-    // the connection. Roles aren't carried on this browser redirect, so fetch
-    // them for requireOrgRole's platform-admin short-circuit.
-    try {
-      const initiator = await db.user.findUnique({
-        where: { id: pending.userId },
-        select: { roles: true },
-      });
-      // A deleted initiator (null) has no roles and no membership → requireOrgRole
-      // rejects it. Cast the Prisma Role[] to the Context.roles union (they are
-      // the same string set) for the platform-admin short-circuit.
-      await requireOrgRole(
-        {
-          db,
-          userId: pending.userId,
-          roles: initiator?.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined,
-        },
-        pending.orgId,
-        'ADMIN',
-      );
-    } catch (err) {
-      // Distinguish the authorization failure from an operational fault so a DB
-      // outage doesn't masquerade as "not authorized" (PR-509 Copilot review).
-      const forbidden = err instanceof Error && err.message === 'Forbidden';
-      if (!forbidden) console.error('microsoft/callback re-check error:', err);
-      const errorUrl = new URL('/app/dashboard', frontendUrl);
-      errorUrl.searchParams.set('exchangeError', forbidden ? 'not_authorized' : 'server_error');
-      res.redirect(errorUrl.toString());
-      return;
-    }
-
-    // #396: core does NOT exchange the code — the provider tool holds the
-    // client secret. Forward the code (with the SAME redirect URI the
-    // authorize URL carried); the tool exchanges it, derives the mailbox
-    // identity (ID-token claims first — personal accounts may fail Graph
-    // /me — then the profile), stores the encrypted refresh token, and
-    // returns the identity (shape-validated by emailClient). Core stores
-    // only that identity.
-    let identity: Awaited<ReturnType<typeof createToolConnection>> | undefined;
-    try {
-      identity = await createToolConnection('ms-exchange', {
-        code,
-        redirectUri: getMicrosoftRedirectUri(),
-      });
-
-      // Reconnecting an existing mailbox mints a NEW tool connection; tear
-      // down the superseded one so it doesn't keep a live token +
-      // subscriptions on the tool side. Fire-and-forget (never throws) —
-      // the browser redirect must not wait on the tool.
-      const existing = await db.exchangeConnection.findUnique({
-        where: {
-          organizationId_mailboxEmail: {
-            organizationId: pending.orgId,
-            mailboxEmail: identity.mailboxEmail,
-          },
-        },
-        select: { toolConnectionId: true, provider: true },
-      });
-      if (existing?.toolConnectionId && existing.toolConnectionId !== identity.id) {
-        void deleteToolConnection(existing.provider, existing.toolConnectionId);
-      }
-
-      await db.exchangeConnection.upsert({
-        where: {
-          organizationId_mailboxEmail: {
-            organizationId: pending.orgId,
-            mailboxEmail: identity.mailboxEmail,
-          },
-        },
-        create: {
-          organizationId: pending.orgId,
-          userId: pending.userId,
-          mailboxEmail: identity.mailboxEmail,
-          displayName: identity.displayName,
-          provider: identity.provider,
-          toolConnectionId: identity.id,
-          syncStatus: 'OK',
-          lastSyncAt: new Date(),
-          createdBy: pending.userId,
-        },
-        update: {
-          displayName: identity.displayName,
-          provider: identity.provider,
-          toolConnectionId: identity.id,
-          // Reconnect transfers OWNERSHIP: mail operations are owner-only,
-          // and the initiator just proved control of the mailbox via OAuth
-          // (and passed the #506 org-ADMIN gate). Without this, a reconnect
-          // by a different user would strand the row on the old owner.
-          userId: pending.userId,
-          // A reconnect also REVIVES a previously-disconnected row —
-          // otherwise the flow reports success while the row stays
-          // soft-deleted and invisible.
-          deletedAt: null,
-          deletedBy: null,
-          // The legacy core-held token (if any) is superseded by the tool's.
-          refreshTokenEncrypted: null,
-          syncStatus: 'OK',
-          lastSyncAt: new Date(),
-          lastError: null,
-          updatedBy: pending.userId,
-        },
-      });
-
-      // Subscribe the inbox to provider change notifications (the event
-      // plane). Best-effort: until the tool's public webhook route +
-      // WEBHOOK_BASE_URL are configured this fails, and the connection is
-      // still fully usable for request/reply operations.
-      subscribeToolFolder(identity.provider, identity.id, 'inbox').catch((err) => {
-        console.log(
-          `[microsoft-oauth] inbox subscription not created for ${identity!.mailboxEmail} (event plane off?): ${err instanceof Error ? err.message : err}`,
-        );
-      });
-
-      console.log(`[microsoft-oauth] Connected Exchange for ${identity.mailboxEmail} → org ${pending.orgId} (tool connection ${identity.id})`);
-
-      const successUrl = new URL(pending.redirect, frontendUrl);
-      successUrl.searchParams.set('exchangeConnected', '1');
-      res.redirect(successUrl.toString());
-    } catch (err) {
-      console.error('[microsoft-oauth] Callback error:', err);
-      // If the tool already minted a connection but core failed to record it,
-      // tear the orphan down — otherwise every failed attempt leaks a live
-      // refresh token + auto-renewing subscriptions with no core record.
-      if (identity) {
-        void deleteToolConnection(identity.provider, identity.id);
-      }
-      const errorUrl = new URL(pending.redirect, frontendUrl);
-      errorUrl.searchParams.set('exchangeError', err instanceof Error ? err.message : 'Microsoft authentication failed');
-      res.redirect(errorUrl.toString());
-    }
-  });
   // ---------------------------------------------------------------------------
   // Email events ingress (tool → core, #396 Phase 4)
   // ---------------------------------------------------------------------------
