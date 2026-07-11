@@ -291,8 +291,8 @@ describe('cloneMemory', () => {
     expect(log).toHaveLength(1);
     expect(log[0].message).toContain('org-a:src-mem');
 
-    // No version history is fabricated for clone nodes.
-    const versions = await db.nodeVersion.findMany({
+    // No revision history is fabricated for clone nodes.
+    const versions = await db.nodeRevision.findMany({
       where: { nodeId: { in: cloneNodes.map((n) => n.id) } },
     });
     expect(versions).toHaveLength(0);

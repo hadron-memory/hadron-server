@@ -3,7 +3,7 @@
  *
  * Pins: encryptMemory's passphrase path (owner auth, private-class gate,
  * abstract now encrypted, verifier/salt stored), the full unlock loop
- * (passphrase → staged key → plaintext read), and NodeVersion snapshots
+ * (passphrase → staged key → plaintext read), and NodeRevision snapshots
  * remaining ciphertext.
  */
 

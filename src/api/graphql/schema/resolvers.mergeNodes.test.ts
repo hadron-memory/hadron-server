@@ -1,7 +1,7 @@
 /**
  * mergeNodes — fold a source node into a target node. Covers per-field merge
  * strategy (text concat, tag union, JSON shallow-merge), field selection via
- * `include`, edge re-pointing, deleteSource, URN inputs, the version snapshot
+ * `include`, edge re-pointing, deleteSource, URN inputs, the revision snapshot
  * + abstract-staleness recompute, and the guard errors.
  */
 
@@ -254,8 +254,8 @@ describe('mergeNodes — edges', () => {
   });
 });
 
-describe('mergeNodes — version history + staleness', () => {
-  it('snapshots a NodeVersion of the target and refreshes the abstract hash', async () => {
+describe('mergeNodes — revision history + staleness', () => {
+  it('snapshots a NodeRevision of the target and refreshes the abstract hash', async () => {
     const src = await makeNode('src', { content: 'sc', abstract: 'src abstract' });
     const tgt = await makeNode('tgt', {
       content: 'tc',
@@ -269,7 +269,7 @@ describe('mergeNodes — version history + staleness', () => {
     // abstract changed → hash recomputed off the post-merge content.
     expect(out.abstractOriginHash).not.toBe('stale123');
 
-    const versions = await db.nodeVersion.findMany({ where: { nodeId: tgt.id } });
+    const versions = await db.nodeRevision.findMany({ where: { nodeId: tgt.id } });
     expect(versions).toHaveLength(1);
     expect(versions[0].content).toBe('tc'); // pre-merge snapshot
   });

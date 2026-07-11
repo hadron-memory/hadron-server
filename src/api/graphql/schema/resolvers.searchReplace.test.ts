@@ -1,7 +1,7 @@
 /**
  * searchReplaceInNodes — bulk literal/regex search-and-replace across selected
  * nodes. Covers selection (nodeIds / memoryIds / prefix), field coverage,
- * dryRun, the name/abstract guards, version snapshots, and regex mode.
+ * dryRun, the name/abstract guards, revision snapshots, and regex mode.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -129,10 +129,10 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     expect(res.nodesChanged).toBe(1);
   });
 
-  it('writes a NodeVersion snapshot for each changed node', async () => {
+  it('writes a NodeRevision snapshot for each changed node', async () => {
     const a = await makeNode('a', { content: 'cat' });
     await call({ oldText: 'cat', newText: 'dog', nodeIds: [a.id], fields: ['content'] });
-    const versions = await db.nodeVersion.findMany({ where: { nodeId: a.id } });
+    const versions = await db.nodeRevision.findMany({ where: { nodeId: a.id } });
     expect(versions).toHaveLength(1);
     expect(versions[0].content).toBe('cat'); // pre-change snapshot
   });
@@ -140,7 +140,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
   // #88/#620: an explicit reason lands in each changed node's version
   // snapshot as revLabel (it historically squatted in editedBy, which now
   // carries the editing user's PK); `changes` records the rewritten fields.
-  it('records an explicit reason in each version snapshot (revLabel)', async () => {
+  it('records an explicit reason in each revision snapshot (revLabel)', async () => {
     const a = await makeNode('a', { content: 'cat' });
     await call({
       oldText: 'cat',
@@ -149,7 +149,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
       fields: ['content'],
       reason: 'rename across corpus',
     });
-    const versions = await db.nodeVersion.findMany({ where: { nodeId: a.id } });
+    const versions = await db.nodeRevision.findMany({ where: { nodeId: a.id } });
     expect(versions[0].revLabel).toBe('rename across corpus');
     expect(versions[0].editedBy).toBe(admin.id);
     expect(versions[0].changes).toEqual(['content']);

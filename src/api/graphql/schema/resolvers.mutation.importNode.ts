@@ -10,7 +10,7 @@
 //     falls back to the whole page when no article is found.
 //   - Conflict = UPDATE IN PLACE: delegation to writeNodeCore mode 'upsert'
 //     (the internal-callers-only mode) — full write invariants apply
-//     (NodeVersion snapshot = undo, encryption, hash, re-embed, git mirror).
+//     (NodeRevision snapshot = undo, encryption, hash, re-embed, git mirror).
 //   - taskRef post-import hand-off: implemented #528 — when set, the stored
 //     node is handed to that task via a MANUAL AppRun (async). (Supersedes the
 //     2026-07-01 D12 deferral.)

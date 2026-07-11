@@ -1,7 +1,7 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
-import { jsonOrDbNull } from '../../lib/nodeVersionSnapshot.js';
+import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 
 /**
@@ -12,7 +12,7 @@ import { computeContentHash } from '../../lib/contentHash.js';
  *
  * What is deliberately NOT copied (the clone is a fresh start, not a fork
  * of the source's operational state):
- *   - NodeVersion history — clone nodes are "newly created" (the create
+ *   - NodeRevision history — clone nodes are "newly created" (the create
  *     path in upsertNode also writes no initial version).
  *   - NodeEmbedding vectors — content changes under URN rewrite, so the
  *     caller re-stamps via backfillMemoryEmbeddings when the clone is

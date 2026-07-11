@@ -56,7 +56,7 @@ const canonicalStoredMemoryUrn = (urn: string): string =>
  * bare ID-shaped value (isId — legacy reasons/commit messages never match)
  * look up the User PK. Returns { handle, urn } — never name/email/any PII.
  */
-async function lookupVersionEditorCandidate(
+async function lookupRevisionEditorCandidate(
   ctx: Context,
   cand: string,
 ): Promise<{ handle: string; urn: string | null } | null> {
@@ -90,25 +90,25 @@ async function lookupVersionEditorCandidate(
 }
 
 /**
- * Resolve a version editor/approver candidate list (#617/#619/#620): first
+ * Resolve a revision editor/approver candidate list (#617/#619/#620): first
  * candidate that resolves to a live, handle-bearing user wins. A node's
  * history overwhelmingly repeats the same few editor strings, so lookups are
  * memoized per request on the Context (same pattern as loadMemoryUrn /
  * loadEdgeEndpointNode) — a 50-row history costs one query per DISTINCT
  * candidate, negative results included.
  */
-function resolveVersionEditor(
+function resolveRevisionEditor(
   ctx: Context,
   candidates: Array<string | null | undefined>,
 ): Promise<{ handle: string; urn: string | null } | null> {
-  const cache = (ctx.versionEditorCache ??= new Map<
+  const cache = (ctx.revisionEditorCache ??= new Map<
     string,
     Promise<{ handle: string; urn: string | null } | null>
   >());
   const lookup = (cand: string) => {
     let pending = cache.get(cand);
     if (!pending) {
-      pending = lookupVersionEditorCandidate(ctx, cand);
+      pending = lookupRevisionEditorCandidate(ctx, cand);
       cache.set(cand, pending);
     }
     return pending;
@@ -202,12 +202,12 @@ export const typeResolvers = {
       }
     },
   },
-  NodeVersion: {
+  NodeRevision: {
     createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
     // Prisma reads a NULL scalar list as [] already; belt-and-suspenders for
     // rows that arrive from raw queries (#620 legacy rows).
     changes: (nv: { changes?: string[] | null }) => nv.changes ?? [],
-    // #617/#619/#620 — resolve the version's editor to PUBLIC identifiers
+    // #617/#619/#620 — resolve the revision's editor to PUBLIC identifiers
     // only: handle + urn, never name/email. Candidates in preference order:
     //   1. editedBy — post-#620 this holds ONLY a User id;
     //   2. createdBy — legacy rows captured `userId ?? clientId` here (user
@@ -225,10 +225,10 @@ export const typeResolvers = {
       nv: { editedBy?: string | null; createdBy?: string | null; editedByInfo?: string | null },
       _: unknown,
       ctx: Context,
-    ) => resolveVersionEditor(ctx, [nv.editedBy, nv.createdBy, nv.editedByInfo]),
+    ) => resolveRevisionEditor(ctx, [nv.editedBy, nv.createdBy, nv.editedByInfo]),
     // #620 — same public-identifier resolution for the (reserved) approver.
     approvedByUser: async (nv: { approvedBy?: string | null }, _: unknown, ctx: Context) =>
-      resolveVersionEditor(ctx, [nv.approvedBy]),
+      resolveRevisionEditor(ctx, [nv.approvedBy]),
   },
   Asset: {
     uploadedAt: (a: { uploadedAt: Date | string }) => toISO(a.uploadedAt)!,

@@ -1,14 +1,14 @@
 /**
- * Shared NodeVersion snapshot builder (#620).
+ * Shared NodeRevision snapshot builder (#620).
  *
- * A NodeVersion is a hand-curated subset of Node columns captured at every
+ * A NodeRevision is a hand-curated subset of Node columns captured at every
  * write site (spec cor:dmo:060:04) — upsertNode, searchReplaceInNodes,
- * moveNode, mergeNodes, restoreNodeVersion, hadron_update_node,
+ * moveNode, mergeNodes, restoreNodeRevision, hadron_update_node,
  * hadron_move_node, and mergeMemories. Before #620 each site assembled the
  * row literal by hand, which is exactly how new Node columns kept getting
  * silently dropped from history (the spec-031 lesson). Every site now goes
- * through `buildNodeVersionSnapshot`, so adding a versioned field is a
- * one-place change (plus the restoreNodeVersion write-back).
+ * through `buildNodeRevisionSnapshot`, so adding a versioned field is a
+ * one-place change (plus the restoreNodeRevision write-back).
  *
  * Editor capture (#620): `editedBy` holds ONLY a User.id. When no user is
  * known, whatever we do know about the principal goes to `editedByInfo`
@@ -22,7 +22,7 @@ import { Prisma } from '../generated/prisma/index.js';
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
  * memories `content` / `abstract` / `data` are the AT-REST ciphertext,
- * deliberately (versions store the at-rest form; spec 041).
+ * deliberately (revisions store the at-rest form; spec 041).
  */
 export interface SnapshotSourceNode {
   id: string;
@@ -47,9 +47,9 @@ export interface SnapshotSourceNode {
 
 /** Editor identity split per #620 — see module doc. */
 export interface SnapshotEditor {
-  /** User.id when a user is known → NodeVersion.editedBy. */
+  /** User.id when a user is known → NodeRevision.editedBy. */
   userId?: string | null;
-  /** Fallback principal info when no user → NodeVersion.editedByInfo. */
+  /** Fallback principal info when no user → NodeRevision.editedByInfo. */
   info?: string | null;
 }
 
@@ -79,21 +79,21 @@ export function jsonOrDbNull(v: Prisma.JsonValue | null | undefined) {
 }
 
 /**
- * Cap on `NodeVersion.revLabel` — a user-settable display label (same
+ * Cap on `NodeRevision.revLabel` — a user-settable display label (same
  * rationale as USER_API_KEY_LABEL_MAX_LEN: the column is uncapped TEXT and a
- * label is not a document). The updateNodeVersion mutation rejects longer
+ * label is not a document). The updateNodeRevision mutation rejects longer
  * input; the snapshot builder truncates (a long #88 `reason` must not abort
  * the edit that carries it).
  */
 export const REV_LABEL_MAX_LEN = 500;
 
 /**
- * Build the `data` payload for a `nodeVersion.create` call from the node's
+ * Build the `data` payload for a `nodeRevision.create` call from the node's
  * PRE-edit state. `changes` names the fields the edit ABOUT to be applied
  * will modify (the delta between this snapshot and the state replacing it);
- * `revLabel` carries the caller-supplied #88 `reason` / version label.
+ * `revLabel` carries the caller-supplied #88 `reason` / revision label.
  */
-export function buildNodeVersionSnapshot(
+export function buildNodeRevisionSnapshot(
   node: SnapshotSourceNode,
   editor: SnapshotEditor,
   opts?: { revLabel?: string | null; changes?: string[] },
@@ -132,7 +132,7 @@ export function buildNodeVersionSnapshot(
  * operational/derived columns (embedding*, tokens, contentHash) and audit
  * stamps, matching what the snapshot itself carries.
  */
-export const VERSIONED_NODE_FIELDS = [
+export const TRACKED_NODE_FIELDS = [
   'memoryId',
   'loc',
   'name',
@@ -189,11 +189,11 @@ function fieldEquals(a: unknown, b: unknown): boolean {
  * regardless).
  */
 export function diffNodeChanges(
-  existing: Partial<Record<(typeof VERSIONED_NODE_FIELDS)[number], unknown>>,
+  existing: Partial<Record<(typeof TRACKED_NODE_FIELDS)[number], unknown>>,
   updates: Record<string, unknown>,
 ): string[] {
   const changed: string[] = [];
-  for (const field of VERSIONED_NODE_FIELDS) {
+  for (const field of TRACKED_NODE_FIELDS) {
     if (!(field in updates) || updates[field] === undefined) continue;
     if (!fieldEquals(existing[field], updates[field])) changed.push(field);
   }
@@ -201,7 +201,7 @@ export function diffNodeChanges(
 }
 
 /**
- * The node fields a snapshot restores (restoreNodeVersion) — ONE home for
+ * The node fields a snapshot restores (restoreNodeRevision) — ONE home for
  * both the pre-restore `changes` diff and the write-back, so the field list
  * and the legacy sentinel can't drift between them (the spec-031 silent-drop
  * pattern). A NULL `nodeType` marks a pre-#620 LEGACY snapshot that never
@@ -209,7 +209,7 @@ export function diffNodeChanges(
  * so they are omitted entirely. Values are returned RAW (at-rest form); the
  * write site maps `properties`/`data` through jsonOrDbNull.
  */
-export function restorableNodeFields(version: {
+export function restorableNodeFields(revision: {
   name: string;
   alias: string | null;
   description: string | null;
@@ -227,24 +227,24 @@ export function restorableNodeFields(version: {
   aiAgent: string | null;
 }): Record<string, unknown> {
   const base: Record<string, unknown> = {
-    name: version.name,
-    alias: version.alias,
-    description: version.description,
-    abstract: version.abstract,
-    abstractOriginHash: version.abstractOriginHash,
-    content: version.content,
-    tags: (version.tags ?? []) as string[],
+    name: revision.name,
+    alias: revision.alias,
+    description: revision.description,
+    abstract: revision.abstract,
+    abstractOriginHash: revision.abstractOriginHash,
+    content: revision.content,
+    tags: (revision.tags ?? []) as string[],
   };
-  if (version.nodeType == null) return base;
+  if (revision.nodeType == null) return base;
   return {
     ...base,
-    nodeType: version.nodeType,
-    isLink: version.isLink ?? false,
-    properties: version.properties,
-    data: version.data,
-    seq: version.seq,
-    isRunnable: version.isRunnable,
-    llmModel: version.llmModel,
-    aiAgent: version.aiAgent,
+    nodeType: revision.nodeType,
+    isLink: revision.isLink ?? false,
+    properties: revision.properties,
+    data: revision.data,
+    seq: revision.seq,
+    isRunnable: revision.isRunnable,
+    llmModel: revision.llmModel,
+    aiAgent: revision.aiAgent,
   };
 }

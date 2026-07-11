@@ -1,14 +1,14 @@
 /**
- * Integration tests for the node version-history write surface (#617):
- *   - deleteNodeVersion(versionId): delete one snapshot; NOT_FOUND on miss.
+ * Integration tests for the node revision-history write surface (#617):
+ *   - deleteNodeRevision(revisionId): delete one snapshot; NOT_FOUND on miss.
  *   - clearNodeHistory(nodeRef): delete all snapshots, return the count.
- *   - restoreNodeVersion(versionId, truncate): the new truncate branch —
+ *   - restoreNodeRevision(revisionId, truncate): the new truncate branch —
  *     restore + collapse newer history in one transaction, no pre-restore
  *     snapshot; the selected row is kept (exclusive boundary).
- *   - nodeVersion(versionId): single-snapshot read (Display), access-gated.
+ *   - nodeRevision(revisionId): single-snapshot read (Display), access-gated.
  *
  * Auth: reads gate on the node's memory READ access, writes on WRITE access
- * (same shape as nodeVersions / restoreNodeVersion). A non-member is denied.
+ * (same shape as nodeRevisions / restoreNodeRevision). A non-member is denied.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -55,13 +55,13 @@ beforeEach(async () => {
   node = await db.node.create({
     data: { id: generateId(), memoryId: memory.id, loc: 'guide', name: 'Current', content: 'current body' },
   });
-  v1 = await db.nodeVersion.create({
+  v1 = await db.nodeRevision.create({
     data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v1', content: 'body-1', createdAt: T1 },
   });
-  v2 = await db.nodeVersion.create({
+  v2 = await db.nodeRevision.create({
     data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v2', content: 'body-2', createdAt: T2 },
   });
-  v3 = await db.nodeVersion.create({
+  v3 = await db.nodeRevision.create({
     data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v3', content: 'body-3', createdAt: T3 },
   });
 
@@ -70,26 +70,26 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: userMember.id, role: 'READER' } });
 });
 
-describe('deleteNodeVersion (#617)', () => {
+describe('deleteNodeRevision (#617)', () => {
   it('deletes a single snapshot and returns true', async () => {
-    const ok = await resolvers.Mutation.deleteNodeVersion(null, { versionId: v2.id }, adminCtx());
+    const ok = await resolvers.Mutation.deleteNodeRevision(null, { revisionId: v2.id }, adminCtx());
     expect(ok).toBe(true);
-    const remaining = await db.nodeVersion.findMany({ where: { nodeId: node.id } });
+    const remaining = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
     expect(remaining.map((r) => r.id).sort()).toEqual([v1.id, v3.id].sort());
   });
 
-  it('throws NOT_FOUND for an unknown versionId', async () => {
+  it('throws NOT_FOUND for an unknown revisionId', async () => {
     await expect(
-      resolvers.Mutation.deleteNodeVersion(null, { versionId: 'cnope00000000000000000000' }, adminCtx()),
-    ).rejects.toThrow('Node version not found');
+      resolvers.Mutation.deleteNodeRevision(null, { revisionId: 'cnope00000000000000000000' }, adminCtx()),
+    ).rejects.toThrow('Node revision not found');
   });
 
   it('denies a non-member (no write access)', async () => {
     await expect(
-      resolvers.Mutation.deleteNodeVersion(null, { versionId: v2.id }, outsiderCtx()),
+      resolvers.Mutation.deleteNodeRevision(null, { revisionId: v2.id }, outsiderCtx()),
     ).rejects.toThrow('Forbidden');
     // No row was deleted.
-    expect(await db.nodeVersion.count({ where: { nodeId: node.id } })).toBe(3);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(3);
   });
 });
 
@@ -97,7 +97,7 @@ describe('clearNodeHistory (#617)', () => {
   it('deletes all snapshots and returns the count (by ID)', async () => {
     const count = await resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, adminCtx());
     expect(count).toBe(3);
-    expect(await db.nodeVersion.count({ where: { nodeId: node.id } })).toBe(0);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
   });
 
   it('accepts a fully-qualified node URN', async () => {
@@ -117,7 +117,7 @@ describe('clearNodeHistory (#617)', () => {
     await expect(
       resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, outsiderCtx()),
     ).rejects.toThrow('Forbidden');
-    expect(await db.nodeVersion.count({ where: { nodeId: node.id } })).toBe(3);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(3);
   });
 
   // Cleanup op: a soft-deleted node still owns residual history an owner can
@@ -126,71 +126,71 @@ describe('clearNodeHistory (#617)', () => {
     await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
     const count = await resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, adminCtx());
     expect(count).toBe(3);
-    expect(await db.nodeVersion.count({ where: { nodeId: node.id } })).toBe(0);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
   });
 });
 
-describe('restoreNodeVersion truncate (#617)', () => {
+describe('restoreNodeRevision truncate (#617)', () => {
   it('truncate:true restores + deletes NEWER snapshots, keeps the selected row and older', async () => {
-    const restored = await resolvers.Mutation.restoreNodeVersion(
-      null, { versionId: v2.id, truncate: true }, adminCtx(),
+    const restored = await resolvers.Mutation.restoreNodeRevision(
+      null, { revisionId: v2.id, truncate: true }, adminCtx(),
     );
     // Node restored to v2.
     expect(restored.name).toBe('v2');
     expect(restored.content).toBe('body-2');
     // History: v3 (newer) deleted, v2 (selected) + v1 (older) kept, NO
     // pre-restore snapshot added.
-    const remaining = await db.nodeVersion.findMany({ where: { nodeId: node.id } });
+    const remaining = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
     expect(remaining.map((r) => r.id).sort()).toEqual([v1.id, v2.id].sort());
   });
 
   it('truncate:false (default) restores AND adds a pre-restore snapshot', async () => {
-    const restored = await resolvers.Mutation.restoreNodeVersion(
-      null, { versionId: v2.id }, adminCtx(),
+    const restored = await resolvers.Mutation.restoreNodeRevision(
+      null, { revisionId: v2.id }, adminCtx(),
     );
     expect(restored.name).toBe('v2');
     // 3 originals + 1 snapshot of the pre-restore ("Current") state = 4.
-    const all = await db.nodeVersion.findMany({ where: { nodeId: node.id } });
+    const all = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
     expect(all).toHaveLength(4);
     expect(all.some((r) => r.name === 'Current' && r.content === 'current body')).toBe(true);
   });
 
-  it('truncate on the NEWEST version deletes nothing newer (selected kept)', async () => {
-    await resolvers.Mutation.restoreNodeVersion(null, { versionId: v3.id, truncate: true }, adminCtx());
-    const remaining = await db.nodeVersion.findMany({ where: { nodeId: node.id } });
+  it('truncate on the NEWEST revision deletes nothing newer (selected kept)', async () => {
+    await resolvers.Mutation.restoreNodeRevision(null, { revisionId: v3.id, truncate: true }, adminCtx());
+    const remaining = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
     // All three kept (none is newer than v3), no pre-restore snapshot.
     expect(remaining).toHaveLength(3);
   });
 });
 
-describe('nodeVersion query (#617 Display)', () => {
+describe('nodeRevision query (#617 Display)', () => {
   it('returns a single snapshot by id for a reader', async () => {
-    const v = await resolvers.Query.nodeVersion(null, { versionId: v2.id }, memberCtx());
+    const v = await resolvers.Query.nodeRevision(null, { revisionId: v2.id }, memberCtx());
     expect(v?.id).toBe(v2.id);
     expect(v?.name).toBe('v2');
   });
 
-  it('returns null for an unknown versionId (no existence disclosure)', async () => {
-    const v = await resolvers.Query.nodeVersion(null, { versionId: 'cnope00000000000000000000' }, adminCtx());
+  it('returns null for an unknown revisionId (no existence disclosure)', async () => {
+    const v = await resolvers.Query.nodeRevision(null, { revisionId: 'cnope00000000000000000000' }, adminCtx());
     expect(v).toBeNull();
   });
 
   it('returns null for a non-member (no existence leak)', async () => {
-    const v = await resolvers.Query.nodeVersion(null, { versionId: v2.id }, outsiderCtx());
+    const v = await resolvers.Query.nodeRevision(null, { revisionId: v2.id }, outsiderCtx());
     expect(v).toBeNull();
   });
 
   it('returns null when the node is soft-deleted (no tombstoned-history leak)', async () => {
     await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
-    const v = await resolvers.Query.nodeVersion(null, { versionId: v2.id }, memberCtx());
+    const v = await resolvers.Query.nodeRevision(null, { revisionId: v2.id }, memberCtx());
     expect(v).toBeNull();
   });
 
   it('resolves editedBy to a user editor (handle + urn only)', async () => {
     const editor = await db.user.create({ data: { githubId: 7301, githubUsername: 'nvm-ed', handle: 'nvm-editor', name: 'Secret Name', email: 'secret@x.com', roles: ['READER'] } });
-    await db.nodeVersion.update({ where: { id: v2.id }, data: { editedBy: editor.id } });
-    const parent = await db.nodeVersion.findUniqueOrThrow({ where: { id: v2.id } });
-    const res = await resolvers.NodeVersion.editedByUser(parent, null, adminCtx());
+    await db.nodeRevision.update({ where: { id: v2.id }, data: { editedBy: editor.id } });
+    const parent = await db.nodeRevision.findUniqueOrThrow({ where: { id: v2.id } });
+    const res = await resolvers.NodeRevision.editedByUser(parent, null, adminCtx());
     expect(res).toEqual({ handle: 'nvm-editor', urn: 'hrn:user:nvm-editor' });
     // Never exposes name/email — the type has no such fields.
     expect(res).not.toHaveProperty('name');
@@ -198,18 +198,18 @@ describe('nodeVersion query (#617 Display)', () => {
   });
 
   it('returns null when editedBy is an app/client principal (not a user id)', async () => {
-    const res = await resolvers.NodeVersion.editedByUser({ editedBy: 'capp0000000000000000000x' }, null, adminCtx());
+    const res = await resolvers.NodeRevision.editedByUser({ editedBy: 'capp0000000000000000000x' }, null, adminCtx());
     expect(res).toBeNull();
   });
 
   it('returns null when editedBy is unset', async () => {
-    const res = await resolvers.NodeVersion.editedByUser({ editedBy: null }, null, adminCtx());
+    const res = await resolvers.NodeRevision.editedByUser({ editedBy: null }, null, adminCtx());
     expect(res).toBeNull();
   });
 
   it('returns null for a handle-less user (portal falls back to the raw id)', async () => {
     const editor = await db.user.create({ data: { githubId: 7302, githubUsername: 'nvm-nohandle', roles: ['READER'] } });
-    const res = await resolvers.NodeVersion.editedByUser({ editedBy: editor.id }, null, adminCtx());
+    const res = await resolvers.NodeRevision.editedByUser({ editedBy: editor.id }, null, adminCtx());
     expect(res).toBeNull();
   });
 
@@ -220,11 +220,11 @@ describe('nodeVersion query (#617 Display)', () => {
     const restrictedMem = await db.memory.create({
       data: { id: generateId(), organizationId: otherOrg.id, urn: 'nvm-other:secret', name: 'secret', class: 'knowledge' },
     });
-    const secretSnap = await db.nodeVersion.create({
+    const secretSnap = await db.nodeRevision.create({
       data: { id: generateId(), nodeId: node.id, memoryId: restrictedMem.id, loc: 'guide', name: 'secret-era' },
     });
     // Member can read the node's current memory but not the snapshot's memory.
-    const v = await resolvers.Query.nodeVersion(null, { versionId: secretSnap.id }, memberCtx());
+    const v = await resolvers.Query.nodeRevision(null, { revisionId: secretSnap.id }, memberCtx());
     expect(v).toBeNull();
   });
 });

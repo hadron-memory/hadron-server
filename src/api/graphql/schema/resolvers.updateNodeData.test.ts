@@ -2,7 +2,7 @@
  * updateNodeData — shallow-merge a JSON patch into a node's `data` bag
  * (issue #366). Covers the merge semantics (patch wins, keys preserved,
  * no-prior-data, nested-value replacement), node resolution by ID and URN,
- * input validation, write-auth gating, and a version snapshot on write.
+ * input validation, write-auth gating, and a revision snapshot on write.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -117,24 +117,24 @@ describe('updateNodeData — auth + versioning', () => {
     expect(reread!.data).toEqual({ a: 1 });
   });
 
-  it('snapshots a NodeVersion on write (undo point)', async () => {
+  it('snapshots a NodeRevision on write (undo point)', async () => {
     const node = await makeNode('n9', { a: 1 });
     await call(node.id, { b: 2 });
-    const versions = await db.nodeVersion.findMany({ where: { nodeId: node.id } });
+    const versions = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
     expect(versions.length).toBeGreaterThanOrEqual(1);
   });
 
-  // #88/#620: an explicit reason lands in the version snapshot's revLabel
+  // #88/#620: an explicit reason lands in the revision snapshot's revLabel
   // (it historically squatted in editedBy, which now carries the editing
   // user's PK) — so CLI edits via updateNodeData carry rationale into history.
-  it('records an explicit reason in the version snapshot (revLabel)', async () => {
+  it('records an explicit reason in the revision snapshot (revLabel)', async () => {
     const node = await makeNode('n10', { a: 1 });
     await resolvers.Mutation.updateNodeData(
       {},
       { nodeRef: node.id, data: { b: 2 }, reason: 'restore data' } as never,
       ctx(),
     );
-    const versions = await db.nodeVersion.findMany({ where: { nodeId: node.id } });
+    const versions = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
     expect(versions[0]!.revLabel).toBe('restore data');
     expect(versions[0]!.editedBy).toBe(admin.id);
     expect(versions[0]!.changes).toEqual(['data']);
@@ -143,7 +143,7 @@ describe('updateNodeData — auth + versioning', () => {
   it('falls back to the caller identity when no reason is given', async () => {
     const node = await makeNode('n11', { a: 1 });
     await call(node.id, { b: 2 });
-    const versions = await db.nodeVersion.findMany({ where: { nodeId: node.id } });
+    const versions = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
     expect(versions[0]!.editedBy).toBe(admin.id);
   });
 });

@@ -432,7 +432,7 @@ export const typeDefs = `#graphql
     """
     Spec 033 FR-006/FR-007 — set when this node needs (re-)embedding;
     cleared on success. The single work signal the embedding worker
-    drains. Operational state (never versioned on NodeVersion). The
+    drains. Operational state (never versioned on NodeRevision). The
     portal renders this as a subtle "embedding…" badge so a user who
     just edited isn't confused that their change "didn't take" in
     search yet. System-managed.
@@ -551,17 +551,17 @@ export const typeDefs = `#graphql
   }
 
   """
-  A version's editor resolved to PUBLIC IDENTIFIERS ONLY (#617). Deliberately
+  A revision's editor resolved to PUBLIC IDENTIFIERS ONLY (#617). Deliberately
   excludes name / email / any PII — resolving editedBy must never widen the
   disclosure surface. handle + urn are the same public identifiers the users
   search already exposes, so no per-caller visibility gate applies.
   """
-  type NodeVersionEditor {
+  type NodeRevisionEditor {
     handle: String
     urn: String
   }
 
-  type NodeVersion {
+  type NodeRevision {
     id: ID!
     nodeId: String!
     loc: String!
@@ -599,8 +599,8 @@ export const typeDefs = `#graphql
     nothing resolves — the portal falls back to the raw strings. Public
     identifiers only (#617).
     """
-    editedByUser: NodeVersionEditor
-    "User-settable label for this version (#620, 500-char cap) — set via updateNodeVersion; also captures the 'reason' supplied with the edit that took this snapshot (legacy reasons were migrated here)."
+    editedByUser: NodeRevisionEditor
+    "User-settable label for this revision (#620, 500-char cap) — set via updateNodeRevision; also captures the 'reason' supplied with the edit that took this snapshot (legacy reasons were migrated here)."
     revLabel: String
     """
     Which node fields the edit that took this snapshot changed, e.g.
@@ -609,10 +609,10 @@ export const typeDefs = `#graphql
     Empty for legacy rows.
     """
     changes: [String!]!
-    "Reserved (#620): User id that approved this version. No write surface yet."
+    "Reserved (#620): User id that approved this revision. No write surface yet."
     approvedBy: String
     "approvedBy resolved to public identifiers (handle + URN), like editedByUser."
-    approvedByUser: NodeVersionEditor
+    approvedByUser: NodeRevisionEditor
     createdAt: String!
   }
 
@@ -1564,10 +1564,10 @@ export const typeDefs = `#graphql
     # Replace all outgoing edges when provided (omit to leave edges unchanged)
     edges: [NodeEdgeInput!]
     """
-    Why this change was made — recorded on the version-history snapshot
-    (NodeVersion.revLabel, #620; historically it squatted in editedBy),
+    Why this change was made — recorded on the revision-history snapshot
+    (NodeRevision.revLabel, #620; historically it squatted in editedBy),
     mirroring hadron_update_node's reason arg so CLI and MCP edits leave
-    equally-traceable history. Only an update snapshots a prior version, so
+    equally-traceable history. Only an update snapshots a prior revision, so
     reason has no effect on a pure create.
     """
     reason: String
@@ -1609,7 +1609,7 @@ export const typeDefs = `#graphql
     aiAgent: String
     "Outgoing edges to create with the node."
     edges: [NodeEdgeInput!]
-    "Recorded on version history only when a soft-deleted node is resurrected (a pure create snapshots nothing)."
+    "Recorded on revision history only when a soft-deleted node is resurrected (a pure create snapshots nothing)."
     reason: String
   }
 
@@ -1649,8 +1649,8 @@ export const typeDefs = `#graphql
     # Replace all outgoing edges when provided (omit to leave edges unchanged)
     edges: [NodeEdgeInput!]
     """
-    Why this change was made — recorded on the version-history snapshot
-    (NodeVersion.revLabel, #620; historically it squatted in editedBy),
+    Why this change was made — recorded on the revision-history snapshot
+    (NodeRevision.revLabel, #620; historically it squatted in editedBy),
     mirroring hadron_update_node's reason arg so CLI and MCP edits leave
     equally-traceable history.
     """
@@ -2057,8 +2057,8 @@ export const typeDefs = `#graphql
     "When true, report matches without writing anything."
     dryRun: Boolean = false
     """
-    Why this change was made — recorded on each changed node's version-history
-    snapshot (NodeVersion.revLabel, #620; historically it squatted in
+    Why this change was made — recorded on each changed node's revision-history
+    snapshot (NodeRevision.revLabel, #620; historically it squatted in
     editedBy), mirroring hadron_update_node's reason arg.
     """
     reason: String
@@ -2603,26 +2603,26 @@ export const typeDefs = `#graphql
     usageEvents(type: String, memoryId: ID, nodeId: ID, limit: Int, offset: Int): [UsageEvent!]!
 
     """
-    Version history for a node, most recent first.
+    Revision history for a node, most recent first.
 
     Accepts the node's ID or URN. Access-gated on the node's memory: a node
     whose memory the caller can't read returns an empty list (no existence
     disclosure).
     """
-    nodeVersions(nodeRef: ID!, limit: Int): [NodeVersion!]!
+    nodeRevisions(nodeRef: ID!, limit: Int): [NodeRevision!]!
 
     """
-    A single node-version snapshot by its id (#617 Display).
+    A single node-revision snapshot by its id (#617 Display).
 
-    Access-gated on the snapshot's node memory (read): null when the version
+    Access-gated on the snapshot's node memory (read): null when the revision
     does not exist OR the caller cannot read the node's current memory OR the
     memory the snapshot was captured in (per-snapshot gating mirrors
-    nodeVersions — a moved node keeps its id, so a snapshot may belong to a
+    nodeRevisions — a moved node keeps its id, so a snapshot may belong to a
     memory the caller cannot read). A soft-deleted node is also null (its
     history drops out of every read surface). Null, never an error, so there
     is no existence disclosure.
     """
-    nodeVersion(versionId: ID!): NodeVersion
+    nodeRevision(revisionId: ID!): NodeRevision
 
     """
     Aggregated usage counts per node and type for a memory.
@@ -3087,50 +3087,50 @@ export const typeDefs = `#graphql
     # If the node has no 'data' yet, the supplied JSON becomes its 'data'
     # verbatim. 'data' must be a JSON object (not an array or scalar). 'nodeRef'
     # is a node ID or fully-qualified URN. Honors the same single-write
-    # invariants as updateNode (per-memory write auth, encryption, version
+    # invariants as updateNode (per-memory write auth, encryption, revision
     # history, git mirror). Returns the updated node.
     updateNodeData(nodeRef: ID!, data: JSON!, reason: String): Node!
 
     # Bulk search-and-replace text across selected nodes (literal or regex).
-    # Honors per-memory write auth, encryption, version history, abstract
+    # Honors per-memory write auth, encryption, revision history, abstract
     # staleness, and re-embedding. Supports dryRun preview.
     searchReplaceInNodes(input: SearchReplaceInNodesInput!): SearchReplaceResult!
 
     # Delete a node identified by 'nodeRef' (a node ID or fully-qualified URN;
     # #542). Soft-delete by default (sets deletedAt; the node disappears from
     # reads, matching the hadron_delete_node MCP tool). Pass hard: true to
-    # remove the row entirely (cascades edges + NodeVersion via FK) —
+    # remove the row entirely (cascades edges + NodeRevision via FK) —
     # irreversible. #391. A re-delete of an already soft-deleted node is
     # idempotent (the ref resolves through the tombstone).
     deleteNode(nodeRef: ID!, hard: Boolean): Boolean!
 
-    # Restore a node to a previous version (#617).
+    # Restore a node to a previous revision (#617).
     #
     # Default (truncate: false): snapshots the CURRENT node state into history
-    # first, then restores the node's fields to the version — non-destructive,
+    # first, then restores the node's fields to the revision — non-destructive,
     # the restore itself becomes undoable.
     #
-    # truncate: true: restores the node's fields to the version AND deletes
-    # every NodeVersion NEWER than the selected one (createdAt strictly greater),
+    # truncate: true: restores the node's fields to the revision AND deletes
+    # every NodeRevision NEWER than the selected one (createdAt strictly greater),
     # WITHOUT creating a pre-restore snapshot. Boundary is EXCLUSIVE of the
-    # selected row: the selected version is KEPT and becomes the new baseline
+    # selected row: the selected revision is KEPT and becomes the new baseline
     # (the most-recent snapshot afterward); its era and older survive. Restore +
     # truncate run in one transaction (atomic).
-    restoreNodeVersion(versionId: ID!, truncate: Boolean = false): Node!
+    restoreNodeRevision(revisionId: ID!, truncate: Boolean = false): Node!
 
-    # Delete a single node-version snapshot by id (#617). Auth: the node's memory
-    # write access (as restoreNodeVersion). Throws NOT_FOUND for an unknown id.
-    deleteNodeVersion(versionId: ID!): Boolean!
+    # Delete a single node-revision snapshot by id (#617). Auth: the node's memory
+    # write access (as restoreNodeRevision). Throws NOT_FOUND for an unknown id.
+    deleteNodeRevision(revisionId: ID!): Boolean!
 
-    # Set or clear the user-facing label on a version snapshot (#620,
-    # NodeVersion.revLabel, 500-char cap). Omit revLabel to preserve; pass
+    # Set or clear the user-facing label on a revision snapshot (#620,
+    # NodeRevision.revLabel, 500-char cap). Omit revLabel to preserve; pass
     # null to clear. Auth: the node's memory write access (as
-    # deleteNodeVersion) PLUS the nodeVersion query's read gates — it returns
+    # deleteNodeRevision) PLUS the nodeRevision query's read gates — it returns
     # the full snapshot, so a soft-deleted node or a snapshot captured in an
     # unreadable memory answers the same NOT_FOUND as an unknown id.
-    updateNodeVersion(versionId: ID!, revLabel: String): NodeVersion!
+    updateNodeRevision(revisionId: ID!, revLabel: String): NodeRevision!
 
-    # Delete ALL NodeVersion rows for a node, returning the count deleted (#617).
+    # Delete ALL NodeRevision rows for a node, returning the count deleted (#617).
     # 'nodeRef' is the node's PK or fully-qualified URN. Auth: the node's memory
     # write access. An unknown ref throws NODE_NOT_FOUND. Reachable on a
     # soft-deleted node (purging residual history is a cleanup op).
@@ -3161,7 +3161,7 @@ export const typeDefs = `#graphql
     # with the target winning on key collisions; EDGES re-points the source's
     # relationships onto the target. 'include' selects which fields fold in
     # (omitted = all). 'deleteSource: true' hard-deletes the source afterward.
-    # Honors per-memory write auth, encryption, version history, abstract
+    # Honors per-memory write auth, encryption, revision history, abstract
     # staleness, and re-embedding (same invariants as createNode/updateNode).
     mergeNodes(input: MergeNodesInput!): Node!
 
@@ -3215,7 +3215,7 @@ export const typeDefs = `#graphql
     ~30s budget — the fetch carries NO user credentials, so authenticated
     pages must come as 'content') or 'content' (client-captured, e.g. the
     Web Clipper's authenticated DOM). Target: 'nodeUrn' XOR ('memoryId' +
-    'loc'); an existing node is updated IN PLACE (NodeVersion snapshot is
+    'loc'); an existing node is updated IN PLACE (NodeRevision snapshot is
     the undo), a missing one is created. HTML converts to Markdown at the
     write seam (contentType defaults to text/html here, unlike createNode).
     """
@@ -3432,7 +3432,7 @@ export const typeDefs = `#graphql
     Vector-index config carries over and the clone's nodes are stamped for
     re-embedding.
 
-    NOT copied: version history, subscriptions, shares, group members
+    NOT copied: revision history, subscriptions, shares, group members
     (the caller is bootstrapped as a group clone's first owner), sessions,
     licenses, log entries, assets, and git-sync config (the clone starts
     DB-only).

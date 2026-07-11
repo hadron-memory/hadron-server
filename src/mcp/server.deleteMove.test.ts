@@ -421,14 +421,14 @@ describe('hadron_move_node — return record (#185 F1)', () => {
     expect(text).toMatch(/Children: 1 immediate descendant/);
   });
 
-  it('writes a NodeVersion snapshot of the pre-move state', async () => {
+  it('writes a NodeRevision snapshot of the pre-move state', async () => {
     const srv = createTestableMcpServer(adminAuth());
     await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:relocated`,
     });
 
-    const versions = await db.nodeVersion.findMany({
+    const versions = await db.nodeRevision.findMany({
       where: { nodeId: fx.nodes.moveSource.id },
     });
     expect(versions).toHaveLength(1);

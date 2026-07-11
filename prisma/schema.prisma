@@ -403,8 +403,8 @@ model User {
   userApiKeys               UserApiKey[]
   authCodes                 AuthCode[]
   authHandoffCodes          AuthHandoffCode[]
-  // #620: versions this user approved (NodeVersion.approvedBy).
-  approvedNodeVersions      NodeVersion[]              @relation("NodeVersionApprover")
+  // #620: revisions this user approved (NodeRevision.approvedBy).
+  approvedNodeRevisions      NodeRevision[]              @relation("NodeRevisionApprover")
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -858,7 +858,7 @@ model Node {
   // ─── 033-rag-vector-retrieval: durable embedding-queue markers ───
   /// Set when this node needs (re-)embedding; cleared on success. The single
   /// work signal the embedding worker drains (FR-006/FR-007). Operational
-  /// state only — intentionally NOT versioned on NodeVersion.
+  /// state only — intentionally NOT versioned on NodeRevision.
   embeddingPendingAt DateTime? @map("embedding_pending_at")
   /// Set when an embed attempt failed (record, not a work signal). Transient
   /// failures keep pending set for retry; permanent failures clear pending (FR-009).
@@ -902,7 +902,7 @@ model Node {
   incomingEdges Edge[]          @relation("TargetNode")
   pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
-  versions      NodeVersion[]
+  revisions     NodeRevision[]
   embeddings    NodeEmbedding[] // 033: 1 abstract row + N chunk rows; Cascade delete
 
   @@unique([loc, memoryId])
@@ -1730,12 +1730,12 @@ model EmailVerificationToken {
 
 /// A versioned snapshot of a Node's content. Written every time a
 /// Node is updated, so the full history is recoverable.
-model NodeVersion {
+model NodeRevision {
   id                 String   @id @default(cuid())
   nodeId             String   @map("node_id")
   /// Memory this snapshot's content belonged to at capture time. A node
   /// can be MOVED across memories (moveNode keeps the stable id), so gating
-  /// version history by the node's CURRENT memory alone would leak snapshots
+  /// revision history by the node's CURRENT memory alone would leak snapshots
   /// captured while the node lived in a memory the caller can't read (#602 /
   /// Codex P1). Every snapshot site stamps this; nullable only for legacy
   /// rows predating the column (backfilled to the node's current memory —
@@ -1747,12 +1747,12 @@ model NodeVersion {
   description        String?
   /// Paragraph summary at the time of the snapshot. Spec 031.
   /// Added in the US1 implementation when the live `Node.abstract`
-  /// column landed — version history would otherwise silently drop
+  /// column landed — revision history would otherwise silently drop
   /// abstract edits.
   abstract           String?
   /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
-  /// version capture. Restored verbatim by `restoreNodeVersion`;
-  /// legacy versions (pre-spec) have NULL here, which short-circuits
+  /// version capture. Restored verbatim by `restoreNodeRevision`;
+  /// legacy revisions (pre-spec) have NULL here, which short-circuits
   /// the staleness check on the live row after restore (no false
   /// positives).
   abstractOriginHash String?  @map("abstract_origin_hash")
@@ -1761,7 +1761,7 @@ model NodeVersion {
   // ─── #620: full curated-subset snapshot of the Node's content fields.
   // NULL `nodeType` marks a LEGACY row captured before these columns
   // existed (nodeType is non-null on Node, so every post-#620 snapshot
-  // sets it) — restoreNodeVersion keys on that sentinel to leave the
+  // sets it) — restoreNodeRevision keys on that sentinel to leave the
   // live node's values for these fields untouched when restoring a
   // legacy snapshot, instead of wiping them to NULL. Deliberately NOT
   // versioned: embedding* (operational state), tokens (derived from
@@ -1787,7 +1787,7 @@ model NodeVersion {
   /// / "user:<id>" (AuthContext.clientId) and "app:<App.id>" (App-key
   /// principals).
   editedByInfo       String?  @map("edited_by_info")
-  /// #620: user-settable label for this version (updateNodeVersion
+  /// #620: user-settable label for this version (updateNodeRevision
   /// mutation; REV_LABEL_MAX_LEN cap). Also captures the #88 `reason`
   /// arg at snapshot time — the edit rationale that previously squatted
   /// in `editedBy` (legacy reasons were migrated here).
@@ -1797,17 +1797,17 @@ model NodeVersion {
   /// state, so `changes` describes the delta between this snapshot and
   /// the state that replaced it. Empty for legacy rows (NULL reads as []).
   changes            String[]
-  /// #620: reserved — User who approved this version. No write surface
+  /// #620: reserved — User who approved this revision. No write surface
   /// yet; the approve flow lands later.
   approvedBy         String?  @map("approved_by")
   createdBy          String?  @map("created_by")
   createdAt          DateTime @default(now()) @map("created_at")
 
   node           Node  @relation(fields: [nodeId], references: [id], onDelete: Cascade)
-  approvedByUser User? @relation("NodeVersionApprover", fields: [approvedBy], references: [id], onDelete: SetNull)
+  approvedByUser User? @relation("NodeRevisionApprover", fields: [approvedBy], references: [id], onDelete: SetNull)
 
   @@index([nodeId, createdAt])
-  @@map("node_versions")
+  @@map("node_revisions")
 }
 
 /// Temporary record holding an encrypted API key for a newly

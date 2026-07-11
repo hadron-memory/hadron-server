@@ -1,11 +1,11 @@
 /**
- * Integration tests for the nodeVersions query (#602).
+ * Integration tests for the nodeRevisions query (#602).
  *
  * Two behaviors under test:
  *   - nodeRef accepts an ID or a fully-qualified node URN (cor:api:140,
  *     routed through resolveNodeRef) — was a raw `nodeId` PK.
  *   - a memory-read gate (previously ABSENT — any authenticated caller could
- *     read any tenant's node version history). A node whose memory the caller
+ *     read any tenant's node revision history). A node whose memory the caller
  *     can't read returns [], and an unknown ref returns [] too (no existence
  *     disclosure), mirroring memoryUsageSummary. Per-SNAPSHOT gating closes the
  *     moved-node leak (Codex P1): a node moved across memories keeps its id, so
@@ -42,7 +42,7 @@ beforeEach(async () => {
     data: { id: generateId(), memoryId: memory.id, loc: 'guide', name: 'Guide' },
   });
   // Three snapshots for this node, all captured while it lived in `memory`.
-  await db.nodeVersion.createMany({
+  await db.nodeRevision.createMany({
     data: [
       { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v1' },
       { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v2' },
@@ -55,44 +55,44 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: userMember.id, role: 'READER' } });
 });
 
-describe('nodeVersions', () => {
-  it('returns a node\'s version history (input by ID)', async () => {
-    const result = await resolvers.Query.nodeVersions(null, { nodeRef: node.id }, adminCtx());
+describe('nodeRevisions', () => {
+  it('returns a node\'s revision history (input by ID)', async () => {
+    const result = await resolvers.Query.nodeRevisions(null, { nodeRef: node.id }, adminCtx());
     expect(result).toHaveLength(3);
   });
 
   // cor:api:140 / 007-entity-id-or-urn: nodeRef accepts a bare full node URN.
   it('accepts a bare node URN as nodeRef', async () => {
-    const result = await resolvers.Query.nodeVersions(
+    const result = await resolvers.Query.nodeRevisions(
       null, { nodeRef: `${memory.urn}:${node.loc}` }, adminCtx(),
     );
     expect(result).toHaveLength(3);
   });
 
   it('accepts a prefixed canonical node URN as nodeRef', async () => {
-    const result = await resolvers.Query.nodeVersions(
+    const result = await resolvers.Query.nodeRevisions(
       null, { nodeRef: `urn:node:${org.urn}::mem::${node.loc}` }, adminCtx(),
     );
     expect(result).toHaveLength(3);
   });
 
   it('honors the limit', async () => {
-    const result = await resolvers.Query.nodeVersions(null, { nodeRef: node.id, limit: 2 }, adminCtx());
+    const result = await resolvers.Query.nodeRevisions(null, { nodeRef: node.id, limit: 2 }, adminCtx());
     expect(result).toHaveLength(2);
   });
 
   it('returns [] for an unknown nodeRef (no existence disclosure)', async () => {
-    const result = await resolvers.Query.nodeVersions(
+    const result = await resolvers.Query.nodeRevisions(
       null, { nodeRef: 'cnonexistentnonexistent12' }, adminCtx(),
     );
     expect(result).toEqual([]);
   });
 
   it('includes a legacy NULL-memoryId snapshot (falls back to the current memory)', async () => {
-    await db.nodeVersion.create({
+    await db.nodeRevision.create({
       data: { id: generateId(), nodeId: node.id, memoryId: null, loc: 'guide', name: 'legacy' },
     });
-    const result = await resolvers.Query.nodeVersions(
+    const result = await resolvers.Query.nodeRevisions(
       null, { nodeRef: node.id }, { db, userId: userMember.id, roles: ['READER'] } as Context,
     );
     // 3 stamped-in-`memory` + the legacy NULL row = 4 (member can read `memory`).
@@ -100,16 +100,16 @@ describe('nodeVersions', () => {
   });
 });
 
-describe('nodeVersions access control (#602)', () => {
-  it('an org member can read their node\'s version history', async () => {
-    const result = await resolvers.Query.nodeVersions(
+describe('nodeRevisions access control (#602)', () => {
+  it('an org member can read their node\'s revision history', async () => {
+    const result = await resolvers.Query.nodeRevisions(
       null, { nodeRef: node.id }, { db, userId: userMember.id, roles: ['READER'] } as Context,
     );
     expect(result).toHaveLength(3);
   });
 
   it('a non-member is denied with [] even though the node exists (no existence leak)', async () => {
-    const result = await resolvers.Query.nodeVersions(
+    const result = await resolvers.Query.nodeRevisions(
       null, { nodeRef: node.id }, { db, userId: userOutsider.id, roles: ['READER'] } as Context,
     );
     expect(result).toEqual([]);
@@ -117,7 +117,7 @@ describe('nodeVersions access control (#602)', () => {
 
   it('a caller with no role is rejected by the READER gate', async () => {
     await expect(
-      resolvers.Query.nodeVersions(null, { nodeRef: node.id }, { db, roles: [] } as Context),
+      resolvers.Query.nodeRevisions(null, { nodeRef: node.id }, { db, roles: [] } as Context),
     ).rejects.toThrow('Forbidden');
   });
 
@@ -134,12 +134,12 @@ describe('nodeVersions access control (#602)', () => {
     });
     // A snapshot for `node` (current memory = `memory`) captured while it lived
     // in the restricted memory of another org.
-    await db.nodeVersion.create({
+    await db.nodeRevision.create({
       data: { id: generateId(), nodeId: node.id, memoryId: restrictedMem.id, loc: 'guide', name: 'secret-era' },
     });
 
     // userMember can read `memory` but is NOT a member of otherOrg.
-    const result = await resolvers.Query.nodeVersions(
+    const result = await resolvers.Query.nodeRevisions(
       null, { nodeRef: node.id }, { db, userId: userMember.id, roles: ['READER'] } as Context,
     );
     // Only the 3 snapshots from the readable `memory` — the restricted one is dropped.
@@ -160,7 +160,7 @@ describe('nodeVersions access control (#602)', () => {
     // Live node now lives in dest; the pre-move snapshot records the SOURCE memory.
     const moved = await db.node.findUniqueOrThrow({ where: { id: mover.id } });
     expect(moved.memoryId).toBe(dest.id);
-    const snap = await db.nodeVersion.findFirstOrThrow({ where: { nodeId: mover.id } });
+    const snap = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: mover.id } });
     expect(snap.memoryId).toBe(memory.id);
   });
 });

@@ -1,9 +1,9 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
-  buildNodeVersionSnapshot,
+  buildNodeRevisionSnapshot,
   type SnapshotEditor,
-} from '../../lib/nodeVersionSnapshot.js';
+} from '../../lib/nodeRevisionSnapshot.js';
 import {
   mergeNodeFields,
   type NodeMergeField,
@@ -35,7 +35,7 @@ import { NodeAbstractTooLongError } from '../../lib/entityRef/errors.js';
  *      per page. Ids are preserved, so inbound edges keep resolving, and every
  *      SQL id/loc list stays bounded by the page size (no unbounded `notIn`).
  *   2. **Fold** — fold colliding nodes in batches; per node: snapshot the
- *      target counterpart (`NodeVersion`), merge the selected fields,
+ *      target counterpart (`NodeRevision`), merge the selected fields,
  *      recompute `abstractOriginHash`, repoint/transfer its incident edges
  *      onto the counterpart (when EDGES is selected), then delete the emptied
  *      source row. One transaction per batch, all reads + writes inside it.
@@ -220,8 +220,8 @@ export async function mergeMemoryGraph(
           if (e instanceof NodeAbstractTooLongError) (e as AbstractTooLongAtLoc).loc = tgt.loc;
           throw e;
         }
-        await tx.nodeVersion.create({
-          data: buildNodeVersionSnapshot(tgt, editor, {
+        await tx.nodeRevision.create({
+          data: buildNodeRevisionSnapshot(tgt, editor, {
             changes: Object.keys(merged.changed),
           }),
         });

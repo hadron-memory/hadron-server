@@ -1,5 +1,5 @@
 /**
- * Unit tests for the shared NodeVersion snapshot builder (#620): the editor
+ * Unit tests for the shared NodeRevision snapshot builder (#620): the editor
  * split (editedBy = User PK only; everything else → editedByInfo), the
  * revLabel/changes capture, and the diffNodeChanges field comparison.
  */
@@ -7,11 +7,11 @@
 import { describe, it, expect } from 'vitest';
 import { Prisma } from '../generated/prisma/index.js';
 import {
-  buildNodeVersionSnapshot,
+  buildNodeRevisionSnapshot,
   editorFromAuth,
   diffNodeChanges,
   type SnapshotSourceNode,
-} from './nodeVersionSnapshot.js';
+} from './nodeRevisionSnapshot.js';
 
 const NODE: SnapshotSourceNode = {
   id: 'n1',
@@ -58,9 +58,9 @@ describe('editorFromAuth (#620)', () => {
   });
 });
 
-describe('buildNodeVersionSnapshot (#620)', () => {
+describe('buildNodeRevisionSnapshot (#620)', () => {
   it('captures the full curated subset including the new fields', () => {
-    const snap = buildNodeVersionSnapshot(NODE, { userId: 'u1' });
+    const snap = buildNodeRevisionSnapshot(NODE, { userId: 'u1' });
     expect(snap).toMatchObject({
       nodeId: 'n1',
       memoryId: 'm1',
@@ -86,7 +86,7 @@ describe('buildNodeVersionSnapshot (#620)', () => {
   });
 
   it('records revLabel (the #88 reason) and changes', () => {
-    const snap = buildNodeVersionSnapshot(NODE, { userId: 'u1' }, {
+    const snap = buildNodeRevisionSnapshot(NODE, { userId: 'u1' }, {
       revLabel: 'why not',
       changes: ['content', 'tags'],
     });
@@ -95,14 +95,14 @@ describe('buildNodeVersionSnapshot (#620)', () => {
   });
 
   it('truncates an over-long revLabel instead of failing the edit', () => {
-    const snap = buildNodeVersionSnapshot(NODE, { userId: 'u1' }, {
+    const snap = buildNodeRevisionSnapshot(NODE, { userId: 'u1' }, {
       revLabel: 'r'.repeat(600),
     });
     expect(snap.revLabel).toHaveLength(500);
   });
 
   it('routes a user-less principal to editedByInfo (editedBy stays null)', () => {
-    const snap = buildNodeVersionSnapshot(NODE, editorFromAuth({ appId: 'app-9' }));
+    const snap = buildNodeRevisionSnapshot(NODE, editorFromAuth({ appId: 'app-9' }));
     expect(snap.editedBy).toBeNull();
     expect(snap.editedByInfo).toBe('app:app-9');
     expect(snap.createdBy).toBe('app:app-9');

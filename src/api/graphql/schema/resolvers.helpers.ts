@@ -56,11 +56,11 @@ export interface Context {
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
   memoryUrnCache?: Map<string, Promise<string | null>>;
-  // Request-scoped memo for NodeVersion.editedByUser / approvedByUser
+  // Request-scoped memo for NodeRevision.editedByUser / approvedByUser
   // candidate lookups (#620) — a node's history repeats the same few editor
   // strings, so each distinct candidate (including misses) is resolved once
-  // per request (lazily created; see resolveVersionEditor).
-  versionEditorCache?: Map<string, Promise<{ handle: string; urn: string | null } | null>>;
+  // per request (lazily created; see resolveRevisionEditor).
+  revisionEditorCache?: Map<string, Promise<{ handle: string; urn: string | null } | null>>;
 }
 
 /**
@@ -1483,7 +1483,7 @@ export interface NodeInput {
   aiAgent?: string;
   ownerRepo?: string;
   edges?: NodeEdgeInput[];
-  /** Why this change was made — stored in version history (editedBy). Issue #88. */
+  /** Why this change was made — stored in revision history (NodeRevision.revLabel, #620). Issue #88. */
   reason?: string | null;
 }
 
@@ -1518,7 +1518,7 @@ export interface SearchReplaceInNodesInput {
   caseInsensitive?: boolean;
   regex?: boolean;
   dryRun?: boolean;
-  /** Why this change was made — stored in version history (editedBy). Issue #88. */
+  /** Why this change was made — stored in revision history (NodeRevision.revLabel, #620). Issue #88. */
   reason?: string | null;
 }
 

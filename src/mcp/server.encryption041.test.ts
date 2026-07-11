@@ -212,7 +212,7 @@ describe('locked vs unlocked writes', () => {
   it('hadron_update_node while locked is REJECTED with NO side effects — not even a version row (PR-517 Codex P2)', async () => {
     const server = mcp(ownerAuth());
     const before = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
-    const versionsBefore = await db.nodeVersion.count({ where: { nodeId: before.id } });
+    const versionsBefore = await db.nodeRevision.count({ where: { nodeId: before.id } });
     const out = await server.callToolText('hadron_update_node', {
       urn: `mcp41-org::vault::secret-note`,
       content: 'plaintext overwrite attempt',
@@ -220,7 +220,7 @@ describe('locked vs unlocked writes', () => {
     expect(out).toContain('encrypted and locked');
     const after = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
     expect(after.content).toBe(before.content); // untouched ciphertext
-    expect(await db.nodeVersion.count({ where: { nodeId: before.id } })).toBe(versionsBefore);
+    expect(await db.nodeRevision.count({ where: { nodeId: before.id } })).toBe(versionsBefore);
   });
 
   it('an abstract-only update hashes the DECRYPTED content — no false-stale (PR-517 Codex P2)', async () => {
@@ -250,7 +250,7 @@ describe('locked vs unlocked writes', () => {
       content: 'v2 secret',
     });
     const node = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
-    const version = await db.nodeVersion.findFirstOrThrow({
+    const version = await db.nodeRevision.findFirstOrThrow({
       where: { nodeId: node.id },
       orderBy: { createdAt: 'desc' },
     });

@@ -2,7 +2,7 @@
  * 033-rag-vector-retrieval — write-path embedding enqueue + prompt-drain.
  *
  * Called from every node write surface (GraphQL upsertNode, MCP
- * hadron_create_node/hadron_update_node, importer, restoreNodeVersion). When the memory is
+ * hadron_create_node/hadron_update_node, importer, restoreNodeRevision). When the memory is
  * vector-indexed it sets the durable `embeddingPendingAt` marker (the recovery
  * net) and, if an embedding endpoint is configured, fires a `setImmediate`
  * prompt-drain that embeds using the in-closure PLAINTEXT — so encrypted

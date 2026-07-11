@@ -18,10 +18,10 @@
  *     update preserves the existing hash (won't fire staleness later
  *     because the read-time check requires content non-null).
  *
- *   - NodeVersion snapshot captures `existing.abstractOriginHash` on
- *     hadron_update_node so version history round-trips the hash.
+ *   - NodeRevision snapshot captures `existing.abstractOriginHash` on
+ *     hadron_update_node so revision history round-trips the hash.
  *
- *   - hadron_move_node NodeVersion snapshot also captures the hash (spec 031
+ *   - hadron_move_node NodeRevision snapshot also captures the hash (spec 031
  *     lesson: every snapshot site must include new columns).
  *
  *   - `hadron_create_node` is upsert-semantically a fresh write: every call
@@ -232,15 +232,15 @@ describe('hadron_update_node — abstractOriginHash 9-row matrix', () => {
   });
 });
 
-// ─── NodeVersion snapshots capture the hash ────────────────────────────
+// ─── NodeRevision snapshots capture the hash ────────────────────────────
 
-describe('NodeVersion snapshots capture abstractOriginHash', () => {
+describe('NodeRevision snapshots capture abstractOriginHash', () => {
   it('hadron_update_node snapshot captures existing.abstractOriginHash', async () => {
     await addNode({ loc: 'v1', abstract: 'X', content: 'Y' });
     const before = await readRow('v1');
     // Trigger an update that creates a version
     await updateNode({ loc: 'v1', abstract: "X'" });
-    const versions = await db.nodeVersion.findMany({
+    const versions = await db.nodeRevision.findMany({
       where: { nodeId: before!.id },
       orderBy: { createdAt: 'asc' },
     });
@@ -249,7 +249,7 @@ describe('NodeVersion snapshots capture abstractOriginHash', () => {
   });
 
   it('hadron_move_node snapshot captures existing.abstractOriginHash', async () => {
-    // Spec 031 lesson + PR-209 Copilot review: every NodeVersion.create
+    // Spec 031 lesson + PR-209 Copilot review: every NodeRevision.create
     // site must be exercised. Without this test, a future refactor that
     // drops the column from the hadron_move_node snapshot won't be caught.
     await addNode({ loc: 'v2', abstract: 'X', content: 'Y' });
@@ -259,7 +259,7 @@ describe('NodeVersion snapshots capture abstractOriginHash', () => {
       urn: 'stale-org::stalemem::v2',
       targetUrn: 'stale-org::stalemem::v2moved',
     });
-    const versions = await db.nodeVersion.findMany({
+    const versions = await db.nodeRevision.findMany({
       where: { nodeId: before!.id },
       orderBy: { createdAt: 'asc' },
     });
