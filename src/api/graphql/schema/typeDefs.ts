@@ -1805,6 +1805,27 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  "An individual action grant (design:grant-model): extra management actions for one member of one org, on top of their role bundle. Grantee and org are projected as scalars, never nested objects."
+  type PrincipalGrant {
+    id: ID!
+    "Grantee kind - 'USER' in v1."
+    principalType: String!
+    principalId: ID!
+    principalHandle: String
+    organizationId: ID!
+    organizationUrn: String
+    "Allowed actions - exact ('memory.clone'), prefix ('memory.*'), or '*'."
+    actions: [String!]!
+    "ISO-8601 expiry, or null for perpetual (until revoked)."
+    expiresAt: String
+    createdAt: String
+  }
+
+  type PrincipalGrantsPage {
+    items: [PrincipalGrant!]!
+    total: Int!
+  }
+
   "Webhook trigger (D-2026-05-02). The secret is NEVER exposed here — the URL is returned once at create/rotate."
   type AgentWebhook {
     id: ID!
@@ -2951,6 +2972,10 @@ export const typeDefs = `#graphql
     connectionGrant(ref: ID!): ConnectionGrant
     "The caller's own connection grants; connectionRef narrows to one connection."
     connectionGrants(connectionRef: String, limit: Int, offset: Int): ConnectionGrantsPage!
+    "One action grant by ID - visible to the grantee or an admin of its org; null otherwise (no existence oracle)."
+    principalGrant(ref: ID!): PrincipalGrant
+    "Action grants. Default: the caller's own (self-audit is never gated). An org admin passing orgRef sees that org's grants, optionally narrowed by userRef."
+    principalGrants(orgRef: String, userRef: String, limit: Int, offset: Int): PrincipalGrantsPage!
     "Usage-vs-limit counters for an org (+ one app when appRef given). Org-ADMIN. Rows materialize on first view, seeded with platform defaults (#510)."
     quotaCounters(orgRef: String!, appRef: String): [QuotaCounter!]!
     "Explain the standing policy chain (org / user / app) for one action - which layer denies it (#510, cor:acl:040:02). Org-ADMIN on the app's org."
@@ -3123,6 +3148,10 @@ export const typeDefs = `#graphql
     createConnectionGrant(connectionRef: String!, appRef: String!, scopes: [String!]!, expiresAt: String): ConnectionGrant!
     "Revoke a connection grant you created (soft delete). Owner-only."
     revokeConnectionGrant(ref: ID!): Boolean!
+    "Grant a member extra management actions (org-ADMIN, interactive-only; design:grant-model). The grantee must be a live member of the org."
+    createPrincipalGrant(orgRef: String!, userRef: String!, actions: [String!]!, expiresAt: String): PrincipalGrant!
+    "Revoke an action grant (org-ADMIN, interactive-only; soft delete)."
+    revokePrincipalGrant(ref: ID!): Boolean!
     "Mint comm.outbound tickets into the org ledger (org-ADMIN; cor:acl:050:04)."
     mintActionTickets(input: MintActionTicketsInput!): Int!
     "Set the stored (enforced) quota limit for a scope x action (#510) - the operator dial that previously required psql. Org-ADMIN."

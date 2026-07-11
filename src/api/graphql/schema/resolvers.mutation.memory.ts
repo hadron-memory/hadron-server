@@ -79,6 +79,7 @@ import {
   requireMemorySharePrincipal,
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
+import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 
 export const memoryMutations = {
     mergeMemories: async (
@@ -298,7 +299,10 @@ export const memoryMutations = {
           );
         }
       } else {
-        await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+        // Grant-model gate (design:grant-model P2a): role bundle union
+        // individual grants. Behavior-equivalent to the former
+        // requireOrgRole(ADMIN) until a memory.create grant row exists.
+        await requireOrgAction(ctx, resolvedOrgId, 'memory.create');
       }
       // 023-app-shape US4: group-class memories must carry GROUP
       // visibility (enforced by the chk_memory_group_visibility CHECK
@@ -685,7 +689,8 @@ export const memoryMutations = {
           throw new Error(`Forbidden: only the owner can delete a ${memory.class} memory`);
         }
       } else {
-        await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+        // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
+        await requireOrgAction(ctx, memory.organizationId, 'memory.delete');
       }
       // System-class memories are owned by their agent and can only be
       // removed by deleting the agent. This prevents the agent from ending
@@ -727,7 +732,10 @@ export const memoryMutations = {
           );
         }
       } else {
-        await requireOrgRole(ctx, source.organizationId, 'ADMIN');
+        // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
+        // A memory.clone PrincipalGrant now lets a specific non-admin member
+        // clone; the cross-org DESTINATION gate below is unchanged (#604).
+        await requireOrgAction(ctx, source.organizationId, 'memory.clone');
       }
       // system/app-class memories auto-provision via the agent/install
       // paths (same rationale as createMemory rejecting these classes) —
