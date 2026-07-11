@@ -2,10 +2,10 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
-  buildNodeVersionSnapshot,
+  buildNodeRevisionSnapshot,
   editorFromAuth,
   diffNodeChanges,
-} from '../lib/nodeVersionSnapshot.js';
+} from '../lib/nodeRevisionSnapshot.js';
 import {
   parseUrnInput,
   formatCanonicalUrn,
@@ -2771,7 +2771,7 @@ export function createMcpServerInstance(
         description: z.string().optional().describe('Edge description'),
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Replace outgoing edges (the full set on this node)'),
-      reason: z.string().optional().describe('Why this change was made (stored in version history)'),
+      reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
     async ({ urn: rawUrn, name, nodeType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
@@ -2808,7 +2808,7 @@ export function createMcpServerInstance(
         return textResult(`Node not found: "${rawUrn}"`);
       }
 
-      // Resolve edge targets BEFORE the version snapshot + node update
+      // Resolve edge targets BEFORE the revision snapshot + node update
       // so an unresolvable target rolls back cleanly with no source-
       // node mutation. Issue #107 review feedback.
       //
@@ -2842,8 +2842,8 @@ export function createMcpServerInstance(
       }
 
       // Spec 031 — length-cap + trim-then-check the abstract BEFORE the
-      // version snapshot, so an over-cap abstract aborts cleanly without
-      // mutating either the row or the version history.
+      // revision snapshot, so an over-cap abstract aborts cleanly without
+      // mutating either the row or the revision history.
       let normalizedAbstract: string | null | undefined;
       try {
         normalizedAbstract = normalizeAbstract(abstract);
@@ -2854,7 +2854,7 @@ export function createMcpServerInstance(
 
       // Spec 041 (PR-2, PR-517 review): the encrypted-memory gate runs
       // BEFORE any side effect — a locked rejection must leave NO trace,
-      // including the version-history row below (Codex P2).
+      // including the revision-history row below (Codex P2).
       const updMemEnc = await db.memory.findUnique({
         where: { id: existing.memoryId },
         select: { isEncrypted: true },
@@ -2868,18 +2868,18 @@ export function createMcpServerInstance(
         );
       }
 
-      // Snapshot current state for version history.
+      // Snapshot current state for revision history.
       // Spec 032 — capture existing.abstractOriginHash so the version
       // history round-trips the staleness signal. On an encrypted memory
       // `existing` still holds CIPHERTEXT here — versions store the
       // at-rest form, deliberately (the decrypt happens just below).
-      await db.nodeVersion.create({
+      await db.nodeRevision.create({
         // #620 — shared builder: editedBy carries the user PK (when the MCP
         // caller is a user token), `reason` rides in revLabel, and `changes`
         // records the fields this update supplies with a different value.
         data: {
           id: generateId(),
-          ...buildNodeVersionSnapshot(existing, editorFromAuth(auth), {
+          ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
             revLabel: reason,
             changes: diffNodeChanges(existing, {
               name,
@@ -2941,7 +2941,7 @@ export function createMcpServerInstance(
 
       // Spec 041 (PR-2): encrypted memory — encrypt the provided encrypted-
       // envelope fields with this session's key (gate + key resolved above,
-      // before the version snapshot).
+      // before the revision snapshot).
       if (updKey) {
         const enc = encryptNodeFieldsWithKey(
           {
@@ -3017,13 +3017,13 @@ export function createMcpServerInstance(
   // Distinct from hadron_update_node's `data` arg, which REPLACES the whole
   // bag — use this when you want to set/overwrite a few keys and keep the
   // rest. Delegates to the GraphQL updateNodeData resolver so the single-write
-  // invariants (per-memory auth, encryption, version history, git mirror) have
+  // invariants (per-memory auth, encryption, revision history, git mirror) have
   // ONE implementation; like hadron_replace_text (and unlike the inline write
   // tools, #206) the delegated path encrypts/decrypts correctly.
 
   server.tool(
     'hadron_update_node_data',
-    "Merge a JSON object into a node's `data` bag, preserving keys you don't mention. The patch's top-level keys are written over the node's existing data (the patch wins on collision); other keys stay as they were; a node with no data yet takes the patch as-is. The merge is SHALLOW — a nested object value is replaced wholesale, not deep-merged. Use this for partial data edits; to REPLACE the whole `data` bag instead, use hadron_update_node's `data` argument. Honors write permissions, version history, and encryption.",
+    "Merge a JSON object into a node's `data` bag, preserving keys you don't mention. The patch's top-level keys are written over the node's existing data (the patch wins on collision); other keys stay as they were; a node with no data yet takes the patch as-is. The merge is SHALLOW — a nested object value is replaced wholesale, not deep-merged. Use this for partial data edits; to REPLACE the whole `data` bag instead, use hadron_update_node's `data` argument. Honors write permissions, revision history, and encryption.",
     {
       nodeUrn: z.string().describe('Node to update — a fully-qualified node URN (org::memory::loc) or an ID-shape PK.'),
       data: z.record(z.string(), z.unknown()).describe('JSON object to merge into the node\'s `data`. Must be an object (not an array or scalar). Its top-level keys overwrite existing ones; unmentioned keys are preserved.'),
@@ -3060,14 +3060,14 @@ export function createMcpServerInstance(
   //
   // Bulk literal/regex search-and-replace across many nodes at once. Delegates
   // to the GraphQL searchReplaceInNodes resolver so there is ONE implementation
-  // of the write invariants (per-memory auth, encryption, version history,
+  // of the write invariants (per-memory auth, encryption, revision history,
   // abstract-staleness, re-embedding, git mirror). Unlike the other MCP write
   // tools (#206), the delegated path encrypts/decrypts correctly because the
   // resolver owns that logic.
 
   server.tool(
     'hadron_replace_text',
-    "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Honors write permissions, version history (each change is undoable), and re-embeds changed nodes.",
+    "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Honors write permissions, revision history (each change is undoable), and re-embeds changed nodes.",
     {
       oldText: z.string().describe('Text to find (literal substring), or a regular-expression source when regex:true. Must be non-empty.'),
       newText: z.string().describe('Replacement text. May be empty to delete the matched text. In regex mode, $1/$<name>/$& are honored.'),
@@ -3183,7 +3183,7 @@ export function createMcpServerInstance(
   //     (it points at nodes that don't exist yet), so the target side
   //     does NOT cascade — we delete those rows explicitly inside the
   //     transaction below. Caught in PR-189 review.
-  //   - NodeVersion: onDelete: Cascade.
+  //   - NodeRevision: onDelete: Cascade.
   //   - UsageEvent.nodeId: SetNull — audit history preserved.
   //
   // Cross-memory edge gate (hard-delete only): if any edge bridges this
@@ -3201,12 +3201,12 @@ export function createMcpServerInstance(
     'hadron_delete_node',
     `Delete a node. Soft-delete by default (sets deletedAt; node disappears from find/read/list and is excluded from Related / Referenced-by edge surfaces). Pass \`hard: true\` to remove the row entirely.
 
-Hard-delete cascades to Edge (both directions) and NodeVersion via FK. PendingEdge source-side rows also cascade via FK, but the target-side column is intentionally not a foreign key — those rows are deleted explicitly inside the same transaction. UsageEvent.nodeId is SetNull so audit history is preserved.
+Hard-delete cascades to Edge (both directions) and NodeRevision via FK. PendingEdge source-side rows also cascade via FK, but the target-side column is intentionally not a foreign key — those rows are deleted explicitly inside the same transaction. UsageEvent.nodeId is SetNull so audit history is preserved.
 
 Refuses if the node has descendants under its URN prefix unless \`recursive: true\`. Hard-delete additionally refuses if any edge bridges this memory to another (the caller doesn't necessarily own the other memory) unless \`cascadeCrossMemoryEdges: true\`. The URN MUST be fully qualified (org::memory::loc).`,
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports".'),
-      hard: z.boolean().optional().describe('Default false (soft-delete). Pass true to delete the row entirely; cascades to Edge and NodeVersion via FK and explicitly cleans up PendingEdge target-side rows. Irreversible.'),
+      hard: z.boolean().optional().describe('Default false (soft-delete). Pass true to delete the row entirely; cascades to Edge and NodeRevision via FK and explicitly cleans up PendingEdge target-side rows. Irreversible.'),
       recursive: z.boolean().optional().describe('Default false (refuses with descendants). Pass true to apply the same soft/hard mode to every descendant under the node\'s URN prefix.'),
       cascadeCrossMemoryEdges: z.boolean().optional().describe('Hard-delete only; default false. Pass true to acknowledge that hard-deleting will remove edges whose other endpoint lives in a different memory (the other memory\'s view loses them silently).'),
     },
@@ -3363,7 +3363,7 @@ Collision policy: if a live node already occupies \`targetUrn\`, the call refuse
 
 Descendants of the source node are NOT moved automatically — they remain at their original locs and become children of an implicit parent at the old prefix. Move them explicitly if needed.
 
-Atomicity: collision-evict → NodeVersion snapshot → row move all run inside a single db.$transaction so a partial failure cannot leave the URN slot empty.
+Atomicity: collision-evict → NodeRevision snapshot → row move all run inside a single db.$transaction so a partial failure cannot leave the URN slot empty.
 
 On success returns the moved node's record: new URN, name, type, tags, edge counts, and immediate-child count (empty sections omitted).`,
     {
@@ -3418,7 +3418,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
       const isSameSlot = toLoc === fromLoc && toMemory.id === fromMemory.id;
 
-      // Transactional core. Collision-check, eviction-re-stamp, NodeVersion
+      // Transactional core. Collision-check, eviction-re-stamp, NodeRevision
       // snapshot, and the row move all run inside one transaction. The move
       // itself targets the row BY ID (not by composite key) so the post-
       // move record fetch can't race against a concurrent move into the
@@ -3471,17 +3471,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           }
         }
 
-        // NodeVersion snapshot of the pre-move state — mirrors the
+        // NodeRevision snapshot of the pre-move state — mirrors the
         // pattern hadron_update_node already follows. Loc / name / memoryId
         // changes are audit-worthy. The snapshot belongs to the SOURCE
         // memory (#602) — the builder stamps existing.memoryId. #620 —
         // shared builder; `changes` records the addressing fields the
         // move rewrites.
         const newName = toLoc.split(':').pop()!;
-        await tx.nodeVersion.create({
+        await tx.nodeRevision.create({
           data: {
             id: generateId(),
-            ...buildNodeVersionSnapshot(existing, editorFromAuth(auth), {
+            ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
               changes: diffNodeChanges(existing, {
                 loc: toLoc,
                 name: newName,

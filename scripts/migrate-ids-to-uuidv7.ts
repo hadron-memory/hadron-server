@@ -69,7 +69,7 @@ const ENTITIES = [
       { table: 'edges', column: 'target_id' },
       { table: 'pending_edges', column: 'source_id' },
       { table: 'usage_events', column: 'node_id' },
-      { table: 'node_versions', column: 'node_id' },
+      { table: 'node_revisions', column: 'node_id' },
     ],
   },
   {
@@ -89,7 +89,7 @@ const ENTITIES = [
   { table: 'edges', fkRefs: [] },
   { table: 'pending_edges', fkRefs: [] },
   { table: 'usage_events', fkRefs: [] },
-  { table: 'node_versions', fkRefs: [] },
+  { table: 'node_revisions', fkRefs: [] },
   { table: 'station_agent_subscriptions', fkRefs: [] },
   { table: 'agent_memory_items', fkRefs: [] },
   { table: 'memory_subscriptions', fkRefs: [] },

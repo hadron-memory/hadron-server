@@ -2,13 +2,13 @@
 import { generateId } from '../../../lib/id.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
-  buildNodeVersionSnapshot,
+  buildNodeRevisionSnapshot,
   editorFromAuth,
   diffNodeChanges,
   restorableNodeFields,
   jsonOrDbNull,
   REV_LABEL_MAX_LEN,
-} from '../../../lib/nodeVersionSnapshot.js';
+} from '../../../lib/nodeRevisionSnapshot.js';
 import {
   buildReplacer,
   replaceInTags,
@@ -77,7 +77,7 @@ import {
 // server-internal callers (updateNodeData, and the spec-039 import worker)
 // call it directly and may use mode 'upsert', which is no longer exposed on
 // the GraphQL surface. Every single-write invariant lives here once:
-// per-memory write auth, encryption (decrypt→mutate→re-encrypt), NodeVersion
+// per-memory write auth, encryption (decrypt→mutate→re-encrypt), NodeRevision
 // snapshot, abstractOriginHash recompute, re-embed enqueue, git mirror.
 type NodeWriteMode = 'create' | 'update' | 'upsert';
 /** NodeInput with `name` optional — update mode preserves it on omit (D4). */
@@ -130,7 +130,7 @@ export async function writeNodeCore(
 
       // #476 / #488 — contentType conversion at the single write seam, so the
       // converted Markdown (not the source HTML/PDF) is what every downstream
-      // invariant sees: encryption, NodeVersion snapshot, abstractOriginHash,
+      // invariant sees: encryption, NodeRevision snapshot, abstractOriginHash,
       // re-embed, git mirror. 'text/markdown' (default) is a no-op; 'text/html'
       // converts captured DOM via hadrontool-pdf (which sanitizes — no second
       // pass here); 'application/pdf' takes raw base64 (a PDF is binary, so the
@@ -211,7 +211,7 @@ export async function writeNodeCore(
       // reserved exception namespace (spec 001-edge-condition-spec FR-013).
       throwOnReservedExtractionSpec(input.data);
 
-      // Snapshot current state before update (for version history). The
+      // Snapshot current state before update (for revision history). The
       // update-by-PK path anchors on the immutable id; everything else keys
       // on (loc, memoryId).
       const existing = await ctx.db.node.findUnique({
@@ -247,7 +247,7 @@ export async function writeNodeCore(
 
       // Resolve edge targets BEFORE any write so an unresolvable
       // target aborts the mutation without committing the source
-      // node, the version snapshot, or any edge changes. Per spec 007
+      // node, the revision snapshot, or any edge changes. Per spec 007
       // (issue #105), `targetId` accepts ID, full URN, memory-prefixed
       // loc, or short loc — `resolveNodeRef` is the single resolver
       // and throws `NodeNotFoundError` on miss.
@@ -312,8 +312,8 @@ export async function writeNodeCore(
         if (input.tags !== undefined) {
           supplied.tags = serializeTags(input.tags ?? []);
         }
-        await ctx.db.nodeVersion.create({
-          data: buildNodeVersionSnapshot(existing, editorFromAuth(ctx), {
+        await ctx.db.nodeRevision.create({
+          data: buildNodeRevisionSnapshot(existing, editorFromAuth(ctx), {
             revLabel: input.reason,
             changes: diffNodeChanges(existing, supplied),
           }),
@@ -336,7 +336,7 @@ export async function writeNodeCore(
       // below. `tags` is re-applied per-branch below (serialized, and
       // update-gated) — leaving the raw array in `nodeFields` would write the
       // wrong shape on SQLite and clobber the preserve-on-omit gating above.
-      // `reason` is version-history metadata (consumed into editedBy above), not
+      // `reason` is revision-history metadata (consumed into editedBy above), not
       // a Node column — strip it so it never reaches the node upsert payload.
       const {
         edges: _edges,
@@ -744,7 +744,7 @@ export const nodeMutations = {
     // `data` (the patch wins on collision); untouched keys are preserved; a
     // node with no prior data takes the patch verbatim. Delegates the write to
     // the shared write core so every single-write invariant (write auth,
-    // re-encryption, NodeVersion snapshot, git mirror) is applied once and
+    // re-encryption, NodeRevision snapshot, git mirror) is applied once and
     // stays in sync — this resolver only resolves the node and computes the
     // merged plaintext.
     updateNodeData: async (
@@ -840,7 +840,7 @@ export const nodeMutations = {
           loc: row.loc,
           data: merged,
           ...(row.ownerRepo != null ? { ownerRepo: row.ownerRepo } : {}),
-          // #88: thread the edit rationale through to the version snapshot.
+          // #88: thread the edit rationale through to the revision snapshot.
           ...(reason != null ? { reason } : {}),
         },
         ctx,
@@ -850,7 +850,7 @@ export const nodeMutations = {
 
     // Bulk literal/regex search-and-replace across selected nodes. Reuses the
     // single-write invariants from upsertNode (per-memory write auth,
-    // decrypt→replace→re-encrypt, NodeVersion snapshot, abstractOriginHash
+    // decrypt→replace→re-encrypt, NodeRevision snapshot, abstractOriginHash
     // recompute, re-embed, git mirror) but keyed off existing node rows rather
     // than a full NodeInput. Selection is the union of nodeIds + (memoryIds,
     // optionally narrowed by a loc `prefix`). See SearchReplaceInNodesInput.
@@ -983,7 +983,7 @@ export const nodeMutations = {
           );
         }
         // Decrypt a working copy to plaintext; `raw` stays ciphertext so the
-        // NodeVersion snapshot below matches upsertNode's snapshot shape.
+        // NodeRevision snapshot below matches upsertNode's snapshot shape.
         const pt = { ...raw } as NodeRow;
         if (memEnc.isEncrypted) decryptNodeFields(pt, memEnc);
 
@@ -1097,14 +1097,14 @@ export const nodeMutations = {
 
       if (dryRun) return buildResult();
 
-      // ── Write pass: version snapshot + node update, all-or-nothing ──
+      // ── Write pass: revision snapshot + node update, all-or-nothing ──
       await ctx.db.$transaction(async (tx) => {
         for (const p of plans) {
           const raw = p.raw;
           // #88: the bulk-edit rationale rides in revLabel (#620); `changes`
           // is exactly the field set the replace pass rewrote on this node.
-          await tx.nodeVersion.create({
-            data: buildNodeVersionSnapshot(raw, editorFromAuth(ctx), {
+          await tx.nodeRevision.create({
+            data: buildNodeRevisionSnapshot(raw, editorFromAuth(ctx), {
               revLabel: input.reason,
               changes: Object.keys(p.changed),
             }),
@@ -1238,7 +1238,7 @@ export const nodeMutations = {
       await requireMemoryWriteAccess(ctx, node.memoryId);
       try {
         if (hard) {
-          // Irreversible row delete; edges + NodeVersion cascade via FK.
+          // Irreversible row delete; edges + NodeRevision cascade via FK.
           await ctx.db.node.delete({ where: { id: resolvedId } });
         } else {
           // #391: soft-delete by default, mirroring the hadron_delete_node MCP
@@ -1536,12 +1536,12 @@ export const nodeMutations = {
             );
           }
         }
-        // Pre-move NodeVersion snapshot — a loc/memory change is audit-worthy.
+        // Pre-move NodeRevision snapshot — a loc/memory change is audit-worthy.
         // The snapshot belongs to the SOURCE memory (#602): the node is about
         // to leave it, and this snapshot's content lived there (the builder
         // stamps source.memoryId).
-        await tx.nodeVersion.create({
-          data: buildNodeVersionSnapshot(source, editorFromAuth(ctx), {
+        await tx.nodeRevision.create({
+          data: buildNodeRevisionSnapshot(source, editorFromAuth(ctx), {
             changes: diffNodeChanges(source, { loc: destLoc, memoryId: destMemoryId }),
           }),
         });
@@ -1563,7 +1563,7 @@ export const nodeMutations = {
     // Incoming edges are never copied (they reference the source's identity).
     // Delegates to writeNodeCore('create'), inheriting every single-write
     // invariant (dest write auth, encryption re-encrypt for the destination,
-    // NodeVersion, abstractOriginHash, re-embed, git mirror) and its fail-loud
+    // NodeRevision, abstractOriginHash, re-embed, git mirror) and its fail-loud
     // NodeLocConflictError when the destination loc is already occupied.
     cloneNode: async (
       _: unknown,
@@ -1638,7 +1638,7 @@ export const nodeMutations = {
 
     // Fold a source node into a target node, returning the updated target.
     // Reuses upsertNode's single-write invariants (per-memory write auth,
-    // decrypt→merge→re-encrypt, NodeVersion snapshot, abstractOriginHash
+    // decrypt→merge→re-encrypt, NodeRevision snapshot, abstractOriginHash
     // recompute, re-embed, git mirror) but combines two existing rows rather
     // than applying a NodeInput. See MergeNodesInput / NodeMergeField.
     mergeNodes: async (
@@ -1830,11 +1830,11 @@ export const nodeMutations = {
       }
       writeData.updatedBy = ctx.userId ?? ctx.clientId ?? null;
 
-      // ── Atomic write: version snapshot → target update → edge re-point →
+      // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       await ctx.db.$transaction(async (tx) => {
-        await tx.nodeVersion.create({
-          data: buildNodeVersionSnapshot(target, editorFromAuth(ctx), {
+        await tx.nodeRevision.create({
+          data: buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
             // Plaintext field names the merge folds into the target — the
             // node columns the update below writes.
             changes: Object.keys(changed),
@@ -2089,12 +2089,12 @@ export const nodeMutations = {
       return nodes.length;
     },
 
-    restoreNodeVersion: async (
+    restoreNodeRevision: async (
       _: unknown,
-      { versionId, truncate = false }: { versionId: string; truncate?: boolean },
+      { revisionId, truncate = false }: { revisionId: string; truncate?: boolean },
       ctx: Context,
     ) => {
-      const version = await ctx.db.nodeVersion.findUniqueOrThrow({ where: { id: versionId } });
+      const version = await ctx.db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
 
@@ -2111,7 +2111,7 @@ export const nodeMutations = {
           // (createdAt strictly greater — EXCLUSIVE of the selected row, which
           // is kept), and skip the pre-restore snapshot. Ties on createdAt are
           // kept (never deletes the selected row); an over-keep is safe.
-          await tx.nodeVersion.deleteMany({
+          await tx.nodeRevision.deleteMany({
             where: { nodeId: node.id, createdAt: { gt: version.createdAt } },
           });
         } else {
@@ -2123,10 +2123,10 @@ export const nodeMutations = {
           // restore is about to rewrite; restorableNodeFields is the single
           // home for the restored field set + the legacy sentinel, shared
           // with the write-back below.
-          await tx.nodeVersion.create({
+          await tx.nodeRevision.create({
             data: {
               id: generateId(),
-              ...buildNodeVersionSnapshot(node, editorFromAuth(ctx), {
+              ...buildNodeRevisionSnapshot(node, editorFromAuth(ctx), {
                 changes: diffNodeChanges(node, restoreFields),
               }),
             },
@@ -2157,7 +2157,7 @@ export const nodeMutations = {
           include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
         });
       });
-      // 033 — re-embed the restored content (version snapshots are plaintext on
+      // 033 — re-embed the restored content (revision snapshots are plaintext on
       // non-encrypted memories; ciphertext snapshots are handled by embedNode's
       // #206 permanent-fail path).
       void enqueueNodeEmbedding(ctx.db, {
@@ -2169,39 +2169,39 @@ export const nodeMutations = {
     },
 
     // #617 — delete a single snapshot. Write-gated on the node's CURRENT memory
-    // (as restoreNodeVersion) — the memory you own the live node in, even if the
+    // (as restoreNodeRevision) — the memory you own the live node in, even if the
     // snapshot was captured in another memory before a move.
-    deleteNodeVersion: async (_: unknown, { versionId }: { versionId: string }, ctx: Context) => {
-      const version = await ctx.db.nodeVersion.findUnique({ where: { id: versionId } });
+    deleteNodeRevision: async (_: unknown, { revisionId }: { revisionId: string }, ctx: Context) => {
+      const version = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
       if (!version) {
         throw new GraphQLError('Node version not found', {
-          extensions: { code: 'NOT_FOUND', versionId },
+          extensions: { code: 'NOT_FOUND', revisionId },
         });
       }
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: version.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
-      await ctx.db.nodeVersion.delete({ where: { id: versionId } });
+      await ctx.db.nodeRevision.delete({ where: { id: revisionId } });
       return true;
     },
 
-    // #620 — set or clear the user-facing label on a version snapshot
-    // (NodeVersion.revLabel). Write-gated on the node's CURRENT memory (as
-    // deleteNodeVersion) — but unlike the Boolean-returning prune mutations,
+    // #620 — set or clear the user-facing label on a revision snapshot
+    // (NodeRevision.revLabel). Write-gated on the node's CURRENT memory (as
+    // deleteNodeRevision) — but unlike the Boolean-returning prune mutations,
     // this one RETURNS the full snapshot, so it must also enforce the read
-    // gates of the nodeVersion query: the per-snapshot memory gate (#602 —
+    // gates of the nodeRevision query: the per-snapshot memory gate (#602 —
     // a moved node's history can hold snapshots captured in a memory the
     // caller can't read) and the soft-deleted-node collapse (#618). Every
     // miss is the same NOT_FOUND (no existence disclosure).
-    updateNodeVersion: async (
+    updateNodeRevision: async (
       _: unknown,
-      { versionId, revLabel }: { versionId: string; revLabel?: string | null },
+      { revisionId, revLabel }: { revisionId: string; revLabel?: string | null },
       ctx: Context,
     ) => {
       const notFound = () =>
         new GraphQLError('Node version not found', {
-          extensions: { code: 'NOT_FOUND', versionId },
+          extensions: { code: 'NOT_FOUND', revisionId },
         });
-      const version = await ctx.db.nodeVersion.findUnique({ where: { id: versionId } });
+      const version = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
       if (!version) throw notFound();
       const node = await ctx.db.node.findUnique({
         where: { id: version.nodeId },
@@ -2222,8 +2222,8 @@ export const nodeMutations = {
           { extensions: { code: 'BAD_USER_INPUT', max: REV_LABEL_MAX_LEN } },
         );
       }
-      return ctx.db.nodeVersion.update({
-        where: { id: versionId },
+      return ctx.db.nodeRevision.update({
+        where: { id: revisionId },
         data: { revLabel },
       });
     },
@@ -2235,7 +2235,7 @@ export const nodeMutations = {
       try {
         // includeDeleted: a soft-deleted node still owns residual history an
         // owner may want to purge — clearing it is a cleanup op, so it stays
-        // reachable on tombstones (parity with deleteNodeVersion's by-id path;
+        // reachable on tombstones (parity with deleteNodeRevision's by-id path;
         // contrast the READ surfaces, which hide tombstoned history). PR #618.
         ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef, undefined, { includeDeleted: true }));
       } catch (e) {
@@ -2251,7 +2251,7 @@ export const nodeMutations = {
         select: { memoryId: true },
       });
       await requireMemoryWriteAccess(ctx, node.memoryId);
-      const { count } = await ctx.db.nodeVersion.deleteMany({ where: { nodeId } });
+      const { count } = await ctx.db.nodeRevision.deleteMany({ where: { nodeId } });
       return count;
     },
 

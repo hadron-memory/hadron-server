@@ -262,9 +262,9 @@ describe('createNode — create-only + abstract', () => {
   });
 });
 
-// ───── restoreNodeVersion + abstract round-trip ───────────────────────────
+// ───── restoreNodeRevision + abstract round-trip ───────────────────────────
 
-describe('restoreNodeVersion — abstract round-trips through history', () => {
+describe('restoreNodeRevision — abstract round-trips through history', () => {
   it('restoring a version with a non-null abstract reverts the node abstract to that value', async () => {
     // Initial state: abstract A
     const created = await upsertNode({ loc: 'rv1', name: 'rv1', abstract: 'A' });
@@ -272,8 +272,8 @@ describe('restoreNodeVersion — abstract round-trips through history', () => {
     // Capture v1 (records "A") by performing an update that triggers a snapshot.
     await upsertNode({ loc: 'rv1', name: 'rv1', abstract: 'B' });
 
-    // The NodeVersion just created snapshotted the pre-update state ("A").
-    const versions = await db.nodeVersion.findMany({
+    // The NodeRevision just created snapshotted the pre-update state ("A").
+    const versions = await db.nodeRevision.findMany({
       where: { nodeId: created.id },
       orderBy: { createdAt: 'asc' },
     });
@@ -282,9 +282,9 @@ describe('restoreNodeVersion — abstract round-trips through history', () => {
     expect(vA.abstract).toBe('A');
 
     // Restore that version. Node abstract should revert to "A".
-    const restored = await resolvers.Mutation.restoreNodeVersion(
+    const restored = await resolvers.Mutation.restoreNodeRevision(
       {},
-      { versionId: vA.id },
+      { revisionId: vA.id },
       fx.ctx,
     );
     expect(restored.abstract).toBe('A');
@@ -298,16 +298,16 @@ describe('restoreNodeVersion — abstract round-trips through history', () => {
     // Update to give the node an abstract — snapshot captures the pre-update NULL.
     await upsertNode({ loc: 'rv2', name: 'rv2', abstract: 'Later.' });
 
-    const versions = await db.nodeVersion.findMany({
+    const versions = await db.nodeRevision.findMany({
       where: { nodeId: created.id },
       orderBy: { createdAt: 'asc' },
     });
     const vNullAbs = versions[0];
     expect(vNullAbs.abstract).toBeNull();
 
-    const restored = await resolvers.Mutation.restoreNodeVersion(
+    const restored = await resolvers.Mutation.restoreNodeRevision(
       {},
-      { versionId: vNullAbs.id },
+      { revisionId: vNullAbs.id },
       fx.ctx,
     );
     expect(restored.abstract).toBeNull();
@@ -321,7 +321,7 @@ describe('restoreNodeVersion — abstract round-trips through history', () => {
     // Bump to "Y" so we have a prior version (with abstract X) to restore.
     await upsertNode({ loc: 'rv3', name: 'rv3', abstract: 'Y' });
 
-    const versions = await db.nodeVersion.findMany({
+    const versions = await db.nodeRevision.findMany({
       where: { nodeId: created.id },
       orderBy: { createdAt: 'asc' },
     });
@@ -329,13 +329,13 @@ describe('restoreNodeVersion — abstract round-trips through history', () => {
 
     // Restore vX — node abstract becomes "X", but the pre-restore snapshot
     // must record the CURRENT abstract ("Y") so we can round-trip back.
-    await resolvers.Mutation.restoreNodeVersion(
+    await resolvers.Mutation.restoreNodeRevision(
       {},
-      { versionId: vX.id },
+      { revisionId: vX.id },
       fx.ctx,
     );
 
-    const versionsAfterRestore = await db.nodeVersion.findMany({
+    const versionsAfterRestore = await db.nodeRevision.findMany({
       where: { nodeId: created.id },
       orderBy: { createdAt: 'asc' },
     });
@@ -398,22 +398,22 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
   });
 });
 
-describe('spec 032 — restoreNodeVersion round-trips abstractOriginHash', () => {
+describe('spec 032 — restoreNodeRevision round-trips abstractOriginHash', () => {
   it("restores the version's stored hash verbatim", async () => {
     const created = await upsertNode({ loc: 'rv-h', name: 'rv-h', abstract: 'A', content: 'B' });
     // Trigger snapshot via an update
     await upsertNode({ loc: 'rv-h', name: 'rv-h', abstract: 'A2' });
 
-    const versions = await db.nodeVersion.findMany({
+    const versions = await db.nodeRevision.findMany({
       where: { nodeId: created.id },
       orderBy: { createdAt: 'asc' },
     });
     const v0 = versions[0];
     expect(v0.abstractOriginHash).toBe(computeContentHash('B'));
 
-    const restored = await resolvers.Mutation.restoreNodeVersion(
+    const restored = await resolvers.Mutation.restoreNodeRevision(
       {},
-      { versionId: v0.id },
+      { revisionId: v0.id },
       fx.ctx,
     );
     // After restore, the live row should have the version's stored hash.
@@ -426,17 +426,17 @@ describe('spec 032 — restoreNodeVersion round-trips abstractOriginHash', () =>
     const created = await upsertNode({ loc: 'rv-h2', name: 'rv-h2', abstract: 'A', content: 'B' });
     await upsertNode({ loc: 'rv-h2', name: 'rv-h2', abstract: 'A2', content: "B'" });
 
-    const versions = await db.nodeVersion.findMany({
+    const versions = await db.nodeRevision.findMany({
       where: { nodeId: created.id },
       orderBy: { createdAt: 'asc' },
     });
     const v0 = versions[0]; // captures hash(B)
 
-    // Restore the original. This creates a NEW NodeVersion snapshot
+    // Restore the original. This creates a NEW NodeRevision snapshot
     // capturing the pre-restore live state (which has hash(B')).
-    await resolvers.Mutation.restoreNodeVersion({}, { versionId: v0.id }, fx.ctx);
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: v0.id }, fx.ctx);
 
-    const allVersions = await db.nodeVersion.findMany({
+    const allVersions = await db.nodeRevision.findMany({
       where: { nodeId: created.id },
       orderBy: { createdAt: 'asc' },
     });

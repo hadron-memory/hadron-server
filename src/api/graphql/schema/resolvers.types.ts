@@ -202,7 +202,7 @@ export const typeResolvers = {
       }
     },
   },
-  NodeVersion: {
+  NodeRevision: {
     createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
     // Prisma reads a NULL scalar list as [] already; belt-and-suspenders for
     // rows that arrive from raw queries (#620 legacy rows).

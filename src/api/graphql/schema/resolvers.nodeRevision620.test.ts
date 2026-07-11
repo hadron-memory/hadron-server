@@ -1,13 +1,13 @@
 /**
- * Integration tests for the #620 NodeVersion changes (+ the #619 editor
+ * Integration tests for the #620 NodeRevision changes (+ the #619 editor
  * resolution):
  *   - updateNode snapshots the FULL curated subset (properties/data/nodeType/
  *     seq/isRunnable/llmModel/aiAgent/isLink), captures editedBy as the USER
  *     PK, routes the #88 `reason` to revLabel, and computes `changes`.
- *   - restoreNodeVersion round-trips the new fields; a LEGACY snapshot (NULL
+ *   - restoreNodeRevision round-trips the new fields; a LEGACY snapshot (NULL
  *     nodeType sentinel) leaves the live node's new-field values untouched.
- *   - updateNodeVersion sets/clears revLabel, write-gated like
- *     deleteNodeVersion.
+ *   - updateNodeRevision sets/clears revLabel, write-gated like
+ *     deleteNodeRevision.
  *   - editedByUser resolves editedBy (User PK) → createdBy fallback →
  *     editedByInfo identity strings ('github:<login>' case-insensitive,
  *     'email:<addr>', 'user:<id>'); free-form legacy strings resolve to null.
@@ -80,7 +80,7 @@ describe('updateNode snapshot capture (#620)', () => {
       ctx(),
     );
 
-    const versions = await db.nodeVersion.findMany({ where: { nodeId: n.id } });
+    const versions = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
     expect(versions).toHaveLength(1);
     const v = versions[0];
     // Pre-edit state, full subset.
@@ -108,12 +108,12 @@ describe('updateNode snapshot capture (#620)', () => {
       { input: { id: n.id, content: 'stable', description: 'd2' } } as never,
       ctx(),
     );
-    const [v] = await db.nodeVersion.findMany({ where: { nodeId: n.id } });
+    const [v] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
     expect(v.changes).toEqual(['description']);
   });
 });
 
-describe('restoreNodeVersion round-trip (#620)', () => {
+describe('restoreNodeRevision round-trip (#620)', () => {
   it('restores the new curated fields verbatim', async () => {
     const n = await makeNode('rt', {
       content: 'v1',
@@ -127,9 +127,9 @@ describe('restoreNodeVersion round-trip (#620)', () => {
       { input: { id: n.id, content: 'v2', properties: { p: 2 }, data: { d: 2 }, seq: 9, isRunnable: false } } as never,
       ctx(),
     );
-    const [v1snap] = await db.nodeVersion.findMany({ where: { nodeId: n.id } });
+    const [v1snap] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
 
-    await resolvers.Mutation.restoreNodeVersion({}, { versionId: v1snap.id }, ctx());
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: v1snap.id }, ctx());
 
     const restored = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     expect(restored.content).toBe('v1');
@@ -138,7 +138,7 @@ describe('restoreNodeVersion round-trip (#620)', () => {
     expect(restored.seq).toBe(1);
     expect(restored.isRunnable).toBe(true);
     // The pre-restore snapshot recorded what the restore rewrote.
-    const preRestore = await db.nodeVersion.findFirst({
+    const preRestore = await db.nodeRevision.findFirst({
       where: { nodeId: n.id },
       orderBy: { createdAt: 'desc' },
     });
@@ -155,7 +155,7 @@ describe('restoreNodeVersion round-trip (#620)', () => {
       seq: 7,
     });
     // Simulate a pre-#620 snapshot: none of the new columns captured.
-    const legacy = await db.nodeVersion.create({
+    const legacy = await db.nodeRevision.create({
       data: {
         id: generateId(),
         nodeId: n.id,
@@ -167,7 +167,7 @@ describe('restoreNodeVersion round-trip (#620)', () => {
       },
     });
 
-    await resolvers.Mutation.restoreNodeVersion({}, { versionId: legacy.id }, ctx());
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: legacy.id }, ctx());
 
     const restored = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     // Captured fields restore…
@@ -181,45 +181,45 @@ describe('restoreNodeVersion round-trip (#620)', () => {
   });
 });
 
-describe('updateNodeVersion (#620 revLabel)', () => {
-  let versionId: string;
+describe('updateNodeRevision (#620 revLabel)', () => {
+  let revisionId: string;
 
   beforeEach(async () => {
     const n = await makeNode('lbl', { content: 'v1' });
     await resolvers.Mutation.updateNode({}, { input: { id: n.id, content: 'v2' } } as never, ctx());
-    const [v] = await db.nodeVersion.findMany({ where: { nodeId: n.id } });
-    versionId = v.id;
+    const [v] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
+    revisionId = v.id;
   });
 
   it('sets and clears the label', async () => {
-    const labeled = await resolvers.Mutation.updateNodeVersion(
-      {}, { versionId, revLabel: 'the good one' }, ctx(),
+    const labeled = await resolvers.Mutation.updateNodeRevision(
+      {}, { revisionId, revLabel: 'the good one' }, ctx(),
     );
     expect(labeled.revLabel).toBe('the good one');
 
-    const cleared = await resolvers.Mutation.updateNodeVersion(
-      {}, { versionId, revLabel: null }, ctx(),
+    const cleared = await resolvers.Mutation.updateNodeRevision(
+      {}, { revisionId, revLabel: null }, ctx(),
     );
     expect(cleared.revLabel).toBeNull();
   });
 
   it('omitting revLabel preserves the existing label (omit-means-preserve)', async () => {
-    await resolvers.Mutation.updateNodeVersion({}, { versionId, revLabel: 'keep me' }, ctx());
-    const untouched = await resolvers.Mutation.updateNodeVersion({}, { versionId }, ctx());
+    await resolvers.Mutation.updateNodeRevision({}, { revisionId, revLabel: 'keep me' }, ctx());
+    const untouched = await resolvers.Mutation.updateNodeRevision({}, { revisionId }, ctx());
     expect(untouched.revLabel).toBe('keep me');
   });
 
   it('rejects a label over the 500-char cap', async () => {
     await expect(
-      resolvers.Mutation.updateNodeVersion({}, { versionId, revLabel: 'x'.repeat(501) }, ctx()),
+      resolvers.Mutation.updateNodeRevision({}, { revisionId, revLabel: 'x'.repeat(501) }, ctx()),
     ).rejects.toThrow('500-character cap');
   });
 
   it('answers NOT_FOUND for a soft-deleted node (read-gate parity, #618)', async () => {
-    const version = await db.nodeVersion.findUniqueOrThrow({ where: { id: versionId } });
+    const version = await db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
     await db.node.update({ where: { id: version.nodeId }, data: { deletedAt: new Date() } });
     await expect(
-      resolvers.Mutation.updateNodeVersion({}, { versionId, revLabel: 'x' }, ctx()),
+      resolvers.Mutation.updateNodeRevision({}, { revisionId, revLabel: 'x' }, ctx()),
     ).rejects.toThrow('Node version not found');
   });
 
@@ -232,8 +232,8 @@ describe('updateNodeVersion (#620 revLabel)', () => {
     const restrictedMem = await db.memory.create({
       data: { id: generateId(), organizationId: otherOrg.id, urn: 'nv620-other:secret', name: 'secret', class: 'knowledge' },
     });
-    const version = await db.nodeVersion.findUniqueOrThrow({ where: { id: versionId } });
-    const secretSnap = await db.nodeVersion.create({
+    const version = await db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
+    const secretSnap = await db.nodeRevision.create({
       data: {
         id: generateId(),
         nodeId: version.nodeId,
@@ -245,16 +245,16 @@ describe('updateNodeVersion (#620 revLabel)', () => {
     // Org-scoped admin (not global): write access to the node's memory via
     // org role, but no read on the other org's memory.
     await expect(
-      resolvers.Mutation.updateNodeVersion(
-        {}, { versionId: secretSnap.id, revLabel: 'x' },
+      resolvers.Mutation.updateNodeRevision(
+        {}, { revisionId: secretSnap.id, revLabel: 'x' },
         { db, roles: [], userId: admin.id } as never,
       ),
     ).rejects.toThrow('Node version not found');
   });
 
-  it('throws NOT_FOUND for an unknown versionId', async () => {
+  it('throws NOT_FOUND for an unknown revisionId', async () => {
     await expect(
-      resolvers.Mutation.updateNodeVersion({}, { versionId: 'nope', revLabel: 'x' }, ctx()),
+      resolvers.Mutation.updateNodeRevision({}, { revisionId: 'nope', revLabel: 'x' }, ctx()),
     ).rejects.toThrow('Node version not found');
   });
 
@@ -263,8 +263,8 @@ describe('updateNodeVersion (#620 revLabel)', () => {
       data: { githubId: 6201, githubUsername: 'nv620-out', roles: ['READER'] },
     });
     await expect(
-      resolvers.Mutation.updateNodeVersion(
-        {}, { versionId, revLabel: 'x' }, ctx({ roles: ['READER'], userId: outsider.id }),
+      resolvers.Mutation.updateNodeRevision(
+        {}, { revisionId, revLabel: 'x' }, ctx({ roles: ['READER'], userId: outsider.id }),
       ),
     ).rejects.toThrow();
   });
@@ -272,7 +272,7 @@ describe('updateNodeVersion (#620 revLabel)', () => {
 
 describe('editedByUser resolution (#619/#620)', () => {
   const resolve = (nv: Record<string, unknown>) =>
-    resolvers.NodeVersion.editedByUser(nv as never, null, ctx());
+    resolvers.NodeRevision.editedByUser(nv as never, null, ctx());
 
   it('resolves editedBy as a User PK first', async () => {
     expect(await resolve({ editedBy: admin.id })).toEqual({

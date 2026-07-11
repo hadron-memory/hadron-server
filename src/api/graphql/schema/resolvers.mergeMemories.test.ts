@@ -179,11 +179,11 @@ describe('mergeMemories — source disposition', () => {
     expect(tgt.get('x')?.content).toBe('x');
   });
 
-  it('snapshots a NodeVersion of the target counterpart on a collision merge', async () => {
+  it('snapshots a NodeRevision of the target counterpart on a collision merge', async () => {
     await makeNode(srcMem.id, 'shared', { content: 'sc' });
     const tgt = await makeNode(tgtMem.id, 'shared', { content: 'tc' });
     await merge({ source: srcMem.id, target: tgtMem.id, include: ['CONTENT'] });
-    const versions = await db.nodeVersion.findMany({ where: { nodeId: tgt.id } });
+    const versions = await db.nodeRevision.findMany({ where: { nodeId: tgt.id } });
     expect(versions).toHaveLength(1);
     expect(versions[0].content).toBe('tc'); // pre-merge snapshot
   });

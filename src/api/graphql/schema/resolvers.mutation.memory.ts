@@ -1,6 +1,6 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
-import { editorFromAuth } from '../../../lib/nodeVersionSnapshot.js';
+import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
 import { deleteMemoryVectors } from '../../../services/embedding/vectors.js';

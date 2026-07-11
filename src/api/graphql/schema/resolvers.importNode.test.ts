@@ -8,7 +8,7 @@
  *   - url path: fetch (mocked) → Readability (mocked) → convert → store;
  *     whole-page fallback when extraction returns null; properties.url
  *     provenance; no user credentials is webFetch's contract, not tested here.
- *   - conflict semantics: UPDATE IN PLACE with a NodeVersion snapshot, and
+ *   - conflict semantics: UPDATE IN PLACE with a NodeRevision snapshot, and
  *     the curated-name preservation rule on re-import.
  *   - result shape: STORED, node set, jobId null.
  *
@@ -295,7 +295,7 @@ describe('importNode — url path (sync v1)', () => {
 // ───── conflict semantics ───────────────────────────────────────────────────
 
 describe('importNode — update in place (handoff decision 3)', () => {
-  it('re-import overwrites content, snapshots a NodeVersion, preserves the curated name', async () => {
+  it('re-import overwrites content, snapshots a NodeRevision, preserves the curated name', async () => {
     const created = await resolvers.Mutation.createNode(
       {},
       {
@@ -318,7 +318,7 @@ describe('importNode — update in place (handoff decision 3)', () => {
     // No caller name, no Readability title (content path) → preserved.
     expect(res.node.name).toBe('Curated Name');
     // The undo path: prior state snapshotted.
-    const versions = await db.nodeVersion.findMany({ where: { nodeId: created.id } });
+    const versions = await db.nodeRevision.findMany({ where: { nodeId: created.id } });
     expect(versions.length).toBeGreaterThanOrEqual(1);
     expect(versions.some((v) => v.content === 'original body')).toBe(true);
   });

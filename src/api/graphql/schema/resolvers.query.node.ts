@@ -1067,7 +1067,7 @@ export const nodeQueries = {
       });
     },
 
-    nodeVersions: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
+    nodeRevisions: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
       requireRole(ctx, 'READER');
       // cor:api:140 / 007-entity-id-or-urn: nodeRef may be an ID or a fully-
       // qualified node URN. A genuine miss collapses to [] (no existence
@@ -1081,7 +1081,7 @@ export const nodeQueries = {
         throw e;
       }
       // Access control (#602): this resolver previously had NO gate — any
-      // authenticated caller could read any tenant's node version history.
+      // authenticated caller could read any tenant's node revision history.
       const node = await ctx.db.node.findUnique({
         where: { id: nodeId },
         select: { memoryId: true },
@@ -1100,7 +1100,7 @@ export const nodeQueries = {
       // memoryUsageSummary).
       if (!canRead(node.memoryId)) return [];
 
-      const versions = await ctx.db.nodeVersion.findMany({
+      const versions = await ctx.db.nodeRevision.findMany({
         where: { nodeId },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 50,
@@ -1114,21 +1114,21 @@ export const nodeQueries = {
     },
 
     // #617 (Display) — a single snapshot by id, so the portal doesn't filter
-    // the list client-side. Access-gated like nodeVersions: read on the node's
+    // the list client-side. Access-gated like nodeRevisions: read on the node's
     // current memory AND on the snapshot's own memory (per-snapshot gating —
     // a moved node keeps its id, so a snapshot may live in a memory the caller
     // can't read). Any miss collapses to null (no existence disclosure).
-    nodeVersion: async (_: unknown, { versionId }: { versionId: string }, ctx: Context) => {
+    nodeRevision: async (_: unknown, { revisionId }: { revisionId: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
-      const version = await ctx.db.nodeVersion.findUnique({ where: { id: versionId } });
+      const version = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
       if (!version) return null;
       const node = await ctx.db.node.findUnique({
         where: { id: version.nodeId },
         select: { memoryId: true, deletedAt: true },
       });
-      // A soft-deleted node drops out of every read surface: nodeVersions
+      // A soft-deleted node drops out of every read surface: nodeRevisions
       // resolves through resolveNodeRef (excludes tombstones) → []. This by-id
-      // read must match, or a retained versionId keeps leaking a deleted node's
+      // read must match, or a retained revisionId keeps leaking a deleted node's
       // history to any reader of its memory (PR #618 review).
       if (!node || node.deletedAt) return null;
       const accessible = await getAccessibleMemoryIds(ctx);
