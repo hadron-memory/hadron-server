@@ -2395,6 +2395,8 @@ export const typeDefs = `#graphql
     MEMORY_MEMBER
     "personal-class cross-user grant (MemoryShare)."
     MEMORY_SHARE
+    "individual action grant (PrincipalGrant, cor:acl:040:06) - clone/delete capabilities on top of the role bundle."
+    PRINCIPAL_GRANT
     "node inherits its memory's access."
     NODE_INHERITED
     "AppMember row."

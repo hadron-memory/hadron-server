@@ -10,4 +10,4 @@ allowBuilds:
   esbuild: true
   prisma: true
 minimumReleaseAgeExclude:
-  - '@hadron-memory/access-control@0.2.0'
+  - '@hadron-memory/access-control@0.3.0'

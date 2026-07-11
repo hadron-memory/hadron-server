@@ -453,3 +453,60 @@ describe('the resolved user is returned', () => {
     expect((res as any).user.id).toBe(member.id);
   });
 });
+
+describe('memory — individual action grants (PRINCIPAL_GRANT, cor:acl:040:06)', () => {
+  const grantRow = (userId: string, actions: string[], overrides: Record<string, unknown> = {}) =>
+    db.principalGrant.create({
+      data: {
+        id: generateId(),
+        principalType: 'USER',
+        principalId: userId,
+        organizationId: org.id,
+        actions,
+        ...overrides,
+      },
+    });
+
+  it('a memory.clone grant surfaces as manage with PRINCIPAL_GRANT lineage', async () => {
+    await grantRow(member.id, ['memory.clone']);
+    const res = await call(member.id, `hrn:memory:${graph.urn}`, asAdmin());
+    expect(res.canManage).toBe(true);
+    expect(res.canDelete).toBe(false);
+    const g = res.grants.find((x: any) => x.source === 'PRINCIPAL_GRANT');
+    expect(g).toBeTruthy();
+    expect(g!.role).toBe('memory.clone');
+    expect(g!.via).toBe(org.urn);
+    // Capability-shaped source: it must not become the clean role label.
+    expect(res.role).toBeNull();
+  });
+
+  it('a memory.* wildcard grant confers manage AND delete', async () => {
+    await grantRow(member.id, ['memory.*']);
+    const res = await call(member.id, `hrn:memory:${graph.urn}`, asAdmin());
+    expect(res.canManage).toBe(true);
+    expect(res.canDelete).toBe(true);
+  });
+
+  it('read/write-only grants are NOT surfaced (no enforced gate consults them)', async () => {
+    await grantRow(member.id, ['memory.read', 'memory.write']);
+    const res = await call(member.id, `hrn:memory:${graph.urn}`, asAdmin());
+    expect(res.grants.some((x: any) => x.source === 'PRINCIPAL_GRANT')).toBe(false);
+    expect(res.canWrite).toBe(false);
+  });
+
+  it('an expired or revoked grant is absent', async () => {
+    await grantRow(member.id, ['memory.clone'], { expiresAt: new Date(Date.now() - 60_000) });
+    await grantRow(member.id, ['memory.delete'], { deletedAt: new Date() });
+    const res = await call(member.id, `hrn:memory:${graph.urn}`, asAdmin());
+    expect(res.grants.some((x: any) => x.source === 'PRINCIPAL_GRANT')).toBe(false);
+    expect(res.canManage).toBe(false);
+    expect(res.canDelete).toBe(false);
+  });
+
+  it('a grant without live membership confers nothing (requireOrgAction parity)', async () => {
+    await grantRow(stranger.id, ['memory.clone']);
+    const res = await call(stranger.id, `hrn:memory:${graph.urn}`, asAdmin());
+    expect(res.grants.some((x: any) => x.source === 'PRINCIPAL_GRANT')).toBe(false);
+    expect(res.canManage).toBe(false);
+  });
+});
