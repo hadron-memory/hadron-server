@@ -40,13 +40,14 @@ function viewerP(): SearchPrincipal {
     isPlatformAdmin: false,
     accessibleMemoryIds: [fx.memoryA, fx.memoryEnc, fx.memoryC],
     orgIds: [fx.orgA],
+    viewerOrgIds: [fx.orgA],
   };
 }
 function adminP(): SearchPrincipal {
-  return { viewerUserId: fx.admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: null };
+  return { viewerUserId: fx.admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: null, viewerOrgIds: [] };
 }
 function anonP(): SearchPrincipal {
-  return { viewerUserId: null, isPlatformAdmin: false, accessibleMemoryIds: [], orgIds: [] };
+  return { viewerUserId: null, isPlatformAdmin: false, accessibleMemoryIds: [], orgIds: [], viewerOrgIds: [] };
 }
 
 const byType = (hits: GlobalSearchHit[], t: SearchEntityType) => hits.filter((h) => h.entityType === t);
@@ -296,7 +297,7 @@ describe('globalSearch — pagination (issue #465)', () => {
   // Admin sees every memory; 'Memory' matches all four memory names and no
   // other entity, giving a clean, fully-ranked set to page over.
   const allP = (): SearchPrincipal => ({
-    viewerUserId: fx.admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: null,
+    viewerUserId: fx.admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: null, viewerOrgIds: [],
   });
 
   it('returns a bounded total and slices the ranked list by offset/limit', async () => {
@@ -344,7 +345,7 @@ describe('globalSearch — pagination (issue #465)', () => {
 describe('globalSearch — org scope (issue #463)', () => {
   it('orgScopeId confines memory hits to that org', async () => {
     const scoped: SearchPrincipal = {
-      viewerUserId: fx.admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: [fx.orgA], orgScopeId: fx.orgA,
+      viewerUserId: fx.admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: [fx.orgA], viewerOrgIds: [], orgScopeId: fx.orgA,
     };
     const memIds = ids(byType((await globalSearch(db, { query: 'Memory', entityTypes: ['memory'] }, scoped)).hits, 'memory'));
     expect(memIds).toContain(fx.memoryA);
@@ -355,6 +356,38 @@ describe('globalSearch — org scope (issue #463)', () => {
     // Viewer can read only orgA memories; scoping to orgB (AND-ed) yields nothing.
     const scoped: SearchPrincipal = { ...viewerP(), orgIds: [fx.orgB], orgScopeId: fx.orgB };
     expect(byType((await globalSearch(db, { query: 'Memory', entityTypes: ['memory'] }, scoped)).hits, 'memory')).toHaveLength(0);
+  });
+});
+
+describe('globalSearch — hidden orgs are not discoverable, even by admins (#609)', () => {
+  it("hides an isVisible=false org from an admin's search; the owner still finds it", async () => {
+    const listable = await db.organization.create({
+      data: { id: generateId(), name: 'Zephyr Listed', urn: `zephyr-list-${generateId()}`, isVisible: true },
+    });
+    const hidden = await db.organization.create({
+      data: { id: generateId(), name: 'Zephyr Hidden', urn: `zephyr-hid-${generateId()}`, isVisible: false },
+    });
+    await db.orgMember.create({ data: { organizationId: hidden.id, userId: fx.viewer, role: 'OWNER' } });
+
+    // Admin (member of neither): the listable org, never the hidden one.
+    const asAdmin = ids(byType((await globalSearch(db, { query: 'Zephyr' }, adminP())).hits, 'organization'));
+    expect(asAdmin).toContain(listable.id);
+    expect(asAdmin).not.toContain(hidden.id);
+
+    // The hidden org's own member still finds it.
+    const ownerP: SearchPrincipal = { ...viewerP(), orgIds: [fx.orgA, hidden.id], viewerOrgIds: [fx.orgA, hidden.id] };
+    const asOwner = ids(byType((await globalSearch(db, { query: 'Zephyr' }, ownerP)).hits, 'organization'));
+    expect(asOwner).toContain(hidden.id);
+  });
+
+  it('an admin still finds a hidden org they are a member of (viewerOrgIds)', async () => {
+    const hidden = await db.organization.create({
+      data: { id: generateId(), name: 'Zephyr AdminOwned', urn: `zephyr-ao-${generateId()}`, isVisible: false },
+    });
+    await db.orgMember.create({ data: { organizationId: hidden.id, userId: fx.admin, role: 'OWNER' } });
+    const adminMemberP: SearchPrincipal = { ...adminP(), viewerOrgIds: [hidden.id] };
+    const found = ids(byType((await globalSearch(db, { query: 'Zephyr' }, adminMemberP)).hits, 'organization'));
+    expect(found).toContain(hidden.id);
   });
 });
 

@@ -85,6 +85,14 @@ export interface SearchPrincipal {
   accessibleMemoryIds: string[] | null;
   orgIds: string[] | null;
   /**
+   * The caller's OWN member org ids (admin or not); [] for App-Key /
+   * unauthenticated. Unlike `orgIds`, never the null "unrestricted" sentinel.
+   * The Organization slice uses it for the #609 hidden-org carve-out: an admin
+   * (`orgIds === null`) sees only LISTABLE orgs (`isVisible` not explicitly
+   * false) plus the hidden orgs they themselves belong to.
+   */
+  viewerOrgIds: string[];
+  /**
    * When set, narrow the search to a single organization: the Memory + Node
    * slices are additionally constrained to `memory.organizationId === orgScopeId`
    * (AND-ed onto the access scope, so it never widens access), and the caller

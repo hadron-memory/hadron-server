@@ -256,6 +256,9 @@ export const orgQueries = {
         isPlatformAdmin,
         accessibleMemoryIds,
         orgIds,
+        // #609: the caller's OWN member orgs — the Organization slice uses this
+        // so an admin still finds a hidden org they belong to.
+        viewerOrgIds: callerOrgIds,
         orgScopeId,
       };
       return runGlobalSearch(ctx.db, { query, entityTypes, fields, limit, offset }, principal);
@@ -311,7 +314,20 @@ export const orgQueries = {
         !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
       let where: Record<string, unknown>;
       if (isPlatformAdmin && !filter?.memberOnly) {
-        where = { deletedAt: null };
+        // #609: `isVisible` is a listing-visibility flag — a non-listable org
+        // (anything but an explicit `true`, i.e. an un-activated personal org
+        // `false`, or a legacy/unset `null`) must not surface in ANY user's org
+        // listing, platform admins included. Listable ⟺ `isVisible === true`,
+        // matching the codebase-wide `!== true` "hidden/personal" convention.
+        // Admin reach is every listable org PLUS the admin's own memberships (so
+        // a hidden org they belong to still resolves for them). This is a
+        // listing filter, NOT an access gate: members still read hidden orgs
+        // directly via `organization(ref:)`.
+        const memberOrgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+        where = {
+          deletedAt: null,
+          OR: [{ isVisible: true }, { id: { in: memberOrgIds } }],
+        };
       } else {
         // Membership scope — for non-admins (unchanged default) and for any
         // caller with filter.memberOnly (a no-op for non-admins, whose default
