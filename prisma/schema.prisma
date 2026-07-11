@@ -652,6 +652,10 @@ model Memory {
   chunkOverlap              Int?              @map("chunk_overlap")
   /// Force fixed-size chunking, bypassing structure-aware (FR-015).
   forceFixedSize            Boolean           @default(false) @map("force_fixed_size")
+  /// #621 — cap on how many NodeRevision rows are kept per node in this
+  /// memory. On each new revision the oldest overflow is pruned. Must be >= 1
+  /// (chk_memory_max_rev_count_positive); default 10.
+  maxRevCount               Int               @default(10) @map("max_rev_count")
   /// Spec 041 (D-2026-07-06-B) — passphrase-derivation material for a
   /// caller-held-key encrypted memory. Parameters, NOT secrets: salt
   /// (base64) + scrypt params. NULL when the memory was encrypted with a

@@ -18,6 +18,7 @@
  */
 
 import { Prisma } from '../generated/prisma/index.js';
+import type { PrismaClient } from '../generated/prisma/index.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -124,6 +125,58 @@ export function buildNodeRevisionSnapshot(
     changes: opts?.changes ?? [],
     createdBy: editor.userId ?? editor.info ?? null,
   };
+}
+
+/**
+ * Column default for `Memory.maxRevCount` (#621) — the per-node cap on
+ * retained NodeRevision rows. Also the fallback when the snapshot's memory row
+ * can't be read (defensive; every snapshot stamps a real memoryId).
+ */
+export const DEFAULT_MAX_REV_COUNT = 10;
+
+/**
+ * Create a NodeRevision and prune the node's history to `Memory.maxRevCount`
+ * (#621). Every revision-write site goes through here (not a bare
+ * `nodeRevision.create`) so the cap is enforced in ONE place. After the insert,
+ * any revisions beyond the newest `maxRevCount` for this node are deleted.
+ *
+ * `db` may be the base client or a transaction client (both satisfy the Pick).
+ * The cap is read from the snapshot's memory — the memory the node lived in at
+ * capture (#602); for a move that's the source memory, which is correct (the
+ * pre-move history belonged there).
+ */
+export async function createNodeRevision(
+  db: Pick<PrismaClient, 'nodeRevision' | 'memory'>,
+  data: Prisma.NodeRevisionUncheckedCreateInput,
+): Promise<void> {
+  await db.nodeRevision.create({ data });
+
+  const max = data.memoryId
+    ? (
+        await db.memory.findUnique({
+          where: { id: data.memoryId },
+          select: { maxRevCount: true },
+        })
+      )?.maxRevCount ?? DEFAULT_MAX_REV_COUNT
+    : DEFAULT_MAX_REV_COUNT;
+  // Defensive: chk_memory_max_rev_count_positive enforces >= 1 at the DB.
+  if (max < 1) return;
+
+  // Keep the newest `max`; delete the older overflow. `skip` past the newest
+  // `max` (createdAt desc, id as a deterministic tiebreak for same-ms rows)
+  // yields exactly the rows to prune — handles a lowered cap (multiple
+  // overflow rows), not just the single newest-over-the-line case.
+  const overflow = await db.nodeRevision.findMany({
+    where: { nodeId: data.nodeId },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    skip: max,
+    select: { id: true },
+  });
+  if (overflow.length > 0) {
+    await db.nodeRevision.deleteMany({
+      where: { id: { in: overflow.map((r) => r.id) } },
+    });
+  }
 }
 
 /**

@@ -1278,6 +1278,11 @@ export const typeDefs = `#graphql
     """
     forceFixedSize: Boolean!
     """
+    #621 — cap on how many NodeRevision rows are kept per node in this memory.
+    On each new revision the oldest overflow is pruned. Default 10; minimum 1.
+    """
+    maxRevCount: Int!
+    """
     Spec 033 FR-026 — timestamp at which the memory owner accepted the
     encrypted-memory vector-inversion disclosure. Set when the caller
     passes acknowledgeVectorInversionRisk: true on updateMemory for an
@@ -3494,6 +3499,8 @@ export const typeDefs = `#graphql
       """
       vectorIndexEnabled: Boolean
       embeddingSource: EmbeddingSource
+      """#621 — per-node revision-history cap (default 10, minimum 1)."""
+      maxRevCount: Int
     ): Memory!
 
     """
@@ -3508,7 +3515,7 @@ export const typeDefs = `#graphql
     truth in \`FR_026_DISCLOSURE\` — see \`src/lib/entityRef/errors.ts\`). On a
     non-encrypted memory the flag is a no-op.
     """
-    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean): Memory!
+    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean, maxRevCount: Int): Memory!
 
     """
     Soft-delete a Memory.

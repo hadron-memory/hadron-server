@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
   buildNodeRevisionSnapshot,
+  createNodeRevision,
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
@@ -2880,13 +2881,12 @@ export function createMcpServerInstance(
       // history round-trips the staleness signal. On an encrypted memory
       // `existing` still holds CIPHERTEXT here — revisions store the
       // at-rest form, deliberately (the decrypt happens just below).
-      await db.nodeRevision.create({
-        // #620 — shared builder: editedBy carries the user PK (when the MCP
-        // caller is a user token), `reason` rides in revLabel, and `changes`
-        // records the fields this update supplies with a different value.
-        data: {
-          id: generateId(),
-          ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
+      // #620 — shared builder: editedBy carries the user PK (when the MCP
+      // caller is a user token), `reason` rides in revLabel, and `changes`
+      // records the fields this update supplies with a different value.
+      await createNodeRevision(db, {
+        id: generateId(),
+        ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
             revLabel: reason,
             changes: diffNodeChanges(existing, {
               name,
@@ -2903,7 +2903,6 @@ export function createMcpServerInstance(
               aiAgent,
             }),
           }),
-        },
       }).catch(() => {});
 
       // Spec 041 (PR-517 review, Codex P2): decrypt `existing` in place NOW
@@ -3487,17 +3486,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // shared builder; `changes` records the addressing fields the
         // move rewrites.
         const newName = toLoc.split(':').pop()!;
-        await tx.nodeRevision.create({
-          data: {
-            id: generateId(),
-            ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
-              changes: diffNodeChanges(existing, {
-                loc: toLoc,
-                name: newName,
-                memoryId: toMemory.id,
-              }),
+        await createNodeRevision(tx, {
+          id: generateId(),
+          ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
+            changes: diffNodeChanges(existing, {
+              loc: toLoc,
+              name: newName,
+              memoryId: toMemory.id,
             }),
-          },
+          }),
         });
 
         // Move BY ID — see comment above the transaction.

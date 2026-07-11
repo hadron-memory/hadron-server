@@ -169,6 +169,8 @@ export async function cloneMemoryGraph(
           chunkTokens: source.chunkTokens,
           chunkOverlap: source.chunkOverlap,
           forceFixedSize: source.forceFixedSize,
+          // #621 — clone inherits the source's revision cap.
+          maxRevCount: source.maxRevCount,
           // Git-sync config intentionally NOT copied — see module doc.
           // userId only for personal/private (CHECK-enforced both ways).
           userId: args.ownerUserId,

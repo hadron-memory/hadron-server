@@ -88,6 +88,11 @@ export async function setup() {
     ALTER TABLE "memories"
       ADD CONSTRAINT "chk_memory_chunk_overlap_valid"
       CHECK (chunk_overlap IS NULL OR (chunk_overlap >= 0 AND (chunk_tokens IS NULL OR chunk_overlap < chunk_tokens)));
+
+    ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_max_rev_count_positive";
+    ALTER TABLE "memories"
+      ADD CONSTRAINT "chk_memory_max_rev_count_positive"
+      CHECK (max_rev_count >= 1);
   `);
 
   // 036-ai-service-config: a config belongs to exactly one owner; name is
