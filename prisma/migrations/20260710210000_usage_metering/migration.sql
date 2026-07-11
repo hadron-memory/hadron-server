@@ -1,5 +1,5 @@
 -- 046-usage-metering (billing Phase 0): billing attribution + cost snapshot
--- on usage_events, the ModelPrice rate table, and the append-only
+-- on usage_events, the AiModelPrice rate table, and the append-only
 -- credit_ledger_entries monetary ledger. Additive only. See
 -- specs/046-usage-metering/spec.md and prisma/schema.prisma.
 
@@ -23,7 +23,7 @@ ALTER TABLE "usage_events" ADD CONSTRAINT "usage_events_user_id_fkey" FOREIGN KE
 ALTER TABLE "usage_events" ADD CONSTRAINT "usage_events_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "organizations"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- CreateTable
-CREATE TABLE "model_prices" (
+CREATE TABLE "ai_model_prices" (
     "id" TEXT NOT NULL,
     "provider" TEXT NOT NULL,
     "model" TEXT NOT NULL,
@@ -34,15 +34,19 @@ CREATE TABLE "model_prices" (
     "effective_at" TIMESTAMP(3) NOT NULL,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "created_by" TEXT,
+    "updated_at" TIMESTAMP(3),
+    "updated_by" TEXT,
+    "deleted_at" TIMESTAMP(3),
+    "deleted_by" TEXT,
 
-    CONSTRAINT "model_prices_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "ai_model_prices_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "model_prices_provider_model_tier_effective_at_key" ON "model_prices"("provider", "model", "tier", "effective_at");
+CREATE UNIQUE INDEX "ai_model_prices_provider_model_tier_effective_at_key" ON "ai_model_prices"("provider", "model", "tier", "effective_at");
 
 -- CreateIndex
-CREATE INDEX "model_prices_provider_model_tier_idx" ON "model_prices"("provider", "model", "tier");
+CREATE INDEX "ai_model_prices_provider_model_tier_idx" ON "ai_model_prices"("provider", "model", "tier");
 
 -- CreateTable
 CREATE TABLE "credit_ledger_entries" (
@@ -56,6 +60,10 @@ CREATE TABLE "credit_ledger_entries" (
     "note" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "created_by" TEXT,
+    "updated_at" TIMESTAMP(3),
+    "updated_by" TEXT,
+    "deleted_at" TIMESTAMP(3),
+    "deleted_by" TEXT,
 
     CONSTRAINT "credit_ledger_entries_pkey" PRIMARY KEY ("id")
 );

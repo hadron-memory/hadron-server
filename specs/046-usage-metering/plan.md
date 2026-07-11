@@ -9,7 +9,7 @@
 - `keyOwnerType String?` — AiConfigOwnerType of the key that served the call.
 - `costMicroCents BigInt?` — snapshot at write; null = no price known / n/a.
 
-**ModelPrice** (new, `model_prices`): `id`, `provider`, `model`,
+**AiModelPrice** (new, `model_prices`): `id`, `provider`, `model`,
 `inputMicroCentsPerMTok BigInt`, `outputMicroCentsPerMTok BigInt`,
 `effectiveAt`, audit cols. Unique `(provider, model, effectiveAt)`.
 Lookup: latest `effectiveAt <= at`. String columns, no enums (avoids the
@@ -44,11 +44,11 @@ surface anywhere.
 
 ## GraphQL
 
-Types `ModelPrice`, `CreditLedgerEntry`, `CreditBalance { organizationId,
-balanceMicroCents }`; extend `UsageEvent`. Queries `modelPrice(ref)`,
-`modelPrices(provider, model, limit, offset) → {items,total}`,
+Types `AiModelPrice`, `CreditLedgerEntry`, `CreditBalance { organizationId,
+balanceMicroCents }`; extend `UsageEvent`. Queries `aiModelPrice(ref)`,
+`aiModelPrices(provider, model, limit, offset) → {items,total}`,
 `creditLedgerEntries(orgRef, limit, offset) → {items,total}`,
-`creditBalance(orgRef)`. Mutations `setModelPrice(input)` /
+`creditBalance(orgRef)`. Mutations `setAiModelPrice(input)` /
 `grantCredits(input)` — platform-admin gate (same as other host-level ops);
 org read surface via `requireOrgRole(ADMIN)`. BigInt travels as String in
 GraphQL (custom scalars out of scope — serialize `.toString()`).

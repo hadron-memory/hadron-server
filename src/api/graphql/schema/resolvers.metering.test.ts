@@ -1,7 +1,7 @@
 /**
  * Spec 046 — metering GraphQL surface auth matrix.
  *
- * The load-bearing property: setModelPrice and grantCredits are PLATFORM
+ * The load-bearing property: setAiModelPrice and grantCredits are PLATFORM
  * ADMIN only — an org ADMIN (who passes requireOrgRole everywhere else on
  * this surface) must be Forbidden on both, since rates set what they are
  * billed at and grants mint money. Ledger reads are org-ADMIN.
@@ -35,7 +35,7 @@ const contributorCtx = (): Partial<Context> => ({ userId: contributor, roles: ['
 const strangerCtx = (): Partial<Context> => ({ userId: stranger, roles: ['READER'] });
 const anonCtx = (): Partial<Context> => ({ roles: [] });
 
-const SET_PRICE = `mutation($input: SetModelPriceInput!) { setModelPrice(input: $input) {
+const SET_PRICE = `mutation($input: SetAiModelPriceInput!) { setAiModelPrice(input: $input) {
   id provider model tier markupBasisPoints inputMicroCentsPerMTok outputMicroCentsPerMTok effectiveAt } }`;
 const GRANT = `mutation($input: GrantCreditsInput!) { grantCredits(input: $input) {
   id kind amountMicroCents organizationId } }`;
@@ -43,7 +43,7 @@ const BALANCE = `query($orgRef: String!) { creditBalance(orgRef: $orgRef) {
   organizationId balanceMicroCents } }`;
 const LEDGER = `query($orgRef: String!) { creditLedgerEntries(orgRef: $orgRef) {
   total items { kind amountMicroCents } } }`;
-const PRICES = `query { modelPrices { total items { provider model inputMicroCentsPerMTok } } }`;
+const PRICES = `query { aiModelPrices { total items { provider model inputMicroCentsPerMTok } } }`;
 
 const priceInput = {
   provider: 'anthropic',
@@ -71,11 +71,11 @@ beforeEach(async () => {
   });
 });
 
-describe('setModelPrice', () => {
+describe('setAiModelPrice', () => {
   it('platform admin appends a rate row', async () => {
     const res = await gql(SET_PRICE, platformCtx(), { input: priceInput });
     expect(res.errors).toBeUndefined();
-    const row = (res.data as Record<string, Record<string, string>>).setModelPrice;
+    const row = (res.data as Record<string, Record<string, string>>).setAiModelPrice;
     expect(row.inputMicroCentsPerMTok).toBe('30000000');
   });
 
@@ -102,14 +102,14 @@ describe('setModelPrice', () => {
   it('defaults tier to 1 and round-trips tier + markupBasisPoints', async () => {
     const dflt = await gql(SET_PRICE, platformCtx(), { input: priceInput });
     expect(dflt.errors).toBeUndefined();
-    const dfltRow = (dflt.data as Record<string, Record<string, unknown>>).setModelPrice;
+    const dfltRow = (dflt.data as Record<string, Record<string, unknown>>).setAiModelPrice;
     expect(dfltRow.tier).toBe(1);
     expect(dfltRow.markupBasisPoints).toBeNull();
     const t2 = await gql(SET_PRICE, platformCtx(), {
       input: { ...priceInput, tier: 2, markupBasisPoints: 5000 },
     });
     expect(t2.errors).toBeUndefined();
-    const t2Row = (t2.data as Record<string, Record<string, unknown>>).setModelPrice;
+    const t2Row = (t2.data as Record<string, Record<string, unknown>>).setAiModelPrice;
     expect(t2Row.tier).toBe(2);
     expect(t2Row.markupBasisPoints).toBe(5000);
   });
@@ -124,12 +124,12 @@ describe('setModelPrice', () => {
   });
 });
 
-describe('modelPrices read', () => {
+describe('aiModelPrices read', () => {
   it('any authenticated principal can read; anonymous cannot', async () => {
     await gql(SET_PRICE, platformCtx(), { input: priceInput });
     const asStranger = await gql(PRICES, strangerCtx());
     expect(asStranger.errors).toBeUndefined();
-    expect((asStranger.data as { modelPrices: { total: number } }).modelPrices.total).toBe(1);
+    expect((asStranger.data as { aiModelPrices: { total: number } }).aiModelPrices.total).toBe(1);
     const asAnon = await gql(PRICES, anonCtx());
     expect(asAnon.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
   });

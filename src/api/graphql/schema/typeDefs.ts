@@ -573,7 +573,7 @@ export const typeDefs = `#graphql
 
   # 046-usage-metering: effective-dated provider rate row. Prices are
   # micro-cents (1e-8 USD) per MILLION tokens, as base-10 integer strings.
-  type ModelPrice {
+  type AiModelPrice {
     id: ID!
     provider: String!
     model: String!
@@ -589,8 +589,8 @@ export const typeDefs = `#graphql
     createdBy: String
   }
 
-  type ModelPriceList {
-    items: [ModelPrice!]!
+  type AiModelPriceList {
+    items: [AiModelPrice!]!
     total: Int!
   }
 
@@ -619,7 +619,7 @@ export const typeDefs = `#graphql
     balanceMicroCents: String!
   }
 
-  input SetModelPriceInput {
+  input SetAiModelPriceInput {
     provider: String!
     model: String!
     # Pricing tier 1-3; defaults to 1.
@@ -3131,9 +3131,9 @@ export const typeDefs = `#graphql
     "Explain the standing policy chain (org / user / app) for one action - which layer denies it (#510, cor:acl:040:02). Org-ADMIN on the app's org."
     effectiveActionPolicy(appRef: String!, action: String!, userRef: String): EffectiveActionPolicy!
     "One provider rate row by id (spec 046). Authenticated read - rates are not a secret."
-    modelPrice(ref: ID!): ModelPrice
+    aiModelPrice(ref: ID!): AiModelPrice
     "Provider rate rows, newest effective first, optional provider/model filter (spec 046). Authenticated read."
-    modelPrices(provider: String, model: String, tier: Int, limit: Int, offset: Int): ModelPriceList!
+    aiModelPrices(provider: String, model: String, tier: Int, limit: Int, offset: Int): AiModelPriceList!
     "One org's append-only credit-ledger page, newest first (spec 046). Org-ADMIN."
     creditLedgerEntries(orgRef: String!, limit: Int, offset: Int): CreditLedgerEntryList!
     "One org's credit balance - SUM over the append-only ledger (spec 046). Org-ADMIN."
@@ -3344,7 +3344,7 @@ export const typeDefs = `#graphql
     "Set the stored (enforced) quota limit for a scope x action (#510) - the operator dial that previously required psql. Org-ADMIN."
     setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
     "Append an effective-dated provider rate row (spec 046). PLATFORM ADMIN - org admins must never set the prices they are billed at."
-    setModelPrice(input: SetModelPriceInput!): ModelPrice!
+    setAiModelPrice(input: SetAiModelPriceInput!): AiModelPrice!
     "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN ONLY (self-grant risk); processor top-ups land here later."
     grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!
     "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."

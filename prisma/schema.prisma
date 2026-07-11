@@ -1208,7 +1208,7 @@ model UsageEvent {
   /// spend is platform-paid and thus debitable; BYOK is observability-only.
   keyOwnerType   String? @map("key_owner_type")
   /// Provider cost snapshot in micro-cents (1e-8 USD), computed from the
-  /// ModelPrice row effective at event time. NULL = no price known (or the
+  /// AiModelPrice row effective at event time. NULL = no price known (or the
   /// event carries no tokens). Never recomputed — prices change (FR-003).
   costMicroCents BigInt? @map("cost_micro_cents")
   createdAt  DateTime  @default(now()) @map("created_at")
@@ -2975,22 +2975,24 @@ model ActionTicket {
 /// Provider price row for one (provider, model, tier) triple — the rate
 /// source for UsageEvent.costMicroCents AND the debit markup (spec 046
 /// FR-002/FR-003). Effective-dated: lookup takes the latest
-/// `effectiveAt <= eventTime`; price changes append a new row, never
-/// mutate an old one (historical costs stay auditable). Prices are in
-/// micro-cents (1e-8 USD) per MILLION tokens — e.g. $3/MTok input =
-/// 30_000_000. Operator-managed via `setModelPrice` (platform admin); an
-/// absent triple means "no cost computed", never a blocked call.
+/// `effectiveAt <= eventTime` with `deletedAt IS NULL`; price changes
+/// append a new row, never mutate an old one (historical costs stay
+/// auditable — stamped costs are snapshots, so soft-deleting a mispriced
+/// row is safe and is the "retire" lever). Prices are in micro-cents
+/// (1e-8 USD) per MILLION tokens — e.g. $3/MTok input = 30_000_000.
+/// Operator-managed via `setAiModelPrice` (platform admin); an absent
+/// triple means "no cost computed", never a blocked call.
 /// String columns, no enums — validation lives in src/lib/metering.
-model ModelPrice {
+model AiModelPrice {
   id                       String    @id
   provider                 String
   model                    String
   /// Pricing tier 1-3 (Holger, 2026-07-11): reserved room for future
   /// product tiers carrying different markups per (provider, model)
-  /// WITHOUT another ModelPrice migration. Everything defaults to and
+  /// WITHOUT another AiModelPrice migration. Everything defaults to and
   /// resolves tier 1 until tiers become a real product concept; the
   /// semantics of 2/3 are deliberately undefined today. Validated 1-3 in
-  /// code (setModelPrice / getModelPrice), no CHECK by convention.
+  /// code (setAiModelPrice / getAiModelPrice), no CHECK by convention.
   tier                     Int       @default(1)
   /// Micro-cents per 1M input tokens.
   inputMicroCentsPerMTok   BigInt    @map("input_micro_cents_per_mtok")
@@ -3005,10 +3007,14 @@ model ModelPrice {
   effectiveAt              DateTime  @map("effective_at")
   createdAt                DateTime  @default(now()) @map("created_at")
   createdBy                String?   @map("created_by")
+  updatedAt                DateTime? @updatedAt @map("updated_at")
+  updatedBy                String?   @map("updated_by")
+  deletedAt                DateTime? @map("deleted_at")
+  deletedBy                String?   @map("deleted_by")
 
   @@unique([provider, model, tier, effectiveAt])
   @@index([provider, model, tier])
-  @@map("model_prices")
+  @@map("ai_model_prices")
 }
 
 /// Append-only monetary ledger for an organization's AI credits (spec 046
@@ -3019,6 +3025,9 @@ model ModelPrice {
 /// restrict prepaid expiry — see the spec's legal notes); FIFO expiry
 /// enforcement is a later phase. Automatic usage debits are gated by
 /// BILLING_DEBIT_ENABLED and apply only to platform-key spend (FR-004/006).
+/// Audit columns follow the schema-wide convention; the SANCTIONED
+/// correction is an `adjustment` row — soft-delete is break-glass ops only
+/// (balance and reads exclude soft-deleted rows, codebase-wide semantic).
 model CreditLedgerEntry {
   id              String    @id
   organizationId  String    @map("organization_id")
@@ -3035,6 +3044,10 @@ model CreditLedgerEntry {
   note            String?
   createdAt       DateTime  @default(now()) @map("created_at")
   createdBy       String?   @map("created_by")
+  updatedAt       DateTime? @updatedAt @map("updated_at")
+  updatedBy       String?   @map("updated_by")
+  deletedAt       DateTime? @map("deleted_at")
+  deletedBy       String?   @map("deleted_by")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 

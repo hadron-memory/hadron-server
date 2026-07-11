@@ -6,7 +6,7 @@
  * classification (FR-004), and the gated automatic debit (FR-006).
  *
  * Money units: micro-cents (1e-8 USD) throughout, as bigint. Prices are
- * micro-cents per MILLION tokens (ModelPrice), so a $3/MTok rate is
+ * micro-cents per MILLION tokens (AiModelPrice), so a $3/MTok rate is
  * 30_000_000n and a 1k-token call at that rate costs 30_000n (= $0.0003).
  *
  * Posture: metering must never fail the work it meters — tokens are
@@ -15,7 +15,7 @@
  * their callers (GraphQL mutations) want real errors.
  */
 
-import type { ModelPrice, PrismaClient, UsageEvent } from '../../generated/prisma/index.js';
+import type { AiModelPrice, PrismaClient, UsageEvent } from '../../generated/prisma/index.js';
 import type { AiConfigOwnerType } from '../aiConfig.js';
 import { generateId } from '../id.js';
 
@@ -42,14 +42,14 @@ function markupPercent(): number {
 // ── Price lookup (FR-002) ────────────────────────────────────────────────
 
 interface CachedPrice {
-  row: ModelPrice | null;
+  row: AiModelPrice | null;
   fetchedAt: number;
 }
 
 const PRICE_CACHE_TTL_MS = 60_000;
 const priceCache = new Map<string, CachedPrice>();
 
-/** Test hook: drop the price cache (e.g. after seeding ModelPrice rows). */
+/** Test hook: drop the price cache (e.g. after seeding AiModelPrice rows). */
 export function clearPriceCache(): void {
   priceCache.clear();
 }
@@ -63,7 +63,7 @@ export const PRICE_TIER_MIN = 1;
 export const PRICE_TIER_MAX = 3;
 export const PRICE_TIER_DEFAULT = 1;
 
-export interface GetModelPriceOpts {
+export interface GetAiModelPriceOpts {
   /** Event instant; omit for "now" (the cached hot path). */
   at?: Date;
   /** Pricing tier 1-3; defaults to tier 1. */
@@ -71,7 +71,7 @@ export interface GetModelPriceOpts {
 }
 
 /**
- * The ModelPrice row effective for (provider, model, tier) at `at` — the
+ * The AiModelPrice row effective for (provider, model, tier) at `at` — the
  * latest row with `effectiveAt <= at`, or null when the triple is unpriced
  * (which means "no cost computed", never a blocked call — FR-002). Tier
  * defaults to 1; there is deliberately NO cross-tier fallback — an unpriced
@@ -81,12 +81,12 @@ export interface GetModelPriceOpts {
  * historical `at` bypass the cache, since the cached row is the CURRENT
  * price and may postdate `at`.
  */
-export async function getModelPrice(
+export async function getAiModelPrice(
   db: PrismaClient,
   provider: string,
   model: string,
-  opts: GetModelPriceOpts = {},
-): Promise<ModelPrice | null> {
+  opts: GetAiModelPriceOpts = {},
+): Promise<AiModelPrice | null> {
   const { at } = opts;
   const tier = opts.tier ?? PRICE_TIER_DEFAULT;
   const now = Date.now();
@@ -96,8 +96,8 @@ export async function getModelPrice(
     const hit = priceCache.get(key);
     if (hit && now - hit.fetchedAt < PRICE_CACHE_TTL_MS) return hit.row;
   }
-  const row = await db.modelPrice.findFirst({
-    where: { provider, model, tier, effectiveAt: { lte: at ?? new Date(now) } },
+  const row = await db.aiModelPrice.findFirst({
+    where: { provider, model, tier, deletedAt: null, effectiveAt: { lte: at ?? new Date(now) } },
     orderBy: { effectiveAt: 'desc' },
   });
   if (useCache) priceCache.set(key, { row, fetchedAt: now });
@@ -109,7 +109,7 @@ export async function getModelPrice(
  * to the next micro-cent (never bill-under on our own ledger).
  */
 export function computeCostMicroCents(
-  price: Pick<ModelPrice, 'inputMicroCentsPerMTok' | 'outputMicroCentsPerMTok'>,
+  price: Pick<AiModelPrice, 'inputMicroCentsPerMTok' | 'outputMicroCentsPerMTok'>,
   tokensIn: number,
   tokensOut: number,
 ): bigint {
@@ -134,11 +134,11 @@ export function applyMarkup(costMicroCents: bigint, percent: number): bigint {
 
 /**
  * Markup for a debit, in basis points: the effective-dated per-tier value on
- * the ModelPrice row wins; a NULL column falls back to the global
+ * the AiModelPrice row wins; a NULL column falls back to the global
  * CREDIT_MARKUP_PERCENT env (the row column supersedes the env, which
  * remains only as the fleet-wide default).
  */
-export function markupBpFor(price: Pick<ModelPrice, 'markupBasisPoints'>): number {
+export function markupBpFor(price: Pick<AiModelPrice, 'markupBasisPoints'>): number {
   return price.markupBasisPoints ?? Math.round(markupPercent() * 100);
 }
 
@@ -169,7 +169,7 @@ export interface LlmUsageParams {
 
 /**
  * Record one token-bearing usage event: cost snapshot from the effective
- * ModelPrice (null when unpriced), then the gated automatic debit —
+ * AiModelPrice (null when unpriced), then the gated automatic debit —
  * only when BILLING_DEBIT_ENABLED, only for platform-key spend
  * (keyOwnerType === 'HADRON_SERVER', FR-004), only with a billable org.
  *
@@ -181,7 +181,7 @@ export async function recordLlmUsage(
   params: LlmUsageParams,
 ): Promise<UsageEvent | null> {
   try {
-    const price = await getModelPrice(db, params.provider, params.model, {
+    const price = await getAiModelPrice(db, params.provider, params.model, {
       tier: params.tier,
     });
     const cost = price
@@ -302,7 +302,10 @@ export async function debitCredits(db: PrismaClient, params: DebitCreditsParams)
 /** Org balance = SUM over the append-only ledger; 0n for an empty ledger. */
 export async function creditBalance(db: PrismaClient, organizationId: string): Promise<bigint> {
   const agg = await db.creditLedgerEntry.aggregate({
-    where: { organizationId },
+    // deletedAt null: soft-delete is break-glass ops; the balance follows
+    // the codebase-wide soft-deleted-is-gone semantic. Sanctioned
+    // corrections are `adjustment` rows, which DO count.
+    where: { organizationId, deletedAt: null },
     _sum: { amountMicroCents: true },
   });
   return agg._sum.amountMicroCents ?? 0n;

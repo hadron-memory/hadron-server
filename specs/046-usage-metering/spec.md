@@ -25,7 +25,7 @@ cost column), a durable monetary ledger, and metering on the embedding path.
   `userId` (nullable — pure-App runs have none) and the `organizationId`
   (the billable unit). MCP usage events record `userId` when the
   authenticated principal is a user.
-- **FR-002 Price source.** A `ModelPrice` table keyed `(provider, model,
+- **FR-002 Price source.** A `AiModelPrice` table keyed `(provider, model,
   tier, effectiveAt)` holds input/output prices in micro-cents per million
   tokens plus an optional per-row `markupBasisPoints`. Tier is 1-3 (Holger,
   2026-07-11) — schema headroom for future product tiers with different
@@ -56,8 +56,8 @@ cost column), a durable monetary ledger, and metering on the embedding path.
   exactness is not required — embedding spend is infra-shaped, the point is
   observability parity.
 - **FR-008 Read/admin surface.** Per `cor:api:120` / `cor:api:140`:
-  `modelPrice(ref)` + `modelPrices(...)` (authenticated read),
-  `setModelPrice` (platform admin), `grantCredits` (platform admin ONLY —
+  `aiModelPrice(ref)` + `aiModelPrices(...)` (authenticated read),
+  `setAiModelPrice` (platform admin), `grantCredits` (platform admin ONLY —
   org admins must not self-grant), `creditLedgerEntries(orgRef, ...)` +
   `creditBalance(orgRef)` (org ADMIN via `requireOrgRole`).
 

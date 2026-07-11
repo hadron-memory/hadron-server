@@ -1,4 +1,4 @@
-// Metering resolvers — ModelPrice rates + the org credit ledger (spec 046,
+// Metering resolvers — AiModelPrice rates + the org credit ledger (spec 046,
 // AI-credit billing Phase 0). Rates and grants are PLATFORM-ADMIN writes:
 // an org admin must never set the prices they are billed at, and grantCredits
 // is minting money — the org-ADMIN bar of setQuotaLimit does NOT carry over
@@ -22,7 +22,7 @@ import {
   PRICE_TIER_MAX,
   PRICE_TIER_MIN,
 } from '../../../lib/metering/index.js';
-import type { CreditLedgerEntry, ModelPrice } from '../../../generated/prisma/index.js';
+import type { CreditLedgerEntry, AiModelPrice } from '../../../generated/prisma/index.js';
 
 const badInput = (message: string) =>
   new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -42,7 +42,7 @@ function parseMicroCents(raw: string, field: string): bigint {
 }
 
 /** GraphQL projection — bigint stringified, dates ISO. */
-function projectPrice(p: ModelPrice) {
+function projectPrice(p: AiModelPrice) {
   return {
     id: p.id,
     provider: p.provider,
@@ -75,9 +75,9 @@ function projectLedgerEntry(e: CreditLedgerEntry) {
 
 export const meteringQueries = {
   /** One price row by id. Authenticated read — rates are not a secret. */
-  modelPrice: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+  aiModelPrice: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
     if (!ctx.userId && !ctx.appId) throw forbidden();
-    const row = await ctx.db.modelPrice.findUnique({ where: { id: ref } });
+    const row = await ctx.db.aiModelPrice.findFirst({ where: { id: ref, deletedAt: null } });
     return row ? projectPrice(row) : null;
   },
 
@@ -85,7 +85,7 @@ export const meteringQueries = {
    * Uniform list (cor:api:120): all price rows, newest effective first,
    * optionally filtered by provider/model/tier. Authenticated read.
    */
-  modelPrices: async (
+  aiModelPrices: async (
     _: unknown,
     {
       provider,
@@ -104,18 +104,19 @@ export const meteringQueries = {
   ) => {
     if (!ctx.userId && !ctx.appId) throw forbidden();
     const where = {
+      deletedAt: null,
       ...(provider ? { provider } : {}),
       ...(model ? { model } : {}),
       ...(tier != null ? { tier } : {}),
     };
     const [items, total] = await Promise.all([
-      ctx.db.modelPrice.findMany({
+      ctx.db.aiModelPrice.findMany({
         where,
         orderBy: [{ provider: 'asc' }, { model: 'asc' }, { tier: 'asc' }, { effectiveAt: 'desc' }],
         take: clampListTake(limit),
         skip: Math.max(0, offset ?? 0),
       }),
-      ctx.db.modelPrice.count({ where }),
+      ctx.db.aiModelPrice.count({ where }),
     ]);
     return { items: items.map(projectPrice), total };
   },
@@ -128,7 +129,7 @@ export const meteringQueries = {
   ) => {
     const { id: orgId } = await resolveOrgRef(ctx.db, orgRef);
     await requireOrgRole(ctx, orgId, 'ADMIN');
-    const where = { organizationId: orgId };
+    const where = { organizationId: orgId, deletedAt: null };
     const [items, total] = await Promise.all([
       ctx.db.creditLedgerEntry.findMany({
         where,
@@ -159,7 +160,7 @@ export const meteringMutations = {
    * violation surfaced as BAD_USER_INPUT. `markupBasisPoints` (2500 = 25%)
    * is the per-tier debit markup; NULL falls back to CREDIT_MARKUP_PERCENT.
    */
-  setModelPrice: async (
+  setAiModelPrice: async (
     _: unknown,
     {
       input,
@@ -190,9 +191,9 @@ export const meteringMutations = {
     }
     const effectiveAt = input.effectiveAt ? new Date(input.effectiveAt) : new Date();
     if (Number.isNaN(effectiveAt.getTime())) throw badInput('effectiveAt is not a valid date.');
-    let row: ModelPrice;
+    let row: AiModelPrice;
     try {
-      row = await ctx.db.modelPrice.create({
+      row = await ctx.db.aiModelPrice.create({
         data: {
           id: generateId(),
           provider,

@@ -17,7 +17,7 @@ import {
   computeCostMicroCents,
   creditBalance,
   debitCredits,
-  getModelPrice,
+  getAiModelPrice,
   grantCredits,
   InvalidLedgerAmountError,
   recordLlmUsage,
@@ -37,7 +37,7 @@ async function mkPrice(
   outRate = OUT_RATE,
   extra: { tier?: number; markupBasisPoints?: number | null } = {},
 ) {
-  return db.modelPrice.create({
+  return db.aiModelPrice.create({
     data: {
       id: generateId(),
       provider,
@@ -105,21 +105,21 @@ describe('applyMarkup', () => {
   });
 });
 
-describe('getModelPrice', () => {
+describe('getAiModelPrice', () => {
   it('returns null for an unpriced (provider, model) pair', async () => {
-    expect(await getModelPrice(db, 'anthropic', 'claude-nope')).toBeNull();
+    expect(await getAiModelPrice(db, 'anthropic', 'claude-nope')).toBeNull();
   });
 
   it('selects the latest row effective at or before the given instant', async () => {
     const old = await mkPrice('anthropic', 'claude-x', new Date('2026-01-01'), 10n, 20n);
     const current = await mkPrice('anthropic', 'claude-x', new Date('2026-06-01'), 30n, 40n);
     // Historical `at` (cache-bypassing) → the old row.
-    const atFeb = await getModelPrice(db, 'anthropic', 'claude-x', { at: new Date('2026-02-01') });
+    const atFeb = await getAiModelPrice(db, 'anthropic', 'claude-x', { at: new Date('2026-02-01') });
     expect(atFeb?.id).toBe(old.id);
     // `at` before any row → null.
-    expect(await getModelPrice(db, 'anthropic', 'claude-x', { at: new Date('2025-01-01') })).toBeNull();
+    expect(await getAiModelPrice(db, 'anthropic', 'claude-x', { at: new Date('2025-01-01') })).toBeNull();
     // Now → the current row.
-    const nowRow = await getModelPrice(db, 'anthropic', 'claude-x');
+    const nowRow = await getAiModelPrice(db, 'anthropic', 'claude-x');
     expect(nowRow?.id).toBe(current.id);
   });
 
@@ -129,23 +129,23 @@ describe('getModelPrice', () => {
       tier: 2,
     });
     // Default lookup resolves tier 1.
-    expect((await getModelPrice(db, 'anthropic', 'claude-t'))?.id).toBe(t1.id);
+    expect((await getAiModelPrice(db, 'anthropic', 'claude-t'))?.id).toBe(t1.id);
     // Explicit tier 2 gets the tier-2 row.
-    expect((await getModelPrice(db, 'anthropic', 'claude-t', { tier: 2 }))?.id).toBe(t2.id);
+    expect((await getAiModelPrice(db, 'anthropic', 'claude-t', { tier: 2 }))?.id).toBe(t2.id);
     // An unpriced tier is unpriced — never another tier's rate.
-    expect(await getModelPrice(db, 'anthropic', 'claude-t', { tier: 3 })).toBeNull();
+    expect(await getAiModelPrice(db, 'anthropic', 'claude-t', { tier: 3 })).toBeNull();
   });
 
   it('caches the now-lookup until clearPriceCache', async () => {
     await mkPrice('anthropic', 'claude-c', new Date('2026-01-01'), 10n, 10n);
-    const first = await getModelPrice(db, 'anthropic', 'claude-c');
+    const first = await getAiModelPrice(db, 'anthropic', 'claude-c');
     // A newer row appears, but the cached row keeps serving...
     await mkPrice('anthropic', 'claude-c', new Date('2026-02-01'), 99n, 99n);
-    const cached = await getModelPrice(db, 'anthropic', 'claude-c');
+    const cached = await getAiModelPrice(db, 'anthropic', 'claude-c');
     expect(cached?.id).toBe(first?.id);
-    // ...until the cache is dropped (what setModelPrice does).
+    // ...until the cache is dropped (what setAiModelPrice does).
     clearPriceCache();
-    const fresh = await getModelPrice(db, 'anthropic', 'claude-c');
+    const fresh = await getAiModelPrice(db, 'anthropic', 'claude-c');
     expect(fresh?.inputMicroCentsPerMTok).toBe(99n);
   });
 });
