@@ -577,8 +577,13 @@ export const typeDefs = `#graphql
     id: ID!
     provider: String!
     model: String!
+    # Pricing tier 1-3; tier 1 is the default everything resolves today.
+    tier: Int!
     inputMicroCentsPerMTok: String!
     outputMicroCentsPerMTok: String!
+    # Per-tier debit markup in basis points (2500 = 25%). Null falls back
+    # to the CREDIT_MARKUP_PERCENT env default.
+    markupBasisPoints: Int
     effectiveAt: String!
     createdAt: String!
     createdBy: String
@@ -617,8 +622,13 @@ export const typeDefs = `#graphql
   input SetModelPriceInput {
     provider: String!
     model: String!
+    # Pricing tier 1-3; defaults to 1.
+    tier: Int
     inputMicroCentsPerMTok: String!
     outputMicroCentsPerMTok: String!
+    # Per-tier debit markup in basis points (2500 = 25%); omit to fall
+    # back to the CREDIT_MARKUP_PERCENT env default.
+    markupBasisPoints: Int
     # Defaults to now. Appends a new effective-dated row - never mutates.
     effectiveAt: String
   }
@@ -3123,7 +3133,7 @@ export const typeDefs = `#graphql
     "One provider rate row by id (spec 046). Authenticated read - rates are not a secret."
     modelPrice(ref: ID!): ModelPrice
     "Provider rate rows, newest effective first, optional provider/model filter (spec 046). Authenticated read."
-    modelPrices(provider: String, model: String, limit: Int, offset: Int): ModelPriceList!
+    modelPrices(provider: String, model: String, tier: Int, limit: Int, offset: Int): ModelPriceList!
     "One org's append-only credit-ledger page, newest first (spec 046). Org-ADMIN."
     creditLedgerEntries(orgRef: String!, limit: Int, offset: Int): CreditLedgerEntryList!
     "One org's credit balance - SUM over the append-only ledger (spec 046). Org-ADMIN."

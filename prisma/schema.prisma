@@ -2972,29 +2972,42 @@ model ActionTicket {
   @@map("action_tickets")
 }
 
-/// Provider price row for one (provider, model) pair — the rate source for
-/// UsageEvent.costMicroCents (spec 046 FR-002/FR-003). Effective-dated:
-/// lookup takes the latest `effectiveAt <= eventTime`; price changes append
-/// a new row, never mutate an old one (historical costs stay auditable).
-/// Prices are in micro-cents (1e-8 USD) per MILLION tokens — e.g. $3/MTok
-/// input = 30_000_000. Operator-managed via `setModelPrice` (platform
-/// admin); an absent pair means "no cost computed", never a blocked call.
+/// Provider price row for one (provider, model, tier) triple — the rate
+/// source for UsageEvent.costMicroCents AND the debit markup (spec 046
+/// FR-002/FR-003). Effective-dated: lookup takes the latest
+/// `effectiveAt <= eventTime`; price changes append a new row, never
+/// mutate an old one (historical costs stay auditable). Prices are in
+/// micro-cents (1e-8 USD) per MILLION tokens — e.g. $3/MTok input =
+/// 30_000_000. Operator-managed via `setModelPrice` (platform admin); an
+/// absent triple means "no cost computed", never a blocked call.
 /// String columns, no enums — validation lives in src/lib/metering.
 model ModelPrice {
   id                       String    @id
   provider                 String
   model                    String
+  /// Pricing tier 1-3 (Holger, 2026-07-11): reserved room for future
+  /// product tiers carrying different markups per (provider, model)
+  /// WITHOUT another ModelPrice migration. Everything defaults to and
+  /// resolves tier 1 until tiers become a real product concept; the
+  /// semantics of 2/3 are deliberately undefined today. Validated 1-3 in
+  /// code (setModelPrice / getModelPrice), no CHECK by convention.
+  tier                     Int       @default(1)
   /// Micro-cents per 1M input tokens.
   inputMicroCentsPerMTok   BigInt    @map("input_micro_cents_per_mtok")
   /// Micro-cents per 1M output tokens.
   outputMicroCentsPerMTok  BigInt    @map("output_micro_cents_per_mtok")
+  /// Markup applied when debiting platform-key spend at THIS tier, in
+  /// basis points (2500 = 25%) — integer-exact, no float money. NULL
+  /// falls back to the CREDIT_MARKUP_PERCENT env (which this column
+  /// supersedes). Effective-dated with the rest of the row.
+  markupBasisPoints        Int?      @map("markup_basis_points")
   /// Row applies to events at/after this instant (until a later row).
   effectiveAt              DateTime  @map("effective_at")
   createdAt                DateTime  @default(now()) @map("created_at")
   createdBy                String?   @map("created_by")
 
-  @@unique([provider, model, effectiveAt])
-  @@index([provider, model])
+  @@unique([provider, model, tier, effectiveAt])
+  @@index([provider, model, tier])
   @@map("model_prices")
 }
 

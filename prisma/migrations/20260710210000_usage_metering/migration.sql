@@ -27,8 +27,10 @@ CREATE TABLE "model_prices" (
     "id" TEXT NOT NULL,
     "provider" TEXT NOT NULL,
     "model" TEXT NOT NULL,
+    "tier" INTEGER NOT NULL DEFAULT 1,
     "input_micro_cents_per_mtok" BIGINT NOT NULL,
     "output_micro_cents_per_mtok" BIGINT NOT NULL,
+    "markup_basis_points" INTEGER,
     "effective_at" TIMESTAMP(3) NOT NULL,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "created_by" TEXT,
@@ -37,10 +39,10 @@ CREATE TABLE "model_prices" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "model_prices_provider_model_effective_at_key" ON "model_prices"("provider", "model", "effective_at");
+CREATE UNIQUE INDEX "model_prices_provider_model_tier_effective_at_key" ON "model_prices"("provider", "model", "tier", "effective_at");
 
 -- CreateIndex
-CREATE INDEX "model_prices_provider_model_idx" ON "model_prices"("provider", "model");
+CREATE INDEX "model_prices_provider_model_tier_idx" ON "model_prices"("provider", "model", "tier");
 
 -- CreateTable
 CREATE TABLE "credit_ledger_entries" (

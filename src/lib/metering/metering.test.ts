@@ -35,14 +35,17 @@ async function mkPrice(
   effectiveAt: Date,
   inRate = IN_RATE,
   outRate = OUT_RATE,
+  extra: { tier?: number; markupBasisPoints?: number | null } = {},
 ) {
   return db.modelPrice.create({
     data: {
       id: generateId(),
       provider,
       model,
+      tier: extra.tier ?? 1,
       inputMicroCentsPerMTok: inRate,
       outputMicroCentsPerMTok: outRate,
+      markupBasisPoints: extra.markupBasisPoints ?? null,
       effectiveAt,
     },
   });
@@ -111,13 +114,26 @@ describe('getModelPrice', () => {
     const old = await mkPrice('anthropic', 'claude-x', new Date('2026-01-01'), 10n, 20n);
     const current = await mkPrice('anthropic', 'claude-x', new Date('2026-06-01'), 30n, 40n);
     // Historical `at` (cache-bypassing) → the old row.
-    const atFeb = await getModelPrice(db, 'anthropic', 'claude-x', new Date('2026-02-01'));
+    const atFeb = await getModelPrice(db, 'anthropic', 'claude-x', { at: new Date('2026-02-01') });
     expect(atFeb?.id).toBe(old.id);
     // `at` before any row → null.
-    expect(await getModelPrice(db, 'anthropic', 'claude-x', new Date('2025-01-01'))).toBeNull();
+    expect(await getModelPrice(db, 'anthropic', 'claude-x', { at: new Date('2025-01-01') })).toBeNull();
     // Now → the current row.
     const nowRow = await getModelPrice(db, 'anthropic', 'claude-x');
     expect(nowRow?.id).toBe(current.id);
+  });
+
+  it('isolates tiers: no cross-tier fallback, default is tier 1', async () => {
+    const t1 = await mkPrice('anthropic', 'claude-t', new Date('2026-01-01'), 10n, 10n);
+    const t2 = await mkPrice('anthropic', 'claude-t', new Date('2026-01-01'), 50n, 50n, {
+      tier: 2,
+    });
+    // Default lookup resolves tier 1.
+    expect((await getModelPrice(db, 'anthropic', 'claude-t'))?.id).toBe(t1.id);
+    // Explicit tier 2 gets the tier-2 row.
+    expect((await getModelPrice(db, 'anthropic', 'claude-t', { tier: 2 }))?.id).toBe(t2.id);
+    // An unpriced tier is unpriced — never another tier's rate.
+    expect(await getModelPrice(db, 'anthropic', 'claude-t', { tier: 3 })).toBeNull();
   });
 
   it('caches the now-lookup until clearPriceCache', async () => {
@@ -182,6 +198,18 @@ describe('recordLlmUsage', () => {
     expect(entries[0].amountMicroCents).toBe(-131_250n);
     expect(entries[0].sourceType).toBe('usage-event');
     expect(await creditBalance(db, orgId)).toBe(-131_250n);
+  });
+
+  it('row markupBasisPoints overrides the env markup (per-tier pricing)', async () => {
+    vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
+    vi.stubEnv('CREDIT_MARKUP_PERCENT', '25'); // must LOSE to the row value
+    await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'), IN_RATE, OUT_RATE, {
+      markupBasisPoints: 5000, // 50%
+    });
+    await recordLlmUsage(db, { ...base, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    const [entry] = await db.creditLedgerEntry.findMany({ where: { organizationId: orgId } });
+    // 105_000 × 1.5 = 157_500, stored negated — NOT the env's 131_250.
+    expect(entry.amountMicroCents).toBe(-157_500n);
   });
 
   it('never debits BYOK spend (FR-004), even when enabled', async () => {

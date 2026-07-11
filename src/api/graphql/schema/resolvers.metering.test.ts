@@ -36,7 +36,7 @@ const strangerCtx = (): Partial<Context> => ({ userId: stranger, roles: ['READER
 const anonCtx = (): Partial<Context> => ({ roles: [] });
 
 const SET_PRICE = `mutation($input: SetModelPriceInput!) { setModelPrice(input: $input) {
-  id provider model inputMicroCentsPerMTok outputMicroCentsPerMTok effectiveAt } }`;
+  id provider model tier markupBasisPoints inputMicroCentsPerMTok outputMicroCentsPerMTok effectiveAt } }`;
 const GRANT = `mutation($input: GrantCreditsInput!) { grantCredits(input: $input) {
   id kind amountMicroCents organizationId } }`;
 const BALANCE = `query($orgRef: String!) { creditBalance(orgRef: $orgRef) {
@@ -97,6 +97,30 @@ describe('setModelPrice', () => {
       input: { ...priceInput, inputMicroCentsPerMTok: '3.5e7' },
     });
     expect(res.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+  });
+
+  it('defaults tier to 1 and round-trips tier + markupBasisPoints', async () => {
+    const dflt = await gql(SET_PRICE, platformCtx(), { input: priceInput });
+    expect(dflt.errors).toBeUndefined();
+    const dfltRow = (dflt.data as Record<string, Record<string, unknown>>).setModelPrice;
+    expect(dfltRow.tier).toBe(1);
+    expect(dfltRow.markupBasisPoints).toBeNull();
+    const t2 = await gql(SET_PRICE, platformCtx(), {
+      input: { ...priceInput, tier: 2, markupBasisPoints: 5000 },
+    });
+    expect(t2.errors).toBeUndefined();
+    const t2Row = (t2.data as Record<string, Record<string, unknown>>).setModelPrice;
+    expect(t2Row.tier).toBe(2);
+    expect(t2Row.markupBasisPoints).toBe(5000);
+  });
+
+  it('rejects an out-of-range tier and a negative markup', async () => {
+    const badTier = await gql(SET_PRICE, platformCtx(), { input: { ...priceInput, tier: 4 } });
+    expect(badTier.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+    const badMarkup = await gql(SET_PRICE, platformCtx(), {
+      input: { ...priceInput, markupBasisPoints: -100 },
+    });
+    expect(badMarkup.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
   });
 });
 

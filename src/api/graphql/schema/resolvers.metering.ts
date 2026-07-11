@@ -18,6 +18,9 @@ import {
   creditBalance,
   grantCredits,
   InvalidLedgerAmountError,
+  PRICE_TIER_DEFAULT,
+  PRICE_TIER_MAX,
+  PRICE_TIER_MIN,
 } from '../../../lib/metering/index.js';
 import type { CreditLedgerEntry, ModelPrice } from '../../../generated/prisma/index.js';
 
@@ -44,8 +47,10 @@ function projectPrice(p: ModelPrice) {
     id: p.id,
     provider: p.provider,
     model: p.model,
+    tier: p.tier,
     inputMicroCentsPerMTok: p.inputMicroCentsPerMTok.toString(),
     outputMicroCentsPerMTok: p.outputMicroCentsPerMTok.toString(),
+    markupBasisPoints: p.markupBasisPoints,
     effectiveAt: toISO(p.effectiveAt),
     createdAt: toISO(p.createdAt),
     createdBy: p.createdBy,
@@ -78,27 +83,35 @@ export const meteringQueries = {
 
   /**
    * Uniform list (cor:api:120): all price rows, newest effective first,
-   * optionally filtered by provider/model. Authenticated read.
+   * optionally filtered by provider/model/tier. Authenticated read.
    */
   modelPrices: async (
     _: unknown,
     {
       provider,
       model,
+      tier,
       limit,
       offset,
-    }: { provider?: string | null; model?: string | null; limit?: number | null; offset?: number | null },
+    }: {
+      provider?: string | null;
+      model?: string | null;
+      tier?: number | null;
+      limit?: number | null;
+      offset?: number | null;
+    },
     ctx: Context,
   ) => {
     if (!ctx.userId && !ctx.appId) throw forbidden();
     const where = {
       ...(provider ? { provider } : {}),
       ...(model ? { model } : {}),
+      ...(tier != null ? { tier } : {}),
     };
     const [items, total] = await Promise.all([
       ctx.db.modelPrice.findMany({
         where,
-        orderBy: [{ provider: 'asc' }, { model: 'asc' }, { effectiveAt: 'desc' }],
+        orderBy: [{ provider: 'asc' }, { model: 'asc' }, { tier: 'asc' }, { effectiveAt: 'desc' }],
         take: clampListTake(limit),
         skip: Math.max(0, offset ?? 0),
       }),
@@ -139,11 +152,12 @@ export const meteringQueries = {
 
 export const meteringMutations = {
   /**
-   * Append a price row for (provider, model) effective at `effectiveAt`
-   * (default now). Platform admin only. Appends — never mutates an existing
-   * row (FR-002/003: historical costs stay auditable); re-posting the same
-   * (provider, model, effectiveAt) is a unique violation surfaced as
-   * BAD_USER_INPUT.
+   * Append a price row for (provider, model, tier) effective at `effectiveAt`
+   * (default now; tier default 1). Platform admin only. Appends — never
+   * mutates an existing row (FR-002/003: historical costs stay auditable);
+   * re-posting the same (provider, model, tier, effectiveAt) is a unique
+   * violation surfaced as BAD_USER_INPUT. `markupBasisPoints` (2500 = 25%)
+   * is the per-tier debit markup; NULL falls back to CREDIT_MARKUP_PERCENT.
    */
   setModelPrice: async (
     _: unknown,
@@ -153,8 +167,10 @@ export const meteringMutations = {
       input: {
         provider: string;
         model: string;
+        tier?: number | null;
         inputMicroCentsPerMTok: string;
         outputMicroCentsPerMTok: string;
+        markupBasisPoints?: number | null;
         effectiveAt?: string | null;
       };
     },
@@ -164,6 +180,14 @@ export const meteringMutations = {
     const provider = input.provider.trim();
     const model = input.model.trim();
     if (!provider || !model) throw badInput('provider and model are required.');
+    const tier = input.tier ?? PRICE_TIER_DEFAULT;
+    if (!Number.isInteger(tier) || tier < PRICE_TIER_MIN || tier > PRICE_TIER_MAX) {
+      throw badInput(`tier must be an integer ${PRICE_TIER_MIN}-${PRICE_TIER_MAX}.`);
+    }
+    const markupBasisPoints = input.markupBasisPoints ?? null;
+    if (markupBasisPoints != null && (!Number.isInteger(markupBasisPoints) || markupBasisPoints < 0)) {
+      throw badInput('markupBasisPoints must be a non-negative integer (2500 = 25%).');
+    }
     const effectiveAt = input.effectiveAt ? new Date(input.effectiveAt) : new Date();
     if (Number.isNaN(effectiveAt.getTime())) throw badInput('effectiveAt is not a valid date.');
     let row: ModelPrice;
@@ -173,8 +197,10 @@ export const meteringMutations = {
           id: generateId(),
           provider,
           model,
+          tier,
           inputMicroCentsPerMTok: parseMicroCents(input.inputMicroCentsPerMTok, 'inputMicroCentsPerMTok'),
           outputMicroCentsPerMTok: parseMicroCents(input.outputMicroCentsPerMTok, 'outputMicroCentsPerMTok'),
+          markupBasisPoints,
           effectiveAt,
           createdBy: ctx.userId ?? null,
         },
@@ -182,7 +208,7 @@ export const meteringMutations = {
     } catch (err) {
       if ((err as { code?: string }).code === 'P2002') {
         throw badInput(
-          `A price for ${provider}/${model} at ${effectiveAt.toISOString()} already exists — post a new effectiveAt.`,
+          `A price for ${provider}/${model} tier ${tier} at ${effectiveAt.toISOString()} already exists — post a new effectiveAt.`,
         );
       }
       throw err;

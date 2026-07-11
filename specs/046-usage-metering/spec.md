@@ -26,9 +26,13 @@ cost column), a durable monetary ledger, and metering on the embedding path.
   (the billable unit). MCP usage events record `userId` when the
   authenticated principal is a user.
 - **FR-002 Price source.** A `ModelPrice` table keyed `(provider, model,
-  effectiveAt)` holds input/output prices in micro-cents per million tokens.
-  Rows are operator-managed (platform admin) — env seeds nothing; an unknown
-  `(provider, model)` simply yields no cost (never blocks the call).
+  tier, effectiveAt)` holds input/output prices in micro-cents per million
+  tokens plus an optional per-row `markupBasisPoints`. Tier is 1-3 (Holger,
+  2026-07-11) — schema headroom for future product tiers with different
+  markups; everything defaults to and resolves tier 1 today, with NO
+  cross-tier fallback (an unpriced tier is unpriced). Rows are
+  operator-managed (platform admin) — env seeds nothing; an unknown triple
+  simply yields no cost (never blocks the call).
 - **FR-003 Cost-at-write.** Usage events snapshot `costMicroCents` computed
   from the price row effective at event time. Historical costs are never
   recomputed (LLM prices change).
@@ -42,9 +46,10 @@ cost column), a durable monetary ledger, and metering on the embedding path.
   phase). Balance = SUM; rows are never mutated or reset.
 - **FR-006 Debit gating.** Automatic debits are OFF by default
   (`BILLING_DEBIT_ENABLED`, unset ⇒ off) so the pilot stays free while the
-  data flow is real. Debit amount = cost × (1 + `CREDIT_MARKUP_PERCENT`/100),
-  default markup 0. A debit failure never fails the run (usage is already
-  spent at the provider).
+  data flow is real. Debit amount = cost × (1 + markup), where markup is the
+  price row's `markupBasisPoints` (per-tier, effective-dated) when set, else
+  the `CREDIT_MARKUP_PERCENT` env fallback (default 0). A debit failure never
+  fails the run (usage is already spent at the provider).
 - **FR-007 Embedding metering.** `embedNode` records a usage event
   (`type='embedding'`, estimated `tokensIn`, provider from
   `EMBEDDING_PROVIDER`, org from the memory). Estimation: ceil(chars/4);
