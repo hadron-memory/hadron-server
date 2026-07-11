@@ -387,6 +387,22 @@ describe('Query.organizations / Query.users — merged list semantics', () => {
     expect(after.items.map((o: { id: string }) => o.id)).toContain(hidden.id);
   });
 
+  it('organization(ref): a non-member admin cannot resolve a hidden org; a member can (#609)', async () => {
+    const hidden = await db.organization.create({
+      data: { id: generateId(), name: 'uni-ref-hidden', urn: `uni-ref-hidden-${Date.now()}`, isVisible: false },
+    });
+    const adminCtx = ctx(admin.id, ['ADMIN']);
+    // Non-member admin: denied on the hidden org...
+    await expect(Q.organization(null, { ref: hidden.id }, adminCtx)).rejects.toThrow(/forbidden/i);
+    // ...but still resolves a listable (isVisible=true) org they aren't a member of.
+    expect((await Q.organization(null, { ref: orgA.id }, adminCtx))?.id).toBe(orgA.id);
+    // A member resolves their own hidden org regardless of listing visibility.
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: hidden.id, userId: member.id, role: 'OWNER' },
+    });
+    expect((await Q.organization(null, { ref: hidden.id }, ctx(member.id)))?.id).toBe(hidden.id);
+  });
+
   it('users: admin full list is paginated with an exact total', async () => {
     const page = await Q.users(null, { limit: 2 }, ctx(admin.id, ['ADMIN']));
     expect(page.total).toBe(3); // member, stranger, admin

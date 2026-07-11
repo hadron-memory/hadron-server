@@ -49,11 +49,13 @@ function appCtx(appId: string, overrides: Partial<Context> = {}): Context {
 beforeEach(async () => {
   await cleanDb(db);
 
+  // Normal (listable) orgs — an admin non-member resolves orgA by ref below,
+  // which #609 allows only for isVisible === true orgs.
   orgA = await db.organization.create({
-    data: { id: generateId(), name: 'org-a', urn: 'org-a' },
+    data: { id: generateId(), name: 'org-a', urn: 'org-a', isVisible: true },
   });
   orgB = await db.organization.create({
-    data: { id: generateId(), name: 'org-b', urn: 'org-b' },
+    data: { id: generateId(), name: 'org-b', urn: 'org-b', isVisible: true },
   });
 
   adminUser = await db.user.create({

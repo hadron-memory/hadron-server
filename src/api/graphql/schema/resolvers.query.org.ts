@@ -358,12 +358,24 @@ export const orgQueries = {
     organization: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveOrgRef(ctx.db, ref);
-      if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
-        if (!ctx.userId) throw new Error('Forbidden');
-        const member = await ctx.db.orgMember.findFirst({
-          where: { organizationId: resolvedId, userId: ctx.userId, deletedAt: null },
+      const isAdmin = !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
+      const isMember = ctx.userId
+        ? !!(await ctx.db.orgMember.findFirst({
+            where: { organizationId: resolvedId, userId: ctx.userId, deletedAt: null },
+          }))
+        : false;
+      if (!isMember) {
+        // #609: a non-listable org (isVisible !== true — an un-activated
+        // personal org, or a legacy null) is invisible to non-members, platform
+        // admins included: not listed, not searchable, and not resolvable by
+        // ref. Only a listable org (isVisible === true) is admin-reachable
+        // without membership. Members always resolve their own org regardless of
+        // listing visibility (isVisible gates listing, not a member's read).
+        const gate = await ctx.db.organization.findUnique({
+          where: { id: resolvedId },
+          select: { isVisible: true },
         });
-        if (!member) throw new Error('Forbidden');
+        if (!isAdmin || gate?.isVisible !== true) throw new Error('Forbidden');
       }
       return ctx.db.organization.findUnique({ where: { id: resolvedId }, include: ORG_INCLUDE });
     },
