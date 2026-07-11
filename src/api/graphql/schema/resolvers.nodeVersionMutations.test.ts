@@ -186,6 +186,33 @@ describe('nodeVersion query (#617 Display)', () => {
     expect(v).toBeNull();
   });
 
+  it('resolves editedBy to a user editor (handle + urn only)', async () => {
+    const editor = await db.user.create({ data: { githubId: 7301, githubUsername: 'nvm-ed', handle: 'nvm-editor', name: 'Secret Name', email: 'secret@x.com', roles: ['READER'] } });
+    await db.nodeVersion.update({ where: { id: v2.id }, data: { editedBy: editor.id } });
+    const parent = await db.nodeVersion.findUniqueOrThrow({ where: { id: v2.id } });
+    const res = await resolvers.NodeVersion.editedByUser(parent, null, adminCtx());
+    expect(res).toEqual({ handle: 'nvm-editor', urn: 'hrn:user:nvm-editor' });
+    // Never exposes name/email — the type has no such fields.
+    expect(res).not.toHaveProperty('name');
+    expect(res).not.toHaveProperty('email');
+  });
+
+  it('returns null when editedBy is an app/client principal (not a user id)', async () => {
+    const res = await resolvers.NodeVersion.editedByUser({ editedBy: 'capp0000000000000000000x' }, null, adminCtx());
+    expect(res).toBeNull();
+  });
+
+  it('returns null when editedBy is unset', async () => {
+    const res = await resolvers.NodeVersion.editedByUser({ editedBy: null }, null, adminCtx());
+    expect(res).toBeNull();
+  });
+
+  it('returns null for a handle-less user (portal falls back to the raw id)', async () => {
+    const editor = await db.user.create({ data: { githubId: 7302, githubUsername: 'nvm-nohandle', roles: ['READER'] } });
+    const res = await resolvers.NodeVersion.editedByUser({ editedBy: editor.id }, null, adminCtx());
+    expect(res).toBeNull();
+  });
+
   it('returns null for a snapshot captured in a memory the caller cannot read (moved-node leak)', async () => {
     const otherOrg = await db.organization.create({
       data: { id: generateId(), name: 'nvm-other', urn: 'nvm-other' },

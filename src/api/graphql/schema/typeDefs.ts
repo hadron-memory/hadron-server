@@ -550,6 +550,17 @@ export const typeDefs = `#graphql
     createdAt: String!
   }
 
+  """
+  A version's editor resolved to PUBLIC IDENTIFIERS ONLY (#617). Deliberately
+  excludes name / email / any PII — resolving editedBy must never widen the
+  disclosure surface. handle + urn are the same public identifiers the users
+  search already exposes, so no per-caller visibility gate applies.
+  """
+  type NodeVersionEditor {
+    handle: String
+    urn: String
+  }
+
   type NodeVersion {
     id: ID!
     nodeId: String!
@@ -559,7 +570,14 @@ export const typeDefs = `#graphql
     description: String
     content: String
     tags: [String!]!
+    "Raw editor id at capture: a User id OR an app/client principal id (opaque). Use editedByUser to resolve the user case."
     editedBy: String
+    """
+    The editor resolved to a user (handle + URN), when editedBy is a user id.
+    Null for app/client principals, deleted users, or handle-less users — the
+    portal falls back to the raw editedBy string. Public identifiers only (#617).
+    """
+    editedByUser: NodeVersionEditor
     createdAt: String!
   }
 
