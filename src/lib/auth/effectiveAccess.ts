@@ -40,6 +40,7 @@ import {
   isLifecycleActive,
   isPlatformAdmin,
   assemble,
+  allows,
   READ,
   WRITE,
   FULL,
@@ -251,6 +252,42 @@ async function memoryGrants(
   // both confer read/write when the caller's org holds a CONTRIBUTOR+
   // MemorySubscription — is not yet modeled here, so a purely subscription-based
   // grant is under-reported. Under-reporting is the safe direction for an audit.
+
+  // Individual action grants (design:grant-model, cor:acl:040:06). Mirrors
+  // requireOrgAction exactly: grants count only alongside a LIVE membership
+  // (memberRole non-null — a grant is an exception ON TOP of membership) and
+  // only for the actions the ENFORCED gates actually consult — memory.clone
+  // (cloneMemory ⇒ manage) and memory.delete (deleteMemory ⇒ delete).
+  // memory.read/write entries are deliberately NOT surfaced: no enforced
+  // read/write gate consults PrincipalGrant yet, and the audit must never
+  // over-report. Liveness (deletedAt + expiry) is filtered IN the query.
+  if (memberRole !== null) {
+    const grantRows = await db.principalGrant.findMany({
+      where: {
+        principalType: 'USER',
+        principalId: subject.id,
+        organizationId: memory.organizationId,
+        deletedAt: null,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      select: { actions: true },
+    });
+    if (grantRows.length > 0) {
+      const link = { allow: grantRows.flatMap((g) => g.actions) };
+      const canClone = allows(link, 'memory.clone');
+      const canDelete = allows(link, 'memory.delete');
+      if (canClone || canDelete) {
+        grants.push({
+          source: 'PRINCIPAL_GRANT',
+          role: [canClone ? 'memory.clone' : null, canDelete ? 'memory.delete' : null]
+            .filter(Boolean)
+            .join(','),
+          via: await orgUrn(db, memory.organizationId),
+          caps: { read: false, write: false, manage: canClone, delete: canDelete },
+        });
+      }
+    }
+  }
 
   if (memory.class === 'app' && memory.appId) {
     const member = await db.appMember.findUnique({
