@@ -264,7 +264,9 @@ export const memoryMutations = {
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
 
       // #621 — friendly guard mirroring chk_memory_max_rev_count_positive.
-      if (maxRevCount != null && maxRevCount < 1) {
+      // Explicit `null` is rejected (there is no "null" cap — omit the arg to
+      // get the default); only `undefined` (omitted) or a concrete >= 1 passes.
+      if (maxRevCount === null || (maxRevCount !== undefined && maxRevCount < 1)) {
         throw new GraphQLError('maxRevCount must be at least 1.', {
           extensions: { code: 'BAD_USER_INPUT' },
         });
@@ -503,9 +505,9 @@ export const memoryMutations = {
         await requireOrgRole(ctx, newOrgId, 'ADMIN');
       }
       // #621 — friendly guard mirroring chk_memory_max_rev_count_positive.
-      // `null` means "clear to default" is NOT supported (column is NOT NULL);
-      // treat null like an invalid value would be, so only >= 1 or omitted.
-      if (maxRevCount != null && maxRevCount < 1) {
+      // The column is NOT NULL, so explicit `null` is rejected (omit the arg to
+      // leave the cap unchanged); only `undefined` (omitted) or >= 1 passes.
+      if (maxRevCount === null || (maxRevCount !== undefined && maxRevCount < 1)) {
         throw new GraphQLError('maxRevCount must be at least 1.', {
           extensions: { code: 'BAD_USER_INPUT' },
         });

@@ -106,6 +106,30 @@ describe('NodeRevision pruning (#621)', () => {
     for (let i = 1; i <= 3; i++) await updateContent(n.id, `c${i}`);
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(3);
   });
+
+  // #621 review (Codex P2): the cap is per (node, memory). A moved node carries
+  // revisions from each memory; a low cap in one must not erase another's.
+  it('prunes per (node, memory) — a low cap in one memory spares another memory\'s history', async () => {
+    const memB = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:memB`,
+        name: 'memB', class: 'knowledge', maxRevCount: 2,
+      },
+    });
+    // 4 updates in `memory` (default cap 10) → 4 snapshots stamped memory.id.
+    const n = await makeNode('mover');
+    for (let i = 1; i <= 4; i++) await updateContent(n.id, `a${i}`);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id, memoryId: memory.id } })).toBe(4);
+
+    // Move to memB: the pre-move snapshot belongs to `memory` (source), so
+    // memory now has 5. Then churn in memB (cap 2).
+    await resolvers.Mutation.moveNode({}, { sourceRef: n.id, targetMemoryRef: memB.id }, ctx());
+    for (let i = 1; i <= 4; i++) await updateContent(n.id, `b${i}`);
+
+    // memB's low cap pruned ONLY memB's snapshots; memory's 5 are untouched.
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id, memoryId: memB.id } })).toBe(2);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id, memoryId: memory.id } })).toBe(5);
+  });
 });
 
 describe('maxRevCount validation', () => {
@@ -118,6 +142,15 @@ describe('maxRevCount validation', () => {
   it('rejects maxRevCount < 1 on createMemory', async () => {
     await expect(
       resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'bad', maxRevCount: 0 }, ctx()),
+    ).rejects.toThrow(/at least 1/);
+  });
+
+  it('rejects explicit null maxRevCount (omit to use the default)', async () => {
+    await expect(
+      resolvers.Mutation.updateMemory({}, { id: memory.id, maxRevCount: null }, ctx()),
+    ).rejects.toThrow(/at least 1/);
+    await expect(
+      resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'nullcap', maxRevCount: null }, ctx()),
     ).rejects.toThrow(/at least 1/);
   });
 });

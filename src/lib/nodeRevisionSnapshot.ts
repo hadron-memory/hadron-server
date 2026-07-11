@@ -151,32 +151,52 @@ export async function createNodeRevision(
 ): Promise<void> {
   await db.nodeRevision.create({ data });
 
-  const max = data.memoryId
-    ? (
-        await db.memory.findUnique({
-          where: { id: data.memoryId },
-          select: { maxRevCount: true },
-        })
-      )?.maxRevCount ?? DEFAULT_MAX_REV_COUNT
-    : DEFAULT_MAX_REV_COUNT;
+  // The cap is per (node, memory). A node MOVED across memories keeps its id
+  // and carries revisions from each memory it lived in (moveNode snapshots the
+  // SOURCE memory); maxRevCount lives on Memory. So this memory's cap must only
+  // ever prune ITS OWN snapshots of the node — never another memory's retained
+  // history (#621 review, Codex P2). A legacy NULL-memory snapshot has nothing
+  // to scope to, so we skip pruning for it.
+  const memoryId = data.memoryId;
+  if (!memoryId) return;
+
+  const max =
+    (
+      await db.memory.findUnique({
+        where: { id: memoryId },
+        select: { maxRevCount: true },
+      })
+    )?.maxRevCount ?? DEFAULT_MAX_REV_COUNT;
   // Defensive: chk_memory_max_rev_count_positive enforces >= 1 at the DB.
   if (max < 1) return;
 
-  // Keep the newest `max`; delete the older overflow. `skip` past the newest
-  // `max` (createdAt desc, id as a deterministic tiebreak for same-ms rows)
-  // yields exactly the rows to prune — handles a lowered cap (multiple
-  // overflow rows), not just the single newest-over-the-line case.
-  const overflow = await db.nodeRevision.findMany({
-    where: { nodeId: data.nodeId },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    skip: max,
-    select: { id: true },
+  // Cutoff = the `max`-th newest revision of this node in this memory
+  // (createdAt desc, id as a deterministic tiebreak for same-ms rows). A single
+  // range delete then removes everything older, so the prune stays O(1) in
+  // query parameters even against a huge pre-cap / cap-lowered history — no
+  // `id IN (…thousands…)` list that could blow the parameter limit (#621
+  // review, Copilot).
+  const cutoff = (
+    await db.nodeRevision.findMany({
+      where: { nodeId: data.nodeId, memoryId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: max - 1,
+      take: 1,
+      select: { id: true, createdAt: true },
+    })
+  )[0];
+  if (!cutoff) return; // fewer than `max` rows for this memory → nothing to prune
+
+  await db.nodeRevision.deleteMany({
+    where: {
+      nodeId: data.nodeId,
+      memoryId,
+      OR: [
+        { createdAt: { lt: cutoff.createdAt } },
+        { createdAt: cutoff.createdAt, id: { lt: cutoff.id } },
+      ],
+    },
   });
-  if (overflow.length > 0) {
-    await db.nodeRevision.deleteMany({
-      where: { id: { in: overflow.map((r) => r.id) } },
-    });
-  }
 }
 
 /**
