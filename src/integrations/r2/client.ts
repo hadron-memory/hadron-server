@@ -88,6 +88,27 @@ export async function mintGetUrl(opts: PresignedGetOptions): Promise<string> {
   return getSignedUrl(getR2Client(), cmd, { expiresIn: opts.ttlSeconds });
 }
 
+/**
+ * Server-side direct write — for platform-authored bytes (e.g. the
+ * hadron_store_file run tool). Browser uploads keep using mintPutUrl;
+ * this path is for content the server already holds.
+ */
+export async function putObject(opts: {
+  key: string;
+  body: Buffer;
+  contentType: string;
+}): Promise<void> {
+  await getR2Client().send(
+    new PutObjectCommand({
+      Bucket: getR2Bucket(),
+      Key: opts.key,
+      Body: opts.body,
+      ContentType: opts.contentType,
+      ContentLength: opts.body.byteLength,
+    }),
+  );
+}
+
 export interface HeadResult {
   exists: boolean;
   contentLength?: number;
