@@ -763,10 +763,10 @@ describe('mintAppRun — conjunctive chain assembly (#510, cor:acl:040:02)', () 
 // ───── quota admin helpers (#510) ───────────────────────────────────────────
 
 describe('setQuotaLimit + ensureQuotaRowsForScope (#510)', () => {
-  it('materializes both action rows with the platform defaults', async () => {
+  it('materializes every counter-action row with the platform defaults', async () => {
     await ensureQuotaRowsForScope(db, 'org', orgId);
     const rows = await db.quotaCounter.findMany({ where: { scopeKind: 'org', scopeId: orgId } });
-    expect(rows.map((r) => r.action).sort()).toEqual(['llm.tokens', 'run.execute']);
+    expect(rows.map((r) => r.action).sort()).toEqual(['llm.tokens', 'run.execute', 'sms.send']);
     expect(rows.every((r) => r.limit === defaultQuotaLimit('org', r.action as never))).toBe(true);
   });
 
