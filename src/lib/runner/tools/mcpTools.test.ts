@@ -163,4 +163,49 @@ describe('materializeMcpRunTools', () => {
     expect(err).toEqual({ isError: true, error: 'quota exceeded' });
     expect(logs.some((l) => l.includes('upstream tool error'))).toBe(true);
   });
+
+  it('degrades on malformed content blocks and bounds the flattened result (third-party payload)', async () => {
+    await registerServer();
+    vi.mocked(listMcpTools).mockResolvedValue([
+      { name: 'generate_image', inputSchema: { type: 'object' } },
+    ]);
+    const [def] = await materializeMcpRunTools(db, fakeRun(), ['mcp__everart__generate_image']);
+
+    // Null / primitive / typeless blocks must degrade, never crash the hop
+    // (PR-634 review). The conduit validates too, but core must not trust it.
+    vi.mocked(callMcpTool).mockResolvedValue({
+      isError: false,
+      content: [null, 42, { text: 'no type' }, { type: 'text', text: 'ok' }] as never,
+    });
+    const mixed = await def.execute(fakeCtx([]), {});
+    expect(mixed).toEqual({
+      result:
+        '[unsupported unknown content omitted]\n[unsupported unknown content omitted]\n' +
+        '[unsupported unknown content omitted]\nok',
+    });
+
+    vi.mocked(callMcpTool).mockResolvedValue({
+      isError: false,
+      content: [{ type: 'text', text: 'y'.repeat(150_000) }],
+    });
+    const big = (await def.execute(fakeCtx([]), {})) as { result: string };
+    expect(big.result.length).toBeLessThan(101_000);
+    expect(big.result.endsWith('[truncated by hadron-server]')).toBe(true);
+  });
+
+  it('fetches multi-server tool lists in parallel (no sequential timeout stacking)', async () => {
+    await registerServer();
+    await registerServer({ slug: 'other', name: 'Other' });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    vi.mocked(listMcpTools).mockImplementation(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight -= 1;
+      return [{ name: 'tool_a', inputSchema: { type: 'object' } }];
+    });
+    await materializeMcpRunTools(db, fakeRun(), ['mcp__everart__tool_a', 'mcp__other__tool_a']);
+    expect(maxInFlight).toBe(2);
+  });
 });

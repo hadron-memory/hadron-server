@@ -220,4 +220,21 @@ describe('mcpServerTools', () => {
     expect(await resolvers.Query.mcpServerTools({}, { ref: server.id }, ctxFor(outsider.id))).toBeNull();
     expect(listMcpTools).not.toHaveBeenCalled();
   });
+
+  it('errors typed on a disabled server without calling the conduit (what-you-see-is-what-runs)', async () => {
+    const server = await createServer({ enabled: false });
+    await expect(resolvers.Query.mcpServerTools({}, { ref: server.id }, ctxFor(member.id))).rejects.toThrow(
+      /disabled/,
+    );
+    expect(listMcpTools).not.toHaveBeenCalled();
+  });
+
+  it('caps third-party descriptions on the browse path (same cap as the runner)', async () => {
+    const server = await createServer();
+    vi.mocked(listMcpTools).mockResolvedValue([
+      { name: 'verbose', description: 'x'.repeat(5000), inputSchema: { type: 'object' } },
+    ]);
+    const tools = await resolvers.Query.mcpServerTools({}, { ref: server.id }, ctxFor(member.id));
+    expect(tools![0].description).toHaveLength(1024);
+  });
 });

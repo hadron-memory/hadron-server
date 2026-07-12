@@ -2897,9 +2897,12 @@ export const typeDefs = `#graphql
     """
     Live tools/list passthrough for one registered server (org member) —
     what authors browse to pick data.tools entries. Applies the same
-    admissibility filter as run-tool materialization. Null when the row
-    does not exist or the caller is not a member of its org; errors with
-    MCP_TOOL_* codes when the conduit or the external server fails.
+    admissibility filter as run-tool materialization, so what it returns
+    IS what a run can call: a disabled server errors with
+    MCP_SERVER_DISABLED rather than listing uncallable tools. Null when
+    the row does not exist or the caller is not a member of its org;
+    errors with MCP_TOOL_* codes when the conduit or the external server
+    fails.
     """
     mcpServerTools(ref: ID!): [McpServerTool!]
     exchangeMessages(

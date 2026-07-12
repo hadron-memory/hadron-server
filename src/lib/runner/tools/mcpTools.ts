@@ -22,13 +22,16 @@ import {
   decryptMcpHeaders,
   mcpToolAllowed,
   parseMcpRunToolName,
+  MAX_MCP_DESCRIPTION_LENGTH,
   MAX_RUN_TOOL_NAME_LENGTH,
   MCP_RUN_TOOL_PREFIX,
 } from '../../mcpServers.js';
 import type { RunToolDef } from './types.js';
 
-/** Cap on an upstream description entering the prompt (untrusted content). */
-const MAX_DESCRIPTION_LENGTH = 1024;
+/** Cap on the total flattened result text handed to the LLM. The conduit
+ *  bounds per-block (200k) and per-count (100); this is core's own ceiling
+ *  so a rogue payload can never inflate a hop's context unbounded. */
+const MAX_FLATTENED_RESULT_LENGTH = 100_000;
 
 /** True when a `data.tools` entry belongs to this dynamic namespace. */
 export function isMcpRunToolName(name: string): boolean {
@@ -79,15 +82,22 @@ export async function unknownMcpToolNames(
     .map(({ name }) => name);
 }
 
-/** Flatten an MCP content-block array to the text the LLM sees. */
+/** Flatten an MCP content-block array to the text the LLM sees. Blocks are
+ *  THIRD-PARTY payload — null/primitive elements must degrade, not crash
+ *  the hop (PR-634 review, Gemini + Copilot). */
 function flattenContent(content: Array<Record<string, unknown>>): string {
   const parts = content.map((block) => {
-    if (block.type === 'text' && typeof block.text === 'string') return block.text;
+    const isObject = block !== null && typeof block === 'object' && !Array.isArray(block);
+    if (isObject && block.type === 'text' && typeof block.text === 'string') return block.text;
     // Non-text blocks (image/audio/resource) have no v1 rendering path
     // into a run hop — surface their presence instead of dropping them.
-    return `[unsupported ${String(block.type ?? 'unknown')} content omitted]`;
+    const typeLabel = isObject && typeof block.type === 'string' ? block.type : 'unknown';
+    return `[unsupported ${typeLabel} content omitted]`;
   });
-  return parts.join('\n');
+  const text = parts.join('\n');
+  return text.length > MAX_FLATTENED_RESULT_LENGTH
+    ? `${text.slice(0, MAX_FLATTENED_RESULT_LENGTH)}\n[truncated by hadron-server]`
+    : text;
 }
 
 /**
@@ -110,14 +120,18 @@ export async function materializeMcpRunTools(
   const servers = await loadServers(db, run.organizationId, parsed.map((p) => p.slug));
 
   const upstreamBySlug = new Map<string, Map<string, { description?: string; inputSchema: Record<string, unknown> }>>();
-  for (const slug of new Set(parsed.map((p) => p.slug))) {
-    const server = servers.get(slug);
-    // loadNodeSpec validated registration, but a row can be deleted or
-    // disabled between validation and this hop — same loud failure.
-    if (!server) throw new Error(`MCP server "${slug}" is not registered (or disabled) for this organization.`);
-    const tools = await listMcpTools({ url: server.url, headers: decryptMcpHeaders(server) });
-    upstreamBySlug.set(slug, new Map(tools.map((t) => [t.name, t])));
-  }
+  // One live tools/list per referenced server, in parallel — a multi-server
+  // node must not pay the timeouts sequentially (PR-634 review, Gemini).
+  await Promise.all(
+    [...new Set(parsed.map((p) => p.slug))].map(async (slug) => {
+      const server = servers.get(slug);
+      // loadNodeSpec validated registration, but a row can be deleted or
+      // disabled between validation and this hop — same loud failure.
+      if (!server) throw new Error(`MCP server "${slug}" is not registered (or disabled) for this organization.`);
+      const tools = await listMcpTools({ url: server.url, headers: decryptMcpHeaders(server) });
+      upstreamBySlug.set(slug, new Map(tools.map((t) => [t.name, t])));
+    }),
+  );
 
   return parsed.map(({ name, slug, tool }) => {
     const server = servers.get(slug)!;
@@ -132,7 +146,7 @@ export async function materializeMcpRunTools(
       name,
       description:
         `[External tool on MCP server "${server.name}"] ` +
-        (upstream.description ?? '').slice(0, MAX_DESCRIPTION_LENGTH),
+        (upstream.description ?? '').slice(0, MAX_MCP_DESCRIPTION_LENGTH),
       inputSchema: upstream.inputSchema,
       cost: 1,
       execute: async (ctx, args) => {

@@ -25,6 +25,10 @@ export const MCP_UPSTREAM_TOOL_RE = /^[a-zA-Z0-9_-]+$/;
 /** Provider tool-name length cap (Anthropic's 64 is the strictest). */
 export const MAX_RUN_TOOL_NAME_LENGTH = 64;
 
+/** Cap on an upstream tool description — third-party content that enters
+ *  prompts (runner) and GraphQL responses (browse); one cap for both. */
+export const MAX_MCP_DESCRIPTION_LENGTH = 1024;
+
 /** Compose the run-tool / policy name for one upstream tool. */
 export function mcpRunToolName(slug: string, tool: string): string {
   return `${MCP_RUN_TOOL_PREFIX}${slug}__${tool}`;
