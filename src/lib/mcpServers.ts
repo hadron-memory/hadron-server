@@ -12,6 +12,8 @@ import type { McpServer } from '../generated/prisma/index.js';
  * it must satisfy the strictest provider tool-name rule:
  * ^[a-zA-Z0-9_-]{1,64}$ (Anthropic). Slugs therefore exclude underscores —
  * `__` is unambiguous as the separator.
+ *
+ * Spec: cor:int:030:02
  */
 
 export const MCP_RUN_TOOL_PREFIX = 'mcp__';
