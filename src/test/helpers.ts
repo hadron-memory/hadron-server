@@ -33,6 +33,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // Spec 043 — Slack integration (receipts have no FK; connections FK org + app).
   await db.slackEventReceipt.deleteMany();
   await db.slackConnection.deleteMany();
+  // hadrontool-mcp conduit registry (FKs org only).
+  await db.mcpServer.deleteMany();
   // Spec 040 — headless-run tables (no FKs between them; order-free).
   await db.appRun.deleteMany();
   await db.agentSchedule.deleteMany();

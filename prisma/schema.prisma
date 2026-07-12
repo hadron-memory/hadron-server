@@ -471,6 +471,7 @@ model Organization {
   invitations         UserInvitation[]     @relation("OrgInvitations")
   exchangeConnections ExchangeConnection[]
   slackConnections    SlackConnection[]
+  mcpServers          McpServer[]
   // 046-usage-metering: billing back-relations.
   usageEvents         UsageEvent[]
   creditLedgerEntries CreditLedgerEntry[]
@@ -2070,6 +2071,47 @@ model SlackEventReceipt {
   @@unique([connectionId, envelopeId])
   @@index([createdAt])
   @@map("slack_event_receipts")
+}
+
+/// Registered EXTERNAL MCP server — the org-scoped registry behind the
+/// hadrontool-mcp conduit (headless runs calling third-party MCP tools).
+/// The conduit tool is stateless and Hadron-blind (cor:int:030:01); core
+/// owns identity, governance, and the encrypted static headers. A run
+/// reaches a server's tool via the run-tool name `mcp__<slug>__<tool>`,
+/// and every call is gated by the policy chain as `tool.mcp__<slug>__<tool>`
+/// plus the run's action budget — this row grants nothing by itself.
+model McpServer {
+  id             String @id @default(cuid())
+  organizationId String @map("organization_id")
+  /// Run-tool name segment (`mcp__<slug>__<tool>`); lowercase [a-z0-9-],
+  /// unique per org. Keep it short — provider tool-name caps are ~64 chars.
+  slug           String
+  name           String
+  /// Streamable-HTTP MCP endpoint URL. The conduit refuses private-network
+  /// hosts unless explicitly allowed (SSRF guard, dev only).
+  url            String
+  /// AES-256-GCM-encrypted JSON object of static request headers
+  /// (src/lib/tokenCrypto.ts), e.g. {"Authorization":"Bearer ..."} —
+  /// v1 auth posture (no OAuth). WRITE-ONLY on the API surface: resolvers
+  /// expose only a hasHeaders boolean, never the value.
+  headersEncrypted String? @map("headers_encrypted")
+  /// Exposed-tool allowlist; empty = every tool the server advertises.
+  toolAllowlist  String[] @default([]) @map("tool_allowlist")
+  /// Disabled servers fail run-tool resolution loud (unknown tool), same
+  /// posture as an unregistered slug.
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  updatedBy      String?  @map("updated_by")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Hard delete by design: a registry row is config, not audit history —
+  // deleting one makes referencing runs fail their hop loud, which is the
+  // wanted signal. No deletedAt ⇒ a plain (non-partial) unique works.
+  @@unique([organizationId, slug], map: "mcp_servers_org_slug_uniq")
+  @@map("mcp_servers")
 }
 
 /// Pre-launch waitlist signup capture from the marketing site. Holds

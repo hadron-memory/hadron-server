@@ -25,6 +25,7 @@ import { appQueries } from './resolvers.query.app.js';
 import { chatQueries } from './resolvers.query.chat.js';
 import { sessionQueries } from './resolvers.query.session.js';
 import { slackQueries } from './resolvers.query.slack.js';
+import { mcpQueries } from './resolvers.query.mcp.js';
 
 import { nodeMutations } from './resolvers.mutation.node.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
@@ -40,6 +41,7 @@ import { appMutations } from './resolvers.mutation.app.js';
 import { chatMutations } from './resolvers.mutation.chat.js';
 import { sessionMutations } from './resolvers.mutation.session.js';
 import { slackMutations } from './resolvers.mutation.slack.js';
+import { mcpMutations } from './resolvers.mutation.mcp.js';
 
 export const resolvers = {
   ...typeResolvers,
@@ -54,6 +56,7 @@ export const resolvers = {
     ...chatQueries,
     ...sessionQueries,
     ...slackQueries,
+    ...mcpQueries,
     ...appRunQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
@@ -74,5 +77,6 @@ export const resolvers = {
     ...chatMutations,
     ...sessionMutations,
     ...slackMutations,
+    ...mcpMutations,
   },
 };

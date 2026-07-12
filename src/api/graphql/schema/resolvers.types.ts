@@ -124,6 +124,13 @@ function resolveRevisionEditor(
 }
 
 export const typeResolvers = {
+  McpServer: {
+    // headersEncrypted is not in the GraphQL type at all; readers get only
+    // this boolean (write-only secret posture, same as tool-held tokens).
+    hasHeaders: (s: { headersEncrypted?: string | null }) => s.headersEncrypted != null,
+    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
+  },
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
     createdAt: (n: { createdAt: Date | string }) => toISO(n.createdAt)!,
