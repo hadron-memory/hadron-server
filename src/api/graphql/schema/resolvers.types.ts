@@ -131,6 +131,12 @@ export const typeResolvers = {
     createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
     updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
   },
+  HomeAssistantInstance: {
+    // tokenEncrypted is not in the GraphQL type at all (write-only secret
+    // posture) — nothing to derive, just date serialization.
+    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
+  },
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
     createdAt: (n: { createdAt: Date | string }) => toISO(n.createdAt)!,

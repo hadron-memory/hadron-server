@@ -32,6 +32,11 @@ import {
   materializeMcpRunTools,
   unknownMcpToolNames,
 } from '../lib/runner/tools/mcpTools.js';
+import {
+  isHaRunToolName,
+  materializeHaRunTools,
+  unknownHaToolNames,
+} from '../lib/runner/tools/haTools.js';
 import { splitNodeUrn } from '../lib/urn.js';
 import type { RunExecutionDeps, RunNodeSpec } from './appRuns.js';
 import { dispatchRunCallback } from '../api/webhooks.js';
@@ -105,16 +110,22 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         const names = (data.tools as unknown[]).filter((t): t is string => typeof t === 'string');
         if (names.length > 0) {
           // Unknown names fail the hop LOUD before any LLM call (D-TL-6).
-          // `mcp__<slug>__<tool>` names resolve against the run org's
-          // McpServer registry instead of the static builtin registry.
-          const builtin = names.filter((n) => !isMcpRunToolName(n));
+          // `mcp__<slug>__<tool>` / `ha__<slug>__<op>` names resolve
+          // against the run org's registries instead of the static
+          // builtin registry.
+          const builtin = names.filter((n) => !isMcpRunToolName(n) && !isHaRunToolName(n));
           const { unknown } = resolveRunTools(builtin);
           const unknownMcp = await unknownMcpToolNames(
             db,
             run.organizationId,
             names.filter(isMcpRunToolName),
           );
-          const allUnknown = [...unknown, ...unknownMcp];
+          const unknownHa = await unknownHaToolNames(
+            db,
+            run.organizationId,
+            names.filter(isHaRunToolName),
+          );
+          const allUnknown = [...unknown, ...unknownMcp, ...unknownHa];
           if (allUnknown.length > 0) {
             throw new Error(`Unknown tool(s) on "${nodeUrn}": ${allUnknown.join(', ')}.`);
           }
@@ -163,9 +174,12 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
       // LIVE tools/list here (defs come from the external server via the
       // conduit) — a tool that vanished upstream fails the hop loud
       // rather than silently running without it (D-TL-8 posture).
-      const { tools } = resolveRunTools(toolNames.filter((n) => !isMcpRunToolName(n)));
+      const { tools } = resolveRunTools(
+        toolNames.filter((n) => !isMcpRunToolName(n) && !isHaRunToolName(n)),
+      );
       const mcpTools = await materializeMcpRunTools(db, run, toolNames.filter(isMcpRunToolName));
-      return generateWithTools(resolved, req, [...tools, ...mcpTools], {
+      const haTools = await materializeHaRunTools(db, run, toolNames.filter(isHaRunToolName));
+      return generateWithTools(resolved, req, [...tools, ...mcpTools, ...haTools], {
         onToolCall: opts.onToolCall,
         toolCtx: { log: opts.log, db, run, principal: runContext(db, run) },
       });

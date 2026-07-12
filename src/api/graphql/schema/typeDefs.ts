@@ -1597,6 +1597,48 @@ export const typeDefs = `#graphql
     inputSchema: JSON
   }
 
+  # One registered Home Assistant instance (hadrontool-home-assistant
+  # registry, hadron-server#640). Org-owned. The long-lived access token
+  # is encrypted at rest and WRITE-ONLY: no field here ever returns it.
+  # The row grants nothing by itself; every run-time call walks the policy
+  # chain as 'tool.ha__<slug>__<op>' plus the run's action budget.
+  type HomeAssistantInstance {
+    id: ID!
+    organizationId: String!
+    "Run-tool name segment (ha__<slug>__<op>); lowercase [a-z0-9-], unique per org, immutable."
+    slug: String!
+    name: String!
+    "Home Assistant base URL (e.g. https://ha.example.com or a Nabu Casa remote URL)."
+    url: String!
+    "Exposed-op allowlist over the closed op catalog; empty = every op. Lets an admin register a read-only instance."
+    opAllowlist: [String!]!
+    "Disabled instances fail run-tool resolution loud, same as an unregistered slug."
+    enabled: Boolean!
+    createdAt: String!
+    createdBy: String
+    updatedAt: String!
+    updatedBy: String
+  }
+
+  # Uniform paginated list shape (cor:api:120).
+  type HomeAssistantInstancesPage {
+    items: [HomeAssistantInstance!]!
+    total: Int!
+  }
+
+  # One op of the CLOSED Home Assistant op catalog, as admitted by a
+  # registry row's allowlist — what this query returns IS what a run can
+  # declare in data.tools. The catalog is static (no upstream round-trip).
+  type HomeAssistantOp {
+    "The op segment, e.g. call_service."
+    op: String!
+    description: String!
+    "The run-tool / policy name: ha__<slug>__<op>."
+    runToolName: String!
+    "The op's argument JSON Schema."
+    inputSchema: JSON
+  }
+
   # Provider-neutral flag state (spec 002) — Graph's tri-state mapped to a
   # neutral vocabulary so a future Gmail tool can map its own subset.
   enum EmailFlag {
@@ -3007,6 +3049,31 @@ export const typeDefs = `#graphql
     fails.
     """
     mcpServerTools(ref: ID!): [McpServerTool!]
+
+    """
+    Fetch one registered Home Assistant instance (org member). Null when
+    the row does not exist OR the caller is not a member of its org — no
+    existence disclosure.
+    """
+    homeAssistantInstance(ref: ID!): HomeAssistantInstance
+
+    """
+    Uniform paginated Home Assistant instance list (cor:api:120). Default
+    scope: the caller's member orgs. orgId follows cor:api:100:01 (member
+    -> that org, non-member -> empty page, no disclosure, no admin
+    bypass). Slug-ascending order (id tiebreak); limit default 50 / cap
+    200; limit: 0 -> count only.
+    """
+    homeAssistantInstances(orgId: ID, limit: Int, offset: Int): HomeAssistantInstancesPage!
+
+    """
+    The ops one registered instance exposes (the closed catalog filtered
+    by the row's allowlist) — what authors browse to pick data.tools
+    entries; what this returns IS what a run can call. Null when the row
+    does not exist or the caller is not a member of its org; a disabled
+    instance errors with HA_INSTANCE_DISABLED.
+    """
+    homeAssistantInstanceOps(ref: ID!): [HomeAssistantOp!]
     exchangeMessages(
       connectionId: ID!
       top: Int
@@ -3941,6 +4008,41 @@ export const typeDefs = `#graphql
 
     "Hard-delete a registered MCP server (org ADMIN/OWNER); runs referencing its tools fail loud afterwards."
     deleteMcpServer(ref: ID!): Boolean!
+
+    """
+    Register a Home Assistant instance (org ADMIN/OWNER). orgRef accepts
+    ID or URN (cor:api:140). accessToken is an HA long-lived access token
+    — encrypted at rest, write-only, never returned. Registration grants
+    nothing by itself: runs still need the policy chain to allow
+    tool.ha__<slug>__<op>.
+    """
+    createHomeAssistantInstance(
+      orgRef: ID!
+      slug: String!
+      name: String!
+      url: String!
+      accessToken: String!
+      opAllowlist: [String!]
+      enabled: Boolean
+    ): HomeAssistantInstance!
+
+    """
+    Update a registered Home Assistant instance (org ADMIN/OWNER). The
+    slug is immutable — flow nodes reference it in data.tools names.
+    accessToken REPLACES the stored token (never cleared: an instance
+    without a token is unusable).
+    """
+    updateHomeAssistantInstance(
+      ref: ID!
+      name: String
+      url: String
+      accessToken: String
+      opAllowlist: [String!]
+      enabled: Boolean
+    ): HomeAssistantInstance!
+
+    "Hard-delete a registered Home Assistant instance (org ADMIN/OWNER); runs referencing its ops fail loud afterwards."
+    deleteHomeAssistantInstance(ref: ID!): Boolean!
     exchangeReply(connectionId: ID!, messageId: ID!, body: String!): Boolean!
     exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
 

@@ -472,6 +472,7 @@ model Organization {
   exchangeConnections ExchangeConnection[]
   slackConnections    SlackConnection[]
   mcpServers          McpServer[]
+  homeAssistantInstances HomeAssistantInstance[]
   // 046-usage-metering: billing back-relations.
   usageEvents         UsageEvent[]
   creditLedgerEntries CreditLedgerEntry[]
@@ -2117,6 +2118,44 @@ model McpServer {
   // wanted signal. No deletedAt ⇒ a plain (non-partial) unique works.
   @@unique([organizationId, slug], map: "mcp_servers_org_slug_uniq")
   @@map("mcp_servers")
+}
+
+/// One registered Home Assistant instance — the org-scoped registry behind
+/// the hadrontool-home-assistant capability tool (hadron-server#640). Same
+/// posture as McpServer: the row grants nothing by itself (every run-time
+/// call walks the policy chain as `tool.ha__<slug>__<op>` + action budget),
+/// hard delete by design, slug immutable because flow nodes reference it
+/// inside data.tools names.
+model HomeAssistantInstance {
+  id             String @id @default(cuid())
+  organizationId String @map("organization_id")
+  /// Run-tool name segment (`ha__<slug>__<op>`); lowercase [a-z0-9-],
+  /// unique per org. Keep it short — provider tool-name caps are ~64 chars.
+  slug           String
+  name           String
+  /// Home Assistant base URL (e.g. https://ha.example.com or a Nabu Casa
+  /// remote URL). The tool refuses private-network hosts unless its
+  /// HA_TOOL_ALLOW_PRIVATE_NETWORKS flag is set (self-hosted posture).
+  url            String
+  /// AES-256-GCM-encrypted long-lived access token
+  /// (src/lib/tokenCrypto.ts). WRITE-ONLY on the API surface: resolvers
+  /// never return it; update replaces it.
+  tokenEncrypted String   @map("token_encrypted")
+  /// Exposed-op allowlist over the closed HA_OPS catalog; empty = every op.
+  /// Lets an admin register a READ-ONLY instance (no call_service).
+  opAllowlist    String[] @default([]) @map("op_allowlist")
+  /// Disabled instances fail run-tool resolution loud (unknown tool), same
+  /// posture as an unregistered slug.
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  updatedBy      String?  @map("updated_by")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, slug], map: "home_assistant_instances_org_slug_uniq")
+  @@map("home_assistant_instances")
 }
 
 /// Pre-launch waitlist signup capture from the marketing site. Holds
