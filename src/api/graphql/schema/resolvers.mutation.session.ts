@@ -29,15 +29,29 @@ import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
-import { deleteToolConnection } from '../../../lib/emailClient.js';
+import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import {
   type Context,
   requireOrgRole,
   SESSION_INCLUDE,
+  mapToolCalendarEvent,
   runOwnedEmailOperation,
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
+
+/**
+ * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
+ * either/or schema sees absent fields, not null values (JSON.stringify drops
+ * undefined but serializes null).
+ */
+function dropNulls(t: { dateTime?: string | null; date?: string | null; timeZone?: string | null }) {
+  return {
+    dateTime: t.dateTime ?? undefined,
+    date: t.date ?? undefined,
+    timeZone: t.timeZone ?? undefined,
+  };
+}
 
 export const sessionMutations = {
     startSession: async (_: unknown, { input }: { input: SessionInput }, ctx: Context) => {
@@ -727,6 +741,164 @@ export const sessionMutations = {
         categories,
       });
       return true;
+    },
+
+    // ── Calendar mutations (hadrontool-google-cal) ─────────────────────
+    // All owner-only in v1: no OPERATION_SCOPES entry maps to these, so an
+    // App/headless caller is denied fail-closed even with a grant. The tool
+    // validates the either/or event-boundary shape and the response
+    // vocabulary; its typed validation_error passes through verbatim.
+
+    calendarCreateEvent: async (
+      _: unknown,
+      {
+        connectionRef,
+        calendarId,
+        title,
+        description,
+        location,
+        start,
+        end,
+        attendees,
+        notifyAttendees,
+        idempotencyKey,
+      }: {
+        connectionRef: string;
+        calendarId?: string | null;
+        title: string;
+        description?: string | null;
+        location?: string | null;
+        start: { dateTime?: string | null; date?: string | null; timeZone?: string | null };
+        end: { dateTime?: string | null; date?: string | null; timeZone?: string | null };
+        attendees?: string[] | null;
+        notifyAttendees?: boolean | null;
+        idempotencyKey?: string | null;
+      },
+      ctx: Context,
+    ) => {
+      const { event } = await runOwnedEmailOperation<{ event: ToolCalendarEvent }>(
+        ctx,
+        connectionRef,
+        'create-event',
+        {
+          calendarId: calendarId ?? undefined,
+          title,
+          description: description ?? undefined,
+          location: location ?? undefined,
+          start: dropNulls(start),
+          end: dropNulls(end),
+          attendees: attendees?.length ? attendees : undefined,
+          notifyAttendees: notifyAttendees ?? undefined,
+          idempotencyKey: idempotencyKey ?? undefined,
+        },
+      );
+      return mapToolCalendarEvent(event);
+    },
+
+    calendarUpdateEvent: async (
+      _: unknown,
+      {
+        connectionRef,
+        eventId,
+        calendarId,
+        title,
+        description,
+        location,
+        start,
+        end,
+        attendees,
+        notifyAttendees,
+        idempotencyKey,
+      }: {
+        connectionRef: string;
+        eventId: string;
+        calendarId?: string | null;
+        title?: string | null;
+        description?: string | null;
+        location?: string | null;
+        start?: { dateTime?: string | null; date?: string | null; timeZone?: string | null } | null;
+        end?: { dateTime?: string | null; date?: string | null; timeZone?: string | null } | null;
+        attendees?: string[] | null;
+        notifyAttendees?: boolean | null;
+        idempotencyKey?: string | null;
+      },
+      ctx: Context,
+    ) => {
+      const { event } = await runOwnedEmailOperation<{ event: ToolCalendarEvent }>(
+        ctx,
+        connectionRef,
+        'update-event',
+        {
+          eventId,
+          calendarId: calendarId ?? undefined,
+          title: title ?? undefined,
+          description: description ?? undefined,
+          location: location ?? undefined,
+          start: start ? dropNulls(start) : undefined,
+          end: end ? dropNulls(end) : undefined,
+          // An explicit empty list is a real patch value (clear the set).
+          attendees: attendees ?? undefined,
+          notifyAttendees: notifyAttendees ?? undefined,
+          idempotencyKey: idempotencyKey ?? undefined,
+        },
+      );
+      return mapToolCalendarEvent(event);
+    },
+
+    calendarDeleteEvent: async (
+      _: unknown,
+      {
+        connectionRef,
+        eventId,
+        calendarId,
+        notifyAttendees,
+        idempotencyKey,
+      }: {
+        connectionRef: string;
+        eventId: string;
+        calendarId?: string | null;
+        notifyAttendees?: boolean | null;
+        idempotencyKey?: string | null;
+      },
+      ctx: Context,
+    ) => {
+      await runOwnedEmailOperation(ctx, connectionRef, 'delete-event', {
+        eventId,
+        calendarId: calendarId ?? undefined,
+        notifyAttendees: notifyAttendees ?? undefined,
+        idempotencyKey: idempotencyKey ?? undefined,
+      });
+      return true;
+    },
+
+    calendarRespondToEvent: async (
+      _: unknown,
+      {
+        connectionRef,
+        eventId,
+        response,
+        calendarId,
+      }: {
+        connectionRef: string;
+        eventId: string;
+        response: 'ACCEPTED' | 'DECLINED' | 'TENTATIVE' | 'NONE';
+        calendarId?: string | null;
+      },
+      ctx: Context,
+    ) => {
+      const { event } = await runOwnedEmailOperation<{ event: ToolCalendarEvent }>(
+        ctx,
+        connectionRef,
+        'respond-to-event',
+        {
+          eventId,
+          calendarId: calendarId ?? undefined,
+          // NONE is not settable — the tool's schema rejects it with a typed
+          // validation_error (the EmailFlag COMPLETE precedent).
+          response: response.toLowerCase(),
+        },
+      );
+      return mapToolCalendarEvent(event);
     },
 
     runTask: async (

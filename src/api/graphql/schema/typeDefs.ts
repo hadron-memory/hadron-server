@@ -1630,6 +1630,102 @@ export const typeDefs = `#graphql
     unreadItemCount: Int
   }
 
+  # ── Calendar surface (hadrontool-google-cal; provider-neutral) ────────
+  # Calendar connections are ExchangeConnection rows (provider 'google-cal')
+  # on the same owner-only + ConnectionGrant gate as mail; only the
+  # operations differ. Shapes mirror the tool's neutral contract so an
+  # ms-exchange calendar sibling needs zero schema changes.
+
+  "Provider-neutral attendee response. NONE = invited, not yet answered."
+  enum CalendarEventResponse {
+    ACCEPTED
+    DECLINED
+    TENTATIVE
+    NONE
+  }
+
+  "One calendar the connected account can see."
+  type CalendarInfo {
+    id: ID!
+    name: String!
+    description: String
+    timeZone: String
+    "True for the account's primary calendar (the default calendarId)."
+    isPrimary: Boolean!
+    "True when the connected account may create/modify events here."
+    canEdit: Boolean!
+  }
+
+  """
+  An event boundary: exactly one of dateTime (timed, with timeZone) or
+  date (YYYY-MM-DD, all-day) is set.
+  """
+  type CalendarEventTime {
+    dateTime: String
+    date: String
+    timeZone: String
+  }
+
+  type CalendarAttendee {
+    name: String
+    address: String!
+    optional: Boolean!
+    response: CalendarEventResponse!
+  }
+
+  type CalendarPerson {
+    name: String
+    address: String
+  }
+
+  type CalendarEvent {
+    id: ID!
+    calendarId: String!
+    title: String
+    description: String
+    location: String
+    start: CalendarEventTime!
+    end: CalendarEventTime!
+    isAllDay: Boolean!
+    "confirmed, tentative, or cancelled (provider-neutral vocabulary)."
+    status: String!
+    organizer: CalendarPerson
+    "True when the connected account organized the event."
+    isOrganizer: Boolean!
+    attendees: [CalendarAttendee!]!
+    "The connected account's own response; null when it is not an attendee."
+    myResponse: CalendarEventResponse
+    webLink: String
+    "Series id when this is an instance of a recurring event."
+    seriesId: ID
+    createdAt: String
+    updatedAt: String
+  }
+
+  type ScheduleBusyInterval {
+    start: String!
+    end: String!
+  }
+
+  "Free/busy intervals for one requested schedule (calendarSchedule)."
+  type ScheduleFreeBusy {
+    id: ID!
+    busy: [ScheduleBusyInterval!]!
+    "Set when the provider could not resolve this schedule; the query still succeeds for the others."
+    error: String
+  }
+
+  """
+  An event boundary for create/update: exactly one of dateTime (timed) or
+  date (YYYY-MM-DD, all-day). A dateTime needs timeZone unless it carries
+  its own UTC offset — a zone-less value is rejected, never guessed.
+  """
+  input CalendarEventTimeInput {
+    dateTime: String
+    date: String
+    timeZone: String
+  }
+
   # Invitation to join the platform (and optionally an organization)
   type UserInvitation {
     id: ID!
@@ -2920,6 +3016,45 @@ export const typeDefs = `#graphql
     ): [ExchangeMessage!]!
     exchangeFolders(connectionId: ID!): [ExchangeFolder!]!
 
+    # ── Calendar reads (hadrontool-google-cal) ─────────────────────────
+    # Owner-only for interactive users; App/headless callers need a
+    # ConnectionGrant covering calendar.read (calendar.freebusy for
+    # calendarSchedule) — the same gate as the mail surface.
+
+    "Calendars the connected account can see. Grant scope: calendar.read."
+    calendars(connectionRef: ID!): [CalendarInfo!]!
+
+    """
+    Events in a time window (recurring events expand to instances, ordered
+    chronologically). start/end are RFC 3339; calendarId defaults to the
+    account's primary calendar. Grant scope: calendar.read.
+    """
+    calendarEvents(
+      connectionRef: ID!
+      calendarId: String
+      start: String
+      end: String
+      "Free-text search over event fields."
+      query: String
+      top: Int
+    ): [CalendarEvent!]!
+
+    "One event by id. Grant scope: calendar.read."
+    calendarEvent(connectionRef: ID!, eventId: ID!, calendarId: String): CalendarEvent!
+
+    """
+    Free/busy intervals for one or more schedules (calendar ids or addresses
+    the account can read; defaults to the account's primary calendar).
+    Structurally capped at yes/no busy windows — never event contents.
+    Grant scope: calendar.freebusy.
+    """
+    calendarSchedule(
+      connectionRef: ID!
+      start: String!
+      end: String!
+      schedules: [String!]
+    ): [ScheduleFreeBusy!]!
+
     """
     Uniform paginated app list (#473) — replaces the org-ADMIN apps(orgId!)
     and the member myApps. Scope: Apps in the caller's member orgs (App
@@ -3840,6 +3975,63 @@ export const typeDefs = `#graphql
 
     "Set the categories (color labels) on a message. Owner-only."
     emailCategorizeMessage(connectionRef: ID!, messageId: ID!, categories: [String!]!): Boolean!
+
+    # ── Calendar mutations (hadrontool-google-cal) ─────────────────────
+    # All owner-only in v1 (no grant scope maps to calendar mutations —
+    # fail-closed for App/headless callers). idempotencyKey rides through
+    # to the tool's reservation-based replay (at-least-once callers).
+    # notifyAttendees (default true) controls invitation/update emails.
+
+    "Create an event. calendarId defaults to the primary calendar. Owner-only."
+    calendarCreateEvent(
+      connectionRef: ID!
+      calendarId: String
+      title: String!
+      description: String
+      location: String
+      start: CalendarEventTimeInput!
+      end: CalendarEventTimeInput!
+      "Attendee email addresses."
+      attendees: [String!]
+      notifyAttendees: Boolean
+      idempotencyKey: String
+    ): CalendarEvent!
+
+    "Patch an event — absent fields stay unchanged; attendees replaces the set. Owner-only."
+    calendarUpdateEvent(
+      connectionRef: ID!
+      eventId: ID!
+      calendarId: String
+      title: String
+      description: String
+      location: String
+      start: CalendarEventTimeInput
+      end: CalendarEventTimeInput
+      attendees: [String!]
+      notifyAttendees: Boolean
+      idempotencyKey: String
+    ): CalendarEvent!
+
+    "Delete (cancel) an event. Owner-only."
+    calendarDeleteEvent(
+      connectionRef: ID!
+      eventId: ID!
+      calendarId: String
+      notifyAttendees: Boolean
+      idempotencyKey: String
+    ): Boolean!
+
+    """
+    Set the connected account's own RSVP on an event it was invited to
+    (ACCEPTED / DECLINED / TENTATIVE — NONE is not a settable response).
+    Owner-only.
+    """
+    calendarRespondToEvent(
+      connectionRef: ID!
+      eventId: ID!
+      response: CalendarEventResponse!
+      calendarId: String
+    ): CalendarEvent!
 
     # ── Chat API ──────────────────────────────────────────────────────
     """

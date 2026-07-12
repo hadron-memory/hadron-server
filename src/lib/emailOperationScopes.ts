@@ -49,9 +49,14 @@ export const OPERATION_SCOPES: Readonly<Record<string, ConnectionGrantScope>> = 
   'save-draft': 'mail.send',
   'update-draft': 'mail.send',
   'send-draft': 'mail.send',
-  // calendar (ops land in hadrontool-ms-exchange later; table is ready now)
+  // calendar (hadrontool-google-cal implements these; an ms-exchange
+  // calendar sibling reuses the same names). Calendar MUTATIONS
+  // (create/update/delete/respond-to-event) are deliberately absent —
+  // owner-only in v1, same posture as the mailbox mutations.
   'get-schedule': 'calendar.freebusy',
   'list-events': 'calendar.read',
+  'get-event': 'calendar.read',
+  'list-calendars': 'calendar.read',
 });
 
 /** The scope an operation requires, or `undefined` when it is owner-only. */
