@@ -1,0 +1,320 @@
+import type { PrismaClient } from '../../generated/prisma/index.js';
+import { Prisma } from '../../generated/prisma/index.js';
+import { generateId } from '../../lib/id.js';
+import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
+import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
+
+/**
+ * Extract a parent node and its whole loc-subtree into a BRAND-NEW memory,
+ * making the parent the new memory's root.
+ *
+ * The "subtree" is loc-prefix defined (the same shape searchReplaceInNodes /
+ * moveNode descendants use): the node at `parentLoc` plus every live node whose
+ * loc starts with `parentLoc:`. Locs are REBASED so the parent becomes the
+ * memory root — `parentLoc` → `rootLoc`, `parentLoc:x:y` → `rootLoc:x:y`.
+ *
+ * Two dispositions (chosen by the caller):
+ *   - copy (default): the source subtree stays; the new memory gets fresh-id
+ *     copies (mirrors cloneMemory — the copies are "newly created", no revision
+ *     history, embeddings backfilled by the caller when indexed).
+ *   - move: after the copy, the source subtree (its nodes + the source memory's
+ *     edges/pending-edges touching it) is soft-deleted, so the parent is truly
+ *     relocated out of the source.
+ *
+ * The new memory PRESERVES the source's class (a `group` source stays a
+ * member-restricted group, personal/private stay owner-owned) so an extract
+ * never widens who can read the content. Governance/config columns
+ * (requiresLicense, acceptsUploads, revision cap, chunk dials) carry over from
+ * the source too.
+ *
+ * What carries over and what does not (v1):
+ *   - Edges: ONLY those wholly INSIDE the subtree (both endpoints moved). Their
+ *     loc is re-derived from the rebased endpoint locs (edge identity is
+ *     loc+memory, spec 037), with a numeric suffix on the rare derived-loc
+ *     collision so no edge is silently dropped. Boundary-crossing edges are
+ *     DROPPED.
+ *   - PendingEdges: DROPPED (an unresolved forward reference from the subtree
+ *     is left behind; carrying + rewriting them is a follow-up).
+ *   - NodeRevision history, embeddings, subscriptions/shares/members, assets,
+ *     git-sync config: NOT copied (same rationale as cloneMemory).
+ *
+ * v1 limitation: node content/abstract are copied verbatim. Because both the
+ * memory slug AND node locs change, URN references among the moved nodes inside
+ * prose WILL break (a self-reference like `…::findings:auth:oauth` is wrong on
+ * both axes) — a full loc-rewrite is a follow-up.
+ *
+ * The caller (extractParentNodeToMemory resolver) is responsible for authz,
+ * source-class/encryption gating, URN-collision checks, and post-extract
+ * embedding backfill.
+ */
+
+export interface ExtractParentNodeArgs {
+  /** Source memory the subtree currently lives in. */
+  sourceMemoryId: string;
+  /** Loc of the parent node — the subtree root to extract. */
+  parentLoc: string;
+  /** Pre-computed `<org.urn>:<slug>` URN for the new memory. */
+  newUrn: string;
+  /** Display name of the new memory. Doubles as its root loc (a valid slug). */
+  name: string;
+  /** Root loc for the rebased subtree — the parent node lands here. */
+  rootLoc: string;
+  /** Org the new memory lands in (resolved + authorized by the caller). */
+  targetOrganizationId: string;
+  /** Class of the new memory — the source's own (system/app rejected upstream). */
+  newClass: MemoryClass;
+  /** Visibility of the new memory (GROUP for group; NULL for personal/private). */
+  visibility: MemoryVisibility | null;
+  /** Owner for personal/private extractions (chk_personal_visibility_user). */
+  ownerUserId: string | null;
+  /** Bootstrap this user as the group-class extract's first owner member. */
+  groupOwnerUserId: string | null;
+  /** contentChunks vector index on the new memory (knowledge default = true). */
+  vectorIndexEnabled: boolean;
+  /** move = soft-delete the source subtree after copying; copy = leave it. */
+  move: boolean;
+  /** Audit attribution for createdBy / deletedBy columns. */
+  actorId: string | null;
+}
+
+export interface ExtractParentNodeResult {
+  memoryId: string;
+  nodeCount: number;
+  edgeCount: number;
+}
+
+/**
+ * Execute the extract inside one transaction. Throws if no live node exists at
+ * `parentLoc` in the source memory.
+ */
+export async function extractParentNodeGraph(
+  db: PrismaClient,
+  args: ExtractParentNodeArgs,
+): Promise<ExtractParentNodeResult> {
+  return db.$transaction(
+    async (tx) => {
+      const source = await tx.memory.findUniqueOrThrow({ where: { id: args.sourceMemoryId } });
+
+      // ── Subtree ──────────────────────────────────────────────────────────
+      // The node at parentLoc plus its descendants, on `:` path boundaries so
+      // a sibling like `findings:auth-v2` isn't swept in with `findings:auth`.
+      const nodes = await tx.node.findMany({
+        where: {
+          memoryId: args.sourceMemoryId,
+          deletedAt: null,
+          OR: [{ loc: args.parentLoc }, { loc: { startsWith: `${args.parentLoc}:` } }],
+        },
+      });
+      const parent = nodes.find((n) => n.loc === args.parentLoc);
+      if (!parent) {
+        throw new ParentNodeNotFoundError(args.parentLoc, args.sourceMemoryId);
+      }
+
+      // Rebase a source loc onto the new root: parentLoc → rootLoc,
+      // parentLoc:x → rootLoc:x. `slice(parentLoc.length)` yields '' for the
+      // parent and `:x…` for a descendant.
+      const rebase = (oldLoc: string): string =>
+        args.rootLoc + oldLoc.slice(args.parentLoc.length);
+
+      // ── New memory ───────────────────────────────────────────────────────
+      const memoryId = generateId();
+      await tx.memory.create({
+        data: {
+          id: memoryId,
+          organizationId: args.targetOrganizationId,
+          urn: args.newUrn,
+          name: args.name,
+          visibility: args.visibility,
+          class: args.newClass,
+          // Governance/config carried from the source so an extract never
+          // silently drops a license gate or resets tuned chunking (a licensed
+          // source must stay licensed, cross-org subscribe still gated).
+          requiresLicense: source.requiresLicense,
+          acceptsUploads: source.acceptsUploads,
+          maxRevCount: source.maxRevCount,
+          chunkTokens: source.chunkTokens,
+          chunkOverlap: source.chunkOverlap,
+          forceFixedSize: source.forceFixedSize,
+          vectorIndexEnabled: args.vectorIndexEnabled,
+          // Match createMemory: a content-chunk index needs a contentChunks
+          // source, otherwise most nodes stay unindexed until abstracts exist.
+          ...(args.vectorIndexEnabled ? { embeddingSource: 'contentChunks' as const } : {}),
+          // userId set iff personal/private (chk_personal_visibility_user).
+          userId: args.ownerUserId,
+          createdBy: args.actorId,
+        },
+      });
+
+      // Group-class extract: bootstrap the caller as first owner in the SAME
+      // transaction so the memory is never persisted zero-owner (matches
+      // createMemory / cloneMemoryGraph).
+      if (args.groupOwnerUserId) {
+        await tx.memoryMember.create({
+          data: {
+            memoryId,
+            userId: args.groupOwnerUserId,
+            role: 'owner',
+            createdBy: args.groupOwnerUserId,
+          },
+        });
+      }
+
+      // ── Nodes ────────────────────────────────────────────────────────────
+      const idMap = new Map<string, string>();
+      const newLocById = new Map<string, string>();
+      for (const n of nodes) {
+        idMap.set(n.id, generateId());
+        newLocById.set(n.id, rebase(n.loc));
+      }
+      const movedIds = [...idMap.keys()];
+
+      const nodeRows: Prisma.NodeCreateManyInput[] = nodes.map((n) => ({
+        id: idMap.get(n.id)!,
+        memoryId,
+        nodeType: n.nodeType,
+        name: n.name,
+        alias: n.alias,
+        loc: newLocById.get(n.id)!,
+        isLink: n.isLink,
+        description: n.description,
+        // Content copied verbatim (v1 — no URN/loc rewrite). contentHash and
+        // abstractOriginHash therefore still describe these exact bytes.
+        abstract: n.abstract,
+        content: n.content,
+        contentHash: n.contentHash,
+        abstractOriginHash: n.abstractOriginHash,
+        tags: n.tags,
+        properties: jsonOrDbNull(n.properties),
+        data: jsonOrDbNull(n.data),
+        seq: n.seq,
+        ownerRepo: n.ownerRepo,
+        isRunnable: n.isRunnable,
+        llmModel: n.llmModel,
+        aiAgent: n.aiAgent,
+        tokens: n.tokens,
+        // Embedding markers start clean; the caller backfills if indexed.
+        createdBy: args.actorId,
+      }));
+      if (nodeRows.length > 0) {
+        await tx.node.createMany({ data: nodeRows });
+      }
+
+      // ── Edges (intra-subtree only) ───────────────────────────────────────
+      // Both endpoints must be in the moved set; boundary-crossing edges are
+      // dropped. Edge loc is re-derived from the rebased endpoint locs (node
+      // locs changed; edge identity is loc+memory, spec 037). Two source edges
+      // between the same endpoints with names that sanitize alike derive the
+      // same loc — disambiguate with a numeric suffix so neither is dropped.
+      const edges = await tx.edge.findMany({
+        where: {
+          // movedIds are all source-memory nodes, so this is implied — but
+          // stating it lets the planner use the (memoryId, ...) index and keeps
+          // the "edges of the source memory" invariant explicit.
+          memoryId: args.sourceMemoryId,
+          deletedAt: null,
+          sourceId: { in: movedIds },
+          targetId: { in: movedIds },
+        },
+      });
+      const usedEdgeLocs = new Set<string>();
+      const edgeRows: Prisma.EdgeCreateManyInput[] = edges.map((e) => {
+        const base = deriveEdgeLoc(newLocById.get(e.sourceId)!, e.name, newLocById.get(e.targetId)!);
+        let loc = base;
+        for (let n = 2; usedEdgeLocs.has(loc); n++) loc = `${base}:${n}`;
+        usedEdgeLocs.add(loc);
+        return {
+          id: generateId(),
+          memoryId,
+          sourceId: idMap.get(e.sourceId)!,
+          targetId: idMap.get(e.targetId)!,
+          loc,
+          name: e.name,
+          description: e.description,
+          isRunnable: e.isRunnable,
+          condition: jsonOrDbNull(e.condition),
+          priority: e.priority,
+          data: jsonOrDbNull(e.data),
+          createdBy: args.actorId,
+        };
+      });
+      if (edgeRows.length > 0) {
+        await tx.edge.createMany({ data: edgeRows });
+      }
+
+      // ── Move disposition ─────────────────────────────────────────────────
+      // Soft-delete the source subtree so the parent is truly relocated.
+      if (args.move) {
+        const now = new Date();
+        // Only edges that LIVE in the source memory (Edge.memoryId is the
+        // source node's memory). This catches intra-subtree edges and outgoing
+        // edges to nodes outside the subtree. Incoming cross-memory edges
+        // (memoryId = another memory) are left untouched — soft-deleting them
+        // would mutate a memory the caller has no write access to.
+        await tx.edge.updateMany({
+          where: {
+            memoryId: args.sourceMemoryId,
+            deletedAt: null,
+            OR: [{ sourceId: { in: movedIds } }, { targetId: { in: movedIds } }],
+          },
+          data: { deletedAt: now, deletedBy: args.actorId },
+        });
+        await tx.node.updateMany({
+          where: { memoryId: args.sourceMemoryId, id: { in: movedIds }, deletedAt: null },
+          data: { deletedAt: now, deletedBy: args.actorId },
+        });
+        // PendingEdges hang off moved nodes (sourceId, Cascade) — soft-delete
+        // them too so none dangle at a now-deleted node, and keep the source's
+        // denormalized pendingEdgeCount honest.
+        const movedPending = await tx.pendingEdge.findMany({
+          where: { sourceId: { in: movedIds }, deletedAt: null },
+          select: { id: true },
+        });
+        if (movedPending.length > 0) {
+          await tx.pendingEdge.updateMany({
+            where: { id: { in: movedPending.map((p) => p.id) } },
+            data: { deletedAt: now, deletedBy: args.actorId },
+          });
+          await tx.memory.update({
+            where: { id: args.sourceMemoryId },
+            data: { pendingEdgeCount: { decrement: movedPending.length } },
+          });
+        }
+      }
+
+      // Provenance breadcrumb on the new memory.
+      await tx.memoryLogEntry.create({
+        data: {
+          id: generateId(),
+          memoryId,
+          level: 'INFO',
+          eventType: 'OTHER',
+          message: `${args.move ? 'Moved' : 'Extracted'} from node "${args.parentLoc}" of memory "${source.urn}"`,
+          detail: {
+            sourceMemoryId: args.sourceMemoryId,
+            sourceMemoryUrn: source.urn,
+            parentLoc: args.parentLoc,
+            move: args.move,
+          },
+          createdBy: args.actorId,
+        },
+      });
+
+      return { memoryId, nodeCount: nodeRows.length, edgeCount: edgeRows.length };
+    },
+    // A large subtree copies many rows; the default 5s interactive-transaction
+    // timeout is too tight (mirrors cloneMemoryGraph).
+    { timeout: 120_000 },
+  );
+}
+
+/** No live node exists at the requested parent loc in the source memory. */
+export class ParentNodeNotFoundError extends Error {
+  constructor(
+    public readonly loc: string,
+    public readonly memoryId: string,
+  ) {
+    super(`No live node at loc "${loc}" in memory ${memoryId}.`);
+    this.name = 'ParentNodeNotFoundError';
+  }
+}
