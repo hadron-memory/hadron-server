@@ -72,6 +72,7 @@ type MemoryForAccess = {
   appId: string | null;
   userMemoryOfAgentId: string | null;
   organizationId: string;
+  isEncrypted: boolean;
 };
 
 const MEMORY_SELECT = {
@@ -83,6 +84,7 @@ const MEMORY_SELECT = {
   appId: true,
   userMemoryOfAgentId: true,
   organizationId: true,
+  isEncrypted: true,
   deletedAt: true,
 } as const;
 
@@ -274,7 +276,14 @@ async function memoryGrants(
     });
     if (grantRows.length > 0) {
       const link = { allow: grantRows.flatMap((g) => g.actions) };
-      const canClone = allows(link, 'memory.clone');
+      // A clone grant maps to manage only where a clone could actually run:
+      // cloneMemory categorically rejects app-class and (v1) encrypted
+      // sources AFTER its gate, so mapping those would over-report a
+      // capability the holder cannot exercise. deleteMemory has no such
+      // rejection, so memory.delete maps on every class that reaches here.
+      const clonable =
+        (memory.class === 'knowledge' || memory.class === 'group') && !memory.isEncrypted;
+      const canClone = clonable && allows(link, 'memory.clone');
       const canDelete = allows(link, 'memory.delete');
       if (canClone || canDelete) {
         grants.push({

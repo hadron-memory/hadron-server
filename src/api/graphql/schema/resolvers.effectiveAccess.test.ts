@@ -509,4 +509,45 @@ describe('memory — individual action grants (PRINCIPAL_GRANT, cor:acl:040:06)'
     expect(res.grants.some((x: any) => x.source === 'PRINCIPAL_GRANT')).toBe(false);
     expect(res.canManage).toBe(false);
   });
+
+  it('on an app-class memory a clone grant confers nothing, a delete grant confers delete', async () => {
+    // cloneMemory categorically rejects app-class sources after its gate, so
+    // mapping clone → manage there would over-report; deleteMemory does gate
+    // app-class through requireOrgAction, so delete maps.
+    const { app } = await createDbAppWithKey(db, 'grantapp', org.id);
+    const appMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:grantappmem`,
+        name: 'grantappmem',
+        class: 'app',
+        appId: app.id,
+      },
+    });
+    await grantRow(member.id, ['memory.clone', 'memory.delete']);
+    const res = await call(member.id, `hrn:memory:${appMem.urn}`, asAdmin());
+    expect(res.canManage).toBe(false);
+    expect(res.canDelete).toBe(true);
+    const g = res.grants.find((x: any) => x.source === 'PRINCIPAL_GRANT');
+    expect(g).toEqual({ source: 'PRINCIPAL_GRANT', role: 'memory.delete', via: org.urn });
+  });
+
+  it('on an ENCRYPTED memory a clone grant confers nothing (cloneMemory rejects encrypted sources)', async () => {
+    await db.memory.update({ where: { id: graph.id }, data: { isEncrypted: true } });
+    await grantRow(member.id, ['memory.clone', 'memory.delete']);
+    const res = await call(member.id, `hrn:memory:${graph.urn}`, asAdmin());
+    expect(res.canManage).toBe(false);
+    expect(res.canDelete).toBe(true); // deleteMemory has no encryption guard
+    const g = res.grants.find((x: any) => x.source === 'PRINCIPAL_GRANT');
+    expect(g).toEqual({ source: 'PRINCIPAL_GRANT', role: 'memory.delete', via: org.urn });
+  });
+
+  it('a node inherits the grant-derived capabilities as NODE_INHERITED', async () => {
+    await grantRow(member.id, ['memory.clone']);
+    const node = await createDbNode(db, { loc: 'grantnode', name: 'grantnode', memoryId: graph.id });
+    const res = await call(member.id, `hrn:node:${graph.urn}:${node.loc}`, asAdmin());
+    expect(res.canManage).toBe(true);
+    expect(res.grants.some((g) => g.source === 'NODE_INHERITED' && g.role === 'memory.clone')).toBe(true);
+  });
 });
