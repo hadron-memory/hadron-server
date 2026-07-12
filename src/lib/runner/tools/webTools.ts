@@ -32,6 +32,41 @@ import type { RunToolDef } from './types.js';
 const WEB_FETCH_FORMATS = ['markdown', 'text', 'html', 'links'] as const;
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
 
+/**
+ * Origin + pathname only, for the hop-trail ledger. The hop log is persisted in
+ * `AppRun.hops` and readable via the run audit API, so a presigned/OAuth
+ * `finalUrl` would leak its token (query/fragment) to any org reader. Strip the
+ * search + hash before logging (Codex P2 / Copilot review, #639).
+ */
+function redactUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    // Not a parseable absolute URL — drop everything from the first ? or # on.
+    return raw.replace(/[?#].*$/, '');
+  }
+}
+
+/** The tool caps bytes itself; here we only reject nonsense (NaN, ≤0, fractional). */
+function validMaxBytes(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
+}
+
+/**
+ * Coerce a caller-supplied `headers` object to `Record<string,string>`: the LLM
+ * may emit numbers/booleans, and the downstream tool's contract is string
+ * values. Non-object/array ⇒ undefined; null/undefined values are dropped.
+ */
+function coerceHeaders(v: unknown): Record<string, string> | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (val !== null && val !== undefined) out[k] = String(val);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export const webFetch: RunToolDef = {
   name: 'web_fetch',
   description:
@@ -61,15 +96,15 @@ export const webFetch: RunToolDef = {
       typeof args.format === 'string' && (WEB_FETCH_FORMATS as readonly string[]).includes(args.format)
         ? (args.format as (typeof WEB_FETCH_FORMATS)[number])
         : undefined;
-    const maxBytes = typeof args.maxBytes === 'number' ? args.maxBytes : undefined;
+    const maxBytes = validMaxBytes(args.maxBytes);
     const result = await fetchUrl({
       url,
       ...(format ? { format } : {}),
       ...(maxBytes != null ? { maxBytes } : {}),
     });
-    // Log the hop trail as an outbound-request ledger — status + final URL, no
-    // bodies/headers (they can carry secrets; #628).
-    ctx.log(`web_fetch ${result.status} ${result.finalUrl}`);
+    // Log the hop trail as an outbound-request ledger — status + redacted final
+    // URL, no query/fragment/bodies/headers (they can carry secrets; #628/#639).
+    ctx.log(`web_fetch ${result.status} ${redactUrl(result.finalUrl)}`);
     return result;
   },
 };
@@ -90,9 +125,16 @@ export const webRequest: RunToolDef = {
         description: 'HTTP method.',
       },
       url: { type: 'string', description: 'The absolute http(s) URL to request.' },
-      headers: { type: 'object', description: 'Optional request headers (name → value).' },
+      headers: {
+        type: 'object',
+        additionalProperties: { type: 'string' },
+        description: 'Optional request headers (name → string value).',
+      },
       body: { type: 'string', description: 'Optional raw string request body. Use body OR json, not both.' },
-      json: { type: 'object', description: 'Optional JSON request body (sent as application/json).' },
+      // No `type` constraint: many APIs accept an array or primitive JSON body,
+      // not only an object — the LLM must not be blocked from a valid call
+      // (Copilot review, #639). Exclusivity with `body` is enforced at runtime.
+      json: { description: 'Optional JSON request body — any JSON value (sent as application/json).' },
       maxBytes: { type: 'number', description: 'Optional cap on the number of response bytes read.' },
     },
     required: ['method', 'url'],
@@ -112,14 +154,14 @@ export const webRequest: RunToolDef = {
       throw new Error('web_request: pass "body" OR "json", not both.');
     }
     const input: HttpRequestInput = { method, url };
-    if (args.headers && typeof args.headers === 'object' && !Array.isArray(args.headers)) {
-      input.headers = args.headers as Record<string, string>;
-    }
+    const headers = coerceHeaders(args.headers);
+    if (headers) input.headers = headers;
     if (typeof args.body === 'string') input.body = args.body;
     if (args.json !== undefined) input.json = args.json;
-    if (typeof args.maxBytes === 'number') input.maxBytes = args.maxBytes;
+    const maxBytes = validMaxBytes(args.maxBytes);
+    if (maxBytes != null) input.maxBytes = maxBytes;
     const result = await httpRequest(input);
-    ctx.log(`web_request ${result.method ?? method} ${result.status} ${result.finalUrl ?? url}`);
+    ctx.log(`web_request ${result.method ?? method} ${result.status} ${redactUrl(result.finalUrl ?? url)}`);
     return result;
   },
 };

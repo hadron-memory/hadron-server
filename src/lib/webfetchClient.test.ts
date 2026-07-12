@@ -97,6 +97,17 @@ describe('webfetchClient', () => {
     expect((err as GraphQLError).message).not.toContain('SUPER_SECRET');
   });
 
+  it('maps a serialization failure to WEBFETCH_TOOL_ERROR, not _UNREACHABLE, and never hits the network', async () => {
+    const fetchMock = fetchStub(async () => okJson({}));
+    vi.stubGlobal('fetch', fetchMock);
+    // A BigInt in the JSON body is not serializable by JSON.stringify.
+    const err = await httpRequest({ method: 'POST', url: 'https://api', json: { n: 1n } }).catch(
+      (e) => e as GraphQLError,
+    );
+    expect((err as GraphQLError).extensions.code).toBe('WEBFETCH_TOOL_ERROR');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('http-request forwards method, body, and headers verbatim', async () => {
     const fetchMock = fetchStub(async () =>
       okJson({ method: 'POST', finalUrl: 'https://api.example', status: 201, headers: {}, contentType: 'application/json', body: { id: 1 }, truncated: false }),

@@ -136,6 +136,18 @@ function toolConfig(): { baseUrl: string; token?: string } {
  */
 async function runOperation<T>(operation: string, input: unknown): Promise<T> {
   const { baseUrl, token } = toolConfig();
+  // Serialize BEFORE opening the network try: a serialization failure (a
+  // circular ref, or a BigInt in `json`) is a caller-input error, not an
+  // unreachable tool — mapping it to WEBFETCH_TOOL_UNREACHABLE would be
+  // misleading. Never attach `input` to the error — it can carry credentials.
+  let body: string;
+  try {
+    body = JSON.stringify(input);
+  } catch (err) {
+    throw new GraphQLError('Web fetch request could not be serialized.', {
+      extensions: { code: 'WEBFETCH_TOOL_ERROR', cause: String(err) },
+    });
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
   let res: Response;
@@ -147,7 +159,7 @@ async function runOperation<T>(operation: string, input: unknown): Promise<T> {
         'content-type': 'application/json',
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify(input),
+      body,
       signal: controller.signal,
     });
     // Keep the body read inside the timeout window — a tool that sends headers

@@ -41,6 +41,22 @@ describe('web_fetch', () => {
     await expect(webFetch.execute(stubCtx(), {})).rejects.toThrow(/"url" is required/);
     expect(fetchUrl).not.toHaveBeenCalled();
   });
+
+  it('redacts the query/fragment from the final URL before logging (no token leak into the hop trail)', async () => {
+    vi.mocked(fetchUrl).mockResolvedValueOnce({ finalUrl: 'https://x/p?token=SECRET#frag', status: 200 } as never);
+    const log = vi.fn();
+    await webFetch.execute(stubCtx(log), { url: 'https://x' });
+    expect(log).toHaveBeenCalledWith('web_fetch 200 https://x/p');
+    expect((log.mock.calls[0]![0] as string)).not.toContain('SECRET');
+  });
+
+  it('drops a non-positive or fractional maxBytes', async () => {
+    vi.mocked(fetchUrl).mockResolvedValue({ finalUrl: 'https://x', status: 200 } as never);
+    await webFetch.execute(stubCtx(), { url: 'https://x', maxBytes: -5 });
+    expect(fetchUrl).toHaveBeenLastCalledWith({ url: 'https://x' });
+    await webFetch.execute(stubCtx(), { url: 'https://x', maxBytes: 1.5 });
+    expect(fetchUrl).toHaveBeenLastCalledWith({ url: 'https://x' });
+  });
 });
 
 describe('web_request', () => {
@@ -81,6 +97,27 @@ describe('web_request', () => {
     vi.mocked(httpRequest).mockResolvedValueOnce({ method: 'GET', finalUrl: 'https://api', status: 200 } as never);
     await webRequest.execute(stubCtx(), { method: 'GET', url: 'https://api', headers: ['a', 'b'] });
     expect(httpRequest).toHaveBeenCalledWith({ method: 'GET', url: 'https://api' });
+  });
+
+  it('coerces non-string header values to strings and drops null/undefined', async () => {
+    vi.mocked(httpRequest).mockResolvedValueOnce({ method: 'GET', finalUrl: 'https://api', status: 200 } as never);
+    await webRequest.execute(stubCtx(), {
+      method: 'GET',
+      url: 'https://api',
+      headers: { 'x-count': 3, 'x-flag': true, 'x-skip': null },
+    });
+    expect(httpRequest).toHaveBeenCalledWith({
+      method: 'GET',
+      url: 'https://api',
+      headers: { 'x-count': '3', 'x-flag': 'true' },
+    });
+  });
+
+  it('redacts the query/fragment from the logged URL', async () => {
+    vi.mocked(httpRequest).mockResolvedValueOnce({ method: 'POST', finalUrl: 'https://api/x?sig=SECRET', status: 200 } as never);
+    const log = vi.fn();
+    await webRequest.execute(stubCtx(log), { method: 'POST', url: 'https://api/x?sig=SECRET' });
+    expect(log).toHaveBeenCalledWith('web_request POST 200 https://api/x');
   });
 });
 
