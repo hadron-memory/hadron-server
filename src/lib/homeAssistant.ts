@@ -92,6 +92,7 @@ export const HA_OPS: readonly HaOpDef[] = [
         entityIds: {
           type: 'array',
           items: { type: 'string' },
+          maxItems: 100,
           description: 'Only these entity ids (max 100).',
         },
       },
@@ -202,6 +203,14 @@ export function validateHaInstanceUrl(raw: string): void {
   }
   if (parsed.username || parsed.password) {
     throw new GraphQLError('url must not embed credentials — use accessToken.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  // A BASE url only — the tool composes /api/* paths onto it, and would
+  // silently drop a query/fragment (haFetch uses origin+pathname), so
+  // reject at registration rather than store something misleading.
+  if (parsed.search || parsed.hash) {
+    throw new GraphQLError('url must be a base URL without query parameters or fragments.', {
       extensions: { code: 'BAD_USER_INPUT' },
     });
   }

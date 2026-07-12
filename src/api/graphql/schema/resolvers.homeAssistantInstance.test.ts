@@ -94,6 +94,8 @@ describe('createHomeAssistantInstance', () => {
     await expect(createInstance({ slug: 'Has_Underscore' })).rejects.toThrow(/slug/);
     await expect(createInstance({ url: 'not-a-url' })).rejects.toThrow(/absolute URL/);
     await expect(createInstance({ url: 'https://user:pw@ha.example.com' })).rejects.toThrow(/credentials/);
+    await expect(createInstance({ url: 'https://ha.example.com/?query=1' })).rejects.toThrow(/base URL/);
+    await expect(createInstance({ url: 'https://ha.example.com/#frag' })).rejects.toThrow(/base URL/);
     await expect(createInstance({ accessToken: 'has space' })).rejects.toThrow(/accessToken/);
     await expect(createInstance({ accessToken: '' })).rejects.toThrow(/accessToken/);
     await expect(createInstance({ opAllowlist: ['call_service', 'reboot_house'] })).rejects.toThrow(
