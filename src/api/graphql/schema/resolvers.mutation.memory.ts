@@ -912,6 +912,16 @@ export const memoryMutations = {
       const parent = await ctx.db.node.findUniqueOrThrow({ where: { id: parentId } });
       const source = await ctx.db.memory.findUniqueOrThrow({ where: { id: parent.memoryId } });
 
+      // A node can outlive its memory's soft-delete — deleteMemory only
+      // tombstones the Memory row, and resolveNodeRef filters the node row, not
+      // its memory. Treat an extract from a tombstoned source as not-found so a
+      // stale node id can't resurrect deleted content into a new live memory.
+      if (source.deletedAt) {
+        throw new GraphQLError(`Node not found: "${parentRef}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+        });
+      }
+
       // Reading the subtree's content requires read access to the source — a
       // URN-widened parentRef must not become a cross-tenant exfiltration path
       // (review:entity-ref-args #3). Denial reads as not-found (no oracle).
@@ -939,15 +949,28 @@ export const memoryMutations = {
         );
       }
 
-      // A move that targets the source's ROOT would soft-delete every node and
-      // leave the source a rootless husk (createMemory guarantees a live node
-      // at loc = name). Reject it — clone-then-delete the whole memory instead.
-      if (move && parent.loc === source.name) {
-        throw new GraphQLError(
-          'extractParentNodeToMemory cannot move the source root subtree (it would empty the source). ' +
-            'Use cloneMemory + deleteMemory, or extract a child subtree.',
-          { extensions: { code: 'BAD_USER_INPUT', memoryId: source.id, parentLoc: parent.loc } },
-        );
+      // A move must leave at least one live node OUTSIDE the subtree, else it
+      // empties the source (and orphans its root). Checked by node set, NOT by
+      // `parent.loc === source.name`: Memory.name is mutable (updateMemory) and
+      // a rename does not rename the root node loc, so a name-based guard is
+      // wrong both ways (misses a renamed root, false-flags a node at the new
+      // name). Rename-proof — the survivor query doesn't reference the name.
+      if (move) {
+        const survivor = await ctx.db.node.findFirst({
+          where: {
+            memoryId: source.id,
+            deletedAt: null,
+            NOT: { OR: [{ loc: parent.loc }, { loc: { startsWith: `${parent.loc}:` } }] },
+          },
+          select: { id: true },
+        });
+        if (!survivor) {
+          throw new GraphQLError(
+            'extractParentNodeToMemory: this move would empty the source memory (no live node remains ' +
+              'outside the subtree). Use cloneMemory + deleteMemory, or extract a child subtree.',
+            { extensions: { code: 'BAD_USER_INPUT', memoryId: source.id, parentLoc: parent.loc } },
+          );
+        }
       }
 
       // ── Destination URN → org + slug (mirrors cloneMemory) ───────────────

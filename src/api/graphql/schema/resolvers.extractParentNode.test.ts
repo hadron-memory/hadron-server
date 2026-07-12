@@ -178,13 +178,40 @@ describe('extractParentNodeToMemory — move edge cases', () => {
     expect(await db.memory.findUniqueOrThrow({ where: { id: memA.id } })).toMatchObject({ pendingEdgeCount: 0 });
   });
 
-  it('rejects a move that targets the source root subtree', async () => {
-    // memA.name is 'src' (createDbOrgAndGraph graphName) — the root loc.
+  it('rejects a move that would empty the source memory', async () => {
     const root = await createDbNode(db, { loc: 'src', memoryId: memA.id });
-    await createDbNode(db, { loc: 'src:child', memoryId: memA.id });
+    await createDbNode(db, { loc: 'src:child', memoryId: memA.id }); // whole live set is the subtree
     await expect(
       M.extractParentNodeToMemory(null, { parentRef: root.id, targetUrn: 'ex-org::extracted', move: true }, asAdmin()),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+
+  it('the empty-source guard is rename-proof (does not rely on Memory.name)', async () => {
+    const root = await createDbNode(db, { loc: 'orig', memoryId: memA.id });
+    await createDbNode(db, { loc: 'orig:child', memoryId: memA.id });
+    // Rename the memory — the root node loc stays 'orig', name no longer matches.
+    await db.memory.update({ where: { id: memA.id }, data: { name: 'renamed' } });
+    await expect(
+      M.extractParentNodeToMemory(null, { parentRef: root.id, targetUrn: 'ex-org::extracted', move: true }, asAdmin()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+
+  it('allows a move that leaves at least one node outside the subtree', async () => {
+    const { parent } = await seedSubtree(); // sibling + outsider remain
+    const mem = await M.extractParentNodeToMemory(
+      null,
+      { parentRef: parent.id, targetUrn: 'ex-org::extracted', move: true },
+      asAdmin(),
+    );
+    expect(mem.id).toBeTruthy();
+  });
+
+  it('treats an extract from a soft-deleted source memory as NODE_NOT_FOUND', async () => {
+    const { parent } = await seedSubtree();
+    await db.memory.update({ where: { id: memA.id }, data: { deletedAt: new Date() } });
+    await expect(
+      M.extractParentNodeToMemory(null, { parentRef: parent.id, targetUrn: 'ex-org::extracted' }, asAdmin()),
+    ).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
   });
 });
 

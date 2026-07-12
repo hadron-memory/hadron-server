@@ -208,6 +208,10 @@ export async function extractParentNodeGraph(
       // same loc — disambiguate with a numeric suffix so neither is dropped.
       const edges = await tx.edge.findMany({
         where: {
+          // movedIds are all source-memory nodes, so this is implied — but
+          // stating it lets the planner use the (memoryId, ...) index and keeps
+          // the "edges of the source memory" invariant explicit.
+          memoryId: args.sourceMemoryId,
           deletedAt: null,
           sourceId: { in: movedIds },
           targetId: { in: movedIds },
@@ -256,7 +260,7 @@ export async function extractParentNodeGraph(
           data: { deletedAt: now, deletedBy: args.actorId },
         });
         await tx.node.updateMany({
-          where: { id: { in: movedIds }, deletedAt: null },
+          where: { memoryId: args.sourceMemoryId, id: { in: movedIds }, deletedAt: null },
           data: { deletedAt: now, deletedBy: args.actorId },
         });
         // PendingEdges hang off moved nodes (sourceId, Cascade) — soft-delete
