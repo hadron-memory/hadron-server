@@ -11,6 +11,7 @@ import {
   MemoryShareGranteeMissingError,
 } from '../../../controller/operations/createMemoryShare.js';
 import { cloneMemoryGraph } from '../../../controller/operations/cloneMemory.js';
+import { extractParentNodeGraph } from '../../../controller/operations/extractParentNode.js';
 import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
 import { revokeMemoryShare } from '../../../controller/operations/revokeMemoryShare.js';
 import {
@@ -45,11 +46,14 @@ import {
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import {
   NodeAbstractTooLongError,
+  NodeNotFoundError,
   EncryptedVectorIndexNotAcknowledgedError,
   InvalidChunkConfigError,
 } from '../../../lib/entityRef/errors.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { canReadMemory } from '../../../mcp/access-control.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   agentSlugFromUrn,
@@ -876,6 +880,199 @@ export const memoryMutations = {
       // vectors; stamp every node pending so the sweep (or prompt-drain on
       // future writes) re-embeds the rewritten content.
       if (source.vectorIndexEnabled) {
+        await backfillMemoryEmbeddings(ctx.db, memoryId);
+      }
+
+      return ctx.db.memory.findUniqueOrThrow({
+        where: { id: memoryId },
+        include: MEMORY_INCLUDE,
+      });
+    },
+
+    extractParentNodeToMemory: async (
+      _: unknown,
+      { parentRef, targetUrn, move: rawMove }: { parentRef: string; targetUrn: string; move?: boolean | null },
+      ctx: Context,
+    ) => {
+      const move = rawMove ?? false;
+
+      // Resolve the parent node (PK or fully-qualified URN). A miss surfaces as
+      // NODE_NOT_FOUND rather than a raw resolver throw.
+      let parentId: string;
+      try {
+        ({ id: parentId } = await resolveNodeRef(ctx.db, parentRef));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) {
+          throw new GraphQLError(`Node not found: "${parentRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+          });
+        }
+        throw e;
+      }
+      const parent = await ctx.db.node.findUniqueOrThrow({ where: { id: parentId } });
+      const source = await ctx.db.memory.findUniqueOrThrow({ where: { id: parent.memoryId } });
+
+      // Reading the subtree's content requires read access to the source — a
+      // URN-widened parentRef must not become a cross-tenant exfiltration path
+      // (review:entity-ref-args #3). Denial reads as not-found (no oracle).
+      if (!(await canReadMemory(ctx.db, ctx, source.id))) {
+        throw new GraphQLError(`Node not found: "${parentRef}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+        });
+      }
+
+      // v1 gating mirrors cloneMemory: encrypted sources need a cross-key
+      // re-encrypt of the moved content (a separate follow-up); system/app
+      // sources auto-provision and carry pivot invariants a free-form extract
+      // would violate.
+      if (source.isEncrypted) {
+        throw new GraphQLError(
+          'extractParentNodeToMemory does not support encrypted memories yet.',
+          { extensions: { code: 'ENCRYPTED_MEMORY_EXTRACT_UNSUPPORTED', memoryId: source.id } },
+        );
+      }
+      if (source.class === 'system' || source.class === 'app') {
+        throw new GraphQLError(
+          `extractParentNodeToMemory does not accept a class='${source.class}' source. ` +
+            `Only 'knowledge', 'group', 'personal', and 'private' memories can be extracted from.`,
+          { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryId: source.id, memoryClass: source.class } },
+        );
+      }
+
+      // A move that targets the source's ROOT would soft-delete every node and
+      // leave the source a rootless husk (createMemory guarantees a live node
+      // at loc = name). Reject it — clone-then-delete the whole memory instead.
+      if (move && parent.loc === source.name) {
+        throw new GraphQLError(
+          'extractParentNodeToMemory cannot move the source root subtree (it would empty the source). ' +
+            'Use cloneMemory + deleteMemory, or extract a child subtree.',
+          { extensions: { code: 'BAD_USER_INPUT', memoryId: source.id, parentLoc: parent.loc } },
+        );
+      }
+
+      // ── Destination URN → org + slug (mirrors cloneMemory) ───────────────
+      assertFullyQualifiedUrn(targetUrn, 'memory');
+      const prefixedTarget = hasSchemePrefix(targetUrn) ? targetUrn : `hrn:memory:${targetUrn}`;
+      const parsedTarget = parseUrn(prefixedTarget);
+      if (parsedTarget.pathSegments.length !== 2) {
+        throw new GraphQLError(
+          `extractParentNodeToMemory targetUrn must be a fully-qualified "<org>::<slug>" memory URN (got "${targetUrn}").`,
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+      const [targetOrgSlug, targetSlug] = parsedTarget.pathSegments;
+      validateUserSlug(targetSlug);
+      const { id: targetOrgId } = await resolveOrgRef(ctx.db, `hrn:org:${targetOrgSlug}`);
+      const targetOrg = await ctx.db.organization.findUniqueOrThrow({
+        where: { id: targetOrgId },
+        select: { urn: true },
+      });
+
+      // ── Class of the NEW memory + authorization ──────────────────────────
+      // The new memory PRESERVES the source's class so an extract never widens
+      // who can read the content: a member-restricted `group` stays group,
+      // personal/private stay owner-owned, knowledge stays knowledge.
+      const isUserOwned = source.class === 'personal' || source.class === 'private';
+      const isGroup = source.class === 'group';
+      const newClass = source.class; // system/app already rejected above
+
+      if (isUserOwned) {
+        // canReadMemory already proved ctx.userId is the owner. The new memory
+        // must land in an org the owner actually belongs to (NOT requireOrgAction,
+        // whose global-admin bypass would let a platform admin drop it into an
+        // org they don't belong to — matches createMemory's personal path).
+        if (!ctx.userId) {
+          throw new GraphQLError(
+            'Extracting a personal/private subtree requires an authenticated user (the owner).',
+            { extensions: { code: 'UNAUTHENTICATED' } },
+          );
+        }
+        const membership = await ctx.db.orgMember.findFirst({
+          where: { organizationId: targetOrgId, userId: ctx.userId, deletedAt: null },
+        });
+        if (!membership) {
+          throw new GraphQLError(
+            'You must be a member of the organization to extract a personal/private subtree into it.',
+            { extensions: { code: 'FORBIDDEN' } },
+          );
+        }
+      } else {
+        // A group extract bootstraps the caller as first owner → needs a user.
+        if (isGroup && !ctx.userId) {
+          throw new GraphQLError(
+            'Extracting a group-class subtree requires an authenticated user (the caller becomes the first owner).',
+            { extensions: { code: 'UNAUTHENTICATED' } },
+          );
+        }
+        // Source-side gate at clone parity (design:grant-model P2a): copying a
+        // subtree out is an export, so hold the SOURCE org's memory.clone grant
+        // — canReadMemory alone would let a bare reader exfiltrate. cloneMemory
+        // gates the same way.
+        await requireOrgAction(ctx, source.organizationId, 'memory.clone');
+        // Target-side create grant (same as createMemory).
+        await requireOrgAction(ctx, targetOrgId, 'memory.create');
+        // Cross-org drop requires an ACTUAL non-reader membership of the target
+        // org (mirrors cloneMemory #604; findFirst + deletedAt:null so a revoked
+        // membership can't authorize).
+        if (targetOrgId !== source.organizationId) {
+          if (!ctx.userId) {
+            throw new GraphQLError(
+              'Extracting into another organization requires an authenticated user.',
+              { extensions: { code: 'UNAUTHENTICATED' } },
+            );
+          }
+          const membership = await ctx.db.orgMember.findFirst({
+            where: { organizationId: targetOrgId, userId: ctx.userId, deletedAt: null },
+          });
+          if (!membership || membership.role === 'READER') {
+            throw new GraphQLError(
+              'Forbidden: extracting into an organization requires a non-reader membership there.',
+              { extensions: { code: 'FORBIDDEN' } },
+            );
+          }
+        }
+      }
+
+      // move soft-deletes the source subtree → write access to the source.
+      if (move) {
+        await requireMemoryWriteAccess(ctx, source.id);
+      }
+
+      // URN collision handling matches createMemory / cloneMemory.
+      const newUrn = `${targetOrg.urn}:${targetSlug}`;
+      const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
+      if (existing) {
+        if (existing.deletedAt) {
+          await ctx.db.memory.delete({ where: { id: existing.id } });
+        } else {
+          throw new Error(`A memory with URN "${newUrn}" already exists`);
+        }
+      }
+
+      // The parent becomes the new memory's root — its rebased loc is the
+      // slug (a valid loc), and the display name is the slug the caller chose.
+      const vectorIndexEnabled = newClass === 'knowledge';
+      const { memoryId } = await extractParentNodeGraph(ctx.db, {
+        sourceMemoryId: source.id,
+        parentLoc: parent.loc,
+        newUrn,
+        name: targetSlug,
+        rootLoc: targetSlug,
+        targetOrganizationId: targetOrgId,
+        newClass,
+        // 035: group carries GROUP visibility (chk_memory_group_visibility);
+        // personal/private carry NULL; knowledge defaults ORGANIZATION.
+        visibility: isGroup ? 'GROUP' : isUserOwned ? null : 'ORGANIZATION',
+        ownerUserId: isUserOwned ? ctx.userId! : null,
+        groupOwnerUserId: isGroup ? ctx.userId! : null,
+        vectorIndexEnabled,
+        move,
+        actorId: ctx.userId ?? ctx.clientId ?? null,
+      });
+
+      // The extract carries the subtree's content but no vectors; stamp every
+      // node pending so the sweep embeds it (no-op when not indexed).
+      if (vectorIndexEnabled) {
         await backfillMemoryEmbeddings(ctx.db, memoryId);
       }
 

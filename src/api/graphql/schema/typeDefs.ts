@@ -3626,6 +3626,44 @@ export const typeDefs = `#graphql
     cloneMemory(ref: ID!, targetUrn: String!): Memory!
 
     """
+    Extract a parent node and its whole loc-subtree into a BRAND-NEW memory,
+    making the parent the new memory's root.
+
+    The subtree is loc-prefix defined: the node at the parent's loc plus every
+    live descendant (loc starting with 'parentLoc:'). Locs are REBASED so the
+    parent becomes the root — 'findings:auth' becomes the memory slug and
+    'findings:auth:oauth' becomes '<slug>:oauth'. Edges wholly inside the
+    subtree carry over (their loc re-derived from the rebased endpoints);
+    boundary-crossing edges and PendingEdges are dropped.
+
+    'parentRef' is the parent node's ID or fully-qualified URN. 'targetUrn' is
+    a fully-qualified '<org>::<slug>' URN naming the new memory (it may land in
+    a DIFFERENT org). 'move' = false (default) COPIES the subtree, leaving the
+    source intact; 'move' = true relocates it, soft-deleting the source subtree
+    (its nodes, the source memory's touching edges, and its pending edges).
+
+    The new memory PRESERVES the source's class so an extract never widens who
+    can read the content: a member-restricted 'group' stays group, a
+    personal/private source stays owner-owned, knowledge stays knowledge.
+    Governance/config (requiresLicense, chunk dials, revision cap, acceptsUploads)
+    carries over from the source.
+
+    Authorization: read access to the source memory (denial reads as
+    NODE_NOT_FOUND). For knowledge/group sources the caller needs the SOURCE
+    org's memory.clone grant (an export) AND the destination org's memory.create
+    (plus a non-reader membership for a cross-org drop); a personal/private
+    extract instead requires the owner to be a member of the destination org.
+    'move' additionally requires source write access, and cannot target the
+    source root (that would empty the source — clone + deleteMemory instead).
+    Encrypted and system/app-class sources are rejected.
+
+    v1 limitation: node content is copied verbatim — because both the slug and
+    node locs change, URN references among the moved nodes WILL break; and
+    unresolved PendingEdges within the subtree are dropped.
+    """
+    extractParentNodeToMemory(parentRef: ID!, targetUrn: String!, move: Boolean = false): Memory!
+
+    """
     Set encrypted source token for non-GitHub-App repos.
 
     Accepts the entity's ID or URN.
