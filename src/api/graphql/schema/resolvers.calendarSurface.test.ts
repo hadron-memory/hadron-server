@@ -246,6 +246,43 @@ describe('the shared connection gate applies to calendar ops', () => {
   });
 });
 
+describe('a calendar connection coexists with a mail connection for the same account', () => {
+  // PR-638 Codex P1: the ExchangeConnection uniqueness key is
+  // provider-scoped — connecting Google Calendar for an address that already
+  // has a Gmail connection must create a SECOND row, never upsert over the
+  // mail row (which would tear down its tool connection and grants).
+  it('allows both rows under the provider-scoped unique key, each routing to its own provider', async () => {
+    const mailConnection = await db.exchangeConnection.create({
+      data: {
+        organizationId: orgId,
+        userId: owner.id,
+        mailboxEmail: 'owner@gcal.example', // SAME address as the calendar fixture
+        provider: 'gmail',
+        toolConnectionId: 'tool-mail-1',
+        createdBy: owner.id,
+      },
+    });
+
+    await run(`query { exchangeMessages(connectionId: "${mailConnection.id}") { id } }`, {
+      userId: owner.id,
+      roles: ['READER'],
+    });
+    expect(vi.mocked(runEmailOperation)).toHaveBeenLastCalledWith(
+      'gmail',
+      'list-messages',
+      expect.objectContaining({ connectionId: 'tool-mail-1' }),
+    );
+
+    vi.mocked(runEmailOperation).mockResolvedValueOnce({ events: [] });
+    await run(EVENTS_QUERY(connectionId), { userId: owner.id, roles: ['READER'] });
+    expect(vi.mocked(runEmailOperation)).toHaveBeenLastCalledWith(
+      'google-cal',
+      'list-events',
+      expect.objectContaining({ connectionId: 'tool-cal-1' }),
+    );
+  });
+});
+
 describe('calendar mutations', () => {
   it('calendarCreateEvent routes create-event with the idempotency key and returns the mapped event', async () => {
     vi.mocked(runEmailOperation).mockResolvedValueOnce({
@@ -279,6 +316,15 @@ describe('calendar mutations', () => {
         idempotencyKey: 'k-1',
       }),
     );
+  });
+
+  it('rejects NONE as a settable response in core with a stable code', async () => {
+    const r = await run(
+      `mutation { calendarRespondToEvent(connectionRef: "${connectionId}", eventId: "evt-1", response: NONE) { id } }`,
+      { userId: owner.id, roles: ['READER'] },
+    );
+    expect(r.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(vi.mocked(runEmailOperation)).not.toHaveBeenCalled();
   });
 
   it('calendarRespondToEvent maps the enum to the neutral vocabulary', async () => {

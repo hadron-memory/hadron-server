@@ -234,14 +234,18 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         redirectUri: cfg.getRedirectUri(),
       });
 
-      // Reconnecting an existing mailbox mints a NEW tool connection; tear
-      // down the superseded one so it doesn't keep a live token +
+      // Reconnecting an existing connection mints a NEW tool connection;
+      // tear down the superseded one so it doesn't keep a live token +
       // subscriptions on the tool side. Fire-and-forget (never throws) —
-      // the browser redirect must not wait on the tool.
+      // the browser redirect must not wait on the tool. The key is
+      // PROVIDER-SCOPED: a calendar connect for an address that already has
+      // a mail connection (same Google account) must never tear down or
+      // overwrite the mail row (PR-638 Codex P1).
       const existing = await db.exchangeConnection.findUnique({
         where: {
-          organizationId_mailboxEmail: {
+          organizationId_provider_mailboxEmail: {
             organizationId: pending.orgId,
+            provider: cfg.provider,
             mailboxEmail: identity.mailboxEmail,
           },
         },
@@ -253,8 +257,9 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
 
       await db.exchangeConnection.upsert({
         where: {
-          organizationId_mailboxEmail: {
+          organizationId_provider_mailboxEmail: {
             organizationId: pending.orgId,
+            provider: cfg.provider,
             mailboxEmail: identity.mailboxEmail,
           },
         },

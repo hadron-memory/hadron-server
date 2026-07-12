@@ -886,6 +886,16 @@ export const sessionMutations = {
       },
       ctx: Context,
     ) => {
+      // NONE exists in the enum for READS (invited, not yet answered) but is
+      // not a settable response for ANY provider — reject in core with a
+      // stable code rather than leaning on the tool's validation wording
+      // (PR-638 Copilot review). Unlike EmailFlag's COMPLETE, this is not
+      // provider-dependent, so core is the right layer.
+      if (response === 'NONE') {
+        throw new GraphQLError('NONE is not a settable response — use ACCEPTED, DECLINED, or TENTATIVE.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       const { event } = await runOwnedEmailOperation<{ event: ToolCalendarEvent }>(
         ctx,
         connectionRef,
@@ -893,8 +903,6 @@ export const sessionMutations = {
         {
           eventId,
           calendarId: calendarId ?? undefined,
-          // NONE is not settable — the tool's schema rejects it with a typed
-          // validation_error (the EmailFlag COMPLETE precedent).
           response: response.toLowerCase(),
         },
       );
