@@ -8,7 +8,13 @@ import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
-import { type ToolEmailFolder, type ToolEmailMessage } from '../../../lib/emailClient.js';
+import {
+  type ToolCalendarEvent,
+  type ToolCalendarInfo,
+  type ToolEmailFolder,
+  type ToolEmailMessage,
+  type ToolScheduleFreeBusy,
+} from '../../../lib/emailClient.js';
 import {
   type Context,
   requireRole,
@@ -16,6 +22,7 @@ import {
   getAccessibleMemoryIds,
   sessionScopeFilter,
   SESSION_INCLUDE,
+  mapToolCalendarEvent,
   runOwnedEmailOperation,
 } from './resolvers.helpers.js';
 
@@ -258,6 +265,91 @@ export const sessionQueries = {
         totalItemCount: f.totalCount,
         unreadItemCount: f.unreadCount,
       }));
+    },
+
+    // ── Calendar reads (hadrontool-google-cal) ─────────────────────────
+    // Same gate as the mail surface (requireEmailConnection via
+    // runOwnedEmailOperation): interactive owner, or an App holding a
+    // ConnectionGrant with the operation's calendar.* scope.
+
+    calendars: async (_: unknown, { connectionRef }: { connectionRef: string }, ctx: Context) => {
+      const { calendars } = await runOwnedEmailOperation<{ calendars: ToolCalendarInfo[] }>(
+        ctx,
+        connectionRef,
+        'list-calendars',
+      );
+      return calendars;
+    },
+
+    calendarEvents: async (
+      _: unknown,
+      {
+        connectionRef,
+        calendarId,
+        start,
+        end,
+        query,
+        top,
+      }: {
+        connectionRef: string;
+        calendarId?: string | null;
+        start?: string | null;
+        end?: string | null;
+        query?: string | null;
+        top?: number | null;
+      },
+      ctx: Context,
+    ) => {
+      const { events } = await runOwnedEmailOperation<{ events: ToolCalendarEvent[] }>(
+        ctx,
+        connectionRef,
+        'list-events',
+        {
+          calendarId: calendarId ?? undefined,
+          start: start ?? undefined,
+          end: end ?? undefined,
+          query: query ?? undefined,
+          // The tool caps top at 100 — clamp instead of surfacing a
+          // validation error (the exchangeMessages precedent).
+          top: Math.max(1, Math.min(top ?? 25, 100)),
+        },
+      );
+      return events.map(mapToolCalendarEvent);
+    },
+
+    calendarEvent: async (
+      _: unknown,
+      { connectionRef, eventId, calendarId }: { connectionRef: string; eventId: string; calendarId?: string | null },
+      ctx: Context,
+    ) => {
+      const { event } = await runOwnedEmailOperation<{ event: ToolCalendarEvent }>(ctx, connectionRef, 'get-event', {
+        eventId,
+        calendarId: calendarId ?? undefined,
+      });
+      return mapToolCalendarEvent(event);
+    },
+
+    calendarSchedule: async (
+      _: unknown,
+      {
+        connectionRef,
+        start,
+        end,
+        schedules,
+      }: { connectionRef: string; start: string; end: string; schedules?: string[] | null },
+      ctx: Context,
+    ) => {
+      const result = await runOwnedEmailOperation<{ schedules: ToolScheduleFreeBusy[] }>(
+        ctx,
+        connectionRef,
+        'get-schedule',
+        {
+          start,
+          end,
+          schedules: schedules?.length ? schedules : undefined,
+        },
+      );
+      return result.schedules;
     },
 };
 

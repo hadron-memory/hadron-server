@@ -1873,8 +1873,10 @@ model ExchangeConnection {
   id                    String     @id @default(cuid())
   organizationId        String     @map("organization_id")
   userId                String     @map("user_id")
-  /// The mailbox email address; (organizationId, mailboxEmail) is
-  /// unique.
+  /// The mailbox/account email address; (organizationId, provider,
+  /// mailboxEmail) is unique — provider-scoped so a calendar connection
+  /// (provider 'google-cal') for the same Google account COEXISTS with its
+  /// mail connection instead of overwriting it (PR-638 Codex P1).
   mailboxEmail          String     @map("mailbox_email")
   displayName           String?    @map("display_name")
   /// Email provider backing this connection — the emailClient dispatch key
@@ -1909,7 +1911,7 @@ model ExchangeConnection {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([organizationId, mailboxEmail])
+  @@unique([organizationId, provider, mailboxEmail])
   @@index([userId])
   // The email-events ingress resolves connections by the tool's id on every
   // inbound email — this lookup must be indexed (#396 Phase 4).

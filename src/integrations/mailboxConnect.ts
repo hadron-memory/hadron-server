@@ -38,6 +38,14 @@ export interface MailboxConnectConfig {
    * an unhandled throw inside the authorize redirect.
    */
   isConfigured: () => boolean;
+  /**
+   * Whether the callback subscribes the connection's inbox to the provider
+   * event plane (default true — the email tools). Providers whose tool has
+   * no folder-subscription surface (hadrontool-google-cal: calendar, no
+   * event plane in v1) set false so every connect doesn't log a spurious
+   * best-effort failure.
+   */
+  subscribeInbox?: boolean;
 }
 
 /** Mount the three mailbox-connect routes for one provider. */
@@ -226,14 +234,18 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         redirectUri: cfg.getRedirectUri(),
       });
 
-      // Reconnecting an existing mailbox mints a NEW tool connection; tear
-      // down the superseded one so it doesn't keep a live token +
+      // Reconnecting an existing connection mints a NEW tool connection;
+      // tear down the superseded one so it doesn't keep a live token +
       // subscriptions on the tool side. Fire-and-forget (never throws) —
-      // the browser redirect must not wait on the tool.
+      // the browser redirect must not wait on the tool. The key is
+      // PROVIDER-SCOPED: a calendar connect for an address that already has
+      // a mail connection (same Google account) must never tear down or
+      // overwrite the mail row (PR-638 Codex P1).
       const existing = await db.exchangeConnection.findUnique({
         where: {
-          organizationId_mailboxEmail: {
+          organizationId_provider_mailboxEmail: {
             organizationId: pending.orgId,
+            provider: cfg.provider,
             mailboxEmail: identity.mailboxEmail,
           },
         },
@@ -245,8 +257,9 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
 
       await db.exchangeConnection.upsert({
         where: {
-          organizationId_mailboxEmail: {
+          organizationId_provider_mailboxEmail: {
             organizationId: pending.orgId,
+            provider: cfg.provider,
             mailboxEmail: identity.mailboxEmail,
           },
         },
@@ -287,12 +300,15 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       // Subscribe the inbox to provider change notifications (the event
       // plane). Best-effort: until the tool's public ingress route is
       // configured this fails, and the connection is still fully usable for
-      // request/reply operations.
-      subscribeToolFolder(identity.provider, identity.id, 'inbox').catch((err) => {
-        console.log(
-          `[${cfg.logPrefix}] inbox subscription not created for ${identity!.mailboxEmail} (event plane off?): ${err instanceof Error ? err.message : err}`,
-        );
-      });
+      // request/reply operations. Skipped for providers without a
+      // folder-subscription surface (subscribeInbox: false).
+      if (cfg.subscribeInbox !== false) {
+        subscribeToolFolder(identity.provider, identity.id, 'inbox').catch((err) => {
+          console.log(
+            `[${cfg.logPrefix}] inbox subscription not created for ${identity!.mailboxEmail} (event plane off?): ${err instanceof Error ? err.message : err}`,
+          );
+        });
+      }
 
       console.log(
         `[${cfg.logPrefix}] Connected ${cfg.provider} for ${identity.mailboxEmail} → org ${pending.orgId} (tool connection ${identity.id})`,

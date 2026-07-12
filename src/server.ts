@@ -64,6 +64,11 @@ import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
 import { buildMicrosoftAuthUrl, getMicrosoftRedirectUri } from './integrations/exchange/auth.js';
 import { buildGmailAuthUrl, getGmailRedirectUri, isGmailConnectConfigured } from './integrations/gmail/auth.js';
+import {
+  buildGoogleCalAuthUrl,
+  getGoogleCalRedirectUri,
+  isGoogleCalConnectConfigured,
+} from './integrations/googleCal/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
 
 export async function createServer(): Promise<Express> {
@@ -1204,6 +1209,21 @@ export async function createServer(): Promise<Express> {
     // Fails safe until the mailbox GCP project's client is provisioned —
     // same posture as Google login (#583).
     isConfigured: isGmailConnectConfigured,
+  });
+  // Google Calendar = hadrontool-google-cal — a CALENDAR connection on the
+  // same rails (ExchangeConnection row, provider 'google-cal'). Separate
+  // OAuth client from both Google login and the Gmail mailbox client
+  // (sensitive vs restricted scope verification — see googleCal/auth.ts).
+  mountMailboxConnectRoutes(app, {
+    provider: 'google-cal',
+    routeName: 'google-cal',
+    buildAuthUrl: buildGoogleCalAuthUrl,
+    getRedirectUri: getGoogleCalRedirectUri,
+    logPrefix: 'google-cal-oauth',
+    isConfigured: isGoogleCalConnectConfigured,
+    // The calendar tool has no folder-subscription surface (no event plane
+    // in v1) — don't POST a doomed inbox subscription on every connect.
+    subscribeInbox: false,
   });
 
   // ---------------------------------------------------------------------------

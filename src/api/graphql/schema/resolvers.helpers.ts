@@ -3,7 +3,7 @@
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
-import { runEmailOperation } from '../../../lib/emailClient.js';
+import { runEmailOperation, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import { scopeForOperation } from '../../../lib/emailOperationScopes.js';
 import {
   AiServiceConfigNotFoundError,
@@ -1118,6 +1118,20 @@ export async function runOwnedEmailOperation<T = Record<string, unknown>>(
     ...input,
     connectionId: connection.toolConnectionId,
   });
+}
+
+/**
+ * Map a tool CalendarEvent (lowercase response vocabulary on the wire) to
+ * the GraphQL shape (CalendarEventResponse enum values are uppercase). The
+ * ONE mapper both the query and mutation resolvers use, so the wire→schema
+ * translation cannot drift between the two surfaces.
+ */
+export function mapToolCalendarEvent(e: ToolCalendarEvent) {
+  return {
+    ...e,
+    attendees: e.attendees.map((a) => ({ ...a, response: a.response.toUpperCase() })),
+    myResponse: e.myResponse ? e.myResponse.toUpperCase() : null,
+  };
 }
 
 // ---------------------------------------------------------------------------

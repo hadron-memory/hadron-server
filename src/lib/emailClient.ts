@@ -8,15 +8,19 @@ import { GraphQLError } from 'graphql';
  *
  * PROVIDER DISPATCH: one capability tool per provider (decided 2026-07-08).
  * Every call takes the connection's `provider` and routes to that provider's
- * tool config: `ms-exchange` (hadrontool-ms-exchange) and `gmail`
- * (hadrontool-gmail, #580). Adding a provider = a new entry in
- * PROVIDER_TOOLS, no caller changes (spec 002 US4).
+ * tool config: `ms-exchange` (hadrontool-ms-exchange), `gmail`
+ * (hadrontool-gmail, #580), and `google-cal` (hadrontool-google-cal — a
+ * CALENDAR tool riding the same connection registry, identity contract, and
+ * error surface; only its operation names differ). Adding a provider = a new
+ * entry in PROVIDER_TOOLS, no caller changes (spec 002 US4).
  *
  * Configured by env (per provider):
  *   MS_EXCHANGE_TOOL_URL    e.g. http://hadrontool-ms-exchange:8080 (required)
  *   MS_EXCHANGE_TOOL_TOKEN  shared bearer token (optional; sent when set)
  *   GMAIL_TOOL_URL          e.g. http://hadrontool-gmail:8080 (required)
  *   GMAIL_TOOL_TOKEN        shared bearer token (optional; sent when set)
+ *   GOOGLE_CAL_TOOL_URL     e.g. http://hadrontool-google-cal:8080 (required)
+ *   GOOGLE_CAL_TOOL_TOKEN   shared bearer token (optional; sent when set)
  *
  * Error surface: EMAIL_TOOL_NOT_CONFIGURED / EMAIL_TOOL_UNREACHABLE /
  * EMAIL_TOOL_ERROR as GraphQL extensions.code — plus pass-through of the
@@ -36,6 +40,7 @@ interface ProviderToolConfig {
 const PROVIDER_TOOLS: Record<string, ProviderToolConfig> = {
   'ms-exchange': { urlEnv: 'MS_EXCHANGE_TOOL_URL', tokenEnv: 'MS_EXCHANGE_TOOL_TOKEN' },
   gmail: { urlEnv: 'GMAIL_TOOL_URL', tokenEnv: 'GMAIL_TOOL_TOKEN' },
+  'google-cal': { urlEnv: 'GOOGLE_CAL_TOOL_URL', tokenEnv: 'GOOGLE_CAL_TOOL_TOKEN' },
 };
 
 /** Resolve a provider's tool base URL + token; typed error when unknown/unconfigured. */
@@ -137,6 +142,59 @@ export interface ToolEmailFolder {
   name: string;
   totalCount: number;
   unreadCount: number;
+}
+
+// ── Calendar tool shapes (hadrontool-google-cal; provider-neutral) ──────
+// The calendar sibling of ToolEmailMessage/ToolEmailFolder: what the
+// calendar tool's read surfaces return. A future ms-exchange calendar tool
+// must return the same shapes byte-for-byte.
+
+/** One entry from the tool's list-calendars operation. */
+export interface ToolCalendarInfo {
+  id: string;
+  name: string;
+  description: string | null;
+  timeZone: string | null;
+  isPrimary: boolean;
+  canEdit: boolean;
+}
+
+/** An event boundary: exactly one of dateTime (timed) or date (all-day). */
+export interface ToolCalendarEventTime {
+  dateTime: string | null;
+  date: string | null;
+  timeZone: string | null;
+}
+
+/** Provider-neutral attendee response vocabulary (tool wire form). */
+export type ToolEventResponse = 'accepted' | 'declined' | 'tentative' | 'none';
+
+/** Provider-neutral event shape the calendar tool returns. */
+export interface ToolCalendarEvent {
+  id: string;
+  calendarId: string;
+  title: string | null;
+  description: string | null;
+  location: string | null;
+  start: ToolCalendarEventTime;
+  end: ToolCalendarEventTime;
+  isAllDay: boolean;
+  status: 'confirmed' | 'tentative' | 'cancelled';
+  organizer: { name: string | null; address: string | null } | null;
+  isOrganizer: boolean;
+  attendees: { name: string | null; address: string; optional: boolean; response: ToolEventResponse }[];
+  myResponse: ToolEventResponse | null;
+  webLink: string | null;
+  seriesId: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+/** One schedule's busy intervals from the tool's get-schedule operation. */
+export interface ToolScheduleFreeBusy {
+  id: string;
+  busy: { start: string; end: string }[];
+  error: string | null;
 }
 
 /**
