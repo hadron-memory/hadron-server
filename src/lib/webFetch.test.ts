@@ -6,7 +6,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isForbiddenAddress, embeddedIpv4, parseImportUrl } from './webFetch.js';
+import type { LookupAddress } from 'node:dns';
+import { isForbiddenAddress, embeddedIpv4, parseImportUrl, pinnedLookup } from './webFetch.js';
 
 describe('isForbiddenAddress', () => {
   it('blocks the private/reserved IPv4 ranges', () => {
@@ -106,5 +107,77 @@ describe('parseImportUrl', () => {
         expect((e as { extensions?: { code?: string } }).extensions?.code).toBe('IMPORT_URL_INVALID');
       }
     }
+  });
+});
+
+describe('pinnedLookup — DNS-rebinding pin (#645)', () => {
+  const call = (
+    addrs: LookupAddress[],
+    options: { all?: boolean; family?: number },
+  ): Promise<{ address: unknown; family?: number }> =>
+    new Promise((resolve, reject) => {
+      pinnedLookup(addrs)('rebind.example', options, (err, address, family) =>
+        err ? reject(err) : resolve({ address, family }),
+      );
+    });
+
+  it('hands back the whole validated set for an all=true query (no re-resolution)', async () => {
+    const addrs: LookupAddress[] = [
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:4700::1111', family: 6 },
+    ];
+    expect((await call(addrs, { all: true })).address).toEqual(addrs);
+  });
+
+  it('hands back the first address+family for a single query', async () => {
+    expect(await call([{ address: '93.184.216.34', family: 4 }], { all: false })).toEqual({
+      address: '93.184.216.34',
+      family: 4,
+    });
+  });
+
+  it('refuses to return a forbidden address even if one slips into the pin set', async () => {
+    await expect(call([{ address: '127.0.0.1', family: 4 }], { all: false })).rejects.toThrow(
+      /re-validation/,
+    );
+  });
+
+  it('errors on an empty pin set instead of indexing undefined', async () => {
+    await expect(call([], { all: true })).rejects.toThrow(/no pinned addresses/);
+  });
+
+  it('honors an explicitly requested family for a single query', async () => {
+    const addrs: LookupAddress[] = [
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:4700::1111', family: 6 },
+    ];
+    expect(await call(addrs, { all: false, family: 6 })).toEqual({
+      address: '2606:4700:4700::1111',
+      family: 6,
+    });
+  });
+
+  it('errors when no pinned address matches the requested family', async () => {
+    await expect(
+      call([{ address: '93.184.216.34', family: 4 }], { all: false, family: 6 }),
+    ).rejects.toThrow(/family 6/);
+  });
+
+  it('honors a bare numeric family argument (Node lookup(host, 4, cb) form)', async () => {
+    const addrs: LookupAddress[] = [
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:4700::1111', family: 6 },
+    ];
+    // dns.lookup allows `options` to be a family integer instead of an object.
+    const res: { address: unknown; family?: number } = await new Promise((resolve, reject) => {
+      (pinnedLookup(addrs) as unknown as (
+        h: string,
+        o: number,
+        cb: (e: Error | null, a?: unknown, f?: number) => void,
+      ) => void)('rebind.example', 6, (err, address, family) =>
+        err ? reject(err) : resolve({ address, family }),
+      );
+    });
+    expect(res).toEqual({ address: '2606:4700:4700::1111', family: 6 });
   });
 });

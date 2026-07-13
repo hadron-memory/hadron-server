@@ -10,20 +10,25 @@
  *   - 30s total budget, response body capped at MAX_HTML_CHARS bytes,
  *     content-type must be HTML/XHTML.
  *
- * KNOWN LIMITATION (documented, accepted for v1): the resolve-then-fetch
- * sequence is a DNS-rebinding TOCTOU — a hostile nameserver can answer the
- * validation lookup with a public address and the fetch's own lookup with a
- * private one. Closing it requires pinning the connection through a custom
- * dispatcher lookup (undici Agent) while preserving SNI; deferred until the
- * import surface is exposed beyond user-initiated callers (the chrome
- * extension) — accepted-and-expiring per cor:api:130:02.
+ * DNS-rebinding pin (issue #645): the resolve-then-fetch sequence was a
+ * TOCTOU — a hostile nameserver could answer the validation lookup with a
+ * public address and the fetch's own lookup with a private one, steering the
+ * outbound socket at an internal address. Closed by pinning: assertHostAllowed
+ * returns the validated addresses, and the fetch runs through a per-request
+ * undici dispatcher whose connect `lookup` returns ONLY those addresses, so no
+ * second resolution happens and the socket can only land on a cleared address.
+ * The Host header + TLS SNI still derive from the URL hostname, so cert
+ * validation is intact — only the connect IP is pinned.
  *
  * Auth boundary (issue #457): this fetch carries NO user credentials —
  * authenticated pages must come through importNode's inline `content` path.
  */
 
 import { lookup } from 'node:dns/promises';
+import type { LookupAddress } from 'node:dns';
 import { isIP } from 'node:net';
+import type { LookupFunction } from 'node:net';
+import { Agent } from 'undici';
 import { GraphQLError } from 'graphql';
 import { MAX_HTML_CHARS } from './pdfClient.js';
 
@@ -123,20 +128,31 @@ export function embeddedIpv4(ip6: string): string | null {
   return `${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`;
 }
 
-/** Validate a URL's host: IP literals directly, hostnames via full resolution. */
-async function assertHostAllowed(url: URL): Promise<void> {
+/**
+ * Validate a URL's host: IP literals directly, hostnames via full resolution.
+ * Returns the validated addresses so the caller can PIN the TCP connection to
+ * them — fetch would otherwise re-resolve at connect time, reopening the
+ * DNS-rebinding TOCTOU this guard exists to close (issue #645).
+ */
+async function assertHostAllowed(url: URL): Promise<LookupAddress[]> {
   // URL.hostname wraps IPv6 in brackets — strip for isIP/lookup.
   const host = url.hostname.replace(/^\[|\]$/g, '');
-  if (isIP(host)) {
+  const literalFamily = isIP(host);
+  if (literalFamily) {
     if (isForbiddenAddress(host)) {
       throw importError(`Fetching from "${host}" is not allowed.`, 'IMPORT_URL_FORBIDDEN', { host });
     }
-    return;
+    return [{ address: host, family: literalFamily }];
   }
-  let addrs: { address: string }[];
+  let addrs: LookupAddress[];
   try {
     addrs = await lookup(host, { all: true, verbatim: true });
   } catch {
+    throw importError(`Could not resolve host "${host}".`, 'IMPORT_URL_UNRESOLVABLE', { host });
+  }
+  // An empty answer must fail here, not fall through to a fetch (or an empty
+  // pin set) — treat it as unresolvable.
+  if (addrs.length === 0) {
     throw importError(`Could not resolve host "${host}".`, 'IMPORT_URL_UNRESOLVABLE', { host });
   }
   // EVERY address must be public — a mixed answer is exactly the rebinding
@@ -146,6 +162,52 @@ async function assertHostAllowed(url: URL): Promise<void> {
       throw importError(`Fetching from "${host}" is not allowed.`, 'IMPORT_URL_FORBIDDEN', { host });
     }
   }
+  return addrs;
+}
+
+/**
+ * The connect-time `lookup` the pin installs: it never re-resolves, it just
+ * hands back the addresses assertHostAllowed already cleared. Re-checks them as
+ * a last line of defense so a forbidden address can never reach the socket even
+ * if that invariant ever regressed.
+ *
+ * undici's connector calls this with `{ all: true }` (and no family), expecting
+ * the array form — so that is the live path; the single-address branch is a
+ * fallback for other lookup callers.
+ */
+export function pinnedLookup(addresses: LookupAddress[]) {
+  return (
+    _hostname: string,
+    options: { all?: boolean; family?: number } | number | null | undefined,
+    callback: (err: Error | null, address?: LookupAddress[] | string, family?: number) => void,
+  ): void => {
+    if (addresses.length === 0) {
+      callback(new Error('no pinned addresses available'));
+      return;
+    }
+    if (addresses.some((a) => isForbiddenAddress(a.address))) {
+      callback(new Error('pinned address failed re-validation'));
+      return;
+    }
+    // Node's dns.lookup contract allows `options` to be a bare family integer
+    // (lookup(host, 4, cb)); normalize so family filtering isn't silently
+    // skipped in that form (Gemini review on #646).
+    const opt = typeof options === 'number' ? { family: options } : options;
+    const family = opt?.family;
+    // Honor an explicitly requested family (4/6); 0 or unset means any.
+    const wanted = family ? addresses.filter((a) => a.family === family) : addresses;
+    if (wanted.length === 0) {
+      callback(new Error(`no pinned address for family ${family}`));
+      return;
+    }
+    if (opt?.all) callback(null, wanted);
+    else callback(null, wanted[0].address, wanted[0].family);
+  };
+}
+
+/** Per-request undici dispatcher that pins connections to the validated set. */
+function pinnedDispatcher(addresses: LookupAddress[]): Agent {
+  return new Agent({ connect: { lookup: pinnedLookup(addresses) as unknown as LookupFunction } });
 }
 
 /**
@@ -212,74 +274,85 @@ export async function fetchWebPage(rawUrl: string): Promise<WebFetchResult> {
   const timer = setTimeout(() => controller.abort(), TOTAL_TIMEOUT_MS);
   try {
     for (let hop = 0; ; hop++) {
-      await assertHostAllowed(url);
-      let res: Response;
+      const pin = await assertHostAllowed(url);
+      // Pin the outbound socket to exactly the addresses just validated, so a
+      // rebinding second resolution can't swap in a private IP (issue #645).
+      const dispatcher = pinnedDispatcher(pin);
       try {
-        res = await fetch(url, {
-          redirect: 'manual',
-          signal: controller.signal,
-          headers: {
-            accept: 'text/html,application/xhtml+xml',
-            'user-agent': 'hadron-server-import/1.0 (+https://hadronmemory.com)',
-          },
-        });
-      } catch (err) {
-        throw importError(
-          controller.signal.aborted
-            ? `Import fetch timed out after ${TOTAL_TIMEOUT_MS / 1000}s.`
-            : 'Import fetch failed.',
-          controller.signal.aborted ? 'IMPORT_FETCH_TIMEOUT' : 'IMPORT_FETCH_FAILED',
-          { cause: String(err) },
-        );
-      }
-      if (res.status >= 300 && res.status < 400) {
-        const location = res.headers.get('location');
-        // Drain/cancel the redirect body so the socket is released.
-        await res.body?.cancel().catch(() => {});
-        if (!location) {
-          throw importError(`Redirect without a Location header.`, 'IMPORT_FETCH_FAILED', {
+        let res: Response;
+        try {
+          res = await fetch(url, {
+            redirect: 'manual',
+            signal: controller.signal,
+            dispatcher,
+            headers: {
+              accept: 'text/html,application/xhtml+xml',
+              'user-agent': 'hadron-server-import/1.0 (+https://hadronmemory.com)',
+            },
+          } as RequestInit & { dispatcher: Agent });
+        } catch (err) {
+          throw importError(
+            controller.signal.aborted
+              ? `Import fetch timed out after ${TOTAL_TIMEOUT_MS / 1000}s.`
+              : 'Import fetch failed.',
+            controller.signal.aborted ? 'IMPORT_FETCH_TIMEOUT' : 'IMPORT_FETCH_FAILED',
+            { cause: String(err) },
+          );
+        }
+        if (res.status >= 300 && res.status < 400) {
+          const location = res.headers.get('location');
+          // Drain/cancel the redirect body so the socket is released.
+          await res.body?.cancel().catch(() => {});
+          if (!location) {
+            throw importError(`Redirect without a Location header.`, 'IMPORT_FETCH_FAILED', {
+              status: res.status,
+            });
+          }
+          if (hop >= MAX_REDIRECTS) {
+            throw importError(`Too many redirects (max ${MAX_REDIRECTS}).`, 'IMPORT_FETCH_FAILED');
+          }
+          url = parseImportUrl(new URL(location, url).toString());
+          continue;
+        }
+        if (!res.ok) {
+          await res.body?.cancel().catch(() => {});
+          throw importError(`Fetch failed with HTTP ${res.status}.`, 'IMPORT_FETCH_FAILED', {
             status: res.status,
           });
         }
-        if (hop >= MAX_REDIRECTS) {
-          throw importError(`Too many redirects (max ${MAX_REDIRECTS}).`, 'IMPORT_FETCH_FAILED');
+        const contentType = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+        if (!ACCEPTED_CONTENT_TYPES.includes(contentType)) {
+          await res.body?.cancel().catch(() => {});
+          throw importError(
+            `Unsupported content-type "${contentType}" — only HTML pages can be imported by URL in v1.`,
+            'IMPORT_UNSUPPORTED_CONTENT_TYPE',
+            { contentType },
+          );
         }
-        url = parseImportUrl(new URL(location, url).toString());
-        continue;
+        // Body-read failures happen OUTSIDE the fetch() try above — a page
+        // that returns headers then stalls aborts during reader.read(), and
+        // a raw AbortError must not leak past the typed-error contract
+        // (PR-486 review, Codex P2).
+        let html: string;
+        try {
+          html = await readCapped(res);
+        } catch (err) {
+          if (err instanceof GraphQLError) throw err; // our own size-cap error
+          throw importError(
+            controller.signal.aborted
+              ? `Import fetch timed out after ${TOTAL_TIMEOUT_MS / 1000}s.`
+              : 'Import fetch failed while reading the response body.',
+            controller.signal.aborted ? 'IMPORT_FETCH_TIMEOUT' : 'IMPORT_FETCH_FAILED',
+            { cause: String(err) },
+          );
+        }
+        return { html, finalUrl: url.toString() };
+      } finally {
+        // Per-request agent — close it once this hop is done (body already
+        // read/cancelled). Fire-and-forget: TCP teardown must not add to the
+        // request's latency.
+        dispatcher.close().catch(() => {});
       }
-      if (!res.ok) {
-        await res.body?.cancel().catch(() => {});
-        throw importError(`Fetch failed with HTTP ${res.status}.`, 'IMPORT_FETCH_FAILED', {
-          status: res.status,
-        });
-      }
-      const contentType = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
-      if (!ACCEPTED_CONTENT_TYPES.includes(contentType)) {
-        await res.body?.cancel().catch(() => {});
-        throw importError(
-          `Unsupported content-type "${contentType}" — only HTML pages can be imported by URL in v1.`,
-          'IMPORT_UNSUPPORTED_CONTENT_TYPE',
-          { contentType },
-        );
-      }
-      // Body-read failures happen OUTSIDE the fetch() try above — a page
-      // that returns headers then stalls aborts during reader.read(), and
-      // a raw AbortError must not leak past the typed-error contract
-      // (PR-486 review, Codex P2).
-      let html: string;
-      try {
-        html = await readCapped(res);
-      } catch (err) {
-        if (err instanceof GraphQLError) throw err; // our own size-cap error
-        throw importError(
-          controller.signal.aborted
-            ? `Import fetch timed out after ${TOTAL_TIMEOUT_MS / 1000}s.`
-            : 'Import fetch failed while reading the response body.',
-          controller.signal.aborted ? 'IMPORT_FETCH_TIMEOUT' : 'IMPORT_FETCH_FAILED',
-          { cause: String(err) },
-        );
-      }
-      return { html, finalUrl: url.toString() };
     }
   } finally {
     clearTimeout(timer);
