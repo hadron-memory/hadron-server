@@ -229,8 +229,13 @@ export async function recordLlmUsage(
     // error object logs Prisma's message as truncated noise without the P-code
     // or meta that actually identifies the cause (issue #643).
     if (err instanceof Prisma.PrismaClientKnownRequestError) {
+      // Pass meta as a separate arg rather than JSON.stringify-ing it: meta can
+      // carry a bigint, which JSON.stringify throws on — and a throw here would
+      // defeat the fail-open guarantee. Node's console formatter is bigint-safe.
       console.error(
-        `recordLlmUsage failed (usage NOT recorded): PrismaClientKnownRequestError code=${err.code} meta=${JSON.stringify(err.meta)}`,
+        `recordLlmUsage failed (usage NOT recorded): PrismaClientKnownRequestError code=${err.code}`,
+        'meta:',
+        err.meta,
         err,
       );
     } else {
