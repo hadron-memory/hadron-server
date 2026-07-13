@@ -36,9 +36,15 @@ function validCount(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
 }
 
-/** A non-empty string, or undefined — for the optional freshness/locale hints. */
+/**
+ * A trimmed non-empty string, or undefined — for the optional freshness/locale
+ * hints. Trims before the empty check so a whitespace-only arg is omitted, the
+ * same posture `query` gets below (consistency; Copilot/Gemini review).
+ */
 function optionalString(v: unknown): string | undefined {
-  return typeof v === 'string' && v.length > 0 ? v : undefined;
+  if (typeof v !== 'string') return undefined;
+  const trimmed = v.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 export const webSearchTool: RunToolDef = {

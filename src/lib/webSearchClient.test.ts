@@ -81,6 +81,14 @@ describe('webSearchClient', () => {
     });
   });
 
+  it('treats a whitespace-only tool URL as unconfigured', async () => {
+    process.env.WEBSEARCH_TOOL_URL = '   ';
+    expect(isWebSearchConfigured()).toBe(false);
+    await expect(webSearch({ query: 'x' })).rejects.toMatchObject({
+      extensions: { code: 'WEBSEARCH_TOOL_NOT_CONFIGURED' },
+    });
+  });
+
   it('attaches the env-sourced provider + bearer credential inline in the body (never a URL param)', async () => {
     process.env.WEBSEARCH_PROVIDER = 'brave';
     process.env.WEBSEARCH_PROVIDER_API_KEY = 'PROVIDER_SECRET';
@@ -144,6 +152,36 @@ describe('webSearchClient', () => {
     const err = await webSearch({ query: 'x' }).catch((e) => e as GraphQLError);
     expect((err as GraphQLError).extensions.code).toBe('WEBSEARCH_TOOL_UNREACHABLE');
     expect(JSON.stringify((err as GraphQLError).extensions)).not.toContain('PROVIDER_SECRET');
+  });
+
+  it('classifies a stream-level body-read failure (non-SyntaxError) as _UNREACHABLE, not _ERROR', async () => {
+    // A 200 whose body read drops mid-stream: fetch resolves, res.json() rejects
+    // with a TypeError. That is a transport failure, not a malformed envelope.
+    const res = {
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new TypeError('terminated');
+      },
+    } as unknown as Response;
+    vi.stubGlobal('fetch', fetchStub(async () => res));
+    await expect(webSearch({ query: 'x' })).rejects.toMatchObject({
+      extensions: { code: 'WEBSEARCH_TOOL_UNREACHABLE' },
+    });
+  });
+
+  it('recovers a malformed-JSON body (SyntaxError) as WEBSEARCH_TOOL_ERROR', async () => {
+    const res = {
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON');
+      },
+    } as unknown as Response;
+    vi.stubGlobal('fetch', fetchStub(async () => res));
+    await expect(webSearch({ query: 'x' })).rejects.toMatchObject({
+      extensions: { code: 'WEBSEARCH_TOOL_ERROR' },
+    });
   });
 
   it('rejects a response missing a results array as WEBSEARCH_TOOL_ERROR', async () => {

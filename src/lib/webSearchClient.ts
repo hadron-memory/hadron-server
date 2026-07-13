@@ -24,11 +24,16 @@ import { GraphQLError } from 'graphql';
  * allowlist. Because the destination is configuration and not caller-directed,
  * this surface carries a materially lower SSRF risk than fetch and needs none
  * of its connection-pinning apparatus. Core SOURCES the provider API key (env /
- * Doppler) and passes it INLINE per request via `auth` (bearer / basic / named
- * header — never a URL query string); the tool stores none. This module reads
- * that credential from env (`providerCredentialFromEnv`) — a deliberately
- * minimal single-provider seam; the org-scoped multi-provider trust-tier
- * registry (`cor:web:020:02`) is the deferred follow-up.
+ * Doppler) and passes it INLINE per request via `auth`; the tool stores none.
+ * The `WebSearchAuth` channel is provider-agnostic and mirrors the fetch
+ * surface's three shapes (bearer / basic / named header), but this module's
+ * env seam (`providerCredentialFromEnv`) only SOURCES the two shapes real search
+ * providers use — a bearer token or a named header (e.g. Brave's
+ * `X-Subscription-Token`); `basic` remains representable in the type for an
+ * API caller that already holds such a credential, but no env var emits it. This
+ * env seam is a deliberately minimal single-provider stand-in; the org-scoped
+ * multi-provider trust-tier registry (`cor:web:020:02`) is the deferred
+ * follow-up.
  *
  * STATELESS + RETRY-SAFE. The tool holds nothing between calls. A search is a
  * GET-idempotent read, so — unlike the non-GET fetch path — retry IS safe here;
@@ -126,17 +131,19 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * Mirrors isSmsConfigured(): lets a caller fail before touching governance.
  */
 export function isWebSearchConfigured(): boolean {
-  return Boolean(process.env.WEBSEARCH_TOOL_URL);
+  return Boolean(process.env.WEBSEARCH_TOOL_URL?.trim());
 }
 
 function toolConfig(): { baseUrl: string; token?: string } {
-  const baseUrl = process.env.WEBSEARCH_TOOL_URL;
+  // Trim: a whitespace-only value is a config mistake, not a configured tool —
+  // treat it as unset rather than letting it reach fetch() as an invalid URL.
+  const baseUrl = process.env.WEBSEARCH_TOOL_URL?.trim();
   if (!baseUrl) {
     throw new GraphQLError('Web search is not configured (WEBSEARCH_TOOL_URL unset).', {
       extensions: { code: 'WEBSEARCH_TOOL_NOT_CONFIGURED' },
     });
   }
-  return { baseUrl: baseUrl.replace(/\/+$/, ''), token: process.env.WEBSEARCH_TOOL_TOKEN || undefined };
+  return { baseUrl: baseUrl.replace(/\/+$/, ''), token: process.env.WEBSEARCH_TOOL_TOKEN?.trim() || undefined };
 }
 
 /**
@@ -150,13 +157,15 @@ function toolConfig(): { baseUrl: string; token?: string } {
  * succeeding when the operator meant to send a key.
  */
 export function providerCredentialFromEnv(): { provider?: string; auth?: WebSearchAuth } {
-  const provider = process.env.WEBSEARCH_PROVIDER || undefined;
-  const apiKey = process.env.WEBSEARCH_PROVIDER_API_KEY || undefined;
+  // Trim every provider var: stray whitespace in a header name or API key is a
+  // silent, hard-to-diagnose auth failure at the provider.
+  const provider = process.env.WEBSEARCH_PROVIDER?.trim() || undefined;
+  const apiKey = process.env.WEBSEARCH_PROVIDER_API_KEY?.trim() || undefined;
   if (!apiKey) return { provider };
 
-  const authKind = (process.env.WEBSEARCH_PROVIDER_AUTH || 'bearer').toLowerCase();
+  const authKind = (process.env.WEBSEARCH_PROVIDER_AUTH || 'bearer').trim().toLowerCase();
   if (authKind === 'header') {
-    const name = process.env.WEBSEARCH_PROVIDER_HEADER;
+    const name = process.env.WEBSEARCH_PROVIDER_HEADER?.trim();
     if (!name) {
       throw new GraphQLError(
         'Web search provider auth is misconfigured (WEBSEARCH_PROVIDER_AUTH=header requires WEBSEARCH_PROVIDER_HEADER).',
@@ -228,7 +237,11 @@ export async function webSearch(input: WebSearchInput): Promise<WebSearchRespons
     try {
       payload = (await res.json()) as Record<string, unknown> | null;
     } catch (err) {
-      if (controller.signal.aborted) throw err; // timed out mid-body → outer catch
+      // Only a JSON parse failure (SyntaxError) is a "malformed body" we recover
+      // from as null. A timeout-abort or a stream-level read failure (TypeError,
+      // e.g. the connection dropping mid-body) must propagate to the outer catch
+      // so it classifies as _UNREACHABLE, not a misleading _ERROR (Gemini review).
+      if (controller.signal.aborted || !(err instanceof SyntaxError)) throw err;
       payload = null; // malformed/empty body — handled below
     }
   } catch (err) {

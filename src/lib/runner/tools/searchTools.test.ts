@@ -53,10 +53,16 @@ describe('web_search', () => {
     expect(webSearch).not.toHaveBeenCalled();
   });
 
-  it('trims the query and omits blank/invalid refinements', async () => {
+  it('trims the query and omits blank/whitespace-only refinements', async () => {
     vi.mocked(webSearch).mockResolvedValueOnce({ results: [] } as never);
-    await webSearchTool.execute(stubCtx(), { query: '  cats  ', freshness: '', locale: '' });
+    await webSearchTool.execute(stubCtx(), { query: '  cats  ', freshness: '   ', locale: '' });
     expect(webSearch).toHaveBeenCalledWith({ query: 'cats' });
+  });
+
+  it('trims (not just presence-checks) the refinements it does forward', async () => {
+    vi.mocked(webSearch).mockResolvedValueOnce({ results: [] } as never);
+    await webSearchTool.execute(stubCtx(), { query: 'cats', freshness: '  week  ', locale: ' en-US ' });
+    expect(webSearch).toHaveBeenCalledWith({ query: 'cats', freshness: 'week', locale: 'en-US' });
   });
 
   it('drops a non-positive or fractional count', async () => {
