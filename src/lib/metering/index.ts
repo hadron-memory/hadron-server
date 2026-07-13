@@ -15,6 +15,7 @@
  * their callers (GraphQL mutations) want real errors.
  */
 
+import { Prisma } from '../../generated/prisma/index.js';
 import type { AiModelPrice, PrismaClient, UsageEvent } from '../../generated/prisma/index.js';
 import type { AiConfigOwnerType } from '../aiConfig.js';
 import { generateId } from '../id.js';
@@ -223,7 +224,18 @@ export async function recordLlmUsage(
     }
     return event;
   } catch (err) {
-    console.error('recordLlmUsage failed (usage NOT recorded):', err);
+    // Fail-open (FR-006): metering must never fail the run that spent the
+    // tokens. But log enough to diagnose transient failures post-hoc — a bare
+    // error object logs Prisma's message as truncated noise without the P-code
+    // or meta that actually identifies the cause (issue #643).
+    if (err instanceof Prisma.PrismaClientKnownRequestError) {
+      console.error(
+        `recordLlmUsage failed (usage NOT recorded): PrismaClientKnownRequestError code=${err.code} meta=${JSON.stringify(err.meta)}`,
+        err,
+      );
+    } else {
+      console.error('recordLlmUsage failed (usage NOT recorded):', err);
+    }
     return null;
   }
 }
