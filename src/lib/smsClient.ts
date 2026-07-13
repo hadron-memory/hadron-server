@@ -32,6 +32,25 @@ export interface SmsSendResult {
   status: string;
 }
 
+/**
+ * Cheap config preflight for callers that consume scarce resources (quota
+ * counters, comm.outbound tickets) BEFORE a send — an unconfigured
+ * deployment must fail before any governance is touched (PR-642 review).
+ */
+export function isSmsConfigured(): boolean {
+  return Boolean(process.env.TWILIO_TOOL_URL);
+}
+
+/**
+ * Redact E.164-looking sequences from provider text before it enters the
+ * GraphQL error surface — Twilio messages can echo the destination number,
+ * and error messages end up in run outputs and logs (PR-642 review,
+ * Copilot; the trail-masking posture applied to the error path).
+ */
+function redactPhoneNumbers(text: string): string {
+  return text.replace(/\+\d{5,15}/g, (m) => `${m.slice(0, 2)}•••`);
+}
+
 function tool(): { baseUrl: string; token?: string } {
   const baseUrl = process.env.TWILIO_TOOL_URL;
   if (!baseUrl) {
@@ -82,7 +101,9 @@ export async function sendSms(message: { to: string; body: string }): Promise<Sm
   if (!res.ok) {
     const smsErrorCode = typeof payload?.error === 'string' ? payload.error : undefined;
     const message_ =
-      typeof payload?.message === 'string' ? payload.message.slice(0, 500) : `SMS tool error (${res.status}).`;
+      typeof payload?.message === 'string'
+        ? redactPhoneNumbers(payload.message.slice(0, 500))
+        : `SMS tool error (${res.status}).`;
     throw new GraphQLError(message_, {
       extensions: {
         code: 'SMS_TOOL_ERROR',

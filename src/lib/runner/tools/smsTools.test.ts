@@ -16,12 +16,13 @@ import { GraphQLError } from 'graphql';
 
 vi.mock('../../smsClient.js', () => ({
   sendSms: vi.fn(),
+  isSmsConfigured: vi.fn(() => true),
 }));
 
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../id.js';
-import { sendSms } from '../../smsClient.js';
+import { isSmsConfigured, sendSms } from '../../smsClient.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { evaluatePolicyChain, parsePolicyLink } from '@hadron-memory/access-control';
 import { hadronSendSms, resolveRunTools } from './index.js';
@@ -93,6 +94,7 @@ async function setSmsLimit(scopeKind: 'app' | 'org', limit: number): Promise<voi
 beforeEach(async () => {
   vi.clearAllMocks();
   vi.mocked(sendSms).mockResolvedValue({ sid: 'SM123', status: 'queued' });
+  vi.mocked(isSmsConfigured).mockReturnValue(true);
   await cleanDb(db);
   const org = await db.organization.create({
     data: { id: generateId(), name: ORG_URN, urn: ORG_URN },
@@ -312,19 +314,26 @@ describe('hadron_send_sms provider/transport failure posture', () => {
     await expect(hadronSendSms.execute(toolCtx(run), { to: TO, body: 'hi' })).rejects.toThrow(/unreachable/);
   });
 
-  it('a missing tool configuration throws → TOOL_FAILED (deployment problem, not author problem)', async () => {
+  it('an unconfigured deployment throws BEFORE any governance touch (no quota, no ticket)', async () => {
+    // Codex P2 on PR-642: an unconfigured rollout must not drain the scarce
+    // counters/ticket ledger on attempts that can never leave the platform.
     await mintTicket();
-    vi.mocked(sendSms).mockRejectedValue(
-      new GraphQLError('SMS sending is not configured (TWILIO_TOOL_URL unset).', {
-        extensions: { code: 'SMS_TOOL_NOT_CONFIGURED' },
-      }),
-    );
+    vi.mocked(isSmsConfigured).mockReturnValue(false);
     const run = await mintRun();
     await expect(hadronSendSms.execute(toolCtx(run), { to: TO, body: 'hi' })).rejects.toThrow(/not configured/);
+    expect(sendSms).not.toHaveBeenCalled();
+    expect(await quotaUsed('app')).toBeNull(); // no row was even created
+    expect(await db.actionTicket.count({ where: { consumedAt: { not: null } } })).toBe(0);
   });
 });
 
 describe('hadron_send_sms PII posture', () => {
+  it('masks short-but-valid E.164 numbers to the prefix only (no tail leak)', () => {
+    expect(maskPhoneNumber('+15551234567')).toBe('+1•••4567');
+    expect(maskPhoneNumber('+12345')).toBe('+1•••'); // tail slice would leak 4 of 5 digits
+    expect(maskPhoneNumber('+12')).toBe('+1•••');
+  });
+
   it('trail lines carry the masked number and never the body', async () => {
     await mintTicket();
     const run = await mintRun();

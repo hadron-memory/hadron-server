@@ -37,7 +37,7 @@ import {
   consumeActionTicket,
   defaultQuotaLimit,
 } from '../../../jobs/appRuns.js';
-import { sendSms } from '../../smsClient.js';
+import { isSmsConfigured, sendSms } from '../../smsClient.js';
 import type { RunToolDef } from './types.js';
 import type { PrismaClient } from '../../../generated/prisma/index.js';
 
@@ -47,8 +47,14 @@ const E164_RE = /^\+[1-9]\d{1,14}$/;
 /** Twilio's hard cap on an outbound message body (concatenated segments). */
 export const MAX_SMS_BODY_CHARS = 1_600;
 
-/** `+15551234567` → `+1•••4567` — enough to recognize, never the number. */
+/**
+ * `+15551234567` → `+1•••4567` — enough to recognize, never the number.
+ * Short-but-valid E.164 values (some countries have 5-7 digit numbers)
+ * would leak via the tail slice, so they mask to the prefix only
+ * (PR-642 review, Gemini + Copilot).
+ */
 export function maskPhoneNumber(to: string): string {
+  if (to.length < 8) return `${to.slice(0, 2)}•••`;
   return `${to.slice(0, 2)}•••${to.slice(-4)}`;
 }
 
@@ -91,6 +97,14 @@ export const hadronSendSms: RunToolDef = {
     }
     if (body.length === 0 || body.length > MAX_SMS_BODY_CHARS) {
       throw new Error(`hadron_send_sms: "body" must be 1-${MAX_SMS_BODY_CHARS} characters.`);
+    }
+    // Config preflight BEFORE any governance touch: an unconfigured
+    // deployment must not drain the scarce counters/ticket ledger on
+    // attempts that can never leave the platform (PR-642 review, Codex P2).
+    if (!isSmsConfigured()) {
+      throw new GraphQLError('SMS sending is not configured (TWILIO_TOOL_URL unset).', {
+        extensions: { code: 'SMS_TOOL_NOT_CONFIGURED' },
+      });
     }
     const masked = maskPhoneNumber(to);
 
