@@ -178,7 +178,7 @@ async function assertHostAllowed(url: URL): Promise<LookupAddress[]> {
 export function pinnedLookup(addresses: LookupAddress[]) {
   return (
     _hostname: string,
-    options: { all?: boolean; family?: number },
+    options: { all?: boolean; family?: number } | number | null | undefined,
     callback: (err: Error | null, address?: LookupAddress[] | string, family?: number) => void,
   ): void => {
     if (addresses.length === 0) {
@@ -189,13 +189,18 @@ export function pinnedLookup(addresses: LookupAddress[]) {
       callback(new Error('pinned address failed re-validation'));
       return;
     }
+    // Node's dns.lookup contract allows `options` to be a bare family integer
+    // (lookup(host, 4, cb)); normalize so family filtering isn't silently
+    // skipped in that form (Gemini review on #646).
+    const opt = typeof options === 'number' ? { family: options } : options;
+    const family = opt?.family;
     // Honor an explicitly requested family (4/6); 0 or unset means any.
-    const wanted = options?.family ? addresses.filter((a) => a.family === options.family) : addresses;
+    const wanted = family ? addresses.filter((a) => a.family === family) : addresses;
     if (wanted.length === 0) {
-      callback(new Error(`no pinned address for family ${options.family}`));
+      callback(new Error(`no pinned address for family ${family}`));
       return;
     }
-    if (options?.all) callback(null, wanted);
+    if (opt?.all) callback(null, wanted);
     else callback(null, wanted[0].address, wanted[0].family);
   };
 }

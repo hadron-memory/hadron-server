@@ -162,4 +162,22 @@ describe('pinnedLookup — DNS-rebinding pin (#645)', () => {
       call([{ address: '93.184.216.34', family: 4 }], { all: false, family: 6 }),
     ).rejects.toThrow(/family 6/);
   });
+
+  it('honors a bare numeric family argument (Node lookup(host, 4, cb) form)', async () => {
+    const addrs: LookupAddress[] = [
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:4700::1111', family: 6 },
+    ];
+    // dns.lookup allows `options` to be a family integer instead of an object.
+    const res: { address: unknown; family?: number } = await new Promise((resolve, reject) => {
+      (pinnedLookup(addrs) as unknown as (
+        h: string,
+        o: number,
+        cb: (e: Error | null, a?: unknown, f?: number) => void,
+      ) => void)('rebind.example', 6, (err, address, family) =>
+        err ? reject(err) : resolve({ address, family }),
+      );
+    });
+    expect(res).toEqual({ address: '2606:4700:4700::1111', family: 6 });
+  });
 });
