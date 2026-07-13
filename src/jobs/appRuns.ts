@@ -55,6 +55,11 @@ const QUOTA_RUNS_PER_DAY_APP = intEnv('QUOTA_RUNS_PER_DAY_APP', 200);
 const QUOTA_RUNS_PER_DAY_ORG = intEnv('QUOTA_RUNS_PER_DAY_ORG', 1_000);
 const QUOTA_TOKENS_PER_DAY_APP = intEnv('QUOTA_TOKENS_PER_DAY_APP', 2_000_000);
 const QUOTA_TOKENS_PER_DAY_ORG = intEnv('QUOTA_TOKENS_PER_DAY_ORG', 10_000_000);
+// Deliberately small: SMS is for internal/staff notifications (hadrontool-twilio),
+// not campaigns — the counter is the mass-messaging brake on the shared
+// platform Twilio account.
+const QUOTA_SMS_PER_DAY_APP = intEnv('QUOTA_SMS_PER_DAY_APP', 50);
+const QUOTA_SMS_PER_DAY_ORG = intEnv('QUOTA_SMS_PER_DAY_ORG', 200);
 
 /** Parse a positive-integer env var, falling back when unset/invalid. */
 function intEnv(name: string, fallback: number): number {
@@ -83,6 +88,9 @@ export class RunLaunchDeniedError extends Error {
 
 // ── Quota counters (cor:acl:050:01/:04 tier 1) ──────────────────────────────
 
+/** The v1 counter actions (cor:acl:050:04): runs, LLM tokens, SMS sends. */
+export type QuotaAction = 'run.execute' | 'llm.tokens' | 'sms.send';
+
 /** Start of the next UTC day — the daily quota window boundary. */
 function nextUtcMidnight(): Date {
   const d = new Date();
@@ -102,7 +110,7 @@ async function ensureQuotaRow(
   db: PrismaClient,
   scopeKind: 'app' | 'org',
   scopeId: string,
-  action: 'run.execute' | 'llm.tokens',
+  action: QuotaAction,
   defaultLimit: number,
 ): Promise<void> {
   try {
@@ -126,25 +134,29 @@ async function ensureQuotaRow(
 /** Platform-default (env-seeded) limit for a scope × action (#510 admin surface). */
 export function defaultQuotaLimit(
   scopeKind: 'app' | 'org',
-  action: 'run.execute' | 'llm.tokens',
+  action: QuotaAction,
 ): number {
   if (action === 'run.execute') {
     return scopeKind === 'app' ? QUOTA_RUNS_PER_DAY_APP : QUOTA_RUNS_PER_DAY_ORG;
+  }
+  if (action === 'sms.send') {
+    return scopeKind === 'app' ? QUOTA_SMS_PER_DAY_APP : QUOTA_SMS_PER_DAY_ORG;
   }
   return scopeKind === 'app' ? QUOTA_TOKENS_PER_DAY_APP : QUOTA_TOKENS_PER_DAY_ORG;
 }
 
 /**
- * Materialize the canonical counter rows for a scope (#510): both actions,
- * seeded with the platform defaults, expired windows rolled. Lets the admin
- * surface show usage-vs-limit BEFORE the scope's first run touches a row.
+ * Materialize the canonical counter rows for a scope (#510): every counter
+ * action, seeded with the platform defaults, expired windows rolled. Lets
+ * the admin surface show usage-vs-limit BEFORE the scope's first run
+ * touches a row.
  */
 export async function ensureQuotaRowsForScope(
   db: PrismaClient,
   scopeKind: 'app' | 'org',
   scopeId: string,
 ): Promise<void> {
-  for (const action of ['run.execute', 'llm.tokens'] as const) {
+  for (const action of ['run.execute', 'llm.tokens', 'sms.send'] as const) {
     await ensureQuotaRow(db, scopeKind, scopeId, action, defaultQuotaLimit(scopeKind, action));
   }
 }
@@ -159,7 +171,7 @@ export async function setQuotaLimit(
   db: PrismaClient,
   scopeKind: 'app' | 'org',
   scopeId: string,
-  action: 'run.execute' | 'llm.tokens',
+  action: QuotaAction,
   limit: number,
 ): Promise<void> {
   await ensureQuotaRow(db, scopeKind, scopeId, action, defaultQuotaLimit(scopeKind, action));
@@ -178,7 +190,7 @@ export async function consumeQuota(
   db: PrismaClient,
   scopeKind: 'app' | 'org',
   scopeId: string,
-  action: 'run.execute' | 'llm.tokens',
+  action: QuotaAction,
   defaultLimit: number,
   amount = 1,
 ): Promise<boolean> {
@@ -196,7 +208,7 @@ export async function hasQuotaHeadroom(
   db: PrismaClient,
   scopeKind: 'app' | 'org',
   scopeId: string,
-  action: 'run.execute' | 'llm.tokens',
+  action: QuotaAction,
   defaultLimit: number,
 ): Promise<boolean> {
   await ensureQuotaRow(db, scopeKind, scopeId, action, defaultLimit);
@@ -218,7 +230,7 @@ export async function recordQuotaUsage(
   db: PrismaClient,
   scopeKind: 'app' | 'org',
   scopeId: string,
-  action: 'run.execute' | 'llm.tokens',
+  action: QuotaAction,
   defaultLimit: number,
   amount: number,
 ): Promise<void> {
