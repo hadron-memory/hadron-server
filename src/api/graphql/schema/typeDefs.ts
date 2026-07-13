@@ -3924,6 +3924,13 @@ export const typeDefs = `#graphql
     createMemorySubscription(memoryId: ID!, orgId: ID!, role: Role!): MemorySubscription!
 
     """
+    Subscribe an organization to a PUBLIC Agent without creating an App.
+
+    Accepts the entity's ID or URN.
+    """
+    createAgentOrgGrant(agentRef: ID!, orgRef: ID!): AgentOrgGrant!
+
+    """
     Update a cross-org Memory subscription.
 
     Accepts the entity's ID or URN.

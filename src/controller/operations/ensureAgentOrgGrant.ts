@@ -28,6 +28,7 @@ export async function ensureAgentOrgGrant(
   db: PrismaClient,
   orgId: string,
   agentId: string,
+  opts: { createdBy?: string | null } = {},
 ): Promise<void> {
   try {
     await db.agentOrgGrant.upsert({
@@ -38,6 +39,7 @@ export async function ensureAgentOrgGrant(
         // v1 default: activate immediately on creation since billing is out
         // of scope. Mirrors the AgentSubscription pattern from 005.
         activatedAt: new Date(),
+        createdBy: opts.createdBy ?? null,
       },
       update: {},
     });
