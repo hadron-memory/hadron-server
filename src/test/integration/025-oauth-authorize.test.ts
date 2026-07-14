@@ -9,7 +9,8 @@
  *     code_challenge, code_challenge_method=plain, missing response_type,
  *     missing resource, unsupported scope.
  *   - Option-C sign-in redirect — caller without hadron_token cookie
- *     bounces through /auth/github?return_to=<encoded>.
+ *     bounces through the selected login provider with return_to=<encoded>;
+ *     GitHub remains the default.
  *   - Happy GET — consent HTML carries CSRF token + every hidden input.
  *   - POST CSRF — missing / invalid `_csrf` field → 403.
  *   - POST approve — AuthCode created with codeHash (not plaintext per
@@ -345,6 +346,45 @@ describe('GET /oauth/authorize — Option-C sign-in (FR-007)', () => {
     // original query intact.
     expect(returnTo).toMatch(/^\/oauth\/authorize\?/);
     expect(returnTo).toContain(`client_id=${testClientId}`);
+  });
+
+  it('login_provider=google → redirect to /auth/google with the full return_to', async () => {
+    const q = buildAuthorizeQuery({ login_provider: 'google' });
+    const res = await getAuthorize(q, { cookie: null });
+
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get('location')!, baseUrl);
+    expect(url.pathname).toBe('/auth/google');
+    const returnTo = url.searchParams.get('return_to');
+    expect(returnTo).not.toBeNull();
+    expect(returnTo).toMatch(/^\/oauth\/authorize\?/);
+    expect(returnTo).toContain('login_provider=google');
+    expect(returnTo).toContain(`client_id=${testClientId}`);
+  });
+
+  it('unknown login_provider → OAuth invalid_request, never an auth-route redirect', async () => {
+    const res = await getAuthorize(
+      buildAuthorizeQuery({ login_provider: 'not-a-provider' }),
+      { cookie: null },
+    );
+
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get('location')!);
+    expect(url.origin + url.pathname).toBe(REGISTERED_REDIRECT);
+    expect(url.searchParams.get('error')).toBe('invalid_request');
+    expect(url.searchParams.get('state')).toBe('opaque-state-value');
+  });
+
+  it('multi-value login_provider → OAuth invalid_request', async () => {
+    const params = new URLSearchParams(buildAuthorizeQuery());
+    params.append('login_provider', 'google');
+    params.append('login_provider', 'github');
+    const res = await getAuthorize(params.toString(), { cookie: null });
+
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get('location')!);
+    expect(url.origin + url.pathname).toBe(REGISTERED_REDIRECT);
+    expect(url.searchParams.get('error')).toBe('invalid_request');
   });
 
   it('malformed hadron_token cookie → also bounces to /auth/github', async () => {

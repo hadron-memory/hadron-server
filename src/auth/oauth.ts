@@ -595,7 +595,7 @@ function buildAuthorizeCsrfProtection(): DoubleCsrfUtilities {
  * Extract the signed-in user's id from the `hadron_token` cookie.
  * Returns `null` for "not signed in or invalid token" — the caller
  * treats both as anonymous (which under Option-C means redirecting
- * to `/auth/github`).
+ * to the selected first-party login provider).
  */
 async function getUserIdFromCookie(req: Request): Promise<string | null> {
   const token = req.cookies?.hadron_token;
@@ -731,6 +731,7 @@ const CODE_CHALLENGE_MIN_LENGTH = 43;
 const CODE_CHALLENGE_MAX_LENGTH = 128;
 const CODE_CHALLENGE_CHARSET = /^[A-Za-z0-9\-._~]+$/;
 const RESOURCE_MAX_LENGTH = 2048;
+const LOGIN_PROVIDERS = new Set(['github', 'google']);
 
 /** True iff `v` is a valid PKCE S256 code_challenge per RFC 7636 §4.2. */
 function isValidCodeChallenge(v: string): boolean {
@@ -745,7 +746,8 @@ function isValidCodeChallenge(v: string): boolean {
  * `GET /oauth/authorize` per the contract in contracts/oauth-endpoints.md.
  * Validation order (load-bearing):
  *   1. `client_id` + `redirect_uri` — pre-redirect 400 if invalid.
- *   2. Sign-in check — Option-C bounce to /auth/github with return_to.
+ *   2. Login-provider validation, then sign-in check — Option-C bounce to
+ *      /auth/github (default) or /auth/google with return_to.
  *   3. Other param shape — post-client-validated → redirect with
  *      `?error=invalid_request|invalid_scope`.
  *   4. Happy path — issue CSRF token + render consent HTML.
@@ -781,15 +783,30 @@ function buildHandleAuthorizeGet(
         ? q.state
         : '';
 
+    // The CLI can select which first-party identity provider performs the
+    // browser sign-in. Omission remains GitHub for compatibility with older
+    // CLI versions and bookmarked authorize URLs. This is deliberately an
+    // allow-list: never interpolate an arbitrary query value into an auth
+    // route. Validate it after the registered redirect URI so malformed
+    // requests can use the standard OAuth error redirect safely.
+    const loginProvider = q.login_provider === undefined ? 'github' : q.login_provider;
+    if (typeof loginProvider !== 'string' || !LOGIN_PROVIDERS.has(loginProvider)) {
+      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+      return;
+    }
+
     // 2. Sign-in check. Not signed in → Option-C bounce.
     const userId = await getUserIdFromCookie(req);
     if (!userId) {
       // req.originalUrl is the path + query that hit Express
       // (e.g., `/oauth/authorize?client_id=…&state=…`). The
-      // `/auth/github` handler's `isServerLocalPath` predicate
+      // selected auth handler's `isServerLocalPath` predicate
       // accepts paths starting with `/` and not `//`, which
       // matches.
-      res.redirect(302, `/auth/github?return_to=${encodeURIComponent(req.originalUrl)}`);
+      res.redirect(
+        302,
+        `/auth/${loginProvider}?return_to=${encodeURIComponent(req.originalUrl)}`,
+      );
       return;
     }
 
