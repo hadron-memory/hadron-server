@@ -336,6 +336,45 @@ export const agentMutations = {
       return grant;
     },
 
+    revokeAgentOrgGrant: async (
+      _: unknown,
+      { agentRef, orgRef }: { agentRef: string; orgRef: string },
+      ctx: Context,
+    ) => {
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+
+      await requireAgentOrgGrantRevokeRole(ctx, resolvedOrgId, agent.organizationId);
+
+      await ctx.db.agentOrgGrant.updateMany({
+        where: {
+          orgId: resolvedOrgId,
+          agentId: resolvedAgentId,
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: new Date(),
+          revokedBy: ctx.userId ?? null,
+          updatedBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+      });
+
+      const grant = await ctx.db.agentOrgGrant.findUnique({
+        where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
+      });
+      if (!grant) {
+        throw new GraphQLError('AgentOrgGrant not found for this organization and Agent.', {
+          extensions: {
+            code: 'AGENT_ORG_GRANT_NOT_FOUND',
+            orgId: resolvedOrgId,
+            agentId: resolvedAgentId,
+          },
+        });
+      }
+      return grant;
+    },
+
     publishAgentImport: async (
       _: unknown,
       {
@@ -629,3 +668,21 @@ export const agentMutations = {
     // ── Chatbot revisions ─────────────────────────────────────────────
 
 };
+
+async function requireAgentOrgGrantRevokeRole(
+  ctx: Context,
+  subscriberOrgId: string,
+  agentOwnerOrgId: string,
+): Promise<void> {
+  try {
+    await requireOrgRole(ctx, subscriberOrgId, 'ADMIN');
+    return;
+  } catch (subscriberErr) {
+    try {
+      await requireOrgRole(ctx, agentOwnerOrgId, 'ADMIN');
+      return;
+    } catch {
+      throw subscriberErr;
+    }
+  }
+}
