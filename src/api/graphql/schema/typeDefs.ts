@@ -3486,7 +3486,15 @@ export const typeDefs = `#graphql
     # remove the row entirely (cascades edges + NodeRevision via FK) —
     # irreversible. #391. A re-delete of an already soft-deleted node is
     # idempotent (the ref resolves through the tombstone).
-    deleteNode(nodeRef: ID!, hard: Boolean): Boolean!
+    #
+    # If the node has descendants (nodes under its loc prefix), a plain delete
+    # REFUSES with NODE_HAS_DESCENDANTS (carrying the count) rather than silently
+    # orphaning the subtree — parity with the hadron_delete_node MCP tool. Pass
+    # recursive: true to delete the node's whole loc-subtree — the node at its loc
+    # PLUS every descendant, matched on ':' path boundaries (so deleting 'auth'
+    # does not touch 'authoring'). The subtree lives in one memory, so the single
+    # write-access check covers it; 'hard' applies to the whole subtree.
+    deleteNode(nodeRef: ID!, hard: Boolean, recursive: Boolean): Boolean!
 
     # Restore a node to a previous revision (#617).
     #
