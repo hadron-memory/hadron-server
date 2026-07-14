@@ -4,11 +4,13 @@ import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import {
   normalizeHandle,
   normalizeHandleOrNull,
 } from '../../../lib/userHandle.js';
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
+import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
 import { validateOrgSlug } from '../../../lib/urn.js';
 import {
   Prisma,
@@ -16,10 +18,46 @@ import {
 } from '../../../generated/prisma/index.js';
 import {
   type Context,
+  isPlatformAdmin,
   requireRole,
   requireOrgRole,
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
+
+async function requireMergeUsersAccess(
+  ctx: Context,
+  sourceUserId: string,
+  targetUserId: string,
+): Promise<void> {
+  if (isPlatformAdmin(ctx)) return;
+  if (!ctx.userId) throw new Error('Forbidden');
+
+  // An org admin may perform the global account merge only when both users
+  // are live members of at least one org they administer. First identify the
+  // shared live orgs, then delegate the caller check to the canonical gate so
+  // revoked caller memberships and role ordering stay consistent everywhere.
+  const sharedOrgMemberships = await ctx.db.orgMember.findMany({
+    where: {
+      userId: sourceUserId,
+      deletedAt: null,
+      organization: {
+        members: { some: { userId: targetUserId, deletedAt: null } },
+      },
+    },
+    select: { organizationId: true },
+  });
+
+  for (const { organizationId } of sharedOrgMemberships) {
+    try {
+      await requireOrgRole(ctx, organizationId, 'ADMIN');
+      return;
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'Forbidden') throw error;
+    }
+  }
+
+  throw new Error('Forbidden');
+}
 
 export const orgMutations = {
     updateMyProfile: async (
@@ -52,6 +90,41 @@ export const orgMutations = {
     ) => {
       requireRole(ctx, 'ADMIN');
       return ctx.db.user.update({ where: { id: userId }, data: { roles } });
+    },
+
+    mergeUsers: async (
+      _: unknown,
+      { input }: { input: { source: string; target: string } },
+      ctx: Context,
+    ) => {
+      const platformAdmin = isPlatformAdmin(ctx);
+      if (!platformAdmin && !ctx.userId) throw new Error('Forbidden');
+
+      let sourceUserId: string;
+      let targetUserId: string;
+      try {
+        [{ id: sourceUserId }, { id: targetUserId }] = await Promise.all([
+          resolveUserRef(ctx.db, input.source),
+          resolveUserRef(ctx.db, input.target),
+        ]);
+      } catch (error) {
+        // Non-platform callers must not use resolver error differences to
+        // enumerate user refs outside organizations they administer.
+        if (!platformAdmin) throw new Error('Forbidden');
+        throw error;
+      }
+
+      await requireMergeUsersAccess(ctx, sourceUserId, targetUserId);
+      if (sourceUserId === targetUserId) {
+        throw new GraphQLError('mergeUsers: source and target are the same user.', {
+          extensions: { code: 'MERGE_SOURCE_EQUALS_TARGET', userId: sourceUserId },
+        });
+      }
+      return mergeUsers(ctx.db, {
+        sourceUserId,
+        targetUserId,
+        actorUserId: ctx.userId ?? null,
+      });
     },
 
     // ── Organization management ─────────────────────────────────────────
@@ -554,4 +627,3 @@ export const orgMutations = {
     },
 
 };
-
