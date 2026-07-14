@@ -21,7 +21,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 let orgA: { id: string; urn: string };
 let orgB: { id: string; urn: string };
 let adminUser: { id: string };
-let agent: { id: string; organizationId: string; urn: string };
+let agent: { id: string; organizationId: string | null; urn: string };
 let app: { id: string };
 let app2: { id: string };
 

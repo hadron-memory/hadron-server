@@ -105,7 +105,9 @@ async function resolveAppKey(
 
   const ctx: AuthContext = {
     appId: appKey.app.id,
-    organizationId: appKey.app.organizationId,
+    // A user-owned App (spec 047) has no organizationId — undefined
+    // matches the field's existing "unscoped" convention.
+    organizationId: appKey.app.organizationId ?? undefined,
     // App Keys carry no explicit roles; org-level checks are enforced per-call
     // by the resolvers against the app's organization.
     roles: [],

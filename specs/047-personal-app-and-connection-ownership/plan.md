@@ -246,9 +246,19 @@ subscription — no new work once the App is user-owned.
 >   cascade-deleted); 2c switches it to CASCADE once the XOR guarantees an
 >   owner-set row is org-less. On Memory, `ownerUserId` (tenant owner) is a
 >   SECOND user FK, distinct from `userId` (the personal/private strict-owner).
-> - **2c (= merges with Phase 3):** make `organizationId` nullable + XOR CHECK +
->   the owner-or-org authz branches + `createAgent` user-owner + `@<handle>` URN
->   composition, together (they can't be separated safely).
+> - **2c-1 (PR pending):** make `organizationId` nullable on App/Agent/Memory +
+>   the org-XOR-owner CHECK + flip the owner FK to CASCADE + the shared
+>   `requireOwnerOrOrgRole`/`isOwnerOrOrgMember` gate + convert every
+>   `requireOrgRole(x.organizationId)` / OrgMember-filter / `.organization`
+>   access on those entities (~95 sites). Behavior for org-owned rows is
+>   UNCHANGED (nothing creates user-owned entities yet), so the full suite passes
+>   as-is. Org-assuming paths (git-mirror, assets, AgentOrgGrant) guard-and-skip.
+> - **2c-2 (= merges with Phase 3):** `createAgent`/install user-owner targets +
+>   user-owned system memory + `@<handle>` URN composition at create time + the
+>   memory-access predicates for user-owned memory (getOrgReadableMemoryIds etc.
+>   + leak tests) + handle-rename→URN propagation + the deferred owner-branches
+>   flagged in 2c-1 (audit surface, asset keying). This is where user-owned
+>   entities actually get CREATED and function.
 
 1. **Handle NOT NULL + URN grammar.** ✅ Generate handle at user creation
    (#654/#657); ✅ `@<handle>` parser grammar (#659); ✅ Holger backfilled prod +

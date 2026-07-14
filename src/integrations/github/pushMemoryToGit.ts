@@ -42,6 +42,9 @@ export async function pushMemoryToGit(
   if (!memory.source) return { nodeCount: 0, error: 'Memory has no git source configured' };
 
   const org = memory.organization;
+  // spec 047: git-mirror is org-scoped (it needs the org's GitHub App). A
+  // user-owned memory has no org, so there's nothing to sync it to.
+  if (!org) return { nodeCount: 0, error: 'Memory has no organization (user-owned memories are not git-synced)' };
   const localPath = memoryLocalPath(org.urn, memory.urn);
 
   // 2. Get installation token

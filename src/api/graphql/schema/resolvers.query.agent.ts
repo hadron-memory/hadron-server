@@ -15,6 +15,7 @@ import {
   aiConfigOwnerOf,
   clampListTake,
   requireOrgRole,
+  requireOwnerOrOrgRole,
   resolveOrgScope,
   isPlatformAdmin,
   toGqlAiServiceConfig,
@@ -53,7 +54,7 @@ export const agentQueries = {
       // memories PUBLIC carve-out, #362). Non-public falls through to the
       // membership gate.
       if (agent.visibility !== 'PUBLIC') {
-        await requireOrgRole(ctx, agent.organizationId, 'READER');
+        await requireOwnerOrOrgRole(ctx, agent, 'READER');
       }
       return agent;
     },
@@ -161,7 +162,7 @@ export const agentQueries = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       // Org ADMIN on the agent's org can read the decrypted key.
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // 036-ai-service-config: registry-backed — the Agent's 'default'
       // config (single-entity contract preserved; no resolution walk).
       const config = await ctx.db.aiServiceConfig.findFirst({
@@ -341,7 +342,7 @@ export const agentQueries = {
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       return ctx.db.agentSubscription.findMany({
         where: { agentId: resolvedAgentId },
         orderBy: { createdAt: 'desc' },

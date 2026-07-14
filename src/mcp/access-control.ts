@@ -127,7 +127,10 @@ export async function getAppMemoryAccess(
   // different orgs. Same-org installs auto-pass — the Agent owner has implicit
   // license to deploy it. The active-status predicate is shared across
   // AgentSubscription + AgentOrgGrant via isLifecycleActive (008 R-2).
-  if (app.organizationId !== primary.organizationId) {
+  // spec 047: the cross-org AgentOrgGrant gate is org-scoped. A user-owned App
+  // has no org — its install license rides the owner's AgentSubscription
+  // (Phase 2c-2), so the org-grant gate doesn't apply.
+  if (app.organizationId !== null && app.organizationId !== primary.organizationId) {
     const grant = await db.agentOrgGrant.findUnique({
       where: { orgId_agentId: { orgId: app.organizationId, agentId: primary.id } },
     });

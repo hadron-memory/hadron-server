@@ -31,7 +31,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
  */
 export async function isOrgExternalAppMember(
   db: PrismaClient,
-  args: { userId: string; appId: string; organizationId?: string },
+  args: { userId: string; appId: string; organizationId?: string | null },
 ): Promise<boolean> {
   // First half: AppMember row must exist. Without this, the predicate
   // would silently return true for any non-org-member, which is wrong
@@ -51,6 +51,11 @@ export async function isOrgExternalAppMember(
     });
     if (!app) return false; // App vanished mid-call — degenerate; report false.
     organizationId = app.organizationId;
+  }
+  if (!organizationId) {
+    // User-owned App (spec 047): no owning org to be a member of, so any
+    // AppMember is vacuously org-external.
+    return true;
   }
   const orgMember = await db.orgMember.findFirst({
     where: { userId: args.userId, organizationId, deletedAt: null },

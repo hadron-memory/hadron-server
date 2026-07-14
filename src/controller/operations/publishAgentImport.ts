@@ -86,6 +86,11 @@ export async function publishAgentImport(
     where: { id: parentAgentId },
     select: { organizationId: true },
   });
+  // AgentOrgGrant/AgentImport model an org-to-org licensing relationship —
+  // not yet defined for a user-owned parent Agent.
+  if (!parentAgent.organizationId) {
+    throw new Error('Agent imports are not supported for a user-owned Agent yet.');
+  }
   const grant = await db.agentOrgGrant.findUnique({
     where: {
       orgId_agentId: {

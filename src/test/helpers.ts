@@ -245,6 +245,9 @@ export async function createDbAgentImport(
     where: { id: parentAgentId },
     select: { organizationId: true },
   });
+  if (!parent.organizationId) {
+    throw new Error('createDbAgentImport requires an org-owned parent Agent (AgentOrgGrant is org-scoped).');
+  }
   return db.agentImport.create({
     data: {
       parentAgentId,

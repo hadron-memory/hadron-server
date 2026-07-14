@@ -34,6 +34,7 @@ import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/email
 import {
   type Context,
   requireOrgRole,
+  requireOwnerOrOrgRole,
   SESSION_INCLUDE,
   mapToolCalendarEvent,
   runOwnedEmailOperation,
@@ -141,6 +142,12 @@ export const sessionMutations = {
 
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
       if (agent.deletedAt) throw new Error('Agent not found');
+      // Per-user/anonymous session memories are provisioned under the
+      // Agent's owning org (their URN is derived from the org's URN) — not
+      // yet modeled for a user-owned Agent.
+      if (!agent.organizationId) {
+        throw new GraphQLError('startAgentSession is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
 
       // SECRET mode requires a data key; USER_ID mode rejects it.
       if (app.identifyUserMethod === 'SECRET' && !dataKey) {
@@ -330,7 +337,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -400,7 +407,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -435,7 +442,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -532,7 +539,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
 
       const now = new Date();
       const lockExpiry = (agent as any).editorLockExpiresAt as Date | null;
@@ -561,7 +568,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
 
       await ctx.db.agent.update({
         where: { id: resolvedAgentId },

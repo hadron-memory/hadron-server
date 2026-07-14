@@ -15,7 +15,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 let orgA: { id: string; urn: string };
 let adminUser: { id: string };
 let otherUser: { id: string };
-let agent: { id: string; organizationId: string };
+let agent: { id: string; organizationId: string | null };
 let systemMemory: { id: string };
 
 function adminCtx(overrides: Partial<Context> = {}): Context {

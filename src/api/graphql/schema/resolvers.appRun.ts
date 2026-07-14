@@ -23,7 +23,7 @@ import {
 } from '../../../lib/urn.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
-import { type Context, requireOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
+import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 
 export interface CreateAgentScheduleInput {
   /** App reference — PK or fully-qualified URN (the platform-wide `ref` convention). */
@@ -50,13 +50,21 @@ async function requireScheduleAdmin(ctx: Context, appRef: string) {
   const { id } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findFirst({
     where: { id, deletedAt: null },
-    select: { id: true, organizationId: true },
+    select: { id: true, organizationId: true, ownerUserId: true },
   });
   if (!app) {
     throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
   }
-  await requireOrgRole(ctx, app.organizationId, 'ADMIN');
-  return app;
+  await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+  // Schedules, webhooks, and the policy-debug surface all key off an
+  // organization (AgentSchedule/AgentWebhook.organizationId are still
+  // required non-null columns) — not yet modeled for a user-owned App.
+  if (!app.organizationId) {
+    throw new GraphQLError('This operation is not supported for user-owned Apps yet.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  return { id: app.id, organizationId: app.organizationId };
 }
 
 /** Next occurrence for a cron+timezone pair, as a typed BAD_USER_INPUT on invalid input. */
@@ -142,20 +150,30 @@ async function requireManualRunAccess(ctx: Context, appRef: string) {
   const { id } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findFirst({
     where: { id, deletedAt: null },
-    select: { id: true, organizationId: true },
+    select: { id: true, organizationId: true, ownerUserId: true },
   });
   if (!app) {
     throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
   }
   // Platform admin, or the App triggering under its own key.
-  if (isPlatformAdmin(ctx) || ctx.appId === app.id) return app;
-  // A user with a live relationship to the App (AppMember or active subscriber).
-  if (ctx.userId && (await hasAppRelationship(ctx.db, app.id, ctx.userId))) return app;
-  // Otherwise fall back to the org-ADMIN gate: admits org admins who aren't
-  // AppMembers, and yields the standard typed Forbidden for callers with no
-  // relationship at all.
-  await requireOrgRole(ctx, app.organizationId, 'ADMIN');
-  return app;
+  if (isPlatformAdmin(ctx) || ctx.appId === app.id) {
+    // authorized — fall through to the shared organizationId guard below
+  } else if (ctx.userId && (await hasAppRelationship(ctx.db, app.id, ctx.userId))) {
+    // A user with a live relationship to the App (AppMember or active subscriber).
+  } else {
+    // Otherwise fall back to the owner-or-org-ADMIN gate: admits org admins
+    // who aren't AppMembers (or the App's own owner-user), and yields the
+    // standard typed Forbidden for callers with no relationship at all.
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+  }
+  // AppRun.organizationId is still a required non-null column — manual runs
+  // aren't yet modeled for a user-owned App.
+  if (!app.organizationId) {
+    throw new GraphQLError('Manual runs are not supported for user-owned Apps yet.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  return { id: app.id, organizationId: app.organizationId };
 }
 
 /**

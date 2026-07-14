@@ -45,6 +45,10 @@ export async function softDeleteAsset(
   if (!asset.memory) {
     throw new AssetUploadError('INVALID_INPUT', 'cannot soft-delete a staged (unattached) asset');
   }
+  if (!asset.memory.organizationId) {
+    // isAdminFor is an org-admin check — not yet modeled for a user-owned memory.
+    throw new AssetUploadError('NOT_FOUND', 'asset soft-delete is not supported for a user-owned memory yet');
+  }
 
   const isUploader = asset.uploadedBy === caller.userId;
   const isAdmin = isUploader

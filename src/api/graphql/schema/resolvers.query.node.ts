@@ -43,6 +43,8 @@ import {
   ROLE_ORDER,
   requireRole,
   requireOrgRole,
+  requireOwnerOrOrgRole,
+  isOwnerOrOrgMember,
   getAccessibleMemoryIds,
   memoryAccessFilter,
 } from './resolvers.helpers.js';
@@ -75,10 +77,10 @@ export const nodeQueries = {
           }
           const memory = await ctx.db.memory.findUnique({
             where: { id },
-            select: { organizationId: true },
+            select: { organizationId: true, ownerUserId: true },
           });
           if (!memory) return null;
-          if (!(await isOrgMember(memory.organizationId))) return null;
+          if (!(await isOwnerOrOrgMember(ctx, memory))) return null;
           return { kind: 'memory', id };
         }
         case 'node': {
@@ -125,13 +127,13 @@ export const nodeQueries = {
           }
           const agent = await ctx.db.agent.findUnique({
             where: { id },
-            select: { organizationId: true, visibility: true },
+            select: { organizationId: true, visibility: true, ownerUserId: true },
           });
           if (!agent) return null;
           // #551: a PUBLIC agent resolves for any caller (marketplace share
           // links), mirroring the agent(ref:) gate; otherwise fall back to the
-          // org-membership check.
-          if (agent.visibility !== 'PUBLIC' && !(await isOrgMember(agent.organizationId))) {
+          // owner-or-org-membership check.
+          if (agent.visibility !== 'PUBLIC' && !(await isOwnerOrOrgMember(ctx, agent))) {
             return null;
           }
           return { kind: 'agent', id };
@@ -145,15 +147,16 @@ export const nodeQueries = {
           }
           const app = await ctx.db.app.findUnique({
             where: { id },
-            select: { organizationId: true },
+            select: { organizationId: true, ownerUserId: true },
           });
           if (!app) return null;
           // The dedicated app(ref:) query admits any member of the App's org
           // (#473 relaxed it from org ADMIN); mirror that so a member's
           // /app/u/<app-urn> share link resolves to the same page they can
-          // already open directly. isOrgMember covers the global-admin
-          // bypass and the revoked-membership (deletedAt) rule.
-          if (!(await isOrgMember(app.organizationId))) return null;
+          // already open directly. isOwnerOrOrgMember covers the
+          // global-admin bypass, the App's owner-user, and the
+          // revoked-membership (deletedAt) rule.
+          if (!(await isOwnerOrOrgMember(ctx, app))) return null;
           return { kind: 'app', id, organizationId: app.organizationId };
         }
         case 'user': {
@@ -1167,7 +1170,7 @@ export const nodeQueries = {
       // org may read its accessible nodes; platform ADMIN/OWNER bypasses.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) {
-        await requireOrgRole(ctx, app.organizationId, 'READER');
+        await requireOwnerOrOrgRole(ctx, app, 'READER');
       }
       // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Gather
       // memoryItems for every installed Agent. Apps with no installed

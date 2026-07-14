@@ -41,7 +41,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 /** Minimal App shape needed to populate the auth context downstream. */
 export interface ResolvedUserApp {
   id: string;
-  organizationId: string;
+  organizationId: string | null;
 }
 
 /**
@@ -56,7 +56,7 @@ export interface ResolvedUserApp {
  *    envelope per the engagement heuristic. Advisory tools ignore it.
  */
 export type AppResolution =
-  | { kind: 'resolved'; appId: string; organizationId: string }
+  | { kind: 'resolved'; appId: string; organizationId: string | null }
   | { kind: 'no-app' }
   | { kind: 'multi-app' };
 
@@ -130,7 +130,7 @@ export interface ResolvedUserAppWithMeta {
   id: string;
   urn: string;
   name: string;
-  organizationId: string;
+  organizationId: string | null;
   role: string;
 }
 

@@ -65,6 +65,10 @@ export async function setAgentAssetUploadEnabled(
   if (!agent) {
     throw new SetAssetEnabledError('NOT_FOUND', 'agent not found');
   }
+  if (!agent.organizationId) {
+    // isAdminFor is an org-admin check — not yet modeled for a user-owned agent.
+    throw new SetAssetEnabledError('NOT_FOUND', 'asset-upload toggle is not supported for a user-owned agent yet');
+  }
 
   const isAdmin = await isAdminFor(db, caller.userId, agent.organizationId);
   if (!isAdmin) {

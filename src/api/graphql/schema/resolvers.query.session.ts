@@ -60,9 +60,12 @@ export const sessionQueries = {
       if (ctx.userId && session.appId) {
         const app = await ctx.db.app.findUnique({
           where: { id: session.appId },
-          select: { organizationId: true },
+          select: { organizationId: true, ownerUserId: true },
         });
-        if (app) {
+        if (app?.ownerUserId) {
+          // User-owned App: the owner themself can see its sessions.
+          if (app.ownerUserId === ctx.userId) return session;
+        } else if (app?.organizationId) {
           const member = await ctx.db.orgMember.findUnique({
             where: {
               organizationId_userId: { organizationId: app.organizationId, userId: ctx.userId },

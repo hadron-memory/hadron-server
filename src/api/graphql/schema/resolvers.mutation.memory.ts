@@ -76,6 +76,7 @@ import {
   type Context,
   requireRole,
   requireOrgRole,
+  requireOwnerOrOrgRole,
   requireMemoryWriteAccess,
   MEMORY_INCLUDE,
   AGENT_INCLUDE,
@@ -149,7 +150,7 @@ export const memoryMutations = {
             );
           }
         } else {
-          await requireOrgRole(ctx, sourceMem.organizationId, 'ADMIN');
+          await requireOwnerOrOrgRole(ctx, sourceMem, 'ADMIN');
         }
       }
 
@@ -504,7 +505,7 @@ export const memoryMutations = {
       ctx: Context,
     ) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
       // If transferring to a new org, require ADMIN on the target org too
       if (newOrgId && newOrgId !== memory.organizationId) {
         await requireOrgRole(ctx, newOrgId, 'ADMIN');
@@ -521,6 +522,11 @@ export const memoryMutations = {
       const effectiveOrgId = newOrgId ?? memory.organizationId;
       let newUrn: string | undefined;
       if (urn !== undefined || (newOrgId && newOrgId !== memory.organizationId)) {
+        if (!effectiveOrgId) {
+          throw new GraphQLError('Renaming or transferring the URN is not supported for a user-owned memory yet.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: effectiveOrgId }, select: { urn: true } });
         // Guard: a memory slug must be BARE — not a full or embedded URN. The
         // portal settings form once mis-derived the slug from a canonical
@@ -721,7 +727,17 @@ export const memoryMutations = {
         if (!ctx.userId || memory.userId !== ctx.userId) {
           throw new Error(`Forbidden: only the owner can delete a ${memory.class} memory`);
         }
+      } else if (memory.ownerUserId !== null) {
+        // spec 047: a user-owned memory is deletable only by its owner.
+        if (ctx.userId !== memory.ownerUserId) {
+          throw new Error('Forbidden: only the owner can delete this memory');
+        }
       } else {
+        // Org-owned (the XOR CHECK guarantees ownerUserId is null here ⇒ org is
+        // set); assert it explicitly rather than fall back to an empty org id.
+        if (memory.organizationId === null) {
+          throw new Error('Invariant: org-owned memory has no organizationId');
+        }
         // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
         await requireOrgAction(ctx, memory.organizationId, 'memory.delete');
       }
@@ -764,7 +780,16 @@ export const memoryMutations = {
             { extensions: { code: 'FORBIDDEN' } },
           );
         }
+      } else if (source.ownerUserId !== null) {
+        // spec 047: a user-owned source memory is cloneable only by its owner.
+        if (ctx.userId !== source.ownerUserId) {
+          throw new Error('Forbidden: only the owner can clone this memory');
+        }
       } else {
+        // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
+        if (source.organizationId === null) {
+          throw new Error('Invariant: org-owned memory has no organizationId');
+        }
         // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
         // A memory.clone PrincipalGrant now lets a specific non-admin member
         // clone; the cross-org DESTINATION gate below is unchanged (#604).
@@ -1031,8 +1056,18 @@ export const memoryMutations = {
         // Source-side gate at clone parity (design:grant-model P2a): copying a
         // subtree out is an export, so hold the SOURCE org's memory.clone grant
         // — canReadMemory alone would let a bare reader exfiltrate. cloneMemory
-        // gates the same way.
-        await requireOrgAction(ctx, source.organizationId, 'memory.clone');
+        // gates the same way. spec 047: a user-owned source is gated by its owner.
+        if (source.ownerUserId !== null) {
+          if (ctx.userId !== source.ownerUserId) {
+            throw new Error('Forbidden: only the owner can copy from this memory');
+          }
+        } else {
+          // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
+          if (source.organizationId === null) {
+            throw new Error('Invariant: org-owned memory has no organizationId');
+          }
+          await requireOrgAction(ctx, source.organizationId, 'memory.clone');
+        }
         // Target-side create grant (same as createMemory).
         await requireOrgAction(ctx, targetOrgId, 'memory.create');
         // Cross-org drop requires an ACTUAL non-reader membership of the target
@@ -1112,7 +1147,7 @@ export const memoryMutations = {
       ctx: Context,
     ) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
       const encrypted = encryptToken(token);
       return ctx.db.memory.update({
         where: { id },
@@ -1137,7 +1172,7 @@ export const memoryMutations = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // System-class memories can only be linked via Agent.systemMemoryId.
       // Attaching them as regular memory items would allow access patterns
       // we don't want (e.g. another agent reading the linked agent's prompts).
@@ -1179,7 +1214,7 @@ export const memoryMutations = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // #501: only a LIVE grant is updatable — updateMany + deletedAt:null
       // (findUnique on the composite PK can't filter soft-deletes; the
       // requireOrgRole-pattern rule from findings:revoked-membership-auth-
@@ -1207,7 +1242,7 @@ export const memoryMutations = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       await ctx.db.agentMemoryItem.delete({
         where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
       });
@@ -1254,7 +1289,7 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
       return ctx.db.memorySubscription.update({
         where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
         data: { role: role as Role },
@@ -1275,6 +1310,8 @@ export const memoryMutations = {
       const isOwnerAdmin = async () => {
         if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
         if (!ctx.userId) return false;
+        // spec 047: a user-owned memory has no org — no org-admin via this path.
+        if (memory.organizationId === null) return false;
         const m = await ctx.db.orgMember.findFirst({
           where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
         });
@@ -1301,7 +1338,7 @@ export const memoryMutations = {
         where: { id },
         include: { organization: true },
       });
-      await requireOrgRole(ctx, memory.organizationId, 'CONTRIBUTOR');
+      await requireOwnerOrOrgRole(ctx, memory, 'CONTRIBUTOR');
 
       const result = await syncGraphFromGithub(memory);
       if (result.error) throw new Error(result.error);
@@ -1311,7 +1348,7 @@ export const memoryMutations = {
 
     pushMemoryToGit: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
 
       const { pushMemoryToGit: push } = await import('../../../integrations/github/pushMemoryToGit.js');
       const result = await push(id);
@@ -1417,6 +1454,9 @@ export const memoryMutations = {
       const agent = await ctx.db.agent.findUniqueOrThrow({
         where: { id: memory.userMemoryOfAgentId },
       });
+      if (!agent.organizationId) {
+        throw new Error('linkMemoryToUser is not supported for a user-owned Agent yet');
+      }
       const org = await ctx.db.organization.findUniqueOrThrow({
         where: { id: agent.organizationId }, select: { urn: true },
       });

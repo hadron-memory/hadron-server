@@ -44,6 +44,7 @@ import {
 import {
   type Context,
   requireOrgRole,
+  requireOwnerOrOrgRole,
   rethrowAiConfigTyped,
   APP_INCLUDE,
   installAgentIntoAppCore,
@@ -56,7 +57,7 @@ export const appMutations = {
       const { id: resolvedId } = await resolveAppRef(ctx.db, id);
       const existing = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
+      if (!isPlatformAdmin) await requireOwnerOrOrgRole(ctx, existing, 'ADMIN');
 
       // Revoke all active keys, then create a fresh one.
       await ctx.db.appKey.updateMany({
@@ -387,7 +388,7 @@ export const appMutations = {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveAppRef(ctx.db, id);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       // #510: the app-layer action-policy link (cor:acl:040:02) — validate
       // shape before storing; explicit null clears (= no restriction).
       if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
@@ -399,6 +400,9 @@ export const appMutations = {
       // app's current org.
       let newUrn: string | undefined;
       if (urn !== undefined) {
+        if (!app.organizationId) {
+          throw new GraphQLError('Renaming via urn is not supported for user-owned Apps.', { extensions: { code: 'BAD_USER_INPUT' } });
+        }
         const org = await ctx.db.organization.findUniqueOrThrow({
           where: { id: app.organizationId }, select: { urn: true },
         });
@@ -483,7 +487,7 @@ export const appMutations = {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveAppRef(ctx.db, id);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       await ctx.db.app.update({ where: { id: resolvedId }, data: { deletedAt: new Date() } });
       return true;
     },
@@ -565,15 +569,20 @@ export const appMutations = {
       // owner-role AppMember. Self-service joins are not allowed in v1.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) {
-        const orgMember = await ctx.db.orgMember.findFirst({
-          where: {
-            organizationId: app.organizationId,
-            userId: ctx.userId ?? '',
-            deletedAt: null,
-            role: { in: ['ADMIN', 'OWNER'] },
-          },
-        });
-        if (!orgMember) {
+        // spec 047: a user-owned App is authorized by its user owner (no org).
+        const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
+        const orgMember =
+          !isAppOwnerUser && app.organizationId
+            ? await ctx.db.orgMember.findFirst({
+                where: {
+                  organizationId: app.organizationId,
+                  userId: ctx.userId ?? '',
+                  deletedAt: null,
+                  role: { in: ['ADMIN', 'OWNER'] },
+                },
+              })
+            : null;
+        if (!isAppOwnerUser && !orgMember) {
           const ownerMember = ctx.userId
             ? await ctx.db.appMember.findUnique({
                 where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
@@ -626,15 +635,20 @@ export const appMutations = {
       if (!isSelfRemoval) {
         const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
         if (!isPlatformAdmin) {
-          const orgMember = await ctx.db.orgMember.findFirst({
-            where: {
-              organizationId: app.organizationId,
-              userId: ctx.userId ?? '',
-              deletedAt: null,
-              role: { in: ['ADMIN', 'OWNER'] },
-            },
-          });
-          if (!orgMember) {
+          // spec 047: a user-owned App is authorized by its user owner (no org).
+          const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
+          const orgMember =
+            !isAppOwnerUser && app.organizationId
+              ? await ctx.db.orgMember.findFirst({
+                  where: {
+                    organizationId: app.organizationId,
+                    userId: ctx.userId ?? '',
+                    deletedAt: null,
+                    role: { in: ['ADMIN', 'OWNER'] },
+                  },
+                })
+              : null;
+          if (!isAppOwnerUser && !orgMember) {
             const ownerMember = ctx.userId
               ? await ctx.db.appMember.findUnique({
                   where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
@@ -730,7 +744,7 @@ export const appMutations = {
       // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
       const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
       const keyHash = hashAppKey(rawKey);
@@ -752,7 +766,7 @@ export const appMutations = {
         where: { id },
         include: { app: true },
       });
-      await requireOrgRole(ctx, key.app.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, key.app, 'ADMIN');
       await ctx.db.appKey.update({ where: { id }, data: { revokedAt: new Date() } });
       return true;
     },

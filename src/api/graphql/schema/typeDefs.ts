@@ -737,7 +737,7 @@ export const typeDefs = `#graphql
     urn: String!
     "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."
     policy: JSON
-    organizationId: String!
+    organizationId: String
     organization: Organization
     # 008-agent-installation: direct FK replaces the AppAgent join.
     agentId: ID
@@ -1222,7 +1222,7 @@ export const typeDefs = `#graphql
 
   type Memory {
     id: ID!
-    organizationId: String!
+    organizationId: String
     organization: Organization
     urn: String!
     name: String!
@@ -1331,7 +1331,7 @@ export const typeDefs = `#graphql
   # of an Agent in some org.
   type Agent {
     id: ID!
-    organizationId: String!
+    organizationId: String
     urn: String!
     name: String!
     description: String
