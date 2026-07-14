@@ -7,6 +7,14 @@ name: Unit Tests
 # blocking. This workflow is the lasting fix (#176): once configured
 # as a required status check on `main`, any new red breaks the merge
 # button and stays surfaced.
+#
+# The suite is SHARDED across N parallel jobs (`vitest run --shard=i/N`).
+# GitHub's ubuntu-latest runners are only ~2 cores, so the in-process
+# per-worker-DB parallelism (perWorkerDb.ts) barely helps here — splitting
+# the FILES across separate runners is what cuts CI wall-time. Each shard
+# gets its own Postgres service + template DB. The required status check
+# stays named `test` via the aggregation gate job at the bottom, so the
+# matrix change doesn't break branch protection.
 
 on:
   pull_request:
@@ -20,13 +28,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  test-shard:
     runs-on: ubuntu-latest
     # GH default job timeout is 6 hours — a hung vitest worker or
     # deadlocked postgres connection would consume it before failing.
-    # Local suite runs in well under 1 minute; 20 minutes is generous
-    # cover for CI cold starts (install + prisma generate + db setup).
+    # A shard runs a quarter of the suite; 20 minutes is generous cover
+    # for CI cold starts (install + prisma generate + db setup).
     timeout-minutes: 20
+    strategy:
+      # Don't cancel the other shards when one fails — surface every shard's
+      # results so a failure isn't masked by a sibling shard's early exit.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       # Used by `prisma db push` below. The vitest config reads
       # `TEST_DATABASE_URL` (also set below) for the test runner's
@@ -71,13 +85,25 @@ jobs:
         # CHECKs the tests depend on. The vitest globalSetup also adds a
         # subset of these IF NOT EXISTS; running post-push.sql first
         # ensures the complete set lands in the canonical post-023 form.
+        # This builds the `hadron_test` TEMPLATE that perWorkerDb.ts clones.
         run: |
           pnpm prisma db push --skip-generate
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/post-push.sql
 
-      - name: Run vitest suite
-        # `vitest run` exits non-zero on any test failure, which fails
-        # the job. That's the entire point of this workflow. Once added
-        # to the protected-branch required-status-checks list, red here
-        # blocks the merge.
-        run: pnpm test
+      - name: Run vitest suite (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+        # `vitest run --shard=i/N` deterministically splits the test FILES
+        # into N slices and runs slice i here. A non-zero exit fails the job.
+        run: pnpm exec vitest run --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+
+  # Aggregation gate: a single stable check named `test` that passes iff every
+  # shard passed. Keep THIS as the required status check on `main` (matrix jobs
+  # report as `test-shard (1..4)` and don't need to be individually required).
+  test:
+    needs: [test-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all shards to pass
+        run: |
+          echo "test-shard aggregate result: ${{ needs.test-shard.result }}"
+          test "${{ needs.test-shard.result }}" = "success"
