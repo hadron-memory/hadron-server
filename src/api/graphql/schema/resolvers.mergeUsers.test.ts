@@ -76,8 +76,11 @@ describe('Mutation.mergeUsers — identity and guards', () => {
     const tombstone = await db.user.findUniqueOrThrow({ where: { id: source.id } });
     expect(tombstone.deletedAt).not.toBeNull();
     expect(tombstone.deletedBy).toBe(admin.id);
+    // handle is NOT NULL (spec 047): the tombstone gets a fresh random handle,
+    // which RELEASES the original ('merge-source') for the target / reuse.
+    expect(tombstone.handle).not.toBe('merge-source');
+    expect(tombstone.handle).toMatch(/^merged-[0-9a-f]{12}$/);
     expect(tombstone).toMatchObject({
-      handle: null,
       githubId: null,
       githubUsername: null,
       googleId: null,

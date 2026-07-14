@@ -328,10 +328,15 @@ enum AssetScanStatus {
 /// account is still created (don't block a real human on a counter).
 model User {
   id               String            @id @default(cuid())
-  /// Unique username, e.g. "holger"; displayed as `@holger` in UI and
-  /// node frontmatter `author` field. Defaults to githubUsername on
-  /// signup.
-  handle           String?           @unique
+  /// Unique username, e.g. "holger"; displayed as `@holger` in UI and node
+  /// frontmatter `author` field, and the owner namespace of a user-owned
+  /// App/Agent/Memory URN (spec 047). NOT NULL (all users backfilled 2026-07-14):
+  /// every real signup path assigns one via `generateUniqueHandle`; the
+  /// DB-generated random default is a backstop for handle-omitting inserts
+  /// (test fixtures) so those need no churn. Case-insensitive uniqueness is the
+  /// `users_handle_lower_uniq` functional index (post-push.sql); the `@unique`
+  /// here is the plain case-sensitive one.
+  handle           String            @unique @default(dbgenerated("left(md5(random()::text), 12)"))
   /// User-layer action-policy link (cor:acl:040:02) — constrains runs made
   /// on-behalf-of this user. Same allow-list shape as Organization.policy;
   /// NULL = no restriction. Self-authored (updateMyPolicy).

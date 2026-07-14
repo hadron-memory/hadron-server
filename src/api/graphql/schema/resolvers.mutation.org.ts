@@ -64,12 +64,18 @@ export const orgMutations = {
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
       // A handle is the hrn:user:<handle> slug — normalize to lowercase-canonical
-      // and validate (#325). `undefined` leaves it unchanged; `null`/empty clears
-      // it (clients pass explicit null to clear); an illegal handle throws.
-      const handleData =
-        handle === undefined
-          ? {}
-          : { handle: !handle || handle.trim() === '' ? null : normalizeHandle(handle) };
+      // and validate (#325). `undefined` leaves it unchanged; an illegal handle
+      // throws. spec 047: handle is NOT NULL, so it can no longer be cleared —
+      // an explicit null/empty is a BAD_USER_INPUT rather than a silent null.
+      let handleData: { handle?: string } = {};
+      if (handle !== undefined) {
+        if (!handle || handle.trim() === '') {
+          throw new GraphQLError('handle is required and cannot be cleared.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+        handleData = { handle: normalizeHandle(handle) };
+      }
       return ctx.db.user.update({
         where: { id: ctx.userId },
         data: {

@@ -28,11 +28,12 @@ describe('Mutation.updateMyProfile — handle normalization (#325)', () => {
   });
 
   it('rejects an illegal (non-URN-atom) handle', async () => {
+    await db.user.update({ where: { id: user.id }, data: { handle: 'keep' } });
     await expect(
       resolvers.Mutation.updateMyProfile({}, { handle: 'bad handle!' }, meCtx()),
     ).rejects.toThrow();
     // unchanged
-    expect((await db.user.findUnique({ where: { id: user.id } }))?.handle).toBeNull();
+    expect((await db.user.findUnique({ where: { id: user.id } }))?.handle).toBe('keep');
   });
 
   it('rejects a reserved-word handle', async () => {
@@ -41,16 +42,21 @@ describe('Mutation.updateMyProfile — handle normalization (#325)', () => {
     ).rejects.toThrow();
   });
 
-  it('clears the handle on empty string', async () => {
+  // spec 047: handle is NOT NULL — it can no longer be cleared.
+  it('rejects an empty-string handle (cannot clear)', async () => {
     await db.user.update({ where: { id: user.id }, data: { handle: 'keep' } });
-    await resolvers.Mutation.updateMyProfile({}, { handle: '' }, meCtx());
-    expect((await db.user.findUnique({ where: { id: user.id } }))?.handle).toBeNull();
+    await expect(
+      resolvers.Mutation.updateMyProfile({}, { handle: '' }, meCtx()),
+    ).rejects.toThrow(/required/);
+    expect((await db.user.findUnique({ where: { id: user.id } }))?.handle).toBe('keep');
   });
 
-  it('clears the handle on explicit null (no crash)', async () => {
+  it('rejects an explicit null handle (cannot clear)', async () => {
     await db.user.update({ where: { id: user.id }, data: { handle: 'keep' } });
-    await resolvers.Mutation.updateMyProfile({}, { handle: null }, meCtx());
-    expect((await db.user.findUnique({ where: { id: user.id } }))?.handle).toBeNull();
+    await expect(
+      resolvers.Mutation.updateMyProfile({}, { handle: null }, meCtx()),
+    ).rejects.toThrow(/required/);
+    expect((await db.user.findUnique({ where: { id: user.id } }))?.handle).toBe('keep');
   });
 
   it('leaves the handle untouched when not provided', async () => {

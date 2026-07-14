@@ -207,10 +207,12 @@ describe('nodeRevision query (#617 Display)', () => {
     expect(res).toBeNull();
   });
 
-  it('returns null for a handle-less user (portal falls back to the raw id)', async () => {
-    const editor = await db.user.create({ data: { githubId: 7302, githubUsername: 'nvm-nohandle', roles: ['READER'] } });
+  // spec 047: every user now has a handle (NOT NULL), so an editor always
+  // resolves to its `@handle` — the handle-less/null fallback is unreachable.
+  it('resolves the editor with its handle', async () => {
+    const editor = await db.user.create({ data: { githubId: 7302, githubUsername: 'nvm', roles: ['READER'] } });
     const res = await resolvers.NodeRevision.editedByUser({ editedBy: editor.id }, null, adminCtx());
-    expect(res).toBeNull();
+    expect(res).toMatchObject({ handle: editor.handle, urn: `hrn:user:${editor.handle}` });
   });
 
   it('returns null for a snapshot captured in a memory the caller cannot read (moved-node leak)', async () => {
