@@ -283,6 +283,27 @@
       "input": "hrn:app:@::gmail-app",
       "expectedReject": "invalid-segment-shape",
       "offendingSegment": "@"
+    },
+    {
+      "_section": "spec 047 — @ rejected in a node LOC (not an author-context position)",
+      "input": "hrn:node:hadronmemory.com::gmail-app::inbox-triage::system::@foo:bar",
+      "expectedReject": "invalid-charset",
+      "offendingSegment": "@foo"
+    },
+    {
+      "_section": "spec 047 — @<handle> author context IS accepted at the agent position of a node URN",
+      "input": "hrn:node:micromentor.org::coding-app::@holger:triage::system::review:foo",
+      "expectedType": "node",
+      "expectedParserCanonical": "hrn:node:micromentor.org::coding-app::@holger:triage::system::review:foo",
+      "expectedParserRewrites": [],
+      "expectedNeedsResolver": true
+    },
+    {
+      "_section": "spec 047 — @<handle> author survives an optional leading type marker (cat 4 optionality)",
+      "input": "hrn:agent:micromentor.org::app:gmail::agent:@holger:triage",
+      "expectedType": "agent",
+      "expectedParserCanonical": "hrn:agent:micromentor.org::gmail::@holger:triage",
+      "expectedParserRewrites": ["type-marker-optionality"]
     }
   ]
 }
