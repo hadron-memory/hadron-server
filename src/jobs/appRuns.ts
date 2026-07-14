@@ -306,6 +306,8 @@ export interface MintAppRunArgs {
   parentRunId?: string | null;
   entryNodeUrn: string;
   eventData?: Record<string, unknown> | null;
+  /** Trigger policy link, or a previously captured `{chain:[...]}` snapshot
+   *  that must remain an additional restriction (integration events). */
   policy?: unknown;
   timeoutMs?: number | null;
   createdBy?: string | null;
@@ -410,7 +412,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
     parsePolicyLink(orgPolicyRow?.policy),
     parsePolicyLink(userPolicyRow?.policy),
     parsePolicyLink(appPolicyRow?.policy),
-    parsePolicyLink(args.policy),
+    ...parseRunPolicySnapshot(args.policy),
   ];
   if (!evaluatePolicyChain('run.execute', chainLinks)) {
     throw new RunLaunchDeniedError(
@@ -517,7 +519,7 @@ export interface RunExecutionDeps {
     req: { system?: string; prompt: string; maxTokens?: number },
     toolNames: string[],
     opts: {
-      onToolCall: (name: string, cost: 0 | 1) => Promise<boolean>;
+      onToolCall: (action: `tool.${string}`, cost: 0 | 1) => Promise<boolean>;
       log: (message: string) => void;
     },
   ) => Promise<LlmToolLoopResult>;
@@ -713,8 +715,8 @@ async function executeAppRunInner(
             },
             spec.tools,
             {
-              onToolCall: (name, cost) =>
-                checkActivation(db, runId, `tool.${name}`, cost > 0 ? { actionCost: cost } : {}),
+              onToolCall: (action, cost) =>
+                checkActivation(db, runId, action, cost > 0 ? { actionCost: cost } : {}),
               log: (message) => hopLogs.push(message),
             },
           );

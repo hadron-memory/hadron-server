@@ -533,7 +533,7 @@ describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
       llmTools: vi.fn(async (_run, _resolved, _req, toolNames, opts) => {
         expect(toolNames).toEqual(['hadron_create_node']);
         // Simulate the loop: one costed call + one author log line.
-        expect(await opts.onToolCall('hadron_create_node', 1)).toBe(true);
+        expect(await opts.onToolCall('tool.hadron_create_node', 1)).toBe(true);
         opts.log('created the task node');
         return {
           text: 'done acting', tokensIn: 60, tokensOut: 20, provider: 'anthropic', model: 'test',

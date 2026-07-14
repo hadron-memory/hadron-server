@@ -323,7 +323,7 @@ describe('3-node flow through production deps (§10)', () => {
     deps.llmTools = async (r, _resolved, _req, toolNames, opts) => {
       const { tools } = resolveRunTools(toolNames);
       const create = tools.find((t) => t.name === 'hadron_create_node')!;
-      if (!(await opts.onToolCall(create.name, create.cost))) throw new ToolDeniedError(create.name);
+      if (!(await opts.onToolCall(create.policyAction ?? `tool.${create.name}`, create.cost))) throw new ToolDeniedError(create.name);
       const started = Date.now();
       await create.execute(
         { log: opts.log, db, run: r, principal: runContext(db, r) },
@@ -365,7 +365,7 @@ describe('3-node flow through production deps (§10)', () => {
     deps.llmTools = async (r, _resolved, _req, toolNames, opts) => {
       const { tools } = resolveRunTools(toolNames);
       const create = tools.find((t) => t.name === 'hadron_create_node')!;
-      if (!(await opts.onToolCall(create.name, create.cost))) throw new ToolDeniedError(create.name);
+      if (!(await opts.onToolCall(create.policyAction ?? `tool.${create.name}`, create.cost))) throw new ToolDeniedError(create.name);
       await create.execute({ log: opts.log, db, run: r, principal: runContext(db, r) }, { urn: taskUrn, name: 'x' });
       return { text: 'x', tokensIn: 1, tokensOut: 1, provider: 'anthropic', model: 'test', toolCalls: [] };
     };

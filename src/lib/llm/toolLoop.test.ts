@@ -75,8 +75,22 @@ describe('generateWithTools', () => {
     await expect(
       generateWithTools(resolved, req, [echoTool], { toolCtx: stubCtx(), onToolCall: gate }),
     ).rejects.toBeInstanceOf(ToolDeniedError);
-    expect(gate).toHaveBeenCalledWith('hadron_echo', 1);
+    expect(gate).toHaveBeenCalledWith('tool.hadron_echo', 1);
     expect(echoTool.execute).not.toHaveBeenCalled(); // denied BEFORE the side effect
+  });
+
+  it('uses a tool definition shared policy action instead of its concrete name', async () => {
+    const shared: RunToolDef = {
+      ...echoTool,
+      name: 'web_poll_start',
+      policyAction: 'tool.web_poll',
+    };
+    sdkRunsTools({ name: shared.name, args: {} });
+    const gate = vi.fn(async () => true);
+
+    await generateWithTools(resolved, req, [shared], { toolCtx: stubCtx(), onToolCall: gate });
+
+    expect(gate).toHaveBeenCalledWith('tool.web_poll', 1);
   });
 
   it('a handler throw becomes ToolExecutionError carrying the tool name (D-TL-6)', async () => {

@@ -39,6 +39,9 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.homeAssistantInstance.deleteMany();
   // hadrontool-resend BYO sender registry (FKs org only).
   await db.resendSender.deleteMany();
+  // Webfetch polling: receipts + origin bindings both FK AppRun.
+  await db.webFetchEventReceipt.deleteMany();
+  await db.webFetchPollBinding.deleteMany();
   // Spec 040 — headless-run tables (no FKs between them; order-free).
   await db.appRun.deleteMany();
   await db.agentSchedule.deleteMany();

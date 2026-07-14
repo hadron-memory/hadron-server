@@ -355,8 +355,9 @@ export class ToolExecutionError extends Error {
 export interface ToolLoopOpts {
   /** Max LLM steps for this hop (D-TL-4). Default RUN_MAX_TOOL_STEPS_PER_HOP (8). */
   stepCap?: number;
-  /** Per-call governance (D-TL-3): checkActivation('tool.<name>'). False = deny. */
-  onToolCall?: (name: string, cost: 0 | 1) => Promise<boolean>;
+  /** Per-call governance (D-TL-3): receives the definition's explicit policy
+   *  action, or `tool.<name>` by default. False = deny. */
+  onToolCall?: (action: `tool.${string}`, cost: 0 | 1) => Promise<boolean>;
   /** Handler context (trail logging; kernel extends per phase). */
   toolCtx: RunToolContext;
 }
@@ -399,7 +400,7 @@ export async function generateWithTools(
         execute: async (args: Record<string, unknown>) => {
           const started = Date.now();
           try {
-            if (opts.onToolCall && !(await opts.onToolCall(def.name, def.cost))) {
+            if (opts.onToolCall && !(await opts.onToolCall(def.policyAction ?? `tool.${def.name}`, def.cost))) {
               throw new ToolDeniedError(def.name);
             }
             const result = await def.execute(opts.toolCtx, args ?? {});
