@@ -31,7 +31,6 @@ import { type InputJsonValue } from '../../../generated/prisma/runtime/library.j
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { isAgentInstalled } from '../../../lib/appAgent.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 import { type Context, requireOrgRole, MEMORY_INCLUDE } from './resolvers.helpers.js';
@@ -41,17 +40,25 @@ type AppMemoryClass = 'app' | 'personal' | 'private';
 
 /**
  * Load the target App, reject an uninstalled one, and enforce the class-split
- * authorization. Returns the loaded App (id, urn, organizationId).
+ * authorization. Returns the loaded App (id, urn, organizationId, and the
+ * org's urn — eagerly loaded so the createMemoryInApp URN derivation needs no
+ * second query).
  */
 async function loadAppAndAuthorize(
   ctx: Context,
   appRef: string,
   klass: AppMemoryClass,
-): Promise<{ id: string; urn: string; organizationId: string }> {
+): Promise<{ id: string; urn: string; organizationId: string; organizationUrn: string }> {
   const { id: appId } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findUniqueOrThrow({
     where: { id: appId },
-    select: { id: true, urn: true, organizationId: true, uninstalledAt: true },
+    select: {
+      id: true,
+      urn: true,
+      organizationId: true,
+      uninstalledAt: true,
+      organization: { select: { urn: true } },
+    },
   });
   // resolveAppRef filters uninstalledAt on the URN path but NOT the ID path —
   // re-check explicitly (mirrors installAgentIntoAppCore).
@@ -84,26 +91,33 @@ async function loadAppAndAuthorize(
       );
     }
   }
-  return { id: app.id, urn: app.urn, organizationId: app.organizationId };
+  return {
+    id: app.id,
+    urn: app.urn,
+    organizationId: app.organizationId,
+    organizationUrn: app.organization.urn,
+  };
 }
 
-/** Resolve the agent and assert it is installed in the App. */
+/** Resolve the agent and assert it is installed in the App (single query). */
 async function resolveInstalledAgent(
   ctx: Context,
   appId: string,
   agentRef: string,
 ): Promise<{ id: string; urn: string }> {
   const { id: agentId } = await resolveAgentRef(ctx.db, agentRef);
-  if (!(await isAgentInstalled(ctx.db, appId, agentId))) {
+  // One query does the install check AND fetches the agent's urn (via the
+  // AppAgent join) instead of isAgentInstalled + a separate agent read.
+  const appAgent = await ctx.db.appAgent.findUnique({
+    where: { appId_agentId: { appId, agentId } },
+    select: { agent: { select: { id: true, urn: true } } },
+  });
+  if (!appAgent) {
     throw new GraphQLError('That Agent is not installed in this App.', {
       extensions: { code: 'AGENT_NOT_INSTALLED' },
     });
   }
-  const agent = await ctx.db.agent.findUniqueOrThrow({
-    where: { id: agentId },
-    select: { id: true, urn: true },
-  });
-  return { id: agent.id, urn: agent.urn };
+  return appAgent.agent;
 }
 
 export const appMemoryMutations = {
@@ -165,16 +179,9 @@ export const appMemoryMutations = {
     // hung under the org URN) rather than the name-slug, so two members can name
     // their own memories the same and one owner's names never leak to another.
     const isUserOwned = klass === 'personal' || klass === 'private';
-    let memoryUrn: string;
-    if (isUserOwned) {
-      const memOrg = await ctx.db.organization.findUniqueOrThrow({
-        where: { id: app.organizationId },
-        select: { urn: true },
-      });
-      memoryUrn = `${memOrg.urn}:${agentSlug}:app-user:${generateId()}`;
-    } else {
-      memoryUrn = `${app.urn}:${agentSlug}:app-mem:${slug}`;
-    }
+    const memoryUrn = isUserOwned
+      ? `${app.organizationUrn}:${agentSlug}:app-user:${generateId()}`
+      : `${app.urn}:${agentSlug}:app-mem:${slug}`;
 
     // URN uniqueness is the only dedup (no composite unique on Memory). A live
     // collision is a conflict; a soft-deleted one is cleared and reused.

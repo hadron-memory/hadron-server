@@ -3793,8 +3793,9 @@ export const typeDefs = `#graphql
     requires org OWNER/ADMIN; 'personal'/'private' are the caller's OWN memory
     and require only App membership (the caller becomes the owner).
 
-    Typed errors: UNSUPPORTED_MEMORY_CLASS, APP_UNINSTALLED, AGENT_NOT_INSTALLED,
-    MEMORY_URN_CONFLICT, FORBIDDEN, UNAUTHENTICATED.
+    Typed errors: UNSUPPORTED_MEMORY_CLASS, BAD_USER_INPUT (maxRevCount < 1),
+    APP_UNINSTALLED, AGENT_NOT_INSTALLED, MEMORY_URN_CONFLICT, FORBIDDEN,
+    UNAUTHENTICATED.
     """
     createMemoryInApp(
       appRef: ID!
