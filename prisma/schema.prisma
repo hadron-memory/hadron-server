@@ -398,6 +398,12 @@ model User {
   externalApp               App?                       @relation(fields: [externalAppId], references: [id], onDelete: SetNull)
   sessions                  Session[]                  @relation("SessionUser")
   ownedMemories             Memory[]                   @relation("UserMemoriesOwned")
+  // spec 047 (Phase 2b): entities this user is the TENANT owner of (user-owned
+  // App/Agent/Memory). `ownedMemories` above is the personal/private strict
+  // owner (Memory.userId) — a DIFFERENT relation from `tenantMemories` here.
+  ownedApps                 App[]                      @relation("AppOwner")
+  ownedAgents               Agent[]                    @relation("AgentOwner")
+  tenantMemories            Memory[]                   @relation("MemoryTenantOwner")
   agentSubscriptions        AgentSubscription[]        @relation("UserAgentSubscriptions")
   appMemberships            AppMember[]                @relation("UserAppMemberships")
   // 023-app-shape: per-Memory authorization back-relations.
@@ -547,6 +553,13 @@ model OrgMember {
 model Memory {
   id                  String  @id @default(cuid())
   organizationId      String  @map("organization_id")
+  /// spec 047 (Phase 2b): the user TENANT owner of a user-owned Memory
+  /// (owner-namespace `@<handle>` URN). DISTINCT from `userId` (the
+  /// personal/private strict-owner). Additive + unused for now — nullable, no
+  /// XOR; the exactly-one-of `organizationId`/`ownerUserId` invariant, the
+  /// nullable-org migration, and the authz branches land together in Phase 2c.
+  ownerUserId         String? @map("owner_user_id")
+  ownerUser           User?   @relation("MemoryTenantOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   // 008-agent-installation (2026-05-02), relaxed by 034-memory-class-access and
   // #653: App pivot. Required for class='app'; OPTIONAL for knowledge/group/
   // personal/private (set when app-scoped, NULL when free-standing); forbidden
@@ -1267,6 +1280,11 @@ model UsageEvent {
 model Agent {
   id                   String          @id @default(cuid())
   organizationId       String          @map("organization_id")
+  /// spec 047 (Phase 2b): user owner of a user-owned Agent (owner-namespace
+  /// `@<handle>` URN). Additive + unused — nullable, no XOR; the org-XOR-owner
+  /// invariant + nullable-org + creation land in Phase 2c.
+  ownerUserId          String?         @map("owner_user_id")
+  ownerUser            User?           @relation("AgentOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   /// Globally unique identifier (e.g. "micromentor.org:juno");
   /// derived from `org.urn + ":" + slug`.
   urn                  String          @unique
@@ -2300,6 +2318,11 @@ model App {
   /// pattern in PR #124.
   urn                   String
   organizationId        String               @map("organization_id")
+  /// spec 047 (Phase 2b): user owner of a user-owned App (owner-namespace
+  /// `@<handle>` URN). Additive + unused — nullable, no XOR; the org-XOR-owner
+  /// invariant + nullable-org + creation land in Phase 2c.
+  ownerUserId           String?              @map("owner_user_id")
+  ownerUser             User?                @relation("AppOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
   identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")
   sessionTimeoutSeconds Int                  @default(900) @map("session_timeout_seconds")
