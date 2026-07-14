@@ -733,8 +733,13 @@ export const memoryMutations = {
           throw new Error('Forbidden: only the owner can delete this memory');
         }
       } else {
+        // Org-owned (the XOR CHECK guarantees ownerUserId is null here ⇒ org is
+        // set); assert it explicitly rather than fall back to an empty org id.
+        if (memory.organizationId === null) {
+          throw new Error('Invariant: org-owned memory has no organizationId');
+        }
         // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
-        await requireOrgAction(ctx, memory.organizationId ?? '', 'memory.delete');
+        await requireOrgAction(ctx, memory.organizationId, 'memory.delete');
       }
       // System-class memories are owned by their agent and can only be
       // removed by deleting the agent. This prevents the agent from ending
@@ -781,10 +786,14 @@ export const memoryMutations = {
           throw new Error('Forbidden: only the owner can clone this memory');
         }
       } else {
+        // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
+        if (source.organizationId === null) {
+          throw new Error('Invariant: org-owned memory has no organizationId');
+        }
         // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
         // A memory.clone PrincipalGrant now lets a specific non-admin member
         // clone; the cross-org DESTINATION gate below is unchanged (#604).
-        await requireOrgAction(ctx, source.organizationId ?? '', 'memory.clone');
+        await requireOrgAction(ctx, source.organizationId, 'memory.clone');
       }
       // system/app-class memories auto-provision via the agent/install
       // paths (same rationale as createMemory rejecting these classes) —
@@ -1053,7 +1062,11 @@ export const memoryMutations = {
             throw new Error('Forbidden: only the owner can copy from this memory');
           }
         } else {
-          await requireOrgAction(ctx, source.organizationId ?? '', 'memory.clone');
+          // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
+          if (source.organizationId === null) {
+            throw new Error('Invariant: org-owned memory has no organizationId');
+          }
+          await requireOrgAction(ctx, source.organizationId, 'memory.clone');
         }
         // Target-side create grant (same as createMemory).
         await requireOrgAction(ctx, targetOrgId, 'memory.create');

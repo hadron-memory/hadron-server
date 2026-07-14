@@ -661,7 +661,10 @@ export const typeResolvers = {
             select: { organizationId: true },
           })
         )?.organizationId;
-      if (!organizationId) return false;
+      // spec 047: a user-owned App has no owning org, so an AppMember is
+      // vacuously org-external (NOT an OrgMember of a nonexistent org). Kept in
+      // sync with isOrgExternalAppMember (src/lib/auth/isOrgExternalAppMember.ts).
+      if (!organizationId) return true;
       const orgMember = await ctx.db.orgMember.findFirst({
         where: { userId: s.userId, organizationId, deletedAt: null },
         select: { userId: true },
