@@ -585,7 +585,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
 
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
-    select: { organizationId: true, userId: true, class: true },
+    select: { organizationId: true, userId: true, class: true, appId: true },
   });
 
   // 034-memory-class-access: owner-owned personal/private memories are
@@ -597,6 +597,15 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
 
   // Non-personal/private: global ADMIN/OWNER bypass.
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
+
+  // #653: an APP-SCOPED knowledge/group memory is App-internal — it must NOT be
+  // writable via the org-member CONTRIBUTOR / cross-org-subscription grants
+  // below (which key on organizationId, ignoring app_id). App-scoped write goes
+  // through the App-key/agent path (canWriteToMemory via getAppMemoryAccess); a
+  // JWT org contributor who isn't ADMIN gets no write here (codex review, #660).
+  if (memory.appId !== null && (memory.class === 'knowledge' || memory.class === 'group')) {
+    throw new Error('Forbidden: no write access to this memory');
+  }
 
   // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
   // membership no longer grants write access (same rule as requireOrgRole).
@@ -643,6 +652,9 @@ export const ORG_INCLUDE = {
     where: {
       deletedAt: null,
       userMemoryOfAgentId: null,
+      // #653: an app-scoped knowledge/group memory is App-internal, not an "org
+      // memory" — keep it out of the org's main list (surfaced via the App).
+      appId: null,
       // 034-memory-class-access: owner-owned personal/private are never "org
       // memories" — they're owner-only and surfaced via the owner's own views.
       // 035-visibility-enum-cleanup: system memories (was `type !=

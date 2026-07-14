@@ -20,9 +20,10 @@
  * personal/private + per-user "holding" clauses — those are identity-scoped,
  * not org-scoped, and each surface gates them on its own strict-ownership
  * path):
- *   - org-owned `knowledge` / `group` memories (`userMemoryOfAgentId IS NULL`)
- *   - cross-org subscribed non-personal memories
- *   - `PUBLIC` non-personal memories (always — even for a user with no orgs)
+ *   - org-owned `knowledge` / `group` memories (`userMemoryOfAgentId IS NULL`,
+ *     `app_id IS NULL` — an app-scoped one is App-internal, not org-wide; #653)
+ *   - cross-org subscribed non-personal memories (never app-scoped)
+ *   - `PUBLIC` non-personal, non-app-scoped memories (always — even with no orgs)
  *
  * **Read-only by nature.** Org membership confers READ; write stays gated by
  * the App/agent-role path in each caller. `personal`/`private` memories are
@@ -63,16 +64,22 @@ export async function getOrgReadableMemoryIds(
         // excluded here (caller re-admits its own via the identity clause).
         ...(orgIds.length > 0
           ? [
-              { organizationId: { in: orgIds }, class: { in: ['knowledge', 'group'] as any }, userMemoryOfAgentId: null },
+              // #653: `appId: null` — an APP-SCOPED knowledge/group memory is
+              // NOT org-wide readable; it's reachable only through the App
+              // surface (getAppMemoryAccess), like an app-class memory. Without
+              // this, a knowledge memory provisioned for App A would leak to
+              // every org member (codex review on #660).
+              { organizationId: { in: orgIds }, class: { in: ['knowledge', 'group'] as any }, appId: null, userMemoryOfAgentId: null },
               // Cross-org subscriptions never reach owner-only personal/private.
               // `deletedAt: null` on the subscription so a REVOKED (soft-deleted)
-              // subscription stops granting read.
-              { class: { notIn: ['personal', 'private'] as any }, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds }, deletedAt: null } } },
+              // subscription stops granting read. `appId: null` — app-scoped
+              // memories are App-internal, never cross-org-subscription-readable.
+              { class: { notIn: ['personal', 'private'] as any }, appId: null, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds }, deletedAt: null } } },
             ]
           : []),
-        // PUBLIC memories — defensively excluding personal/private and
-        // per-user holdings so a mis-set visibility can't expose them.
-        { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any }, userMemoryOfAgentId: null },
+        // PUBLIC memories — defensively excluding personal/private, per-user
+        // holdings, and app-scoped (#653) so a mis-set visibility can't expose them.
+        { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any }, appId: null, userMemoryOfAgentId: null },
       ],
     },
     select: { id: true },

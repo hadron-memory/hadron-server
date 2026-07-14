@@ -6,15 +6,19 @@
  * These two mutations are the explicit, caller-invokable way to add every
  * App-associable memory class to a chosen App:
  *
- *   - createMemoryInApp — create a new memory born App-scoped (app | personal |
- *     private).
+ *   - createMemoryInApp — create a new memory born App-scoped (app | knowledge |
+ *     personal | private).
  *   - attachMemoryToApp — bind an existing free-standing personal/private memory
  *     to an App (an app-class memory can't exist free-standing, so it has
  *     nothing to attach).
  *
  * Split auth model (matches the App membership model, cf. requireAiConfigPicker
  * Access):
- *   - class='app' is shared deployment data → org OWNER/ADMIN (requireOrgRole).
+ *   - class='app' and class='knowledge' are shared data → org OWNER/ADMIN
+ *     (requireOrgRole). #653: an app-scoped knowledge memory is App-internal
+ *     shared reference content — it is linked to the App's agent (AgentMemoryItem)
+ *     so agents read it via the App surface, and is excluded from every org-wide
+ *     read/write grant (getOrgReadableMemoryIds / requireMemoryWriteAccess).
  *   - personal/private are the CALLER'S OWN memory → App membership is the bar
  *     (an App member who is neither org admin nor App owner may still add their
  *     own memory). The caller always owns the resulting personal/private row.
@@ -35,8 +39,8 @@ import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 import { type Context, requireOrgRole, MEMORY_INCLUDE } from './resolvers.helpers.js';
 
-/** App-associable memory classes (the DB CHECK forbids app_id on the others). */
-type AppMemoryClass = 'app' | 'personal' | 'private';
+/** App-associable memory classes (the DB CHECK forbids app_id only on system). */
+type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
 
 /**
  * Load the target App, reject an uninstalled one, and enforce the class-split
@@ -68,8 +72,8 @@ async function loadAppAndAuthorize(
     });
   }
 
-  if (klass === 'app') {
-    // Shared deployment data — an org-management action.
+  if (klass === 'app' || klass === 'knowledge') {
+    // Shared data (deployment config / reference knowledge) — org-management.
     await requireOrgRole(ctx, app.organizationId, 'ADMIN');
   } else {
     // personal/private: the caller OWNS the resulting memory, so App membership
@@ -150,10 +154,15 @@ export const appMemoryMutations = {
     },
     ctx: Context,
   ) => {
-    if (memoryClass !== 'app' && memoryClass !== 'personal' && memoryClass !== 'private') {
+    if (
+      memoryClass !== 'app' &&
+      memoryClass !== 'knowledge' &&
+      memoryClass !== 'personal' &&
+      memoryClass !== 'private'
+    ) {
       throw new GraphQLError(
         `createMemoryInApp does not accept class='${memoryClass}'. Only ` +
-          `'app', 'personal', and 'private' can be scoped to an App.`,
+          `'app', 'knowledge', 'personal', and 'private' can be scoped to an App.`,
         { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' } },
       );
     }
@@ -208,13 +217,16 @@ export const appMemoryMutations = {
           description,
           ...(data !== undefined ? { data: data as InputJsonValue } : {}),
           tags: tags ?? [],
-          // visibility MUST be NULL for app/personal/private (chk_memory_visibility_class).
-          visibility: null,
+          // visibility: NULL for app/personal/private; ORGANIZATION for an
+          // app-scoped knowledge memory (chk_memory_visibility_class permits a
+          // non-null visibility only for knowledge/group). Access is App-scoped
+          // regardless — #653 excludes app-scoped rows from org-visibility grants.
+          visibility: klass === 'knowledge' ? 'ORGANIZATION' : null,
           class: klass,
           appId: app.id,
-          // app-class is agent-scoped-by-URN only (no owner, no agent pivot);
-          // personal/private carry the (app, user, agent) pivot required by
-          // chk_memory_personal_agent_id + chk_personal_visibility_user.
+          // app/knowledge are agent-scoped-by-URN only (no owner, no agent
+          // pivot); personal/private carry the (app, user, agent) pivot required
+          // by chk_memory_personal_agent_id + chk_personal_visibility_user.
           userMemoryOfAgentId: isUserOwned ? agent.id : null,
           userId: isUserOwned ? ctx.userId : null,
           vectorIndexEnabled: vectorIndexEnabled ?? false,
@@ -232,6 +244,23 @@ export const appMemoryMutations = {
         });
       }
       throw err;
+    }
+
+    // #653: link an app-scoped knowledge memory to the App's agent so it is
+    // readable via the App surface (getAppMemoryAccess → READ_ONLY). Nothing
+    // else grants read on it — it is excluded from every org-wide gate, so this
+    // link is the ONLY read path (besides platform ADMIN/OWNER). role='read':
+    // agents read this reference content; writes stay with the org admin.
+    if (klass === 'knowledge') {
+      await ctx.db.agentMemoryItem.create({
+        data: {
+          id: generateId(),
+          agentId: agent.id,
+          memoryId: memory.id,
+          role: 'read',
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+      });
     }
 
     // Root node, as createMemory does.

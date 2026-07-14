@@ -232,8 +232,13 @@ subscription — no new work once the App is user-owned.
 > authz** work and ships with it. Also `Memory` already has a `userId`
 > strict-owner (`UserMemoriesOwned`), so `ownerUserId` is a **second** user FK
 > (tenant owner) needing distinct modeling. Re-sliced accordingly:
-> - **2a (shipped, PR #660):** the #653 `chk_memory_class_app_id` relaxation
->   only — independent, zero-ripple, closes #653.
+> - **2a (PR #660):** the full #653 as an access-control unit — the
+>   `chk_memory_class_app_id` relaxation + `createMemoryInApp` knowledge path
+>   (org-ADMIN, linked to the App agent via `AgentMemoryItem`) + tightening the
+>   shared gates so an app-scoped knowledge/group row is never org/public/
+>   subscription readable or writable (`getOrgReadableMemoryIds`,
+>   `requireMemoryWriteAccess`, `ORG_INCLUDE`). **`group` deferred** pending its
+>   App-vs-group-membership semantics.
 > - **2b:** additive `ownerUserId` columns + relations (no XOR yet).
 > - **2c (= merges with Phase 3):** make `organizationId` nullable + XOR CHECK +
 >   the owner-or-org authz branches + `createAgent` user-owner + `@<handle>` URN
