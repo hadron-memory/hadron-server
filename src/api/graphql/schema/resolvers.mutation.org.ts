@@ -8,6 +8,7 @@ import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import {
   normalizeHandle,
   normalizeHandleOrNull,
+  generateUniqueHandle,
 } from '../../../lib/userHandle.js';
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
@@ -610,14 +611,22 @@ export const orgMutations = {
       });
       if (existing) return existing;
 
+      // Handle is NOT NULL (spec 047). Honor an explicit, legal app-supplied
+      // handle; otherwise assign a RANDOM one. App end-users are addressed by
+      // (externalAppId, externalId), not by handle, and aren't the `@handle`
+      // owner persona — so we deliberately do NOT seed from name/email/externalId
+      // (that would leak app-internal PII into a global handle). The seed is
+      // gated through normalizeHandleOrNull so an illegal value (a name, an
+      // email) normalizes to null → bare random, never sanitized into a handle.
+      const handle_ = await generateUniqueHandle(ctx.db, {
+        seeds: [normalizeHandleOrNull(handle)],
+      });
       return ctx.db.user.create({
         data: {
           externalAppId: ctx.appId,
           externalId,
           identityProvider: 'APP',
-          // Lenient: an illegal app-supplied handle drops to null rather than
-          // blocking user creation (#325).
-          handle: normalizeHandleOrNull(handle),
+          handle: handle_,
           name: name ?? null,
           email: email ?? null,
           createdBy: ctx.appId,
