@@ -766,7 +766,7 @@ describe('setQuotaLimit + ensureQuotaRowsForScope (#510)', () => {
   it('materializes every counter-action row with the platform defaults', async () => {
     await ensureQuotaRowsForScope(db, 'org', orgId);
     const rows = await db.quotaCounter.findMany({ where: { scopeKind: 'org', scopeId: orgId } });
-    expect(rows.map((r) => r.action).sort()).toEqual(['llm.tokens', 'run.execute', 'sms.send']);
+    expect(rows.map((r) => r.action).sort()).toEqual(['email.send', 'llm.tokens', 'run.execute', 'sms.send']);
     expect(rows.every((r) => r.limit === defaultQuotaLimit('org', r.action as never))).toBe(true);
   });
 

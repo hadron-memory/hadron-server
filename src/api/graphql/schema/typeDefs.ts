@@ -2225,7 +2225,7 @@ export const typeDefs = `#graphql
     "app or org."
     scopeKind: String!
     scopeId: String!
-    "run.execute, llm.tokens, or sms.send."
+    "run.execute, llm.tokens, sms.send, or email.send."
     action: String!
     "Window kind (day). The row rolls in place at UTC midnight - used resets, limit persists."
     window: String!
@@ -2239,7 +2239,7 @@ export const typeDefs = `#graphql
     orgRef: String!
     "Optional app scope - ref: PK or URN; must belong to the org. Omit to set the org-level limit."
     appRef: String
-    "run.execute, llm.tokens, or sms.send."
+    "run.execute, llm.tokens, sms.send, or email.send."
     action: String!
     "Non-negative integer; 0 pauses the scope (every launch denies QUOTA_EXCEEDED)."
     limit: Int!

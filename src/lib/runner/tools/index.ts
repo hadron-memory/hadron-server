@@ -12,6 +12,7 @@ import { STORE_TOOLS } from './storeTools.js';
 import { WEB_TOOLS } from './webTools.js';
 import { SEARCH_TOOLS } from './searchTools.js';
 import { SMS_TOOLS } from './smsTools.js';
+import { EMAIL_TOOLS } from './emailTools.js';
 
 export { AuthorFailError };
 export { hadronReadNode, hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
@@ -20,6 +21,7 @@ export { hadronStoreFile } from './storeTools.js';
 export { webFetch, webRequest } from './webTools.js';
 export { webSearchTool } from './searchTools.js';
 export { hadronSendSms } from './smsTools.js';
+export { hadronSendEmail } from './emailTools.js';
 export type { RunToolDef, RunToolContext };
 
 /** The author's printf — lands on the hop's trail element (D-TL-2). */
@@ -65,9 +67,16 @@ export const hadronFail: RunToolDef = {
 export const ALWAYS_ON_TOOLS: readonly RunToolDef[] = [hadronLog, hadronFail];
 
 const REGISTRY = new Map<string, RunToolDef>(
-  [...ALWAYS_ON_TOOLS, ...NODE_TOOLS, ...SPAWN_TOOLS, ...STORE_TOOLS, ...WEB_TOOLS, ...SEARCH_TOOLS, ...SMS_TOOLS].map(
-    (t) => [t.name, t],
-  ),
+  [
+    ...ALWAYS_ON_TOOLS,
+    ...NODE_TOOLS,
+    ...SPAWN_TOOLS,
+    ...STORE_TOOLS,
+    ...WEB_TOOLS,
+    ...SEARCH_TOOLS,
+    ...SMS_TOOLS,
+    ...EMAIL_TOOLS,
+  ].map((t) => [t.name, t]),
 );
 
 /**

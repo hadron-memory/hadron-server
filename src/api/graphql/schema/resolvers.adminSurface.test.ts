@@ -134,7 +134,7 @@ describe('quotaCounters + setQuotaLimit (#510)', () => {
   it('materializes org rows on first view, seeded with defaults', async () => {
     const rows = await resolvers.Query.quotaCounters({}, { orgRef: org.urn }, adminCtx());
     const actions = rows.map((r: { action: string }) => r.action).sort();
-    expect(actions).toEqual(['llm.tokens', 'run.execute', 'sms.send']);
+    expect(actions).toEqual(['email.send', 'llm.tokens', 'run.execute', 'sms.send']);
     expect(rows.every((r: { scopeKind: string; used: number }) => r.scopeKind === 'org' && r.used === 0)).toBe(true);
   });
 
@@ -144,7 +144,7 @@ describe('quotaCounters + setQuotaLimit (#510)', () => {
       { orgRef: org.id, appRef: app.id },
       adminCtx(),
     );
-    expect(rows).toHaveLength(6); // 3 counter actions × {org, app} scope
+    expect(rows).toHaveLength(8); // 4 counter actions × {org, app} scope
     const otherOrg = await db.organization.create({
       data: { id: generateId(), name: 'other', urn: 'adm-other' },
     });

@@ -60,6 +60,9 @@ const QUOTA_TOKENS_PER_DAY_ORG = intEnv('QUOTA_TOKENS_PER_DAY_ORG', 10_000_000);
 // platform Twilio account.
 const QUOTA_SMS_PER_DAY_APP = intEnv('QUOTA_SMS_PER_DAY_APP', 50);
 const QUOTA_SMS_PER_DAY_ORG = intEnv('QUOTA_SMS_PER_DAY_ORG', 200);
+// Agent email is deliberately a notification channel, not a campaign plane.
+const QUOTA_EMAILS_PER_DAY_APP = intEnv('QUOTA_EMAILS_PER_DAY_APP', 25);
+const QUOTA_EMAILS_PER_DAY_ORG = intEnv('QUOTA_EMAILS_PER_DAY_ORG', 100);
 
 /** Parse a positive-integer env var, falling back when unset/invalid. */
 function intEnv(name: string, fallback: number): number {
@@ -88,8 +91,8 @@ export class RunLaunchDeniedError extends Error {
 
 // ── Quota counters (cor:acl:050:01/:04 tier 1) ──────────────────────────────
 
-/** The v1 counter actions (cor:acl:050:04): runs, LLM tokens, SMS sends. */
-export type QuotaAction = 'run.execute' | 'llm.tokens' | 'sms.send';
+/** The v1 counter actions (cor:acl:050:04): runs, tokens, and outbound sends. */
+export type QuotaAction = 'run.execute' | 'llm.tokens' | 'sms.send' | 'email.send';
 
 /** Start of the next UTC day — the daily quota window boundary. */
 function nextUtcMidnight(): Date {
@@ -142,6 +145,9 @@ export function defaultQuotaLimit(
   if (action === 'sms.send') {
     return scopeKind === 'app' ? QUOTA_SMS_PER_DAY_APP : QUOTA_SMS_PER_DAY_ORG;
   }
+  if (action === 'email.send') {
+    return scopeKind === 'app' ? QUOTA_EMAILS_PER_DAY_APP : QUOTA_EMAILS_PER_DAY_ORG;
+  }
   return scopeKind === 'app' ? QUOTA_TOKENS_PER_DAY_APP : QUOTA_TOKENS_PER_DAY_ORG;
 }
 
@@ -156,7 +162,7 @@ export async function ensureQuotaRowsForScope(
   scopeKind: 'app' | 'org',
   scopeId: string,
 ): Promise<void> {
-  for (const action of ['run.execute', 'llm.tokens', 'sms.send'] as const) {
+  for (const action of ['run.execute', 'llm.tokens', 'sms.send', 'email.send'] as const) {
     await ensureQuotaRow(db, scopeKind, scopeId, action, defaultQuotaLimit(scopeKind, action));
   }
 }
