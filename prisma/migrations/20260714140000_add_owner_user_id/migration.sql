@@ -8,10 +8,15 @@
 -- be split safely — nullable-org couples with the authz surface).
 --
 -- On Memory this is DISTINCT from `user_id` (the personal/private strict-owner).
--- No index yet — Phase 2c adds one alongside the owner queries.
+-- Each FK column is indexed so a user delete's ON DELETE CASCADE doesn't
+-- sequential-scan the child tables (and to back Phase 2c's owner queries).
 ALTER TABLE "apps" ADD COLUMN "owner_user_id" TEXT;
 ALTER TABLE "agents" ADD COLUMN "owner_user_id" TEXT;
 ALTER TABLE "memories" ADD COLUMN "owner_user_id" TEXT;
+
+CREATE INDEX "apps_owner_user_id_idx" ON "apps"("owner_user_id");
+CREATE INDEX "agents_owner_user_id_idx" ON "agents"("owner_user_id");
+CREATE INDEX "memories_owner_user_id_idx" ON "memories"("owner_user_id");
 
 ALTER TABLE "apps" ADD CONSTRAINT "apps_owner_user_id_fkey" FOREIGN KEY ("owner_user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "agents" ADD CONSTRAINT "agents_owner_user_id_fkey" FOREIGN KEY ("owner_user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;

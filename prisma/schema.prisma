@@ -740,6 +740,7 @@ model Memory {
   @@index([anonymousExpiresAt])
   @@index([userId])
   @@index([appId])
+  @@index([ownerUserId])
   @@map("memories")
 }
 
@@ -1369,6 +1370,7 @@ model Agent {
   orgGrants         AgentOrgGrant[]
   aiServiceConfigs  AiServiceConfig[]
 
+  @@index([ownerUserId])
   @@map("agents")
 }
 
@@ -2414,6 +2416,7 @@ model App {
   // + uninstalled) also index-served. Prisma generates a non-unique
   // btree index on `urn`.
   @@index([urn])
+  @@index([ownerUserId])
   @@map("apps")
 }
 
