@@ -231,6 +231,58 @@
       "expectedType": "prompt",
       "expectedParserCanonical": "hrn:prompt:micromentor.org::coding-app::coding-agent::system::review:sort-imports",
       "expectedParserRewrites": []
+    },
+
+    {
+      "_section": "spec 047 — @<handle> owner namespace (user-owned entities) accepted alongside org domains",
+      "input": "hrn:app:@holger::gmail-app",
+      "expectedType": "app",
+      "expectedParserCanonical": "hrn:app:@holger::gmail-app",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "hrn:agent:@holger::inbox-triage",
+      "expectedType": "agent",
+      "expectedParserCanonical": "hrn:agent:@holger::inbox-triage",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "hrn:memory:@holger::inbox-triage",
+      "expectedType": "memory",
+      "expectedParserCanonical": "hrn:memory:@holger::inbox-triage",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "hrn:node:@holger::gmail-app::inbox-triage::system::review:sort-imports",
+      "expectedType": "node",
+      "expectedParserCanonical": "hrn:node:@holger::gmail-app::inbox-triage::system::review:sort-imports",
+      "expectedParserRewrites": [],
+      "expectedNeedsResolver": true
+    },
+    {
+      "_section": "spec 047 — self-install collapse with a @<handle> author namespace (cat 1)",
+      "input": "hrn:agent:@holger::@holger:triage",
+      "expectedType": "agent",
+      "expectedParserCanonical": "hrn:agent:@holger::triage",
+      "expectedParserRewrites": ["source-install-memory"]
+    },
+    {
+      "_section": "spec 047 — @ rejected for user URNs (position-0 is the handle itself, not an owner namespace)",
+      "input": "hrn:user:@holger",
+      "expectedReject": "invalid-charset",
+      "offendingSegment": "@holger"
+    },
+    {
+      "_section": "spec 047 — @ rejected at a non-namespace position (single-atom slug segment)",
+      "input": "hrn:app:hadronmemory.com::@foo",
+      "expectedReject": "invalid-charset",
+      "offendingSegment": "@foo"
+    },
+    {
+      "_section": "spec 047 — empty @<handle> is a shape error",
+      "input": "hrn:app:@::gmail-app",
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "@"
     }
   ]
 }

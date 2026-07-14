@@ -594,8 +594,8 @@ export function parseUrn(input: string): ParsedUrn {
   // word check happens after cat 4 stripping below so type markers don't
   // trip on themselves). Errors propagate with the FULL URN as `input` so
   // logging/telemetry preserves context.
-  for (const segment of rawSegments) {
-    validatePathSegment(input, segment);
+  for (let i = 0; i < rawSegments.length; i++) {
+    validatePathSegment(input, rawSegments[i], type, i);
   }
 
   // === Parser-layer rewrites ===
@@ -680,11 +680,37 @@ export function parseUrn(input: string): ParsedUrn {
  *
  * `input` is the full URN being parsed; threaded through so any
  * `UrnParseError` carries the full URN as `error.input` (not just the
- * offending atom) for downstream logging/telemetry.
+ * offending atom) for downstream logging/telemetry. `type` and `index` (the
+ * URN type and this segment's position) gate the spec-047 `@<handle>`
+ * owner/author namespace — see the inline comment for the exact rule.
  */
-function validatePathSegment(input: string, segment: string): void {
+function validatePathSegment(
+  input: string,
+  segment: string,
+  type: string,
+  index: number,
+): void {
   const atoms = segment.split(':');
-  for (const atom of atoms) {
+  const ownerNamespaced = OWNER_NAMESPACED_TYPES.has(type);
+  for (let j = 0; j < atoms.length; j++) {
+    let atom = atoms[j];
+    // spec 047: a user-handle owner/author namespace is written `@<handle>`. It
+    // appears as the FIRST atom of either the owner segment (position 0) or an
+    // author-context segment `<@handle>:<slug>` in an install / self-install
+    // shape (≥2 atoms). The `@` is a namespace marker, not part of the atom
+    // charset, so strip it before the charset check. `@` stays illegal anywhere
+    // else (other atoms, other positions, and the `org` / `user` types).
+    const isOwnerHandleAtom =
+      ownerNamespaced &&
+      j === 0 &&
+      atom.startsWith('@') &&
+      (index === 0 || atoms.length >= 2);
+    if (isOwnerHandleAtom) {
+      atom = atom.slice(1);
+      if (atom.length === 0) {
+        throw new UrnParseError(input, 'invalid-segment-shape', segment);
+      }
+    }
     validateAtomShape(input, atom);
   }
 }
@@ -827,6 +853,22 @@ const NODE_URN_TYPES: ReadonlySet<string> = new Set<string>([
   ...NODE_TYPES,
   ...NODE_ROLES,
   ...NODE_PARTS,
+]);
+
+/**
+ * URN types whose owner/author namespace may be a USER handle written
+ * `@<handle>` (spec 047), not just an org domain. This covers every type whose
+ * first path-segment is an owner org — app / agent / memory / edge and all the
+ * node-family types. It deliberately EXCLUDES `org` and `user`: their position-0
+ * segment is the entity's own slug, so `@` stays illegal there (a user URN is
+ * `hrn:user:holger`, never `hrn:user:@holger`).
+ */
+const OWNER_NAMESPACED_TYPES: ReadonlySet<string> = new Set<string>([
+  'app',
+  'agent',
+  'memory',
+  'edge',
+  ...NODE_URN_TYPES,
 ]);
 
 /**
