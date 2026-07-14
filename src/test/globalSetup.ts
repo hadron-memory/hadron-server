@@ -28,17 +28,18 @@ export async function setup() {
       CHECK (("class" IN ('personal', 'private')) = ("user_id" IS NOT NULL));
   `);
 
-  // 008-agent-installation, relaxed by 034-memory-class-access: app_id required
-  // only for class='app'; forbidden for system/knowledge/group; OPTIONAL for
-  // personal/private (set when app-scoped, NULL when free-standing).
+  // 008-agent-installation, relaxed by 034-memory-class-access and #653: app_id
+  // required for class='app'; forbidden for class='system'; OPTIONAL for
+  // knowledge/group/personal/private. #653 moved knowledge + group to optional
+  // so they can be attached to an App. Synced with prisma/post-push.sql.
   await client.query(`
     ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_class_app_id";
     ALTER TABLE "memories"
       ADD CONSTRAINT "chk_memory_class_app_id"
       CHECK (
         (class = 'app' AND app_id IS NOT NULL)
-        OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
-        OR (class IN ('personal', 'private'))
+        OR (class = 'system' AND app_id IS NULL)
+        OR (class IN ('knowledge', 'group', 'personal', 'private'))
       );
   `);
 

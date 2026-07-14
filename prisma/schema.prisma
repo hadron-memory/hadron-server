@@ -541,14 +541,14 @@ model OrgMember {
 model Memory {
   id                  String  @id @default(cuid())
   organizationId      String  @map("organization_id")
-  // 008-agent-installation (2026-05-02), relaxed by 034-memory-class-access:
-  // App pivot. Required for class='app'; OPTIONAL for personal/private (set
-  // when app-scoped, NULL when free-standing); forbidden for system/knowledge/
-  // group. Enforced by the chk_memory_class_app_id CHECK constraint.
-  /// The App this memory belongs to. Required when `class` is `app`;
-  /// optional for `personal`/`private` (set when app-scoped, NULL when
-  /// free-standing); NULL for `system`/`knowledge`/`group`. Enforced by
-  /// chk_memory_class_app_id.
+  // 008-agent-installation (2026-05-02), relaxed by 034-memory-class-access and
+  // #653: App pivot. Required for class='app'; OPTIONAL for knowledge/group/
+  // personal/private (set when app-scoped, NULL when free-standing); forbidden
+  // for class='system'. Enforced by the chk_memory_class_app_id CHECK constraint.
+  /// The App this memory belongs to. Required when `class` is `app`; optional
+  /// for `knowledge`/`group`/`personal`/`private` (set when app-scoped, NULL
+  /// when free-standing); NULL for `system`. Enforced by chk_memory_class_app_id
+  /// (#653 allowed knowledge + group to attach to an App).
   appId               String? @map("app_id")
   // 005-agent-subscription (2026-04-30), re-keyed onto class by 034: explicit
   // User owner for personal/private-class memories. NULL otherwise. Postgres
