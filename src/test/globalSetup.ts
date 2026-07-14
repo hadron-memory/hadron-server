@@ -11,10 +11,10 @@
  */
 
 import { Client } from 'pg';
+import { PARALLEL_DBS, baseTestDbUrl, baseDbName, maintenanceUrl } from './dbWorkers.js';
 
 export async function setup() {
-  const databaseUrl =
-    process.env.TEST_DATABASE_URL ?? 'postgresql://holger@localhost:5432/hadron_test';
+  const databaseUrl = baseTestDbUrl();
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
 
@@ -152,5 +152,37 @@ export async function setup() {
     CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
   `);
 
+  // The base DB above is now the fully-provisioned TEMPLATE. Must be closed
+  // before it can be used as a CREATE DATABASE template (no open connections).
   await client.end();
+
+  if (!PARALLEL_DBS) return;
+
+  // Worker DBs are cloned from this template LAZILY, per worker (perWorkerDb.ts),
+  // because VITEST_POOL_ID isn't statically bounded. Nothing to create up front;
+  // just drop any leftover `hadron_test_<n>` clones from a prior run so a schema
+  // change to the template can't be masked by a stale clone.
+  const base = baseDbName();
+  const admin = new Client({ connectionString: maintenanceUrl() });
+  await admin.connect();
+  await dropWorkerDbs(admin, base);
+  await admin.end();
+
+  return async function teardown() {
+    const a = new Client({ connectionString: maintenanceUrl() });
+    await a.connect();
+    await dropWorkerDbs(a, base);
+    await a.end();
+  };
+}
+
+/** Drop every `<base>_<digits>` clone (precise regex — base has no metachars). */
+async function dropWorkerDbs(admin: Client, base: string): Promise<void> {
+  const { rows } = await admin.query<{ datname: string }>(
+    `SELECT datname FROM pg_database WHERE datname ~ $1`,
+    [`^${base}_[0-9]+$`],
+  );
+  for (const { datname } of rows) {
+    await admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`).catch(() => {});
+  }
 }

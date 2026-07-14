@@ -15,8 +15,13 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 
+// Prefer the per-worker DATABASE_URL (set by perWorkerDb.ts in parallel mode)
+// so the raw pg client and the Prisma `db` above target the SAME database;
+// falls back to TEST_DATABASE_URL / the default for the serial single-DB mode.
 const DATABASE_URL =
-  process.env.TEST_DATABASE_URL ?? 'postgresql://holger@localhost:5432/hadron_test';
+  process.env.DATABASE_URL ??
+  process.env.TEST_DATABASE_URL ??
+  'postgresql://holger@localhost:5432/hadron_test';
 
 let pgClient: Client;
 

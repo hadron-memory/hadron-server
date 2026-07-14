@@ -91,7 +91,14 @@ that drift is what the deprecated `hadron_dev` row above warns about).
 ## Common commands
 
 ```bash
-# Run the test suite (always against hadron_test)
+# Run the test suite. Files run in PARALLEL, each vitest worker against its own
+# clone of hadron_test (`hadron_test_<VITEST_POOL_ID>`, created lazily from the
+# template by src/test/perWorkerDb.ts and dropped at teardown) — ~6-7x faster
+# than the old serial mode. `hadron_test` is still the template you build with
+# `pnpm db:test-setup`. Set HADRON_TEST_PARALLEL=0 to fall back to the single-DB
+# serial mode (e.g. to debug a suspected cross-file ordering issue). A test that
+# opens its OWN raw pg connection must read `process.env.DATABASE_URL` (the
+# per-worker URL), NOT `TEST_DATABASE_URL`, or it splits across two DBs.
 pnpm test
 
 # Typecheck
