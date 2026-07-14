@@ -165,24 +165,42 @@ export async function setup() {
   const base = baseDbName();
   const admin = new Client({ connectionString: maintenanceUrl() });
   await admin.connect();
-  await dropWorkerDbs(admin, base);
-  await admin.end();
+  try {
+    // Pre-run cleanup fails LOUD (swallow: false): if a stale clone can't be
+    // dropped, perWorkerDb would see it exists, skip CREATE, and run the suite
+    // against an old schema — masking failures. Better to abort setup (Codex).
+    await dropWorkerDbs(admin, base, { swallow: false });
+  } finally {
+    await admin.end();
+  }
 
   return async function teardown() {
     const a = new Client({ connectionString: maintenanceUrl() });
     await a.connect();
-    await dropWorkerDbs(a, base);
-    await a.end();
+    try {
+      // Post-run cleanup is best-effort (swallow: true) — a failure here can't
+      // affect correctness (the next run's setup drops loudly first).
+      await dropWorkerDbs(a, base, { swallow: true });
+    } finally {
+      await a.end();
+    }
   };
 }
 
-/** Drop every `<base>_<digits>` clone (precise regex — base has no metachars). */
-async function dropWorkerDbs(admin: Client, base: string): Promise<void> {
-  const { rows } = await admin.query<{ datname: string }>(
-    `SELECT datname FROM pg_database WHERE datname ~ $1`,
-    [`^${base}_[0-9]+$`],
+/**
+ * Drop every `<base>_<digits>` worker clone. Matches by exact prefix + numeric
+ * suffix in JS (not a SQL regex) so a base name with regex metachars can never
+ * over-match and drop an unrelated database.
+ */
+async function dropWorkerDbs(admin: Client, base: string, opts: { swallow: boolean }): Promise<void> {
+  const prefix = `${base}_`;
+  const { rows } = await admin.query<{ datname: string }>('SELECT datname FROM pg_database');
+  const clones = rows.filter(
+    (r) => r.datname.startsWith(prefix) && /^[0-9]+$/.test(r.datname.slice(prefix.length)),
   );
-  for (const { datname } of rows) {
-    await admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`).catch(() => {});
+  for (const { datname } of clones) {
+    const drop = admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`);
+    if (opts.swallow) await drop.catch(() => {});
+    else await drop;
   }
 }
