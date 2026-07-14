@@ -559,7 +559,7 @@ model Memory {
   /// XOR; the exactly-one-of `organizationId`/`ownerUserId` invariant, the
   /// nullable-org migration, and the authz branches land together in Phase 2c.
   ownerUserId         String? @map("owner_user_id")
-  ownerUser           User?   @relation("MemoryTenantOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  ownerUser           User?   @relation("MemoryTenantOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
   // 008-agent-installation (2026-05-02), relaxed by 034-memory-class-access and
   // #653: App pivot. Required for class='app'; OPTIONAL for knowledge/group/
   // personal/private (set when app-scoped, NULL when free-standing); forbidden
@@ -1285,7 +1285,7 @@ model Agent {
   /// `@<handle>` URN). Additive + unused — nullable, no XOR; the org-XOR-owner
   /// invariant + nullable-org + creation land in Phase 2c.
   ownerUserId          String?         @map("owner_user_id")
-  ownerUser            User?           @relation("AgentOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  ownerUser            User?           @relation("AgentOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
   /// Globally unique identifier (e.g. "micromentor.org:juno");
   /// derived from `org.urn + ":" + slug`.
   urn                  String          @unique
@@ -2324,7 +2324,7 @@ model App {
   /// `@<handle>` URN). Additive + unused — nullable, no XOR; the org-XOR-owner
   /// invariant + nullable-org + creation land in Phase 2c.
   ownerUserId           String?              @map("owner_user_id")
-  ownerUser             User?                @relation("AppOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  ownerUser             User?                @relation("AppOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
   identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")
   sessionTimeoutSeconds Int                  @default(900) @map("session_timeout_seconds")
