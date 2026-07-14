@@ -336,7 +336,7 @@ model User {
   /// (test fixtures) so those need no churn. Case-insensitive uniqueness is the
   /// `users_handle_lower_uniq` functional index (post-push.sql); the `@unique`
   /// here is the plain case-sensitive one.
-  handle           String            @unique @default(dbgenerated("left(md5(random()::text), 12)"))
+  handle           String            @unique @default(dbgenerated("\"left\"(md5((random())::text), 12)"))
   /// User-layer action-policy link (cor:acl:040:02) — constrains runs made
   /// on-behalf-of this user. Same allow-list shape as Organization.policy;
   /// NULL = no restriction. Self-authored (updateMyPolicy).
