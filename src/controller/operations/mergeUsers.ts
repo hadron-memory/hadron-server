@@ -149,17 +149,18 @@ export async function mergeUsers(
       },
     });
 
-    // Most statements bind $1 = target, $2 = source. A statement that references
-    // only some placeholders can pass its own bind list (Postgres tolerates
-    // extra binds, but passing exactly what the SQL references is clearer).
-    const run = (sql: string, ...params: unknown[]) =>
-      tx.$executeRawUnsafe(sql, ...(params.length > 0 ? params : [targetUserId, sourceUserId]));
+    // Fixed-identifier statements use parameterized tagged `$executeRaw`
+    // (review:raw-sql-mutations): the two user ids interpolate as BOUND params,
+    // and every table/column name is a literal in the template — never
+    // interpolated. The two identifier-driven loops at the end can't use this
+    // form (Postgres binds values, not identifiers) and stay `$executeRawUnsafe`
+    // with a documented safety argument (#665).
 
     // Composite-key / unique relationships: combine ordered entitlements,
     // remove the source collision, then retarget source-only rows. A revoked
     // OrgMember contributes no role/canInvite authority. LEAST is strongest
     // for Role (OWNER is declared first in the Postgres enum).
-    await run(`UPDATE org_members t SET
+    await tx.$executeRaw`UPDATE org_members t SET
         role = CASE
           WHEN s.deleted_at IS NOT NULL THEN t.role
           WHEN t.deleted_at IS NOT NULL THEN s.role
@@ -180,20 +181,20 @@ export async function mergeUsers(
         END,
         updated_at = now()
       FROM org_members s
-      WHERE t.user_id = $1 AND s.user_id = $2
-        AND t.organization_id = s.organization_id`);
-    await run(`DELETE FROM org_members s USING org_members t
-      WHERE s.user_id = $2 AND t.user_id = $1
-        AND s.organization_id = t.organization_id`);
-    await run('UPDATE org_members SET user_id = $1 WHERE user_id = $2');
+      WHERE t.user_id = ${targetUserId} AND s.user_id = ${sourceUserId}
+        AND t.organization_id = s.organization_id`;
+    await tx.$executeRaw`DELETE FROM org_members s USING org_members t
+      WHERE s.user_id = ${sourceUserId} AND t.user_id = ${targetUserId}
+        AND s.organization_id = t.organization_id`;
+    await tx.$executeRaw`UPDATE org_members SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
 
-    await run(`DELETE FROM app_members s USING app_members t
-      WHERE s.user_id = $2 AND t.user_id = $1 AND s.app_id = t.app_id`);
-    await run('UPDATE app_members SET user_id = $1 WHERE user_id = $2');
+    await tx.$executeRaw`DELETE FROM app_members s USING app_members t
+      WHERE s.user_id = ${sourceUserId} AND t.user_id = ${targetUserId} AND s.app_id = t.app_id`;
+    await tx.$executeRaw`UPDATE app_members SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
 
     // Preserve the union's strongest live subscription. When both are active,
     // keep the earlier activation and broader expiry (NULL = perpetual).
-    await run(`UPDATE agent_subscriptions t SET
+    await tx.$executeRaw`UPDATE agent_subscriptions t SET
         activated_at = CASE
           WHEN t.activated_at IS NOT NULL AND t.revoked_at IS NULL
             AND (t.expires_at IS NULL OR t.expires_at > now())
@@ -237,35 +238,53 @@ export async function mergeUsers(
         END,
         updated_at = now()
       FROM agent_subscriptions s
-      WHERE t.user_id = $1 AND s.user_id = $2 AND t.agent_id = s.agent_id`);
-    await run(`DELETE FROM agent_subscriptions s USING agent_subscriptions t
-      WHERE s.user_id = $2 AND t.user_id = $1 AND s.agent_id = t.agent_id`);
-    await run('UPDATE agent_subscriptions SET user_id = $1 WHERE user_id = $2');
+      WHERE t.user_id = ${targetUserId} AND s.user_id = ${sourceUserId} AND t.agent_id = s.agent_id`;
+    await tx.$executeRaw`DELETE FROM agent_subscriptions s USING agent_subscriptions t
+      WHERE s.user_id = ${sourceUserId} AND t.user_id = ${targetUserId} AND s.agent_id = t.agent_id`;
+    await tx.$executeRaw`UPDATE agent_subscriptions SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
 
     // MemoryMemberRole is declared reader < writer < owner, so GREATEST
     // preserves owner and therefore the last-owner invariant.
-    await run(`UPDATE memory_members t SET
+    await tx.$executeRaw`UPDATE memory_members t SET
         role = GREATEST(t.role, s.role), updated_at = now()
       FROM memory_members s
-      WHERE t.user_id = $1 AND s.user_id = $2 AND t.memory_id = s.memory_id`);
-    await run(`DELETE FROM memory_members s USING memory_members t
-      WHERE s.user_id = $2 AND t.user_id = $1 AND s.memory_id = t.memory_id`);
-    await run('UPDATE memory_members SET user_id = $1 WHERE user_id = $2');
+      WHERE t.user_id = ${targetUserId} AND s.user_id = ${sourceUserId} AND t.memory_id = s.memory_id`;
+    await tx.$executeRaw`DELETE FROM memory_members s USING memory_members t
+      WHERE s.user_id = ${sourceUserId} AND t.user_id = ${targetUserId} AND s.memory_id = t.memory_id`;
+    await tx.$executeRaw`UPDATE memory_members SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
 
-    await run(`UPDATE memory_shares t SET
+    await tx.$executeRaw`UPDATE memory_shares t SET
         role = GREATEST(t.role, s.role), updated_at = now()
       FROM memory_shares s
-      WHERE t.grantee_id = $1 AND s.grantee_id = $2 AND t.memory_id = s.memory_id`);
-    await run(`DELETE FROM memory_shares s USING memory_shares t
-      WHERE s.grantee_id = $2 AND t.grantee_id = $1 AND s.memory_id = t.memory_id`);
-    await run('UPDATE memory_shares SET grantee_id = $1 WHERE grantee_id = $2');
-    await run('UPDATE memory_shares SET grantor_id = $1 WHERE grantor_id = $2');
+      WHERE t.grantee_id = ${targetUserId} AND s.grantee_id = ${sourceUserId} AND t.memory_id = s.memory_id`;
+    await tx.$executeRaw`DELETE FROM memory_shares s USING memory_shares t
+      WHERE s.grantee_id = ${sourceUserId} AND t.grantee_id = ${targetUserId} AND s.memory_id = t.memory_id`;
+    await tx.$executeRaw`UPDATE memory_shares SET grantee_id = ${targetUserId} WHERE grantee_id = ${sourceUserId}`;
+    await tx.$executeRaw`UPDATE memory_shares SET grantor_id = ${targetUserId} WHERE grantor_id = ${sourceUserId}`;
     // A share can become self-directed when either its owner or grantee moves.
-    await run('DELETE FROM memory_shares WHERE grantee_id = $1 AND grantor_id = $1', targetUserId);
+    await tx.$executeRaw`DELETE FROM memory_shares WHERE grantee_id = ${targetUserId} AND grantor_id = ${targetUserId}`;
 
-    await run(`DELETE FROM pending_setups s USING pending_setups t
-      WHERE s.user_id = $2 AND t.user_id = $1`);
-    await run('UPDATE pending_setups SET user_id = $1 WHERE user_id = $2');
+    await tx.$executeRaw`DELETE FROM pending_setups s USING pending_setups t
+      WHERE s.user_id = ${sourceUserId} AND t.user_id = ${targetUserId}`;
+    await tx.$executeRaw`UPDATE pending_setups SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
+
+    await tx.$executeRaw`UPDATE user_invitations SET
+      sender_user_id = CASE WHEN sender_user_id = ${sourceUserId} THEN ${targetUserId} ELSE sender_user_id END,
+      new_user_id = CASE WHEN new_user_id = ${sourceUserId} THEN ${targetUserId} ELSE new_user_id END
+      WHERE sender_user_id = ${sourceUserId} OR new_user_id = ${sourceUserId}`;
+    await tx.$executeRaw`UPDATE node_revisions SET
+      edited_by = CASE WHEN edited_by = ${sourceUserId} THEN ${targetUserId} ELSE edited_by END,
+      approved_by = CASE WHEN approved_by = ${sourceUserId} THEN ${targetUserId} ELSE approved_by END
+      WHERE edited_by = ${sourceUserId} OR approved_by = ${sourceUserId}`;
+
+    // The remaining two rewrites interpolate table/column IDENTIFIERS, which a
+    // tagged template cannot bind (Postgres parameters are values, not
+    // identifiers). They stay `$executeRawUnsafe`, and it is safe: every
+    // identifier comes from a compile-time-constant allowlist in THIS file
+    // (`directReferences` / `AUDIT_USER_COLUMNS`) — never user input — while the
+    // two user ids are still passed as bound parameters ($1 = target, $2 =
+    // source), not interpolated. See #665.
+    const runWithIds = (sql: string) => tx.$executeRawUnsafe(sql, targetUserId, sourceUserId);
 
     // Non-conflicting ownership, attribution, credential, and history links.
     const directReferences: ReadonlyArray<readonly [string, string]> = [
@@ -287,28 +306,18 @@ export async function mergeUsers(
       ['agents', 'editor_lock_user_id'],
     ];
     for (const [table, column] of directReferences) {
-      await run(`UPDATE "${table}" SET "${column}" = $1 WHERE "${column}" = $2`);
+      await runWithIds(`UPDATE "${table}" SET "${column}" = $1 WHERE "${column}" = $2`);
     }
-
-    await run(`UPDATE user_invitations SET
-      sender_user_id = CASE WHEN sender_user_id = $2 THEN $1 ELSE sender_user_id END,
-      new_user_id = CASE WHEN new_user_id = $2 THEN $1 ELSE new_user_id END
-      WHERE sender_user_id = $2 OR new_user_id = $2`);
-    await run(`UPDATE node_revisions SET
-      edited_by = CASE WHEN edited_by = $2 THEN $1 ELSE edited_by END,
-      approved_by = CASE WHEN approved_by = $2 THEN $1 ELSE approved_by END
-      WHERE edited_by = $2 OR approved_by = $2`);
 
     // Audit actor ids are identity references in several authorization and
     // creator-only paths (not merely display history), so the merged identity
-    // must follow them as well. Identifiers are compile-time constants; only
-    // the two user ids are bound values.
+    // must follow them as well.
     for (const [table, columns] of Object.entries(AUDIT_USER_COLUMNS)) {
       const assignments = columns
         .map((column) => `"${column}" = CASE WHEN "${column}" = $2 THEN $1 ELSE "${column}" END`)
         .join(', ');
       const predicate = columns.map((column) => `"${column}" = $2`).join(' OR ');
-      await run(`UPDATE "${table}" SET ${assignments} WHERE ${predicate}`);
+      await runWithIds(`UPDATE "${table}" SET ${assignments} WHERE ${predicate}`);
     }
 
     await tx.user.update({
