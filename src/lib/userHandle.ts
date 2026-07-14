@@ -8,6 +8,8 @@
  * handles go through here on write; legacy rows are grandfathered (see #325).
  */
 
+import { randomBytes } from 'crypto';
+import type { PrismaClient } from '../generated/prisma/client.js';
 import { validateUserSlug, formatUrn } from './urn.js';
 
 /**
@@ -52,4 +54,91 @@ export function normalizeHandleOrNull(input: string | null | undefined): string 
   } catch {
     return null;
   }
+}
+
+/**
+ * Coerce an arbitrary seed (a display name, an email local-part, an OAuth login)
+ * into a URN-atom-legal handle **base**, or `null` when nothing legal survives.
+ *
+ * Lowercases, maps every out-of-charset run to a single `-`, trims to a start/
+ * end-alnum atom, and truncates to 32 chars (leaving room for a disambiguating
+ * suffix — the atom cap is 64). The result is re-validated through
+ * {@link normalizeHandleOrNull}, so a base that lands on a reserved word (e.g.
+ * `system`) returns `null` and the caller falls through to the next seed. Spec
+ * 047 (handle generation for the `@<handle>` owner namespace).
+ */
+export function sanitizeHandleSeed(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const base = input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-') // out-of-charset runs → single '-'
+    .replace(/^[^a-z0-9]+/, '') // atoms must start alnum
+    .replace(/[^a-z0-9]+$/, '') // …and end alnum
+    .slice(0, 32)
+    .replace(/[^a-z0-9]+$/, ''); // re-trim a trailing sep exposed by the slice
+  return normalizeHandleOrNull(base);
+}
+
+/** Minimal DB surface the handle probe + generator need. */
+type HandleProbeDb = Pick<PrismaClient, 'user'>;
+
+/**
+ * True when some user already holds this handle, matched **case-insensitively**
+ * to mirror the DB's real guard — the `users_handle_lower_uniq` functional index
+ * on `lower(handle)` (migration 20260624120000). A case-sensitive probe could
+ * miss a legacy mixed-case row and hand back a handle the insert then rejects
+ * with P2002. Exported so the OAuth signup paths can distinguish a handle
+ * collision (retryable) from any other unique conflict (rethrow).
+ */
+export async function isHandleTaken(db: HandleProbeDb, handle: string): Promise<boolean> {
+  const existing = await db.user.findFirst({
+    where: { handle: { equals: handle, mode: 'insensitive' } },
+    select: { id: true },
+  });
+  return existing !== null;
+}
+
+/**
+ * Produce a URN-atom-legal handle that is not currently taken, for signup paths
+ * that must set `User.handle` (NOT NULL under spec 047). Tries each `seeds`
+ * entry in order (a name, an email local-part, an OAuth login) plus an optional
+ * `fallback`, and returns the first legal, currently-free one (`holger`).
+ *
+ * On collision — or when no seed is usable — it disambiguates with a **random**
+ * token, never a sequential suffix (a `-2`/`-7` ladder would leak signup order
+ * and user count). A readable stem is kept when we have one
+ * (`holger-a3f91c04`); with no usable seed at all it returns a short bare
+ * random handle. Handles are user-editable, so an ugly one is fine.
+ *
+ * The DB `lower(handle)` unique index remains the real guard: on the rare
+ * concurrent-signup race two callers can pick the same free handle, and the
+ * loser's `create` throws P2002 — the OAuth paths retry, regenerating.
+ */
+export async function generateUniqueHandle(
+  db: HandleProbeDb,
+  opts: { seeds?: Array<string | null | undefined>; fallback?: string } = {},
+): Promise<string> {
+  const bases: string[] = [];
+  for (const seed of [...(opts.seeds ?? []), opts.fallback]) {
+    const base = sanitizeHandleSeed(seed);
+    if (base && !bases.includes(base)) bases.push(base);
+  }
+
+  // 1. A free, readable, seed-derived handle is ideal.
+  for (const base of bases) {
+    if (!(await isHandleTaken(db, base))) return base;
+  }
+
+  // 2. Collision or no usable seed: random entropy, never a sequential suffix.
+  //    Keep a readable stem when we have one; otherwise a bare random handle.
+  const stem = bases[0]; // undefined when every seed was illegal/reserved
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const candidate = stem
+      ? `${stem.slice(0, 40)}-${randomBytes(4).toString('hex')}`
+      : randomBytes(6).toString('hex');
+    const legal = normalizeHandleOrNull(candidate);
+    if (legal && !(await isHandleTaken(db, legal))) return legal;
+  }
+  throw new Error('generateUniqueHandle: could not find a free handle');
 }

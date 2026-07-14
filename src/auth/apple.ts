@@ -20,6 +20,7 @@ import {
   type JWTVerifyGetKey,
 } from 'jose';
 import { db } from '../integrations/db/client.js';
+import { generateUniqueHandle, isHandleTaken } from '../lib/userHandle.js';
 
 /** Identity claims extracted from a verified Apple ID token. */
 export interface AppleIdentity {
@@ -235,23 +236,36 @@ export async function resolveAppleUser(identity: AppleIdentity, name: string | n
  * findings:prisma-upsert-not-race-safe) by resolving to the winner's row.
  */
 async function createFreshUser(identity: AppleIdentity, name: string | null) {
-  try {
-    return await db.user.create({
-      data: {
-        appleId: identity.sub,
-        identityProvider: 'APPLE',
-        email: identity.emailVerified ? identity.email : null,
-        name,
-        roles: ['READER'],
-      },
+  // Handle is NOT NULL (spec 047): generate a legal, currently-free one seeded
+  // from the display name (first-auth only) then the email local-part. Two
+  // attempts so a lost handle race regenerates rather than failing signup; the
+  // DB `lower(handle)` unique index stays the real guard.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const handle = await generateUniqueHandle(db, {
+      seeds: [name, identity.email?.split('@')[0]],
     });
-  } catch (err: any) {
-    if (err?.code === 'P2002') {
-      const winner = await db.user.findUnique({ where: { appleId: identity.sub } });
-      if (winner) return winner;
+    try {
+      return await db.user.create({
+        data: {
+          appleId: identity.sub,
+          handle,
+          identityProvider: 'APPLE',
+          email: identity.emailVerified ? identity.email : null,
+          name,
+          roles: ['READER'],
+        },
+      });
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        const winner = await db.user.findUnique({ where: { appleId: identity.sub } });
+        if (winner) return winner;
+        // Only a genuine handle collision is retryable; anything else rethrows.
+        if (await isHandleTaken(db, handle)) continue;
+      }
+      throw err;
     }
-    throw err;
   }
+  throw new Error('createFreshUser: handle contention after retry');
 }
 
 function getAppleCallbackUrl(): string {

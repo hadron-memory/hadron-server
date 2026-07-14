@@ -288,13 +288,14 @@ describe('resolveAppleUser', () => {
     );
   });
 
-  it('(c) creates a fresh user with the first-auth name and no handle', async () => {
+  it('(c) creates a fresh user with the first-auth name and a generated handle', async () => {
     const user = await resolveAppleUser(identity, 'Ada Lovelace');
     expect(user.appleId).toBe(identity.sub);
     expect(user.identityProvider).toBe('APPLE');
     expect(user.email).toBe('ada@example.com');
     expect(user.name).toBe('Ada Lovelace');
-    expect(user.handle).toBeNull();
+    // Handle is NOT NULL (spec 047): seeded from the first-auth name.
+    expect(user.handle).toBe('ada-lovelace');
     expect(user.roles).toEqual(['READER']);
   });
 

@@ -244,13 +244,14 @@ describe('resolveGoogleUser', () => {
     );
   });
 
-  it('(c) creates a fresh user with identityProvider GOOGLE and no handle', async () => {
+  it('(c) creates a fresh user with identityProvider GOOGLE and a generated handle', async () => {
     const user = await resolveGoogleUser(identity);
     expect(user.googleId).toBe(identity.sub);
     expect(user.identityProvider).toBe('GOOGLE');
     expect(user.email).toBe('ada@example.com');
     expect(user.name).toBe('Ada Lovelace');
-    expect(user.handle).toBeNull();
+    // Handle is NOT NULL (spec 047): seeded from the display name.
+    expect(user.handle).toBe('ada-lovelace');
     expect(user.roles).toEqual(['READER']);
   });
 

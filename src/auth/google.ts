@@ -16,6 +16,7 @@ import {
   type JWTVerifyGetKey,
 } from 'jose';
 import { db } from '../integrations/db/client.js';
+import { generateUniqueHandle, isHandleTaken } from '../lib/userHandle.js';
 
 /** Identity claims extracted from a verified Google ID token. */
 export interface GoogleIdentity {
@@ -173,25 +174,39 @@ export async function resolveGoogleUser(identity: GoogleIdentity) {
  * findings:prisma-upsert-not-race-safe) by resolving to the winner's row.
  */
 async function createFreshUser(identity: GoogleIdentity) {
-
-  try {
-    return await db.user.create({
-      data: {
-        googleId: identity.sub,
-        identityProvider: 'GOOGLE',
-        email: identity.emailVerified ? identity.email : null,
-        name: identity.name,
-        avatarUrl: identity.picture,
-        roles: ['READER'],
-      },
+  // Handle is NOT NULL (spec 047): generate a legal, currently-free one seeded
+  // from the display name then the email local-part (Google has no username).
+  // Two attempts so a lost handle race regenerates rather than failing signup;
+  // the DB `lower(handle)` unique index stays the real guard.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const handle = await generateUniqueHandle(db, {
+      seeds: [identity.name, identity.email?.split('@')[0]],
     });
-  } catch (err: any) {
-    if (err?.code === 'P2002') {
-      const winner = await db.user.findUnique({ where: { googleId: identity.sub } });
-      if (winner) return winner;
+    try {
+      return await db.user.create({
+        data: {
+          googleId: identity.sub,
+          handle,
+          identityProvider: 'GOOGLE',
+          email: identity.emailVerified ? identity.email : null,
+          name: identity.name,
+          avatarUrl: identity.picture,
+          roles: ['READER'],
+        },
+      });
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        // Provider-id race: the concurrent winner already created this account.
+        const winner = await db.user.findUnique({ where: { googleId: identity.sub } });
+        if (winner) return winner;
+        // Only a genuine handle collision is retryable — regenerate against the
+        // now-updated table. Any other unique conflict rethrows (not masked).
+        if (await isHandleTaken(db, handle)) continue;
+      }
+      throw err;
     }
-    throw err;
   }
+  throw new Error('createFreshUser: handle contention after retry');
 }
 
 function getGoogleCallbackUrl(): string {

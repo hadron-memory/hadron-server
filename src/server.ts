@@ -36,7 +36,7 @@ import { resolvers } from './api/graphql/schema/resolvers.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError, UrnParseError } from './lib/urn.js';
-import { normalizeHandleOrNull } from './lib/userHandle.js';
+import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
@@ -249,6 +249,10 @@ export async function createServer(): Promise<Express> {
       const existing = await db.user.findUnique({
         where: { githubUsername: ghUser.login },
       });
+      // Handle is NOT NULL (spec 047): a NEW GitHub user gets a legal,
+      // currently-free handle seeded from the login then the display name.
+      // Returning logins skip generation; the create path retries on a lost
+      // handle race, mirroring the Google/Apple paths.
       const user = existing
         ? await db.user.update({
             where: { id: existing.id },
@@ -258,25 +262,40 @@ export async function createServer(): Promise<Express> {
               avatarUrl: ghUser.avatar_url,
             },
           })
-        : await db.user.upsert({
-            where: { githubId: ghUser.id },
-            create: {
-              githubId: ghUser.id,
-              githubUsername: ghUser.login,
-              // Lowercase-canonical, URN-legal handle (#325); a GitHub login that
-              // isn't URN-legal drops to null rather than blocking signup.
-              handle: normalizeHandleOrNull(ghUser.login),
-              identityProvider: 'GITHUB',
-              name: ghUser.name,
-              avatarUrl: ghUser.avatar_url,
-              roles: ['READER'],
-            },
-            update: {
-              githubUsername: ghUser.login,
-              name: ghUser.name,
-              avatarUrl: ghUser.avatar_url,
-            },
-          });
+        : await (async () => {
+            for (let attempt = 0; ; attempt++) {
+              const ghHandle = await generateUniqueHandle(db, {
+                seeds: [ghUser.login, ghUser.name],
+              });
+              try {
+                // upsert on githubId absorbs the provider-id race (→ update
+                // branch); a P2002 here is a handle/githubUsername collision.
+                return await db.user.upsert({
+                  where: { githubId: ghUser.id },
+                  create: {
+                    githubId: ghUser.id,
+                    githubUsername: ghUser.login,
+                    handle: ghHandle,
+                    identityProvider: 'GITHUB',
+                    name: ghUser.name,
+                    avatarUrl: ghUser.avatar_url,
+                    roles: ['READER'],
+                  },
+                  update: {
+                    githubUsername: ghUser.login,
+                    name: ghUser.name,
+                    avatarUrl: ghUser.avatar_url,
+                  },
+                });
+              } catch (err: any) {
+                // Only a genuine handle collision is retryable (once).
+                if (err?.code === 'P2002' && attempt < 1 && (await isHandleTaken(db, ghHandle))) {
+                  continue;
+                }
+                throw err;
+              }
+            }
+          })();
 
       // Provision personal workspace for new users
       let isNew = !(await hasPersonalWorkspace(db, user.id));
