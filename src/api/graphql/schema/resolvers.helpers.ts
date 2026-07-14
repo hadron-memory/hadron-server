@@ -495,9 +495,11 @@ export async function getAccessibleMemoryIds(
     return [...accessibleIds];
   }
 
-  // Unauthenticated — public memories only
+  // Unauthenticated — public memories only. #653: exclude app-scoped rows — an
+  // app-scoped knowledge/group memory is App-internal even if its visibility was
+  // changed to PUBLIC (mirrors getOrgReadableMemoryIds' PUBLIC clause).
   const publicMemories = await ctx.db.memory.findMany({
-    where: { ...scope, visibility: 'PUBLIC', deletedAt: null },
+    where: { ...scope, visibility: 'PUBLIC', appId: null, deletedAt: null },
     select: { id: true },
   });
   return publicMemories.map((g) => g.id);

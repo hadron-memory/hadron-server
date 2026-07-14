@@ -239,6 +239,7 @@ describe('createMemoryInApp', () => {
 
 describe('#653 — app-scoped knowledge is App-internal (no org-wide leak)', () => {
   let knowledgeId: string;
+  let knowledgeUrn: string;
   let orgContributor: { id: string }; // org CONTRIBUTOR, NOT an App member
 
   beforeEach(async () => {
@@ -248,6 +249,7 @@ describe('#653 — app-scoped knowledge is App-internal (no org-wide leak)', () 
       asUser(adminUser.id),
     );
     knowledgeId = mem.id;
+    knowledgeUrn = mem.urn;
     orgContributor = await db.user.create({ data: { githubId: 7, githubUsername: 'contrib' } });
     await db.orgMember.create({
       data: { organizationId: org.id, userId: orgContributor.id, role: 'CONTRIBUTOR' },
@@ -279,6 +281,30 @@ describe('#653 — app-scoped knowledge is App-internal (no org-wide leak)', () 
     await expect(
       requireMemoryWriteAccess({ db, userId: adminUser.id, roles: ['ADMIN'] } as Context, knowledgeId),
     ).resolves.toBeUndefined();
+  });
+
+  it('effectiveAccess does not over-report for a non-App org CONTRIBUTOR', async () => {
+    const effectiveAccess = resolvers.Query.effectiveAccess as (
+      _: unknown,
+      args: { user: string; resource: string },
+      ctx: Context,
+    ) => Promise<any>;
+    // Self-audit is ungated — the CONTRIBUTOR asks about their OWN access.
+    const res = await effectiveAccess(
+      null,
+      { user: orgContributor.id, resource: `hrn:memory:${knowledgeUrn}` },
+      asUser(orgContributor.id),
+    );
+    expect(res.canRead).toBe(false);
+    expect(res.canWrite).toBe(false);
+  });
+
+  it('stays App-internal even if set PUBLIC (unauthenticated read excludes it)', async () => {
+    await db.memory.update({ where: { id: knowledgeId }, data: { visibility: 'PUBLIC' } });
+    // Unauthenticated context → the public-only branch, which now excludes
+    // app-scoped rows.
+    const ids = await getAccessibleMemoryIds({ db, roles: [] } as Context);
+    expect(ids ?? []).not.toContain(knowledgeId);
   });
 });
 
