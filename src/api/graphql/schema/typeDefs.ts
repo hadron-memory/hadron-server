@@ -3494,7 +3494,13 @@ export const typeDefs = `#graphql
     # PLUS every descendant, matched on ':' path boundaries (so deleting 'auth'
     # does not touch 'authoring'). The subtree lives in one memory, so the single
     # write-access check covers it; 'hard' applies to the whole subtree.
-    deleteNode(nodeRef: ID!, hard: Boolean, recursive: Boolean): Boolean!
+    #
+    # A hard delete cascades edges on both endpoints via FK. If any affected node
+    # is on an edge that bridges this memory to another, the hard delete REFUSES
+    # with CROSS_MEMORY_EDGES (the caller may not own the other memory) unless
+    # cascadeCrossMemoryEdges: true. A non-recursive soft re-delete of an already
+    # soft-deleted node is an idempotent no-op that preserves its audit stamp.
+    deleteNode(nodeRef: ID!, hard: Boolean, recursive: Boolean, cascadeCrossMemoryEdges: Boolean): Boolean!
 
     # Restore a node to a previous revision (#617).
     #
