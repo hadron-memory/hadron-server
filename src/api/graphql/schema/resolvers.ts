@@ -36,6 +36,7 @@ import { principalGrantMutations, principalGrantQueries } from './resolvers.prin
 import { importNodeMutations } from './resolvers.mutation.importNode.js';
 import { assetMutations } from './resolvers.mutation.asset.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
+import { appMemoryMutations } from './resolvers.mutation.appMemory.js';
 import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
 import { appMutations } from './resolvers.mutation.app.js';
@@ -74,6 +75,7 @@ export const resolvers = {
     ...importNodeMutations,
     ...assetMutations,
     ...memoryMutations,
+    ...appMemoryMutations,
     ...orgMutations,
     ...agentMutations,
     ...appMutations,

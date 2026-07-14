@@ -3781,6 +3781,50 @@ export const typeDefs = `#graphql
     ): Memory!
 
     """
+    Add a NEW memory to an App, born App-scoped.
+
+    Unlike createMemory (which only makes free-standing memories), this scopes
+    the new memory to an App. memoryClass accepts only the App-associable
+    classes: 'app', 'personal', or 'private' ('system'/'knowledge'/'group'
+    forbid an app_id). appRef/agentRef accept an ID, bare URN, or prefixed URN;
+    the Agent must be installed in the App.
+
+    Authorization is split by class: 'app' is shared deployment data and
+    requires org OWNER/ADMIN; 'personal'/'private' are the caller's OWN memory
+    and require only App membership (the caller becomes the owner).
+
+    Typed errors: UNSUPPORTED_MEMORY_CLASS, APP_UNINSTALLED, AGENT_NOT_INSTALLED,
+    MEMORY_URN_CONFLICT, FORBIDDEN, UNAUTHENTICATED.
+    """
+    createMemoryInApp(
+      appRef: ID!
+      agentRef: ID!
+      memoryClass: MemoryClass!
+      name: String!
+      shortDescription: String
+      description: String
+      data: JSON
+      tags: [String!]
+      vectorIndexEnabled: Boolean
+      embeddingSource: EmbeddingSource
+      maxRevCount: Int
+    ): Memory!
+
+    """
+    Attach an EXISTING free-standing memory to an App.
+
+    Applies only to 'personal'/'private' memories owned by the caller (an
+    'app'-class memory can't be free-standing, so there is nothing to attach).
+    Sets the App and Agent scope; the memory's URN, class, and owner are
+    unchanged. memoryRef/appRef/agentRef accept an ID, bare URN, or prefixed
+    URN; the Agent must be installed in the App. Requires App membership.
+
+    Typed errors: UNSUPPORTED_MEMORY_CLASS, MEMORY_ALREADY_APP_SCOPED,
+    APP_UNINSTALLED, AGENT_NOT_INSTALLED, FORBIDDEN, ORGANIZATION_MISMATCH.
+    """
+    attachMemoryToApp(memoryRef: ID!, appRef: ID!, agentRef: ID!): Memory!
+
+    """
     Update a Memory.
 
     Accepts the entity's ID or URN.
