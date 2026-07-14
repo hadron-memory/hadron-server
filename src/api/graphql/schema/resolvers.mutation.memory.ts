@@ -1,5 +1,6 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
@@ -1398,11 +1399,15 @@ export const memoryMutations = {
         if (app.createUserPermission === 'DENY') {
           throw new Error('User not found and createUserPermission=DENY');
         }
+        // Handle is NOT NULL (spec 047). This magic-link-provisioned app
+        // end-user gets a RANDOM handle — addressed by (externalAppId,
+        // externalId), not by handle.
         user = await ctx.db.user.create({
           data: {
             externalAppId: ctx.appId,
             externalId: externalUserId,
             identityProvider: 'APP',
+            handle: await generateUniqueHandle(ctx.db),
             createdBy: ctx.appId,
           },
         });

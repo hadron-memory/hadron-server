@@ -51,7 +51,13 @@ grammar and a uniform `organizationId`-XOR-`ownerUserId` ownership shape.
    ladder is an enumeration oracle exposing signup order / user count).
    User-editable later. **Holger backfills existing production users** before
    the NOT-NULL migration. The `@<handle>` namespace depends on every user
-   having one. Implemented in `src/lib/userHandle.ts` (`generateUniqueHandle`).
+   having one. Implemented in `src/lib/userHandle.ts` (`generateUniqueHandle`),
+   wired into every `user.create` path. **App end-users** (`identityProvider=
+   'APP'` — `createAppUser`, implicit-session auto-provision, magic-link) get a
+   **random** handle (an explicit `createAppUser` `handle` arg is honored);
+   they're keyed by `(externalAppId, externalId)` and aren't the `@handle`-owner
+   persona, so they're deliberately **not** seeded from name/email/externalId
+   (no app PII leaks into a global handle).
    **Handle rename re-addresses URNs**: because a user-owned App/Agent/Memory
    URN is `@<handle>::<slug>`, renaming a handle must propagate to those child
    URNs — the same mechanism as `propagateOrgUrnRename` (org URN → children).

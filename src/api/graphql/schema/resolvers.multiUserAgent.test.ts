@@ -233,6 +233,17 @@ describe('createAppUser', () => {
     expect(user.handle).toBe('alice');
   });
 
+  it('assigns a random handle when none is supplied (NOT NULL, spec 047)', async () => {
+    const user = await resolvers.Mutation.createAppUser(
+      {},
+      { externalId: 'mm-99', name: 'Nameless' },
+      appCtx(app.id),
+    );
+    // App end-users are not seeded from name/email/externalId (no PII leak into a
+    // global handle) — a bare random handle, never null.
+    expect(user.handle).toMatch(/^[0-9a-f]{12}$/);
+  });
+
   it('is idempotent on the same externalId', async () => {
     const u1 = await resolvers.Mutation.createAppUser(
       {},

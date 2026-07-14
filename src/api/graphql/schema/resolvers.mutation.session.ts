@@ -20,6 +20,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -161,11 +162,16 @@ export const sessionMutations = {
           if (app.createUserPermission !== 'IMPLICIT') {
             throw new Error('User not found. Call createAppUser first or set createUserPermission=IMPLICIT.');
           }
+          // Handle is NOT NULL (spec 047). An implicitly-provisioned app
+          // end-user gets a RANDOM handle — it's addressed by (externalAppId,
+          // externalId), not by handle, and its externalId must not leak into a
+          // global handle.
           user = await ctx.db.user.create({
             data: {
               externalAppId: ctx.appId,
               externalId: externalUserId,
               identityProvider: 'APP',
+              handle: await generateUniqueHandle(ctx.db),
               createdBy: ctx.appId,
             },
           });

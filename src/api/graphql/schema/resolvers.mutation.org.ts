@@ -6,7 +6,7 @@ import { parsePolicyLink } from '@hadron-memory/access-control';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   normalizeHandle,
-  normalizeHandleOrNull,
+  generateUniqueHandle,
 } from '../../../lib/userHandle.js';
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { validateOrgSlug } from '../../../lib/urn.js';
@@ -538,14 +538,18 @@ export const orgMutations = {
       });
       if (existing) return existing;
 
+      // Handle is NOT NULL (spec 047). Honor an explicit, legal app-supplied
+      // handle; otherwise assign a RANDOM one. App end-users are addressed by
+      // (externalAppId, externalId), not by handle, and aren't the `@handle`
+      // owner persona — so we deliberately do NOT seed from name/email/externalId
+      // (that would leak app-internal PII into a global handle).
+      const handle_ = await generateUniqueHandle(ctx.db, { seeds: [handle] });
       return ctx.db.user.create({
         data: {
           externalAppId: ctx.appId,
           externalId,
           identityProvider: 'APP',
-          // Lenient: an illegal app-supplied handle drops to null rather than
-          // blocking user creation (#325).
-          handle: normalizeHandleOrNull(handle),
+          handle: handle_,
           name: name ?? null,
           email: email ?? null,
           createdBy: ctx.appId,
