@@ -244,6 +244,17 @@ describe('createAppUser', () => {
     expect(user.handle).toMatch(/^[0-9a-f]{12}$/);
   });
 
+  it('ignores an illegal handle arg (random, not sanitized from the value)', async () => {
+    const user = await resolvers.Mutation.createAppUser(
+      {},
+      { externalId: 'mm-77', handle: 'Jane Doe' },
+      appCtx(app.id),
+    );
+    // "Jane Doe" is not URN-legal → must NOT become "jane-doe"; falls to random.
+    expect(user.handle).not.toBe('jane-doe');
+    expect(user.handle).toMatch(/^[0-9a-f]{12}$/);
+  });
+
   it('is idempotent on the same externalId', async () => {
     const u1 = await resolvers.Mutation.createAppUser(
       {},

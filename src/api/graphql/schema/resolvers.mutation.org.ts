@@ -6,6 +6,7 @@ import { parsePolicyLink } from '@hadron-memory/access-control';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   normalizeHandle,
+  normalizeHandleOrNull,
   generateUniqueHandle,
 } from '../../../lib/userHandle.js';
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
@@ -542,8 +543,12 @@ export const orgMutations = {
       // handle; otherwise assign a RANDOM one. App end-users are addressed by
       // (externalAppId, externalId), not by handle, and aren't the `@handle`
       // owner persona — so we deliberately do NOT seed from name/email/externalId
-      // (that would leak app-internal PII into a global handle).
-      const handle_ = await generateUniqueHandle(ctx.db, { seeds: [handle] });
+      // (that would leak app-internal PII into a global handle). The seed is
+      // gated through normalizeHandleOrNull so an illegal value (a name, an
+      // email) normalizes to null → bare random, never sanitized into a handle.
+      const handle_ = await generateUniqueHandle(ctx.db, {
+        seeds: [normalizeHandleOrNull(handle)],
+      });
       return ctx.db.user.create({
         data: {
           externalAppId: ctx.appId,
