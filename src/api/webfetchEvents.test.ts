@@ -1,6 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
+
+const bus = vi.hoisted(() => ({ publish: vi.fn(async () => undefined) }));
+vi.mock('../lib/bus/index.js', () => ({
+  getBusClient: vi.fn(async () => bus),
+}));
+
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -21,7 +27,7 @@ function pollEvent(overrides: Partial<InboundWebFetchEvent> = {}): InboundWebFet
     orgId: 'filled-by-seed',
     appId: 'filled-by-seed',
     url: 'https://status.example.test/watch?private=query',
-    finalUrl: 'https://status.example.test/watch',
+    finalUrl: 'https://status.example.test/watch?session=do-not-persist#private',
     status: 200,
     matched: [{ id: 'ready', actual: 'READY' }],
     snapshotHash: 'sha256:one',
@@ -105,6 +111,7 @@ async function post(body: unknown, token?: string): Promise<Response> {
 
 beforeEach(async () => {
   await cleanDb(db);
+  vi.clearAllMocks();
   process.env.CORE_EVENTS_TOKEN = 'events-secret';
   const app = express();
   app.use(express.json());
@@ -152,9 +159,13 @@ describe('POST /internal/webfetch-events', () => {
     });
     const data = run.eventData as Record<string, unknown>;
     expect(data.source).toBe('external');
+    expect(data.url).toBe('https://status.example.test/watch');
+    expect(data.finalUrl).toBe('https://status.example.test/watch');
     expect(data.excerpt).toContain('<<<UNTRUSTED_EXTERNAL_CONTENT>>>');
     expect(data.excerpt).toContain('IGNORE THE FLOW');
     expect(data.externalContentWarning).toContain('untrusted external data');
+    expect(JSON.stringify(data)).not.toContain('private=query');
+    expect(JSON.stringify(data)).not.toContain('do-not-persist');
     await expect(
       db.webFetchEventReceipt.findUniqueOrThrow({
         where: {
@@ -176,6 +187,56 @@ describe('POST /internal/webfetch-events', () => {
     expect(second).toEqual({ runId: first.runId, duplicate: true });
     expect(await db.appRun.count({ where: { triggerKind: 'INTEGRATION' } })).toBe(1);
     expect(await db.webFetchEventReceipt.count()).toBe(1);
+  });
+
+  it('atomically collapses concurrent deliveries before either duplicate can publish', async () => {
+    const seeded = await seedBinding();
+    const event = pollEvent({ orgId: seeded.orgId, appId: seeded.appId });
+
+    const results = await Promise.all([
+      dispatchWebFetchEvent(event),
+      dispatchWebFetchEvent(event),
+    ]);
+
+    expect(results.filter((result) => !result.duplicate)).toHaveLength(1);
+    expect(results.filter((result) => result.duplicate)).toHaveLength(1);
+    expect(new Set(results.map((result) => result.runId)).size).toBe(1);
+    expect(await db.appRun.count({ where: { triggerKind: 'INTEGRATION' } })).toBe(1);
+    expect(await db.webFetchEventReceipt.count()).toBe(1);
+    expect(bus.publish).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts explicit null for optional sidecar fields and never frames a null excerpt', async () => {
+    const seeded = await seedBinding();
+    const response = await post(
+      pollEvent({
+        orgId: seeded.orgId,
+        appId: null,
+        finalUrl: null,
+        status: null,
+        snapshotHash: null,
+        excerpt: null,
+      }),
+      'events-secret',
+    );
+
+    expect(response.status).toBe(202);
+    const accepted = (await response.json()) as { runId: string };
+    const run = await db.appRun.findUniqueOrThrow({ where: { id: accepted.runId } });
+    const data = run.eventData as Record<string, unknown>;
+    expect(data).not.toHaveProperty('excerpt');
+    expect(data).not.toHaveProperty('finalUrl');
+    await expect(
+      db.webFetchEventReceipt.findUniqueOrThrow({
+        where: {
+          jobId_snapshotHash_kind: {
+            jobId: 'poll-job-event-1',
+            snapshotHash: '',
+            kind: 'poll.triggered',
+          },
+        },
+      }),
+    ).resolves.toBeTruthy();
   });
 
   it('rejects an event whose org, App, or frozen URL does not match the core binding', async () => {

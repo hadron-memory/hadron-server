@@ -173,6 +173,30 @@ describe('web poll run tools', () => {
     expect(createPoll).not.toHaveBeenCalled();
   });
 
+  it('treats explicit null optional arguments as omitted', async () => {
+    const { ctx } = await seedContext();
+
+    await webPollStart.execute(ctx, {
+      url: 'https://api.example.test/v1/orders',
+      contentKind: null,
+      mode: null,
+      firePolicy: null,
+      cooldownSeconds: null,
+      conditions: [{ id: 'x', type: 'content_changed' }],
+      intervalSeconds: 60,
+      ttlSeconds: 3600,
+    });
+
+    expect(createPoll).toHaveBeenCalledWith(
+      expect.not.objectContaining({
+        contentKind: expect.anything(),
+        mode: expect.anything(),
+        firePolicy: expect.anything(),
+        cooldownSeconds: expect.anything(),
+      }),
+    );
+  });
+
   it('cancels only a job bound to the run organization and lists by that immutable org id', async () => {
     const { ctx } = await seedContext();
     await db.webFetchPollBinding.create({

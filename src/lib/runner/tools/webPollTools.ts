@@ -31,7 +31,7 @@ function optionalEnum<T extends readonly string[]>(
   values: T,
   field: string,
 ): T[number] | undefined {
-  if (value === undefined) return undefined;
+  if (value == null) return undefined;
   if (typeof value !== 'string' || !values.includes(value as T[number])) {
     throw new Error(`web_poll_start: "${field}" must be one of ${values.join(', ')}.`);
   }
@@ -95,7 +95,7 @@ export const webPollStart: RunToolDef = {
     const intervalSeconds = requiredPositiveInteger(args.intervalSeconds, 'intervalSeconds');
     const ttlSeconds = requiredPositiveInteger(args.ttlSeconds, 'ttlSeconds');
     const cooldownSeconds =
-      args.cooldownSeconds === undefined
+      args.cooldownSeconds == null
         ? undefined
         : requiredPositiveInteger(args.cooldownSeconds, 'cooldownSeconds');
     const headers = coerceHeaders(args.headers);

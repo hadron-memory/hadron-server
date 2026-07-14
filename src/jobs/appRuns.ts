@@ -116,18 +116,16 @@ async function ensureQuotaRow(
   action: QuotaAction,
   defaultLimit: number,
 ): Promise<void> {
-  try {
-    await db.quotaCounter.create({
-      data: {
-        id: generateId(), scopeKind, scopeId, action,
-        window: QUOTA_WINDOW, used: 0, limit: defaultLimit, resetAt: nextUtcMidnight(),
-      },
-    });
-  } catch (err) {
-    // Only the unique-constraint race is success (prisma-upsert-not-race-safe);
-    // anything else — connectivity, permissions — must surface (PR-493 review).
-    if ((err as { code?: string }).code !== 'P2002') throw err;
-  }
+  // Native conflict handling is race-safe AND transaction-safe. Catching a
+  // Prisma P2002 works in autocommit mode, but PostgreSQL marks an interactive
+  // transaction aborted before JavaScript can catch the error (#667 review).
+  await db.$executeRaw`
+    INSERT INTO quota_counters
+      (id, scope_kind, scope_id, action, "window", used, "limit", reset_at)
+    VALUES
+      (${generateId()}, ${scopeKind}, ${scopeId}, ${action}, ${QUOTA_WINDOW}, 0,
+       ${defaultLimit}::int, ${nextUtcMidnight()})
+    ON CONFLICT (scope_kind, scope_id, action, "window") DO NOTHING`;
   await db.quotaCounter.updateMany({
     where: { scopeKind, scopeId, action, window: QUOTA_WINDOW, resetAt: { lte: new Date() } },
     data: { used: 0, resetAt: nextUtcMidnight() },
@@ -311,6 +309,9 @@ export interface MintAppRunArgs {
   policy?: unknown;
   timeoutMs?: number | null;
   createdBy?: string | null;
+  /** Internal outbox control for callers that must commit related durable
+   *  state atomically before this run becomes publishable. Defaults true. */
+  publish?: boolean;
 }
 
 export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promise<AppRun> {
@@ -468,12 +469,12 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       createdBy: args.createdBy ?? null,
     },
   });
-  await publishRunRequested(db, run.id);
+  if (args.publish !== false) await publishRunRequested(db, run.id);
   return run;
 }
 
 /** Publish + stamp publishedAt on success; NULL keeps the sweep republishing. */
-async function publishRunRequested(db: PrismaClient, runId: string): Promise<void> {
+export async function publishRunRequested(db: PrismaClient, runId: string): Promise<void> {
   try {
     const bus = await getBusClient();
     if (!bus) return; // sweep-only mode (D-2026-06-17-004)
