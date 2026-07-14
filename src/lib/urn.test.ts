@@ -969,6 +969,34 @@ describe('composeInstalledAgentUrn — US1 install URN provenance', () => {
     ).toBe('hrn:agent:hadronmemory.com::coding-app::coding-agent');
   });
 
+  // spec 047 — user-owned entities carry a @<handle> owner/author namespace.
+  it('composes a user-owned app hosting an org-authored agent', () => {
+    expect(
+      composeInstalledAgentUrn(
+        'urn:app:@holger::gmail-app',
+        'urn:agent:hadronmemory.com::coding-agent',
+      ),
+    ).toBe('hrn:agent:@holger::gmail-app::hadronmemory.com:coding-agent');
+  });
+
+  it('composes an org app hosting a user-authored agent (@handle author context)', () => {
+    expect(
+      composeInstalledAgentUrn(
+        'urn:app:micromentor.org::coding-app',
+        'urn:agent:@holger::triage',
+      ),
+    ).toBe('hrn:agent:micromentor.org::coding-app::@holger:triage');
+  });
+
+  it('user self-install (user app == user agent author) collapses via cat 1', () => {
+    expect(
+      composeInstalledAgentUrn(
+        'urn:app:@holger::gmail-app',
+        'urn:agent:@holger::triage',
+      ),
+    ).toBe('hrn:agent:@holger::gmail-app::triage');
+  });
+
   it('accepts legacy single-`:` shapes (transitional during migration)', () => {
     // Pre-021 stored urns: `<org>:<slug>` without `urn:app:`/`urn:agent:` prefix.
     expect(
