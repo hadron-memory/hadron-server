@@ -91,9 +91,12 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/post-push.sql
 
       - name: Run vitest suite (shard ${{ matrix.shard }}/${{ strategy.job-total }})
-        # `vitest run --shard=i/N` deterministically splits the test FILES
-        # into N slices and runs slice i here. A non-zero exit fails the job.
-        run: pnpm exec vitest run --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+        # Go through the `pnpm test` script (= `vitest run`) so CI can't drift
+        # from it. `--shard=i/N` deterministically splits the test FILES into N
+        # slices and runs slice i here; a non-zero exit fails the job. NOTE: the
+        # flag is passed WITHOUT a `--` separator — `pnpm test -- --shard=…`
+        # drops the arg in pnpm 11 and silently runs the whole suite.
+        run: pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
 
   # Aggregation gate: a single stable check named `test` that passes iff every
   # shard passed. Keep THIS as the required status check on `main` (matrix jobs
