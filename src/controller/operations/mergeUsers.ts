@@ -119,7 +119,7 @@ export async function mergeUsers(
     await tx.user.update({
       where: { id: sourceUserId },
       data: {
-        handle: `merged-${randomBytes(6).toString('hex')}`,
+        handle: `merged-${randomBytes(8).toString('hex')}`,
         githubId: null,
         githubUsername: null,
         googleId: null,
