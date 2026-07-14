@@ -8,6 +8,7 @@ import { generateId } from '../../lib/id.js';
 // 023-app-shape: AppAgent (re-introduced N:M join — PR #130),
 // MemoryShare (US3 — PR #133), MemoryMember (US4 — this PR).
 // 025-oauth-for-mcp: OAuthClient (clientId is the PK).
+// 667-webfetch-polling: WebFetchPollBinding (jobId is the PK).
 const MODELS_WITHOUT_ID = new Set<string>([
   'AgentSubscription',
   'AppMember',
@@ -17,6 +18,7 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'MemoryShare',
   'MemoryMember',
   'OAuthClient',
+  'WebFetchPollBinding',
 ]);
 
 const basePrisma = new PrismaClient();

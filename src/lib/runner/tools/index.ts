@@ -10,6 +10,7 @@ import { NODE_TOOLS } from './nodeTools.js';
 import { SPAWN_TOOLS } from './spawnTools.js';
 import { STORE_TOOLS } from './storeTools.js';
 import { WEB_TOOLS } from './webTools.js';
+import { WEB_POLL_TOOLS } from './webPollTools.js';
 import { SEARCH_TOOLS } from './searchTools.js';
 import { SMS_TOOLS } from './smsTools.js';
 import { EMAIL_TOOLS } from './emailTools.js';
@@ -19,6 +20,7 @@ export { hadronReadNode, hadronCreateNode, hadronUpdateNode } from './nodeTools.
 export { hadronSpawn, hadronChildRuns } from './spawnTools.js';
 export { hadronStoreFile } from './storeTools.js';
 export { webFetch, webRequest } from './webTools.js';
+export { webPollStart, webPollCancel, webPollList } from './webPollTools.js';
 export { webSearchTool } from './searchTools.js';
 export { hadronSendSms } from './smsTools.js';
 export { hadronSendEmail } from './emailTools.js';
@@ -73,6 +75,7 @@ const REGISTRY = new Map<string, RunToolDef>(
     ...SPAWN_TOOLS,
     ...STORE_TOOLS,
     ...WEB_TOOLS,
+    ...WEB_POLL_TOOLS,
     ...SEARCH_TOOLS,
     ...SMS_TOOLS,
     ...EMAIL_TOOLS,

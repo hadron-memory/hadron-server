@@ -1,17 +1,17 @@
 import { GraphQLError } from 'graphql';
 
 /**
- * Client for the internal, stateless hadrontool-webfetch capability tool
- * (#628). Mirrors pdfClient.ts / emailClient.ts: hadron-server stays the front
+ * Client for the internal hadrontool-webfetch capability tool (#628/#667).
+ * The `/ops` plane is stateless; the `/polls` plane owns durable watch jobs.
+ * Mirrors pdfClient.ts / emailClient.ts: hadron-server stays the front
  * door — the policy chain + grant model have already authorized the run before
  * anything here is called — and this module only ships an already-authorized
  * request to the tool and returns its typed result.
  *
- * The tool is STATELESS (no DB, no connections, no keys): every call is
- * self-contained and, when a fetch needs credentials, the caller supplies them
- * inline in `auth`. The tool holds nothing between calls, so there is NOTHING
- * to replay — and this client performs exactly ONE request per call and NEVER
- * retries. That is load-bearing for non-GET operations: `http-request` may
+ * Ops calls are self-contained and, when a fetch needs credentials, the caller
+ * supplies them inline in `auth`. This client performs exactly ONE request per
+ * call and NEVER retries. That is load-bearing for non-GET operations:
+ * `http-request` may
  * POST/PUT/PATCH/DELETE, which are not known-idempotent, so an auto-retry could
  * double a side effect. GET/HEAD (`fetch-url` / `check-url`) are safe to retry,
  * but retry policy belongs to the caller, not this client.
@@ -112,6 +112,55 @@ export interface HttpRequestResult {
   source?: 'external';
 }
 
+export type WebPollContentKind = 'auto' | 'html' | 'json';
+export type WebPollMode = 'any' | 'all';
+export type WebPollFirePolicy = 'once' | 'every_change' | 'cooldown';
+
+/** Conditions are validated and evaluated by the sidecar's shared schema. */
+export type WebPollCondition = Record<string, unknown>;
+
+export interface CreatePollInput {
+  url: string;
+  contentKind?: WebPollContentKind;
+  conditions: WebPollCondition[];
+  mode?: WebPollMode;
+  intervalSeconds: number;
+  ttlSeconds: number;
+  firePolicy?: WebPollFirePolicy;
+  cooldownSeconds?: number;
+  headers?: Record<string, string>;
+  auth?: WebFetchAuth;
+  orgId: string;
+  appId?: string;
+  credentialsNodeUrn?: string;
+  /** Audit provenance only; core enforces this binding before creation. */
+  urlPrefix?: string;
+}
+
+export interface CreatePollResult {
+  jobId: string;
+  nextRunAt: string;
+  expiresAt: string;
+}
+
+export interface WebPollStatus {
+  jobId: string;
+  orgId?: string;
+  appId?: string | null;
+  url?: string;
+  status: string;
+  nextRunAt?: string | null;
+  expiresAt: string;
+  lastCheckedAt?: string | null;
+  lastTriggeredAt?: string | null;
+  triggerCount: number;
+  consecutiveFailures: number;
+}
+
+export interface ListPollsResult {
+  jobs: WebPollStatus[];
+}
+
 /**
  * Client timeout. Set ABOVE the tool's own total fetch budget so a genuinely
  * slow page surfaces as the tool's typed `fetch_timeout` (a WEBFETCH_TOOL_ERROR
@@ -134,27 +183,33 @@ function toolConfig(): { baseUrl: string; token?: string } {
  * POST a single op to the stateless tool's `/ops/<operation>` plane with a
  * timeout and typed-error mapping. One request, no retry (see module doc).
  */
-async function runOperation<T>(operation: string, input: unknown): Promise<T> {
+async function runToolRequest<T>(
+  path: string,
+  method: 'GET' | 'POST' | 'DELETE',
+  input?: unknown,
+): Promise<T> {
   const { baseUrl, token } = toolConfig();
   // Serialize BEFORE opening the network try: a serialization failure (a
   // circular ref, or a BigInt in `json`) is a caller-input error, not an
   // unreachable tool — mapping it to WEBFETCH_TOOL_UNREACHABLE would be
   // misleading. Never attach `input` to the error — it can carry credentials.
-  let body: string;
-  try {
-    body = JSON.stringify(input);
-  } catch (err) {
-    throw new GraphQLError('Web fetch request could not be serialized.', {
-      extensions: { code: 'WEBFETCH_TOOL_ERROR', cause: String(err) },
-    });
+  let body: string | undefined;
+  if (input !== undefined) {
+    try {
+      body = JSON.stringify(input);
+    } catch (err) {
+      throw new GraphQLError('Web fetch request could not be serialized.', {
+        extensions: { code: 'WEBFETCH_TOOL_ERROR', cause: String(err) },
+      });
+    }
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
   let res: Response;
   let payload: Record<string, unknown> | null;
   try {
-    res = await fetch(`${baseUrl}/ops/${operation}`, {
-      method: 'POST',
+    res = await fetch(`${baseUrl}${path}`, {
+      method,
       headers: {
         'content-type': 'application/json',
         ...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -207,6 +262,10 @@ async function runOperation<T>(operation: string, input: unknown): Promise<T> {
   return payload as T;
 }
 
+async function runOperation<T>(operation: string, input: unknown): Promise<T> {
+  return runToolRequest<T>(`/ops/${operation}`, 'POST', input);
+}
+
 /** GET a page and return readable content (the workhorse). Retry-safe. */
 export function fetchUrl(input: FetchUrlInput): Promise<FetchUrlResult> {
   return runOperation<FetchUrlResult>('fetch-url', input);
@@ -224,4 +283,24 @@ export function checkUrl(input: CheckUrlInput): Promise<CheckUrlResult> {
  */
 export function httpRequest(input: HttpRequestInput): Promise<HttpRequestResult> {
   return runOperation<HttpRequestResult>('http-request', input);
+}
+
+/** Create one durable GET-only watch job. One request; no blind retries. */
+export function createPoll(input: CreatePollInput): Promise<CreatePollResult> {
+  return runToolRequest<CreatePollResult>('/polls', 'POST', input);
+}
+
+/** Read one poll's sanitized status/counters. */
+export function getPoll(jobId: string): Promise<WebPollStatus> {
+  return runToolRequest<WebPollStatus>(`/polls/${encodeURIComponent(jobId)}`, 'GET');
+}
+
+/** List sanitized jobs for exactly one core-authorized organization. */
+export function listPolls(organizationId: string): Promise<ListPollsResult> {
+  return runToolRequest<ListPollsResult>(`/polls?orgId=${encodeURIComponent(organizationId)}`, 'GET');
+}
+
+/** Cancel one poll. Core checks ownership before calling this. */
+export function cancelPoll(jobId: string): Promise<WebPollStatus> {
+  return runToolRequest<WebPollStatus>(`/polls/${encodeURIComponent(jobId)}`, 'DELETE');
 }

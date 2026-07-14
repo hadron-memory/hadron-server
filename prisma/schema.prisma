@@ -2080,6 +2080,51 @@ model SlackEventReceipt {
   @@map("slack_event_receipts")
 }
 
+/// Core-owned routing/audit binding for a sidecar-owned webfetch poll job.
+/// Poll state, scheduling, snapshots, and credentials remain in the sidecar;
+/// this immutable snapshot answers which already-authorized run principal an
+/// at-least-once event may wake.
+model WebFetchPollBinding {
+  jobId                 String   @id @map("job_id")
+  sourceRunId           String   @map("source_run_id")
+  organizationId        String   @map("organization_id")
+  appId                 String   @map("app_id")
+  agentId               String?  @map("agent_id")
+  userId                String?  @map("user_id")
+  entryNodeUrn           String   @map("entry_node_urn")
+  policy                 Json?
+  credentialsNodeUrn     String?  @map("credentials_node_urn")
+  /// Query- and fragment-free URL for audit/event-origin validation.
+  url                    String
+  cancelledAt            DateTime? @map("cancelled_at")
+  createdAt              DateTime @default(now()) @map("created_at")
+
+  sourceRun AppRun @relation("WebFetchPollSourceRun", fields: [sourceRunId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, appId, cancelledAt])
+  @@index([sourceRunId])
+  @@map("webfetch_poll_bindings")
+}
+
+/// Durable completed-dispatch receipt for the at-least-once webfetch event
+/// ingress. An absent snapshot hash is represented by the empty string so the
+/// compound unique key remains effective under Postgres NULL semantics.
+model WebFetchEventReceipt {
+  id           String   @id @default(cuid())
+  jobId        String   @map("job_id")
+  snapshotHash String   @default("") @map("snapshot_hash")
+  kind         String
+  routedRunId  String   @map("routed_run_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  routedRun AppRun @relation("WebFetchEventRoutedRun", fields: [routedRunId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, snapshotHash, kind])
+  @@index([createdAt])
+  @@index([routedRunId])
+  @@map("webfetch_event_receipts")
+}
+
 /// Registered EXTERNAL MCP server — the org-scoped registry behind the
 /// hadrontool-mcp conduit (headless runs calling third-party MCP tools).
 /// The conduit tool is stateless and Hadron-blind (cor:int:030:01); core
@@ -3000,6 +3045,9 @@ model AppRun {
   finishedAt     DateTime?         @map("finished_at")
   createdAt      DateTime          @default(now()) @map("created_at")
   createdBy      String?           @map("created_by")
+
+  webFetchPollBindings  WebFetchPollBinding[]  @relation("WebFetchPollSourceRun")
+  webFetchEventReceipts WebFetchEventReceipt[] @relation("WebFetchEventRoutedRun")
 
   @@index([status, publishedAt])
   @@index([appId, createdAt])

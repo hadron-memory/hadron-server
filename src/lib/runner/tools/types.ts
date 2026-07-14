@@ -25,6 +25,9 @@ export interface RunToolContext {
 export interface RunToolDef {
   /** MCP-convention name (`hadron_create_node`); policy action is `tool.<name>`. */
   name: string;
+  /** Optional shared policy action for a family of tool names. Defaults to
+   *  `tool.<name>`; e.g. every web_poll_* operation uses `tool.web_poll`. */
+  policyAction?: `tool.${string}`;
   description: string;
   /** JSON Schema (curated subset — same posture as Node.schema, D15). */
   inputSchema: Record<string, unknown>;

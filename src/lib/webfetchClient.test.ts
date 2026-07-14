@@ -6,7 +6,15 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { GraphQLError } from 'graphql';
-import { fetchUrl, httpRequest, checkUrl } from './webfetchClient.js';
+import {
+  fetchUrl,
+  httpRequest,
+  checkUrl,
+  createPoll,
+  getPoll,
+  listPolls,
+  cancelPoll,
+} from './webfetchClient.js';
 
 const okJson = (body: unknown) =>
   ({ ok: true, status: 200, json: async () => body }) as unknown as Response;
@@ -122,5 +130,46 @@ describe('webfetchClient', () => {
       json: { a: 1 },
       headers: { 'x-y': 'z' },
     });
+  });
+
+  it('maps poll CRUD to the stateful /polls plane without retry wrappers', async () => {
+    const fetchMock = fetchStub(async () =>
+      okJson({
+        jobId: 'job/one',
+        status: 'active',
+        expiresAt: '2026-07-15T00:00:00Z',
+        nextRunAt: '2026-07-14T20:00:00Z',
+        triggerCount: 0,
+        consecutiveFailures: 0,
+        jobs: [],
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createPoll({
+      url: 'https://x.example/',
+      conditions: [{ id: 'ready', type: 'text_contains', value: 'Ready' }],
+      intervalSeconds: 60,
+      ttlSeconds: 3600,
+      orgId: 'org-1',
+      appId: 'app-1',
+    });
+    await getPoll('job/one');
+    await listPolls('org/one');
+    await cancelPoll('job/one');
+
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
+      ['http://webfetch.test:8080/polls', 'POST'],
+      ['http://webfetch.test:8080/polls/job%2Fone', 'GET'],
+      ['http://webfetch.test:8080/polls?orgId=org%2Fone', 'GET'],
+      ['http://webfetch.test:8080/polls/job%2Fone', 'DELETE'],
+    ]);
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toMatchObject({
+      orgId: 'org-1',
+      appId: 'app-1',
+    });
+    expect(fetchMock.mock.calls[1]![1]!.body).toBeUndefined();
+    expect(fetchMock.mock.calls[2]![1]!.body).toBeUndefined();
+    expect(fetchMock.mock.calls[3]![1]!.body).toBeUndefined();
   });
 });

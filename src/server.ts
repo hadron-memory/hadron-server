@@ -62,6 +62,7 @@ import { startSchedulerLoop } from './jobs/scheduler.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
+import { mountWebFetchEventRoutes } from './api/webfetchEvents.js';
 import { buildMicrosoftAuthUrl, getMicrosoftRedirectUri } from './integrations/exchange/auth.js';
 import { buildGmailAuthUrl, getGmailRedirectUri, isGmailConnectConfigured } from './integrations/gmail/auth.js';
 import {
@@ -1260,6 +1261,12 @@ export async function createServer(): Promise<Express> {
   // (spec 043 Phase 2) — same CORE_EVENTS_TOKEN contract; dispatch dedupes
   // on (connectionId, envelopeId) because the tool's inbox is at-least-once.
   mountSlackEventRoutes(app);
+
+  // Durable webfetch poll events (poll.triggered / expired / failed) arrive
+  // from hadrontool-webfetch. The core validates the origin-run binding,
+  // dedupes, frames external excerpts, and mints an INTEGRATION AppRun before
+  // acknowledging the sidecar's at-least-once delivery.
+  mountWebFetchEventRoutes(app);
 
 
   // ---------------------------------------------------------------------------

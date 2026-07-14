@@ -9,6 +9,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../../webfetchClient.js', () => ({
   fetchUrl: vi.fn(),
   httpRequest: vi.fn(),
+  createPoll: vi.fn(),
+  getPoll: vi.fn(),
+  listPolls: vi.fn(),
+  cancelPoll: vi.fn(),
 }));
 
 import { fetchUrl, httpRequest } from '../../webfetchClient.js';

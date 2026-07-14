@@ -27,26 +27,11 @@
  */
 
 import { fetchUrl, httpRequest, type HttpMethod, type HttpRequestInput } from '../../webfetchClient.js';
+import { redactUrl } from '../../webUrl.js';
 import type { RunToolDef } from './types.js';
 
 const WEB_FETCH_FORMATS = ['markdown', 'text', 'html', 'links'] as const;
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
-
-/**
- * Origin + pathname only, for the hop-trail ledger. The hop log is persisted in
- * `AppRun.hops` and readable via the run audit API, so a presigned/OAuth
- * `finalUrl` would leak its token (query/fragment) to any org reader. Strip the
- * search + hash before logging (Codex P2 / Copilot review, #639).
- */
-function redactUrl(raw: string): string {
-  try {
-    const u = new URL(raw);
-    return `${u.origin}${u.pathname}`;
-  } catch {
-    // Not a parseable absolute URL — drop everything from the first ? or # on.
-    return raw.replace(/[?#].*$/, '');
-  }
-}
 
 /** The tool caps bytes itself; here we only reject nonsense (NaN, ≤0, fractional). */
 function validMaxBytes(v: unknown): number | undefined {
@@ -58,7 +43,7 @@ function validMaxBytes(v: unknown): number | undefined {
  * may emit numbers/booleans, and the downstream tool's contract is string
  * values. Non-object/array ⇒ undefined; null/undefined values are dropped.
  */
-function coerceHeaders(v: unknown): Record<string, string> | undefined {
+export function coerceHeaders(v: unknown): Record<string, string> | undefined {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
   const out: Record<string, string> = {};
   for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
