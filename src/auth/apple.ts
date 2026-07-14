@@ -20,7 +20,7 @@ import {
   type JWTVerifyGetKey,
 } from 'jose';
 import { db } from '../integrations/db/client.js';
-import { generateUniqueHandle } from '../lib/userHandle.js';
+import { generateUniqueHandle, isHandleTaken } from '../lib/userHandle.js';
 
 /** Identity claims extracted from a verified Apple ID token. */
 export interface AppleIdentity {
@@ -259,7 +259,8 @@ async function createFreshUser(identity: AppleIdentity, name: string | null) {
       if (err?.code === 'P2002') {
         const winner = await db.user.findUnique({ where: { appleId: identity.sub } });
         if (winner) return winner;
-        continue; // handle taken between probe and insert — regenerate.
+        // Only a genuine handle collision is retryable; anything else rethrows.
+        if (await isHandleTaken(db, handle)) continue;
       }
       throw err;
     }

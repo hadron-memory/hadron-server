@@ -80,14 +80,22 @@ export function sanitizeHandleSeed(input: string | null | undefined): string | n
   return normalizeHandleOrNull(base);
 }
 
-/** Minimal DB surface {@link generateUniqueHandle} needs — a lowercase-exact
- * handle existence probe (handles are stored lowercase, so exact match matches
- * the `lower(handle)` unique index). */
+/** Minimal DB surface the handle probe + generator need. */
 type HandleProbeDb = Pick<PrismaClient, 'user'>;
 
-/** True when a user already holds this (lowercase) handle. */
-async function handleTaken(db: HandleProbeDb, handle: string): Promise<boolean> {
-  const existing = await db.user.findFirst({ where: { handle }, select: { id: true } });
+/**
+ * True when some user already holds this handle, matched **case-insensitively**
+ * to mirror the DB's real guard — the `users_handle_lower_uniq` functional index
+ * on `lower(handle)` (migration 20260624120000). A case-sensitive probe could
+ * miss a legacy mixed-case row and hand back a handle the insert then rejects
+ * with P2002. Exported so the OAuth signup paths can distinguish a handle
+ * collision (retryable) from any other unique conflict (rethrow).
+ */
+export async function isHandleTaken(db: HandleProbeDb, handle: string): Promise<boolean> {
+  const existing = await db.user.findFirst({
+    where: { handle: { equals: handle, mode: 'insensitive' } },
+    select: { id: true },
+  });
   return existing !== null;
 }
 
@@ -119,7 +127,7 @@ export async function generateUniqueHandle(
 
   // 1. A free, readable, seed-derived handle is ideal.
   for (const base of bases) {
-    if (!(await handleTaken(db, base))) return base;
+    if (!(await isHandleTaken(db, base))) return base;
   }
 
   // 2. Collision or no usable seed: random entropy, never a sequential suffix.
@@ -130,7 +138,7 @@ export async function generateUniqueHandle(
       ? `${stem.slice(0, 40)}-${randomBytes(4).toString('hex')}`
       : randomBytes(6).toString('hex');
     const legal = normalizeHandleOrNull(candidate);
-    if (legal && !(await handleTaken(db, legal))) return legal;
+    if (legal && !(await isHandleTaken(db, legal))) return legal;
   }
   throw new Error('generateUniqueHandle: could not find a free handle');
 }

@@ -16,7 +16,7 @@ import {
   type JWTVerifyGetKey,
 } from 'jose';
 import { db } from '../integrations/db/client.js';
-import { generateUniqueHandle } from '../lib/userHandle.js';
+import { generateUniqueHandle, isHandleTaken } from '../lib/userHandle.js';
 
 /** Identity claims extracted from a verified Google ID token. */
 export interface GoogleIdentity {
@@ -199,9 +199,9 @@ async function createFreshUser(identity: GoogleIdentity) {
         // Provider-id race: the concurrent winner already created this account.
         const winner = await db.user.findUnique({ where: { googleId: identity.sub } });
         if (winner) return winner;
-        // Otherwise our chosen handle was taken between probe and insert —
-        // loop to regenerate against the now-updated table.
-        continue;
+        // Only a genuine handle collision is retryable — regenerate against the
+        // now-updated table. Any other unique conflict rethrows (not masked).
+        if (await isHandleTaken(db, handle)) continue;
       }
       throw err;
     }

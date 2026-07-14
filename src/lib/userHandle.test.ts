@@ -4,6 +4,7 @@ import {
   normalizeHandleOrNull,
   sanitizeHandleSeed,
   generateUniqueHandle,
+  isHandleTaken,
 } from './userHandle.js';
 
 /** Minimal stand-in for the Prisma client's `user.findFirst` handle probe. */
@@ -11,8 +12,12 @@ function mockDb(taken: string[] = []) {
   const set = new Set(taken.map((h) => h.toLowerCase()));
   return {
     user: {
-      findFirst: async (args: { where: { handle: string } }) =>
-        set.has(args.where.handle) ? { id: 'x' } : null,
+      // Mirrors the case-insensitive `lower(handle)` probe used by isHandleTaken.
+      findFirst: async (args: { where: { handle: string | { equals: string } } }) => {
+        const w = args.where.handle;
+        const h = (typeof w === 'string' ? w : w.equals).toLowerCase();
+        return set.has(h) ? { id: 'x' } : null;
+      },
     },
   } as any;
 }
@@ -110,5 +115,20 @@ describe('generateUniqueHandle', () => {
 
   it('honors a custom fallback with no seeds', async () => {
     expect(await generateUniqueHandle(mockDb(), { fallback: 'guest' })).toBe('guest');
+  });
+
+  it('treats a legacy mixed-case handle as taken (case-insensitive probe)', async () => {
+    // The generator only emits lowercase, so a legacy `Holger` row must still
+    // block `holger` — otherwise the insert would 500 on the lower() index.
+    const h = await generateUniqueHandle(mockDb(['Holger']), { seeds: ['Holger'] });
+    expect(h).toMatch(/^holger-[0-9a-f]{8}$/);
+  });
+});
+
+describe('isHandleTaken', () => {
+  it('matches case-insensitively', async () => {
+    expect(await isHandleTaken(mockDb(['Holger']), 'holger')).toBe(true);
+    expect(await isHandleTaken(mockDb(['holger']), 'HOLGER')).toBe(true);
+    expect(await isHandleTaken(mockDb([]), 'holger')).toBe(false);
   });
 });
