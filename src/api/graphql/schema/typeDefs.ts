@@ -2415,6 +2415,13 @@ export const typeDefs = `#graphql
     deleteSourceMem: Boolean = false
   }
 
+  input MergeUsersInput {
+    "Source user — ID, bare handle, or fully-qualified user URN. Folded into 'target' and soft-deleted."
+    source: String!
+    "Target user — ID, bare handle, or fully-qualified user URN. The surviving user; target wins non-combinable conflicts while roles preserve the strongest live entitlement."
+    target: String!
+  }
+
   input SessionInput {
     id: String!
     type: String
@@ -3669,6 +3676,12 @@ export const typeDefs = `#graphql
     # User management
     updateMyProfile(name: String, handle: String, email: String): User!
     updateUserRoles(userId: ID!, roles: [Role!]!): User!
+    # Consolidate a duplicate account into a surviving user. Source-only
+    # identities and relationships move; duplicate role-bearing relationships
+    # preserve the strongest live entitlement. The source is soft-deleted.
+    # Platform admin, or an org admin/owner when both users are live members
+    # of an organization they administer. The resulting merge is global.
+    mergeUsers(input: MergeUsersInput!): User!
 
     # Organization management
     createOrganization(name: String!, urn: String!): Organization!

@@ -4,11 +4,13 @@ import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import {
   normalizeHandle,
   normalizeHandleOrNull,
 } from '../../../lib/userHandle.js';
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
+import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
 import { validateOrgSlug } from '../../../lib/urn.js';
 import {
   Prisma,
@@ -16,10 +18,42 @@ import {
 } from '../../../generated/prisma/index.js';
 import {
   type Context,
+  isPlatformAdmin,
   requireRole,
   requireOrgRole,
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
+
+async function requireMergeUsersAccess(
+  ctx: Context,
+  sourceUserId: string,
+  targetUserId: string,
+): Promise<void> {
+  if (isPlatformAdmin(ctx)) return;
+  if (!ctx.userId) throw new Error('Forbidden');
+
+  // An org admin may perform the global account merge only when both users are
+  // live members of at least one org the caller administers. Single query: an
+  // org (not deleted) where source, target, and an ADMIN/OWNER caller are all
+  // live members. `deletedAt: null` on every membership so a revoked membership
+  // never authorizes (findings:revoked-membership-auth-gates).
+  const administeredSharedOrg = await ctx.db.organization.findFirst({
+    where: {
+      deletedAt: null,
+      members: { some: { userId: sourceUserId, deletedAt: null } },
+      AND: [
+        { members: { some: { userId: targetUserId, deletedAt: null } } },
+        {
+          members: {
+            some: { userId: ctx.userId, role: { in: ['ADMIN', 'OWNER'] }, deletedAt: null },
+          },
+        },
+      ],
+    },
+    select: { id: true },
+  });
+  if (!administeredSharedOrg) throw new Error('Forbidden');
+}
 
 export const orgMutations = {
     updateMyProfile: async (
@@ -52,6 +86,44 @@ export const orgMutations = {
     ) => {
       requireRole(ctx, 'ADMIN');
       return ctx.db.user.update({ where: { id: userId }, data: { roles } });
+    },
+
+    mergeUsers: async (
+      _: unknown,
+      { input }: { input: { source: string; target: string } },
+      ctx: Context,
+    ) => {
+      const platformAdmin = isPlatformAdmin(ctx);
+      if (!platformAdmin && !ctx.userId) throw new Error('Forbidden');
+
+      let sourceUserId: string;
+      let targetUserId: string;
+      try {
+        [{ id: sourceUserId }, { id: targetUserId }] = await Promise.all([
+          resolveUserRef(ctx.db, input.source),
+          resolveUserRef(ctx.db, input.target),
+        ]);
+      } catch (error) {
+        // Non-platform callers must not use resolver error differences to
+        // enumerate user refs outside organizations they administer.
+        if (!platformAdmin) throw new Error('Forbidden');
+        throw error;
+      }
+
+      await requireMergeUsersAccess(ctx, sourceUserId, targetUserId);
+      if (sourceUserId === targetUserId) {
+        throw new GraphQLError('mergeUsers: source and target are the same user.', {
+          extensions: { code: 'MERGE_SOURCE_EQUALS_TARGET', userId: sourceUserId },
+        });
+      }
+      return mergeUsers(ctx.db, {
+        sourceUserId,
+        targetUserId,
+        actorUserId: ctx.userId ?? null,
+        // Only a platform admin may carry the source's global roles onto the
+        // target; an org-authorized merge must not escalate platform privilege.
+        mergeGlobalRoles: platformAdmin,
+      });
     },
 
     // ── Organization management ─────────────────────────────────────────
@@ -554,4 +626,3 @@ export const orgMutations = {
     },
 
 };
-
