@@ -1,3 +1,22 @@
+/**
+ * Email tool (hadrontool-resend): send ONE plain-text email through an
+ * organization-owned fixed Resend sender, or through the platform sender only
+ * when the organization is explicitly allowlisted.
+ *
+ * Governance order is deliberate: tool + sender configuration are checked
+ * before scarce resources are consumed, then the call consumes app and org
+ * `email.send` quota and ONE `comm.outbound` ActionTicket. Quota is compensated
+ * only when a later admission gate denies before the provider attempt starts.
+ * Once the sidecar call begins, quota and ticket consumption are final even on
+ * provider rejection or transport failure: a timeout can happen after Resend
+ * accepted the email, and refunding would permit duplicate or unbounded retries.
+ * The deterministic idempotency key helps the provider deduplicate, but core
+ * never auto-retries a send.
+ *
+ * PII posture: trail output contains only the masked recipient and body length;
+ * subject, body, full recipient, and credentials are never logged.
+ */
+
 import { createHash } from 'node:crypto';
 import { GraphQLError } from 'graphql';
 import {
@@ -5,7 +24,7 @@ import {
   consumeQuota,
   defaultQuotaLimit,
 } from '../../../jobs/appRuns.js';
-import { isResendToolConfigured, sendResendEmail } from '../../resendToolClient.js';
+import { isResendToolConfigured, maskEmailAddress, sendResendEmail } from '../../resendToolClient.js';
 import { decryptResendCredentials, isPlatformResendAllowed } from '../../resendSenders.js';
 import type { PrismaClient } from '../../../generated/prisma/index.js';
 import type { RunToolDef } from './types.js';
@@ -14,10 +33,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export const MAX_EMAIL_SUBJECT_CHARS = 200;
 export const MAX_EMAIL_TEXT_CHARS = 20_000;
 
-export function maskEmailAddress(address: string): string {
-  const [local, domain = ''] = address.split('@');
-  return `${local.slice(0, 1)}•••@${domain.slice(0, 1)}•••`;
-}
+export { maskEmailAddress };
 
 function idempotencyKey(runId: string, to: string, subject: string, text: string): string {
   const digest = createHash('sha256')
@@ -40,7 +56,7 @@ async function refundEmailQuota(db: PrismaClient, scopeKind: 'app' | 'org', scop
 export const hadronSendEmail: RunToolDef = {
   name: 'hadron_send_email',
   description:
-    'Send ONE plain-text email to one recipient through the platform Resend account. ' +
+    'Send ONE plain-text email to one recipient through the organization\'s configured Resend sender. ' +
     'Every send draws on daily App and organization email quotas and burns one ' +
     'outbound-communication ticket. HTML, attachments, CC, and BCC are not supported. ' +
     'Provider failures are not retried.',
@@ -56,8 +72,8 @@ export const hadronSendEmail: RunToolDef = {
   cost: 1,
   execute: async (ctx, args) => {
     const to = String(args.to ?? '').trim();
-    const subject = typeof args.subject === 'string' ? args.subject : '';
-    const text = typeof args.text === 'string' ? args.text : '';
+    const subject = typeof args.subject === 'string' ? args.subject.trim() : '';
+    const text = typeof args.text === 'string' ? args.text.trim() : '';
     if (!EMAIL_RE.test(to) || /[\r\n]/.test(to)) {
       throw new Error('hadron_send_email: "to" must be one valid email address.');
     }

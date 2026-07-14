@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 
-vi.mock('../../resendToolClient.js', () => ({
-  sendResendEmail: vi.fn(),
-  isResendToolConfigured: vi.fn(() => true),
-}));
+vi.mock('../../resendToolClient.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../resendToolClient.js')>();
+  return {
+    ...actual,
+    sendResendEmail: vi.fn(),
+    isResendToolConfigured: vi.fn(() => true),
+  };
+});
 
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -141,10 +145,22 @@ describe('hadron_send_email input and config guards', () => {
       hadronSendEmail.execute(ctx, { to: TO, subject: 'x'.repeat(MAX_EMAIL_SUBJECT_CHARS + 1), text: 'Body' }),
     ).rejects.toThrow(/subject/);
     await expect(hadronSendEmail.execute(ctx, { to: TO, subject: 'Hi', text: '' })).rejects.toThrow(/text/);
+    await expect(hadronSendEmail.execute(ctx, { to: TO, subject: '   ', text: 'Body' })).rejects.toThrow(/subject/);
+    await expect(hadronSendEmail.execute(ctx, { to: TO, subject: 'Hi', text: ' \n ' })).rejects.toThrow(/text/);
     await expect(
       hadronSendEmail.execute(ctx, { to: TO, subject: 'Hi', text: 'x'.repeat(MAX_EMAIL_TEXT_CHARS + 1) }),
     ).rejects.toThrow(/text/);
     expect(sendResendEmail).not.toHaveBeenCalled();
+  });
+
+  it('trims subject and body before sending', async () => {
+    await mintTicket();
+    const run = await mintRun();
+    await hadronSendEmail.execute(toolCtx(run), { to: TO, subject: '  Hi  ', text: '  Body\n' });
+    expect(sendResendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ subject: 'Hi', text: 'Body' }),
+      expect.any(Object),
+    );
   });
 
   it('fails unconfigured before consuming quota or a ticket', async () => {
@@ -283,8 +299,8 @@ describe('hadron_send_email failure and privacy posture', () => {
     expect(sendResendEmail).toHaveBeenCalledTimes(1);
   });
 
-  it('throws transport failure for the kernel to mark TOOL_FAILED', async () => {
-    await mintTicket();
+  it('throws transport failure and keeps governance consumed because provider acceptance is ambiguous', async () => {
+    const ticketId = await mintTicket();
     vi.mocked(sendResendEmail).mockRejectedValue(
       new GraphQLError('Resend tool is unreachable.', { extensions: { code: 'RESEND_TOOL_UNREACHABLE' } }),
     );
@@ -292,6 +308,9 @@ describe('hadron_send_email failure and privacy posture', () => {
     await expect(
       hadronSendEmail.execute(toolCtx(run), { to: TO, subject: 'Hi', text: 'Body' }),
     ).rejects.toThrow(/unreachable/);
+    expect((await db.actionTicket.findUniqueOrThrow({ where: { id: ticketId } })).consumedAt).not.toBeNull();
+    expect(await quotaUsed('app')).toBe(1);
+    expect(await quotaUsed('org')).toBe(1);
   });
 
   it('never places recipient, subject, or body in the run trail', async () => {

@@ -22,11 +22,13 @@ export function isResendToolConfigured(): boolean {
   return Boolean(process.env.RESEND_TOOL_URL);
 }
 
+export function maskEmailAddress(address: string): string {
+  const [local, domain = ''] = address.split('@');
+  return `${local.slice(0, 1)}•••@${domain.slice(0, 1)}•••`;
+}
+
 function redactEmailAddresses(text: string): string {
-  return text.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, (address) => {
-    const [local, domain = ''] = address.split('@');
-    return `${local.slice(0, 1)}•••@${domain.slice(0, 1)}•••`;
-  });
+  return text.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, maskEmailAddress);
 }
 
 function tool(): { baseUrl: string; token?: string } {
@@ -61,6 +63,8 @@ export async function sendResendEmail(
     try {
       payload = (await res.json()) as Record<string, unknown> | null;
     } catch (err) {
+      // The timeout can fire while parsing after headers arrive; retain the
+      // timeout classification instead of treating that as a malformed body.
       if (controller.signal.aborted) throw err;
       payload = null;
     }
