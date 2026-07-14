@@ -239,7 +239,13 @@ subscription — no new work once the App is user-owned.
 >   subscription readable or writable (`getOrgReadableMemoryIds`,
 >   `requireMemoryWriteAccess`, `ORG_INCLUDE`). **`group` deferred** pending its
 >   App-vs-group-membership semantics.
-> - **2b:** additive `ownerUserId` columns + relations (no XOR yet).
+> - **2b (PR #672):** additive `ownerUserId` columns + indexed FK relations on
+>   App/Agent/Memory (+ User back-relations `ownedApps`/`ownedAgents`/
+>   `tenantMemories`). Nullable, no XOR, unused — pure scaffolding for 2c. FK is
+>   `ON DELETE SET NULL` for now (no XOR yet ⇒ a both-set row shouldn't be
+>   cascade-deleted); 2c switches it to CASCADE once the XOR guarantees an
+>   owner-set row is org-less. On Memory, `ownerUserId` (tenant owner) is a
+>   SECOND user FK, distinct from `userId` (the personal/private strict-owner).
 > - **2c (= merges with Phase 3):** make `organizationId` nullable + XOR CHECK +
 >   the owner-or-org authz branches + `createAgent` user-owner + `@<handle>` URN
 >   composition, together (they can't be separated safely).
