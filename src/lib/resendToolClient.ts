@@ -13,6 +13,11 @@ export interface ResendEmailInput {
   idempotencyKey: string;
 }
 
+export interface ResendRequestCredentials {
+  apiKey: string;
+  from: string;
+}
+
 export function isResendToolConfigured(): boolean {
   return Boolean(process.env.RESEND_TOOL_URL);
 }
@@ -34,7 +39,10 @@ function tool(): { baseUrl: string; token?: string } {
   return { baseUrl: baseUrl.replace(/\/+$/, ''), token: process.env.RESEND_TOOL_TOKEN || undefined };
 }
 
-export async function sendResendEmail(input: ResendEmailInput): Promise<ResendEmailResult> {
+export async function sendResendEmail(
+  input: ResendEmailInput,
+  credentials?: ResendRequestCredentials,
+): Promise<ResendEmailResult> {
   const { baseUrl, token } = tool();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
@@ -47,7 +55,7 @@ export async function sendResendEmail(input: ResendEmailInput): Promise<ResendEm
         'content-type': 'application/json',
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify(input),
+      body: JSON.stringify({ ...input, ...credentials }),
       signal: controller.signal,
     });
     try {

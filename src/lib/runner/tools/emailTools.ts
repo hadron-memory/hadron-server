@@ -6,6 +6,7 @@ import {
   defaultQuotaLimit,
 } from '../../../jobs/appRuns.js';
 import { isResendToolConfigured, sendResendEmail } from '../../resendToolClient.js';
+import { decryptResendCredentials, isPlatformResendAllowed } from '../../resendSenders.js';
 import type { PrismaClient } from '../../../generated/prisma/index.js';
 import type { RunToolDef } from './types.js';
 
@@ -72,8 +73,22 @@ export const hadronSendEmail: RunToolDef = {
       });
     }
 
-    const masked = maskEmailAddress(to);
     const { db, run } = ctx;
+    const sender = await db.resendSender.findUnique({ where: { organizationId: run.organizationId } });
+    if (sender && !sender.enabled) {
+      throw new GraphQLError('This organization\'s Resend sender is disabled.', {
+        extensions: { code: 'RESEND_SENDER_NOT_CONFIGURED' },
+      });
+    }
+    const credentials = sender ? decryptResendCredentials(sender) : undefined;
+    const platformAllowed = !sender && isPlatformResendAllowed(run.organizationId);
+    if (!credentials && !platformAllowed) {
+      throw new GraphQLError('This organization has no Resend sender configured.', {
+        extensions: { code: 'RESEND_SENDER_NOT_CONFIGURED' },
+      });
+    }
+
+    const masked = maskEmailAddress(to);
     if (!(await consumeQuota(db, 'app', run.appId, 'email.send', defaultQuotaLimit('app', 'email.send')))) {
       ctx.log(`hadron_send_email: skipped — app email quota exhausted (to ${masked})`);
       return { isError: true, error: 'Daily email quota for this App is exhausted. Do not retry today.' };
@@ -97,12 +112,15 @@ export const hadronSendEmail: RunToolDef = {
 
     let result;
     try {
-      result = await sendResendEmail({
-        to,
-        subject,
-        text,
-        idempotencyKey: idempotencyKey(run.id, to, subject, text),
-      });
+      result = await sendResendEmail(
+        {
+          to,
+          subject,
+          text,
+          idempotencyKey: idempotencyKey(run.id, to, subject, text),
+        },
+        credentials,
+      );
     } catch (err) {
       if (err instanceof GraphQLError && err.extensions?.code === 'RESEND_TOOL_ERROR') {
         const emailErrorCode =

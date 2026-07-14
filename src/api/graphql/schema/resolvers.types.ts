@@ -137,6 +137,12 @@ export const typeResolvers = {
     createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
     updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
   },
+  ResendSender: {
+    hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
+    from: (s: { fromAddress: string }) => s.fromAddress,
+    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
+  },
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
     createdAt: (n: { createdAt: Date | string }) => toISO(n.createdAt)!,
@@ -964,6 +970,4 @@ export const typeResolvers = {
     costMicroCents: (ue: { costMicroCents: bigint | null }) =>
       ue.costMicroCents != null ? ue.costMicroCents.toString() : null,
   },
-
 };
-

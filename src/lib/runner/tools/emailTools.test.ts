@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 
 vi.mock('../../resendToolClient.js', () => ({
@@ -14,6 +14,7 @@ import { runContext } from '../../../jobs/appRunDeps.js';
 import { evaluatePolicyChain, parsePolicyLink } from '@hadron-memory/access-control';
 import { hadronSendEmail, resolveRunTools } from './index.js';
 import { maskEmailAddress, MAX_EMAIL_SUBJECT_CHARS, MAX_EMAIL_TEXT_CHARS } from './emailTools.js';
+import { encryptResendApiKey } from '../../resendSenders.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
 
@@ -80,13 +81,26 @@ beforeEach(async () => {
   vi.clearAllMocks();
   vi.mocked(sendResendEmail).mockResolvedValue({ id: 'email_123' });
   vi.mocked(isResendToolConfigured).mockReturnValue(true);
+  delete process.env.RESEND_PLATFORM_ORG_IDS;
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: ORG_URN, urn: ORG_URN } });
   orgId = org.id;
+  await db.resendSender.create({
+    data: {
+      id: generateId(),
+      organizationId: orgId,
+      fromAddress: 'Acme Agent <agent@acme.example>',
+      apiKeyEncrypted: encryptResendApiKey('re_org_secret'),
+    },
+  });
   const app = await db.app.create({
     data: { id: generateId(), organizationId: orgId, name: 'email-app', urn: `${ORG_URN}::email-app` },
   });
   appId = app.id;
+});
+
+afterEach(() => {
+  delete process.env.RESEND_PLATFORM_ORG_IDS;
 });
 
 describe('hadron_send_email registry + policy vocabulary', () => {
@@ -143,6 +157,28 @@ describe('hadron_send_email input and config guards', () => {
     expect(await quotaUsed('app')).toBeNull();
     expect(await db.actionTicket.count({ where: { consumedAt: { not: null } } })).toBe(0);
   });
+
+  it('requires an enabled org sender when platform fallback is not allowlisted', async () => {
+    await mintTicket();
+    await db.resendSender.delete({ where: { organizationId: orgId } });
+    const run = await mintRun();
+    await expect(hadronSendEmail.execute(toolCtx(run), { to: TO, subject: 'Hi', text: 'Body' })).rejects.toMatchObject({
+      extensions: { code: 'RESEND_SENDER_NOT_CONFIGURED' },
+    });
+    expect(sendResendEmail).not.toHaveBeenCalled();
+    expect(await quotaUsed('app')).toBeNull();
+    expect(await db.actionTicket.count({ where: { consumedAt: { not: null } } })).toBe(0);
+  });
+
+  it('treats a disabled org sender as unavailable before governance', async () => {
+    await db.resendSender.update({ where: { organizationId: orgId }, data: { enabled: false } });
+    process.env.RESEND_PLATFORM_ORG_IDS = orgId;
+    const run = await mintRun();
+    await expect(hadronSendEmail.execute(toolCtx(run), { to: TO, subject: 'Hi', text: 'Body' })).rejects.toThrow(
+      /disabled/,
+    );
+    expect(await quotaUsed('app')).toBeNull();
+  });
 });
 
 describe('hadron_send_email governed send', () => {
@@ -158,12 +194,24 @@ describe('hadron_send_email governed send', () => {
     expect(await quotaUsed('org')).toBe(1);
     expect((await db.actionTicket.findUniqueOrThrow({ where: { id: ticketId } })).consumedByRunId).toBe(run.id);
     const sent = vi.mocked(sendResendEmail).mock.calls[0][0];
+    const credentials = vi.mocked(sendResendEmail).mock.calls[0][1];
     expect(sent).toMatchObject(input);
+    expect(credentials).toEqual({ apiKey: 're_org_secret', from: 'Acme Agent <agent@acme.example>' });
     expect(sent.idempotencyKey).toMatch(new RegExp(`^email:${run.id}:[0-9a-f]{32}$`));
 
     await mintTicket();
     await hadronSendEmail.execute(ctx, input);
     expect(vi.mocked(sendResendEmail).mock.calls[1][0].idempotencyKey).toBe(sent.idempotencyKey);
+  });
+
+  it('uses the platform account only for an explicitly allowlisted org', async () => {
+    await db.resendSender.delete({ where: { organizationId: orgId } });
+    process.env.RESEND_PLATFORM_ORG_IDS = `other-org, ${orgId}`;
+    await mintTicket();
+    const run = await mintRun();
+    await hadronSendEmail.execute(toolCtx(run), { to: TO, subject: 'Hi', text: 'Body' });
+    expect(sendResendEmail).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendResendEmail).mock.calls[0][1]).toBeUndefined();
   });
 
   it('prefers an app-scoped ticket over an org-wide ticket', async () => {

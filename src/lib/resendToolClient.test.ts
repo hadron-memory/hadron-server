@@ -9,6 +9,7 @@ const INPUT = {
   text: 'Everything is healthy.',
   idempotencyKey: 'email:run_123:abc',
 };
+const CREDENTIALS = { apiKey: 're_org_secret', from: 'Acme Agent <agent@acme.example>' };
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -53,6 +54,14 @@ describe('sendResendEmail', () => {
         body: JSON.stringify(INPUT),
       }),
     );
+  });
+
+  it('passes org-owned credentials only in the authenticated internal request body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, id: 'email_456' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(sendResendEmail(INPUT, CREDENTIALS)).resolves.toEqual({ id: 'email_456' });
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({ ...INPUT, ...CREDENTIALS });
   });
 
   it('redacts addresses from tool errors and preserves the stable provider code', async () => {
