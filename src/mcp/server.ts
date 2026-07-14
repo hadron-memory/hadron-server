@@ -3741,14 +3741,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     const byId = new Map<string, RunTaskMem>();
     const ids = await getAccessibleMemoryIds(db, auth);
     if (ids === null) {
-      // ADMIN/OWNER "see all" — minus other users' personal/private memories.
+      // ADMIN/OWNER "see all" — minus other users' personal/private memories
+      // AND (spec 047) other users' user-owned memories (strictly owner-only).
       const all = await db.memory.findMany({
         where: { deletedAt: null },
-        select: { id: true, urn: true, name: true, class: true, userId: true },
+        select: { id: true, urn: true, name: true, class: true, userId: true, ownerUserId: true },
       });
       for (const m of all) {
         const owned = m.userId != null && m.userId === auth.userId;
         if ((m.class === 'personal' || m.class === 'private') && !owned) continue;
+        // spec 047: a user-owned memory owned by SOMEONE ELSE is invisible even
+        // to a platform admin.
+        if (m.ownerUserId != null && m.ownerUserId !== auth.userId) continue;
         byId.set(m.id, { id: m.id, urn: m.urn, name: m.name });
       }
     } else if (ids.length > 0) {
