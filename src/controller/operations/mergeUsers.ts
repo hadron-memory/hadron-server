@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 
 /**
@@ -112,10 +113,13 @@ export async function mergeUsers(
 
     // Release source-held unique values before assigning any of them to the
     // target. The source remains present as a tombstone after the transaction.
+    // handle is NOT NULL (spec 047), so instead of nulling it we give the
+    // tombstone a fresh random handle — that RELEASES the original value (so the
+    // target can adopt it below) while satisfying the constraint.
     await tx.user.update({
       where: { id: sourceUserId },
       data: {
-        handle: null,
+        handle: `merged-${randomBytes(8).toString('hex')}`,
         githubId: null,
         githubUsername: null,
         googleId: null,

@@ -244,8 +244,13 @@ subscription — no new work once the App is user-owned.
 >   the owner-or-org authz branches + `createAgent` user-owner + `@<handle>` URN
 >   composition, together (they can't be separated safely).
 
-1. **Handle NOT NULL + URN grammar.** Generate handle at user creation; Holger
-   backfills prod; flip `User.handle` NOT NULL. Parser accepts `@<handle>`
+1. **Handle NOT NULL + URN grammar.** ✅ Generate handle at user creation
+   (#654/#657); ✅ `@<handle>` parser grammar (#659); ✅ Holger backfilled prod +
+   `User.handle` flipped NOT NULL (2026-07-14) — with a DB-generated random
+   default backstopping handle-omitting inserts (test fixtures) and keeping
+   `handle` optional in the Prisma create input, so no fixture churn.
+   Handle-rename → user-owned-URN propagation still rides Phase 2c. Parser
+   accepts `@<handle>`
    namespace for app/agent/memory (server + golden set); cross-repo parser
    checklist (portal/docs/cli). Tests: user URN round-trips; `composeInstalledAgentUrn`
    parses it; org URNs unchanged.

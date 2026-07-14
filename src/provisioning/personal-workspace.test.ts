@@ -117,11 +117,14 @@ describe('provisionPersonalWorkspace', () => {
     expect(agent!.urn).toBe('alice-org:my-agent');
   });
 
-  it('falls back to `personal-<userId>` when the user has no handle', async () => {
-    // The default fixture user (above) has no handle.
+  // spec 047: every user has a handle now (NOT NULL), so the org URN derives
+  // from it. The `personal-<userId>` fallback for a null/illegal handle is
+  // unreachable via creation; its collision variant is still covered below.
+  it('derives `<handle>-org` from the handle every user now has', async () => {
+    const u = await db.user.findUniqueOrThrow({ where: { id: userId } });
     const { orgId } = await provisionPersonalWorkspace(db, userId, 'Test User');
     const org = await db.organization.findUnique({ where: { id: orgId } });
-    expect(org!.urn).toBe(`personal-${userId}`);
+    expect(org!.urn).toBe(`${u.handle}-org`);
   });
 
   it('falls back to `personal-<userId>` when `<handle>-org` is already taken', async () => {
