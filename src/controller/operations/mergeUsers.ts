@@ -60,6 +60,15 @@ export interface MergeUsersArgs {
   sourceUserId: string;
   targetUserId: string;
   actorUserId?: string | null;
+  /**
+   * Whether the target may inherit the source's global `User.roles` (platform
+   * ADMIN/OWNER etc). ONLY a platform admin may union roles — otherwise an org
+   * admin authorized to merge two of their members could smuggle a source
+   * account's platform privileges onto the target (privilege escalation). When
+   * false, the target keeps its own roles and the source's are dropped with the
+   * tombstone.
+   */
+  mergeGlobalRoles?: boolean;
 }
 
 /**
@@ -74,17 +83,14 @@ export interface MergeUsersArgs {
  */
 export async function mergeUsers(
   db: PrismaClient,
-  { sourceUserId, targetUserId, actorUserId }: MergeUsersArgs,
+  { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false }: MergeUsersArgs,
 ): Promise<User> {
   return db.$transaction(async (tx) => {
     // Serialize two merges involving either account. Ref resolution happens
     // in the GraphQL layer, but the rows are rechecked after the lock so a
-    // concurrent soft-delete cannot be merged through.
-    await tx.$queryRawUnsafe(
-      'SELECT id FROM users WHERE id IN ($1, $2) ORDER BY id FOR UPDATE',
-      sourceUserId,
-      targetUserId,
-    );
+    // concurrent soft-delete cannot be merged through. Parameterized template
+    // (not $queryRawUnsafe) so the ids are bound, never interpolated.
+    await tx.$queryRaw`SELECT id FROM users WHERE id IN (${sourceUserId}, ${targetUserId}) ORDER BY id FOR UPDATE`;
     const [source, target] = await Promise.all([
       tx.user.findUnique({ where: { id: sourceUserId } }),
       tx.user.findUnique({ where: { id: targetUserId } }),
@@ -133,12 +139,21 @@ export async function mergeUsers(
         name: target.name ?? source.name,
         email: target.email ?? source.email,
         avatarUrl: target.avatarUrl ?? source.avatarUrl,
-        roles: [...new Set([...target.roles, ...source.roles])],
+        // Global platform roles union ONLY on a platform-admin-authorized merge
+        // — an org-admin-authorized merge must not let a source account's
+        // ADMIN/OWNER leak onto the target (privilege escalation).
+        ...(mergeGlobalRoles
+          ? { roles: [...new Set([...target.roles, ...source.roles])] }
+          : {}),
         updatedBy: actor,
       },
     });
 
-    const run = (sql: string) => tx.$executeRawUnsafe(sql, targetUserId, sourceUserId);
+    // Most statements bind $1 = target, $2 = source. A statement that references
+    // only some placeholders can pass its own bind list (Postgres tolerates
+    // extra binds, but passing exactly what the SQL references is clearer).
+    const run = (sql: string, ...params: unknown[]) =>
+      tx.$executeRawUnsafe(sql, ...(params.length > 0 ? params : [targetUserId, sourceUserId]));
 
     // Composite-key / unique relationships: combine ordered entitlements,
     // remove the source collision, then retarget source-only rows. A revoked
@@ -246,7 +261,7 @@ export async function mergeUsers(
     await run('UPDATE memory_shares SET grantee_id = $1 WHERE grantee_id = $2');
     await run('UPDATE memory_shares SET grantor_id = $1 WHERE grantor_id = $2');
     // A share can become self-directed when either its owner or grantee moves.
-    await run('DELETE FROM memory_shares WHERE grantee_id = $1 AND grantor_id = $1');
+    await run('DELETE FROM memory_shares WHERE grantee_id = $1 AND grantor_id = $1', targetUserId);
 
     await run(`DELETE FROM pending_setups s USING pending_setups t
       WHERE s.user_id = $2 AND t.user_id = $1`);

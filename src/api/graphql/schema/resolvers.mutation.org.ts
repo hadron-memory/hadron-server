@@ -32,31 +32,27 @@ async function requireMergeUsersAccess(
   if (isPlatformAdmin(ctx)) return;
   if (!ctx.userId) throw new Error('Forbidden');
 
-  // An org admin may perform the global account merge only when both users
-  // are live members of at least one org they administer. First identify the
-  // shared live orgs, then delegate the caller check to the canonical gate so
-  // revoked caller memberships and role ordering stay consistent everywhere.
-  const sharedOrgMemberships = await ctx.db.orgMember.findMany({
+  // An org admin may perform the global account merge only when both users are
+  // live members of at least one org the caller administers. Single query: an
+  // org (not deleted) where source, target, and an ADMIN/OWNER caller are all
+  // live members. `deletedAt: null` on every membership so a revoked membership
+  // never authorizes (findings:revoked-membership-auth-gates).
+  const administeredSharedOrg = await ctx.db.organization.findFirst({
     where: {
-      userId: sourceUserId,
       deletedAt: null,
-      organization: {
-        members: { some: { userId: targetUserId, deletedAt: null } },
-      },
+      members: { some: { userId: sourceUserId, deletedAt: null } },
+      AND: [
+        { members: { some: { userId: targetUserId, deletedAt: null } } },
+        {
+          members: {
+            some: { userId: ctx.userId, role: { in: ['ADMIN', 'OWNER'] }, deletedAt: null },
+          },
+        },
+      ],
     },
-    select: { organizationId: true },
+    select: { id: true },
   });
-
-  for (const { organizationId } of sharedOrgMemberships) {
-    try {
-      await requireOrgRole(ctx, organizationId, 'ADMIN');
-      return;
-    } catch (error) {
-      if (!(error instanceof Error) || error.message !== 'Forbidden') throw error;
-    }
-  }
-
-  throw new Error('Forbidden');
+  if (!administeredSharedOrg) throw new Error('Forbidden');
 }
 
 export const orgMutations = {
@@ -124,6 +120,9 @@ export const orgMutations = {
         sourceUserId,
         targetUserId,
         actorUserId: ctx.userId ?? null,
+        // Only a platform admin may carry the source's global roles onto the
+        // target; an org-authorized merge must not escalate platform privilege.
+        mergeGlobalRoles: platformAdmin,
       });
     },
 

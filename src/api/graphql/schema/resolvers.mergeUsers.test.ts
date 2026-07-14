@@ -133,6 +133,34 @@ describe('Mutation.mergeUsers — identity and guards', () => {
     },
   );
 
+  it('does NOT let an org-admin merge escalate the target with the source platform roles', async () => {
+    // source carries platform roles: ['ADMIN'] (beforeEach); target: ['READER'].
+    const orgAdmin = await db.user.create({
+      data: { handle: 'merge-org-noescalate', roles: ['READER'] },
+    });
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'No-Escalate Org', urn: 'no-escalate-org' },
+    });
+    await db.orgMember.createMany({
+      data: [
+        { organizationId: org.id, userId: orgAdmin.id, role: 'ADMIN' },
+        { organizationId: org.id, userId: source.id, role: 'READER' },
+        { organizationId: org.id, userId: target.id, role: 'READER' },
+      ],
+    });
+
+    const out = await merge(source.id, target.id, { db, userId: orgAdmin.id, roles: ['READER'] });
+    // The target keeps its own roles — the source's platform ADMIN is dropped
+    // with the tombstone, not smuggled onto the target.
+    expect(out.roles).toEqual(['READER']);
+  });
+
+  it('lets a platform admin carry the source global roles onto the target', async () => {
+    // Platform-admin path (adminCtx): union preserves the source's ADMIN.
+    const out = await merge(source.id, target.id);
+    expect(new Set(out.roles)).toEqual(new Set(['READER', 'ADMIN']));
+  });
+
   it('rejects a shared-org member below ADMIN and an admin when the users do not share that org', async () => {
     const caller = await db.user.create({
       data: { handle: 'merge-org-caller', roles: ['READER'] },
