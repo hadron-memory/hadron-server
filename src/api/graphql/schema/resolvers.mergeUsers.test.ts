@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
 import { orgMutations } from './resolvers.mutation.org.js';
 import type { Context } from './resolvers.helpers.js';
 
@@ -84,6 +85,16 @@ describe('Mutation.mergeUsers — identity and guards', () => {
       externalAppId: null,
       externalId: null,
     });
+  });
+
+  it('refuses a self-merge at the operation layer, leaving the account intact', async () => {
+    await expect(
+      mergeUsers(db, { sourceUserId: source.id, targetUserId: source.id }),
+    ).rejects.toThrow('source and target must be different');
+
+    const intact = await db.user.findUniqueOrThrow({ where: { id: source.id } });
+    expect(intact.deletedAt).toBeNull();
+    expect(intact.email).toBe('source@example.test');
   });
 
   it('rejects a caller without platform or shared-org admin authority and a same-user merge', async () => {
