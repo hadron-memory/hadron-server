@@ -169,6 +169,57 @@ export function isPlatformAdmin(ctx: Context): boolean {
 }
 
 /**
+ * Owner-or-org access gate for an entity that may be **user-owned** or
+ * **org-owned** (spec 047: App / Agent / Memory carry
+ * `organizationId`-XOR-`ownerUserId`). The keystone gate that replaces bare
+ * `requireOrgRole(ctx, entity.organizationId, role)` on those entities so a
+ * user-owned row is authorized by its owner, not by an org role.
+ *
+ *   - Platform ADMIN/OWNER: bypass (same as `requireOrgRole`; a user-owned
+ *     App/Agent/Memory-tenant is NOT the strict-personal case — the
+ *     personal/private strict-owner gate on `Memory.userId` is separate and
+ *     lives in `canReadMemory`/`canWriteToMemory`, and DOES deny admins).
+ *   - `ownerUserId` set (user-owned): owner-only — `ctx.userId === ownerUserId`;
+ *     no org-role path, and the `required` role is moot (the owner has full
+ *     authority over their own entity).
+ *   - else `organizationId` set (org-owned): delegate to `requireOrgRole`.
+ *
+ * The XOR CHECK guarantees exactly one is set; a row with neither is denied
+ * defensively. Throws `Forbidden` on denial (mirrors `requireOrgRole`).
+ */
+export async function requireOwnerOrOrgRole(
+  ctx: Context,
+  entity: { organizationId: string | null; ownerUserId: string | null },
+  required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER',
+): Promise<void> {
+  if (isPlatformAdmin(ctx)) return;
+  if (entity.ownerUserId !== null) {
+    if (ctx.userId && ctx.userId === entity.ownerUserId) return;
+    throw new Error('Forbidden');
+  }
+  if (entity.organizationId !== null) {
+    await requireOrgRole(ctx, entity.organizationId, required);
+    return;
+  }
+  throw new Error('Forbidden');
+}
+
+/**
+ * Boolean form of {@link requireOwnerOrOrgRole} (graceful, no throw) — true for
+ * a platform admin, the entity's user owner, or a live member of its owning org.
+ * Mirrors `isOrgMemberOrAdmin` for user-or-org-owned entities.
+ */
+export async function isOwnerOrOrgMember(
+  ctx: Context,
+  entity: { organizationId: string | null; ownerUserId: string | null },
+): Promise<boolean> {
+  if (isPlatformAdmin(ctx)) return true;
+  if (entity.ownerUserId !== null) return !!ctx.userId && ctx.userId === entity.ownerUserId;
+  if (entity.organizationId !== null) return isOrgMemberOrAdmin(ctx, entity.organizationId);
+  return false;
+}
+
+/**
  * Boolean form of the org-membership gate (`requireOrgRole` throws; this
  * returns a boolean). True for a platform ADMIN/OWNER, or a live (non-revoked)
  * member of `orgId` at any role. Used where no-access must degrade gracefully
@@ -255,13 +306,13 @@ export async function requireAiConfigOwnerAdmin(
     case 'APP': {
       const { id } = await resolveAppRef(ctx.db, ownerId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       return { ownerWhere: { appId: id }, resolvedOwnerId: id };
     }
     case 'AGENT': {
       const { id } = await resolveAgentRef(ctx.db, ownerId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       return { ownerWhere: { agentId: id }, resolvedOwnerId: id };
     }
   }
@@ -383,7 +434,8 @@ export async function resolveOrgScope(
       where: { id: ctx.appId },
       select: { organizationId: true },
     });
-    memberOrgIds = app ? [app.organizationId] : [];
+    // spec 047: a user-owned App has no org → contributes no org membership.
+    memberOrgIds = app?.organizationId ? [app.organizationId] : [];
   }
   if (orgId == null) return { memberOrgIds, scopedOrgId: null };
   let resolvedOrgId: string;
@@ -587,7 +639,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
 
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
-    select: { organizationId: true, userId: true, class: true, appId: true },
+    select: { organizationId: true, ownerUserId: true, userId: true, class: true, appId: true },
   });
 
   // 034-memory-class-access: owner-owned personal/private memories are
@@ -606,6 +658,18 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   // through the App-key/agent path (canWriteToMemory via getAppMemoryAccess); a
   // JWT org contributor who isn't ADMIN gets no write here (codex review, #660).
   if (memory.appId !== null && (memory.class === 'knowledge' || memory.class === 'group')) {
+    throw new Error('Forbidden: no write access to this memory');
+  }
+
+  // spec 047: a USER-owned memory is writable only by its owner — no org path,
+  // no org-CONTRIBUTOR grant. (The personal/private strict-owner case above
+  // already returned; this covers a user-owned non-personal memory, e.g. a
+  // user-owned agent's system/knowledge memory.)
+  if (memory.ownerUserId !== null) {
+    if (ctx.userId === memory.ownerUserId) return;
+    throw new Error('Forbidden: no write access to this memory');
+  }
+  if (memory.organizationId === null) {
     throw new Error('Forbidden: no write access to this memory');
   }
 
@@ -905,7 +969,7 @@ export async function installAgentIntoAppCore(
   // #551: installing is a member-level write on the App's org (CONTRIBUTOR+),
   // not an ADMIN-only action — any org member who can author App config can
   // install an Agent.
-  await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
+  await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR');
   const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
   // #551: a foreign Agent may be installed cross-org WHEN it is PUBLIC (the
   // marketplace / AgentOrgGrant path — the grant is auto-provisioned below).
@@ -926,8 +990,10 @@ export async function installAgentIntoAppCore(
     select: { appId: true },
   });
   if (existing) throw new DuplicateAppAgentError(resolvedAppId, resolvedAgentId);
-  // Auto-provision AgentOrgGrant (cross-org gate symmetry).
-  await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
+  // Auto-provision AgentOrgGrant (cross-org gate symmetry). spec 047: an
+  // AgentOrgGrant is org-scoped — a user-owned App has no org, so a personal
+  // install rides the owner's AgentSubscription instead (no grant needed).
+  if (app.organizationId) await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
   // Wrap the App trainingMode update + the AppAgent create in a single
   // transaction. The App update goes FIRST so a subsequent re-fetch of
   // `appAgent.app` in the same response reflects the new trainingMode
@@ -982,7 +1048,7 @@ export async function uninstallAgentFromAppCore(
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
   // #551: symmetric with install — a CONTRIBUTOR+ member of the App's org can
   // uninstall an Agent (was ADMIN-only).
-  await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
+  await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR');
   // Idempotent delete — `deleteMany` returns a count, never throws on
   // absent rows. The (App, Agent, *) memories persist as orphans per
   // spec 023 FR-005.

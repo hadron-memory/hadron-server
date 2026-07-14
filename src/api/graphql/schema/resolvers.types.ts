@@ -321,7 +321,7 @@ export const typeResolvers = {
     // Grantees can read their own shares via User.memorySharesGranted
     // (out of scope here; can be added if a portal page needs it).
     shares: async (
-      g: { id: string; class?: string; userId?: string | null; organizationId?: string },
+      g: { id: string; class?: string; userId?: string | null; organizationId?: string | null },
       _: unknown,
       ctx: Context,
     ) => {
@@ -355,6 +355,9 @@ export const typeResolvers = {
         // organizationId scoped per-request, which would have made
         // non-platform org admins fall through to an empty list.
         if (!ctx.userId) return [];
+        // A user-owned memory (no organizationId) has no org-admin fallback —
+        // only the principal (checked above) can read its shares.
+        if (!orgId) return [];
         const member = await ctx.db.orgMember.findUnique({
           where: {
             organizationId_userId: {
@@ -383,7 +386,7 @@ export const typeResolvers = {
     // ADMIN/OWNER. Non-members of a group memory get an empty list
     // even if they happen to be in the org but not on the team.
     members: async (
-      g: { id: string; class?: string; organizationId?: string },
+      g: { id: string; class?: string; organizationId?: string | null },
       _: unknown,
       ctx: Context,
     ) => {
@@ -413,6 +416,9 @@ export const typeResolvers = {
           select: { userId: true },
         });
         if (!selfMember) {
+          // A user-owned memory (no organizationId) has no org-admin
+          // fallback — only an existing member (checked above) can read.
+          if (!orgId) return [];
           // Fall back to org admin.
           const orgMember = await ctx.db.orgMember.findUnique({
             where: {

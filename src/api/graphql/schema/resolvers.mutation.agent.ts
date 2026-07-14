@@ -34,6 +34,7 @@ import {
 import {
   type Context,
   requireOrgRole,
+  requireOwnerOrOrgRole,
   aiConfigOwnerOf,
   toGqlAiServiceConfig,
   requireAiConfigOwnerAdmin,
@@ -161,9 +162,12 @@ export const agentMutations = {
       ctx: Context,
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       let newUrn: string | undefined;
       if (urn !== undefined) {
+        if (!agent.organizationId) {
+          throw new Error('Renaming via urn is not supported for user-owned agents');
+        }
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: agent.organizationId }, select: { urn: true } });
         newUrn = `${org.urn}:${deriveSlugFromName(urn)}`; // #574: slugify the explicit rename slug
       }
@@ -276,7 +280,7 @@ export const agentMutations = {
 
     deleteAgent: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // Soft-delete the agent and its owned system memory (if any) in the
       // same pass. System memories are owned by the agent and cannot be
       // detached, so deleting the agent is the only way they get cleaned up.
@@ -345,7 +349,7 @@ export const agentMutations = {
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
 
-      await requireAgentOrgGrantRevokeRole(ctx, resolvedOrgId, agent.organizationId);
+      await requireAgentOrgGrantRevokeRole(ctx, resolvedOrgId, agent);
 
       await ctx.db.agentOrgGrant.updateMany({
         where: {
@@ -396,7 +400,7 @@ export const agentMutations = {
         where: { id: resolvedParentId },
       });
       // Authorization: ADMIN/OWNER of the parent Agent's owning org.
-      await requireOrgRole(ctx, parent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, parent, 'ADMIN');
 
       try {
         return await publishAgentImport(ctx.db, {
@@ -431,7 +435,7 @@ export const agentMutations = {
       const parent = await ctx.db.agent.findUniqueOrThrow({
         where: { id: resolvedParentId },
       });
-      await requireOrgRole(ctx, parent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, parent, 'ADMIN');
       await removeAgentImport(ctx.db, resolvedParentId, resolvedImportedId);
       return true;
     },
@@ -442,7 +446,7 @@ export const agentMutations = {
       ctx: Context,
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
 
       const updated = await ctx.db.agentSubscription.update({
         where: { userId_agentId: { userId, agentId } },
@@ -482,7 +486,7 @@ export const agentMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // 036-ai-service-config: upsert the Agent's 'default' registry
       // config. Legacy key semantics preserved: a provided apiKey is
       // encrypted with a preview; omitted/blank keeps the stored key,
@@ -541,7 +545,7 @@ export const agentMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOrgRole(ctx, agent.organizationId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // 036-ai-service-config: clearing deletes the 'default' registry
       // config (idempotent).
       await ctx.db.aiServiceConfig.deleteMany({
@@ -672,14 +676,14 @@ export const agentMutations = {
 async function requireAgentOrgGrantRevokeRole(
   ctx: Context,
   subscriberOrgId: string,
-  agentOwnerOrgId: string,
+  agentOwner: { organizationId: string | null; ownerUserId: string | null },
 ): Promise<void> {
   try {
     await requireOrgRole(ctx, subscriberOrgId, 'ADMIN');
     return;
   } catch (subscriberErr) {
     try {
-      await requireOrgRole(ctx, agentOwnerOrgId, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agentOwner, 'ADMIN');
       return;
     } catch {
       throw subscriberErr;

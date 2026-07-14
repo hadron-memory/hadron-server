@@ -98,6 +98,9 @@ export async function writeNodeToGit(
   }
 
   if (!graphRecord.source) return; // DB-only mode
+  // spec 047: git-mirror is org-scoped (needs the org's GitHub App). A
+  // user-owned memory has no org → nothing to mirror to.
+  if (!graphRecord.organization) return;
 
   const localPath = memoryLocalPath(graphRecord.organization.urn, graphRecord.urn);
 

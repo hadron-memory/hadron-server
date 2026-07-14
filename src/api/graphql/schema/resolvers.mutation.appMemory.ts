@@ -37,7 +37,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
-import { type Context, requireOrgRole, MEMORY_INCLUDE } from './resolvers.helpers.js';
+import { type Context, requireOwnerOrOrgRole, MEMORY_INCLUDE } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -52,7 +52,7 @@ async function loadAppAndAuthorize(
   ctx: Context,
   appRef: string,
   klass: AppMemoryClass,
-): Promise<{ id: string; urn: string; organizationId: string; organizationUrn: string }> {
+): Promise<{ id: string; urn: string; organizationId: string | null; organizationUrn: string | null }> {
   const { id: appId } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findUniqueOrThrow({
     where: { id: appId },
@@ -60,6 +60,7 @@ async function loadAppAndAuthorize(
       id: true,
       urn: true,
       organizationId: true,
+      ownerUserId: true,
       uninstalledAt: true,
       organization: { select: { urn: true } },
     },
@@ -74,7 +75,7 @@ async function loadAppAndAuthorize(
 
   if (klass === 'app' || klass === 'knowledge') {
     // Shared data (deployment config / reference knowledge) — org-management.
-    await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
   } else {
     // personal/private: the caller OWNS the resulting memory, so App membership
     // is the bar (not org admin) and the membership must be genuine — no
@@ -99,7 +100,7 @@ async function loadAppAndAuthorize(
     id: app.id,
     urn: app.urn,
     organizationId: app.organizationId,
-    organizationUrn: app.organization.urn,
+    organizationUrn: app.organization?.urn ?? null,
   };
 }
 
@@ -188,6 +189,12 @@ export const appMemoryMutations = {
     // hung under the org URN) rather than the name-slug, so two members can name
     // their own memories the same and one owner's names never leak to another.
     const isUserOwned = klass === 'personal' || klass === 'private';
+    if (isUserOwned && !app.organizationUrn) {
+      throw new GraphQLError(
+        'Personal/private App-scoped memories are not yet supported for a user-owned App.',
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
+    }
     const memoryUrn = isUserOwned
       ? `${app.organizationUrn}:${agentSlug}:app-user:${generateId()}`
       : `${app.urn}:${agentSlug}:app-mem:${slug}`;

@@ -754,7 +754,7 @@ export function createMcpServerInstance(
       const sel = activeAppByMcpSession.get(sid);
       if (sel) {
         auth.appId = sel.appId;
-        auth.organizationId = sel.organizationId;
+        auth.organizationId = sel.organizationId ?? undefined;
         return null;
       }
     }
@@ -1159,7 +1159,7 @@ export function createMcpServerInstance(
             });
           }
           auth.appId = r.app.id;
-          auth.organizationId = r.app.organizationId;
+          auth.organizationId = r.app.organizationId ?? undefined;
           mcpLog('info', 'regime_c_selection_set', {
             userId: auth.userId,
             mcpSessionId: sid,
@@ -4910,7 +4910,7 @@ const transports = new Map<string, StreamableHTTPServerTransport>();
  */
 const activeAppByMcpSession = new Map<
   string,
-  { appId: string; organizationId: string }
+  { appId: string; organizationId: string | null }
 >();
 
 /**
@@ -5022,7 +5022,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     cachedAppResolution = await resolveAppForRequest(auth.userId, db);
     if (cachedAppResolution.kind === 'resolved') {
       auth.appId = cachedAppResolution.appId;
-      auth.organizationId = cachedAppResolution.organizationId;
+      auth.organizationId = cachedAppResolution.organizationId ?? undefined;
     }
     if (cachedAppResolution.kind === 'multi-app') {
       mcpLog('warn', 'multi_app_session_opened_without_selection', {

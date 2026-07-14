@@ -154,6 +154,27 @@ ALTER TABLE ai_service_configs
   ADD CONSTRAINT chk_ai_service_config_owner
   CHECK (num_nonnulls(hadron_server_id, organization_id, app_id, agent_id) = 1);
 
+-- ─── spec 047 Phase 2c: user-OR-org ownership ────────────────────────────
+-- App / Agent / Memory are owned by EXACTLY ONE of an organization or a user
+-- (org-XOR-owner). `organization_id` is nullable (a user-owned entity has no
+-- org); `owner_user_id` (spec 047) is the user tenant owner. Synced with the
+-- 20260714160000 migration + src/test/globalSetup.ts.
+ALTER TABLE apps
+  DROP CONSTRAINT IF EXISTS chk_app_owner_xor;
+ALTER TABLE apps
+  ADD CONSTRAINT chk_app_owner_xor
+  CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
+ALTER TABLE agents
+  DROP CONSTRAINT IF EXISTS chk_agent_owner_xor;
+ALTER TABLE agents
+  ADD CONSTRAINT chk_agent_owner_xor
+  CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_owner_xor;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_owner_xor
+  CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
+
 -- Per-owner name uniqueness (Prisma cannot express partial uniques).
 CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_server_name_uniq
   ON ai_service_configs (hadron_server_id, name) WHERE hadron_server_id IS NOT NULL;

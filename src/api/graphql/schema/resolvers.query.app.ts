@@ -8,6 +8,7 @@ import {
   type Context,
   clampListTake,
   requireOrgRole,
+  requireOwnerOrOrgRole,
   resolveOrgScope,
   APP_INCLUDE,
 } from './resolvers.helpers.js';
@@ -72,7 +73,7 @@ export const appQueries = {
       // pre-473 org-ADMIN gate was stricter than the list a plain member
       // could already read this App through. Admin-only material (keys,
       // decrypted AI config) keeps its own gates (appKeys / appAIConfig).
-      await requireOrgRole(ctx, app.organizationId, 'READER');
+      await requireOwnerOrOrgRole(ctx, app, 'READER');
       return app;
     },
 
@@ -93,7 +94,7 @@ export const appQueries = {
       // decrypted key.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) {
-        await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+        await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       }
       // 036-ai-service-config: registry-backed — the App's 'default'
       // config (single-entity contract preserved; no resolution walk).
@@ -114,7 +115,7 @@ export const appQueries = {
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       if (!isPlatformAdmin) {
-        await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+        await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       }
       return ctx.db.appKey.findMany({
         where: { appId: resolvedAppId, revokedAt: null },

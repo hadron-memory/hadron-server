@@ -99,8 +99,8 @@ type ConfigForAccess = {
 export type ResolvedResource =
   | { kind: 'memory'; memory: MemoryForAccess }
   | { kind: 'node'; node: { id: string; loc: string }; memory: MemoryForAccess }
-  | { kind: 'app'; app: { id: string; urn: string; organizationId: string } }
-  | { kind: 'agent'; agent: { id: string; urn: string; organizationId: string } }
+  | { kind: 'app'; app: { id: string; urn: string; organizationId: string | null } }
+  | { kind: 'agent'; agent: { id: string; urn: string; organizationId: string | null } }
   | { kind: 'aiServiceConfig'; config: ConfigForAccess }
   | { kind: 'organization'; org: { id: string; urn: string } }
   | { kind: 'user'; user: { id: string; handle: string } };
@@ -359,7 +359,7 @@ async function memoryGrants(
 async function appGrants(
   db: PrismaClient,
   subject: Subject,
-  app: { id: string; organizationId: string },
+  app: { id: string; organizationId: string | null },
 ): Promise<InternalGrant[]> {
   const grants: InternalGrant[] = [];
 
@@ -372,6 +372,9 @@ async function appGrants(
     });
   }
 
+  // spec 047: a user-owned App has no org — no org-role grants (owner grants
+  // land with creation in Phase 2c-2).
+  if (app.organizationId === null) return grants;
   const memberRole = await orgMemberRole(db, app.organizationId, subject.id);
   if (memberRole === 'ADMIN' || memberRole === 'OWNER') {
     grants.push({
@@ -411,7 +414,7 @@ async function appGrants(
 async function agentGrants(
   db: PrismaClient,
   subject: Subject,
-  agent: { id: string; organizationId: string },
+  agent: { id: string; organizationId: string | null },
 ): Promise<InternalGrant[]> {
   const grants: InternalGrant[] = [];
 
@@ -423,6 +426,8 @@ async function agentGrants(
       caps: FULL,
     });
   }
+  // spec 047: a user-owned Agent has no org — no org-role grants.
+  if (agent.organizationId === null) return grants;
 
   const memberRole = await orgMemberRole(db, agent.organizationId, subject.id);
   if (memberRole === 'ADMIN' || memberRole === 'OWNER') {
@@ -710,9 +715,10 @@ export async function callerCanAudit(
       return isOrgAdmin(memory.organizationId);
     }
     case 'app':
-      return isOrgAdmin(resolved.app.organizationId);
+      // spec 047: user-owned App/Agent audit-authz (owner) lands in Phase 2c-2.
+      return resolved.app.organizationId ? isOrgAdmin(resolved.app.organizationId) : false;
     case 'agent':
-      return isOrgAdmin(resolved.agent.organizationId);
+      return resolved.agent.organizationId ? isOrgAdmin(resolved.agent.organizationId) : false;
     case 'organization':
       return isOrgAdmin(resolved.org.id);
     case 'user':
@@ -726,14 +732,16 @@ export async function callerCanAudit(
           where: { id: c.appId },
           select: { organizationId: true },
         });
-        return app ? isOrgAdmin(app.organizationId) : false;
+        // spec 047: a user-owned App has no org, so no org-admin audit path
+        // (owner-audit lands with creation in Phase 2c-2).
+        return app?.organizationId ? isOrgAdmin(app.organizationId) : false;
       }
       if (c.agentId) {
         const agent = await db.agent.findUnique({
           where: { id: c.agentId },
           select: { organizationId: true },
         });
-        return agent ? isOrgAdmin(agent.organizationId) : false;
+        return agent?.organizationId ? isOrgAdmin(agent.organizationId) : false;
       }
       // HADRON_SERVER owner — platform admin only (already handled above).
       return false;

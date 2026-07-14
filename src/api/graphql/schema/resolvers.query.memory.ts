@@ -136,7 +136,9 @@ export const memoryQueries = {
         // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no
         // longer grants access — matches getOrgReadableMemoryIds' own
         // `deletedAt: null` membership filter.
-        const member = ctx.userId
+        // spec 047: a user-owned memory (org NULL) has no org-membership
+        // fast-path — fall straight through to the shared access gate below.
+        const member = ctx.userId && memory.organizationId
           ? await ctx.db.orgMember.findFirst({
               where: {
                 organizationId: memory.organizationId,

@@ -552,14 +552,14 @@ model OrgMember {
 /// single migration.
 model Memory {
   id                  String  @id @default(cuid())
-  organizationId      String  @map("organization_id")
+  organizationId      String? @map("organization_id")
   /// spec 047 (Phase 2b): the user TENANT owner of a user-owned Memory
   /// (owner-namespace `@<handle>` URN). DISTINCT from `userId` (the
   /// personal/private strict-owner). Additive + unused for now — nullable, no
   /// XOR; the exactly-one-of `organizationId`/`ownerUserId` invariant, the
   /// nullable-org migration, and the authz branches land together in Phase 2c.
   ownerUserId         String? @map("owner_user_id")
-  ownerUser           User?   @relation("MemoryTenantOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  ownerUser           User?   @relation("MemoryTenantOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   // 008-agent-installation (2026-05-02), relaxed by 034-memory-class-access and
   // #653: App pivot. Required for class='app'; OPTIONAL for knowledge/group/
   // personal/private (set when app-scoped, NULL when free-standing); forbidden
@@ -700,7 +700,7 @@ model Memory {
   deletedAt                 DateTime?         @map("deleted_at")
   deletedBy                 String?           @map("deleted_by")
 
-  organization             Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization             Organization?        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   nodes                    Node[]
   edges                    Edge[] // first-class edges, scoped via denormalized memoryId
   embeddings               NodeEmbedding[] // 033: per-memory vectors (denormalized memoryId)
@@ -1280,12 +1280,12 @@ model UsageEvent {
 /// orgs).
 model Agent {
   id                   String          @id @default(cuid())
-  organizationId       String          @map("organization_id")
+  organizationId       String?         @map("organization_id")
   /// spec 047 (Phase 2b): user owner of a user-owned Agent (owner-namespace
   /// `@<handle>` URN). Additive + unused — nullable, no XOR; the org-XOR-owner
   /// invariant + nullable-org + creation land in Phase 2c.
   ownerUserId          String?         @map("owner_user_id")
-  ownerUser            User?           @relation("AgentOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  ownerUser            User?           @relation("AgentOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   /// Globally unique identifier (e.g. "micromentor.org:juno");
   /// derived from `org.urn + ":" + slug`.
   urn                  String          @unique
@@ -1357,7 +1357,7 @@ model Agent {
   /// TODO(spec-021-cleanup): drop alongside urnNormalizedAt.
   urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
 
-  organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization      Organization?       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   memoryItems       AgentMemoryItem[]
   userMemories      Memory[]            @relation("UserMemoriesOfAgent")
   sessions          Session[]           @relation("SessionAgent")
@@ -2319,12 +2319,12 @@ model App {
   /// `findUnique` callers in `resolvers.ts` were migrated to this
   /// pattern in PR #124.
   urn                   String
-  organizationId        String               @map("organization_id")
+  organizationId        String?              @map("organization_id")
   /// spec 047 (Phase 2b): user owner of a user-owned App (owner-namespace
   /// `@<handle>` URN). Additive + unused — nullable, no XOR; the org-XOR-owner
   /// invariant + nullable-org + creation land in Phase 2c.
   ownerUserId           String?              @map("owner_user_id")
-  ownerUser             User?                @relation("AppOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  ownerUser             User?                @relation("AppOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
   identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")
   sessionTimeoutSeconds Int                  @default(900) @map("session_timeout_seconds")
@@ -2393,7 +2393,7 @@ model App {
   /// TODO(spec-021-cleanup): drop alongside urnNormalizedAt.
   urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
 
-  organization     Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization     Organization?     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   // 023-app-shape Phase 2b: App↔Agent is N:M through AppAgent. The
   // direct `agent` relation is gone (dropped with `agentId`).
   appAgents        AppAgent[]

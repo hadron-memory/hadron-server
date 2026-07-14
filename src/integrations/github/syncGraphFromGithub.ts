@@ -28,7 +28,9 @@ function decryptToken(ciphertext: string): string {
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
 
-export type MemoryWithOrg = Memory & { organization: Organization };
+// spec 047: `organization` is nullable (a user-owned memory has no org). Git
+// sync is org-scoped, so the sync fn returns early when it's null.
+export type MemoryWithOrg = Memory & { organization: Organization | null };
 
 /**
  * Sync a memory from GitHub: clone/pull the repo, load nodes from filesystem,
@@ -39,6 +41,13 @@ export const syncGraphFromGithub = async (
 ): Promise<{ error?: string; nodeCount?: number }> => {
   try {
     const graphName = graph.urn;
+
+    // spec 047: git sync is org-scoped (needs the org's GitHub App). A
+    // user-owned memory has no org, so there's nothing to sync.
+    if (!graph.organization) {
+      return {};
+    }
+    const organization = graph.organization;
 
     // DB-only mode — skip all git operations
     if (!graph.source) {
@@ -53,24 +62,24 @@ export const syncGraphFromGithub = async (
     }).catch(() => {});
 
     const slug = graphName.includes(':') ? graphName.split(':').slice(1).join(':') : graphName;
-    const localPath = join(GRAPHS_PATH, graph.organization.urn, slug);
+    const localPath = join(GRAPHS_PATH, organization.urn, slug);
     const ownerRepo = extractOwnerRepo(graph.source);
 
     // 1. Get installation token (requires GitHub App installation)
-    if (!graph.organization.githubInstallationId) {
+    if (!organization.githubInstallationId) {
       console.warn(
-        `[syncGraphFromGithub] "${graphName}" — skipping: organization "${graph.organization.urn}" has no githubInstallationId`,
+        `[syncGraphFromGithub] "${graphName}" — skipping: organization "${organization.urn}" has no githubInstallationId`,
       );
       return {};
     }
 
     // Build per-org credentials if available
-    const org = graph.organization;
+    const org = organization;
     const credentials = org.githubAppId && org.githubAppPrivateKeyEncrypted
       ? { appId: org.githubAppId, privateKeyPem: decryptToken(org.githubAppPrivateKeyEncrypted) }
       : undefined;
 
-    const token = await getInstallationToken(graph.organization.githubInstallationId, credentials);
+    const token = await getInstallationToken(organization.githubInstallationId, credentials);
     const cloneUrl = toHttpsUrl(graph.source, token);
 
     // 2. Clone or pull the repo

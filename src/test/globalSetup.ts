@@ -98,6 +98,21 @@ export async function setup() {
 
   // 036-ai-service-config: a config belongs to exactly one owner; name is
   // unique per owner (partial uniques — Prisma can't express either).
+  // spec 047 Phase 2c: App/Agent/Memory are owned by EXACTLY ONE of an org or a
+  // user (org-XOR-owner). Synced with prisma/post-push.sql + the 20260714160000
+  // migration.
+  await client.query(`
+    ALTER TABLE "apps" DROP CONSTRAINT IF EXISTS "chk_app_owner_xor";
+    ALTER TABLE "apps" ADD CONSTRAINT "chk_app_owner_xor"
+      CHECK (("organization_id" IS NULL) <> ("owner_user_id" IS NULL));
+    ALTER TABLE "agents" DROP CONSTRAINT IF EXISTS "chk_agent_owner_xor";
+    ALTER TABLE "agents" ADD CONSTRAINT "chk_agent_owner_xor"
+      CHECK (("organization_id" IS NULL) <> ("owner_user_id" IS NULL));
+    ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_owner_xor";
+    ALTER TABLE "memories" ADD CONSTRAINT "chk_memory_owner_xor"
+      CHECK (("organization_id" IS NULL) <> ("owner_user_id" IS NULL));
+  `);
+
   await client.query(`
     ALTER TABLE "ai_service_configs" DROP CONSTRAINT IF EXISTS "chk_ai_service_config_owner";
     ALTER TABLE "ai_service_configs"

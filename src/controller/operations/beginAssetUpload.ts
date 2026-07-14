@@ -102,6 +102,11 @@ export async function beginAssetUpload(
     },
   });
   if (!agent) throw new AssetUploadError('NOT_FOUND', 'agent not found');
+  if (!agent.organization) {
+    // The storage key is org-scoped (buildStorageKey below) — asset upload
+    // isn't yet modeled for a user-owned Agent.
+    throw new AssetUploadError('NOT_FOUND', 'asset upload is not supported for a user-owned agent yet');
+  }
 
   // Resolve the App that backs this agent. The asset-upload tool gate
   // lives on this App's `agentTools`. Convention: same URN as the agent.
@@ -329,6 +334,11 @@ export async function beginAssetUploadV2(
   });
   if (!memory || memory.deletedAt) {
     throw new AssetUploadError('NOT_FOUND', 'memory not found');
+  }
+  if (!memory.organization) {
+    // The storage key is org-scoped (buildStorageKey below) — asset upload
+    // isn't yet modeled for a user-owned memory.
+    throw new AssetUploadError('NOT_FOUND', 'asset upload is not supported for a user-owned memory yet');
   }
 
   const writeOk = await canWriteToMemory(

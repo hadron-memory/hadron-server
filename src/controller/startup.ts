@@ -25,11 +25,14 @@ export const startup = async (): Promise<void> => {
   console.log(`Starting sync for ${memories.length} memory(s)...`);
 
   for (const memory of memories) {
+    // spec 047: user-owned memories have no org and aren't git-synced.
+    if (!memory.organization) continue;
+    const orgUrn = memory.organization.urn;
     const result = await syncGraphFromGithub(memory);
     if (result.error) {
-      console.error(`  [FAIL] ${memory.organization.urn}/${memory.name}: ${result.error}`);
+      console.error(`  [FAIL] ${orgUrn}/${memory.name}: ${result.error}`);
     } else {
-      console.log(`  [OK]   ${memory.organization.urn}/${memory.name}: ${result.nodeCount} nodes`);
+      console.log(`  [OK]   ${orgUrn}/${memory.name}: ${result.nodeCount} nodes`);
     }
   }
 

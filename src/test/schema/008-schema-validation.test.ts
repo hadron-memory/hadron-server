@@ -395,3 +395,72 @@ describe('008 schema — chk_memory_class_app_id', () => {
     expect(after).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// spec 047 Phase 2c — org-XOR-owner CHECK (exactly one owner)
+// ---------------------------------------------------------------------------
+
+describe('047 schema — chk_<entity>_owner_xor', () => {
+  it('accepts an org-owned App (org set, owner NULL) — the existing shape', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'xor-org-1', urn: 'xor-org-1' },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'org-app', urn: `${org.urn}:org-app`, organizationId: org.id },
+    });
+    expect(app.ownerUserId).toBeNull();
+  });
+
+  it('accepts a user-owned App (owner set, org NULL)', async () => {
+    const user = await db.user.create({ data: { githubId: 88010 } });
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'user-app', urn: `@u:user-app`, ownerUserId: user.id },
+    });
+    expect(app.organizationId).toBeNull();
+    expect(app.ownerUserId).toBe(user.id);
+  });
+
+  it('rejects an App with BOTH an org and a user owner', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'xor-org-2', urn: 'xor-org-2' },
+    });
+    const user = await db.user.create({ data: { githubId: 88011 } });
+    await expect(
+      db.app.create({
+        data: {
+          id: generateId(),
+          name: 'both',
+          urn: `${org.urn}:both`,
+          organizationId: org.id,
+          ownerUserId: user.id,
+        },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('rejects an App with NEITHER an org nor a user owner', async () => {
+    await expect(
+      db.app.create({ data: { id: generateId(), name: 'orphan', urn: `@x:orphan` } }),
+    ).rejects.toThrow();
+  });
+
+  it('rejects a Memory with both org and user owner (chk_memory_owner_xor)', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'xor-org-3', urn: 'xor-org-3' },
+    });
+    const user = await db.user.create({ data: { githubId: 88012 } });
+    await expect(
+      db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: org.id,
+          ownerUserId: user.id,
+          urn: `${org.urn}:xor-mem`,
+          name: 'xor-mem',
+          class: 'knowledge',
+          visibility: 'ORGANIZATION',
+        },
+      }),
+    ).rejects.toThrow();
+  });
+});

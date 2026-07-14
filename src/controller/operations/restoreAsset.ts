@@ -48,6 +48,10 @@ export async function restoreAsset(
   if (!asset.memory) {
     throw new AssetUploadError('NOT_FOUND', 'asset has no memory to restore to');
   }
+  if (!asset.memory.organizationId) {
+    // isAdminFor is an org-admin check — not yet modeled for a user-owned memory.
+    throw new AssetUploadError('NOT_FOUND', 'asset restore is not supported for a user-owned memory yet');
+  }
   if (!asset.deletedAt) {
     throw new AssetUploadError('ASSET_NOT_DELETED', 'asset is not soft-deleted');
   }

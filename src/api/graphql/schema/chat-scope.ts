@@ -138,7 +138,7 @@ export async function findOrCreateAppClassMemory(args: {
    *  colon segment. */
   agentUrn: string;
   agentName: string;
-  organizationId: string;
+  organizationId: string | null;
   actingUserId: string;
   db: PrismaClient;
 }): Promise<string> {
