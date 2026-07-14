@@ -1208,7 +1208,12 @@ export const nodeMutations = {
 
     deleteNode: async (
       _: unknown,
-      { nodeRef, hard }: { nodeRef: string; hard?: boolean | null },
+      { nodeRef, hard, recursive, cascadeCrossMemoryEdges }: {
+        nodeRef: string;
+        hard?: boolean | null;
+        recursive?: boolean | null;
+        cascadeCrossMemoryEdges?: boolean | null;
+      },
       ctx: Context,
     ) => {
       // #542 — a single 'nodeRef' (ID or fully-qualified URN) identifies the
@@ -1231,29 +1236,129 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUnique({
         where: { id: resolvedId },
-        select: { memoryId: true },
+        select: { memoryId: true, loc: true, deletedAt: true },
       });
       if (!node) {
         throw new GraphQLError(`Node not found: "${nodeRef}"`, {
           extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
         });
       }
+      // One check covers the subtree too: every descendant shares this memory.
       await requireMemoryWriteAccess(ctx, node.memoryId);
+
+      // Idempotent no-op: a non-recursive soft re-delete of an already-tombstoned
+      // node preserves its original deletedAt/deletedBy (matches the
+      // hadron_delete_node MCP tool) instead of re-stamping it.
+      if (!recursive && !hard && node.deletedAt !== null) return true;
+
+      const deletedBy = ctx.userId ?? ctx.appId ?? ctx.clientId ?? null;
+      const now = new Date();
+      const memoryId = node.memoryId;
+      // The node at its loc PLUS every descendant, on ':' path boundaries (so
+      // 'auth' won't catch 'authoring') — the same subtree shape as
+      // extractParentNode / the bulk node ops.
+      const subtree: Prisma.NodeWhereInput = {
+        memoryId,
+        OR: [{ loc: node.loc }, { loc: { startsWith: `${node.loc}:` } }],
+      };
       try {
-        if (hard) {
-          // Irreversible row delete; edges + NodeRevision cascade via FK.
-          await ctx.db.node.delete({ where: { id: resolvedId } });
-        } else {
-          // #391: soft-delete by default, mirroring the hadron_delete_node MCP
-          // tool — set deletedAt/deletedBy so the node drops out of every read
-          // (nodes/nodeById/node/resolveUrn) but stays recoverable. Attribute to
-          // the app for app-key callers (userId/clientId unset), then clientId.
-          await ctx.db.node.update({
-            where: { id: resolvedId },
-            data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null },
-          });
-        }
+        // The count and the delete run in one transaction (parity with
+        // hadron_delete_node). NOTE: default READ COMMITTED isolation, so a
+        // descendant concurrently inserted after the count can still commit —
+        // the same guarantee the MCP tool has; hardening both to SERIALIZABLE
+        // is a follow-up.
+        await ctx.db.$transaction(async (tx) => {
+          const useSubtree = !!recursive;
+          if (!useSubtree) {
+            // Non-recursive: refuse rather than silently orphan a subtree under a
+            // now-missing prefix. Hard counts the union (a tombstoned descendant
+            // still cascades via FK); soft counts only live descendants.
+            const descendantCount = await tx.node.count({
+              where: {
+                memoryId,
+                loc: { startsWith: `${node.loc}:` },
+                ...(hard ? {} : { deletedAt: null }),
+              },
+            });
+            if (descendantCount > 0) {
+              throw new GraphQLError(
+                `Node "${nodeRef}" has ${descendantCount} descendant(s). Pass recursive: true to delete the whole subtree.`,
+                { extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount, ref: nodeRef } },
+              );
+            }
+          }
+
+          if (hard) {
+            // Resolve the affected ids for the cross-memory edge gate +
+            // PendingEdge cleanup — the safeguards hadron_delete_node applies.
+            const affectedIds = useSubtree
+              ? (await tx.node.findMany({ where: subtree, select: { id: true } })).map((n) => n.id)
+              : [resolvedId];
+
+            // A hard delete cascades Edge rows on BOTH endpoints via FK. If an
+            // edge bridges this memory to another, cascading silently removes it
+            // from a memory the caller may not own — refuse unless acknowledged.
+            if (!cascadeCrossMemoryEdges) {
+              const crossMemEdges = await tx.edge.count({
+                where: {
+                  OR: [
+                    { targetId: { in: affectedIds }, source: { memoryId: { not: memoryId } } },
+                    { sourceId: { in: affectedIds }, target: { memoryId: { not: memoryId } } },
+                  ],
+                },
+              });
+              if (crossMemEdges > 0) {
+                throw new GraphQLError(
+                  `Hard-delete refused: ${crossMemEdges} edge(s) bridge this memory to another. ` +
+                    `Pass cascadeCrossMemoryEdges: true to remove them (the other memory's view loses them).`,
+                  { extensions: { code: 'CROSS_MEMORY_EDGES', count: crossMemEdges } },
+                );
+              }
+            }
+            // PendingEdge.targetId is intentionally NOT a foreign key, so the FK
+            // cascade misses pending rows aimed at the deleted nodes — clean them
+            // up explicitly (PR-189 pattern).
+            await tx.pendingEdge.deleteMany({ where: { targetId: { in: affectedIds } } });
+
+            if (useSubtree) {
+              await tx.node.deleteMany({ where: subtree });
+            } else {
+              // Scope the write to the authorized memory: if the node was moved
+              // to another memory between the access check and here, this yields
+              // 0 rows → NODE_NOT_FOUND rather than a cross-memory write (TOCTOU).
+              const res = await tx.node.deleteMany({ where: { id: resolvedId, memoryId } });
+              if (res.count === 0) {
+                throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+                  extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+                });
+              }
+            }
+          } else if (useSubtree) {
+            // Soft-delete the whole subtree; only touch live rows so an
+            // already-deleted node keeps its original audit stamp (idempotent).
+            await tx.node.updateMany({
+              where: { ...subtree, deletedAt: null },
+              data: { deletedAt: now, deletedBy },
+            });
+          } else {
+            // #391: soft-delete — set deletedAt/deletedBy so the node drops out of
+            // every read (nodes/nodeById/node/resolveUrn) but stays recoverable.
+            // Scoped to the authorized memory (TOCTOU, as above); the already-
+            // deleted case was handled by the early no-op above, so 0 rows here
+            // means the node moved → NODE_NOT_FOUND.
+            const res = await tx.node.updateMany({
+              where: { id: resolvedId, memoryId, deletedAt: null },
+              data: { deletedAt: now, deletedBy },
+            });
+            if (res.count === 0) {
+              throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+                extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+              });
+            }
+          }
+        });
       } catch (e) {
+        if (e instanceof GraphQLError) throw e; // typed NODE_HAS_DESCENDANTS
         // Prisma P2025 = record not found — wrap so a missing node surfaces a
         // typed NODE_NOT_FOUND instead of leaking as INTERNAL_SERVER_ERROR
         // (mirrors moveNode; issue #100).
