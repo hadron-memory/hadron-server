@@ -37,6 +37,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.mcpServer.deleteMany();
   // hadrontool-home-assistant registry (FKs org only).
   await db.homeAssistantInstance.deleteMany();
+  // hadrontool-resend BYO sender registry (FKs org only).
+  await db.resendSender.deleteMany();
   // Spec 040 — headless-run tables (no FKs between them; order-free).
   await db.appRun.deleteMany();
   await db.agentSchedule.deleteMany();

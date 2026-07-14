@@ -613,8 +613,13 @@ export const appRunMutations = {
   ) => {
     const { id: organizationId } = await resolveOrgRef(ctx.db, input.orgRef);
     await requireOrgRole(ctx, organizationId, 'ADMIN');
-    if (input.action !== 'run.execute' && input.action !== 'llm.tokens' && input.action !== 'sms.send') {
-      throw new GraphQLError('action must be run.execute, llm.tokens, or sms.send.', {
+    if (
+      input.action !== 'run.execute' &&
+      input.action !== 'llm.tokens' &&
+      input.action !== 'sms.send' &&
+      input.action !== 'email.send'
+    ) {
+      throw new GraphQLError('action must be run.execute, llm.tokens, sms.send, or email.send.', {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }

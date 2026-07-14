@@ -1626,6 +1626,26 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  "One org-owned BYO Resend sender. The API key is encrypted and write-only."
+  type ResendSender {
+    id: ID!
+    organizationId: String!
+    "Fixed sender identity, e.g. Hadron Agent <agent@example.com>; Resend enforces verification."
+    from: String!
+    "Whether an encrypted API key is stored; the key is never returned."
+    hasApiKey: Boolean!
+    enabled: Boolean!
+    createdAt: String!
+    createdBy: String
+    updatedAt: String!
+    updatedBy: String
+  }
+
+  type ResendSendersPage {
+    items: [ResendSender!]!
+    total: Int!
+  }
+
   # One op of the CLOSED Home Assistant op catalog, as admitted by a
   # registry row's allowlist — what this query returns IS what a run can
   # declare in data.tools. The catalog is static (no upstream round-trip).
@@ -2225,7 +2245,7 @@ export const typeDefs = `#graphql
     "app or org."
     scopeKind: String!
     scopeId: String!
-    "run.execute, llm.tokens, or sms.send."
+    "run.execute, llm.tokens, sms.send, or email.send."
     action: String!
     "Window kind (day). The row rolls in place at UTC midnight - used resets, limit persists."
     window: String!
@@ -2239,7 +2259,7 @@ export const typeDefs = `#graphql
     orgRef: String!
     "Optional app scope - ref: PK or URN; must belong to the org. Omit to set the org-level limit."
     appRef: String
-    "run.execute, llm.tokens, or sms.send."
+    "run.execute, llm.tokens, sms.send, or email.send."
     action: String!
     "Non-negative integer; 0 pauses the scope (every launch denies QUOTA_EXCEEDED)."
     limit: Int!
@@ -3072,6 +3092,12 @@ export const typeDefs = `#graphql
     200; limit: 0 -> count only.
     """
     homeAssistantInstances(orgId: ID, limit: Int, offset: Int): HomeAssistantInstancesPage!
+
+    "Fetch one sanitized BYO Resend sender config; null for missing or inaccessible."
+    resendSender(ref: ID!): ResendSender
+
+    "Uniform paginated BYO Resend sender list scoped to the caller's member orgs."
+    resendSenders(orgId: ID, limit: Int, offset: Int): ResendSendersPage!
 
     """
     The ops one registered instance exposes (the closed catalog filtered
@@ -4129,6 +4155,15 @@ export const typeDefs = `#graphql
 
     "Hard-delete a registered Home Assistant instance (org ADMIN/OWNER); runs referencing its ops fail loud afterwards."
     deleteHomeAssistantInstance(ref: ID!): Boolean!
+
+    "Register one BYO Resend sender for an org. The API key is encrypted and never returned."
+    createResendSender(orgRef: ID!, from: String!, apiKey: String!, enabled: Boolean): ResendSender!
+
+    "Update the fixed sender, replace its write-only API key, or enable/disable it."
+    updateResendSender(ref: ID!, from: String, apiKey: String, enabled: Boolean): ResendSender!
+
+    "Hard-delete an org's BYO Resend sender."
+    deleteResendSender(ref: ID!): Boolean!
     exchangeReply(connectionId: ID!, messageId: ID!, body: String!): Boolean!
     exchangeMoveMessage(connectionId: ID!, messageId: ID!, folderId: String!): Boolean!
 

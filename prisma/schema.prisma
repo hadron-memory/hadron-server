@@ -473,6 +473,7 @@ model Organization {
   slackConnections    SlackConnection[]
   mcpServers          McpServer[]
   homeAssistantInstances HomeAssistantInstance[]
+  resendSender        ResendSender?
   // 046-usage-metering: billing back-relations.
   usageEvents         UsageEvent[]
   creditLedgerEntries CreditLedgerEntry[]
@@ -2156,6 +2157,30 @@ model HomeAssistantInstance {
 
   @@unique([organizationId, slug], map: "home_assistant_instances_org_slug_uniq")
   @@map("home_assistant_instances")
+}
+
+/// One BYO Resend sender for an organization. Core owns and encrypts the API
+/// key; the stateless hadrontool-resend sidecar receives it only for an
+/// already-authorized send. One sender per org keeps credential selection
+/// deterministic and outside model control.
+model ResendSender {
+  id              String  @id @default(cuid())
+  organizationId  String  @unique(map: "resend_senders_organization_id_uniq") @map("organization_id")
+  /// Fixed sender identity accepted by Resend, e.g.
+  /// `Hadron Agent <agent@example.com>`. Not secret.
+  fromAddress     String  @map("from_address")
+  /// AES-256-GCM-encrypted Resend sending-access API key
+  /// (src/lib/tokenCrypto.ts). WRITE-ONLY on the API surface.
+  apiKeyEncrypted String  @map("api_key_encrypted")
+  enabled         Boolean @default(true)
+  createdAt       DateTime @default(now()) @map("created_at")
+  createdBy       String? @map("created_by")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  updatedBy       String? @map("updated_by")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("resend_senders")
 }
 
 /// Pre-launch waitlist signup capture from the marketing site. Holds
