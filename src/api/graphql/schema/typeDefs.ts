@@ -3931,6 +3931,13 @@ export const typeDefs = `#graphql
     createAgentOrgGrant(agentRef: ID!, orgRef: ID!): AgentOrgGrant!
 
     """
+    Revoke an organization's Agent subscription without deleting install state.
+
+    Accepts the entity's ID or URN.
+    """
+    revokeAgentOrgGrant(agentRef: ID!, orgRef: ID!): AgentOrgGrant!
+
+    """
     Update a cross-org Memory subscription.
 
     Accepts the entity's ID or URN.
