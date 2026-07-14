@@ -36,7 +36,7 @@ import { resolvers } from './api/graphql/schema/resolvers.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError, UrnParseError } from './lib/urn.js';
-import { normalizeHandleOrNull } from './lib/userHandle.js';
+import { generateUniqueHandle } from './lib/userHandle.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
@@ -249,6 +249,12 @@ export async function createServer(): Promise<Express> {
       const existing = await db.user.findUnique({
         where: { githubUsername: ghUser.login },
       });
+      // Handle is NOT NULL (spec 047): a NEW GitHub user gets a legal,
+      // currently-free handle seeded from the login then the display name.
+      // Only generated on the create path (returning logins skip the probe).
+      const ghHandle = existing
+        ? null
+        : await generateUniqueHandle(db, { seeds: [ghUser.login, ghUser.name] });
       const user = existing
         ? await db.user.update({
             where: { id: existing.id },
@@ -263,9 +269,7 @@ export async function createServer(): Promise<Express> {
             create: {
               githubId: ghUser.id,
               githubUsername: ghUser.login,
-              // Lowercase-canonical, URN-legal handle (#325); a GitHub login that
-              // isn't URN-legal drops to null rather than blocking signup.
-              handle: normalizeHandleOrNull(ghUser.login),
+              handle: ghHandle!,
               identityProvider: 'GITHUB',
               name: ghUser.name,
               avatarUrl: ghUser.avatar_url,
