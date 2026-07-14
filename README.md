@@ -61,6 +61,8 @@ pnpm run db:use-pg
 | `FRONTEND_URL` | `http://localhost:5173` | hadron-web URL (OAuth redirect, CORS) |
 | `GITHUB_CLIENT_ID` | — | GitHub OAuth app client ID |
 | `GITHUB_CLIENT_SECRET` | — | GitHub OAuth app client secret |
+| `GOOGLE_CLIENT_ID` | — | Login-only Google OAuth web client ID |
+| `GOOGLE_CLIENT_SECRET` | — | Login-only Google OAuth web client secret |
 | `GITHUB_WEBHOOK_SECRET` | — | GitHub App webhook verification secret |
 | `RESEND_API_KEY` | — | Resend API key for magic-link emails |
 | `EMAIL_FROM` | `Hadron <noreply@hadrongraph.io>` | Sender address for emails |
@@ -101,9 +103,10 @@ Two token types are accepted via `Authorization: Bearer <token>`:
 - **JWT** (contains dots) — issued after GitHub OAuth or email magic-link login; carries `sub`, `roles`, and provider-specific claims.
 - **API key** (hex string) — created via the GraphQL API with a bcrypt-hashed key.
 
-Two identity providers are supported:
+Three identity providers are supported:
 
 - **GitHub OAuth** — `GET /auth/github` starts the flow; user is redirected back with a JWT.
+- **Google OAuth** — `GET /auth/google` starts the login-only OIDC flow when configured.
 - **Email magic link** — `POST /auth/email` sends a sign-in link via Resend; clicking it verifies the email and issues a JWT.
 
 Roles: `OWNER` > `ADMIN` > `CONTRIBUTOR` > `READER`.
@@ -127,6 +130,15 @@ Hadron integrates with GitHub in two ways: **OAuth** for user authentication and
 Users log in via the standard GitHub OAuth flow (`/auth/github` → GitHub → `/auth/github/callback`). On first login, a User record is created and linked to the user's GitHub login. A JWT is issued for subsequent API calls.
 
 Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` from a GitHub OAuth App.
+
+### Google OAuth (user login)
+
+Google login is enabled when `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are
+set. Create a **Web application** OAuth client in a login-only Google Cloud
+project and register `${BASE_URL}/auth/google/callback` as an exact authorized
+redirect URI (plus `http://localhost:4000/auth/google/callback` for local
+development). The client requests only `openid email profile`; do not add Gmail
+scopes or reuse the Gmail mailbox-integration project.
 
 ### GitHub App (graph sync)
 
@@ -201,6 +213,8 @@ and adds the graph to their default bundle).
 | `POST /reload` | — | Re-sync all graphs from GitHub |
 | `GET /auth/github` | — | Start GitHub OAuth flow |
 | `GET /auth/github/callback` | — | OAuth callback |
+| `GET /auth/google` | — | Start Google OIDC login flow |
+| `GET /auth/google/callback` | — | Google OIDC callback |
 | `POST /auth/email` | — | Send magic-link email |
 | `GET /auth/email/verify` | — | Verify magic link and issue JWT |
 | `GET /auth/me` | Bearer | Current user info |
