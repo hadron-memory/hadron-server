@@ -18,11 +18,13 @@ import {
   MissingGrantError,
   PositionConflictError,
 } from '../../../controller/operations/publishAgentImport.js';
+import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { generateId } from '../../../lib/id.js';
+import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import {
@@ -285,6 +287,53 @@ export const agentMutations = {
           .catch((err) => console.warn('[deleteAgent] system memory cleanup failed:', err));
       }
       return true;
+    },
+
+    createAgentOrgGrant: async (
+      _: unknown,
+      { agentRef, orgRef }: { agentRef: string; orgRef: string },
+      ctx: Context,
+    ) => {
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
+      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      if (agent.organizationId === resolvedOrgId) {
+        throw new GraphQLError(
+          'Owner organization has implicit authority for its own Agent and cannot subscribe.',
+          { extensions: { code: 'SELF_AGENT_ORG_GRANT' } },
+        );
+      }
+      if (agent.visibility !== 'PUBLIC') {
+        throw new GraphQLError('Only PUBLIC agents can be subscribed to by other organizations.', {
+          extensions: { code: 'AGENT_NOT_PUBLIC', agentId: resolvedAgentId },
+        });
+      }
+
+      await ensureAgentOrgGrant(ctx.db, resolvedOrgId, resolvedAgentId, {
+        createdBy: ctx.userId ?? ctx.clientId ?? null,
+      });
+
+      const grant = await ctx.db.agentOrgGrant.findUniqueOrThrow({
+        where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
+      });
+      if (!isLifecycleActive(grant)) {
+        throw new GraphQLError(
+          'An AgentOrgGrant already exists for this organization and Agent, but it is not active. Ask the Agent owner to issue a new grant or clear the revocation.',
+          {
+            extensions: {
+              code: 'AGENT_ORG_GRANT_INACTIVE',
+              orgId: resolvedOrgId,
+              agentId: resolvedAgentId,
+              revokedAt: grant.revokedAt?.toISOString() ?? null,
+              expiresAt: grant.expiresAt?.toISOString() ?? null,
+              activatedAt: grant.activatedAt?.toISOString() ?? null,
+            },
+          },
+        );
+      }
+      return grant;
     },
 
     publishAgentImport: async (
@@ -580,4 +629,3 @@ export const agentMutations = {
     // ── Chatbot revisions ─────────────────────────────────────────────
 
 };
-

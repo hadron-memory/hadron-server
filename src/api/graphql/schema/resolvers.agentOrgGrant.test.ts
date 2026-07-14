@@ -1,0 +1,250 @@
+/**
+ * Integration tests for Mutation.createAgentOrgGrant (#649).
+ *
+ * The mutation is the explicit marketplace "subscribe organization to Agent"
+ * step: it creates an AgentOrgGrant without also installing an App.
+ */
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { buildSchema, isNonNullType } from 'graphql';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
+
+const M = resolvers.Mutation as any;
+
+let ownerOrg: { id: string; urn: string };
+let subscriberOrg: { id: string; urn: string };
+let publicAgent: { id: string; urn: string };
+let privateAgent: { id: string; urn: string };
+let subscriberAdmin: { id: string };
+let subscriberOwner: { id: string };
+let subscriberContributor: { id: string };
+let subscriberReader: { id: string };
+
+function ctx(userId?: string): Context {
+  return { db, userId, roles: ['READER'] };
+}
+
+beforeEach(async () => {
+  await cleanDb(db);
+
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+  ownerOrg = await db.organization.create({
+    data: { id: generateId(), name: 'grant-owner', urn: `grant-owner-${suffix}` },
+  });
+  subscriberOrg = await db.organization.create({
+    data: { id: generateId(), name: 'grant-subscriber', urn: `grant-subscriber-${suffix}` },
+  });
+
+  subscriberAdmin = await db.user.create({
+    data: { id: generateId(), githubId: 64901, githubUsername: `grant-admin-${suffix}`, roles: ['READER'] },
+  });
+  subscriberOwner = await db.user.create({
+    data: { id: generateId(), githubId: 64902, githubUsername: `grant-owner-${suffix}`, roles: ['READER'] },
+  });
+  subscriberReader = await db.user.create({
+    data: { id: generateId(), githubId: 64903, githubUsername: `grant-reader-${suffix}`, roles: ['READER'] },
+  });
+  subscriberContributor = await db.user.create({
+    data: { id: generateId(), githubId: 64905, githubUsername: `grant-contrib-${suffix}`, roles: ['READER'] },
+  });
+
+  await db.orgMember.create({
+    data: { id: generateId(), organizationId: subscriberOrg.id, userId: subscriberAdmin.id, role: 'ADMIN' },
+  });
+  await db.orgMember.create({
+    data: { id: generateId(), organizationId: subscriberOrg.id, userId: subscriberOwner.id, role: 'OWNER' },
+  });
+  await db.orgMember.create({
+    data: { id: generateId(), organizationId: subscriberOrg.id, userId: subscriberReader.id, role: 'READER' },
+  });
+  await db.orgMember.create({
+    data: { id: generateId(), organizationId: subscriberOrg.id, userId: subscriberContributor.id, role: 'CONTRIBUTOR' },
+  });
+
+  publicAgent = await db.agent.create({
+    data: {
+      id: generateId(),
+      organizationId: ownerOrg.id,
+      urn: `${ownerOrg.urn}:public-agent`,
+      name: 'Public Agent',
+      visibility: 'PUBLIC',
+    },
+  });
+  privateAgent = await db.agent.create({
+    data: {
+      id: generateId(),
+      organizationId: ownerOrg.id,
+      urn: `${ownerOrg.urn}:private-agent`,
+      name: 'Private Agent',
+      visibility: 'ORGANIZATION',
+    },
+  });
+});
+
+describe('Mutation.createAgentOrgGrant', () => {
+  it('is exposed in SDL with ref-style entity arguments', () => {
+    const field = buildSchema(typeDefs).getMutationType()?.getFields().createAgentOrgGrant;
+    expect(field).toBeDefined();
+    expect(field?.args.map((arg) => arg.name)).toEqual(['agentRef', 'orgRef']);
+    expect(field?.args.every((arg) => isNonNullType(arg.type))).toBe(true);
+  });
+
+  it('subscriber-org ADMIN can subscribe to a foreign PUBLIC Agent', async () => {
+    const grant = await M.createAgentOrgGrant(
+      null,
+      { agentRef: publicAgent.id, orgRef: subscriberOrg.id },
+      ctx(subscriberAdmin.id),
+    );
+
+    expect(grant.agentId).toBe(publicAgent.id);
+    expect(grant.orgId).toBe(subscriberOrg.id);
+    expect(grant.activatedAt).toBeInstanceOf(Date);
+    expect(grant.revokedAt).toBeNull();
+    expect(grant.createdBy).toBe(subscriberAdmin.id);
+  });
+
+  it('admits OWNER through the existing role hierarchy', async () => {
+    const grant = await M.createAgentOrgGrant(
+      null,
+      { agentRef: publicAgent.id, orgRef: subscriberOrg.id },
+      ctx(subscriberOwner.id),
+    );
+    expect(grant.agentId).toBe(publicAgent.id);
+  });
+
+  it('rejects CONTRIBUTOR, READER, and unauthenticated callers', async () => {
+    await expect(
+      M.createAgentOrgGrant(null, { agentRef: publicAgent.id, orgRef: subscriberOrg.id }, ctx(subscriberContributor.id)),
+    ).rejects.toThrow('Forbidden');
+
+    await expect(
+      M.createAgentOrgGrant(null, { agentRef: publicAgent.id, orgRef: subscriberOrg.id }, ctx(subscriberReader.id)),
+    ).rejects.toThrow('Forbidden');
+
+    await expect(
+      M.createAgentOrgGrant(null, { agentRef: publicAgent.id, orgRef: subscriberOrg.id }, ctx()),
+    ).rejects.toThrow('Forbidden');
+  });
+
+  it('rejects foreign non-public Agents', async () => {
+    await expect(
+      M.createAgentOrgGrant(null, { agentRef: privateAgent.id, orgRef: subscriberOrg.id }, ctx(subscriberAdmin.id)),
+    ).rejects.toMatchObject({
+      extensions: expect.objectContaining({ code: 'AGENT_NOT_PUBLIC' }),
+    });
+  });
+
+  it('rejects the owning org self-subscribe path', async () => {
+    const ownerAdmin = await db.user.create({
+      data: { id: generateId(), githubId: 64904, githubUsername: 'grant-owner-admin', roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: ownerOrg.id, userId: ownerAdmin.id, role: 'ADMIN' },
+    });
+
+    await expect(
+      M.createAgentOrgGrant(null, { agentRef: publicAgent.id, orgRef: ownerOrg.id }, ctx(ownerAdmin.id)),
+    ).rejects.toMatchObject({
+      extensions: expect.objectContaining({ code: 'SELF_AGENT_ORG_GRANT' }),
+    });
+  });
+
+  it('accepts bare URNs and prefixed URNs for both refs', async () => {
+    const byBareUrns = await M.createAgentOrgGrant(
+      null,
+      { agentRef: publicAgent.urn, orgRef: subscriberOrg.urn },
+      ctx(subscriberAdmin.id),
+    );
+    expect(byBareUrns.agentId).toBe(publicAgent.id);
+
+    await db.agentOrgGrant.delete({
+      where: { orgId_agentId: { orgId: subscriberOrg.id, agentId: publicAgent.id } },
+    });
+
+    const byLegacyPrefixes = await M.createAgentOrgGrant(
+      null,
+      { agentRef: `urn:agent:${publicAgent.urn}`, orgRef: `urn:org:${subscriberOrg.urn}` },
+      ctx(subscriberAdmin.id),
+    );
+    expect(byLegacyPrefixes.orgId).toBe(subscriberOrg.id);
+
+    await db.agentOrgGrant.delete({
+      where: { orgId_agentId: { orgId: subscriberOrg.id, agentId: publicAgent.id } },
+    });
+
+    const byCanonicalPrefixes = await M.createAgentOrgGrant(
+      null,
+      { agentRef: `hrn:agent:${publicAgent.urn}`, orgRef: `hrn:org:${subscriberOrg.urn}` },
+      ctx(subscriberAdmin.id),
+    );
+    expect(byCanonicalPrefixes.agentId).toBe(publicAgent.id);
+  });
+
+  it('duplicate concurrent requests produce one grant', async () => {
+    const grants = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        M.createAgentOrgGrant(null, { agentRef: publicAgent.id, orgRef: subscriberOrg.id }, ctx(subscriberAdmin.id)),
+      ),
+    );
+
+    expect(grants.every((g) => g.agentId === publicAgent.id && g.orgId === subscriberOrg.id)).toBe(true);
+    expect(await db.agentOrgGrant.count({
+      where: { orgId: subscriberOrg.id, agentId: publicAgent.id },
+    })).toBe(1);
+  });
+
+  it('does not silently reactivate a revoked grant', async () => {
+    const revokedAt = new Date('2026-07-01T00:00:00.000Z');
+    await db.agentOrgGrant.create({
+      data: {
+        orgId: subscriberOrg.id,
+        agentId: publicAgent.id,
+        activatedAt: new Date('2026-06-01T00:00:00.000Z'),
+        revokedAt,
+      },
+    });
+
+    await expect(
+      M.createAgentOrgGrant(null, { agentRef: publicAgent.id, orgRef: subscriberOrg.id }, ctx(subscriberAdmin.id)),
+    ).rejects.toMatchObject({
+      extensions: expect.objectContaining({ code: 'AGENT_ORG_GRANT_INACTIVE' }),
+    });
+
+    const stored = await db.agentOrgGrant.findUniqueOrThrow({
+      where: { orgId_agentId: { orgId: subscriberOrg.id, agentId: publicAgent.id } },
+    });
+    expect(stored.revokedAt?.toISOString()).toBe(revokedAt.toISOString());
+  });
+
+  it('creates no App, AppMember, AppKey, or AppAgent installation state', async () => {
+    await M.createAgentOrgGrant(
+      null,
+      { agentRef: publicAgent.id, orgRef: subscriberOrg.id },
+      ctx(subscriberAdmin.id),
+    );
+
+    expect(await db.app.count()).toBe(0);
+    expect(await db.appMember.count()).toBe(0);
+    expect(await db.appKey.count()).toBe(0);
+    expect(await db.appAgent.count()).toBe(0);
+  });
+
+  it('uses existing typed not-found behavior for unknown and deleted refs', async () => {
+    await expect(
+      M.createAgentOrgGrant(null, { agentRef: 'cnonexistentnonexistent12', orgRef: subscriberOrg.id }, ctx(subscriberAdmin.id)),
+    ).rejects.toThrow(/AGENT_NOT_FOUND/);
+
+    await db.agent.update({ where: { id: publicAgent.id }, data: { deletedAt: new Date() } });
+    await expect(
+      M.createAgentOrgGrant(null, { agentRef: publicAgent.id, orgRef: subscriberOrg.id }, ctx(subscriberAdmin.id)),
+    ).rejects.toThrow(/AGENT_NOT_FOUND/);
+
+    await expect(
+      M.createAgentOrgGrant(null, { agentRef: privateAgent.id, orgRef: 'no-such-org' }, ctx(subscriberAdmin.id)),
+    ).rejects.toThrow(/ORGANIZATION_NOT_FOUND/);
+  });
+});
