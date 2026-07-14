@@ -1,17 +1,22 @@
 import { defineConfig } from 'vitest/config';
+import { PARALLEL_DBS } from './src/test/dbWorkers.js';
 
 export default defineConfig({
   test: {
     globals: true,
     // Each test file runs in its own subprocess so the PrismaClient singleton
     // (created at module load time) is fresh per file and sees the env vars below.
-    // fileParallelism: false prevents concurrent DB access from parallel test files.
     // .claude/worktrees holds sibling agent worktrees — full repo copies whose
     // test files would otherwise be collected into THIS run (and race on the
     // shared hadron_test DB; see findings:parallel-vitest-shared-test-db).
     exclude: ['dist/**', 'node_modules/**', '.claude/**'],
     pool: 'forks',
-    fileParallelism: false,
+    // Parallel by default: perWorkerDb.ts points each worker at its own cloned
+    // DB (hadron_test_<VITEST_POOL_ID>), so files no longer race and can run
+    // concurrently at vitest's default fork concurrency (~cores-2).
+    // HADRON_TEST_PARALLEL=0 restores the old single-DB serial behavior.
+    fileParallelism: PARALLEL_DBS,
+    setupFiles: ['./src/test/perWorkerDb.ts'],
     // CHECK constraints declared in migrations don't survive `prisma db push`
     // (which is what tests use to set up a fresh schema). Apply them once
     // here, before any test file runs. Per spec 005-agent-subscription FR-014.

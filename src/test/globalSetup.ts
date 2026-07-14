@@ -11,10 +11,10 @@
  */
 
 import { Client } from 'pg';
+import { PARALLEL_DBS, baseTestDbUrl, baseDbName, maintenanceUrl } from './dbWorkers.js';
 
 export async function setup() {
-  const databaseUrl =
-    process.env.TEST_DATABASE_URL ?? 'postgresql://holger@localhost:5432/hadron_test';
+  const databaseUrl = baseTestDbUrl();
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
 
@@ -153,5 +153,55 @@ export async function setup() {
     CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
   `);
 
+  // The base DB above is now the fully-provisioned TEMPLATE. Must be closed
+  // before it can be used as a CREATE DATABASE template (no open connections).
   await client.end();
+
+  if (!PARALLEL_DBS) return;
+
+  // Worker DBs are cloned from this template LAZILY, per worker (perWorkerDb.ts),
+  // because VITEST_POOL_ID isn't statically bounded. Nothing to create up front;
+  // just drop any leftover `hadron_test_<n>` clones from a prior run so a schema
+  // change to the template can't be masked by a stale clone.
+  const base = baseDbName();
+  const admin = new Client({ connectionString: maintenanceUrl() });
+  await admin.connect();
+  try {
+    // Pre-run cleanup fails LOUD (swallow: false): if a stale clone can't be
+    // dropped, perWorkerDb would see it exists, skip CREATE, and run the suite
+    // against an old schema — masking failures. Better to abort setup (Codex).
+    await dropWorkerDbs(admin, base, { swallow: false });
+  } finally {
+    await admin.end();
+  }
+
+  return async function teardown() {
+    const a = new Client({ connectionString: maintenanceUrl() });
+    await a.connect();
+    try {
+      // Post-run cleanup is best-effort (swallow: true) — a failure here can't
+      // affect correctness (the next run's setup drops loudly first).
+      await dropWorkerDbs(a, base, { swallow: true });
+    } finally {
+      await a.end();
+    }
+  };
+}
+
+/**
+ * Drop every `<base>_<digits>` worker clone. Matches by exact prefix + numeric
+ * suffix in JS (not a SQL regex) so a base name with regex metachars can never
+ * over-match and drop an unrelated database.
+ */
+async function dropWorkerDbs(admin: Client, base: string, opts: { swallow: boolean }): Promise<void> {
+  const prefix = `${base}_`;
+  const { rows } = await admin.query<{ datname: string }>('SELECT datname FROM pg_database');
+  const clones = rows.filter(
+    (r) => r.datname.startsWith(prefix) && /^[0-9]+$/.test(r.datname.slice(prefix.length)),
+  );
+  for (const { datname } of clones) {
+    const drop = admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`);
+    if (opts.swallow) await drop.catch(() => {});
+    else await drop;
+  }
 }
