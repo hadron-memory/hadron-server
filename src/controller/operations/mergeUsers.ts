@@ -85,6 +85,14 @@ export async function mergeUsers(
   db: PrismaClient,
   { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false }: MergeUsersArgs,
 ): Promise<User> {
+  // Defense-in-depth: the sole production caller (the mergeUsers resolver)
+  // already rejects source === target with MERGE_SOURCE_EQUALS_TARGET, but this
+  // operation is exported — guard here too so a direct or future caller can't
+  // clear every unique field and then tombstone a single account by merging it
+  // into itself.
+  if (sourceUserId === targetUserId) {
+    throw new Error('mergeUsers: source and target must be different users');
+  }
   return db.$transaction(async (tx) => {
     // Serialize two merges involving either account. Ref resolution happens
     // in the GraphQL layer, but the rows are rechecked after the lock so a
