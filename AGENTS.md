@@ -203,11 +203,15 @@ two-layer model without further setup:
   Enforced by `chk_personal_visibility_user` (the name predates 035 — it's now
   keyed on `class`, not a `visibility = 'PERSONAL'` value, which no longer
   exists). Set the owner whenever creating a personal/private memory.
-- **Memory app_id invariant** (008, relaxed by 034): `app_id` is REQUIRED for
-  `class='app'`, FORBIDDEN for `system`/`knowledge`/`group`, and OPTIONAL for
-  `personal`/`private` — set when provisioned inside an App (the
-  `(app_id, user_id)` scope), NULL when **free-standing** (user-owned, created
-  via the CLI or Cowork outside any App). Enforced by `chk_memory_class_app_id`.
+- **Memory app_id invariant** (008, relaxed by 034 and #653): `app_id` is
+  REQUIRED for `class='app'`, FORBIDDEN for `class='system'`, and OPTIONAL for
+  `knowledge`/`group`/`personal`/`private` — set when provisioned inside an App
+  (e.g. the `(app_id, user_id)` scope for personal), NULL when **free-standing**
+  (created via the CLI or Cowork outside any App). #653 moved `knowledge` +
+  `group` from forbidden to optional so those shared classes can attach to an
+  App; an app-scoped knowledge/group row is App-internal (excluded from every
+  org-wide read/write grant — `getOrgReadableMemoryIds`, `requireMemoryWriteAccess`).
+  Enforced by `chk_memory_class_app_id`.
   The agent (`user_memory_of_agent_id`) is required for personal/private only
   when `app_id` is set (`chk_memory_personal_agent_id`). **MCP gate:**
   `canReadMemory` / `canWriteToMemory` treat a free-standing row (app_id + agent

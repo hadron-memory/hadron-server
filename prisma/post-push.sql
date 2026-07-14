@@ -20,18 +20,20 @@ ALTER TABLE memories
   ADD CONSTRAINT chk_personal_visibility_user
   CHECK ((class IN ('personal', 'private')) = (user_id IS NOT NULL));
 
--- 008-agent-installation, relaxed by 034-memory-class-access: app_id is
--- REQUIRED only for class='app'; FORBIDDEN for system/knowledge/group;
--- OPTIONAL for personal/private (set when provisioned inside an app — the
--- (app, user) scope; NULL when free-standing / user-owned).
+-- 008-agent-installation, relaxed by 034-memory-class-access and #653: app_id
+-- is REQUIRED for class='app'; FORBIDDEN for class='system' (an agent's own
+-- definition is never app-scoped); OPTIONAL for knowledge/group/personal/private
+-- (set when provisioned inside an app — the (app, user) scope for personal;
+-- NULL when free-standing). #653 moved knowledge + group from FORBIDDEN to
+-- OPTIONAL so those shared memory classes can be attached to an App.
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_class_app_id;
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_class_app_id
   CHECK (
     (class = 'app' AND app_id IS NOT NULL)
-    OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
-    OR (class IN ('personal', 'private'))
+    OR (class = 'system' AND app_id IS NULL)
+    OR (class IN ('knowledge', 'group', 'personal', 'private'))
   );
 
 -- 023-app-shape FR-024: bidirectional invariant — class='group' ⇔

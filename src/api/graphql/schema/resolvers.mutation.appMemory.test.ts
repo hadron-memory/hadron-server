@@ -15,6 +15,9 @@ import {
 } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
+import { getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { requireMemoryWriteAccess, getAccessibleMemoryIds } from './resolvers.helpers.js';
 
 // Prevent git writes (createMemoryInApp creates a root node).
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -113,6 +116,36 @@ describe('createMemoryInApp', () => {
     expect(mem.userMemoryOfAgentId).toBe(agent.id);
   });
 
+  // #653: app-scoped knowledge — shared reference content for the App.
+  it('creates an app-scoped knowledge memory for an org ADMIN, linked to the agent', async () => {
+    const mem = await createMemoryInApp(
+      null,
+      { appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'App docs' },
+      asUser(adminUser.id),
+    );
+    expect(mem.class).toBe('knowledge');
+    expect(mem.appId).toBe(app.id);
+    expect(mem.userId).toBeNull();
+    expect(mem.userMemoryOfAgentId).toBeNull();
+    expect(mem.visibility).toBe('ORGANIZATION');
+    expect(mem.urn).toBe(`${app.urn}:coach:app-mem:app-docs`);
+    // Linked to the App's agent so it is readable via the App surface.
+    const link = await db.agentMemoryItem.findUnique({
+      where: { agentId_memoryId: { agentId: agent.id, memoryId: mem.id } },
+    });
+    expect(link?.role).toBe('read');
+  });
+
+  it('rejects app-scoped knowledge create by a non-admin App member', async () => {
+    await expect(
+      createMemoryInApp(
+        null,
+        { appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'docs' },
+        asUser(memberUser.id), // App member, but not an org ADMIN
+      ),
+    ).rejects.toThrow(/Forbidden/);
+  });
+
   it('rejects app-class create by a non-admin org member', async () => {
     // Downgrade adminUser's org role to READER for this check via a fresh reader.
     const reader = await db.user.create({ data: { githubId: 9, githubUsername: 'reader' } });
@@ -141,9 +174,11 @@ describe('createMemoryInApp', () => {
 
   it('rejects an unsupported class', async () => {
     await expect(
+      // 'group' is not yet wired through this path (#653 deferred it pending its
+      // App-vs-group-membership semantics); 'system' is never App-scopable.
       createMemoryInApp(
         null,
-        { appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'x' },
+        { appRef: app.id, agentRef: agent.id, memoryClass: 'group', name: 'x' },
         asUser(adminUser.id),
       ).catch((e) => {
         throw new Error(code(e));
@@ -199,6 +234,77 @@ describe('createMemoryInApp', () => {
         throw new Error(code(e));
       }),
     ).rejects.toThrow('UNAUTHENTICATED');
+  });
+});
+
+describe('#653 — app-scoped knowledge is App-internal (no org-wide leak)', () => {
+  let knowledgeId: string;
+  let knowledgeUrn: string;
+  let orgContributor: { id: string }; // org CONTRIBUTOR, NOT an App member
+
+  beforeEach(async () => {
+    const mem = await createMemoryInApp(
+      null,
+      { appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'App docs' },
+      asUser(adminUser.id),
+    );
+    knowledgeId = mem.id;
+    knowledgeUrn = mem.urn;
+    orgContributor = await db.user.create({ data: { githubId: 7, githubUsername: 'contrib' } });
+    await db.orgMember.create({
+      data: { organizationId: org.id, userId: orgContributor.id, role: 'CONTRIBUTOR' },
+    });
+  });
+
+  it('is NOT org-wide readable (getOrgReadableMemoryIds excludes it)', async () => {
+    const ids = await getOrgReadableMemoryIds(db, orgContributor.id);
+    expect(ids).not.toContain(knowledgeId);
+  });
+
+  it("is NOT in a non-App org member's accessible set (portal node gate)", async () => {
+    const ids = await getAccessibleMemoryIds(asUser(orgContributor.id));
+    expect(ids ?? []).not.toContain(knowledgeId);
+  });
+
+  it('IS readable via the App surface (getAppMemoryAccess → READ_ONLY)', async () => {
+    const access = await getAppMemoryAccess(db, app.id);
+    expect(access.get(knowledgeId)).toBe('READ_ONLY');
+  });
+
+  it('is NOT writable by a JWT org CONTRIBUTOR (requireMemoryWriteAccess)', async () => {
+    await expect(
+      requireMemoryWriteAccess(asUser(orgContributor.id), knowledgeId),
+    ).rejects.toThrow(/Forbidden/);
+  });
+
+  it('DOES stay writable by an org ADMIN (management bypass)', async () => {
+    await expect(
+      requireMemoryWriteAccess({ db, userId: adminUser.id, roles: ['ADMIN'] } as Context, knowledgeId),
+    ).resolves.toBeUndefined();
+  });
+
+  it('effectiveAccess does not over-report for a non-App org CONTRIBUTOR', async () => {
+    const effectiveAccess = resolvers.Query.effectiveAccess as (
+      _: unknown,
+      args: { user: string; resource: string },
+      ctx: Context,
+    ) => Promise<any>;
+    // Self-audit is ungated — the CONTRIBUTOR asks about their OWN access.
+    const res = await effectiveAccess(
+      null,
+      { user: orgContributor.id, resource: `hrn:memory:${knowledgeUrn}` },
+      asUser(orgContributor.id),
+    );
+    expect(res.canRead).toBe(false);
+    expect(res.canWrite).toBe(false);
+  });
+
+  it('stays App-internal even if set PUBLIC (unauthenticated read excludes it)', async () => {
+    await db.memory.update({ where: { id: knowledgeId }, data: { visibility: 'PUBLIC' } });
+    // Unauthenticated context → the public-only branch, which now excludes
+    // app-scoped rows.
+    const ids = await getAccessibleMemoryIds({ db, roles: [] } as Context);
+    expect(ids ?? []).not.toContain(knowledgeId);
   });
 });
 

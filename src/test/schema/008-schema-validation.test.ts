@@ -259,7 +259,8 @@ describe('008 schema — chk_memory_class_app_id', () => {
     expect(mem.userId).toBe(user.id);
   });
 
-  it('rejects class=knowledge with a non-NULL app_id', async () => {
+  // #653: knowledge + group memories may now be attached to an App (app_id set).
+  it('accepts class=knowledge and class=group with a non-NULL app_id (#653)', async () => {
     const org = await db.organization.create({
       data: { id: generateId(), name: 'chk-org-3', urn: 'chk-org-3' },
     });
@@ -275,14 +276,58 @@ describe('008 schema — chk_memory_class_app_id', () => {
         appAgents: { create: { agentId: agent.id } },
       },
     });
+    const knowledge = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:app-knowledge`,
+        name: 'app-knowledge',
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
+        appId: app.id,
+      },
+    });
+    expect(knowledge.appId).toBe(app.id);
+    const group = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:app-group`,
+        name: 'app-group',
+        class: 'group',
+        visibility: 'GROUP',
+        appId: app.id,
+      },
+    });
+    expect(group.appId).toBe(app.id);
+  });
+
+  // #653 boundary: class='system' stays app_id-forbidden (an agent's own
+  // definition is never app-scoped).
+  it('rejects class=system with a non-NULL app_id', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'chk-org-3b', urn: 'chk-org-3b' },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:a`, name: 'a' },
+    });
+    const app = await db.app.create({
+      data: {
+        id: generateId(),
+        name: 'chk-app-sys',
+        urn: `${org.urn}:chk-app-sys`,
+        organizationId: org.id,
+        appAgents: { create: { agentId: agent.id } },
+      },
+    });
     await expect(
       db.memory.create({
         data: {
           id: generateId(),
           organizationId: org.id,
-          urn: `${org.urn}:wrong-class`,
+          urn: `${org.urn}:wrong-system`,
           name: 'wrong',
-          class: 'knowledge',
+          class: 'system',
           appId: app.id,
         },
       }),

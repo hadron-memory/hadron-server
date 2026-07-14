@@ -223,6 +223,27 @@ subscription — no new work once the App is user-owned.
 
 ## Phases
 
+> **Slicing update (2026-07-13, discovered during Phase 2 slice 1).** The
+> original Phase 2 bundled the ownership columns *with* making `organizationId`
+> nullable. A blast-radius check showed nullable-org is **not** a standalone
+> additive migration: ~179 `.organizationId` reads + ~60 `.organization.`
+> accesses, most of them `requireOrgRole(ctx, x.organizationId, …)`, must become
+> owner-or-org branches — i.e. nullable-org is **coupled with the Phase 3
+> authz** work and ships with it. Also `Memory` already has a `userId`
+> strict-owner (`UserMemoriesOwned`), so `ownerUserId` is a **second** user FK
+> (tenant owner) needing distinct modeling. Re-sliced accordingly:
+> - **2a (PR #660):** the full #653 as an access-control unit — the
+>   `chk_memory_class_app_id` relaxation + `createMemoryInApp` knowledge path
+>   (org-ADMIN, linked to the App agent via `AgentMemoryItem`) + tightening the
+>   shared gates so an app-scoped knowledge/group row is never org/public/
+>   subscription readable or writable (`getOrgReadableMemoryIds`,
+>   `requireMemoryWriteAccess`, `ORG_INCLUDE`). **`group` deferred** pending its
+>   App-vs-group-membership semantics.
+> - **2b:** additive `ownerUserId` columns + relations (no XOR yet).
+> - **2c (= merges with Phase 3):** make `organizationId` nullable + XOR CHECK +
+>   the owner-or-org authz branches + `createAgent` user-owner + `@<handle>` URN
+>   composition, together (they can't be separated safely).
+
 1. **Handle NOT NULL + URN grammar.** Generate handle at user creation; Holger
    backfills prod; flip `User.handle` NOT NULL. Parser accepts `@<handle>`
    namespace for app/agent/memory (server + golden set); cross-repo parser

@@ -220,6 +220,9 @@ export const memoryQueries = {
           visibility: 'PUBLIC',
           deletedAt: null,
           userMemoryOfAgentId: null,
+          // #653: an app-scoped knowledge/group row is App-internal — never in
+          // the public "marketplace" slice, even if its visibility was set PUBLIC.
+          appId: null,
           ...classFilter,
           ...(scope.scopedOrgId ? { organizationId: scope.scopedOrgId } : {}),
         });

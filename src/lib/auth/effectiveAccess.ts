@@ -211,6 +211,14 @@ async function memoryGrants(
   // does not model; under-reporting a holding owner is the safe direction.
   const isHolding = memory.userMemoryOfAgentId !== null;
 
+  // #653: an app-scoped knowledge/group memory is App-internal — the ENFORCED
+  // gates (getOrgReadableMemoryIds / requireMemoryWriteAccess) exclude it from
+  // every org-role and PUBLIC grant, so this audit surface MUST too or it
+  // over-reports read/write the gate denies (the effectiveAccess-drift tell).
+  // ADMIN/OWNER keep access — they bypass those gates on the enforced side too.
+  const isAppScopedShared =
+    memory.appId !== null && (memory.class === 'knowledge' || memory.class === 'group');
+
   // Owning-org role. Mirrors the ENFORCED gates, not the (narrower) predicate:
   //   - ADMIN/OWNER → full: requireMemoryWriteAccess grants write,
   //     deleteMemory/cloneMemory grant manage/delete.
@@ -228,14 +236,18 @@ async function memoryGrants(
       via: await orgUrn(db, memory.organizationId),
       caps: FULL,
     });
-  } else if (memberRole === 'CONTRIBUTOR') {
+  } else if (memberRole === 'CONTRIBUTOR' && !isAppScopedShared) {
     grants.push({
       source: 'ORG_ROLE',
       role: memberRole,
       via: await orgUrn(db, memory.organizationId),
       caps: WRITE,
     });
-  } else if (memberRole === 'READER' && (memory.class === 'knowledge' || memory.class === 'group')) {
+  } else if (
+    memberRole === 'READER' &&
+    !isAppScopedShared &&
+    (memory.class === 'knowledge' || memory.class === 'group')
+  ) {
     grants.push({
       source: 'ORG_ROLE',
       role: memberRole,
@@ -244,8 +256,10 @@ async function memoryGrants(
     });
   }
 
-  // PUBLIC visibility → readable by anyone (but not a per-user holding).
-  if (memory.visibility === 'PUBLIC' && !isHolding) {
+  // PUBLIC visibility → readable by anyone (but not a per-user holding, and not
+  // an app-scoped knowledge/group row — #653: it's App-internal even if a
+  // visibility change set it PUBLIC).
+  if (memory.visibility === 'PUBLIC' && !isHolding && !isAppScopedShared) {
     grants.push({ source: 'PUBLIC_VISIBILITY', role: 'reader', via: null, caps: READ });
   }
 

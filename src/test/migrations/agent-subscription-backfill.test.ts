@@ -60,8 +60,8 @@ afterEach(async () => {
       ADD CONSTRAINT chk_memory_class_app_id
       CHECK (
         (class = 'app' AND app_id IS NOT NULL)
-        OR (class IN ('system', 'knowledge', 'group') AND app_id IS NULL)
-        OR (class IN ('personal', 'private'))
+        OR (class = 'system' AND app_id IS NULL)
+        OR (class IN ('knowledge', 'group', 'personal', 'private'))
       )
   `);
   await pgClient.end();
