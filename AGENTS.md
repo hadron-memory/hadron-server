@@ -34,6 +34,13 @@ When referring a human to a node, link `https://hadronmemory.com/app/u/<URN>`.
 
 Quick reference for AI agents working in this repo. Updated 2026-06-25.
 
+## PR publishing
+
+When opening pull requests for this repo, open them **ready for review** by
+default. Use a draft PR only when the human explicitly asks for a draft, when
+the work is intentionally incomplete, or when a known blocker is called out in
+the PR body.
+
 ## Production DB (alpha)
 
 Alpha is the prod host (Debian, Hetzner Oregon). Postgres runs **bare metal**;
