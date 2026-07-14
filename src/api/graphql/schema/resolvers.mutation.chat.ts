@@ -261,7 +261,7 @@ export const chatMutations = {
           // analogous to the migration's R-3 fallback for unattributed personal
           // memories.
           if (!agent.organizationId) {
-            throw new Error('Lazy per-user memory provisioning is not supported for a user-owned Agent yet');
+            throw new GraphQLError('Lazy per-user memory provisioning is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
           }
           const org = await ctx.db.organization.findUniqueOrThrow({
             where: { id: agent.organizationId }, select: { urn: true },

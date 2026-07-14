@@ -401,7 +401,7 @@ export const appMutations = {
       let newUrn: string | undefined;
       if (urn !== undefined) {
         if (!app.organizationId) {
-          throw new Error('Renaming via urn is not supported for user-owned Apps');
+          throw new GraphQLError('Renaming via urn is not supported for user-owned Apps.', { extensions: { code: 'BAD_USER_INPUT' } });
         }
         const org = await ctx.db.organization.findUniqueOrThrow({
           where: { id: app.organizationId }, select: { urn: true },

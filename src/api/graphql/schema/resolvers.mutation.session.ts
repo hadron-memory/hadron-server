@@ -146,7 +146,7 @@ export const sessionMutations = {
       // Agent's owning org (their URN is derived from the org's URN) — not
       // yet modeled for a user-owned Agent.
       if (!agent.organizationId) {
-        throw new Error('startAgentSession is not supported for a user-owned Agent yet');
+        throw new GraphQLError('startAgentSession is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
       }
 
       // SECRET mode requires a data key; USER_ID mode rejects it.

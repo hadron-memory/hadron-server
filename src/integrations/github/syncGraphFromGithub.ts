@@ -43,9 +43,11 @@ export const syncGraphFromGithub = async (
     const graphName = graph.urn;
 
     // spec 047: git sync is org-scoped (needs the org's GitHub App). A
-    // user-owned memory has no org, so there's nothing to sync.
+    // user-owned memory has no org — surface it as an error so an explicit
+    // syncMemory call gets a meaningful message rather than a silent no-op
+    // (startup's batch loop guards on `organization` before calling).
     if (!graph.organization) {
-      return {};
+      return { error: 'Memory has no organization (user-owned memories are not git-synced)' };
     }
     const organization = graph.organization;
 

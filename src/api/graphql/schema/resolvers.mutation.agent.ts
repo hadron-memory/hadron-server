@@ -166,7 +166,7 @@ export const agentMutations = {
       let newUrn: string | undefined;
       if (urn !== undefined) {
         if (!agent.organizationId) {
-          throw new Error('Renaming via urn is not supported for user-owned agents');
+          throw new GraphQLError('Renaming via urn is not supported for user-owned agents.', { extensions: { code: 'BAD_USER_INPUT' } });
         }
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: agent.organizationId }, select: { urn: true } });
         newUrn = `${org.urn}:${deriveSlugFromName(urn)}`; // #574: slugify the explicit rename slug
