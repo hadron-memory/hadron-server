@@ -288,6 +288,20 @@ describe('secret(ref) + secrets list', () => {
     });
   });
 
+  it('secret(ref) accepts an hrn:secret URN, not only a cuid (#683)', async () => {
+    const created = await createSecret(); // org-owned 'api-key' (org.urn = secret-org)
+    const byUrn = await resolvers.Query.secret(
+      {},
+      { ref: 'hrn:secret:secret-org::api-key' },
+      ctxFor(member.id),
+    );
+    expect(byUrn).toMatchObject({ id: created.id, ownerType: 'org', name: 'api-key' });
+    // A well-formed URN naming no secret is null (same as a missing cuid).
+    expect(
+      await resolvers.Query.secret({}, { ref: 'hrn:secret:secret-org::nope' }, ctxFor(member.id)),
+    ).toBeNull();
+  });
+
   it('secrets: per-owner page for the entitled, empty page for non-entitled (no disclosure)', async () => {
     await createSecret();
     await createSecret({ name: 'zeta-key' });

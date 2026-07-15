@@ -29,6 +29,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
+import { resolveSecretRef } from '../../../lib/entityRef/secretRef.js';
 import {
   decryptSecretValue,
   isSecretOwnerType,
@@ -60,6 +61,22 @@ function assertOwnerType(value: unknown): SecretOwnerType {
     throw badInput(`ownerType must be one of: ${SECRET_OWNER_TYPES.join(', ')}.`);
   }
   return value;
+}
+
+/**
+ * Resolve a secret ref — a cuid id OR an `hrn:secret:…` URN (#683) — to its
+ * full row, or null when it is malformed / names an absent owner or secret.
+ * Keeps the no-existence-disclosure posture: a bad URN and a missing secret
+ * are both `null` here, and the caller's entitlement gate then applies.
+ */
+async function findSecretByRef(ctx: Context, ref: string) {
+  let id: string;
+  try {
+    ({ id } = await resolveSecretRef(ctx.db, ref));
+  } catch {
+    return null;
+  }
+  return ctx.db.secret.findUnique({ where: { id } });
 }
 
 /**
@@ -216,7 +233,7 @@ export const secretMutations = {
    * only metadata changes, so the two halves can never drift apart.
    */
   updateSecret: async (_: unknown, args: UpdateSecretArgs, ctx: Context) => {
-    const secret = await ctx.db.secret.findUnique({ where: { id: args.ref } });
+    const secret = await findSecretByRef(ctx, args.ref);
     // Missing and not-visible answer identically (no existence disclosure);
     // a viewer without write authority gets Forbidden below.
     if (!secret || !(await canSeeSecretOwner(ctx, secret.ownerType as SecretOwnerType, secret.ownerId))) {
@@ -251,7 +268,7 @@ export const secretMutations = {
    * name — the cascade contract).
    */
   deleteSecret: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-    const secret = await ctx.db.secret.findUnique({ where: { id: ref } });
+    const secret = await findSecretByRef(ctx, ref);
     if (!secret || !(await canSeeSecretOwner(ctx, secret.ownerType as SecretOwnerType, secret.ownerId))) {
       throw new GraphQLError('Secret not found.', { extensions: { code: 'NOT_FOUND' } });
     }
@@ -267,7 +284,7 @@ export const secretQueries = {
    * not-entitled — indistinguishable by design.
    */
   secret: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-    const secret = await ctx.db.secret.findUnique({ where: { id: ref } });
+    const secret = await findSecretByRef(ctx, ref);
     if (!secret) return null;
     if (!(await canSeeSecretOwner(ctx, secret.ownerType as SecretOwnerType, secret.ownerId))) return null;
     return secret;
