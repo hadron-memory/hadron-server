@@ -13,7 +13,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createDbAgentImport, createDbAgentOrgGrant } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { getAppMemoryAccess } from '../../../mcp/access-control.js';
@@ -178,5 +178,40 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
     });
     const access = await getAppMemoryAccess(db, app.id);
     expect(access.has(foreignMem.id)).toBe(false);
+  });
+
+  it('includes a user-owned memory owned by the App owner', async () => {
+    const ownMem = await db.memory.create({
+      data: { id: generateId(), class: 'knowledge', name: 'own', urn: `@appowner:own-${generateId()}`, ownerUserId: ownerId },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), name: 'UO Agent', urn: `@appowner:uo-agent-${generateId()}`, ownerUserId: ownerId,
+        memoryItems: { create: [{ memoryId: ownMem.id, role: 'read' }] } },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'UO App', urn: `@appowner:uo-app-${generateId()}`, ownerUserId: ownerId,
+        appAgents: { create: { agentId: agent.id } } },
+    });
+    const access = await getAppMemoryAccess(db, app.id);
+    expect(access.get(ownMem.id)).toBe('READ_ONLY');
+  });
+});
+
+describe('createApp — personal-App dependency rejection leaves no orphan (codex #685)', () => {
+  it('rejects an agent with required deps BEFORE any write (no App, no subscription)', async () => {
+    // Give the public agent a required import so the personal path must reject.
+    const depAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Dep', urn: `dep-${generateId()}`, organizationId: pubOrgId, visibility: 'PUBLIC' },
+    });
+    await createDbAgentOrgGrant(db, pubOrgId, depAgent.id);
+    await createDbAgentImport(db, publicAgentId, depAgent.id, { required: true, position: 0 });
+    await expect(
+      resolvers.Mutation.createApp({}, { agentId: publicAgentId, name: 'Has Deps' }, ctx({ userId: ownerId, roles: ['READER'] })),
+    ).rejects.toThrow(/required dependencies/i);
+    // No orphan App and no subscription were written.
+    expect(await db.app.count({ where: { ownerUserId: ownerId } })).toBe(0);
+    expect(
+      await db.agentSubscription.count({ where: { userId: ownerId, agentId: publicAgentId } }),
+    ).toBe(0);
   });
 });

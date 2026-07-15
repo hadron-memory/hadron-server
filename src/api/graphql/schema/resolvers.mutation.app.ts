@@ -197,6 +197,25 @@ export const appMutations = {
             extensions: { code: 'ORGANIZATION_MISMATCH', agentId: resolvedAgentId },
           });
         }
+        // spec 047: cascade-install provisions each dependency as its own
+        // ORG-scoped App — unsupported for a personal App in v1. Reject BEFORE
+        // any write (subscription / App create) so a rejected call never leaves
+        // an orphan App + AppAgent behind (codex review, #685). Required deps
+        // always cascade; optional deps cascade when listed in installOptional —
+        // either means "has deps to install", which a personal App can't do yet.
+        const requiredDeps = await ctx.db.agentImport.count({
+          where: { parentAgentId: resolvedAgentId, required: true },
+        });
+        if (requiredDeps > 0) {
+          throw new GraphQLError('Installing an agent with required dependencies as a personal App is not supported yet.', {
+            extensions: { code: 'BAD_USER_INPUT', agentId: resolvedAgentId },
+          });
+        }
+        if (installOptional && installOptional.length > 0) {
+          throw new GraphQLError('Installing optional dependencies as a personal App is not supported yet.', {
+            extensions: { code: 'BAD_USER_INPUT', agentId: resolvedAgentId },
+          });
+        }
         // License the install with the owner's subscription (idempotent,
         // activates immediately in v1). Skipped for the owner's own agent —
         // ownership already licenses it.
@@ -280,20 +299,10 @@ export const appMutations = {
       // 009-install-agent-flow: the outer `if (resolvedAgentId)` guard is
       // dropped — agentId is always present post-009.
       // spec 047: cascade-install provisions each dependency as its own
-      // ORG-scoped App (it threads resolvedOrgId + org.urn). Personal Apps have
-      // no org, so cascade into a personal App isn't supported in v1 — if the
-      // installed agent declares required deps, fail clearly rather than
-      // silently dropping them.
-      if (!resolvedOrgId) {
-        const requiredDeps = await ctx.db.agentImport.count({
-          where: { parentAgentId: resolvedAgentId, required: true },
-        });
-        if (requiredDeps > 0) {
-          throw new GraphQLError('Installing an agent with required dependencies as a personal App is not supported yet.', {
-            extensions: { code: 'BAD_USER_INPUT', agentId: resolvedAgentId },
-          });
-        }
-      }
+      // ORG-scoped App (it threads resolvedOrgId + org.urn). A personal App has
+      // no org, so cascade is unsupported there — the personal branch above
+      // already rejected any agent-with-deps BEFORE writes, so here we simply
+      // scope the cascade to org-owned Apps.
       if (resolvedOrgId) {
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId }, select: { urn: true } });
         const imports = await ctx.db.agentImport.findMany({

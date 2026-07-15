@@ -275,9 +275,12 @@ export const typeResolvers = {
     vectorIndexEncryptedAckAt: (g: {
       vectorIndexEncryptedAckAt?: Date | string | null;
     }) => toISO(g.vectorIndexEncryptedAckAt),
-    organization: (g: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
+    // spec 047: organizationId is nullable (a user-owned memory has no org) —
+    // guard the fallback lookup so it resolves to null instead of calling
+    // findUnique({ id: null }) (codex review, #685).
+    organization: (g: { organizationId: string | null; organization?: unknown }, _: unknown, ctx: Context) =>
       (g as Record<string, unknown>).organization ??
-      ctx.db.organization.findUnique({ where: { id: g.organizationId } }),
+      (g.organizationId ? ctx.db.organization.findUnique({ where: { id: g.organizationId } }) : null),
     // 008-agent-installation: app pivot for app/personal-class memories.
     app: async (g: { appId?: string | null; app?: unknown }, _: unknown, ctx: Context) => {
       if (g.app !== undefined) return g.app ?? null;
@@ -483,9 +486,11 @@ export const typeResolvers = {
       (await defaultAiConfigOf(a, 'appId', ctx))?.model ?? null,
     hasAiApiKey: async (a: { id: string }, _: unknown, ctx: Context) =>
       !!(await defaultAiConfigOf(a, 'appId', ctx))?.apiKeyEncrypted,
-    organization: (a: { organizationId: string; organization?: unknown }, _: unknown, ctx: Context) =>
+    // spec 047: organizationId is nullable (a user-owned App has no org) —
+    // guard the fallback lookup so it resolves to null (codex review, #685).
+    organization: (a: { organizationId: string | null; organization?: unknown }, _: unknown, ctx: Context) =>
       (a as Record<string, unknown>).organization ??
-      ctx.db.organization.findUnique({ where: { id: a.organizationId } }),
+      (a.organizationId ? ctx.db.organization.findUnique({ where: { id: a.organizationId } }) : null),
     // Spec 021 US1: R2 canonical install URN combining App + Agent URNs.
     // 023-app-shape Phase 2b: read the primary installed Agent's URN via
     // the eager-loaded `appAgents` (preferred — APP_INCLUDE / ORG_INCLUDE
