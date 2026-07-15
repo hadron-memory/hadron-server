@@ -281,18 +281,28 @@ subscription — no new work once the App is user-owned.
 >     user-owned), `effectiveAccess` agent/app owner grant + `callerCanAudit`
 >     owner branch (`ResolvedResource` now selects `ownerUserId`). No schema
 >     change. Leak tests: `resolvers.userOwnedAgent.test.ts`.
->   - **2c-2b (remaining):** user-owned **App** create + install (user-owner
->     target in `installAgentIntoAppCore`, subscription-licensed, no
->     `AgentOrgGrant`) + **BLOCKER 2** (`getAppMemoryAccess`) + **BLOCKER 3**
->     (App-management admin fast-paths) + `@<handle>` **handle-rename→URN
->     propagation** (renaming a handle must move every `@old:*` owned App/Agent/
->     Memory URN, incl. the `-system` memory) + connections (org-less
->     mail/calendar) + portal UX.
->     **BLOCKERS that MUST land in the same slice as creation** (the #676
->     security review verified these are real but *unreachable* today because
->     nothing creates user-owned Apps/Agents/Memories yet — they go live the
->     moment a creation path does, so close them alongside it, with tests that
->     exercise a real user-owned entity):
+>   - **2c-2b-2 (PR pending):** user-owned **App** creation + install. `createApp`
+>     with `orgId` OMITTED creates a user-owned App (`ownerUserId` = caller, org
+>     NULL) under `@<handle>`, installing a PUBLIC (marketplace) agent or the
+>     caller's OWN agent; a PUBLIC install is licensed by an auto-provisioned
+>     `AgentSubscription` (`ensureAgentSubscription`), NO `AgentOrgGrant`. Cascade
+>     deps into a personal App are rejected in v1 (they'd need org-scoped dep
+>     Apps). Closes **BLOCKER 2** (`getAppMemoryAccess` now filters out a
+>     user-owned memory whose owner ≠ the App's owner — agent's system memory
+>     shares the agent owner, so no extra query) and **BLOCKER 3** (regenerate
+>     AppKey / ensureAppMember / removeAppMember / appKeys / appAIConfig now route
+>     unconditionally through `requireOwnerOrOrgRole`, which grants a platform
+>     admin on ORG-owned but stays OWNER-ONLY on user-owned — the old
+>     `if (!isPlatformAdmin)` skip bypassed that). `Query.apps` gains the owner
+>     branch (owner sees own; admin "see all" excludes others'). No schema
+>     change. Leak tests: `resolvers.userOwnedApp.test.ts`.
+>   - **2c-2b (remaining):** `@<handle>` **handle-rename→URN propagation**
+>     (renaming a handle must move every `@old:*` owned App/Agent/Memory URN,
+>     incl. the `-system` memory) + connections (org-less mail/calendar) +
+>     portal UX.
+>     **BLOCKERS (all three now CLOSED — 1 in 2c-2b-1, 2 & 3 in 2c-2b-2)** — the
+>     #676 security review flagged these as real-but-unreachable-until-creation;
+>     they were closed in the same slices that made them reachable, with tests:
 >     1. **`Query.memory(ref:)` admin fast-path** (`resolvers.query.memory.ts`,
 >        the `if (!ADMIN && !OWNER)` block ~L135). It only strict-checks
 >        `personal`/`private`; a user-owned `knowledge`/`group`/`system` memory

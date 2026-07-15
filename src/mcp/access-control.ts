@@ -99,6 +99,7 @@ export async function getAppMemoryAccess(
     select: {
       id: true,
       organizationId: true,
+      ownerUserId: true,
       appAgents: {
         orderBy: { createdAt: 'asc' },
         take: 1,
@@ -107,11 +108,12 @@ export async function getAppMemoryAccess(
             select: {
               id: true,
               organizationId: true,
+              ownerUserId: true,
               systemMemoryId: true,
               deletedAt: true,
               memoryItems: {
                 where: { deletedAt: null, memory: { deletedAt: null } },
-                select: { memoryId: true, role: true },
+                select: { memoryId: true, role: true, memory: { select: { ownerUserId: true } } },
               },
             },
           },
@@ -137,13 +139,27 @@ export async function getAppMemoryAccess(
     if (!grant || !isLifecycleActive(grant)) return new Map();
   }
 
-  return foldAgentIntoAccessMap({
-    systemMemoryId: primary.systemMemoryId,
-    memoryItems: primary.memoryItems.map((item) => ({
+  // spec 047 (blocker 2, #676 review): a USER-owned memory folds into an App's
+  // access map ONLY when the App shares its owner. A user-owned memory owned by
+  // someone other than the App's owner must never enter this map — otherwise an
+  // App's members/keys would gain a listing grant on it (canRead/canWriteToMemory
+  // strict-gate the actual read per-memory, so this is the listing-surface half).
+  // Org-owned memories (ownerUserId NULL) are unaffected. The agent's system
+  // memory shares the agent's owner by construction, so `primary.ownerUserId`
+  // stands in for it (no extra query).
+  const appOwner = app.ownerUserId;
+  const foreignUserOwned = (owner: string | null | undefined): boolean =>
+    owner != null && owner !== appOwner;
+
+  const systemMemoryId = foreignUserOwned(primary.ownerUserId) ? null : primary.systemMemoryId;
+  const memoryItems = primary.memoryItems
+    .filter((item) => !foreignUserOwned((item as { memory?: { ownerUserId: string | null } }).memory?.ownerUserId))
+    .map((item) => ({
       memoryId: item.memoryId,
       role: (item as { role?: string | null }).role ?? 'read',
-    })),
-  });
+    }));
+
+  return foldAgentIntoAccessMap({ systemMemoryId, memoryItems });
 }
 
 // ---------------------------------------------------------------------------

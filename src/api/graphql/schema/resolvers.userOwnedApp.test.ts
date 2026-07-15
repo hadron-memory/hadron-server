@@ -1,0 +1,182 @@
+/**
+ * spec 047 Phase 2c-2b — user-owned App creation + install/license + the
+ * owner-only surfaces this makes reachable (security blockers 2 & 3).
+ *
+ * `createApp` with NO `orgId` creates an App owned by the caller (`ownerUserId`
+ * set, org NULL) namespaced under `@<handle>`. A personal App may install only
+ * a PUBLIC (marketplace) agent or the caller's OWN agent; a PUBLIC install is
+ * licensed by an auto-provisioned `AgentSubscription` (no `AgentOrgGrant`). The
+ * App is owner-only: platform admins get no bypass on its keys / AI config /
+ * member management, and its foreign user-owned memories never fold into its
+ * access map.
+ */
+
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { resolvers, type Context } from './resolvers.js';
+import { getAppMemoryAccess } from '../../../mcp/access-control.js';
+
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
+  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
+  syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }),
+}));
+
+function ctx(over: Partial<Context> = {}): Context {
+  return { db, ...over };
+}
+
+let ownerId: string;
+let otherId: string;
+let pubOrgId: string;
+let publicAgentId: string;
+
+/** An org-owned PUBLIC (marketplace) agent + its system memory. */
+async function seedPublicAgent() {
+  const org = await db.organization.create({
+    data: { id: generateId(), name: 'Publisher', urn: `publisher-${generateId()}` },
+  });
+  const sys = await db.memory.create({
+    data: { id: generateId(), class: 'system', name: 'GA System', urn: `${org.urn}:gmail-agent-system`, organizationId: org.id, acceptsUploads: false },
+  });
+  const agent = await db.agent.create({
+    data: { id: generateId(), name: 'Gmail Agent', urn: `${org.urn}:gmail-agent`, organizationId: org.id, visibility: 'PUBLIC', systemMemoryId: sys.id },
+  });
+  return { orgId: org.id, agentId: agent.id };
+}
+
+beforeEach(async () => {
+  await cleanDb(db);
+  const owner = await db.user.create({ data: { id: generateId(), name: 'App Owner', handle: 'appowner', roles: ['READER'] } });
+  const other = await db.user.create({ data: { id: generateId(), name: 'Other', handle: 'appother', roles: ['READER'] } });
+  ownerId = owner.id;
+  otherId = other.id;
+  const seeded = await seedPublicAgent();
+  pubOrgId = seeded.orgId;
+  publicAgentId = seeded.agentId;
+});
+
+describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () => {
+  it('creates a user-owned App under @handle, licensed by a subscription (no org grant)', async () => {
+    const app = await resolvers.Mutation.createApp(
+      {},
+      { agentId: publicAgentId, name: 'My Gmail' },
+      ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    expect(app.organizationId).toBeNull();
+    expect(app.ownerUserId).toBe(ownerId);
+    expect(app.urn).toBe('@appowner:my-gmail');
+
+    // The agent is linked.
+    const link = await db.appAgent.findFirst({ where: { appId: app.id, agentId: publicAgentId } });
+    expect(link).not.toBeNull();
+
+    // Licensed by an active AgentSubscription — NOT an AgentOrgGrant.
+    const sub = await db.agentSubscription.findUnique({
+      where: { userId_agentId: { userId: ownerId, agentId: publicAgentId } },
+    });
+    expect(sub?.activatedAt).toBeTruthy();
+    expect(sub?.revokedAt).toBeNull();
+    const grantCount = await db.agentOrgGrant.count({ where: { agentId: publicAgentId } });
+    expect(grantCount).toBe(0);
+
+    // The owner is auto-added as an owner AppMember.
+    const member = await db.appMember.findUnique({
+      where: { appId_userId: { appId: app.id, userId: ownerId } },
+    });
+    expect(member?.role).toBe('owner');
+  });
+
+  it('rejects an empty-string orgId', async () => {
+    await expect(
+      resolvers.Mutation.createApp({}, { orgId: '', agentId: publicAgentId, name: 'X' }, ctx({ userId: ownerId })),
+    ).rejects.toThrow(/non-empty organization/i);
+  });
+
+  it('requires an authenticated user', async () => {
+    await expect(
+      resolvers.Mutation.createApp({}, { agentId: publicAgentId, name: 'X' }, ctx({})),
+    ).rejects.toThrow(/authenticated/i);
+  });
+
+  it('rejects installing another tenant’s NON-public agent into a personal App', async () => {
+    const privateOrg = await db.organization.create({ data: { id: generateId(), name: 'Priv', urn: `priv-${generateId()}` } });
+    const privAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Private', urn: `${privateOrg.urn}:private-agent`, organizationId: privateOrg.id, visibility: 'ORGANIZATION' },
+    });
+    await expect(
+      resolvers.Mutation.createApp({}, { agentId: privAgent.id, name: 'Sneaky' }, ctx({ userId: ownerId, roles: ['READER'] })),
+    ).rejects.toThrow(/PUBLIC agent or your own/i);
+  });
+});
+
+describe('Query.apps — user-owned App listing', () => {
+  it('the owner sees their user-owned App; another user + admin-unscoped do not', async () => {
+    const app = await resolvers.Mutation.createApp(
+      {}, { agentId: publicAgentId, name: 'Mine' }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    const ownerList = await resolvers.Query.apps(null, {}, ctx({ userId: ownerId, roles: ['READER'] }));
+    expect(ownerList.items.map((a: { id: string }) => a.id)).toContain(app.id);
+
+    const otherList = await resolvers.Query.apps(null, {}, ctx({ userId: otherId, roles: ['READER'] }));
+    expect(otherList.items.map((a: { id: string }) => a.id)).not.toContain(app.id);
+
+    const adminList = await resolvers.Query.apps(null, {}, ctx({ userId: otherId, roles: ['ADMIN'] }));
+    expect(adminList.items.map((a: { id: string }) => a.id)).not.toContain(app.id);
+  });
+});
+
+describe('user-owned App is owner-only (blocker 3 — no platform-admin bypass)', () => {
+  async function makeApp() {
+    return resolvers.Mutation.createApp(
+      {}, { agentId: publicAgentId, name: 'Private App' }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+  }
+
+  it('appKeys / appAIConfig deny a non-owner platform admin', async () => {
+    const app = await makeApp();
+    const adminCtx = ctx({ userId: otherId, roles: ['ADMIN'] });
+    await expect(resolvers.Query.appKeys(null, { appRef: app.id }, adminCtx)).rejects.toThrow('Forbidden');
+    await expect(resolvers.Query.appAIConfig(null, { appRef: app.id }, adminCtx)).rejects.toThrow('Forbidden');
+  });
+
+  it('regenerateAppKey + ensureAppMember deny a non-owner platform admin', async () => {
+    const app = await makeApp();
+    const adminCtx = ctx({ userId: otherId, roles: ['ADMIN'] });
+    await expect(resolvers.Mutation.regenerateAppKey(null, { id: app.id }, adminCtx)).rejects.toThrow('Forbidden');
+    await expect(
+      resolvers.Mutation.ensureAppMember(null, { appId: app.id, userId: otherId, role: 'owner' }, adminCtx),
+    ).rejects.toThrow('Forbidden');
+  });
+
+  it('the owner CAN read their App keys', async () => {
+    const app = await makeApp();
+    const keys = await resolvers.Query.appKeys(null, { appRef: app.id }, ctx({ userId: ownerId, roles: ['READER'] }));
+    expect(Array.isArray(keys)).toBe(true);
+  });
+});
+
+describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never folds)', () => {
+  it('excludes a user-owned memory owned by someone other than the App owner', async () => {
+    // Construct the leak scenario directly (the createApp/install gates prevent
+    // it in normal flow, so wire raw rows): a user-owned App owned by `owner`
+    // whose primary agent carries a memoryItem that is a user-owned memory owned
+    // by `other`.
+    const foreignMem = await db.memory.create({
+      data: { id: generateId(), class: 'knowledge', name: 'foreign', urn: `@appother:foreign-${generateId()}`, ownerUserId: otherId },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), name: 'UO Agent', urn: `@appowner:uo-agent-${generateId()}`, ownerUserId: ownerId,
+        memoryItems: { create: [{ memoryId: foreignMem.id, role: 'read' }] } },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'UO App', urn: `@appowner:uo-app-${generateId()}`, ownerUserId: ownerId,
+        appAgents: { create: { agentId: agent.id } } },
+    });
+    const access = await getAppMemoryAccess(db, app.id);
+    expect(access.has(foreignMem.id)).toBe(false);
+  });
+});

@@ -36,12 +36,28 @@ export const appQueries = {
       if (!scope) return { items: [], total: 0 };
       const isPlatformAdmin =
         !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
+      const scopedToOrg = scope.scopedOrgId != null;
       // Admin unscoped reach applies only WITHOUT an orgId — the active-org
       // selection is a membership concept (cor:api:100:01).
-      const where =
-        isPlatformAdmin && scope.scopedOrgId == null
-          ? { deletedAt: null }
-          : { organizationId: { in: scope.memberOrgIds }, deletedAt: null };
+      let where: Record<string, unknown>;
+      if (isPlatformAdmin && !scopedToOrg) {
+        // Every live App EXCEPT another user's user-owned App — spec 047 strict
+        // ownership (a user-owned App is owner-only; an admin sees only their
+        // own). "org-owned OR mine" as a flat OR.
+        where = {
+          deletedAt: null,
+          OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
+        };
+      } else {
+        // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
+        // caller's OWN user-owned Apps (org NULL) so a personal App the caller
+        // just created is visible. A specific-org selection excludes them.
+        const ownerClauses: Record<string, unknown>[] = [
+          { organizationId: { in: scope.memberOrgIds } },
+        ];
+        if (!scopedToOrg && ctx.userId) ownerClauses.push({ ownerUserId: ctx.userId });
+        where = { deletedAt: null, OR: ownerClauses };
+      }
       const [total, items] = await Promise.all([
         ctx.db.app.count({ where }),
         take === 0
@@ -90,12 +106,11 @@ export const appQueries = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      // Org-scoped auth: ADMIN of the App's org (or platform ADMIN) sees the
-      // decrypted key.
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) {
-        await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
-      }
+      // Auth via the shared gate (unconditional): it grants a platform admin on
+      // an ORG-owned App but enforces OWNER-ONLY on a user-owned App. The old
+      // `if (!isPlatformAdmin)` skip leaked a user-owned App's decrypted AI key
+      // to a platform admin (spec 047 blocker 3, #682 security review).
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       // 036-ai-service-config: registry-backed — the App's 'default'
       // config (single-entity contract preserved; no resolution walk).
       const config = await ctx.db.aiServiceConfig.findFirst({
@@ -113,10 +128,10 @@ export const appQueries = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) {
-        await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
-      }
+      // Unconditional shared gate — platform admin on ORG-owned, OWNER-ONLY on
+      // user-owned (spec 047 blocker 3). The old skip leaked a user-owned App's
+      // key metadata to a platform admin.
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       return ctx.db.appKey.findMany({
         where: { appId: resolvedAppId, revokedAt: null },
         orderBy: { createdAt: 'desc' },
