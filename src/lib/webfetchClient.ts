@@ -132,6 +132,8 @@ export interface CreatePollInput {
   auth?: WebFetchAuth;
   orgId: string;
   appId?: string;
+  /** Audit provenance only. Legacy wire name (tool-side rename pending);
+   *  since #677 it carries the resolved Secret reference (`secret:<id>`). */
   credentialsNodeUrn?: string;
   /** Audit provenance only; core enforces this binding before creation. */
   urlPrefix?: string;

@@ -2118,7 +2118,9 @@ model WebFetchPollBinding {
   userId                String?  @map("user_id")
   entryNodeUrn           String   @map("entry_node_urn")
   policy                 Json?
-  credentialsNodeUrn     String?  @map("credentials_node_urn")
+  /// The resolved `Secret` row a credentialed poll used (#677 — audit
+  /// provenance; supersedes the #628 credentials_node_urn node scheme).
+  credentialSecretId     String?  @map("credential_secret_id")
   /// Query- and fragment-free URL for audit/event-origin validation.
   url                    String
   cancelledAt            DateTime? @map("cancelled_at")
@@ -2189,6 +2191,44 @@ model McpServer {
   // wanted signal. No deletedAt ⇒ a plain (non-partial) unique works.
   @@unique([organizationId, slug], map: "mcp_servers_org_slug_uniq")
   @@map("mcp_servers")
+}
+
+/// One named, owner-scoped secret — the general secret store (#677).
+/// Polymorphic owner (`user` | `org` | `app` | `memory`) — deliberately no
+/// FK: entitlement is checked at resolution time under the caller/run
+/// principal, and a dangling owner simply never resolves. A bare name
+/// resolves via the CSS cascade, most-specific-first: memory → app → user
+/// → org. `kind` is extensible (`generic` opaque; `webfetch-auth` typed:
+/// metadata `{ type, urlPrefix }`, origin-bound at use).
+model Secret {
+  id        String @id @default(cuid())
+  ownerType String @map("owner_type") // 'user' | 'org' | 'app' | 'memory'
+  ownerId   String @map("owner_id")
+  /// Cascade-resolution key; unique per owner; lowercase [a-z0-9-], max 64.
+  name      String
+  kind      String
+  /// The NON-secret, inspectable half — safe on every read surface. A
+  /// reader can see THAT a secret exists and (webfetch-auth) WHERE it
+  /// applies without decrypting.
+  metadata  Json   @default("{}")
+  /// encryptToken(JSON.stringify(payload)) — AES-256-GCM under the platform
+  /// key (src/lib/tokenCrypto.ts). NEVER selected into a read surface:
+  /// redaction by construction, same as the aiConfig / HA / Resend / MCP
+  /// registries. Rotation is overwrite (updateSecret), no versioning (v1).
+  valueEncrypted String  @map("value_encrypted")
+  /// Key-rotation lineage headroom; unused (null) while HADRON_ENCRYPTION_KEY
+  /// is the only key.
+  keyId          String? @map("key_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  updatedBy      String?  @map("updated_by")
+
+  // Hard delete by design (registry-row posture): a deleted secret makes
+  // referencing runs fail their resolution loud — the wanted signal.
+  // The unique doubles as the (ownerType, ownerId) lookup index.
+  @@unique([ownerType, ownerId, name], map: "secrets_owner_name_uniq")
+  @@map("secrets")
 }
 
 /// One registered Home Assistant instance — the org-scoped registry behind

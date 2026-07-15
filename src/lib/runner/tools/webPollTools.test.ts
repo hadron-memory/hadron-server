@@ -17,7 +17,7 @@ import { cancelPoll, createPoll, listPolls } from '../../webfetchClient.js';
 import { resolveRunTools, webPollCancel, webPollList, webPollStart } from './index.js';
 import type { RunToolContext } from './types.js';
 
-async function seedContext(): Promise<{ ctx: RunToolContext; credentialUrn: string }> {
+async function seedContext(): Promise<{ ctx: RunToolContext; credentialName: string; secretId: string }> {
   const org = await db.organization.create({
     data: { id: generateId(), name: 'Poll Org', urn: `poll-${generateId()}` },
   });
@@ -28,25 +28,6 @@ async function seedContext(): Promise<{ ctx: RunToolContext; credentialUrn: stri
       urn: `${org.urn}::credentials`,
       name: 'credentials',
       class: 'knowledge',
-    },
-  });
-  const credentialLoc = 'web:api';
-  await db.node.create({
-    data: {
-      id: generateId(),
-      memoryId: memory.id,
-      loc: credentialLoc,
-      name: 'API credential',
-      data: {
-        webCredential: {
-          type: 'bearer',
-          urlPrefix: 'https://api.example.test/v1/',
-          keyId: 'hadron-v1',
-        },
-        __webfetchAuthEncrypted: encryptToken(
-          JSON.stringify({ type: 'bearer', token: 'poll-secret' }),
-        ),
-      },
     },
   });
   const agent = await db.agent.create({
@@ -76,8 +57,21 @@ async function seedContext(): Promise<{ ctx: RunToolContext; credentialUrn: stri
       status: 'RUNNING',
     },
   });
+  // App-scoped webfetch-auth secret (#677) — the cascade resolves it for
+  // any run under this App.
+  const secret = await db.secret.create({
+    data: {
+      ownerType: 'app',
+      ownerId: app.id,
+      name: 'api-cred',
+      kind: 'webfetch-auth',
+      metadata: { type: 'bearer', urlPrefix: 'https://api.example.test/v1/' },
+      valueEncrypted: encryptToken(JSON.stringify({ type: 'bearer', token: 'poll-secret' })),
+    },
+  });
   return {
-    credentialUrn: `${memory.urn}::${credentialLoc}`,
+    credentialName: 'api-cred',
+    secretId: secret.id,
     ctx: {
       db,
       run,
@@ -124,15 +118,15 @@ describe('web poll run tools', () => {
     );
   });
 
-  it('authorizes and decrypts a bound credential once, then persists the origin-run binding and redacted ledger', async () => {
-    const { ctx, credentialUrn } = await seedContext();
+  it('resolves and injects a named secret server-side, then persists the origin-run binding and redacted ledger', async () => {
+    const { ctx, credentialName, secretId } = await seedContext();
     const out = await webPollStart.execute(ctx, {
       url: 'https://api.example.test/v1/orders?access_token=do-not-log',
       contentKind: 'json',
       conditions: [{ id: 'ready', type: 'json_path', path: 'state', op: 'eq', value: 'ready' }],
       intervalSeconds: 60,
       ttlSeconds: 3600,
-      credentialsNodeUrn: credentialUrn,
+      credentialName,
     });
 
     expect(out).toEqual({ jobId: 'poll-job-1', expiresAt: '2026-07-15T20:00:00Z' });
@@ -140,7 +134,7 @@ describe('web poll run tools', () => {
       expect.objectContaining({
         orgId: ctx.run.organizationId,
         appId: ctx.run.appId,
-        credentialsNodeUrn: credentialUrn,
+        credentialsNodeUrn: `secret:${secretId}`,
         urlPrefix: 'https://api.example.test/v1/',
         auth: { type: 'bearer', token: 'poll-secret' },
       }),
@@ -150,7 +144,7 @@ describe('web poll run tools', () => {
       sourceRunId: ctx.run.id,
       organizationId: ctx.run.organizationId,
       appId: ctx.run.appId,
-      credentialsNodeUrn: credentialUrn,
+      credentialSecretId: secretId,
       url: 'https://api.example.test/v1/orders',
     });
     const log = vi.mocked(ctx.log).mock.calls[0]![0];
@@ -160,16 +154,46 @@ describe('web poll run tools', () => {
   });
 
   it('rejects an origin/path near miss before decrypting or creating a job', async () => {
-    const { ctx, credentialUrn } = await seedContext();
+    const { ctx, credentialName } = await seedContext();
     await expect(
       webPollStart.execute(ctx, {
         url: 'https://api.example.test/v10/orders',
         conditions: [{ id: 'x', type: 'content_changed' }],
         intervalSeconds: 60,
         ttlSeconds: 3600,
-        credentialsNodeUrn: credentialUrn,
+        credentialName,
       }),
-    ).rejects.toThrow(/outside the credential node urlPrefix/);
+    ).rejects.toThrow(/outside the secret urlPrefix/);
+    expect(createPoll).not.toHaveBeenCalled();
+  });
+
+  it('fails loud when the name does not resolve or a nearer scope shadows it with the wrong kind', async () => {
+    const { ctx } = await seedContext();
+    await expect(
+      webPollStart.execute(ctx, {
+        url: 'https://api.example.test/v1/orders',
+        conditions: [{ id: 'x', type: 'content_changed' }],
+        intervalSeconds: 60,
+        ttlSeconds: 3600,
+        credentialName: 'missing-cred',
+      }),
+    ).rejects.toThrow(/no secret named "missing-cred"/i);
+
+    // A generic secret of the same name at the SAME winning scope must not
+    // silently satisfy the webfetch-auth path.
+    await db.secret.updateMany({
+      where: { name: 'api-cred' },
+      data: { kind: 'generic', metadata: {} },
+    });
+    await expect(
+      webPollStart.execute(ctx, {
+        url: 'https://api.example.test/v1/orders',
+        conditions: [{ id: 'x', type: 'content_changed' }],
+        intervalSeconds: 60,
+        ttlSeconds: 3600,
+        credentialName: 'api-cred',
+      }),
+    ).rejects.toThrow(/kind "generic", not "webfetch-auth"/);
     expect(createPoll).not.toHaveBeenCalled();
   });
 
