@@ -4506,7 +4506,12 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     createApp(
-      orgId: ID!
+      """
+      Provide to create an ORG-owned App (requires org ADMIN). OMIT to create a
+      USER-OWNED App owned by the caller (spec 047) — namespaced under the
+      caller's @handle, owner-only in v1. Accepts the org's ID or URN.
+      """
+      orgId: ID
       """
       The Agent this App deploys. Required as of 009-install-agent-flow:
       every App must reference an Agent. The server itself accepts any

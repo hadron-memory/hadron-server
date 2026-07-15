@@ -19,6 +19,8 @@ import {
   mintUserApiKey,
 } from '../../../middleware/auth.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
+import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import {
   ensureAppMember,
   InvalidRoleError,
@@ -57,8 +59,11 @@ export const appMutations = {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveAppRef(ctx.db, id);
       const existing = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) await requireOwnerOrOrgRole(ctx, existing, 'ADMIN');
+      // spec 047 (blocker 3): route unconditionally through the shared gate. It
+      // grants a platform admin on an ORG-owned App (its own admin branch) but
+      // enforces OWNER-ONLY on a user-owned App — the old `if (!isPlatformAdmin)`
+      // skip bypassed that owner-only rule.
+      await requireOwnerOrOrgRole(ctx, existing, 'ADMIN');
 
       // Revoke all active keys, then create a fresh one.
       await ctx.db.appKey.updateMany({
@@ -109,7 +114,7 @@ export const appMutations = {
         sessionTimeoutSeconds,
         anonymousTtlDays,
       }: {
-        orgId: string;
+        orgId?: string | null;
         agentId: string;
         name: string;
         urn?: string;
@@ -132,28 +137,90 @@ export const appMutations = {
       },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
-      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      // URN format matches memories and agents: "{org.urn}:{slug}".
-      // If the caller provides an explicit slug use it; otherwise derive from
-      // the name (lowercase, non-alphanum → hyphens, trimmed).
-      const org = await ctx.db.organization.findUniqueOrThrow({
-        where: { id: resolvedOrgId }, select: { urn: true },
-      });
-      // #574: shared slugify (was an inline copy of this same transform).
-      const appUrn = `${org.urn}:${deriveSlugFromName(urn ?? name)}`;
+      // spec 047: an App is owned by EXACTLY ONE of an org or a user. `orgId`
+      // present ⇒ org-owned (org ADMIN); `orgId` omitted ⇒ user-owned by the
+      // caller, namespaced under their `@<handle>`. An EMPTY-STRING orgId is a
+      // malformed request, not a personal-create signal — reject it so a client
+      // bug can't silently bypass org resolution + the ADMIN gate.
+      if (orgId !== undefined && orgId !== null && orgId.trim() === '') {
+        throw new GraphQLError('orgId must be a non-empty organization ID or URN — omit it entirely to create a personal App.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      let resolvedOrgId: string | null = null;
+      let ownerUserId: string | null = null;
+      let namespace: string;
+      if (orgId) {
+        // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+        const { id } = await resolveOrgRef(ctx.db, orgId);
+        await requireOrgRole(ctx, id, 'ADMIN');
+        const org = await ctx.db.organization.findUniqueOrThrow({ where: { id }, select: { urn: true } });
+        resolvedOrgId = id;
+        namespace = org.urn;
+      } else {
+        if (!ctx.userId) {
+          throw new GraphQLError('Creating a personal App requires an authenticated user.', { extensions: { code: 'UNAUTHENTICATED' } });
+        }
+        const user = await ctx.db.user.findUniqueOrThrow({ where: { id: ctx.userId }, select: { handle: true } });
+        const handle = normalizeHandleOrNull(user.handle);
+        if (!handle) {
+          throw new GraphQLError('Your account needs a valid handle before you can create a personal App. Set one in your profile.', { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        ownerUserId = ctx.userId;
+        namespace = `@${handle}`;
+      }
+      // URN format matches memories and agents: "{namespace}:{slug}" — the
+      // namespace is an org domain OR `@<handle>` for a user-owned App.
+      // #574: shared slugify.
+      const appUrn = `${namespace}:${deriveSlugFromName(urn ?? name)}`;
 
-      // 009-install-agent-flow: agentId is required (typeDef gate). Resolve
-      // the Agent (resolveAgentRef rejects soft-deleted Agents with
-      // AgentNotFoundError). Per 009 spec FR-009, the cross-org install
-      // restriction is enforced at the *portal* layer (the Install affordance
-      // is hidden for non-owned Agents), not at the server. Server-side
-      // auto-provisioning of AgentOrgGrant is retained from 008 to preserve
-      // the existing 008 test surface and the future marketplace path —
-      // tightening to a hard server gate is reserved for the marketplace spec.
+      // 009-install-agent-flow: agentId is required (typeDef gate). Resolve the
+      // Agent (resolveAgentRef rejects soft-deleted Agents).
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      await ensureAgentOrgGrant(ctx.db, resolvedOrgId, resolvedAgentId);
+      if (resolvedOrgId) {
+        // Org path: auto-provision the AgentOrgGrant (008 behavior; portal hides
+        // the cross-org Install affordance — a hard server gate is the
+        // marketplace spec's job).
+        await ensureAgentOrgGrant(ctx.db, resolvedOrgId, resolvedAgentId);
+      } else {
+        // spec 047 personal path: no org ⇒ no AgentOrgGrant. The install is
+        // licensed by the OWNER's AgentSubscription instead. A user may install
+        // ONLY a PUBLIC (marketplace) agent or their OWN user-owned agent into a
+        // personal App — never another tenant's private agent (which would fold
+        // that tenant's memories into this App). Mirror installAgentIntoAppCore's
+        // accessibility gate for the org-less case.
+        const installAgent = await ctx.db.agent.findUniqueOrThrow({
+          where: { id: resolvedAgentId },
+          select: { visibility: true, ownerUserId: true },
+        });
+        const isOwnAgent = installAgent.ownerUserId !== null && installAgent.ownerUserId === ctx.userId;
+        if (installAgent.visibility !== 'PUBLIC' && !isOwnAgent) {
+          throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
+            extensions: { code: 'ORGANIZATION_MISMATCH', agentId: resolvedAgentId },
+          });
+        }
+        // spec 047: cascade-install provisions each dependency as its own
+        // ORG-scoped App — unsupported for a personal App in v1. Reject BEFORE
+        // any write (subscription / App create) so a rejected call never leaves
+        // an orphan App + AppAgent behind (codex review, #685). Required deps
+        // always cascade; optional deps cascade when listed in installOptional —
+        // either means "has deps to install", which a personal App can't do yet.
+        const requiredDeps = await ctx.db.agentImport.count({
+          where: { parentAgentId: resolvedAgentId, required: true },
+        });
+        if (requiredDeps > 0) {
+          throw new GraphQLError('Installing an agent with required dependencies as a personal App is not supported yet.', {
+            extensions: { code: 'BAD_USER_INPUT', agentId: resolvedAgentId },
+          });
+        }
+        if (installOptional && installOptional.length > 0) {
+          throw new GraphQLError('Installing optional dependencies as a personal App is not supported yet.', {
+            extensions: { code: 'BAD_USER_INPUT', agentId: resolvedAgentId },
+          });
+        }
+        // License the install with the owner's subscription (idempotent,
+        // activates immediately in v1). Skipped for the owner's own agent —
+        // ownership already licenses it.
+        if (!isOwnAgent) await ensureAgentSubscription(ctx.db, ctx.userId!, resolvedAgentId);
+      }
 
       // Hard-delete a soft-deleted collision so the URN can be reused
       // (same pattern as createAgent/createMemory).
@@ -180,6 +247,7 @@ export const appMutations = {
       const createdApp = await ctx.db.app.create({
         data: {
           organizationId: resolvedOrgId,
+          ownerUserId,
           name,
           urn: appUrn,
           surfaces: surfaces ?? undefined, // undefined → use the schema default ['chat']
@@ -230,7 +298,13 @@ export const appMutations = {
       // their id appears in `installOptional`.
       // 009-install-agent-flow: the outer `if (resolvedAgentId)` guard is
       // dropped — agentId is always present post-009.
-      {
+      // spec 047: cascade-install provisions each dependency as its own
+      // ORG-scoped App (it threads resolvedOrgId + org.urn). A personal App has
+      // no org, so cascade is unsupported there — the personal branch above
+      // already rejected any agent-with-deps BEFORE writes, so here we simply
+      // scope the cascade to org-owned Apps.
+      if (resolvedOrgId) {
+        const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId }, select: { urn: true } });
         const imports = await ctx.db.agentImport.findMany({
           where: { parentAgentId: resolvedAgentId },
           orderBy: { position: 'asc' },
@@ -584,8 +658,12 @@ export const appMutations = {
 
       // Authorization: ADMIN/OWNER of the App's owning org, OR an existing
       // owner-role AppMember. Self-service joins are not allowed in v1.
+      // spec 047 (blocker 3): the platform-admin bypass applies ONLY to an
+      // ORG-owned App. A user-owned App is STRICTLY owner-only, so a platform
+      // admin who isn't the owner must still fall through the block below and be
+      // denied — hence `|| app.ownerUserId !== null`.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) {
+      if (!isPlatformAdmin || app.ownerUserId !== null) {
         // spec 047: a user-owned App is authorized by its user owner (no org).
         const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
         const orgMember =
@@ -650,8 +728,10 @@ export const appMutations = {
       // a member can remove themselves at any time without org/owner role.
       const isSelfRemoval = ctx.userId === userId;
       if (!isSelfRemoval) {
+        // spec 047 (blocker 3): platform-admin bypass applies ONLY to an
+        // ORG-owned App; a user-owned App stays strictly owner-only.
         const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-        if (!isPlatformAdmin) {
+        if (!isPlatformAdmin || app.ownerUserId !== null) {
           // spec 047: a user-owned App is authorized by its user owner (no org).
           const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
           const orgMember =
