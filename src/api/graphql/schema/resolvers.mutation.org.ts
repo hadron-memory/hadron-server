@@ -12,6 +12,7 @@ import {
   generateUniqueHandle,
 } from '../../../lib/userHandle.js';
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
+import { renameOwnerNamespacedUrns } from '../../../lib/ownerUrnRename.js';
 import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
 import { validateOrgSlug } from '../../../lib/urn.js';
 import {
@@ -77,13 +78,40 @@ export const orgMutations = {
         }
         handleData = { handle: normalizeHandle(handle) };
       }
-      return ctx.db.user.update({
-        where: { id: ctx.userId },
-        data: {
-          ...(name !== undefined ? { name } : {}),
-          ...handleData,
-          ...(email !== undefined ? { email } : {}),
-        },
+      const newHandle = handleData.handle;
+      // spec 047: a handle change re-namespaces every user-owned entity URN
+      // (`@<old>:…` → `@<new>:…`). Do the User update + the URN propagation in
+      // ONE transaction so a handle can never diverge from the URNs that embed
+      // it (a half-rename would orphan `@<old>:…` App/Agent/Memory URNs).
+      const userId = ctx.userId;
+      return ctx.db.$transaction(async (tx) => {
+        // Lock the user row FOR UPDATE before reading the current handle, so a
+        // concurrent updateMyProfile can't let us read a stale handle and then
+        // skip / mis-target the propagation (gemini review, #686 — mirrors the
+        // org-rename lock). A plain SELECT would not serialize the two writers.
+        const locked = await tx.$queryRaw<{ handle: string | null }[]>`
+          SELECT handle FROM users WHERE id = ${userId} FOR UPDATE
+        `;
+        if (locked.length === 0) throw new Error('Unauthenticated');
+        const current = locked[0];
+        const updated = await tx.user.update({
+          where: { id: userId },
+          data: {
+            ...(name !== undefined ? { name } : {}),
+            ...handleData,
+            ...(email !== undefined ? { email } : {}),
+          },
+        });
+        // Propagate only when the (normalized) handle actually changed — the
+        // rewrite is FK-scoped + idempotent, so this guard is just churn
+        // avoidance. `normalizeHandleOrNull` on the stored handle is a
+        // defensive no-op (it's already normalized) that also yields the null
+        // oldHandle the propagation uses to skip the entry_node_urn rewrites.
+        const oldHandle = normalizeHandleOrNull(current.handle);
+        if (newHandle && newHandle !== oldHandle) {
+          await renameOwnerNamespacedUrns(tx, userId, oldHandle, newHandle);
+        }
+        return updated;
       });
     },
 
