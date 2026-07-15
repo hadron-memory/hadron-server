@@ -18,13 +18,13 @@ import { GraphQLError } from 'graphql';
 import type { Context } from './resolvers.helpers.js';
 import {
   clampListTake,
-  getAccessibleMemoryIds,
   isOrgMemberOrAdmin,
   isOwnerOrOrgMember,
   requireMemoryWriteAccess,
   requireOrgRole,
   requireOwnerOrOrgRole,
 } from './resolvers.helpers.js';
+import { canReadMemory } from '../../../mcp/access-control.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -40,6 +40,19 @@ import {
 
 function badInput(message: string): GraphQLError {
   return new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
+}
+
+/** Project the resolver Context onto the AuthContext canReadMemory expects. */
+function secretAuthContext(ctx: Context) {
+  return {
+    clientId: ctx.clientId,
+    userId: ctx.userId,
+    appId: ctx.appId,
+    sessionId: ctx.sessionId,
+    roles: ctx.roles,
+    organizationId: ctx.organizationId,
+    apiKeyId: ctx.apiKeyId,
+  };
 }
 
 function assertOwnerType(value: unknown): SecretOwnerType {
@@ -134,8 +147,14 @@ async function canSeeSecretOwner(
       return app ? isOwnerOrOrgMember(ctx, app) : false;
     }
     case 'memory': {
-      const ids = await getAccessibleMemoryIds(ctx, ownerId);
-      return ids === null || ids.includes(ownerId);
+      // Use the shared class-aware read gate (the SAME predicate the runtime
+      // cascade uses), NOT the portal getAccessibleMemoryIds — the latter
+      // grants an App-key caller no memory access outside an active session,
+      // so it would drift from the write gate (requireMemoryWriteAccess folds
+      // in canWriteToMemory): an App key could create a memory-scoped secret
+      // it then couldn't see/update/delete (Codex P2). canReadMemory keeps
+      // the `memory READ` matrix uniform across principal types.
+      return canReadMemory(ctx.db, secretAuthContext(ctx), ownerId);
     }
   }
 }

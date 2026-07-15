@@ -165,6 +165,31 @@ describe('hadron_read_secret', () => {
       /"scope" must be one of/,
     );
   });
+
+  it('refuses an inject-only kind (webfetch-auth) — never returns its value to the model', async () => {
+    await db.secret.create({
+      data: {
+        ownerType: 'app',
+        ownerId: app.id,
+        name: 'poll-cred',
+        kind: 'webfetch-auth',
+        metadata: { type: 'bearer', urlPrefix: 'https://api.example.test/' },
+        valueEncrypted: enc({ type: 'bearer', token: 'inject-only-secret' }),
+      },
+    });
+    await expect(hadronReadSecret.execute(ctx, { name: 'poll-cred' })).rejects.toThrow(
+      /kind "webfetch-auth"\) is inject-only/,
+    );
+    // A nearer inject-only secret shadows a farther readable one LOUD (the
+    // cascade contract), so it can't be bypassed by name collision.
+    await seedGeneric('org', org.id, 'readable-at-org', 'poll-cred');
+    await expect(hadronReadSecret.execute(ctx, { name: 'poll-cred' })).rejects.toThrow(
+      /inject-only/,
+    );
+    // Pinning the readable org scope reaches the generic secret.
+    const pinned = await hadronReadSecret.execute(ctx, { name: 'poll-cred', scope: 'org' });
+    expect(pinned).toMatchObject({ scope: 'org', value: 'readable-at-org' });
+  });
 });
 
 describe('loadWebFetchAuthSecret + assertUrlWithinPrefix', () => {

@@ -121,6 +121,38 @@ describe('createSecret — gate matrix', () => {
       createSecret({ ownerType: 'memory', ownerRef: memory.id, name: 'x' }, ctxFor(member.id)),
     ).rejects.toThrow('Forbidden');
   });
+
+  // Regression (Codex P2): the memory READ gate (canSeeSecretOwner) must match
+  // the WRITE gate (requireMemoryWriteAccess) across principal types. An
+  // App-key caller with memory write via an installed agent could otherwise
+  // CREATE a memory-scoped secret it then couldn't see/update/delete, because
+  // the portal getAccessibleMemoryIds grants an App key no memory access
+  // outside an active session — canReadMemory closes that drift.
+  it('memory scope: an App-key writer can also see/update/delete its own secret (gate parity)', async () => {
+    const agent = await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: 'secret-org::agent',
+        name: 'Agent',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: memory.id, role: 'read-write' } });
+    const appCtx = { db, appId: app.id, roles: [] } as unknown as Context;
+
+    const secret = await createSecret({ ownerType: 'memory', ownerRef: memory.id }, appCtx);
+    expect(secret).toMatchObject({ ownerType: 'memory', ownerId: memory.id });
+    // Previously NOT_FOUND for the very principal that created it.
+    expect(await resolvers.Query.secret({}, { ref: secret.id }, appCtx)).toMatchObject({ id: secret.id });
+    const page = await resolvers.Query.secrets({}, { ownerType: 'memory', ownerRef: memory.id }, appCtx);
+    expect(page.total).toBe(1);
+    await expect(
+      resolvers.Mutation.updateSecret({}, { ref: secret.id, value: 'rot' } as never, appCtx),
+    ).resolves.toBeTruthy();
+    await expect(resolvers.Mutation.deleteSecret({}, { ref: secret.id }, appCtx)).resolves.toBe(true);
+  });
 });
 
 describe('createSecret — validation + encryption', () => {

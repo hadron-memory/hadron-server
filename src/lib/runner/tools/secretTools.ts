@@ -6,7 +6,7 @@
  * content (web_poll_start, future fetch-shaped tools) must take a secret
  * NAME and let core inject server-side instead — never route through this.
  */
-import { SECRET_SCOPE_ORDER, type SecretOwnerType } from '../../secrets.js';
+import { isModelReadableKind, SECRET_SCOPE_ORDER, type SecretOwnerType } from '../../secrets.js';
 import { resolveRunSecret } from '../secrets.js';
 import type { RunToolDef } from './types.js';
 
@@ -17,7 +17,7 @@ export const hadronReadSecret: RunToolDef = {
     '(memory, app, user, org) at scopes this run is entitled to; pass scope to pin one. ' +
     'The decrypted value is returned into your context — do not call this in a flow that also ' +
     'fetches untrusted external content; credentialed fetch tools take a secret name and ' +
-    'inject it server-side instead.',
+    'inject it server-side instead. Inject-only kinds (e.g. webfetch-auth) are refused here.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -52,6 +52,16 @@ export const hadronReadSecret: RunToolDef = {
         `hadron_read_secret: no secret named "${name}" is resolvable for this run${
           scope ? ` at scope "${scope}"` : ''
         }.`,
+      );
+    }
+    // Enforce the read/inject split as a HARD per-kind lock: an inject-only
+    // kind (e.g. webfetch-auth) must never reach model context, even when the
+    // author declared this tool and the cascade resolved that name (a nearer
+    // inject-only secret shadows a farther readable one loud, not silently).
+    if (!isModelReadableKind(resolved.kind)) {
+      throw new Error(
+        `hadron_read_secret: secret "${name}" (kind "${resolved.kind}") is inject-only and cannot be read into context. ` +
+          `Use it via the tool that injects it server-side (e.g. web_poll_start's credentialName).`,
       );
     }
     // Trail line carries name + winning scope only — never the value.

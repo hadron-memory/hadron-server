@@ -43,6 +43,23 @@ export const SECRET_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const SECRET_KINDS = ['generic', 'webfetch-auth'] as const;
 export type SecretKind = (typeof SECRET_KINDS)[number];
 
+/**
+ * Kinds whose plaintext MAY be returned to the model via `hadron_read_secret`
+ * (the READ half of the read-vs-inject contract). Everything else is
+ * INJECT-ONLY: server-side use only, value never in model context. This is
+ * the enforcement half of the "load-bearing" model above — the read tool
+ * consults it so the boundary can't be bypassed by asking for an inject-only
+ * secret by name, and new kinds default to inject-only until deliberately
+ * added here. `webfetch-auth` is inject-only: a poll fetches untrusted
+ * external content, so a model holding that credential is an exfil target.
+ */
+export const MODEL_READABLE_SECRET_KINDS: readonly SecretKind[] = ['generic'];
+
+/** True when `hadron_read_secret` is allowed to return this kind's value. */
+export function isModelReadableKind(kind: string): boolean {
+  return (MODEL_READABLE_SECRET_KINDS as readonly string[]).includes(kind);
+}
+
 const MAX_VALUE_JSON_LENGTH = 32 * 1024;
 const MAX_METADATA_JSON_LENGTH = 4 * 1024;
 
