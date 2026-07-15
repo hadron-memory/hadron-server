@@ -321,3 +321,44 @@ describe('secret(ref) + secrets list', () => {
     expect(countOnly).toMatchObject({ items: [], total: 2 });
   });
 });
+
+// #677 follow-up: an owner's secrets must not outlive its deletion as live,
+// resolvable credentials (secret resolution doesn't re-check owner deletedAt).
+describe('owner deletion cleans up secrets', () => {
+  it('deleteApp hard-deletes the app-scoped secrets', async () => {
+    const secret = await createSecret({ ownerType: 'app', ownerRef: app.id }, ctxFor(admin.id));
+    expect(await db.secret.findUnique({ where: { id: secret.id } })).not.toBeNull();
+    await expect(resolvers.Mutation.deleteApp({}, { id: app.id }, ctxFor(admin.id))).resolves.toBe(true);
+    expect(await db.secret.findUnique({ where: { id: secret.id } })).toBeNull();
+  });
+
+  it('deleteOrganization hard-deletes the org-scoped secrets', async () => {
+    const secret = await createSecret({ ownerType: 'org', ownerRef: org.id }, ctxFor(admin.id));
+    // deleteOrganization requires platform ADMIN (requireRole).
+    await expect(
+      resolvers.Mutation.deleteOrganization({}, { id: org.id }, ctxFor(admin.id, ['ADMIN'])),
+    ).resolves.toBe(true);
+    expect(await db.secret.findUnique({ where: { id: secret.id } })).toBeNull();
+  });
+
+  it('deleteMemory hard-deletes the memory-scoped secrets', async () => {
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: 'secret-org::mine',
+        name: 'mine',
+        class: 'personal',
+        userId: member.id,
+      },
+    });
+    const secret = await createSecret(
+      { ownerType: 'memory', ownerRef: personal.id, name: 'k' },
+      ctxFor(member.id),
+    );
+    await expect(
+      resolvers.Mutation.deleteMemory({}, { id: personal.id }, ctxFor(member.id)),
+    ).resolves.toBe(true);
+    expect(await db.secret.findUnique({ where: { id: secret.id } })).toBeNull();
+  });
+});

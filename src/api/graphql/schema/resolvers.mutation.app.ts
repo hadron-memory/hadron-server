@@ -5,6 +5,7 @@ import {
 } from 'crypto';
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
+import { deleteSecretsForOwner } from '../../../lib/secrets.js';
 import {
   DEFAULT_AI_CONFIG_NAME,
   apiKeyWriteFields,
@@ -488,7 +489,13 @@ export const appMutations = {
       const { id: resolvedId } = await resolveAppRef(ctx.db, id);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
-      await ctx.db.app.update({ where: { id: resolvedId }, data: { deletedAt: new Date() } });
+      // Atomically soft-delete the App and hard-delete its secrets (#677):
+      // secret resolution doesn't re-check owner deletedAt, so an app-scoped
+      // secret must not outlive its App as a live credential.
+      await ctx.db.$transaction(async (tx) => {
+        await tx.app.update({ where: { id: resolvedId }, data: { deletedAt: new Date() } });
+        await deleteSecretsForOwner(tx, 'app', resolvedId);
+      });
       return true;
     },
 

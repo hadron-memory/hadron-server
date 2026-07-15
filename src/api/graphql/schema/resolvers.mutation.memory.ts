@@ -1,5 +1,6 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import { deleteSecretsForOwner } from '../../../lib/secrets.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
@@ -752,9 +753,17 @@ export const memoryMutations = {
       // explicit short-circuit avoids an unnecessary write; the conditional
       // updateMany closes the read-then-write race so deletedAt is set once.
       if (memory.deletedAt) return true;
-      await ctx.db.memory.updateMany({
-        where: { id: resolvedId, deletedAt: null },
-        data: { deletedAt: new Date() },
+      // Atomically soft-delete the memory and hard-delete its memory-scoped
+      // secrets (#677): secret resolution doesn't re-check owner deletedAt,
+      // so a memory-scoped secret must not outlive its memory as a live
+      // credential. The conditional updateMany keeps the race-closing
+      // deletedAt-null guard.
+      await ctx.db.$transaction(async (tx) => {
+        await tx.memory.updateMany({
+          where: { id: resolvedId, deletedAt: null },
+          data: { deletedAt: new Date() },
+        });
+        await deleteSecretsForOwner(tx, 'memory', resolvedId);
       });
       return true;
     },

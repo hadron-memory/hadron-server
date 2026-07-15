@@ -2,6 +2,7 @@
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
+import { deleteSecretsForOwner } from '../../../lib/secrets.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
@@ -234,7 +235,14 @@ export const orgMutations = {
       requireRole(ctx, 'ADMIN');
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
-      await ctx.db.organization.update({ where: { id: resolvedId }, data: { deletedAt: new Date() } });
+      // Atomically soft-delete the org and hard-delete its org-scoped secrets
+      // (#677). App-/memory-scoped secrets under the org are cleaned up when
+      // those entities are themselves deleted — this removes only the org's
+      // own secrets, mirroring the non-cascading org soft-delete.
+      await ctx.db.$transaction(async (tx) => {
+        await tx.organization.update({ where: { id: resolvedId }, data: { deletedAt: new Date() } });
+        await deleteSecretsForOwner(tx, 'org', resolvedId);
+      });
       return true;
     },
 
