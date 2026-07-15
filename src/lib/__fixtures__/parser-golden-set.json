@@ -351,6 +351,23 @@
       "expectedType": "secret",
       "expectedParserCanonical": "hrn:secret:acme.com::app:internal-ops::stripe-key",
       "expectedParserRewrites": ["legacy-urn-scheme"]
+    },
+    {
+      "_note": "secret owner marker must be app:/memory: — a bad marker is rejected at parse (not parse-OK-then-resolve-fail).",
+      "input": "hrn:secret:acme.com::agent:x::stripe-key",
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "agent:x"
+    },
+    {
+      "_note": "secret owner marker is exactly <app|memory>:<slug> — a 3-atom marker is rejected.",
+      "input": "hrn:secret:acme.com::app:x:y::stripe-key",
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "app:x:y"
+    },
+    {
+      "_note": "a secret URN has at most 3 hierarchy segments.",
+      "input": "hrn:secret:acme.com::app:ops::extra::stripe-key",
+      "expectedReject": "invalid-segment-shape"
     }
   ]
 }

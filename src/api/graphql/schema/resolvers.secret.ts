@@ -30,6 +30,8 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { resolveSecretRef } from '../../../lib/entityRef/secretRef.js';
+import { isId } from '../../../lib/entityRef/shape.js';
+import { SecretNotFoundError } from '../../../lib/entityRef/errors.js';
 import {
   decryptSecretValue,
   isSecretOwnerType,
@@ -65,16 +67,22 @@ function assertOwnerType(value: unknown): SecretOwnerType {
 
 /**
  * Resolve a secret ref — a cuid id OR an `hrn:secret:…` URN (#683) — to its
- * full row, or null when it is malformed / names an absent owner or secret.
- * Keeps the no-existence-disclosure posture: a bad URN and a missing secret
- * are both `null` here, and the caller's entitlement gate then applies.
+ * full row, or null when it names an absent owner or secret. Follows the
+ * repo's ref-resolution convention (cf. `Query.agent`): only genuine
+ * not-found is masked to `null`; a malformed/under-qualified URN surfaces its
+ * `UrnNotQualifiedError`, and operational/DB errors propagate rather than
+ * reading as "not found". A cuid is looked up directly (no double query).
  */
 async function findSecretByRef(ctx: Context, ref: string) {
+  if (isId(ref)) {
+    return ctx.db.secret.findUnique({ where: { id: ref } });
+  }
   let id: string;
   try {
     ({ id } = await resolveSecretRef(ctx.db, ref));
-  } catch {
-    return null;
+  } catch (err) {
+    if (err instanceof SecretNotFoundError) return null;
+    throw err;
   }
   return ctx.db.secret.findUnique({ where: { id } });
 }

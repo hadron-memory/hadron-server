@@ -279,7 +279,9 @@ describe('secret(ref) + secrets list', () => {
     const seen = await resolvers.Query.secret({}, { ref: secret.id }, ctxFor(member.id));
     expect(seen).toMatchObject({ id: secret.id, kind: 'generic' });
     expect(await resolvers.Query.secret({}, { ref: secret.id }, ctxFor(outsider.id))).toBeNull();
-    expect(await resolvers.Query.secret({}, { ref: 'missing' }, ctxFor(admin.id))).toBeNull();
+    // A well-formed-but-absent cuid → null; a malformed ref surfaces its
+    // qualification error instead (agent-resolver convention) — see #683.
+    expect(await resolvers.Query.secret({}, { ref: `c${'0'.repeat(24)}` }, ctxFor(admin.id))).toBeNull();
 
     const personal = await createSecret({ ownerType: 'user', ownerRef: null, name: 'mine' }, ctxFor(member.id));
     expect(await resolvers.Query.secret({}, { ref: personal.id }, ctxFor(admin.id))).toBeNull();

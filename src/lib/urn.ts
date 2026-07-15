@@ -960,6 +960,30 @@ function rejectInvalidSegmentShapes(
 }
 
 /**
+ * Secret (#679) shape check at parse time. A secret URN is
+ * `<root>::[<app|memory>:<slug>::]<name>` — so it has at most 3 hierarchy
+ * segments, and when the middle owner segment is present it MUST be exactly
+ * `app:<slug>` or `memory:<slug>`. (The minimum-count / root-and-name rule is
+ * the qualification gate's job, `assertFullyQualifiedUrn`.) Rejecting a bad
+ * marker here keeps parseUrn consistent with the resolution parser
+ * (`parseSecretUrn`) instead of parse-OK-then-resolve-fail. Note: an
+ * app-SCOPED memory (a multi-segment `Memory.urn` like `org::agent::app-user:id`)
+ * cannot be encoded in a single `memory:<slug>` marker and so is not
+ * URN-addressable in v1 — such secrets are reachable by their cuid id only.
+ */
+function validateSecretSegments(input: string, segments: string[]): void {
+  if (segments.length > 3) {
+    throw new UrnParseError(input, 'invalid-segment-shape', segments[3]);
+  }
+  if (segments.length === 3) {
+    const atoms = segments[1].split(':');
+    if (atoms.length !== 2 || (atoms[0] !== 'app' && atoms[0] !== 'memory')) {
+      throw new UrnParseError(input, 'invalid-segment-shape', segments[1]);
+    }
+  }
+}
+
+/**
  * Position-aware reserved-word rejection during URN parsing.
  * Role-marker words (system, app-mem, app-user, priv, group-mem) appear
  * legitimately at specific structural positions:
@@ -979,13 +1003,16 @@ function rejectReservedWordsAtIllegalPositions(
   segments: string[],
 ): void {
   // Secret (#679): a secret URN's positions are `<root>::[<app|memory>:<slug>::]<name>`.
-  // The `app:`/`memory:` type-marker is legitimate (and required) at the owner
-  // segment, and a secret NAME is a free-form user slug like a node loc — so the
-  // node/memory role-marker reserved-word rules below don't apply. Structural
-  // shape is enforced by rejectInvalidSegmentShapes; the owner-type semantics
-  // (is the marker really app/memory?) are validated at resolution
-  // (parseSecretUrn / resolveSecretRef), not here.
-  if (type === 'secret') return;
+  // The generic node/memory role-marker rules don't apply, but secret's own
+  // shape must be enforced HERE (it skips cat-4 marker-stripping, so a bad
+  // marker like `agent:x` would otherwise parse and only fail later at
+  // resolution — inconsistent with how other types reject reserved words at
+  // parse; PR-684 Copilot). validateSecretSegments admits only the app:/memory:
+  // owner marker and bounds the depth.
+  if (type === 'secret') {
+    validateSecretSegments(input, segments);
+    return;
+  }
   const finalIdx = segments.length - 1;
   // Where a role-marker is structurally allowed for this URN type, AND the
   // minimum total segment count below which a role-marker has no valid

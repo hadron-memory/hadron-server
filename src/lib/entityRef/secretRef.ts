@@ -15,11 +15,23 @@
  *
  * See `cor:urn:010:01` (grammar) and `cor:urn:010:02` (a secret URN must
  * disambiguate its owner or be cleanly rejected).
+ *
+ * v1 limitation (PR-684 Codex): the owner marker is exactly `<app|memory>:<slug>`,
+ * so a secret owned by an app-SCOPED memory — whose `Memory.urn` is a
+ * multi-segment path like `org::agent::app-user:<id>` — is NOT URN-addressable
+ * and is reachable by its cuid id only. Extending the marker to carry a full
+ * memory path is a cor:urn grammar change, deferred.
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
 import { assertFullyQualifiedUrn } from '../urn.js';
-import { SecretNotFoundError } from './errors.js';
+import {
+  SecretNotFoundError,
+  OrganizationNotFoundError,
+  UserNotFoundError,
+  AppNotFoundError,
+} from './errors.js';
+import { MemoryNotFoundError } from '../asset/gate.js';
 import { resolveOrgRef } from './orgRef.js';
 import { resolveUserRef } from './userRef.js';
 import { resolveAppRef } from './appRef.js';
@@ -46,7 +58,10 @@ export function parseSecretUrn(ref: string): ParsedSecretUrn {
   // Strip the optional `hrn:secret:` / legacy `urn:secret:` prefix.
   const prefixMatch = ref.match(/^(?:hrn|urn):secret:(.+)$/i);
   const body = prefixMatch ? prefixMatch[1] : ref;
-  const segments = (body.includes('::') ? body.split('::') : body.split(':')).map((s) => s.trim());
+  // No whitespace trimming: a segment with surrounding space is malformed, not
+  // silently canonicalized (parity with the other resolve*Ref helpers / parseUrn
+  // — PR-684 Copilot).
+  const segments = body.includes('::') ? body.split('::') : body.split(':');
   if (segments.length < 2 || segments.length > 3 || segments.some((s) => s.length === 0)) {
     throw new SecretNotFoundError(ref);
   }
@@ -125,10 +140,19 @@ export async function resolveSecretRef(
   let ownerId: string;
   try {
     ownerId = await resolveSecretOwnerId(db, parsed);
-  } catch {
-    // A missing owner and a missing secret are indistinguishable — no
-    // existence disclosure for a well-formed URN whose owner is absent.
-    throw new SecretNotFoundError(ref);
+  } catch (err) {
+    // A missing owner and a missing secret are indistinguishable — no existence
+    // disclosure for a well-formed URN whose owner is absent. Only genuine
+    // owner-not-found is masked; operational/DB errors propagate (PR-684 review).
+    if (
+      err instanceof OrganizationNotFoundError ||
+      err instanceof UserNotFoundError ||
+      err instanceof AppNotFoundError ||
+      err instanceof MemoryNotFoundError
+    ) {
+      throw new SecretNotFoundError(ref);
+    }
+    throw err;
   }
 
   const secret = await db.secret.findUnique({
