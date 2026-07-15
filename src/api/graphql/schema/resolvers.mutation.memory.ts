@@ -637,8 +637,9 @@ export const memoryMutations = {
           ...(writeBranch !== undefined ? { writeBranch } : {}),
           ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
           // cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement,
-          // not access; independent of visibility).
-          ...(listedOnMarketplace !== undefined ? { listedOnMarketplace } : {}),
+          // not access; independent of visibility). NOT NULL column: an explicit
+          // null is treated like an omitted arg (no change), not a NULL write.
+          ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
           // 033 — vector-index config. The chk_memory_vector_encrypted_ack CHECK
           // constraint blocks enabling on an encrypted memory without the
           // disclosure ack; the resolver-level gate above is the friendly

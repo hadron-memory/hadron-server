@@ -323,8 +323,9 @@ export const agentMutations = {
           ...(systemMemoryId !== undefined ? { systemMemoryId } : {}),
           ...(visibility !== undefined ? { visibility: visibility as AgentVisibility } : {}),
           // cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement,
-          // not access; independent of visibility).
-          ...(listedOnMarketplace !== undefined ? { listedOnMarketplace } : {}),
+          // not access; independent of visibility). NOT NULL column: an explicit
+          // null is treated like an omitted arg (no change), not a NULL write.
+          ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
           ...(type !== undefined ? { type } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),
         },

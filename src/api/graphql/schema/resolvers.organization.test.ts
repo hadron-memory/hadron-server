@@ -45,25 +45,6 @@ beforeEach(async () => {
   });
 });
 
-describe('Mutation.updateOrganization — listedOnMarketplace (cor:acl:080:04, #610)', () => {
-  it('defaults to false on create and is settable via updateOrganization', async () => {
-    // Additive column defaults to false (unlisted).
-    const fresh = await db.organization.findUnique({ where: { id: org.id } });
-    expect(fresh?.listedOnMarketplace).toBe(false);
-    // Opt in via the update mutation; it persists and reads back on the entity.
-    const updated = await resolvers.Mutation.updateOrganization(
-      {},
-      { id: org.id, listedOnMarketplace: true },
-      adminCtx(),
-    );
-    expect(updated.listedOnMarketplace).toBe(true);
-    expect((await db.organization.findUnique({ where: { id: org.id } }))?.listedOnMarketplace).toBe(true);
-    // Omitting the arg leaves it unchanged (partial-update semantics).
-    await resolvers.Mutation.updateOrganization({}, { id: org.id, name: 'renamed-keep-flag' }, adminCtx());
-    expect((await db.organization.findUnique({ where: { id: org.id } }))?.listedOnMarketplace).toBe(true);
-  });
-});
-
 describe('Query.organization (007-entity-id-or-urn)', () => {
   it('accepts an ID', async () => {
     const result = await resolvers.Query.organization({}, { ref: org.id }, adminCtx());

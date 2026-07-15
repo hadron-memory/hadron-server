@@ -196,7 +196,9 @@ export const orgMutations = {
         ...(name ? { name } : {}),
         ...(urn ? { urn } : {}),
         ...(isVisible !== undefined ? { isVisible } : {}),
-        ...(listedOnMarketplace !== undefined ? { listedOnMarketplace } : {}),
+        // NOT NULL column: treat an explicit null like an omitted arg (no
+        // change) rather than letting Prisma attempt a NULL write (Copilot #688).
+        ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
         ...(policy !== undefined ? { policy: policy as never } : {}),
       };
 
