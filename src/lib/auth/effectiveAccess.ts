@@ -102,8 +102,8 @@ type ConfigForAccess = {
 export type ResolvedResource =
   | { kind: 'memory'; memory: MemoryForAccess }
   | { kind: 'node'; node: { id: string; loc: string }; memory: MemoryForAccess }
-  | { kind: 'app'; app: { id: string; urn: string; organizationId: string | null } }
-  | { kind: 'agent'; agent: { id: string; urn: string; organizationId: string | null } }
+  | { kind: 'app'; app: { id: string; urn: string; organizationId: string | null; ownerUserId: string | null } }
+  | { kind: 'agent'; agent: { id: string; urn: string; organizationId: string | null; ownerUserId: string | null } }
   | { kind: 'aiServiceConfig'; config: ConfigForAccess }
   | { kind: 'organization'; org: { id: string; urn: string } }
   | { kind: 'user'; user: { id: string; handle: string } };
@@ -377,9 +377,18 @@ async function memoryGrants(
 async function appGrants(
   db: PrismaClient,
   subject: Subject,
-  app: { id: string; organizationId: string | null },
+  app: { id: string; organizationId: string | null; ownerUserId: string | null },
 ): Promise<InternalGrant[]> {
   const grants: InternalGrant[] = [];
+
+  // spec 047: a USER-owned App is STRICTLY owner-only (v1). Only the owner has
+  // grants; return before the platform/org paths, mirroring memoryGrants.
+  if (app.ownerUserId !== null) {
+    if (app.ownerUserId === subject.id) {
+      grants.push({ source: 'PRINCIPAL_GRANT', role: 'owner', via: null, caps: FULL });
+    }
+    return grants;
+  }
 
   if (isPlatformAdmin(subject.roles)) {
     grants.push({
@@ -390,8 +399,7 @@ async function appGrants(
     });
   }
 
-  // spec 047: a user-owned App has no org — no org-role grants (owner grants
-  // land with creation in Phase 2c-2).
+  // Org-owned past this point (XOR guarantees org non-null when owner is null).
   if (app.organizationId === null) return grants;
   const memberRole = await orgMemberRole(db, app.organizationId, subject.id);
   if (memberRole === 'ADMIN' || memberRole === 'OWNER') {
@@ -432,9 +440,19 @@ async function appGrants(
 async function agentGrants(
   db: PrismaClient,
   subject: Subject,
-  agent: { id: string; organizationId: string | null },
+  agent: { id: string; organizationId: string | null; ownerUserId: string | null },
 ): Promise<InternalGrant[]> {
   const grants: InternalGrant[] = [];
+
+  // spec 047: a USER-owned Agent is STRICTLY owner-only (v1 — no sharing, no
+  // platform-admin bypass). Only the owner has grants; return before the
+  // platform/org paths, mirroring memoryGrants.
+  if (agent.ownerUserId !== null) {
+    if (agent.ownerUserId === subject.id) {
+      grants.push({ source: 'PRINCIPAL_GRANT', role: 'owner', via: null, caps: FULL });
+    }
+    return grants;
+  }
 
   if (isPlatformAdmin(subject.roles)) {
     grants.push({
@@ -444,7 +462,7 @@ async function agentGrants(
       caps: FULL,
     });
   }
-  // spec 047: a user-owned Agent has no org — no org-role grants.
+  // Org-owned past this point (XOR guarantees org non-null when owner is null).
   if (agent.organizationId === null) return grants;
 
   const memberRole = await orgMemberRole(db, agent.organizationId, subject.id);
@@ -738,9 +756,13 @@ export async function callerCanAudit(
       return memory.organizationId !== null ? isOrgAdmin(memory.organizationId) : false;
     }
     case 'app':
-      // spec 047: user-owned App/Agent audit-authz (owner) lands in Phase 2c-2.
+      // spec 047: a user-owned App — only its owner may audit (platform admins
+      // are already handled by the early return above; the result grants them
+      // nothing).
+      if (resolved.app.ownerUserId !== null) return resolved.app.ownerUserId === caller.userId;
       return resolved.app.organizationId ? isOrgAdmin(resolved.app.organizationId) : false;
     case 'agent':
+      if (resolved.agent.ownerUserId !== null) return resolved.agent.ownerUserId === caller.userId;
       return resolved.agent.organizationId ? isOrgAdmin(resolved.agent.organizationId) : false;
     case 'organization':
       return isOrgAdmin(resolved.org.id);
@@ -830,7 +852,7 @@ export async function resolveResource(
         const { id } = await deps.resolveAppRef(db, ref);
         const app = await db.app.findUnique({
           where: { id },
-          select: { id: true, urn: true, organizationId: true },
+          select: { id: true, urn: true, organizationId: true, ownerUserId: true },
         });
         return app ? { kind: 'app', app } : null;
       }
@@ -838,7 +860,7 @@ export async function resolveResource(
         const { id } = await deps.resolveAgentRef(db, ref);
         const agent = await db.agent.findUnique({
           where: { id },
-          select: { id: true, urn: true, organizationId: true },
+          select: { id: true, urn: true, organizationId: true, ownerUserId: true },
         });
         return agent ? { kind: 'agent', agent } : null;
       }

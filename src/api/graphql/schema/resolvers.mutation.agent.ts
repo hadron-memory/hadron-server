@@ -23,6 +23,7 @@ import { removeAgentImport } from '../../../controller/operations/removeAgentImp
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
+import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { generateId } from '../../../lib/id.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
@@ -45,17 +46,40 @@ import {
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces }: { orgId: string; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
-      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId }, select: { urn: true } });
+      // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
+      // present ⇒ org-owned (org ADMIN); `orgId` omitted ⇒ user-owned by the
+      // caller, namespaced under their `@<handle>`. The chosen `namespace` is
+      // the URN owner-atom (org domain OR `@<handle>`) — the rest of the compose
+      // path is identical, and the system memory inherits the same owner.
+      let resolvedOrgId: string | null = null;
+      let ownerUserId: string | null = null;
+      let namespace: string;
+      if (orgId) {
+        // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
+        const { id } = await resolveOrgRef(ctx.db, orgId);
+        await requireOrgRole(ctx, id, 'ADMIN');
+        const org = await ctx.db.organization.findUniqueOrThrow({ where: { id }, select: { urn: true } });
+        resolvedOrgId = id;
+        namespace = org.urn;
+      } else {
+        if (!ctx.userId) {
+          throw new GraphQLError('Creating a personal agent requires an authenticated user.', { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        const user = await ctx.db.user.findUniqueOrThrow({ where: { id: ctx.userId }, select: { handle: true } });
+        const handle = normalizeHandleOrNull(user.handle);
+        if (!handle) {
+          throw new GraphQLError('Your account needs a valid handle before you can create a personal agent. Set one in your profile.', { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        ownerUserId = ctx.userId;
+        namespace = `@${handle}`;
+      }
       // #574: slugify the display name — a raw name would persist a
       // case-sensitive / space-bearing URN (and the system memory URN derives
       // from this one, so it inherits the clean slug).
-      const agentUrn = `${org.urn}:${deriveSlugFromName(name)}`;
+      const agentUrn = `${namespace}:${deriveSlugFromName(name)}`;
       // Check for existing agent with the same URN
       const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
       if (existing) {
@@ -69,6 +93,13 @@ export const agentMutations = {
       const inferredType = type ?? (systemMemoryId ? 'CHATBOT' : 'ASSISTANT');
       const defaultSurfaces = inferredType === 'CHATBOT' ? ['api'] : ['mcp'];
       const agentVisibility = (visibility as AgentVisibility) ?? 'PERSONAL';
+      // spec 047: a user-owned agent is owner-only in v1 (no sharing / no
+      // cross-install). Forbid a non-PERSONAL visibility so it can never become
+      // PUBLIC (which the install gate would let a foreign org install, exposing
+      // the agent's user-owned memories to that App's members).
+      if (ownerUserId !== null && agentVisibility !== 'PERSONAL') {
+        throw new GraphQLError('A personal (user-owned) agent must be PERSONAL — sharing a user-owned agent is not supported yet.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
 
       // Every agent owns a system memory (cor:dmo:050:01 — the Agent carries a
       // pointer to its own class='system' memory). Two entry points:
@@ -88,8 +119,10 @@ export const agentMutations = {
         let resolvedSystemMemoryId: string;
         if (systemMemoryId) {
           const target = await tx.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
-          if (target.organizationId !== resolvedOrgId) {
-            throw new Error('System memory must belong to the same organization as the agent');
+          // spec 047: the promoted memory must share the agent's owner — same
+          // org (org-owned) OR same user (user-owned).
+          if (target.organizationId !== resolvedOrgId || target.ownerUserId !== ownerUserId) {
+            throw new Error('System memory must have the same owner as the agent');
           }
           const otherAgent = await tx.agent.findFirst({
             where: { systemMemoryId, deletedAt: null },
@@ -129,6 +162,7 @@ export const agentMutations = {
             data: {
               id: generateId(),
               organizationId: resolvedOrgId,
+              ownerUserId,
               urn: systemMemoryUrn,
               name: `${name} System`,
               class: 'system',
@@ -144,7 +178,7 @@ export const agentMutations = {
 
         return tx.agent.create({
           data: {
-            organizationId: resolvedOrgId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: resolvedSystemMemoryId,
+            organizationId: resolvedOrgId, ownerUserId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: resolvedSystemMemoryId,
             visibility: agentVisibility,
             type: inferredType,
             surfaces: surfaces ?? defaultSurfaces,

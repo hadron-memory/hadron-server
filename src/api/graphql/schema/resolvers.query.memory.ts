@@ -121,6 +121,16 @@ export const memoryQueries = {
         if (!ctx.userId || memory.userId !== ctx.userId) throw new Error('Forbidden');
         return memory;
       }
+      // spec 047: a USER-owned memory (ownerUserId set — e.g. a user-owned
+      // agent's system/knowledge memory) is STRICTLY owner-only, even for a
+      // non-personal class. Check BEFORE the platform-admin fast-path below —
+      // otherwise an ADMIN/OWNER would read another user's user-owned memory
+      // record (this point-read bypasses getAccessibleMemoryIds/canReadMemory,
+      // which already enforce this everywhere else). #676 security review.
+      if (memory.ownerUserId !== null) {
+        if (!ctx.userId || memory.ownerUserId !== ctx.userId) throw new Error('Forbidden');
+        return memory;
+      }
       // Authorization: platform ADMIN/OWNER, a member of the memory's org, OR
       // any caller the shared read gate already admits — PUBLIC visibility,
       // a cross-org subscription, or an App session scoped to this memory.

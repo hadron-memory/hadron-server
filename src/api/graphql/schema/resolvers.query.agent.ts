@@ -129,18 +129,40 @@ export const agentQueries = {
       const f = filter ?? {};
       const scope = await resolveOrgScope(ctx, orgId);
       if (!scope) return { items: [], total: 0 };
-      // Admin unscoped reach applies only WITHOUT an orgId — the active-org
-      // selection is a membership concept (cor:api:100:01).
-      const orgWhere =
-        isPlatformAdmin(ctx) && scope.scopedOrgId == null
-          ? {}
-          : { organizationId: { in: scope.memberOrgIds } };
-      const where = {
-        ...orgWhere,
+      const scopedToOrg = scope.scopedOrgId != null;
+      const filters = {
         deletedAt: null,
         ...(f.type ? { type: f.type as never } : {}),
         ...(f.visibility ? { visibility: f.visibility as never } : {}),
       };
+      // Admin unscoped reach applies only WITHOUT an orgId — the active-org
+      // selection is a membership concept (cor:api:100:01).
+      let where: Record<string, unknown>;
+      if (isPlatformAdmin(ctx) && !scopedToOrg) {
+        // Every live agent EXCEPT another user's user-owned agent — spec 047
+        // strict ownership: a user-owned (org NULL, ownerUserId set) agent is
+        // owner-only, so even a platform admin doesn't see someone else's in
+        // the list (their OWN still show).
+        where = {
+          ...filters,
+          NOT: {
+            AND: [
+              { ownerUserId: { not: null } },
+              { ownerUserId: { not: ctx.userId ?? '__none__' } },
+            ],
+          },
+        };
+      } else {
+        // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
+        // caller's OWN user-owned agents (org NULL) — otherwise a personal
+        // agent the caller just created is invisible in their agent list. A
+        // specific-org selection excludes them (they belong to no org).
+        const ownerClauses: Record<string, unknown>[] = [
+          { organizationId: { in: scope.memberOrgIds } },
+        ];
+        if (!scopedToOrg && ctx.userId) ownerClauses.push({ ownerUserId: ctx.userId });
+        where = { ...filters, OR: ownerClauses };
+      }
       const [total, items] = await Promise.all([
         ctx.db.agent.count({ where }),
         take === 0
