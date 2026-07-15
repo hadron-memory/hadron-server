@@ -25,6 +25,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
+import { runSerializable } from '../lib/serializableTxn.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import {
   resolveAppForRequest,
@@ -3201,9 +3202,12 @@ export function createMcpServerInstance(
   // cascading would silently mutate data the caller doesn't own.
   //
   // Atomicity: descendant-count → refuse-or-act runs inside a single
-  // db.$transaction so a descendant created mid-flight either appears
-  // in the recursive scope or causes the refusal to fire — never a
-  // half-complete state where the descendant is silently orphaned.
+  // SERIALIZABLE transaction (#664) so a descendant created mid-flight
+  // either appears in the recursive scope or causes the refusal to fire —
+  // never a half-complete state where the descendant is silently orphaned.
+  // At the default READ COMMITTED a concurrent insert could commit between
+  // the count and the act; SERIALIZABLE makes that conflict abort one side
+  // with SQLSTATE 40001, which runSerializable retries.
 
   server.tool(
     'hadron_delete_node',
@@ -3255,7 +3259,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'crossMem'; count: number }
         | { ok: true; descendantCount: number };
 
-      const result: DeleteResult = await db.$transaction(async (tx) => {
+      const result: DeleteResult = await runSerializable(db, async (tx) => {
         // Descendants by URN hierarchy: loc startsWith node.loc + ':'.
         // Soft-delete refuses based on LIVE descendants; hard-delete
         // refuses based on the union (a tombstoned descendant still has

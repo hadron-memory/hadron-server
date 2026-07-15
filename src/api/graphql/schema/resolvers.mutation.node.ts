@@ -50,6 +50,7 @@ import {
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { runSerializable } from '../../../lib/serializableTxn.js';
 import {
   mergeNodeFields,
   ALL_NODE_MERGE_FIELDS,
@@ -1263,11 +1264,12 @@ export const nodeMutations = {
       };
       try {
         // The count and the delete run in one transaction (parity with
-        // hadron_delete_node). NOTE: default READ COMMITTED isolation, so a
-        // descendant concurrently inserted after the count can still commit —
-        // the same guarantee the MCP tool has; hardening both to SERIALIZABLE
-        // is a follow-up.
-        await ctx.db.$transaction(async (tx) => {
+        // hadron_delete_node). SERIALIZABLE isolation (#664) closes the
+        // count-then-act race: a descendant concurrently inserted into this
+        // subtree after the count conflicts on commit, aborting one side with
+        // SQLSTATE 40001, which runSerializable retries — so a non-recursive
+        // delete can't orphan a just-inserted child under a now-missing prefix.
+        await runSerializable(ctx.db, async (tx) => {
           const useSubtree = !!recursive;
           if (!useSubtree) {
             // Non-recursive: refuse rather than silently orphan a subtree under a
