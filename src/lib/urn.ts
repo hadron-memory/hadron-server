@@ -58,7 +58,7 @@ export function normalizeScheme(input: string): string {
 const CORE_TYPES = [
   'agent', 'app', 'app-user', 'ai-config', 'asset', 'edge',
   'license', 'memory', 'node', 'org', 'platform', 'reference',
-  'session', 'subscription', 'usage', 'user',
+  'secret', 'session', 'subscription', 'usage', 'user',
 ] as const;
 
 /** Node types per D1. */
@@ -232,7 +232,7 @@ export class UrnParseError extends Error {
  *
  * Spec: 022 / contracts/urn-qualification.md.
  */
-export type ExpectedUrnType = 'org' | 'memory' | 'agent' | 'app' | 'node' | 'edge' | 'user';
+export type ExpectedUrnType = 'org' | 'memory' | 'agent' | 'app' | 'node' | 'edge' | 'user' | 'secret';
 
 const MIN_HIERARCHY_SEGMENTS: Record<ExpectedUrnType, number> = {
   org: 1,
@@ -247,6 +247,12 @@ const MIN_HIERARCHY_SEGMENTS: Record<ExpectedUrnType, number> = {
   // handle), like an org. Users are keyed by their unique handle, not an
   // org-scoped slug; a handle-less user has no URN.
   user: 1,
+  // Secret (#679): owner-scoped, OWNER-DEPENDENT depth — 2 segments for an
+  // org-/user-owned secret (`<root>::<name>`), 3 for an app-/memory-owned one
+  // (`<root>::<app|memory>:<slug>::<name>`). The gate only checks a minimum, so
+  // 2 admits both; the marker-segment structure is validated deeper in the
+  // parser. The first type without a fixed depth.
+  secret: 2,
 };
 
 const MIN_SEGMENTS_HINT: Record<ExpectedUrnType, string> = {
@@ -257,6 +263,7 @@ const MIN_SEGMENTS_HINT: Record<ExpectedUrnType, string> = {
   node: '3 hierarchy segments (org::memory::loc, e.g., "acme.com::mmdata::review:sort-imports")',
   edge: '3 hierarchy segments (org::memory::loc, e.g., "acme.com::mmdata::intro:next")',
   user: '1 hierarchy segment (the handle, e.g., "holger")',
+  secret: '2+ hierarchy segments (owner root :: [app|memory:slug ::] name, e.g., "acme.com::stripe-key" or "acme.com::app:internal-ops::stripe-key")',
 };
 
 /**
@@ -590,12 +597,18 @@ export function parseUrn(input: string): ParsedUrn {
     throw new UrnParseError(input, 'empty-segment');
   }
 
+  // Secret (#679): a user owner-root may be written `user:<handle>` — normalize
+  // it to the canonical `@<handle>` before the shape checks so both spellings
+  // converge on one canonical form (Holger 2026-07-15). ROOT (position 0) only.
+  const workSegments =
+    type === 'secret' ? rewriteSecretUserRoot(rawSegments) : rawSegments;
+
   // Validate each segment's slug atoms (charset + length only — reserved-
   // word check happens after cat 4 stripping below so type markers don't
   // trip on themselves). Errors propagate with the FULL URN as `input` so
   // logging/telemetry preserves context.
-  for (let i = 0; i < rawSegments.length; i++) {
-    validatePathSegment(input, rawSegments[i], type, i, rawSegments.length);
+  for (let i = 0; i < workSegments.length; i++) {
+    validatePathSegment(input, workSegments[i], type, i, workSegments.length);
   }
 
   // === Parser-layer rewrites ===
@@ -620,7 +633,7 @@ export function parseUrn(input: string): ParsedUrn {
   // type-marker to strip. Codex review on PR #124 caught that the
   // previous version mangled such locs silently.
   const { segments: cat4Segments, fired: cat4Fired } = stripTypeMarkers(
-    rawSegments,
+    workSegments,
     type,
   );
   if (cat4Fired) {
@@ -892,6 +905,9 @@ const OWNER_NAMESPACED_TYPES: ReadonlySet<string> = new Set<string>([
   'agent',
   'memory',
   'edge',
+  // Secret (#679): its owner ROOT (position 0) may be a user `@<handle>` just
+  // like the other owner-namespaced types (an org bare-domain otherwise).
+  'secret',
   ...NODE_URN_TYPES,
 ]);
 
@@ -944,6 +960,30 @@ function rejectInvalidSegmentShapes(
 }
 
 /**
+ * Secret (#679) shape check at parse time. A secret URN is
+ * `<root>::[<app|memory>:<slug>::]<name>` — so it has at most 3 hierarchy
+ * segments, and when the middle owner segment is present it MUST be exactly
+ * `app:<slug>` or `memory:<slug>`. (The minimum-count / root-and-name rule is
+ * the qualification gate's job, `assertFullyQualifiedUrn`.) Rejecting a bad
+ * marker here keeps parseUrn consistent with the resolution parser
+ * (`parseSecretUrn`) instead of parse-OK-then-resolve-fail. Note: an
+ * app-SCOPED memory (a multi-segment `Memory.urn` like `org::agent::app-user:id`)
+ * cannot be encoded in a single `memory:<slug>` marker and so is not
+ * URN-addressable in v1 — such secrets are reachable by their cuid id only.
+ */
+function validateSecretSegments(input: string, segments: string[]): void {
+  if (segments.length > 3) {
+    throw new UrnParseError(input, 'invalid-segment-shape', segments[3]);
+  }
+  if (segments.length === 3) {
+    const atoms = segments[1].split(':');
+    if (atoms.length !== 2 || (atoms[0] !== 'app' && atoms[0] !== 'memory')) {
+      throw new UrnParseError(input, 'invalid-segment-shape', segments[1]);
+    }
+  }
+}
+
+/**
  * Position-aware reserved-word rejection during URN parsing.
  * Role-marker words (system, app-mem, app-user, priv, group-mem) appear
  * legitimately at specific structural positions:
@@ -962,6 +1002,17 @@ function rejectReservedWordsAtIllegalPositions(
   type: string,
   segments: string[],
 ): void {
+  // Secret (#679): a secret URN's positions are `<root>::[<app|memory>:<slug>::]<name>`.
+  // The generic node/memory role-marker rules don't apply, but secret's own
+  // shape must be enforced HERE (it skips cat-4 marker-stripping, so a bad
+  // marker like `agent:x` would otherwise parse and only fail later at
+  // resolution — inconsistent with how other types reject reserved words at
+  // parse; PR-684 Copilot). validateSecretSegments admits only the app:/memory:
+  // owner marker and bounds the depth.
+  if (type === 'secret') {
+    validateSecretSegments(input, segments);
+    return;
+  }
   const finalIdx = segments.length - 1;
   // Where a role-marker is structurally allowed for this URN type, AND the
   // minimum total segment count below which a role-marker has no valid
@@ -1018,6 +1069,19 @@ function rejectReservedWordsAtIllegalPositions(
 }
 
 /**
+ * Secret (#679): normalize a `user:<handle>` owner-root to the canonical
+ * `@<handle>` form. Both spellings are valid and equivalent (Holger,
+ * 2026-07-15); `@<handle>` is canonical (it reuses the shipped spec-047
+ * owner-namespace sigil). Applies to the ROOT (position 0) of a secret URN
+ * only; a non-matching root passes through untouched.
+ */
+function rewriteSecretUserRoot(segments: string[]): string[] {
+  if (segments.length === 0) return segments;
+  const m = /^user:([A-Za-z0-9._-]+)$/.exec(segments[0]);
+  return m ? [`@${m[1]}`, ...segments.slice(1)] : segments;
+}
+
+/**
  * Cat 4 — strip optional type markers (`app:`, `agent:`, `memory:`) from
  * each path-segment where the marker is positionally determinable.
  *
@@ -1036,6 +1100,11 @@ function stripTypeMarkers(
   segments: string[];
   fired: boolean;
 } {
+  // Secret (#679): the `app:`/`memory:` marker on a secret's owner segment is
+  // LOAD-BEARING — it is the only thing distinguishing an app-owned from a
+  // memory-owned secret — so it must survive canonicalization. Never strip it;
+  // `rejectReservedWordsAtIllegalPositions` permits it at that position instead.
+  if (urnType === 'secret') return { segments, fired: false };
   let fired = false;
   const isNodeUrn = NODE_URN_TYPES.has(urnType);
   const lastIdx = segments.length - 1;

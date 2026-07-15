@@ -42,6 +42,19 @@ export class UserNotFoundError extends Error {
 }
 
 /**
+ * Surfaced by `resolveSecretRef` when the inbound reference (cuid id or an
+ * `hrn:secret:<owner>::[…::]<name>` URN, #679) does not name a secret — or
+ * when a secret URN is structurally malformed (bad owner marker, wrong
+ * segment count).
+ */
+export class SecretNotFoundError extends Error {
+  constructor(public ref: string) {
+    super(`SECRET_NOT_FOUND: ${ref}`);
+    this.name = 'SecretNotFoundError';
+  }
+}
+
+/**
  * Surfaced by `resolveNodeRef` when the inbound reference (ID, URN,
  * full memory-prefixed loc, or short loc) does not name a live node.
  * Used by `upsertNode` to fail edge-target resolution loudly instead

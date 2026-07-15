@@ -279,13 +279,29 @@ describe('secret(ref) + secrets list', () => {
     const seen = await resolvers.Query.secret({}, { ref: secret.id }, ctxFor(member.id));
     expect(seen).toMatchObject({ id: secret.id, kind: 'generic' });
     expect(await resolvers.Query.secret({}, { ref: secret.id }, ctxFor(outsider.id))).toBeNull();
-    expect(await resolvers.Query.secret({}, { ref: 'missing' }, ctxFor(admin.id))).toBeNull();
+    // A well-formed-but-absent cuid → null; a malformed ref surfaces its
+    // qualification error instead (agent-resolver convention) — see #683.
+    expect(await resolvers.Query.secret({}, { ref: `c${'0'.repeat(24)}` }, ctxFor(admin.id))).toBeNull();
 
     const personal = await createSecret({ ownerType: 'user', ownerRef: null, name: 'mine' }, ctxFor(member.id));
     expect(await resolvers.Query.secret({}, { ref: personal.id }, ctxFor(admin.id))).toBeNull();
     expect(await resolvers.Query.secret({}, { ref: personal.id }, ctxFor(member.id))).toMatchObject({
       name: 'mine',
     });
+  });
+
+  it('secret(ref) accepts an hrn:secret URN, not only a cuid (#683)', async () => {
+    const created = await createSecret(); // org-owned 'api-key' (org.urn = secret-org)
+    const byUrn = await resolvers.Query.secret(
+      {},
+      { ref: 'hrn:secret:secret-org::api-key' },
+      ctxFor(member.id),
+    );
+    expect(byUrn).toMatchObject({ id: created.id, ownerType: 'org', name: 'api-key' });
+    // A well-formed URN naming no secret is null (same as a missing cuid).
+    expect(
+      await resolvers.Query.secret({}, { ref: 'hrn:secret:secret-org::nope' }, ctxFor(member.id)),
+    ).toBeNull();
   });
 
   it('secrets: per-owner page for the entitled, empty page for non-entitled (no disclosure)', async () => {

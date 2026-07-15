@@ -304,6 +304,70 @@
       "expectedType": "agent",
       "expectedParserCanonical": "hrn:agent:micromentor.org::gmail::@holger:triage",
       "expectedParserRewrites": ["type-marker-optionality"]
+    },
+    {
+      "_section": "#679 — secret owner-scoped shape (owner root :: [app|memory:slug ::] name). The app:/memory: marker is LOAD-BEARING and must NOT be stripped.",
+      "input": "hrn:secret:acme.com::stripe-key",
+      "expectedType": "secret",
+      "expectedParserCanonical": "hrn:secret:acme.com::stripe-key",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "hrn:secret:@holger::stripe-key",
+      "expectedType": "secret",
+      "expectedParserCanonical": "hrn:secret:@holger::stripe-key",
+      "expectedParserRewrites": []
+    },
+    {
+      "_note": "user:<handle> owner-root is an accepted spelling; canonicalizes to @<handle>.",
+      "input": "hrn:secret:user:holger::stripe-key",
+      "expectedType": "secret",
+      "expectedParserCanonical": "hrn:secret:@holger::stripe-key",
+      "expectedParserRewrites": []
+    },
+    {
+      "_note": "app-owned: the app: marker survives canonicalization (no type-marker-optionality rewrite).",
+      "input": "hrn:secret:acme.com::app:internal-ops::stripe-key",
+      "expectedType": "secret",
+      "expectedParserCanonical": "hrn:secret:acme.com::app:internal-ops::stripe-key",
+      "expectedParserRewrites": []
+    },
+    {
+      "input": "hrn:secret:@holger::app:gmail-app::stripe-key",
+      "expectedType": "secret",
+      "expectedParserCanonical": "hrn:secret:@holger::app:gmail-app::stripe-key",
+      "expectedParserRewrites": []
+    },
+    {
+      "_note": "memory-owned: the memory: marker survives too.",
+      "input": "hrn:secret:acme.com::memory:secureid::stripe-key",
+      "expectedType": "secret",
+      "expectedParserCanonical": "hrn:secret:acme.com::memory:secureid::stripe-key",
+      "expectedParserRewrites": []
+    },
+    {
+      "_note": "legacy urn: scheme normalizes to hrn: for secrets too.",
+      "input": "urn:secret:acme.com::app:internal-ops::stripe-key",
+      "expectedType": "secret",
+      "expectedParserCanonical": "hrn:secret:acme.com::app:internal-ops::stripe-key",
+      "expectedParserRewrites": ["legacy-urn-scheme"]
+    },
+    {
+      "_note": "secret owner marker must be app:/memory: — a bad marker is rejected at parse (not parse-OK-then-resolve-fail).",
+      "input": "hrn:secret:acme.com::agent:x::stripe-key",
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "agent:x"
+    },
+    {
+      "_note": "secret owner marker is exactly <app|memory>:<slug> — a 3-atom marker is rejected.",
+      "input": "hrn:secret:acme.com::app:x:y::stripe-key",
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "app:x:y"
+    },
+    {
+      "_note": "a secret URN has at most 3 hierarchy segments.",
+      "input": "hrn:secret:acme.com::app:ops::extra::stripe-key",
+      "expectedReject": "invalid-segment-shape"
     }
   ]
 }
