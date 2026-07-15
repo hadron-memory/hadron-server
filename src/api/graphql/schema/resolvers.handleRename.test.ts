@@ -97,4 +97,39 @@ describe('updateMyProfile — handle rename URN propagation', () => {
     const still = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
     expect(still.urn).toBe('@old-handle:my-agent');
   });
+
+  it('rewrites a durable trigger entry_node_urn that embeds the handle', async () => {
+    // The trigger tables are org-NOT-NULL today, so a handle-embedding
+    // entry_node_urn isn't reachable via a personal App yet — insert one
+    // directly to pin the rewrite SQL for when personal-App triggers land.
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'sched-app', urn: `${(await db.organization.findUniqueOrThrow({ where: { id: orgId }, select: { urn: true } })).urn}:sched-app`, organizationId: orgId },
+    });
+    const sched = await db.agentSchedule.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        appId: app.id,
+        name: 'nightly',
+        runAt: new Date('2026-08-01T00:00:00Z'),
+        entryNodeUrn: '@old-handle::my-agent-system::intro',
+      },
+    });
+    await resolvers.Mutation.updateMyProfile({}, { handle: 'new-handle' }, ctx({ userId, roles: ['READER'] }));
+    const after = await db.agentSchedule.findUniqueOrThrow({ where: { id: sched.id } });
+    expect(after.entryNodeUrn).toBe('@new-handle::my-agent-system::intro');
+  });
+
+  it('reclaims a SOFT-DELETED holder already parked in the target namespace', async () => {
+    const c = ctx({ userId, roles: ['READER'] });
+    const agent = await resolvers.Mutation.createAgent({}, { name: 'My Agent' }, c);
+    // A dead agent already occupying the target URN (e.g. a pre-propagation
+    // rename) — the globally-unique urn index would otherwise abort the rename.
+    await db.agent.create({
+      data: { id: generateId(), name: 'ghost', urn: '@new-handle:my-agent', ownerUserId: userId, deletedAt: new Date() },
+    });
+    await resolvers.Mutation.updateMyProfile({}, { handle: 'new-handle' }, c);
+    const renamed = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
+    expect(renamed.urn).toBe('@new-handle:my-agent'); // rename succeeded, ghost reclaimed
+  });
 });
