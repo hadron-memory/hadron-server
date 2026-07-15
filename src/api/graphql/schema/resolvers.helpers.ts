@@ -638,10 +638,22 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  * 3. Users: org member with CONTRIBUTOR+, or cross-org subscription with CONTRIBUTOR role
  */
 export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
-  // App-keyed callers: delegate to the class-aware MCP gate (handles app-scoped
-  // personal/private + the app+admin short-circuit). Unchanged.
+  // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
+  // short-circuit stands (the documented app+admin short-circuit — App Keys
+  // carry no roles, so this only fires for a platform-admin JWT with an active
+  // App), EXCEPT for a spec-047 user-owned memory: strict ownership means even
+  // a platform admin gets no write, so we skip the bypass and let
+  // canWriteToMemory enforce owner-only (gemini review, #676). (The pre-existing
+  // personal/private app+admin bypass is deliberately left as-is here — it's
+  // load-bearing for agent session writes and out of scope for 2c-2a.)
   if (ctx.appId) {
-    if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
+    if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
+      const m = await ctx.db.memory.findUnique({
+        where: { id: memoryId },
+        select: { ownerUserId: true },
+      });
+      if (m?.ownerUserId == null) return;
+    }
     if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
     throw new Error('Forbidden: no write access to this memory');
   }

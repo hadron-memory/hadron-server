@@ -76,6 +76,15 @@ describe('requireMemoryWriteAccess — user-owned memory', () => {
       requireMemoryWriteAccess(ctx({ userId: otherId, roles: ['ADMIN'] }), mem.id),
     ).rejects.toThrow('Forbidden');
   });
+
+  it('throws for an App-keyed ADMIN caller (the App-path must not short-circuit)', async () => {
+    // gemini #676: the App-keyed path previously returned early for ADMIN/OWNER
+    // BEFORE canWriteToMemory, bypassing strict ownership. It must now delegate.
+    const mem = await createUserOwnedKnowledge(ownerId);
+    await expect(
+      requireMemoryWriteAccess(ctx({ appId: 'some-app', userId: otherId, roles: ['ADMIN'] }), mem.id),
+    ).rejects.toThrow('Forbidden');
+  });
 });
 
 describe('getAccessibleMemoryIds — user-owned memory', () => {
