@@ -66,7 +66,7 @@ export const agentMutations = {
         namespace = org.urn;
       } else {
         if (!ctx.userId) {
-          throw new GraphQLError('Creating a personal agent requires an authenticated user.', { extensions: { code: 'BAD_USER_INPUT' } });
+          throw new GraphQLError('Creating a personal agent requires an authenticated user.', { extensions: { code: 'UNAUTHENTICATED' } });
         }
         const user = await ctx.db.user.findUniqueOrThrow({ where: { id: ctx.userId }, select: { handle: true } });
         const handle = normalizeHandleOrNull(user.handle);
