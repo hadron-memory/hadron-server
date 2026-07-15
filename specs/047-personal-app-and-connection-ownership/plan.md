@@ -273,6 +273,29 @@ subscription — no new work once the App is user-owned.
 >   - **2c-2b (next):** user-owner CREATE paths + `@<handle>` URN composition at
 >     create time + handle-rename→URN propagation + App/Agent user-owned
 >     entity-search scoping + the remaining deferred 2c-1 guards.
+>     **BLOCKERS that MUST land in the same slice as creation** (the #676
+>     security review verified these are real but *unreachable* today because
+>     nothing creates user-owned Apps/Agents/Memories yet — they go live the
+>     moment a creation path does, so close them alongside it, with tests that
+>     exercise a real user-owned entity):
+>     1. **`Query.memory(ref:)` admin fast-path** (`resolvers.query.memory.ts`,
+>        the `if (!ADMIN && !OWNER)` block ~L135). It only strict-checks
+>        `personal`/`private`; a user-owned `knowledge`/`group`/`system` memory
+>        would leak its record (URN/name/data) to a platform admin. Add the
+>        user-owned owner-only branch here, mirroring `canReadMemory` /
+>        `getAccessibleMemoryIds` — this direct point-read bypasses those helpers.
+>     2. **`getAppMemoryAccess` memoryItems fold** (`mcp/access-control.ts`
+>        ~L93-150). It folds an Agent's `memoryItems` into the App access map
+>        with no `ownerUserId` filter — a user-owned Agent installed into a
+>        foreign-org App would leak its memories' URN/name/data + node snippets
+>        to that App's members. Filter user-owned rows out of the fold (or block
+>        cross-owner install upstream).
+>     3. **App-management admin fast-paths** (`resolvers.mutation.app.ts`
+>        regenerateAppKey/ensureAppMember/removeAppMember; `resolvers.query.app.ts`
+>        appKeys/appAIConfig — each pre-checks `isPlatformAdmin` and skips the
+>        shared owner-or-org gate). Pre-existing pattern; once user-owned Apps
+>        exist, decide whether the admin fast-path stays or aligns with the
+>        strict-owner rule (`requireOwnerOrOrgRole` already enforces owner-only).
 
 1. **Handle NOT NULL + URN grammar.** ✅ Generate handle at user creation
    (#654/#657); ✅ `@<handle>` parser grammar (#659); ✅ Holger backfilled prod +
