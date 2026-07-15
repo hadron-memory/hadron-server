@@ -1,5 +1,6 @@
 import { GraphQLError } from 'graphql';
 import { encryptToken, decryptToken } from './tokenCrypto.js';
+import type { PrismaClient } from '../generated/prisma/index.js';
 import type { WebFetchAuth } from './webfetchClient.js';
 
 /**
@@ -179,4 +180,21 @@ export function validateAndEncryptSecret(
 /** Decrypt a row's payload for RESOLUTION (run tool / server-side inject). */
 export function decryptSecretValue(row: { valueEncrypted: string }): unknown {
   return JSON.parse(decryptToken(row.valueEncrypted));
+}
+
+/**
+ * Hard-delete every secret owned by one entity — the owner-deletion cleanup
+ * the polymorphic (FK-less) owner design requires by hand (#677 follow-up).
+ * Call it from an owner's delete handler, inside that handler's transaction,
+ * so the "no live secret survives its owner" invariant holds atomically:
+ * secret resolution (cascade + GraphQL) does NOT re-check the owner's
+ * deletedAt, so a soft-deleted org/app/memory would otherwise keep live,
+ * resolvable credentials. `db` accepts a Prisma tx client. Idempotent.
+ */
+export function deleteSecretsForOwner(
+  db: Pick<PrismaClient, 'secret'>,
+  ownerType: SecretOwnerType,
+  ownerId: string,
+): Promise<{ count: number }> {
+  return db.secret.deleteMany({ where: { ownerType, ownerId } });
 }

@@ -1,5 +1,6 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import { deleteSecretsForOwner } from '../../../lib/secrets.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
@@ -751,10 +752,22 @@ export const memoryMutations = {
       // memory returns true without overwriting the original deletedAt. The
       // explicit short-circuit avoids an unnecessary write; the conditional
       // updateMany closes the read-then-write race so deletedAt is set once.
-      if (memory.deletedAt) return true;
-      await ctx.db.memory.updateMany({
-        where: { id: resolvedId, deletedAt: null },
-        data: { deletedAt: new Date() },
+      // Atomically soft-delete the memory and hard-delete its memory-scoped
+      // secrets (#677): secret resolution doesn't re-check owner deletedAt, so
+      // a memory-scoped secret must not outlive its memory as a live
+      // credential. The updateMany deletedAt-null guard keeps the original
+      // deletedAt (FR-014 idempotency — resolveMemoryRef includeDeleted lets a
+      // re-delete reach here) and closes the read-then-write race. The secret
+      // sweep runs UNCONDITIONALLY — even on a re-delete of an already-deleted
+      // memory — so a straggler (a pre-feature secret, or one raced in during
+      // deletion) is still removed (Copilot review); deleteMany is a cheap
+      // indexed no-op when there is nothing to remove.
+      await ctx.db.$transaction(async (tx) => {
+        await tx.memory.updateMany({
+          where: { id: resolvedId, deletedAt: null },
+          data: { deletedAt: new Date() },
+        });
+        await deleteSecretsForOwner(tx, 'memory', resolvedId);
       });
       return true;
     },

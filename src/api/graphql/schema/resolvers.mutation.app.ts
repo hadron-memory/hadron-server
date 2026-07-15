@@ -5,6 +5,7 @@ import {
 } from 'crypto';
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
+import { deleteSecretsForOwner } from '../../../lib/secrets.js';
 import {
   DEFAULT_AI_CONFIG_NAME,
   apiKeyWriteFields,
@@ -488,7 +489,23 @@ export const appMutations = {
       const { id: resolvedId } = await resolveAppRef(ctx.db, id);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
-      await ctx.db.app.update({ where: { id: resolvedId }, data: { deletedAt: new Date() } });
+      // Atomically soft-delete the App and hard-delete its secrets (#677):
+      // secret resolution doesn't re-check owner deletedAt, so an app-scoped
+      // secret must not outlive its App as a live credential. The updateMany
+      // deletedAt-null guard keeps the original deletedAt under a concurrent
+      // double-delete; the secret sweep runs unconditionally (idempotent
+      // indexed delete) so a straggler raced in during deletion is still
+      // removed. createSecret already rejects an already-soft-deleted owner via
+      // resolveAppRef's deletedAt filter, so only that narrow concurrent-commit
+      // window can leave one — and an app-scoped secret is not run-resolvable
+      // once the App is gone (runs require a live App).
+      await ctx.db.$transaction(async (tx) => {
+        await tx.app.updateMany({
+          where: { id: resolvedId, deletedAt: null },
+          data: { deletedAt: new Date() },
+        });
+        await deleteSecretsForOwner(tx, 'app', resolvedId);
+      });
       return true;
     },
 
