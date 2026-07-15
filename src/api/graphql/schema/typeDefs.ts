@@ -1186,6 +1186,8 @@ export const typeDefs = `#graphql
     "Org-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateOrganization."
     policy: JSON
     isVisible: Boolean
+    "cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement, not access)."
+    listedOnMarketplace: Boolean!
     githubInstallationId: Int
     githubAppId: String
     hasGithubAppPrivateKey: Boolean!
@@ -1246,6 +1248,8 @@ export const typeDefs = `#graphql
     writeBranch: String
     # 035-visibility-enum-cleanup: nullable — set only for knowledge/group.
     visibility: MemoryVisibility
+    "cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement, not access)."
+    listedOnMarketplace: Boolean!
     # 005-agent-subscription: four-way memory typology
     class: MemoryClass!
     # 006-asset-upload-redesign: per-memory upload-acceptance gate.
@@ -1338,6 +1342,8 @@ export const typeDefs = `#graphql
     systemPrompt: String
     systemMemoryId: String
     visibility: AgentVisibility!
+    "cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement, not access)."
+    listedOnMarketplace: Boolean!
     type: AgentType!
     surfaces: [String!]!
     # 036-ai-service-config: the four AI fields below are registry-backed
@@ -3778,7 +3784,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateOrganization(id: ID!, name: String, urn: String, isVisible: Boolean, policy: JSON): Organization!
+    updateOrganization(id: ID!, name: String, urn: String, isVisible: Boolean, listedOnMarketplace: Boolean, policy: JSON): Organization!
 
     """
     Soft-delete an Organization.
@@ -3937,7 +3943,7 @@ export const typeDefs = `#graphql
     truth in \`FR_026_DISCLOSURE\` — see \`src/lib/entityRef/errors.ts\`). On a
     non-encrypted memory the flag is a no-op.
     """
-    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean, maxRevCount: Int): Memory!
+    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, listedOnMarketplace: Boolean, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean, maxRevCount: Int): Memory!
 
     """
     Soft-delete a Memory.
@@ -4033,7 +4039,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!]): Agent!
+    updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!]): Agent!
 
     """
     Soft-delete an Agent.

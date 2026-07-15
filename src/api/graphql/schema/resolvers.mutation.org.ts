@@ -164,8 +164,9 @@ export const orgMutations = {
         name,
         urn,
         isVisible,
+        listedOnMarketplace,
         policy,
-      }: { id: string; name?: string; urn?: string; isVisible?: boolean; policy?: unknown },
+      }: { id: string; name?: string; urn?: string; isVisible?: boolean; listedOnMarketplace?: boolean; policy?: unknown },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
@@ -195,6 +196,7 @@ export const orgMutations = {
         ...(name ? { name } : {}),
         ...(urn ? { urn } : {}),
         ...(isVisible !== undefined ? { isVisible } : {}),
+        ...(listedOnMarketplace !== undefined ? { listedOnMarketplace } : {}),
         ...(policy !== undefined ? { policy: policy as never } : {}),
       };
 

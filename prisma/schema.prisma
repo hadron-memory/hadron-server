@@ -452,6 +452,11 @@ model Organization {
   /// `true`; both `false` and unset (`null`) are hidden, matching the
   /// codebase-wide `isVisible !== true` "hidden/personal" convention.
   isVisible                    Boolean?  @map("is_visible")
+  /// Opt-in marketplace catalogue flag (cor:acl:080:04): whether this org is
+  /// advertised in the marketplace browse. DISTINCT from access/visibility —
+  /// it governs advertisement, not who may read the org. Contributes to
+  /// non-member discoverability (cor:acl:080:02) only when `isVisible = true`.
+  listedOnMarketplace          Boolean   @default(false) @map("listed_on_marketplace")
   /// GitHub App installation id. Used to mint ephemeral tokens
   /// (1-hour expiry) for memory git-sync against repos within this
   /// installation's scope.
@@ -630,6 +635,12 @@ model Memory {
   /// `knowledge` (PUBLIC/ORGANIZATION) and `group` (GROUP); NULL for
   /// system/app/personal/private (enforced by chk_memory_visibility_class).
   visibility                MemoryVisibility?
+  /// Opt-in marketplace catalogue flag (cor:acl:080:04): whether this memory is
+  /// advertised in the marketplace browse. DISTINCT from `visibility` — PUBLIC
+  /// governs access (reachable by URN), this governs advertisement. "Unlisted
+  /// but public" is valid; contributes to the owner org's discoverability
+  /// (cor:acl:080:02) only when that org is activated (`isVisible = true`).
+  listedOnMarketplace       Boolean          @default(false) @map("listed_on_marketplace")
   /// Whether the memory's contents (including asset bytes) are
   /// encrypted at rest using AES-256-GCM under HADRON_ENCRYPTION_KEY.
   isEncrypted               Boolean           @default(false) @map("is_encrypted")
@@ -1302,6 +1313,11 @@ model Agent {
   /// PUBLIC | ORGANIZATION | PERSONAL (035-visibility-enum-cleanup gave
   /// agents their own enum). PERSONAL is the creator-only draft state.
   visibility           AgentVisibility @default(PERSONAL)
+  /// Opt-in marketplace catalogue flag (cor:acl:080:04): whether this agent is
+  /// advertised in the marketplace browse. DISTINCT from `visibility` — PUBLIC
+  /// governs access, this governs advertisement. Contributes to the owner org's
+  /// discoverability (cor:acl:080:02) only when that org is activated.
+  listedOnMarketplace  Boolean         @default(false) @map("listed_on_marketplace")
   /// Coarse behavior hint — see AgentType enum doc. Largely legacy
   /// post-008.
   type                 AgentType       @default(ASSISTANT)

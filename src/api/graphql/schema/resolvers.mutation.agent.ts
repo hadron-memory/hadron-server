@@ -200,7 +200,7 @@ export const agentMutations = {
 
     updateAgent: async (
       _: unknown,
-      { id, name, urn, description, systemPrompt, systemMemoryId, visibility, type, surfaces }: { id: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
+      { id, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces }: { id: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
       ctx: Context,
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
@@ -322,6 +322,9 @@ export const agentMutations = {
           ...(systemPrompt !== undefined ? { systemPrompt } : {}),
           ...(systemMemoryId !== undefined ? { systemMemoryId } : {}),
           ...(visibility !== undefined ? { visibility: visibility as AgentVisibility } : {}),
+          // cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement,
+          // not access; independent of visibility).
+          ...(listedOnMarketplace !== undefined ? { listedOnMarketplace } : {}),
           ...(type !== undefined ? { type } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),
         },
