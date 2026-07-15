@@ -2222,6 +2222,23 @@ export function createMcpServerInstance(
       if (prefix) where.loc = { startsWith: prefix + ':' };
       if (memoryId) where.memoryId = memoryId;
       else if (memoryIds) where.memoryId = { in: memoryIds };
+      else {
+        // memoryIds === null ⇒ ADMIN/OWNER "see all", and no single memory was
+        // resolved (bare parentRel loc). WITHOUT this carve-out the query would
+        // browse EVERY memory at the loc prefix, exposing another user's
+        // personal/private nodes (FR-016) AND (spec 047) user-owned nodes to a
+        // platform admin — the canReadMemory gate above only fires when a
+        // memoryId resolved. Mirror the globalSearch admin carve-out (codex
+        // review, #676).
+        where.memory = {
+          NOT: {
+            OR: [
+              { class: { in: ['personal', 'private'] }, userId: { not: auth.userId ?? '__none__' } },
+              { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: auth.userId ?? '__none__' } }] },
+            ],
+          },
+        };
+      }
       // NB: the runnable filter (cor:api:060) is applied IN-MEMORY below, not
       // here — see the realByKey/nodes split. Filtering it into this DB query
       // would hide real-but-non-runnable ancestors (parent nodes are usually
@@ -3741,16 +3758,24 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     const byId = new Map<string, RunTaskMem>();
     const ids = await getAccessibleMemoryIds(db, auth);
     if (ids === null) {
-      // ADMIN/OWNER "see all" — minus other users' personal/private memories.
+      // ADMIN/OWNER "see all" — minus other users' personal/private memories
+      // AND (spec 047) other users' user-owned memories (strictly owner-only).
+      // Filter in the DB (not in-memory) so it leverages the userId/ownerUserId
+      // indexes and mirrors the globalSearch admin carve-out (gemini review,
+      // #676). The NOT/OR keeps the caller's OWN strict-owner rows in view.
       const all = await db.memory.findMany({
-        where: { deletedAt: null },
-        select: { id: true, urn: true, name: true, class: true, userId: true },
+        where: {
+          deletedAt: null,
+          NOT: {
+            OR: [
+              { class: { in: ['personal', 'private'] as any }, userId: { not: auth.userId ?? '__none__' } },
+              { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: auth.userId ?? '__none__' } }] },
+            ],
+          },
+        },
+        select: { id: true, urn: true, name: true },
       });
-      for (const m of all) {
-        const owned = m.userId != null && m.userId === auth.userId;
-        if ((m.class === 'personal' || m.class === 'private') && !owned) continue;
-        byId.set(m.id, { id: m.id, urn: m.urn, name: m.name });
-      }
+      for (const m of all) byId.set(m.id, { id: m.id, urn: m.urn, name: m.name });
     } else if (ids.length > 0) {
       const mems = await db.memory.findMany({
         where: { id: { in: ids }, deletedAt: null },

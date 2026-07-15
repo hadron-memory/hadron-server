@@ -50,6 +50,10 @@ function mockDb() {
         userId: null,
         userMemoryOfAgentId: null,
         appId: 'app-1',
+        // spec 047: an org-owned memory has ownerUserId NULL. Prisma returns
+        // null (not undefined) for a null column; the canReadMemory user-owned
+        // branch keys on `!== null`, so the mock must spell this out.
+        ownerUserId: null,
       }),
     },
     edge: {

@@ -192,11 +192,14 @@ export async function requireOwnerOrOrgRole(
   entity: { organizationId: string | null; ownerUserId: string | null },
   required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER',
 ): Promise<void> {
-  if (isPlatformAdmin(ctx)) return;
+  // spec 047 (Holger 2026-07-14): a user-owned entity is STRICTLY owner-only —
+  // NO platform-admin bypass, consistent with personal/private strict ownership
+  // (cor:acl:010:02). The owner check runs BEFORE the admin/org path.
   if (entity.ownerUserId !== null) {
     if (ctx.userId && ctx.userId === entity.ownerUserId) return;
     throw new Error('Forbidden');
   }
+  if (isPlatformAdmin(ctx)) return;
   if (entity.organizationId !== null) {
     await requireOrgRole(ctx, entity.organizationId, required);
     return;
@@ -207,14 +210,16 @@ export async function requireOwnerOrOrgRole(
 /**
  * Boolean form of {@link requireOwnerOrOrgRole} (graceful, no throw) — true for
  * a platform admin, the entity's user owner, or a live member of its owning org.
- * Mirrors `isOrgMemberOrAdmin` for user-or-org-owned entities.
+ * Mirrors `isOrgMemberOrAdmin` for user-or-org-owned entities. A user-owned
+ * entity is strictly owner-only (no platform-admin bypass — see the throwing
+ * form), so the owner check precedes the admin path.
  */
 export async function isOwnerOrOrgMember(
   ctx: Context,
   entity: { organizationId: string | null; ownerUserId: string | null },
 ): Promise<boolean> {
-  if (isPlatformAdmin(ctx)) return true;
   if (entity.ownerUserId !== null) return !!ctx.userId && ctx.userId === entity.ownerUserId;
+  if (isPlatformAdmin(ctx)) return true;
   if (entity.organizationId !== null) return isOrgMemberOrAdmin(ctx, entity.organizationId);
   return false;
 }
@@ -498,8 +503,13 @@ export async function getAccessibleMemoryIds(
         ...scope,
         deletedAt: null,
         NOT: {
-          class: { in: ['personal', 'private'] as any },
-          userId: { not: ctx.userId ?? '__none__' },
+          OR: [
+            // Another user's owner-owned personal/private memory (unchanged).
+            { class: { in: ['personal', 'private'] as any }, userId: { not: ctx.userId ?? '__none__' } },
+            // spec 047: a user-owned memory is STRICTLY private — a platform
+            // admin does NOT see another user's user-owned rows either.
+            { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: ctx.userId ?? '__none__' } }] },
+          ],
         },
       },
       select: { id: true },
@@ -538,6 +548,8 @@ export async function getAccessibleMemoryIds(
         OR: [
           { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
           { userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
+          // spec 047: a user-owned memory is readable ONLY by its owner.
+          { ownerUserId: ctx.userId },
         ],
       },
       select: { id: true },
@@ -626,10 +638,22 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  * 3. Users: org member with CONTRIBUTOR+, or cross-org subscription with CONTRIBUTOR role
  */
 export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
-  // App-keyed callers: delegate to the class-aware MCP gate (handles app-scoped
-  // personal/private + the app+admin short-circuit). Unchanged.
+  // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
+  // short-circuit stands (the documented app+admin short-circuit — App Keys
+  // carry no roles, so this only fires for a platform-admin JWT with an active
+  // App), EXCEPT for a spec-047 user-owned memory: strict ownership means even
+  // a platform admin gets no write, so we skip the bypass and let
+  // canWriteToMemory enforce owner-only (gemini review, #676). (The pre-existing
+  // personal/private app+admin bypass is deliberately left as-is here — it's
+  // load-bearing for agent session writes and out of scope for 2c-2a.)
   if (ctx.appId) {
-    if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
+    if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
+      const m = await ctx.db.memory.findUnique({
+        where: { id: memoryId },
+        select: { ownerUserId: true },
+      });
+      if (m?.ownerUserId == null) return;
+    }
     if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
     throw new Error('Forbidden: no write access to this memory');
   }
@@ -649,7 +673,17 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw new Error('Forbidden: no write access to this memory');
   }
 
-  // Non-personal/private: global ADMIN/OWNER bypass.
+  // spec 047: a USER-owned memory is writable ONLY by its owner — STRICT
+  // ownership, so this runs BEFORE the ADMIN/OWNER bypass below (a platform
+  // admin does NOT get write to another user's user-owned memory, consistent
+  // with the personal/private carve-out above). Covers a user-owned
+  // non-personal memory, e.g. a user-owned agent's system/knowledge memory.
+  if (memory.ownerUserId !== null) {
+    if (ctx.userId === memory.ownerUserId) return;
+    throw new Error('Forbidden: no write access to this memory');
+  }
+
+  // Non-personal/private, org-owned: global ADMIN/OWNER bypass.
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
 
   // #653: an APP-SCOPED knowledge/group memory is App-internal — it must NOT be
@@ -661,14 +695,6 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw new Error('Forbidden: no write access to this memory');
   }
 
-  // spec 047: a USER-owned memory is writable only by its owner — no org path,
-  // no org-CONTRIBUTOR grant. (The personal/private strict-owner case above
-  // already returned; this covers a user-owned non-personal memory, e.g. a
-  // user-owned agent's system/knowledge memory.)
-  if (memory.ownerUserId !== null) {
-    if (ctx.userId === memory.ownerUserId) return;
-    throw new Error('Forbidden: no write access to this memory');
-  }
   if (memory.organizationId === null) {
     throw new Error('Forbidden: no write access to this memory');
   }

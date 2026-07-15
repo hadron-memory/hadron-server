@@ -71,7 +71,9 @@ type MemoryForAccess = {
   userId: string | null;
   appId: string | null;
   userMemoryOfAgentId: string | null;
-  organizationId: string;
+  // spec 047: org-XOR-owner — exactly one of organizationId / ownerUserId is set.
+  organizationId: string | null;
+  ownerUserId: string | null;
   isEncrypted: boolean;
 };
 
@@ -84,6 +86,7 @@ const MEMORY_SELECT = {
   appId: true,
   userMemoryOfAgentId: true,
   organizationId: true,
+  ownerUserId: true,
   isEncrypted: true,
   deletedAt: true,
 } as const;
@@ -180,6 +183,21 @@ async function memoryGrants(
   }
 
   // ── Non-strict classes (system / app / knowledge / group) ────────────────
+
+  // spec 047: a USER-owned memory (ownerUserId set — e.g. a user-owned agent's
+  // system/knowledge memory) is STRICTLY owner-only in this audit too, mirroring
+  // canReadMemory / requireMemoryWriteAccess: only the owner has grants — no
+  // platform-admin, no org, no PUBLIC, and this overrides the system-class
+  // universal-read below (a user-owned agent's definition is owner-only in v1).
+  if (memory.ownerUserId !== null) {
+    if (memory.ownerUserId === subject.id) {
+      grants.push({ source: 'MEMORY_PRINCIPAL', role: 'owner', via: null, caps: FULL });
+    }
+    return grants;
+  }
+  // After the user-owned early return, the org-XOR-owner CHECK guarantees an org
+  // owner — narrow organizationId to non-null for the org-role paths below.
+  if (memory.organizationId === null) return grants;
 
   // System memory is universally readable, and is never written or managed
   // through this surface — its only editor is the agent-ownership surface, and
@@ -712,7 +730,12 @@ export async function callerCanAudit(
       ) {
         return true;
       }
-      return isOrgAdmin(memory.organizationId);
+      // spec 047: a user-owned memory — ONLY its owner may audit (strict
+      // ownership; no org-admin path, and the org is null here anyway).
+      if (memory.ownerUserId !== null) {
+        return memory.ownerUserId === caller.userId;
+      }
+      return memory.organizationId !== null ? isOrgAdmin(memory.organizationId) : false;
     }
     case 'app':
       // spec 047: user-owned App/Agent audit-authz (owner) lands in Phase 2c-2.

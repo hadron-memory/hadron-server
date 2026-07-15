@@ -211,6 +211,26 @@ export async function getMemoryAccess(
     }
   }
 
+  // ── spec 047: user-owned (non-personal) memories ────────────────────────
+  // A user-owned memory (ownerUserId === caller) is STRICTLY owner-only and
+  // grants READ_WRITE to its owner. Only NON-personal classes go in this map
+  // — the map is personal-free by design (hadron_list_memories folds the
+  // caller's own personal/private rows in separately, and getAccessibleMemoryIds
+  // consumers rely on it staying personal-free). App-Key callers (no userId)
+  // never match, preserving per-App isolation. canReadMemory / canWriteToMemory
+  // remain the canonical per-memory gates (strict owner-only, no admin bypass).
+  if (auth.userId) {
+    const owned = await db.memory.findMany({
+      where: {
+        ownerUserId: auth.userId,
+        class: { notIn: ['personal', 'private'] },
+        deletedAt: null,
+      },
+      select: { id: true },
+    });
+    for (const { id } of owned) access.set(id, 'READ_WRITE');
+  }
+
   return access;
 }
 
@@ -238,7 +258,7 @@ export async function canWriteToMemory(
 ): Promise<boolean> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
-    select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true },
+    select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true, ownerUserId: true },
   });
 
   if (!memory) return false;
@@ -303,6 +323,15 @@ export async function canWriteToMemory(
     return true;
   }
 
+  // spec 047: a USER-owned non-personal memory (ownerUserId set — e.g. a
+  // user-owned agent's system/knowledge memory) is STRICTLY owner-only. No
+  // ADMIN/OWNER bypass, no App/org path; an App-Key caller (no userId) never
+  // matches, so is denied. Personal/private user-owned rows are already handled
+  // by the block above (strict on userId + per-App isolation).
+  if (memory.ownerUserId !== null) {
+    return auth.userId === memory.ownerUserId;
+  }
+
   // Non-personal memory: standard checks. Per D-2026-05-21-003, when
   // auth.appId is unset (multi-App OAuth caller without selection),
   // getMemoryAccess unions across all the user's accessible Apps —
@@ -329,7 +358,7 @@ export async function canReadMemory(
 ): Promise<boolean> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
-    select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true },
+    select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true, ownerUserId: true },
   });
   if (!memory) return false;
 
@@ -374,6 +403,14 @@ export async function canReadMemory(
       if (!sub || !isActiveAgentSubscription(sub)) return false;
     }
     return true;
+  }
+
+  // spec 047: a USER-owned non-personal memory (ownerUserId set) is STRICTLY
+  // owner-only to read — no ADMIN/OWNER bypass, no App/org path. An App-Key
+  // caller (no userId) never matches. Personal/private user-owned rows are
+  // already handled above.
+  if (memory.ownerUserId !== null) {
+    return auth.userId === memory.ownerUserId;
   }
 
   // Non-personal memory: ADMIN/OWNER bypass + access map check.

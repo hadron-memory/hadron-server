@@ -63,8 +63,16 @@ function memoryScopeWhere(p: SearchPrincipal): AnyWhere {
   const base: AnyWhere =
     p.accessibleMemoryIds !== null
       ? { id: { in: p.accessibleMemoryIds } }
-      // Admin: everything except OTHER users' personal/private (034 carve-out).
-      : { NOT: { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } } };
+      // Admin: everything except OTHER users' personal/private (034 carve-out)
+      // AND other users' user-owned memories (spec 047 strict ownership).
+      : {
+          NOT: {
+            OR: [
+              { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } },
+              { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: p.viewerUserId ?? '__none__' } }] },
+            ],
+          },
+        };
   return p.orgScopeId ? { AND: [base, { organizationId: p.orgScopeId }] } : base;
 }
 
@@ -73,7 +81,16 @@ function nodeScopeWhere(p: SearchPrincipal): AnyWhere {
   const base: AnyWhere =
     p.accessibleMemoryIds !== null
       ? { memoryId: { in: p.accessibleMemoryIds } }
-      : { memory: { NOT: { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } } } };
+      : {
+          memory: {
+            NOT: {
+              OR: [
+                { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } },
+                { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: p.viewerUserId ?? '__none__' } }] },
+              ],
+            },
+          },
+        };
   return p.orgScopeId ? { AND: [base, { memory: { organizationId: p.orgScopeId } }] } : base;
 }
 

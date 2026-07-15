@@ -259,6 +259,20 @@ subscription — no new work once the App is user-owned.
 >   + leak tests) + handle-rename→URN propagation + the deferred owner-branches
 >   flagged in 2c-1 (audit surface, asset keying). This is where user-owned
 >   entities actually get CREATED and function.
+>   - **2c-2a (PR pending):** the READ/WRITE access foundation, ahead of any
+>     creation path — the user-owned-memory branch on every memory gate so a
+>     user-owned memory is STRICTLY owner-only (no platform-admin bypass, parity
+>     with personal/private): MCP `canReadMemory`/`canWriteToMemory`/
+>     `getMemoryAccess`; portal `getAccessibleMemoryIds` (owner sees own; ADMIN
+>     "see all" excludes others' user-owned), `requireMemoryWriteAccess`,
+>     `effectiveAccess`/`callerCanAudit`; the globalSearch admin carve-out; the
+>     `run-task` admin listing. Leak tests at both layers. No schema/migration
+>     change (columns landed in 2b/2c-1); pure authz + tests. The decided model:
+>     user-owned = strictly owner-only; a user-owned agent's system memory is
+>     owner-only too (overrides system-class universal-read) in v1.
+>   - **2c-2b (next):** user-owner CREATE paths + `@<handle>` URN composition at
+>     create time + handle-rename→URN propagation + App/Agent user-owned
+>     entity-search scoping + the remaining deferred 2c-1 guards.
 
 1. **Handle NOT NULL + URN grammar.** ✅ Generate handle at user creation
    (#654/#657); ✅ `@<handle>` parser grammar (#659); ✅ Holger backfilled prod +
