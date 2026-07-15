@@ -491,9 +491,19 @@ export const appMutations = {
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       // Atomically soft-delete the App and hard-delete its secrets (#677):
       // secret resolution doesn't re-check owner deletedAt, so an app-scoped
-      // secret must not outlive its App as a live credential.
+      // secret must not outlive its App as a live credential. The updateMany
+      // deletedAt-null guard keeps the original deletedAt under a concurrent
+      // double-delete; the secret sweep runs unconditionally (idempotent
+      // indexed delete) so a straggler raced in during deletion is still
+      // removed. createSecret already rejects an already-soft-deleted owner via
+      // resolveAppRef's deletedAt filter, so only that narrow concurrent-commit
+      // window can leave one — and an app-scoped secret is not run-resolvable
+      // once the App is gone (runs require a live App).
       await ctx.db.$transaction(async (tx) => {
-        await tx.app.update({ where: { id: resolvedId }, data: { deletedAt: new Date() } });
+        await tx.app.updateMany({
+          where: { id: resolvedId, deletedAt: null },
+          data: { deletedAt: new Date() },
+        });
         await deleteSecretsForOwner(tx, 'app', resolvedId);
       });
       return true;

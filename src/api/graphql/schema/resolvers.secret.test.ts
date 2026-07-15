@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { decryptToken } from '../../../lib/tokenCrypto.js';
+import { decryptToken, encryptToken } from '../../../lib/tokenCrypto.js';
 import { resolvers, type Context } from './resolvers.js';
 
 let org: { id: string };
@@ -360,5 +360,37 @@ describe('owner deletion cleans up secrets', () => {
       resolvers.Mutation.deleteMemory({}, { id: personal.id }, ctxFor(member.id)),
     ).resolves.toBe(true);
     expect(await db.secret.findUnique({ where: { id: secret.id } })).toBeNull();
+  });
+
+  // Copilot review: a re-delete of an already-soft-deleted memory must still
+  // sweep any straggler memory-scoped secret (a pre-feature row, or one raced
+  // in during the owner's deletion) — the cleanup is unconditional, not gated
+  // on the idempotency short-circuit.
+  it('deleteMemory sweeps stragglers even when the memory is already soft-deleted', async () => {
+    const gone = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: 'secret-org::gone',
+        name: 'gone',
+        class: 'personal',
+        userId: member.id,
+        deletedAt: new Date(),
+      },
+    });
+    const straggler = await db.secret.create({
+      data: {
+        ownerType: 'memory',
+        ownerId: gone.id,
+        name: 'k',
+        kind: 'generic',
+        metadata: {},
+        valueEncrypted: encryptToken(JSON.stringify('v')),
+      },
+    });
+    await expect(
+      resolvers.Mutation.deleteMemory({}, { id: gone.id }, ctxFor(member.id)),
+    ).resolves.toBe(true);
+    expect(await db.secret.findUnique({ where: { id: straggler.id } })).toBeNull();
   });
 });

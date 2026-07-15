@@ -238,9 +238,15 @@ export const orgMutations = {
       // Atomically soft-delete the org and hard-delete its org-scoped secrets
       // (#677). App-/memory-scoped secrets under the org are cleaned up when
       // those entities are themselves deleted — this removes only the org's
-      // own secrets, mirroring the non-cascading org soft-delete.
+      // own secrets, mirroring the non-cascading org soft-delete. The
+      // updateMany deletedAt-null guard keeps the original deletedAt under a
+      // concurrent double-delete; the secret sweep runs unconditionally
+      // (idempotent) so a straggler raced in during deletion is still removed.
       await ctx.db.$transaction(async (tx) => {
-        await tx.organization.update({ where: { id: resolvedId }, data: { deletedAt: new Date() } });
+        await tx.organization.updateMany({
+          where: { id: resolvedId, deletedAt: null },
+          data: { deletedAt: new Date() },
+        });
         await deleteSecretsForOwner(tx, 'org', resolvedId);
       });
       return true;
