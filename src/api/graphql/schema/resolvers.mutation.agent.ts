@@ -57,6 +57,14 @@ export const agentMutations = {
       let resolvedOrgId: string | null = null;
       let ownerUserId: string | null = null;
       let namespace: string;
+      // An EMPTY-STRING orgId is a malformed request, not a personal-create
+      // signal — reject it explicitly so a client bug can't silently bypass the
+      // org resolution + ADMIN gate and create a personal agent instead (empty
+      // string is a common "unset" sentinel elsewhere in this file). Omit orgId
+      // entirely to create a personal agent. (Copilot review, #682.)
+      if (orgId !== undefined && orgId !== null && orgId.trim() === '') {
+        throw new GraphQLError('orgId must be a non-empty organization ID or URN — omit it entirely to create a personal agent.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
       if (orgId) {
         // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
         const { id } = await resolveOrgRef(ctx.db, orgId);
@@ -197,6 +205,15 @@ export const agentMutations = {
     ) => {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      // spec 047 (codex review, #682): a user-owned agent is owner-only in v1 —
+      // it must NEVER become non-PERSONAL. The create-time guard alone is
+      // insufficient: without this, an owner could create a PERSONAL agent and
+      // then update it to PUBLIC, which would expose its definition AND let a
+      // foreign org install it (folding the user-owned system memory into that
+      // App's readable set). Applies to a user-owned agent (ownerUserId set).
+      if (agent.ownerUserId !== null && visibility !== undefined && visibility !== 'PERSONAL') {
+        throw new GraphQLError('A personal (user-owned) agent must stay PERSONAL — sharing a user-owned agent is not supported yet.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
       let newUrn: string | undefined;
       if (urn !== undefined) {
         if (!agent.organizationId) {

@@ -142,15 +142,12 @@ export const agentQueries = {
         // Every live agent EXCEPT another user's user-owned agent — spec 047
         // strict ownership: a user-owned (org NULL, ownerUserId set) agent is
         // owner-only, so even a platform admin doesn't see someone else's in
-        // the list (their OWN still show).
+        // the list (their OWN still show). "org-owned OR mine" as a flat OR is
+        // clearer + more index-friendly than a nested NOT/AND (gemini review,
+        // #682).
         where = {
           ...filters,
-          NOT: {
-            AND: [
-              { ownerUserId: { not: null } },
-              { ownerUserId: { not: ctx.userId ?? '__none__' } },
-            ],
-          },
+          OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
         };
       } else {
         // Org-scoped view. In the DEFAULT (no orgId) view, also surface the

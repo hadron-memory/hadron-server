@@ -77,6 +77,33 @@ describe('createAgent — user-owned (no orgId)', () => {
       resolvers.Mutation.createAgent({}, { name: 'Nobody' }, ctx({})),
     ).rejects.toThrow(/authenticated/i);
   });
+
+  it('rejects an empty-string orgId (must not silently route to personal)', async () => {
+    await expect(
+      resolvers.Mutation.createAgent(
+        {},
+        { orgId: '', name: 'Ambiguous' },
+        ctx({ userId: ownerId, roles: ['READER'] }),
+      ),
+    ).rejects.toThrow(/non-empty organization/i);
+  });
+
+  it('updateAgent cannot publish a user-owned agent to PUBLIC (stays owner-only)', async () => {
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { name: 'Stays Private' },
+      ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    await expect(
+      resolvers.Mutation.updateAgent(
+        {},
+        { id: agent.id, visibility: 'PUBLIC' },
+        ctx({ userId: ownerId, roles: ['READER'] }),
+      ),
+    ).rejects.toThrow(/PERSONAL|not supported/i);
+    const still = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
+    expect(still.visibility).toBe('PERSONAL');
+  });
 });
 
 describe('user-owned agent — read/list/audit surfaces are owner-only', () => {
