@@ -4017,13 +4017,16 @@ export const typeDefs = `#graphql
     """
     setMemorySourceToken(id: ID!, token: String!, expiresAt: String): Memory!
 
-    # Agent management (org ADMIN)
+    # Agent management
     """
-    Create an Agent in an organization.
+    Create an agent. Provide orgId to create an ORG-owned agent (requires org
+    ADMIN); OMIT orgId to create a USER-OWNED agent owned by the caller (spec
+    047) — its URN is namespaced under the caller's @handle and its system
+    memory is user-owned too. Exactly one owner (org XOR user).
 
-    Accepts the entity's ID or URN.
+    orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID!, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!]): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!]): Agent!
 
     """
     Update an Agent.

@@ -270,9 +270,24 @@ subscription — no new work once the App is user-owned.
 >     change (columns landed in 2b/2c-1); pure authz + tests. The decided model:
 >     user-owned = strictly owner-only; a user-owned agent's system memory is
 >     owner-only too (overrides system-class universal-read) in v1.
->   - **2c-2b (next):** user-owner CREATE paths + `@<handle>` URN composition at
->     create time + handle-rename→URN propagation + App/Agent user-owned
->     entity-search scoping + the remaining deferred 2c-1 guards.
+>   - **2c-2b-1 (PR pending):** user-owned **Agent** creation. `createAgent`
+>     with `orgId` OMITTED creates a user-owned agent (`ownerUserId` = caller,
+>     org NULL) namespaced under `@<handle>` with a user-owned system memory;
+>     forced PERSONAL visibility (v1 owner-only — this also keeps a user-owned
+>     agent out of the cross-org install path, so BLOCKER 2 stays unreachable
+>     and defers to the install slice). Closes **BLOCKER 1** (`Query.memory`
+>     admin fast-path) and makes every Agent read/list/audit surface owner-
+>     correct: `Query.agents` (owner sees own; admin "see all" excludes others'
+>     user-owned), `effectiveAccess` agent/app owner grant + `callerCanAudit`
+>     owner branch (`ResolvedResource` now selects `ownerUserId`). No schema
+>     change. Leak tests: `resolvers.userOwnedAgent.test.ts`.
+>   - **2c-2b (remaining):** user-owned **App** create + install (user-owner
+>     target in `installAgentIntoAppCore`, subscription-licensed, no
+>     `AgentOrgGrant`) + **BLOCKER 2** (`getAppMemoryAccess`) + **BLOCKER 3**
+>     (App-management admin fast-paths) + `@<handle>` **handle-rename→URN
+>     propagation** (renaming a handle must move every `@old:*` owned App/Agent/
+>     Memory URN, incl. the `-system` memory) + connections (org-less
+>     mail/calendar) + portal UX.
 >     **BLOCKERS that MUST land in the same slice as creation** (the #676
 >     security review verified these are real but *unreachable* today because
 >     nothing creates user-owned Apps/Agents/Memories yet — they go live the
