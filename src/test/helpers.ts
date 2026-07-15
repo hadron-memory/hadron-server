@@ -39,6 +39,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.homeAssistantInstance.deleteMany();
   // hadrontool-resend BYO sender registry (FKs org only).
   await db.resendSender.deleteMany();
+  // General secret store (#677) — polymorphic owner, FK-free.
+  await db.secret.deleteMany();
   // Webfetch polling: receipts + origin bindings both FK AppRun.
   await db.webFetchEventReceipt.deleteMany();
   await db.webFetchPollBinding.deleteMany();

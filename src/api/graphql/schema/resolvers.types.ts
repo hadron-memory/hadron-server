@@ -137,6 +137,12 @@ export const typeResolvers = {
     createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
     updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
   },
+  Secret: {
+    // valueEncrypted is not in the GraphQL type at all (write-only secret
+    // posture, #677) — nothing to derive, just date serialization.
+    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
+    updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
+  },
   ResendSender: {
     hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
     from: (s: { fromAddress: string }) => s.fromAddress,

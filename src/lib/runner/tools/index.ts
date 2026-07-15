@@ -14,6 +14,7 @@ import { WEB_POLL_TOOLS } from './webPollTools.js';
 import { SEARCH_TOOLS } from './searchTools.js';
 import { SMS_TOOLS } from './smsTools.js';
 import { EMAIL_TOOLS } from './emailTools.js';
+import { SECRET_TOOLS } from './secretTools.js';
 
 export { AuthorFailError };
 export { hadronReadNode, hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
@@ -24,6 +25,7 @@ export { webPollStart, webPollCancel, webPollList } from './webPollTools.js';
 export { webSearchTool } from './searchTools.js';
 export { hadronSendSms } from './smsTools.js';
 export { hadronSendEmail } from './emailTools.js';
+export { hadronReadSecret } from './secretTools.js';
 export type { RunToolDef, RunToolContext };
 
 /** The author's printf — lands on the hop's trail element (D-TL-2). */
@@ -79,6 +81,7 @@ const REGISTRY = new Map<string, RunToolDef>(
     ...SEARCH_TOOLS,
     ...SMS_TOOLS,
     ...EMAIL_TOOLS,
+    ...SECRET_TOOLS,
   ].map((t) => [t.name, t]),
 );
 

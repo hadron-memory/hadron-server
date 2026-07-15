@@ -18,10 +18,11 @@
  * tool-loop's transient path from ever auto-replaying it (D-TL-6). This is the
  * run-loop half of the client's "never auto-retry non-GET" rule.
  *
- * CREDENTIALS: neither tool exposes `auth` to the LLM. The credentials-node
- * indirection (a `credentialsNodeUrn` core decrypts and injects, so the secret
- * never enters LLM context) is the deferred core-side follow-up in #628; until
- * it lands, runs fetch anonymously. Fetched content / response bodies are
+ * CREDENTIALS: neither tool exposes `auth` to the LLM. Extending the secret
+ * store's inject path (#677 — a `credentialName` core resolves and injects,
+ * as web_poll_start does, so the secret never enters LLM context) to these
+ * one-shot tools is a deferred follow-up; until it lands, runs fetch
+ * anonymously. Fetched content / response bodies are
  * UNTRUSTED external input — the tool tags the envelope `source: 'external'`
  * and this surface passes it through unchanged.
  */

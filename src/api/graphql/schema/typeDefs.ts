@@ -1597,6 +1597,36 @@ export const typeDefs = `#graphql
     inputSchema: JSON
   }
 
+  # One named, owner-scoped secret — the general secret store (#677).
+  # Polymorphic owner (user | org | app | memory). The value is encrypted
+  # at rest and WRITE-ONLY: no field here ever returns it — kind + metadata
+  # are the inspectable half (you can see THAT a secret exists and, for
+  # webfetch-auth, WHERE it applies, without decrypting). A bare name
+  # resolves at run time via the CSS cascade, most-specific-first:
+  # memory -> app -> user -> org.
+  type Secret {
+    id: ID!
+    "Owner scope: user | org | app | memory."
+    ownerType: String!
+    ownerId: ID!
+    "Cascade-resolution key; unique per owner; lowercase [a-z0-9-], max 64."
+    name: String!
+    "Extensible kind; v1: generic | webfetch-auth."
+    kind: String!
+    "The NON-secret, inspectable half (webfetch-auth: { type, urlPrefix })."
+    metadata: JSON
+    createdAt: String!
+    createdBy: String
+    updatedAt: String!
+    updatedBy: String
+  }
+
+  # Uniform paginated list shape (cor:api:120).
+  type SecretsPage {
+    items: [Secret!]!
+    total: Int!
+  }
+
   # One registered Home Assistant instance (hadrontool-home-assistant
   # registry, hadron-server#640). Org-owned. The long-lived access token
   # is encrypted at rest and WRITE-ONLY: no field here ever returns it.
@@ -3078,6 +3108,23 @@ export const typeDefs = `#graphql
     mcpServerTools(ref: ID!): [McpServerTool!]
 
     """
+    Fetch one secret's inspectable half (never the value). Null when the
+    row does not exist OR the caller is not entitled to its owner scope —
+    no existence disclosure. Entitlement: user -> that user; org -> org
+    member; app -> app owner or org member; memory -> memory READ.
+    """
+    secret(ref: ID!): Secret
+
+    """
+    Paginated secret list for ONE owner scope (the hadron secret ls
+    surface). ownerRef accepts ID or URN (cor:api:140) and defaults to the
+    caller for ownerType user. An unresolvable ref or a non-entitled owner
+    yields an empty page — no disclosure. Name-ascending order (id
+    tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    """
+    secrets(ownerType: String!, ownerRef: ID, limit: Int, offset: Int): SecretsPage!
+
+    """
     Fetch one registered Home Assistant instance (org member). Null when
     the row does not exist OR the caller is not a member of its org — no
     existence disclosure.
@@ -4120,6 +4167,36 @@ export const typeDefs = `#graphql
 
     "Hard-delete a registered MCP server (org ADMIN/OWNER); runs referencing its tools fail loud afterwards."
     deleteMcpServer(ref: ID!): Boolean!
+
+    """
+    Create a named, owner-scoped secret (#677). Gate per owner scope:
+    user -> that user (ownerRef optional, defaults to the caller); org ->
+    org ADMIN; app -> app owner / org ADMIN; memory -> memory WRITE.
+    value is the secret payload — encrypted at rest, write-only, never
+    returned. kind selects validation: generic (opaque JSON) or
+    webfetch-auth ({type: bearer|basic|header, ...} + metadata.urlPrefix
+    origin binding). A run resolves the name via the CSS cascade
+    (memory -> app -> user -> org) at entitled scopes only.
+    """
+    createSecret(
+      ownerType: String!
+      ownerRef: ID
+      name: String!
+      kind: String!
+      metadata: JSON
+      value: JSON!
+    ): Secret!
+
+    """
+    Overwrite a secret's value and/or metadata (v1 rotation — no
+    versioning). Name, kind, and owner are immutable — the cascade and
+    flow config reference the name; create a new name instead. The
+    effective (metadata, value) pair is re-validated per kind.
+    """
+    updateSecret(ref: ID!, metadata: JSON, value: JSON): Secret!
+
+    "Hard-delete a secret; referencing runs fail their resolution loud (or fall through the cascade) afterwards."
+    deleteSecret(ref: ID!): Boolean!
 
     """
     Register a Home Assistant instance (org ADMIN/OWNER). orgRef accepts

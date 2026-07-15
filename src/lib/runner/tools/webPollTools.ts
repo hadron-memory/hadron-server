@@ -10,7 +10,8 @@ import {
   type CreatePollInput,
   type WebPollCondition,
 } from '../../webfetchClient.js';
-import { loadWebFetchCredential } from '../webCredentials.js';
+import { loadWebFetchAuthSecret } from '../secrets.js';
+import { isSecretOwnerType, type SecretOwnerType } from '../../secrets.js';
 import { redactUrl } from '../../webUrl.js';
 import type { RunToolDef } from './types.js';
 import { coerceHeaders } from './webTools.js';
@@ -53,8 +54,9 @@ export const webPollStart: RunToolDef = {
   policyAction: 'tool.web_poll',
   description:
     'Start a durable GET-only watch on an http(s) URL. The sidecar evaluates the supplied HTML/JSON ' +
-    'conditions until they trigger or the mandatory TTL expires. Use credentialsNodeUrn to inject a ' +
-    'server-encrypted credential whose urlPrefix covers this URL; never put secrets in headers or arguments.',
+    'conditions until they trigger or the mandatory TTL expires. Use credentialName to inject a ' +
+    'webfetch-auth secret whose urlPrefix covers this URL — it resolves server-side (memory, app, ' +
+    'user, org cascade) and the value never enters your context; never put secrets in headers or arguments.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -72,9 +74,16 @@ export const webPollStart: RunToolDef = {
       ttlSeconds: { type: 'number', description: 'Mandatory lifetime; sidecar enforces its configured ceiling.' },
       firePolicy: { type: 'string', enum: [...FIRE_POLICIES] },
       cooldownSeconds: { type: 'number' },
-      credentialsNodeUrn: {
+      credentialName: {
         type: 'string',
-        description: 'Optional fully-qualified credential node URN. The secret is never returned to the model.',
+        description:
+          'Optional name of a webfetch-auth secret (hadron secret store). Resolved and injected ' +
+          'server-side; the value is never returned to the model.',
+      },
+      credentialScope: {
+        type: 'string',
+        enum: ['memory', 'app', 'user', 'org'],
+        description: 'Optional: resolve credentialName at exactly this scope instead of the cascade.',
       },
       headers: {
         type: 'object',
@@ -99,12 +108,22 @@ export const webPollStart: RunToolDef = {
         ? undefined
         : requiredPositiveInteger(args.cooldownSeconds, 'cooldownSeconds');
     const headers = coerceHeaders(args.headers);
-    const credentialsNodeUrn =
-      typeof args.credentialsNodeUrn === 'string' && args.credentialsNodeUrn.length > 0
-        ? args.credentialsNodeUrn
+    const credentialName =
+      typeof args.credentialName === 'string' && args.credentialName.length > 0
+        ? args.credentialName
         : undefined;
-    const credential = credentialsNodeUrn
-      ? await loadWebFetchCredential(ctx, credentialsNodeUrn, url)
+    let credentialScope: SecretOwnerType | undefined;
+    if (args.credentialScope != null) {
+      if (!isSecretOwnerType(args.credentialScope)) {
+        throw new Error('web_poll_start: "credentialScope" must be one of memory, app, user, org.');
+      }
+      credentialScope = args.credentialScope;
+    }
+    // INJECT path (#677): the secret resolves server-side and goes straight
+    // to the sidecar — a poll fetches untrusted external content, so the
+    // value must never be readable from model context.
+    const credential = credentialName
+      ? await loadWebFetchAuthSecret(ctx, credentialName, credentialScope, url)
       : undefined;
 
     const input: CreatePollInput = {
@@ -119,7 +138,10 @@ export const webPollStart: RunToolDef = {
       ...(firePolicy ? { firePolicy } : {}),
       ...(cooldownSeconds != null ? { cooldownSeconds } : {}),
       ...(headers ? { headers } : {}),
-      ...(credentialsNodeUrn ? { credentialsNodeUrn } : {}),
+      // The sidecar's audit-provenance field keeps its legacy wire name
+      // (renaming is a hadrontool-webfetch follow-up); it now carries the
+      // resolved Secret row reference, not a node URN.
+      ...(credential ? { credentialsNodeUrn: `secret:${credential.secretId}` } : {}),
       ...(credential ? { auth: credential.auth, urlPrefix: credential.urlPrefix } : {}),
     };
     const created = await createPoll(input);
@@ -139,7 +161,7 @@ export const webPollStart: RunToolDef = {
           userId: ctx.run.userId,
           entryNodeUrn: ctx.run.entryNodeUrn,
           policy: ctx.run.policy ?? undefined,
-          credentialsNodeUrn,
+          credentialSecretId: credential?.secretId,
           url: ledgerUrl,
         },
       });
@@ -154,7 +176,7 @@ export const webPollStart: RunToolDef = {
     ctx.log(
       `web_poll_start ${JSON.stringify({
         jobId: created.jobId,
-        ...(credentialsNodeUrn ? { credentialsNodeUrn } : {}),
+        ...(credentialName ? { credentialName } : {}),
         url: ledgerUrl,
       })}`,
     );

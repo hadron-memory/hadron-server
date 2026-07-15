@@ -28,6 +28,7 @@ import { slackQueries } from './resolvers.query.slack.js';
 import { mcpQueries } from './resolvers.query.mcp.js';
 import { homeAssistantQueries } from './resolvers.query.homeAssistant.js';
 import { resendSenderQueries } from './resolvers.query.resendSender.js';
+import { secretMutations, secretQueries } from './resolvers.secret.js';
 
 import { nodeMutations } from './resolvers.mutation.node.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
@@ -64,6 +65,7 @@ export const resolvers = {
     ...mcpQueries,
     ...homeAssistantQueries,
     ...resendSenderQueries,
+    ...secretQueries,
     ...appRunQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
@@ -88,5 +90,6 @@ export const resolvers = {
     ...mcpMutations,
     ...homeAssistantMutations,
     ...resendSenderMutations,
+    ...secretMutations,
   },
 };
