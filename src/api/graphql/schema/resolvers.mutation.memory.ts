@@ -482,6 +482,7 @@ export const memoryMutations = {
         readBranch,
         writeBranch,
         visibility,
+        listedOnMarketplace,
         vectorIndexEnabled,
         embeddingSource,
         acknowledgeVectorInversionRisk,
@@ -495,6 +496,7 @@ export const memoryMutations = {
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string; readBranch?: string; writeBranch?: string; visibility?: string;
+        listedOnMarketplace?: boolean;
         vectorIndexEnabled?: boolean;
         embeddingSource?: 'abstract' | 'contentChunks' | 'both';
         acknowledgeVectorInversionRisk?: boolean;
@@ -634,6 +636,10 @@ export const memoryMutations = {
           ...(readBranch !== undefined ? { readBranch } : {}),
           ...(writeBranch !== undefined ? { writeBranch } : {}),
           ...(visibility !== undefined ? { visibility: visibility as MemoryVisibility } : {}),
+          // cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement,
+          // not access; independent of visibility). NOT NULL column: an explicit
+          // null is treated like an omitted arg (no change), not a NULL write.
+          ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
           // 033 — vector-index config. The chk_memory_vector_encrypted_ack CHECK
           // constraint blocks enabling on an encrypted memory without the
           // disclosure ack; the resolver-level gate above is the friendly
