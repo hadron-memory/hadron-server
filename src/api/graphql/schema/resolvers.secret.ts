@@ -7,26 +7,21 @@
  * inspectable half. The row grants nothing by itself — run-time use walks
  * the cascade resolver under the run principal (src/lib/runner/secrets.ts).
  *
- * Authorization matrix (issue #677):
+ * Authorization matrix (issue #677; owners narrowed to org/user in #696):
  *   owner    | create/update/delete            | see-it-exists (read surface)
  *   user     | that user (strict, no admin)    | that user
  *   org      | org ADMIN                        | org member
- *   app      | app owner / org ADMIN            | app owner / org member
- *   memory   | memory WRITE                     | memory READ
+ *
+ * The #679 app- and memory-owned scopes are superseded (#696,
+ * D-2026-07-15-006): the flat v2 secret URN carries a single root principal.
  */
 import { GraphQLError } from 'graphql';
 import type { Context } from './resolvers.helpers.js';
 import {
   clampListTake,
   isOrgMemberOrAdmin,
-  isOwnerOrOrgMember,
-  requireMemoryWriteAccess,
   requireOrgRole,
-  requireOwnerOrOrgRole,
 } from './resolvers.helpers.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
-import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { resolveSecretRef } from '../../../lib/entityRef/secretRef.js';
@@ -43,19 +38,6 @@ import {
 
 function badInput(message: string): GraphQLError {
   return new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
-}
-
-/** Project the resolver Context onto the AuthContext canReadMemory expects. */
-function secretAuthContext(ctx: Context) {
-  return {
-    clientId: ctx.clientId,
-    userId: ctx.userId,
-    appId: ctx.appId,
-    sessionId: ctx.sessionId,
-    roles: ctx.roles,
-    organizationId: ctx.organizationId,
-    apiKeyId: ctx.apiKeyId,
-  };
 }
 
 function assertOwnerType(value: unknown): SecretOwnerType {
@@ -109,14 +91,6 @@ async function resolveSecretOwnerRef(
       if (ownerRef == null) throw badInput('ownerRef is required for org-scoped secrets.');
       return (await resolveOrgRef(ctx.db, ownerRef)).id;
     }
-    case 'app': {
-      if (ownerRef == null) throw badInput('ownerRef is required for app-scoped secrets.');
-      return (await resolveAppRef(ctx.db, ownerRef)).id;
-    }
-    case 'memory': {
-      if (ownerRef == null) throw badInput('ownerRef is required for memory-scoped secrets.');
-      return (await resolveMemoryRef(ctx.db, ownerRef)).id;
-    }
   }
 }
 
@@ -139,16 +113,6 @@ async function requireSecretOwnerWrite(
       await requireOrgRole(ctx, ownerId, 'ADMIN');
       return;
     }
-    case 'app': {
-      const app = await ctx.db.app.findUnique({ where: { id: ownerId } });
-      if (!app) throw new Error('Forbidden');
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
-      return;
-    }
-    case 'memory': {
-      await requireMemoryWriteAccess(ctx, ownerId);
-      return;
-    }
   }
 }
 
@@ -167,20 +131,6 @@ async function canSeeSecretOwner(
       return !!ctx.userId && ctx.userId === ownerId;
     case 'org':
       return isOrgMemberOrAdmin(ctx, ownerId);
-    case 'app': {
-      const app = await ctx.db.app.findUnique({ where: { id: ownerId } });
-      return app ? isOwnerOrOrgMember(ctx, app) : false;
-    }
-    case 'memory': {
-      // Use the shared class-aware read gate (the SAME predicate the runtime
-      // cascade uses), NOT the portal getAccessibleMemoryIds — the latter
-      // grants an App-key caller no memory access outside an active session,
-      // so it would drift from the write gate (requireMemoryWriteAccess folds
-      // in canWriteToMemory): an App key could create a memory-scoped secret
-      // it then couldn't see/update/delete (Codex P2). canReadMemory keeps
-      // the `memory READ` matrix uniform across principal types.
-      return canReadMemory(ctx.db, secretAuthContext(ctx), ownerId);
-    }
   }
 }
 

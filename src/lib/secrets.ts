@@ -21,15 +21,20 @@ import type { WebFetchAuth } from './webfetchClient.js';
  * Both share this store and the same cascade resolver.
  */
 
-export const SECRET_OWNER_TYPES = ['user', 'org', 'app', 'memory'] as const;
+// Owners are ORG/USER ONLY (#696, decision D-2026-07-15-006): the flat v2
+// secret URN `hrn:secret:<root>:<name>` has a single root principal and can't
+// express the v1 `app:`/`memory:` owner markers. The #679 app- and
+// memory-owned shapes are superseded; the #702 prod audit confirmed 0 such
+// rows, so this is code + a CHECK constraint, no data migration.
+export const SECRET_OWNER_TYPES = ['user', 'org'] as const;
 export type SecretOwnerType = (typeof SECRET_OWNER_TYPES)[number];
 
 export function isSecretOwnerType(value: unknown): value is SecretOwnerType {
   return typeof value === 'string' && (SECRET_OWNER_TYPES as readonly string[]).includes(value);
 }
 
-/** CSS-cascade resolution order, most specific first. */
-export const SECRET_SCOPE_ORDER: readonly SecretOwnerType[] = ['memory', 'app', 'user', 'org'];
+/** CSS-cascade resolution order, most specific first (user overrides org). */
+export const SECRET_SCOPE_ORDER: readonly SecretOwnerType[] = ['user', 'org'];
 
 /** Cascade-resolution key: lowercase, dash-separated, unique per owner. */
 export const SECRET_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -188,8 +193,8 @@ export function decryptSecretValue(row: { valueEncrypted: string }): unknown {
  * Call it from an owner's delete handler, inside that handler's transaction,
  * so the "no live secret survives its owner" invariant holds atomically:
  * secret resolution (cascade + GraphQL) does NOT re-check the owner's
- * deletedAt, so a soft-deleted org/app/memory would otherwise keep live,
- * resolvable credentials. `db` accepts a Prisma tx client. Idempotent.
+ * deletedAt, so a soft-deleted org would otherwise keep live, resolvable
+ * credentials. `db` accepts a Prisma tx client. Idempotent.
  */
 export function deleteSecretsForOwner(
   db: Pick<PrismaClient, 'secret'>,

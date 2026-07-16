@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { buildNodeRevisionSnapshot, createNodeRevision } from '../../../lib/nodeRevisionSnapshot.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const ORG_URN = 'urnres-org';
@@ -228,5 +229,93 @@ describe('Query.resolveUrn — unresolvable inputs return null', () => {
       { db, userId: outsider.id, roles: ['ADMIN'] },
     );
     expect(r).toEqual({ kind: 'memory', id: memory.id });
+  });
+});
+
+// ─── #696: per-entity v2 shapes (apprun / noderev / #data fragment) ──────────
+describe('Query.resolveUrn — #696 per-entity v2 shapes', () => {
+  async function seedRun() {
+    return db.appRun.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        appId: app.id,
+        agentId: agent.id,
+        triggerKind: 'MANUAL',
+        entryNodeUrn: `${MEM_URN}:flow:start`,
+        status: 'RUNNING',
+        data: { hello: 'world' },
+      },
+    });
+  }
+
+  it('resolves an apprun URN, and AppRun.urn round-trips through it', async () => {
+    const run = await seedRun();
+    // APP_URN is the bare <root>:<slug> form → hrn:apprun:<root>:<app>:<runId>.
+    const urn = `hrn:apprun:${APP_URN}:${run.id}`;
+    const r = await resolvers.Query.resolveUrn({}, { urn }, memberCtx());
+    expect(r).toMatchObject({ kind: 'apprun', id: run.id, organizationId: org.id });
+
+    // The computed AppRun.urn composes to exactly the URN that resolves back.
+    const composed = await resolvers.AppRun.urn(run as never, {}, memberCtx());
+    expect(composed).toBe(urn);
+    const back = await resolvers.Query.resolveUrn({}, { urn: composed! }, memberCtx());
+    expect(back).toMatchObject({ kind: 'apprun', id: run.id });
+  });
+
+  it('resolves an apprun #data fragment to the parent run, tagged fragment:data', async () => {
+    const run = await seedRun();
+    const r = await resolvers.Query.resolveUrn(
+      {},
+      { urn: `hrn:apprun:${APP_URN}:${run.id}#data` },
+      memberCtx(),
+    );
+    expect(r).toMatchObject({ kind: 'apprun', id: run.id, fragment: 'data' });
+  });
+
+  it('resolves a node #data fragment to the parent node, tagged fragment:data', async () => {
+    const r = await resolvers.Query.resolveUrn(
+      {},
+      { urn: `hrn:node:${MEM_URN}:${NODE_LOC}#data` },
+      memberCtx(),
+    );
+    expect(r).toMatchObject({ kind: 'node', id: node.id, memoryId: memory.id, fragment: 'data' });
+  });
+
+  it('rejects a #data fragment on a non-node/apprun parent', async () => {
+    const r = await resolvers.Query.resolveUrn({}, { urn: `hrn:memory:${MEM_URN}#data` }, memberCtx());
+    expect(r).toBeNull();
+  });
+
+  it('mints monotonic revNo and resolves the noderev URN (round-trips)', async () => {
+    const editor = { userId: member.id };
+    const snap = () =>
+      createNodeRevision(
+        db,
+        buildNodeRevisionSnapshot({ ...node, memoryId: memory.id, loc: NODE_LOC, name: 'Topic' } as never, editor),
+      );
+    await snap();
+    await snap();
+
+    const revs = await db.nodeRevision.findMany({
+      where: { nodeId: node.id },
+      orderBy: { revNo: 'asc' },
+      select: { id: true, revNo: true },
+    });
+    expect(revs.map((r) => r.revNo)).toEqual([1, 2]);
+    const refreshed = await db.node.findUniqueOrThrow({ where: { id: node.id }, select: { revSeq: true } });
+    expect(refreshed.revSeq).toBe(2);
+
+    // Resolve r2 by its end-anchored URN, and confirm NodeRevision.urn round-trips.
+    const urn = `hrn:noderev:${MEM_URN}:${NODE_LOC}:r2`;
+    const r = await resolvers.Query.resolveUrn({}, { urn }, memberCtx());
+    expect(r).toMatchObject({ kind: 'noderev', id: revs[1]!.id, memoryId: memory.id });
+
+    const row = await db.nodeRevision.findUniqueOrThrow({
+      where: { id: revs[1]!.id },
+      select: { id: true, loc: true, revNo: true, memoryId: true, nodeId: true },
+    });
+    const composed = await resolvers.NodeRevision.urn(row as never, {}, memberCtx());
+    expect(composed).toBe(urn);
   });
 });

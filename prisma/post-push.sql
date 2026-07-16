@@ -154,6 +154,16 @@ ALTER TABLE ai_service_configs
   ADD CONSTRAINT chk_ai_service_config_owner
   CHECK (num_nonnulls(hadron_server_id, organization_id, app_id, agent_id) = 1);
 
+-- ─── #696: secrets are ORG/USER-owned only ───────────────────────────────
+-- D-2026-07-15-006 narrows the #679 secret store to org/user owners (the flat
+-- v2 secret URN carries a single root principal; app-/memory-owned shapes are
+-- superseded). Synced with the 20260716120000 migration + src/test/globalSetup.ts.
+ALTER TABLE secrets
+  DROP CONSTRAINT IF EXISTS chk_secret_owner_type;
+ALTER TABLE secrets
+  ADD CONSTRAINT chk_secret_owner_type
+  CHECK (owner_type IN ('user', 'org'));
+
 -- ─── spec 047 Phase 2c: user-OR-org ownership ────────────────────────────
 -- App / Agent / Memory are owned by EXACTLY ONE of an organization or a user
 -- (org-XOR-owner). `organization_id` is nullable (a user-owned entity has no

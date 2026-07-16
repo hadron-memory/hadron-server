@@ -55,6 +55,30 @@ export class SecretNotFoundError extends Error {
 }
 
 /**
+ * Surfaced by `resolveAppRunRef` when the inbound reference (an AppRun ID or an
+ * `hrn:apprun:<root>:<app>:<run-id>` URN, #696) does not name a run — or when
+ * the URN is structurally malformed / its app doesn't resolve.
+ */
+export class AppRunNotFoundError extends Error {
+  constructor(public ref: string) {
+    super(`APP_RUN_NOT_FOUND: ${ref}`);
+    this.name = 'AppRunNotFoundError';
+  }
+}
+
+/**
+ * Surfaced by `resolveNodeRevRef` when the inbound reference (a NodeRevision ID
+ * or an end-anchored `hrn:noderev:<root>:<mem>:<loc...>:<rev>` URN, #696) does
+ * not name a revision — or when the URN is malformed / its node doesn't resolve.
+ */
+export class NodeRevisionNotFoundError extends Error {
+  constructor(public ref: string) {
+    super(`NODE_REVISION_NOT_FOUND: ${ref}`);
+    this.name = 'NodeRevisionNotFoundError';
+  }
+}
+
+/**
  * Surfaced by `resolveNodeRef` when the inbound reference (ID, URN,
  * full memory-prefixed loc, or short loc) does not name a live node.
  * Used by `upsertNode` to fail edge-target resolution loudly instead

@@ -22,6 +22,9 @@ import {
   legacyMemoryUrnToCanonical,
 } from '../../../lib/urn.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveAppRunRef, composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
+import { AppRunNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 
@@ -807,11 +810,55 @@ export const appRunQueries = {
   },
 
   appRun: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-    // Runs are URN-less (like AiServiceConfig) — ref is the ID only.
-    const run = await ctx.db.appRun.findUnique({ where: { id: ref } });
+    // #696: ref is an AppRun ID or an hrn:apprun:<root>:<app>:<run-id> URN. A
+    // bare cuid/UUIDv7 goes direct; a URN decomposes via resolveAppRunRef.
+    let id: string;
+    if (isId(ref)) {
+      id = ref;
+    } else {
+      try {
+        ({ id } = await resolveAppRunRef(ctx.db, ref));
+      } catch (err) {
+        if (err instanceof AppRunNotFoundError) return null;
+        throw err;
+      }
+    }
+    const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) return null;
     if (!isPlatformAdmin(ctx)) await requireOrgRole(ctx, run.organizationId, 'READER');
     return run;
+  },
+
+  /**
+   * The "latest run" query (#696) — resolves the most recent run of an App to a
+   * CONCRETE run (whose `.urn` is a concrete apprun URN). "current/latest/
+   * previous" are queries, never magic run-ids in URN space (cor:urn:010:02).
+   * `previous: true` returns the run before the latest (the second-most-recent).
+   */
+  latestAppRun: async (
+    _: unknown,
+    { appRef, previous }: { appRef: string; previous?: boolean | null },
+    ctx: Context,
+  ) => {
+    const { id: appId } = await resolveAppRef(ctx.db, appRef);
+    const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null } });
+    if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+    if (!isPlatformAdmin(ctx)) {
+      try {
+        // Owner-or-org READER — App may be org-owned or user-owned (spec 047).
+        await requireOwnerOrOrgRole(ctx, app, 'READER');
+      } catch {
+        // Denied ≡ not-found (no existence oracle for foreign apps).
+        throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+      }
+    }
+    const [run] = await ctx.db.appRun.findMany({
+      where: { appId },
+      orderBy: { createdAt: 'desc' },
+      skip: previous ? 1 : 0,
+      take: 1,
+    });
+    return run ?? null;
   },
 
   /**

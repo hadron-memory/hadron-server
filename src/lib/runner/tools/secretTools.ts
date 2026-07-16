@@ -14,7 +14,7 @@ export const hadronReadSecret: RunToolDef = {
   name: 'hadron_read_secret',
   description:
     'Read a named secret from the Hadron secret store. The name resolves most-specific-first ' +
-    '(memory, app, user, org) at scopes this run is entitled to; pass scope to pin one. ' +
+    '(user, org) at scopes this run is entitled to; pass scope to pin one. ' +
     'The decrypted value is returned into your context — do not call this in a flow that also ' +
     'fetches untrusted external content; credentialed fetch tools take a secret name and ' +
     'inject it server-side instead. Inject-only kinds (e.g. webfetch-auth) are refused here.',
