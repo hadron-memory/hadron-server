@@ -28,6 +28,7 @@ import {
   type Context,
   loadEdgeEndpointNode,
   loadMemoryUrn,
+  loadAppUrn,
   defaultAiConfigOf,
   isOrgMemberOrAdmin,
   safeCanonicalUrn,
@@ -240,17 +241,16 @@ export const typeResolvers = {
       ctx: Context,
     ) => {
       if (nv.revNo == null) return null;
-      let memUrn: string | null = null;
-      if (nv.memoryId) {
-        const m = await ctx.db.memory.findUnique({ where: { id: nv.memoryId }, select: { urn: true } });
-        memUrn = m?.urn ?? null;
-      }
+      // Reuse the request-memoized memory-urn loader (the same one Node.urn /
+      // Edge.urn use) so a revision-list surface doesn't N+1 (#696 review).
+      let memUrn: string | null = nv.memoryId ? await loadMemoryUrn(ctx, nv.memoryId) : null;
       if (!memUrn) {
+        // Legacy rows (null memoryId) — fall back to the node's current memory.
         const node = await ctx.db.node.findUnique({
           where: { id: nv.nodeId },
-          select: { memory: { select: { urn: true } } },
+          select: { memoryId: true },
         });
-        memUrn = node?.memory?.urn ?? null;
+        memUrn = node?.memoryId ? await loadMemoryUrn(ctx, node.memoryId) : null;
       }
       if (!memUrn) return null;
       try {
@@ -290,10 +290,12 @@ export const typeResolvers = {
     // rare multi-segment App URN the flat shape can't express (compose throws →
     // served as null, never crashes the run audit surface).
     urn: async (r: { id: string; appId: string }, _: unknown, ctx: Context) => {
-      const app = await ctx.db.app.findUnique({ where: { id: r.appId }, select: { urn: true } });
-      if (!app?.urn) return null;
+      // Request-memoized app-urn loader — a run-list page usually shares one App
+      // across many runs, so this avoids an N+1 (#696 review).
+      const appUrn = await loadAppUrn(ctx, r.appId);
+      if (!appUrn) return null;
       try {
-        return composeAppRunUrn(app.urn, r.id);
+        return composeAppRunUrn(appUrn, r.id);
       } catch {
         return null;
       }

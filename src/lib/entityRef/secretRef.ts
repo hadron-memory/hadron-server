@@ -102,17 +102,19 @@ async function resolveSecretOwnerCandidates(
     const user = await resolveUserRef(db, `hrn:user:${parsed.root}`); // throws UserNotFoundError
     return [{ ownerType: 'user', ownerId: user.id }];
   }
+  // Bare v2 root — resolve the org and user namespaces in PARALLEL (independent
+  // lookups). The unified pool (#692) will guarantee at most one principal per
+  // root; a root that resolves to BOTH is AMBIGUOUS and rejected by the caller
+  // (never guessed — that would be a cross-tenant leak).
+  const [orgRes, userRes] = await Promise.allSettled([
+    resolveOrgRef(db, parsed.root),
+    resolveUserRef(db, `hrn:user:${parsed.root}`),
+  ]);
   const candidates: Array<{ ownerType: SecretOwnerType; ownerId: string }> = [];
-  try {
-    candidates.push({ ownerType: 'org', ownerId: (await resolveOrgRef(db, parsed.root)).id });
-  } catch (err) {
-    if (!(err instanceof OrganizationNotFoundError)) throw err;
-  }
-  try {
-    candidates.push({ ownerType: 'user', ownerId: (await resolveUserRef(db, `hrn:user:${parsed.root}`)).id });
-  } catch (err) {
-    if (!(err instanceof UserNotFoundError)) throw err;
-  }
+  if (orgRes.status === 'fulfilled') candidates.push({ ownerType: 'org', ownerId: orgRes.value.id });
+  else if (!(orgRes.reason instanceof OrganizationNotFoundError)) throw orgRes.reason;
+  if (userRes.status === 'fulfilled') candidates.push({ ownerType: 'user', ownerId: userRes.value.id });
+  else if (!(userRes.reason instanceof UserNotFoundError)) throw userRes.reason;
   return candidates;
 }
 
@@ -143,11 +145,16 @@ export async function resolveSecretRef(
     throw err;
   }
   if (candidates.length === 0) throw new SecretNotFoundError(ref);
+  // Ambiguous bare root — both an org AND a user of that name exist, so the URN
+  // doesn't name a single owner. Reject rather than guess (cross-tenant-leak
+  // guard; #692's pool will make this structurally impossible). The #702 audit
+  // found 0 such collisions today.
+  if (candidates.length > 1) throw new SecretNotFoundError(ref);
 
-  const secret = await db.secret.findFirst({
+  const owner = candidates[0]!;
+  const secret = await db.secret.findUnique({
     where: {
-      name: parsed.name,
-      OR: candidates.map((c) => ({ ownerType: c.ownerType, ownerId: c.ownerId })),
+      ownerType_ownerId_name: { ownerType: owner.ownerType, ownerId: owner.ownerId, name: parsed.name },
     },
     select: { id: true },
   });

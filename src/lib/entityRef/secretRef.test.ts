@@ -75,6 +75,25 @@ describe('resolveSecretRef', () => {
     expect(await resolveSecretRef(db, 'urn:secret:secretref.test::k')).toEqual({ id: secretIds.org });
   });
 
+  it('rejects a bare root that names BOTH an org and a user (ambiguous — no cross-tenant guess)', async () => {
+    // A handle↔org collision on the same bare root: until #692 enforces the
+    // unified pool, the URN doesn't name a single owner, so it must be rejected
+    // rather than resolving to an arbitrary owner's secret.
+    const enc = () => encryptToken(JSON.stringify('v'));
+    await db.organization.create({ data: { id: generateId(), name: 'collide', urn: 'collideroot' } });
+    const clashUser = await db.user.create({
+      data: { id: generateId(), email: 'clash@secretref.test', name: 'Clash', handle: 'collideroot' },
+    });
+    await db.secret.create({
+      data: { ownerType: 'user', ownerId: clashUser.id, name: 'k', kind: 'generic', metadata: {}, valueEncrypted: enc() },
+    });
+    await expect(resolveSecretRef(db, 'hrn:secret:collideroot:k')).rejects.toThrow(SecretNotFoundError);
+    // A `@`-pinned user root disambiguates and still resolves.
+    expect(await resolveSecretRef(db, 'hrn:secret:@collideroot:k')).toEqual({
+      id: (await db.secret.findFirstOrThrow({ where: { ownerId: clashUser.id, name: 'k' } })).id,
+    });
+  });
+
   it('throws for absent, malformed, superseded, and unknown-owner refs', async () => {
     await expect(resolveSecretRef(db, 'hrn:secret:secretref.test::nope')).rejects.toThrow(SecretNotFoundError);
     await expect(resolveSecretRef(db, 'hrn:secret:no-such-root.test::k')).rejects.toThrow(SecretNotFoundError);

@@ -56,6 +56,10 @@ export interface Context {
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
   memoryUrnCache?: Map<string, Promise<string | null>>;
+  // Request-scoped memo for AppRun.urn composition (#696) — a run-list response
+  // often shares one App across many runs, so the app-urn lookup is memoized per
+  // request (lazily created; see loadAppUrn).
+  appUrnCache?: Map<string, Promise<string | null>>;
   // Request-scoped memo for NodeRevision.editedByUser / approvedByUser
   // candidate lookups (#620) — a node's history repeats the same few editor
   // strings, so each distinct candidate (including misses) is resolved once
@@ -77,6 +81,24 @@ export function loadMemoryUrn(ctx: Context, memoryId: string): Promise<string | 
       .findUnique({ where: { id: memoryId }, select: { urn: true } })
       .then((m: { urn: string } | null) => m?.urn ?? null);
     cache.set(memoryId, pending);
+  }
+  return pending;
+}
+
+/**
+ * Fetch an App's stored urn by id, memoized per request (#696). Backs the
+ * AppRun.urn field resolver on the run-audit list surfaces (appRuns), where many
+ * runs in a page typically share one App — without memoization each row would
+ * issue an identical findUnique.
+ */
+export function loadAppUrn(ctx: Context, appId: string): Promise<string | null> {
+  const cache = (ctx.appUrnCache ??= new Map<string, Promise<string | null>>());
+  let pending = cache.get(appId);
+  if (!pending) {
+    pending = ctx.db.app
+      .findUnique({ where: { id: appId }, select: { urn: true } })
+      .then((a: { urn: string } | null) => a?.urn ?? null);
+    cache.set(appId, pending);
   }
   return pending;
 }
