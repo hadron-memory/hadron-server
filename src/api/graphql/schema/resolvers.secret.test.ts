@@ -1,11 +1,11 @@
 /**
- * General secret store (#677) — the Secret registry GraphQL surface.
+ * General secret store (#677, narrowed to org/user by #696) — the Secret
+ * registry GraphQL surface.
  *
  * What this file pins:
  *   - createSecret: the per-owner-scope gate matrix (user strict-owner,
- *     org ADMIN, app owner/org-ADMIN, memory WRITE), name grammar,
- *     per-kind validation, value encryption at rest (plaintext never
- *     lands in a column), per-owner name uniqueness.
+ *     org ADMIN), name grammar, per-kind validation, value encryption at
+ *     rest (plaintext never lands in a column), per-owner name uniqueness.
  *   - updateSecret: value rotation + metadata re-validation, immutable
  *     name/kind/owner, no-disclosure NOT_FOUND for outsiders.
  *   - deleteSecret: hard delete, write-gated.
@@ -16,16 +16,13 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { decryptToken, encryptToken } from '../../../lib/tokenCrypto.js';
+import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { resolvers, type Context } from './resolvers.js';
 
 let org: { id: string };
 let admin: { id: string };
-let contributor: { id: string };
 let member: { id: string };
 let outsider: { id: string };
-let app: { id: string };
-let memory: { id: string };
 
 function ctxFor(userId: string, roles: Context['roles'] = ['READER']): Context {
   return { db, roles, userId } as Context;
@@ -55,21 +52,8 @@ beforeEach(async () => {
     data: { id: generateId(), name: 'secret-org', urn: 'secret-org' },
   });
   admin = await createUser('admin', org.id, 'ADMIN');
-  contributor = await createUser('contributor', org.id, 'CONTRIBUTOR');
   member = await createUser('member', org.id, 'READER');
   outsider = await createUser('outsider', null);
-  app = await db.app.create({
-    data: { id: generateId(), organizationId: org.id, urn: 'secret-org::app', name: 'App' },
-  });
-  memory = await db.memory.create({
-    data: {
-      id: generateId(),
-      organizationId: org.id,
-      urn: 'secret-org::kb',
-      name: 'kb',
-      class: 'knowledge',
-    },
-  });
 });
 
 async function createSecret(overrides: Record<string, unknown> = {}, ctx?: Context) {
@@ -106,52 +90,9 @@ describe('createSecret — gate matrix', () => {
     ).rejects.toThrow('Forbidden');
   });
 
-  it('app scope: org ADMIN creates, plain member is Forbidden', async () => {
-    const secret = await createSecret({ ownerType: 'app', ownerRef: app.id }, ctxFor(admin.id));
-    expect(secret).toMatchObject({ ownerType: 'app', ownerId: app.id });
-    await expect(
-      createSecret({ ownerType: 'app', ownerRef: app.id, name: 'x' }, ctxFor(member.id)),
-    ).rejects.toThrow('Forbidden');
-  });
-
-  it('memory scope: memory WRITE (org CONTRIBUTOR+) creates, READER is Forbidden', async () => {
-    const secret = await createSecret({ ownerType: 'memory', ownerRef: memory.id }, ctxFor(contributor.id));
-    expect(secret).toMatchObject({ ownerType: 'memory', ownerId: memory.id });
-    await expect(
-      createSecret({ ownerType: 'memory', ownerRef: memory.id, name: 'x' }, ctxFor(member.id)),
-    ).rejects.toThrow('Forbidden');
-  });
-
-  // Regression (Codex P2): the memory READ gate (canSeeSecretOwner) must match
-  // the WRITE gate (requireMemoryWriteAccess) across principal types. An
-  // App-key caller with memory write via an installed agent could otherwise
-  // CREATE a memory-scoped secret it then couldn't see/update/delete, because
-  // the portal getAccessibleMemoryIds grants an App key no memory access
-  // outside an active session — canReadMemory closes that drift.
-  it('memory scope: an App-key writer can also see/update/delete its own secret (gate parity)', async () => {
-    const agent = await db.agent.create({
-      data: {
-        id: generateId(),
-        organizationId: org.id,
-        urn: 'secret-org::agent',
-        name: 'Agent',
-        visibility: 'ORGANIZATION',
-      },
-    });
-    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-    await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: memory.id, role: 'read-write' } });
-    const appCtx = { db, appId: app.id, roles: [] } as unknown as Context;
-
-    const secret = await createSecret({ ownerType: 'memory', ownerRef: memory.id }, appCtx);
-    expect(secret).toMatchObject({ ownerType: 'memory', ownerId: memory.id });
-    // Previously NOT_FOUND for the very principal that created it.
-    expect(await resolvers.Query.secret({}, { ref: secret.id }, appCtx)).toMatchObject({ id: secret.id });
-    const page = await resolvers.Query.secrets({}, { ownerType: 'memory', ownerRef: memory.id }, appCtx);
-    expect(page.total).toBe(1);
-    await expect(
-      resolvers.Mutation.updateSecret({}, { ref: secret.id, value: 'rot' } as never, appCtx),
-    ).resolves.toBeTruthy();
-    await expect(resolvers.Mutation.deleteSecret({}, { ref: secret.id }, appCtx)).resolves.toBe(true);
+  it('rejects the superseded app/memory owner types (#696)', async () => {
+    await expect(createSecret({ ownerType: 'app', ownerRef: org.id })).rejects.toThrow(/ownerType must be one of/);
+    await expect(createSecret({ ownerType: 'memory', ownerRef: org.id })).rejects.toThrow(/ownerType must be one of/);
   });
 });
 
@@ -206,8 +147,9 @@ describe('createSecret — validation + encryption', () => {
   it('rejects a duplicate name at the same owner, allows it at another scope', async () => {
     await createSecret();
     await expect(createSecret()).rejects.toThrow(/already exists/);
-    const other = await createSecret({ ownerType: 'app', ownerRef: app.id });
-    expect(other).toMatchObject({ ownerType: 'app', name: 'api-key' });
+    // The same name is free at a different owner scope (the caller's user).
+    const other = await createSecret({ ownerType: 'user', ownerRef: null }, ctxFor(member.id));
+    expect(other).toMatchObject({ ownerType: 'user', ownerId: member.id, name: 'api-key' });
   });
 });
 
@@ -298,6 +240,13 @@ describe('secret(ref) + secrets list', () => {
       ctxFor(member.id),
     );
     expect(byUrn).toMatchObject({ id: created.id, ownerType: 'org', name: 'api-key' });
+    // The v2 flat single-colon form resolves identically.
+    const byFlat = await resolvers.Query.secret(
+      {},
+      { ref: 'hrn:secret:secret-org:api-key' },
+      ctxFor(member.id),
+    );
+    expect(byFlat).toMatchObject({ id: created.id });
     // A well-formed URN naming no secret is null (same as a missing cuid).
     expect(
       await resolvers.Query.secret({}, { ref: 'hrn:secret:secret-org::nope' }, ctxFor(member.id)),
@@ -340,14 +289,8 @@ describe('secret(ref) + secrets list', () => {
 
 // #677 follow-up: an owner's secrets must not outlive its deletion as live,
 // resolvable credentials (secret resolution doesn't re-check owner deletedAt).
+// Owners are org/user only (#696), so org deletion is the sweep that remains.
 describe('owner deletion cleans up secrets', () => {
-  it('deleteApp hard-deletes the app-scoped secrets', async () => {
-    const secret = await createSecret({ ownerType: 'app', ownerRef: app.id }, ctxFor(admin.id));
-    expect(await db.secret.findUnique({ where: { id: secret.id } })).not.toBeNull();
-    await expect(resolvers.Mutation.deleteApp({}, { id: app.id }, ctxFor(admin.id))).resolves.toBe(true);
-    expect(await db.secret.findUnique({ where: { id: secret.id } })).toBeNull();
-  });
-
   it('deleteOrganization hard-deletes the org-scoped secrets', async () => {
     const secret = await createSecret({ ownerType: 'org', ownerRef: org.id }, ctxFor(admin.id));
     // deleteOrganization requires platform ADMIN (requireRole).
@@ -355,58 +298,5 @@ describe('owner deletion cleans up secrets', () => {
       resolvers.Mutation.deleteOrganization({}, { id: org.id }, ctxFor(admin.id, ['ADMIN'])),
     ).resolves.toBe(true);
     expect(await db.secret.findUnique({ where: { id: secret.id } })).toBeNull();
-  });
-
-  it('deleteMemory hard-deletes the memory-scoped secrets', async () => {
-    const personal = await db.memory.create({
-      data: {
-        id: generateId(),
-        organizationId: org.id,
-        urn: 'secret-org::mine',
-        name: 'mine',
-        class: 'personal',
-        userId: member.id,
-      },
-    });
-    const secret = await createSecret(
-      { ownerType: 'memory', ownerRef: personal.id, name: 'k' },
-      ctxFor(member.id),
-    );
-    await expect(
-      resolvers.Mutation.deleteMemory({}, { id: personal.id }, ctxFor(member.id)),
-    ).resolves.toBe(true);
-    expect(await db.secret.findUnique({ where: { id: secret.id } })).toBeNull();
-  });
-
-  // Copilot review: a re-delete of an already-soft-deleted memory must still
-  // sweep any straggler memory-scoped secret (a pre-feature row, or one raced
-  // in during the owner's deletion) — the cleanup is unconditional, not gated
-  // on the idempotency short-circuit.
-  it('deleteMemory sweeps stragglers even when the memory is already soft-deleted', async () => {
-    const gone = await db.memory.create({
-      data: {
-        id: generateId(),
-        organizationId: org.id,
-        urn: 'secret-org::gone',
-        name: 'gone',
-        class: 'personal',
-        userId: member.id,
-        deletedAt: new Date(),
-      },
-    });
-    const straggler = await db.secret.create({
-      data: {
-        ownerType: 'memory',
-        ownerId: gone.id,
-        name: 'k',
-        kind: 'generic',
-        metadata: {},
-        valueEncrypted: encryptToken(JSON.stringify('v')),
-      },
-    });
-    await expect(
-      resolvers.Mutation.deleteMemory({}, { id: gone.id }, ctxFor(member.id)),
-    ).resolves.toBe(true);
-    expect(await db.secret.findUnique({ where: { id: straggler.id } })).toBeNull();
   });
 });

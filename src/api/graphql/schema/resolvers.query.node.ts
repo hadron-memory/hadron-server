@@ -27,6 +27,8 @@ import {
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
+import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -66,7 +68,24 @@ export const nodeQueries = {
         return !!member;
       };
 
-      const { type } = parseUrnInput(urn);
+      // #696: a `#data` fragment addresses its parent (node / apprun). Strip
+      // it, resolve the parent, and tag the result so a caller knows it named
+      // the data view. Only `#data` is defined.
+      let fragment: string | undefined;
+      let baseUrn = urn;
+      const hashIdx = urn.indexOf('#');
+      if (hashIdx !== -1) {
+        fragment = urn.slice(hashIdx + 1);
+        baseUrn = urn.slice(0, hashIdx);
+        if (fragment !== 'data') return null;
+      }
+      // Extract the type word generically from the scheme prefix — parseUrnInput
+      // only recognizes the fixed v1 type list, so the v2-only apprun/noderev
+      // types (#696) would fall through to 'unknown'. Fall back to parseUrnInput
+      // for unprefixed / loc: inputs.
+      const schemeType = baseUrn.match(/^(?:hrn|urn):([a-z][a-z0-9-]*):/i)?.[1]?.toLowerCase();
+      const type = schemeType ?? (parseUrnInput(baseUrn).type as string);
+      if (fragment && type !== 'node' && type !== 'apprun') return null;
       switch (type) {
         case 'memory': {
           let id: string;
@@ -86,7 +105,7 @@ export const nodeQueries = {
         case 'node': {
           let id: string;
           try {
-            ({ id } = await resolveNodeRef(ctx.db, urn));
+            ({ id } = await resolveNodeRef(ctx.db, baseUrn));
           } catch {
             return null;
           }
@@ -106,7 +125,7 @@ export const nodeQueries = {
           if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
             if (!(access.memoryId.in as string[]).includes(node.memoryId)) return null;
           }
-          return { kind: 'node', id, memoryId: node.memoryId };
+          return { kind: 'node', id, memoryId: node.memoryId, ...(fragment ? { fragment } : {}) };
         }
         case 'org': {
           let id: string;
@@ -185,6 +204,58 @@ export const nodeQueries = {
             if (!shared) return null;
           }
           return { kind: 'user', id };
+        }
+        case 'apprun': {
+          // #696: hrn:apprun:<root>:<app>:<run-id> (+ optional #data fragment).
+          let id: string;
+          try {
+            ({ id } = await resolveAppRunRef(ctx.db, baseUrn));
+          } catch {
+            return null;
+          }
+          const run = await ctx.db.appRun.findUnique({
+            where: { id },
+            select: { organizationId: true },
+          });
+          if (!run) return null;
+          // Same READER-of-the-org gate the appRun(ref:) query enforces.
+          if (!(await isOrgMember(run.organizationId))) return null;
+          return {
+            kind: 'apprun',
+            id,
+            organizationId: run.organizationId,
+            ...(fragment ? { fragment } : {}),
+          };
+        }
+        case 'noderev': {
+          // #696: hrn:noderev:<root>:<mem>:<loc...>:<rev> (end-anchored).
+          let id: string;
+          try {
+            ({ id } = await resolveNodeRevRef(ctx.db, baseUrn));
+          } catch {
+            return null;
+          }
+          // Gate on the revision's captured memory (#602/#618) — legacy rows
+          // (null memoryId) fall back to the node's current memory.
+          const rev = await ctx.db.nodeRevision.findUnique({
+            where: { id },
+            select: { memoryId: true, nodeId: true },
+          });
+          if (!rev) return null;
+          let memoryId = rev.memoryId;
+          if (!memoryId) {
+            const node = await ctx.db.node.findUnique({
+              where: { id: rev.nodeId },
+              select: { memoryId: true },
+            });
+            memoryId = node?.memoryId ?? null;
+          }
+          if (!memoryId) return null;
+          const access = await memoryAccessFilter(ctx);
+          if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
+            if (!(access.memoryId.in as string[]).includes(memoryId)) return null;
+          }
+          return { kind: 'noderev', id, memoryId };
         }
         default:
           return null;

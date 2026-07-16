@@ -137,6 +137,15 @@ export async function setup() {
       ON slack_connections (organization_id, team_id) WHERE deleted_at IS NULL;
   `);
 
+  // #696: secrets are ORG/USER-owned only (D-2026-07-15-006). Synced with
+  // prisma/post-push.sql + the 20260716120000 migration.
+  await client.query(`
+    ALTER TABLE "secrets" DROP CONSTRAINT IF EXISTS "chk_secret_owner_type";
+    ALTER TABLE "secrets"
+      ADD CONSTRAINT "chk_secret_owner_type"
+      CHECK ("owner_type" IN ('user', 'org'));
+  `);
+
   // 325-user-urn: case-insensitive handle uniqueness (handle is the
   // hrn:user:<handle> slug; lowercase-canonical). Functional index — Prisma's
   // plain @unique is case-sensitive and can't express this.

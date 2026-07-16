@@ -1,10 +1,13 @@
 /**
  * Run-time secret resolution (#677) — the CSS cascade under the run
- * principal. A bare name resolves most-specific-first — memory (the run's
- * flow memory) → app → user → org — returning the first match the run is
- * entitled to use. Entitlement is by construction for app/user/org (the
- * candidate owner IDs come from the run row itself); the memory scope
- * additionally requires `canReadMemory` under the run principal.
+ * principal. A bare name resolves most-specific-first — user → org —
+ * returning the first match the run is entitled to use. Entitlement is by
+ * construction: the candidate owner IDs come from the run row itself.
+ *
+ * Owners are ORG/USER ONLY (#696, D-2026-07-15-006): the app- and
+ * memory-owned scopes of the original #679 store are superseded (the flat v2
+ * secret URN carries a single root principal). The #702 audit found 0
+ * app/memory-owned rows.
  *
  * Both consumption models share this resolver and differ only in whether
  * the value reaches the model: `hadron_read_secret` RETURNS it (general
@@ -15,17 +18,13 @@
  *
  * Supersedes the #628 node-data credential scheme (`loadWebFetchCredential`).
  */
-import { canReadMemory } from '../../mcp/access-control.js';
-import type { AuthContext } from '../../middleware/auth.js';
 import {
   decryptSecretValue,
   isWebFetchAuth,
   SECRET_SCOPE_ORDER,
   type SecretOwnerType,
 } from '../secrets.js';
-import { splitNodeUrn } from '../urn.js';
 import type { WebFetchAuth } from '../webfetchClient.js';
-import { resolveFlowMemory } from './loadFlowNode.js';
 import type { RunToolContext } from './tools/types.js';
 
 export interface ResolvedRunSecret {
@@ -37,33 +36,6 @@ export interface ResolvedRunSecret {
   metadata: Record<string, unknown>;
   /** The decrypted payload. Callers decide read-vs-inject; never log it. */
   value: unknown;
-}
-
-function principalAuth(ctx: RunToolContext): AuthContext {
-  return {
-    clientId: ctx.principal.clientId,
-    userId: ctx.principal.userId,
-    appId: ctx.principal.appId,
-    organizationId: ctx.principal.organizationId,
-  };
-}
-
-/**
- * The run's flow memory, if any — the memory of the node the run is
- * currently executing (falling back to the entry node). Null when the URN
- * doesn't resolve inside the run's org, the memory is encrypted (runs have
- * no session key), or the run principal cannot read it — the cascade then
- * simply skips the memory scope.
- */
-async function runFlowMemoryId(ctx: RunToolContext): Promise<string | null> {
-  const nodeUrn = ctx.run.curNodeUrn ?? ctx.run.entryNodeUrn;
-  try {
-    const { memoryUrn } = splitNodeUrn(nodeUrn);
-    const memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, nodeUrn);
-    return (await canReadMemory(ctx.db, principalAuth(ctx), memory.id)) ? memory.id : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -82,14 +54,6 @@ export async function resolveRunSecret(
   for (const scope of SECRET_SCOPE_ORDER) {
     if (opts.scope && opts.scope !== scope) continue;
     switch (scope) {
-      case 'memory': {
-        const memoryId = await runFlowMemoryId(ctx);
-        if (memoryId) candidates.push({ ownerType: 'memory', ownerId: memoryId });
-        break;
-      }
-      case 'app':
-        candidates.push({ ownerType: 'app', ownerId: ctx.run.appId });
-        break;
       case 'user':
         if (ctx.run.userId) candidates.push({ ownerType: 'user', ownerId: ctx.run.userId });
         break;

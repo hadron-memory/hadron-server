@@ -57,12 +57,12 @@ async function seedContext(): Promise<{ ctx: RunToolContext; credentialName: str
       status: 'RUNNING',
     },
   });
-  // App-scoped webfetch-auth secret (#677) — the cascade resolves it for
-  // any run under this App.
+  // Org-scoped webfetch-auth secret (#677; secrets are org/user-only, #696) —
+  // the cascade resolves it for any run under this org.
   const secret = await db.secret.create({
     data: {
-      ownerType: 'app',
-      ownerId: app.id,
+      ownerType: 'org',
+      ownerId: org.id,
       name: 'api-cred',
       kind: 'webfetch-auth',
       metadata: { type: 'bearer', urlPrefix: 'https://api.example.test/v1/' },

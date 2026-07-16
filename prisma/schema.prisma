@@ -935,6 +935,11 @@ model Node {
   /// AI agent tool that created or last modified this node (e.g.
   /// "claude-code", "cursor", "hadron-portal").
   aiAgent            String?   @map("ai_agent")
+  /// #696: the per-node revision counter. Atomically incremented (the
+  /// QuotaCounter pattern) inside the tx that writes each NodeRevision, so the
+  /// value it yields is that snapshot's monotonic `revNo` — race-safe, unlike a
+  /// read-max-then-+1. Backfilled to the node's current revision count.
+  revSeq             Int       @default(0) @map("rev_seq")
   createdAt          DateTime  @default(now()) @map("created_at")
   createdBy          String?   @map("created_by")
   updatedAt          DateTime  @updatedAt @map("updated_at")
@@ -1878,6 +1883,12 @@ model NodeRevision {
   /// #620: reserved — User who approved this revision. No write surface
   /// yet; the approve flow lands later.
   approvedBy         String?  @map("approved_by")
+  /// #696: per-node MONOTONIC revision number (1, 2, 3, …) — the stable atom
+  /// in the `hrn:noderev:<root>:<mem>:<loc...>:<rev>` URN (rendered `r<N>`).
+  /// Minted race-safely from `Node.revSeq` (atomic increment) inside the same
+  /// tx that inserts the snapshot. Nullable only for legacy rows predating the
+  /// column (backfilled per-node by createdAt order in the migration).
+  revNo              Int?     @map("rev_no")
   createdBy          String?  @map("created_by")
   createdAt          DateTime @default(now()) @map("created_at")
 
@@ -1885,6 +1896,8 @@ model NodeRevision {
   approvedByUser User? @relation("NodeRevisionApprover", fields: [approvedBy], references: [id], onDelete: SetNull)
 
   @@index([nodeId, createdAt])
+  /// #696: resolve a noderev URN by its per-node revision number.
+  @@unique([nodeId, revNo], map: "node_revisions_node_rev_no_uniq")
   @@map("node_revisions")
 }
 

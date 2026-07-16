@@ -146,10 +146,24 @@ export const DEFAULT_MAX_REV_COUNT = 10;
  * pre-move history belonged there).
  */
 export async function createNodeRevision(
-  db: Pick<PrismaClient, 'nodeRevision' | 'memory'>,
+  db: Pick<PrismaClient, 'nodeRevision' | 'memory' | 'node'>,
   data: Prisma.NodeRevisionUncheckedCreateInput,
 ): Promise<void> {
-  await db.nodeRevision.create({ data });
+  // #696: mint the per-node MONOTONIC revNo race-safely — an atomic increment of
+  // Node.revSeq (the QuotaCounter pattern), so concurrent revisions of the same
+  // node get distinct, gap-free numbers (the (nodeId, revNo) unique is the DB
+  // backstop). This runs inside the caller's tx alongside the insert. Skip when
+  // a caller already supplied a number (none do today).
+  let revNo = data.revNo ?? null;
+  if (revNo == null) {
+    const bumped = await db.node.update({
+      where: { id: data.nodeId },
+      data: { revSeq: { increment: 1 } },
+      select: { revSeq: true },
+    });
+    revNo = bumped.revSeq;
+  }
+  await db.nodeRevision.create({ data: { ...data, revNo } });
 
   // The cap is per (node, memory). A node MOVED across memories keeps its id
   // and carries revisions from each memory it lived in (moveNode snapshots the

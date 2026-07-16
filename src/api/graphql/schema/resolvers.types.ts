@@ -12,6 +12,8 @@ import {
   legacyMemoryUrnToCanonical,
 } from '../../../lib/urn.js';
 import { userUrn } from '../../../lib/userHandle.js';
+import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
+import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import {
   canSeeUserPersonalFields,
@@ -229,6 +231,34 @@ export const typeResolvers = {
   },
   NodeRevision: {
     createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
+    // #696 — the computed end-anchored noderev URN. Null for legacy rows with
+    // no revNo, and for the rare multi-segment per-user memory the flat shape
+    // can't express (the compose helper throws → served as null, never crashes).
+    urn: async (
+      nv: { loc: string; revNo?: number | null; memoryId?: string | null; nodeId: string },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (nv.revNo == null) return null;
+      let memUrn: string | null = null;
+      if (nv.memoryId) {
+        const m = await ctx.db.memory.findUnique({ where: { id: nv.memoryId }, select: { urn: true } });
+        memUrn = m?.urn ?? null;
+      }
+      if (!memUrn) {
+        const node = await ctx.db.node.findUnique({
+          where: { id: nv.nodeId },
+          select: { memory: { select: { urn: true } } },
+        });
+        memUrn = node?.memory?.urn ?? null;
+      }
+      if (!memUrn) return null;
+      try {
+        return composeNodeRevUrn(memUrn, nv.loc, nv.revNo);
+      } catch {
+        return null;
+      }
+    },
     // Prisma reads a NULL scalar list as [] already; belt-and-suspenders for
     // rows that arrive from raw queries (#620 legacy rows).
     changes: (nv: { changes?: string[] | null }) => nv.changes ?? [],
@@ -254,6 +284,20 @@ export const typeResolvers = {
     // #620 — same public-identifier resolution for the (reserved) approver.
     approvedByUser: async (nv: { approvedBy?: string | null }, _: unknown, ctx: Context) =>
       resolveRevisionEditor(ctx, [nv.approvedBy]),
+  },
+  AppRun: {
+    // #696 — the computed hrn:apprun:<root>:<app>:<run-id> URN. Null for the
+    // rare multi-segment App URN the flat shape can't express (compose throws →
+    // served as null, never crashes the run audit surface).
+    urn: async (r: { id: string; appId: string }, _: unknown, ctx: Context) => {
+      const app = await ctx.db.app.findUnique({ where: { id: r.appId }, select: { urn: true } });
+      if (!app?.urn) return null;
+      try {
+        return composeAppRunUrn(app.urn, r.id);
+      } catch {
+        return null;
+      }
+    },
   },
   Asset: {
     uploadedAt: (a: { uploadedAt: Date | string }) => toISO(a.uploadedAt)!,

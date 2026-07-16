@@ -650,6 +650,10 @@ export const typeDefs = `#graphql
 
   type NodeRevision {
     id: ID!
+    "Computed end-anchored URN hrn:noderev:<root>:<mem>:<loc...>:<rev> (#696). Null for legacy rows without a revNo, and for multi-segment per-user memories the flat shape cannot express."
+    urn: String
+    "Per-node monotonic revision number (#696). Null on legacy rows predating the counter (backfilled by the migration)."
+    revNo: Int
     nodeId: String!
     loc: String!
     name: String!
@@ -2046,6 +2050,8 @@ export const typeDefs = `#graphql
   # provenance. Spec cor:agt:010:02.
   type AppRun {
     id: ID!
+    "Computed grammar-v2 URN hrn:apprun:<root>:<app>:<run-id> (#696). Null for the rare multi-segment App URN the flat shape cannot express."
+    urn: String
     organizationId: ID!
     appId: ID!
     agentId: ID
@@ -2630,6 +2636,8 @@ export const typeDefs = `#graphql
     id:             ID!
     memoryId:       ID
     organizationId: ID
+    "Set to 'data' when the resolved URN named a #data fragment of its parent node/apprun (#696); null otherwise."
+    fragment:       String
   }
 
   """
@@ -3484,8 +3492,10 @@ export const typeDefs = `#graphql
     serverInfo: ServerInfo!
 
     # Spec 040 — the run audit surface (what ran, why, what it cost).
-    "One run by ID (runs are URN-less, like AiServiceConfig)."
+    "One run (cor:agt:010:02). ref is an AppRun ID or an hrn:apprun:<root>:<app>:<run-id> URN (#696)."
     appRun(ref: ID!): AppRun
+    "The latest run of an App resolved to a concrete run (#696) — 'current/latest/previous' are queries, never magic run-ids in URN space (cor:urn:010:02). previous: true returns the run before the latest."
+    latestAppRun(appRef: String!, previous: Boolean): AppRun
     appRuns(appRef: String, orgRef: String, status: AppRunStatus, parentRunId: ID, limit: Int, offset: Int): AppRunsPage!
     agentSchedules(appRef: String!, limit: Int, offset: Int): AgentSchedulesPage!
     agentWebhooks(appRef: String!, limit: Int, offset: Int): AgentWebhooksPage!

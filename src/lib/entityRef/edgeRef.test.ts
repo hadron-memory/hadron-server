@@ -92,6 +92,19 @@ describe('resolveEdgeRef', () => {
     expect(await resolveEdgeRef(db, ref)).toEqual({ id: edge.id });
   });
 
+  it('#696: the loc is an OPAQUE terminal — endpoints come from FK columns, never the URN', async () => {
+    // A loc whose atoms LOOK like a `<source>:<name>:<target>` triple whose
+    // "endpoints" don't match the real FK nodes. Resolution must key on the loc
+    // as one opaque identity and NEVER derive source/target by splitting it.
+    const edge = await createEdge('edgeref-test-a:rel:edgeref-test-nonexistent-target');
+    const ref = `hrn:edge:${memoryUrn.replace(':', '::')}::${edge.loc}`;
+    expect(await resolveEdgeRef(db, ref)).toEqual({ id: edge.id });
+    // Endpoints are the FK columns set at create — unaffected by the loc string.
+    const row = await db.edge.findUniqueOrThrow({ where: { id: edge.id } });
+    expect(row.sourceId).toBe(sourceId);
+    expect(row.targetId).toBe(targetId);
+  });
+
   it('throws EdgeNotFoundError on an unknown ID', async () => {
     await expect(
       resolveEdgeRef(db, 'cnotanedgeidcnotanedgeidc'),

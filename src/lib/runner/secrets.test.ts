@@ -1,7 +1,8 @@
 /**
- * Run-time secret resolution (#677) — what this file pins:
- *   - the CSS cascade order (memory → app → user → org) and first-match wins;
- *   - scope pinning, the no-user skip, and the memory-entitlement skip;
+ * Run-time secret resolution (#677, narrowed to org/user by #696) — what this
+ * file pins:
+ *   - the CSS cascade order (user → org) and first-match wins;
+ *   - scope pinning and the no-user skip;
  *   - hadron_read_secret: value → model, trail line never carries the value;
  *   - loadWebFetchAuthSecret kind assertion + origin binding
  *     (assertUrlWithinPrefix evil-origin / near-miss cases).
@@ -86,15 +87,11 @@ beforeEach(async () => {
 });
 
 describe('resolveRunSecret — the CSS cascade', () => {
-  it('resolves most-specific-first: memory → app → user → org', async () => {
+  it('resolves most-specific-first: user → org', async () => {
     await seedGeneric('org', org.id, 'org-value');
     await seedGeneric('user', user.id, 'user-value');
-    await seedGeneric('app', app.id, 'app-value');
-    await seedGeneric('memory', memory.id, 'memory-value');
 
     for (const [ownerType, value] of [
-      ['memory', 'memory-value'],
-      ['app', 'app-value'],
       ['user', 'user-value'],
       ['org', 'org-value'],
     ] as const) {
@@ -106,13 +103,18 @@ describe('resolveRunSecret — the CSS cascade', () => {
   });
 
   it('pins resolution to one scope when asked', async () => {
-    await seedGeneric('app', app.id, 'app-value');
+    await seedGeneric('user', user.id, 'user-value');
     await seedGeneric('org', org.id, 'org-value');
     expect(await resolveRunSecret(ctx, { name: 'api-key', scope: 'org' })).toMatchObject({
       ownerType: 'org',
       value: 'org-value',
     });
-    expect(await resolveRunSecret(ctx, { name: 'api-key', scope: 'memory' })).toBeNull();
+    expect(await resolveRunSecret(ctx, { name: 'api-key', scope: 'user' })).toMatchObject({
+      ownerType: 'user',
+      value: 'user-value',
+    });
+    // A scope with no secret of that name resolves to null.
+    expect(await resolveRunSecret(ctx, { name: 'missing', scope: 'org' })).toBeNull();
   });
 
   it('skips the user scope when the run has no on-behalf-of user', async () => {
@@ -120,35 +122,16 @@ describe('resolveRunSecret — the CSS cascade', () => {
     ctx.run = await db.appRun.update({ where: { id: ctx.run.id }, data: { userId: null } });
     expect(await resolveRunSecret(ctx, { name: 'api-key' })).toBeNull();
   });
-
-  it('skips the memory scope when the principal cannot read the flow memory', async () => {
-    // Turn the flow memory personal-and-someone-else's: the run principal
-    // (App, no user) fails the strict-owner gate, so the cascade must fall
-    // through to the app scope rather than resolve the memory secret.
-    const stranger = await db.user.create({
-      data: { id: generateId(), email: 'stranger@secret.test', name: 'Stranger' },
-    });
-    await db.memory.update({
-      where: { id: memory.id },
-      data: { class: 'personal', userId: stranger.id },
-    });
-    await seedGeneric('memory', memory.id, 'memory-value');
-    await seedGeneric('app', app.id, 'app-value');
-    expect(await resolveRunSecret(ctx, { name: 'api-key' })).toMatchObject({
-      ownerType: 'app',
-      value: 'app-value',
-    });
-  });
 });
 
 describe('hadron_read_secret', () => {
   it('returns the decrypted value + winning scope, and the trail line never carries the value', async () => {
-    await seedGeneric('app', app.id, 'sk-super-secret');
+    await seedGeneric('user', user.id, 'sk-super-secret');
     const out = await hadronReadSecret.execute(ctx, { name: 'api-key' });
     expect(out).toEqual({
       name: 'api-key',
       kind: 'generic',
-      scope: 'app',
+      scope: 'user',
       metadata: {},
       value: 'sk-super-secret',
     });
@@ -169,8 +152,8 @@ describe('hadron_read_secret', () => {
   it('refuses an inject-only kind (webfetch-auth) — never returns its value to the model', async () => {
     await db.secret.create({
       data: {
-        ownerType: 'app',
-        ownerId: app.id,
+        ownerType: 'user',
+        ownerId: user.id,
         name: 'poll-cred',
         kind: 'webfetch-auth',
         metadata: { type: 'bearer', urlPrefix: 'https://api.example.test/' },
@@ -220,7 +203,7 @@ describe('loadWebFetchAuthSecret + assertUrlWithinPrefix', () => {
   });
 
   it('a nearer-scope wrong-kind match shadows instead of falling through', async () => {
-    await seedGeneric('app', app.id, 'opaque', 'portal-cred');
+    await seedGeneric('user', user.id, 'opaque', 'portal-cred');
     await db.secret.create({
       data: {
         ownerType: 'org',
