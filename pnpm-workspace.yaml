@@ -11,3 +11,4 @@ allowBuilds:
   prisma: true
 minimumReleaseAgeExclude:
   - '@hadron-memory/access-control@0.3.0'
+  - '@hadron-memory/urn-lib-js@0.0.2'
