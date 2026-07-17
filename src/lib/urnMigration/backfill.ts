@@ -20,7 +20,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { composeUrnV2 } from '../urn.js';
+import { composeUrnV2, normalizeUrnForLookup } from '../urn.js';
 import { mintLocalSlug } from '../mintLocalSlug.js';
 import { planV2Slug, type EntityUrnType } from './planV2Urn.js';
 
@@ -123,7 +123,7 @@ async function rootIsLivePrincipal(
  * roots on the user's handle; otherwise the row is org-owned and roots on the
  * org's name. The FK (not the stored URN's root atom or `@` sigil) is
  * authoritative because a stored URN root can diverge from its real owner
- * (observed: `shadowbrush.com:mealplan` owned by org `baragaun.com`). Returns
+ * (observed: `shadowbrush.com:recipes` owned by org `baragaun.com`). Returns
  * null (→ a recorded failure) only if the selected owner's name column is
  * somehow absent.
  */
@@ -159,14 +159,19 @@ async function migrateRow(
     return 'failed';
   };
 
-  // Root from the OWNER FK (authoritative), slug from the URN string.
+  // Root from the OWNER FK (authoritative); slug from the stored URN, first
+  // collapsed to the single-colon lookup form so a canonical `::`-stored row (a
+  // supported migration-window state, e.g. `acme.com::notes`) is flattened
+  // rather than rejected by planV2Slug's empty-atom guard.
   const owner = ownerRootOf(row);
   if (!owner) return fail('row has no resolvable owner (org/user FK)');
   const { root, ownerKind } = owner;
 
+  const storedUrn = normalizeUrnForLookup(row.urn);
+
   let plan;
   try {
-    plan = planV2Slug(row.urn);
+    plan = planV2Slug(storedUrn);
   } catch (err) {
     return fail(`plan: ${(err as Error).message}`);
   }
@@ -185,11 +190,13 @@ async function migrateRow(
     return fail(`compose: ${(err as Error).message}`);
   }
 
-  // Collision-safe mint. The probe excludes the row itself (so a byte-identical
-  // row doesn't alias against its own urn) and keys on the entity's unique
-  // predicate. It also consults `claimed` — the URNs already taken by EARLIER
-  // rows in this run — so a dry run (which writes nothing) still previews
-  // intra-batch collisions accurately, not just committed state.
+  // Collision-safe mint. The probe excludes the row itself and matches the
+  // entity's unique predicate, checking BOTH `urn` AND `legacyUrn` — a minted
+  // urn must never shadow another row's stored legacy identity, since resolution
+  // checks `urn` before the `legacyUrn` fallback (a shadowed legacy reference
+  // would resolve to the wrong row). It also consults `claimed` — the primary +
+  // legacy URNs already taken by EARLIER rows this run — so a dry run (which
+  // writes nothing) still previews intra-batch collisions accurately.
   let minted;
   try {
     minted = await mintLocalSlug({
@@ -199,16 +206,26 @@ async function migrateRow(
       isTaken: async (composedUrn) =>
         claimed.has(composedUrn) ||
         (await delegate.count({
-          where: { urn: composedUrn, id: { not: row.id }, ...cfg.probeWhere },
+          where: {
+            id: { not: row.id },
+            ...cfg.probeWhere,
+            OR: [{ urn: composedUrn }, { legacyUrn: composedUrn }],
+          },
         })) > 0,
     });
   } catch (err) {
     return fail(`mint: ${(err as Error).message}`);
   }
 
-  const newUrn = minted.urn; // bare `<root>:<slug>`, matching the stored form.
-  claimed.add(newUrn); // reserve it against later rows in this run.
+  const newUrn = minted.urn; // bare `<root>:<slug>`, single colon.
+  claimed.add(newUrn); // reserve the new primary against later rows this run.
+  // When the row's lookup identity moves, its OLD key becomes a legacy alias —
+  // reserve that too so a later row can't mint a urn that shadows it.
+  const identityMoved = newUrn !== storedUrn;
+  if (identityMoved) claimed.add(storedUrn);
 
+  // Already in the exact v2 form (raw stored string == new urn): nothing to
+  // rewrite, just mark it normalized.
   if (newUrn === row.urn) {
     log(`  · ${cfg.entity} ${row.id}: unchanged (${row.urn})`);
     if (!opts.dryRun) {
@@ -218,12 +235,20 @@ async function migrateRow(
   }
 
   log(`  → ${cfg.entity} ${row.id}: ${row.urn}  ⟶  ${newUrn}`);
-  if (opts.dryRun) return 'migrated';
+  const outcome = identityMoved ? 'migrated' : 'unchanged'; // pure `::` collapse = unchanged identity
+  if (opts.dryRun) return outcome;
   try {
     await delegate.update({
       where: { id: row.id },
-      data: { urn: newUrn, legacyUrn: row.urn, urnNormalizedAt: new Date() },
+      data: {
+        urn: newUrn,
+        urnNormalizedAt: new Date(),
+        // Populate the alias map only when the LOOKUP identity actually changed;
+        // a pure `::`→`:` collapse keeps the same lookup key and needs no redirect.
+        ...(identityMoved ? { legacyUrn: storedUrn } : {}),
+      },
     });
+    return outcome;
   } catch (err) {
     // A P2002 here means another row already owns `newUrn` under the entity's
     // full unique — for Memory/Agent typically a TOMBSTONED holder (the unique
@@ -234,7 +259,6 @@ async function migrateRow(
     }
     return fail(`write: ${(err as Error).message}`);
   }
-  return 'migrated';
 }
 
 /**
@@ -242,12 +266,14 @@ async function migrateRow(
  * pending (`urnNormalizedAt IS NULL AND urnMigrationFailedReason IS NULL`) and
  * processes each; because every processed row exits the pending set (success
  * sets `urnNormalizedAt`, failure sets `urnMigrationFailedReason`), the loop
- * drains and is safe to re-run. Paging is by an ascending-`id` CURSOR, not by
- * re-querying the pending set from the start: this guarantees forward progress
- * even for a row that a run leaves pending (a dry run writes nothing; an
+ * drains and is safe to re-run. Paging is KEYSET (a strictly-greater `id`
+ * predicate in the `where`), NOT Prisma's `cursor`/`skip:1`: a migrated row
+ * leaves the pending set, and Prisma's `cursor` throws `P2025` when the cursor
+ * record no longer satisfies the query filter. Keyset paging also guarantees
+ * forward progress for a row a run leaves pending (a dry run writes nothing; an
  * unexpected DB error on a write is caught, counted, and the row left for a
- * later run) — the cursor moves past it rather than re-fetching it forever. The
- * per-row catch upholds "never crash the sweep".
+ * later run) — the `id > cursor` bound moves past it rather than re-fetching it
+ * forever. The per-row catch upholds "never crash the sweep".
  */
 async function backfillEntity(
   db: PrismaClient,
@@ -268,7 +294,7 @@ async function backfillEntity(
   let cursor: string | undefined;
   for (;;) {
     const rows = await delegate.findMany({
-      where: pendingWhere,
+      where: { ...pendingWhere, ...(cursor ? { id: { gt: cursor } } : {}) },
       select: {
         id: true,
         urn: true,
@@ -278,7 +304,6 @@ async function backfillEntity(
       },
       orderBy: { id: 'asc' },
       take: BATCH_SIZE,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
     if (rows.length === 0) break;
 

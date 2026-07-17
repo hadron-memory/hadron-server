@@ -111,16 +111,48 @@ describe('backfillUrnV2', () => {
   it('re-homes a memory whose URN root diverges from its owning org (the shadowbrush case)', async () => {
     // Owned by acme.com but stored under a stale root — the FK is authoritative.
     const mem = await db.memory.create({
-      data: { id: generateId(), organizationId: orgId, urn: 'shadowbrush.com:mealplan', name: 'meal', class: 'knowledge' },
+      data: { id: generateId(), organizationId: orgId, urn: 'shadowbrush.com:recipes', name: 'r', class: 'knowledge' },
     });
 
     await backfillUrnV2(db, { log: noop });
 
     const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
-    expect(after.urn).toBe('acme.com:mealplan'); // re-rooted onto the real owner
-    expect(after.legacyUrn).toBe('shadowbrush.com:mealplan');
+    expect(after.urn).toBe('acme.com:recipes'); // re-rooted onto the real owner
+    expect(after.legacyUrn).toBe('shadowbrush.com:recipes');
     // The old, divergent URN still resolves via the alias map.
-    expect(await resolveMemoryRef(db, 'hrn:memory:shadowbrush.com::mealplan')).toEqual({ id: mem.id });
+    expect(await resolveMemoryRef(db, 'hrn:memory:shadowbrush.com::recipes')).toEqual({ id: mem.id });
+  });
+
+  it('collapses a canonical `::`-stored URN to single-colon v2 without a bogus alias', async () => {
+    const mem = await db.memory.create({
+      data: { id: generateId(), organizationId: orgId, urn: 'acme.com::planner', name: 'p', class: 'knowledge' },
+    });
+
+    await backfillUrnV2(db, { log: noop });
+
+    const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(after.urn).toBe('acme.com:planner'); // `::` collapsed
+    expect(after.legacyUrn).toBeNull(); // same lookup key → no redirect needed
+    expect(after.urnNormalizedAt).not.toBeNull();
+    expect(await resolveMemoryRef(db, 'hrn:memory:acme.com::planner')).toEqual({ id: mem.id });
+  });
+
+  it('does not mint a new URN that shadows another row\'s legacyUrn', async () => {
+    // A previously-migrated row whose OLD identity `acme.com:taken` is now a legacy alias.
+    await db.memory.create({
+      data: { id: generateId(), organizationId: orgId, urn: 'acme.com:moved', legacyUrn: 'acme.com:taken', name: 'm', class: 'knowledge' },
+    });
+    // A compound row whose terminal atom `taken` would collapse onto that legacy key.
+    const collider = await db.memory.create({
+      data: { id: generateId(), organizationId: orgId, urn: 'acme.com:writer:app-user:taken', name: 'c', class: 'knowledge' },
+    });
+
+    await backfillUrnV2(db, { log: noop });
+
+    const after = await db.memory.findUniqueOrThrow({ where: { id: collider.id } });
+    // Must NOT become `acme.com:taken` (would shadow the other row's legacy identity).
+    expect(after.urn).not.toBe('acme.com:taken');
+    expect(after.urn).toBe('acme.com:taken-writer'); // author-derived alias instead
   });
 
   it('roots a user-owned memory on the owner handle from the FK (XOR dispatch)', async () => {

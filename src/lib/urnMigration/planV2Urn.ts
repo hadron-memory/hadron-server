@@ -9,7 +9,7 @@
  *   - **root** — the owner principal — is taken from the row's OWNER FK
  *     (`organizationId` → org name, or `ownerUserId` → user handle), NOT from the
  *     stored URN string. A row's stored URN root can diverge from its real owner
- *     (observed in prod-shaped data: `shadowbrush.com:mealplan` owned by org
+ *     (observed in prod-shaped data: `shadowbrush.com:recipes` owned by org
  *     `baragaun.com`), so the FK is authoritative and this planner never guesses
  *     the root. The backfill supplies it.
  *   - **slug** — the terminal `:`-atom of the stored URN — is what this pure
