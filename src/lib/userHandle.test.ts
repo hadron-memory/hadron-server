@@ -16,7 +16,7 @@ function mockDb(taken: string[] = []) {
   const set = new Set(taken.map((h) => h.toLowerCase()));
   return {
     principal: {
-      findFirst: async (args: { where: { name: string } }) =>
+      findUnique: async (args: { where: { name: string } }) =>
         set.has(args.where.name.toLowerCase()) ? { id: 'x' } : null,
     },
   } as any;

@@ -5,9 +5,13 @@
 -- Steps: create `principals`; add nullable principal_id FKs to users +
 -- organizations; FAIL-LOUD if any cross-kind root-name collision exists (the
 -- #702 audit found 0); backfill one principal per user + per org (soft-deleted →
--- tombstoned); add the cross-kind case-insensitive unique; seed the reserved
--- platform root words. The lower(name) unique is mirrored in prisma/post-push.sql
--- + src/test/globalSetup.ts (Prisma can't model a functional index).
+-- tombstoned); add the cross-kind unique; seed the reserved platform root words.
+--
+-- Notes: `principals.name` is a PLAIN unique — every write lowercases the name,
+-- so it is effectively case-insensitive and index-backs the `findUnique` probe.
+-- Backfill ids use md5(random || clock) to avoid a pgcrypto/gen_random_uuid
+-- extension dependency; timestamps are stored UTC (Prisma reads timestamp(3) as
+-- UTC).
 
 CREATE TABLE "principals" (
   "id"          TEXT NOT NULL,
@@ -51,31 +55,33 @@ END $$;
 -- Backfill one principal per user; a soft-deleted user's name is TOMBSTONED
 -- (kept reserved, no recycling).
 INSERT INTO "principals" ("id", "name", "kind", "status", "released_at", "created_at", "updated_at")
-SELECT replace(gen_random_uuid()::text, '-', ''), lower("handle"), 'user',
+SELECT md5(random()::text || clock_timestamp()::text), lower("handle"), 'user',
        CASE WHEN "deleted_at" IS NULL THEN 'active' ELSE 'released' END,
-       "deleted_at", now(), now()
+       "deleted_at", (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc')
 FROM "users" WHERE "handle" IS NOT NULL;
 UPDATE "users" u SET "principal_id" = p."id"
 FROM "principals" p WHERE p."kind" = 'user' AND p."name" = lower(u."handle");
 
 -- Backfill one principal per org (same tombstone rule).
 INSERT INTO "principals" ("id", "name", "kind", "status", "released_at", "created_at", "updated_at")
-SELECT replace(gen_random_uuid()::text, '-', ''), lower("urn"), 'org',
+SELECT md5(random()::text || clock_timestamp()::text), lower("urn"), 'org',
        CASE WHEN "deleted_at" IS NULL THEN 'active' ELSE 'released' END,
-       "deleted_at", now(), now()
+       "deleted_at", (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc')
 FROM "organizations";
 UPDATE "organizations" o SET "principal_id" = p."id"
 FROM "principals" p WHERE p."kind" = 'org' AND p."name" = lower(o."urn");
 
--- Cross-kind case-insensitive uniqueness spanning ALL statuses (a 'released'
--- tombstone keeps its name reserved forever — indefinite, no recycling; the
--- INVERSE of the deleted_at-filtered Slack partial-unique).
-CREATE UNIQUE INDEX "principals_name_lower_uniq" ON "principals" (lower("name"));
+-- Cross-kind uniqueness spanning ALL statuses (a 'released' tombstone keeps its
+-- name reserved forever — indefinite, no recycling). Plain unique: names are
+-- always lowercased, so this is case-insensitive in practice and index-backs the
+-- findUnique availability probe.
+CREATE UNIQUE INDEX "principals_name_key" ON "principals" ("name");
 
 -- Reserve the platform root words (#692) as pre-seeded rows, so the unique index
 -- rejects any user/org claim for free. Skipped if a name is already claimed (a
 -- prod dry-run surfaces that — see the plan's verification).
 INSERT INTO "principals" ("id", "name", "kind", "status", "created_at", "updated_at")
-SELECT replace(gen_random_uuid()::text, '-', ''), r.w, 'platform', 'reserved', now(), now()
+SELECT md5(random()::text || clock_timestamp()::text), r.w, 'platform', 'reserved',
+       (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc')
 FROM (VALUES ('hadron'), ('hadronmemory'), ('hadron-memory'), ('platform'), ('host'), ('server')) AS r(w)
-WHERE NOT EXISTS (SELECT 1 FROM "principals" p WHERE lower(p."name") = r.w);
+WHERE NOT EXISTS (SELECT 1 FROM "principals" p WHERE p."name" = r.w);

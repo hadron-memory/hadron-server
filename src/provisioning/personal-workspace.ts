@@ -3,7 +3,11 @@ import type { PrismaClient } from '../generated/prisma/client.js';
 import { APP_KEY_PREFIX } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 import { normalizeHandleOrNull } from '../lib/userHandle.js';
-import { ensureOrgPrincipal } from '../lib/principal/mintPrincipal.js';
+import {
+  ensureOrgPrincipal,
+  checkRootAvailable,
+  RootNameTakenError,
+} from '../lib/principal/mintPrincipal.js';
 
 interface ProvisionResult {
   orgId: string;
@@ -61,44 +65,44 @@ export async function provisionPersonalWorkspace(
     select: { handle: true },
   });
   const handle = normalizeHandleOrNull(userRow?.handle);
-  let urn = `personal-${userId}`;
-  if (handle) {
-    const candidate = `${handle}-org`;
-    const taken = await db.organization.findUnique({
-      where: { urn: candidate },
-      select: { id: true },
-    });
-    if (!taken) urn = candidate;
+  const fallbackUrn = `personal-${userId}`;
+  // Prefer `<handle>-org`, but only when the whole POOL (users + orgs) has it
+  // free (#692). Checking `organizations` alone would let a user principal
+  // `alice-org` collide with a new signup `alice`, and the mint below would then
+  // orphan the org. `personal-<userId>` is the guaranteed-unique fallback.
+  let candidateUrn = fallbackUrn;
+  if (handle && (await checkRootAvailable(db, `${handle}-org`))) {
+    candidateUrn = `${handle}-org`;
   }
 
-  // 1. Create personal org.
-  //
-  // The findUnique-then-create above has a TOCTOU window, but we deliberately
-  // let a P2002 on `urn` propagate rather than catching it here. Two cases:
-  //   - Concurrent provisioning of the SAME user (double signup): both compute
-  //     the same slug, one create wins, the other throws P2002. The caller's
-  //     idempotency guard absorbs it (GitHub callback: `P2002 → isNew=false`),
-  //     same as the pre-existing `personal-<userId>` path (also unique-per-
-  //     user). Swallowing it here and retrying would create a SECOND personal
-  //     workspace for the user — worse than the abort.
-  //   - A different user racing for the same `<handle>-org` is impossible:
-  //     `User.handle` is unique, so no two users derive the same candidate.
-  // The only unhandled case is a non-personal org squatting `<handle>-org` in
-  // the sub-millisecond window after the check — negligible, and it surfaces
-  // as the same clean P2002 the caller already tolerates.
-  const org = await db.organization.create({
-    data: {
-      id: generateId(),
-      name: displayName,
-      urn,
-      isVisible: false,
-      createdBy: userId,
-    },
-  });
-  // #692: register the personal org in the pool (undotted slug is exempt from
-  // the dotted-root rule but still reserves its name). After the create, so the
-  // org-urn P2002 stays the personal-workspace race signal the caller tolerates.
-  await ensureOrgPrincipal(db, org);
+  // 1. Create the personal org + mint its pool principal ATOMICALLY, so a mint
+  // collision rolls the org back (no orphan). A TOCTOU race that steals the
+  // candidate between the check and the mint retries with the guaranteed-unique
+  // `personal-<userId>`. A P2002 on `personal-<userId>` itself (a same-user
+  // double-signup) propagates — the caller's idempotency guard absorbs it
+  // (`P2002 → isNew=false`), same as before (the personal org is undotted,
+  // exempt from the #692 dotted-root rule, but still reserves its name).
+  const createOrg = (urn: string) =>
+    db.$transaction(async (tx) => {
+      const created = await tx.organization.create({
+        data: { id: generateId(), name: displayName, urn, isVisible: false, createdBy: userId },
+      });
+      await ensureOrgPrincipal(tx, created);
+      return created;
+    });
+  let org;
+  try {
+    org = await createOrg(candidateUrn);
+  } catch (err) {
+    const raced =
+      err instanceof RootNameTakenError ||
+      (err as { code?: string } | null)?.code === 'P2002';
+    if (raced && candidateUrn !== fallbackUrn) {
+      org = await createOrg(fallbackUrn);
+    } else {
+      throw err;
+    }
+  }
 
   // 2. Add user as OWNER
   await db.orgMember.create({
@@ -117,7 +121,7 @@ export async function provisionPersonalWorkspace(
     data: {
       id: generateId(),
       organizationId: org.id,
-      urn: `${urn}:my-agent`,
+      urn: `${org.urn}:my-agent`,
       name: 'My Agent',
       createdBy: userId,
     },
@@ -140,7 +144,7 @@ export async function provisionPersonalWorkspace(
       data: {
         id: generateId(),
         name: 'My Workstation',
-        urn: `${urn}:my-workstation`,
+        urn: `${org.urn}:my-workstation`,
         organizationId: org.id,
         appType: 'WORKSTATION',
         role: 'READER',

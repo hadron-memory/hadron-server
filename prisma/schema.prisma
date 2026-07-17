@@ -516,19 +516,21 @@ model Organization {
 /// source-of-truth, kept in sync inside the mint transaction.
 ///
 /// A released root name is TOMBSTONED (`status = 'released'`, the owning
-/// user/org detached) — the row is kept, and the case-insensitive
-/// `principals_name_lower_uniq` on `lower(name)` spans ALL statuses, so a
-/// released name is reserved FOREVER (indefinite, no recycling — the identity
-/// guarantee the `@`-sigil rename-safety is replaced by). Reserved platform
-/// words (`hadron`, `platform`, …) are pre-seeded rows with `status = 'reserved'`.
-///
-/// The `lower(name)` functional unique lives in prisma/post-push.sql +
-/// src/test/globalSetup.ts (Prisma can't model it) — synced with the
-/// `<ts>_principal_pool` migration.
+/// user/org detached) — the row is kept, and the `name @unique` spans ALL
+/// statuses, so a released name is reserved FOREVER (indefinite, no recycling —
+/// the identity guarantee the `@`-sigil rename-safety is replaced by). Reserved
+/// platform words (`hadron`, `platform`, …) are pre-seeded rows with
+/// `status = 'reserved'`. `name` is written lowercased everywhere, so the plain
+/// (Prisma-modeled) unique doubles as case-insensitive and backs `findUnique`.
 model Principal {
   id         String    @id @default(cuid())
-  /// The canonical root name, stored lowercase.
-  name       String
+  /// The canonical root name, stored lowercase. `@unique` is a plain (case-
+  /// sensitive) index, which is sufficient because every write lowercases the
+  /// name (mintPrincipal + the migration backfill) — so it is effectively
+  /// case-insensitive AND index-backed for the `findUnique` availability probe.
+  /// Spans ALL statuses (no status filter), so a `released` tombstone reserves
+  /// its name forever (indefinite, no recycling).
+  name       String    @unique
   /// 'user' | 'org' | 'platform'.
   kind       String
   /// 'active' | 'released' (tombstone) | 'reserved' (platform word).

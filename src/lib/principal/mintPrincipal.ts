@@ -48,7 +48,9 @@ type PrincipalDb = Pick<PrismaClient, 'principal'>;
 export async function checkRootAvailable(db: PrincipalDb, name: string): Promise<boolean> {
   const lower = name.toLowerCase();
   if (RESERVED_ROOT_NAMES.has(lower)) return false;
-  const existing = await db.principal.findFirst({
+  // `name` is a plain @unique and always stored lowercased, so this findUnique
+  // is index-backed (no seq scan) and spans every status (a tombstone counts).
+  const existing = await db.principal.findUnique({
     where: { name: lower },
     select: { id: true },
   });

@@ -204,14 +204,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_agent_name_uniq
 CREATE UNIQUE INDEX IF NOT EXISTS users_handle_lower_uniq
   ON users (lower(handle)) WHERE handle IS NOT NULL;
 
--- ─── #692: unified principal pool — cross-kind root-name uniqueness ───────
--- One case-insensitive namespace across user handles AND org names. NOT filtered
--- on status: a 'released' (tombstoned) row keeps its name reserved forever
--- (indefinite, no recycling — the inverse of a deleted_at-filtered partial
--- unique). Prisma can't model a functional index. Synced with the
--- 20260716140000 migration + src/test/globalSetup.ts.
-CREATE UNIQUE INDEX IF NOT EXISTS principals_name_lower_uniq
-  ON principals (lower(name));
+-- ─── #692: unified principal pool — backfill for db-push setups ──────────
+-- `principals.name` is a plain @unique (created by `db push` from the schema;
+-- names are always written lowercased, so it is effectively case-insensitive).
+-- The MIGRATION backfills a principal per existing user/org; but `db:dev-setup`
+-- runs `db push` + this file, NOT the migration, so populate principals here too
+-- or existing local rows stay invisible to the pool probe. Idempotent
+-- (`principal_id IS NULL` + ON CONFLICT), so it is a no-op on the empty test
+-- template and on already-backfilled rows. Soft-deleted → tombstoned.
+INSERT INTO principals (id, name, kind, status, released_at, created_at, updated_at)
+SELECT md5(random()::text || clock_timestamp()::text), lower(handle), 'user',
+       CASE WHEN deleted_at IS NULL THEN 'active' ELSE 'released' END,
+       deleted_at, (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc')
+FROM users u
+WHERE handle IS NOT NULL AND principal_id IS NULL
+ON CONFLICT (name) DO NOTHING;
+UPDATE users u SET principal_id = p.id
+FROM principals p WHERE p.kind = 'user' AND p.name = lower(u.handle) AND u.principal_id IS NULL;
+
+INSERT INTO principals (id, name, kind, status, released_at, created_at, updated_at)
+SELECT md5(random()::text || clock_timestamp()::text), lower(urn), 'org',
+       CASE WHEN deleted_at IS NULL THEN 'active' ELSE 'released' END,
+       deleted_at, (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc')
+FROM organizations o
+WHERE principal_id IS NULL
+ON CONFLICT (name) DO NOTHING;
+UPDATE organizations o SET principal_id = p.id
+FROM principals p WHERE p.kind = 'org' AND p.name = lower(o.urn) AND o.principal_id IS NULL;
+
+-- Reserve the platform root words (idempotent).
+INSERT INTO principals (id, name, kind, status, created_at, updated_at)
+SELECT md5(random()::text || clock_timestamp()::text), r.w, 'platform', 'reserved',
+       (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc')
+FROM (VALUES ('hadron'), ('hadronmemory'), ('hadron-memory'), ('platform'), ('host'), ('server')) AS r(w)
+ON CONFLICT (name) DO NOTHING;
 
 -- ─── cor:api:090 (findNodes) + cor:rag:010:02: lexical FTS substrate ─────
 -- STORED generated tsvector (weighted A/B/C/D = name/alias > loc/tags >
