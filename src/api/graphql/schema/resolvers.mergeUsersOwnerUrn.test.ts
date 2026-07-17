@@ -13,6 +13,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -49,6 +50,20 @@ describe('mergeUsers — owner-namespaced URN re-own (#695)', () => {
     const sys = await db.memory.findUniqueOrThrow({ where: { id: moved.systemMemoryId! } });
     expect(sys.urn).toBe('@merge-target:notes-system');
     expect(sys.ownerUserId).toBe(target.id);
+  });
+
+  it('records the pre-merge URN in legacyUrn so old @source references still resolve (#697)', async () => {
+    const agent = await resolvers.Mutation.createAgent({}, { name: 'Notes' }, ctxFor(source.id));
+    expect(agent.urn).toBe('@merge-source:notes');
+
+    await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
+
+    const moved = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
+    expect(moved.urn).toBe('@merge-target:notes');
+    // The alias map now carries the pre-merge URN…
+    expect(moved.legacyUrn).toBe('@merge-source:notes');
+    // …so an old owner-rooted reference redirects to the re-owned row.
+    expect(await resolveAgentRef(db, 'hrn:agent:@merge-source:notes')).toEqual({ id: agent.id });
   });
 
   it('re-mints a colliding slug on the loser (source) side, leaving the target resource intact', async () => {

@@ -25,8 +25,12 @@
  * Node *content* references to a re-rooted memory URN are deliberately NOT
  * rewritten here (matching `renameOwnerNamespacedUrns`): node/edge URNs are
  * composed on read from the parent memory URN, so they self-heal, and legacy
- * textual refs are covered by the accept-forever promise (#239) and the coming
- * stored alias map (#697). Runs inside the caller's `mergeUsers` transaction.
+ * textual refs to the old `@source:slug` are covered by the stored alias map
+ * (#697) — each re-rooted row records its pre-merge URN in `legacyUrn`, so
+ * `resolve{Memory,Agent,App}Ref` redirects an old reference to the re-owned row.
+ * (Single-column caveat: a row later re-normalized by the #697 v2 backfill keeps
+ * only its most-recent legacy form.) Runs inside the caller's `mergeUsers`
+ * transaction.
  */
 
 import type { Prisma } from '../generated/prisma/index.js';
@@ -100,7 +104,9 @@ export async function mergeOwnerNamespacedUrns(
     await tx.memory.deleteMany({ where: { urn: newUrn, deletedAt: { not: null } } });
     await tx.memory.update({
       where: { id: m.id },
-      data: { urn: newUrn, ownerUserId: targetUserId },
+      // Record the pre-merge URN so old `@source:slug` references still resolve
+      // through the #697 alias map after the re-root.
+      data: { urn: newUrn, ownerUserId: targetUserId, legacyUrn: m.urn },
     });
     memRemap.push([m.urn, newUrn]);
   }
@@ -123,15 +129,17 @@ export async function mergeOwnerNamespacedUrns(
     await tx.agent.deleteMany({ where: { urn: newUrn, deletedAt: { not: null } } });
     await tx.agent.update({
       where: { id: a.id },
-      data: { urn: newUrn, ownerUserId: targetUserId },
+      data: { urn: newUrn, ownerUserId: targetUserId, legacyUrn: a.urn },
     });
   }
 
   // ── Apps ─────────────────────────────────────────────────────────────────
   // Liveness for the urn clash is the partial-unique predicate `uninstalled_at
-  // IS NULL`, not deleted_at.
+  // IS NULL`; also skip soft-deleted rows (`deletedAt: null`), matching the
+  // Memory/Agent loops — a dead row holds no live namespace to re-root, and its
+  // ownership is moved by the sweep at the end.
   const apps = await tx.app.findMany({
-    where: { ownerUserId: sourceUserId, uninstalledAt: null },
+    where: { ownerUserId: sourceUserId, uninstalledAt: null, deletedAt: null },
     select: { id: true, urn: true },
   });
   for (const app of apps) {
@@ -144,7 +152,7 @@ export async function mergeOwnerNamespacedUrns(
     });
     await tx.app.update({
       where: { id: app.id },
-      data: { urn: newUrn, ownerUserId: targetUserId },
+      data: { urn: newUrn, ownerUserId: targetUserId, legacyUrn: app.urn },
     });
   }
 

@@ -36,6 +36,7 @@ import { resolvers } from './api/graphql/schema/resolvers.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError, UrnParseError } from './lib/urn.js';
+import { AmbiguousLegacyUrnError } from './lib/entityRef/errors.js';
 import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
 import { controller } from './controller/controller.js';
@@ -1011,6 +1012,20 @@ export async function createServer(): Promise<Express> {
             code: 'BAD_USER_INPUT',
             reason: original.reason,
             offendingValue: original.offendingSegment,
+          },
+        };
+      }
+      // #697: a legacy URN that matches >1 live row through the stored alias map
+      // fails LOUDLY with this typed code (never a silent wrong resolve). Surface
+      // it as the advertised `extensions.code` rather than INTERNAL_SERVER_ERROR.
+      if (original instanceof AmbiguousLegacyUrnError) {
+        return {
+          ...formattedError,
+          message: original.message,
+          extensions: {
+            ...formattedError.extensions,
+            code: 'AmbiguousLegacyUrnError',
+            offendingValue: original.ref,
           },
         };
       }

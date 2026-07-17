@@ -97,17 +97,18 @@ function capAtom(slug: string): string {
 }
 
 /**
- * Join a stem and a disambiguating suffix under the 64-char atom cap by
- * truncating the STEM (keeping the suffix intact so the disambiguation
+ * Join a base slug and a disambiguating suffix under the 64-char atom cap by
+ * truncating the BASE (keeping the suffix intact so the disambiguation
  * survives), and re-trim any separator the slice exposed so the atom still
- * ends alphanumeric.
+ * ends alphanumeric. (`baseSlug` is the desired slug — distinct from the
+ * author-derived `stem` in `mintLocalSlug` that seeds the suffix.)
  */
-function capJoin(stem: string, suffix: string): string {
-  const joined = `${stem}-${suffix}`;
+function capJoin(baseSlug: string, suffix: string): string {
+  const joined = `${baseSlug}-${suffix}`;
   if (joined.length <= MAX_SLUG_LEN) return joined;
   const room = Math.max(1, MAX_SLUG_LEN - suffix.length - 1); // -1 for the '-'
-  const truncatedStem = stem.slice(0, room).replace(/[._-]+$/g, '') || stem.slice(0, 1);
-  return `${truncatedStem}-${suffix}`;
+  const truncatedBase = baseSlug.slice(0, room).replace(/[._-]+$/g, '') || baseSlug.slice(0, 1);
+  return `${truncatedBase}-${suffix}`;
 }
 
 /**
