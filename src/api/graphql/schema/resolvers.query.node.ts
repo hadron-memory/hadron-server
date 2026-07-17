@@ -87,6 +87,11 @@ export const nodeQueries = {
       const type = schemeType ?? (parseUrnInput(baseUrn).type as string);
       if (fragment && type !== 'node' && type !== 'apprun') return null;
       switch (type) {
+        // `mem` is the grammar-v2 type word for a memory (#697 emission flip);
+        // it dispatches identically to the v1 `memory` word so a v2-emitted
+        // `hrn:mem:root:slug` resolves (resolveMemoryRef accepts both via the
+        // urn-lib `mem`→`memory` input alias).
+        case 'mem':
         case 'memory': {
           let id: string;
           try {

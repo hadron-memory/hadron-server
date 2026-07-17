@@ -38,6 +38,25 @@ describe('resolveMemoryRef', () => {
     expect(result).toEqual({ id: memory.id });
   });
 
+  it('resolves a v2-native hrn:mem:<root>:<slug> input (#697 emission-flip round-trip)', async () => {
+    // Consistent fixture: the memory URN root IS its owning org's urn, and the
+    // v2 input is derived from that same root.
+    const org = await db.organization.create({
+      data: { name: 'memref-test-v2org', urn: `memref-test-v2org-${Date.now()}` },
+    });
+    const memory = await db.memory.create({
+      data: {
+        organizationId: org.id,
+        urn: `${org.urn}:memref-test-v2mem`,
+        name: 'memref-test-v2mem',
+        class: 'knowledge',
+      },
+    });
+    // The v2 emitted form (single colon, `mem` type word) must round-trip back.
+    const result = await resolveMemoryRef(db, `hrn:mem:${org.urn}:memref-test-v2mem`);
+    expect(result).toEqual({ id: memory.id });
+  });
+
   it('resolves a bare URN-shaped reference to the row', async () => {
     const memory = await db.memory.create({
       data: {
