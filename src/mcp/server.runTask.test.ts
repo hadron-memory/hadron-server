@@ -238,7 +238,7 @@ describe('hadron_run_task — resolution by name (cor:api:060:02)', () => {
     expect(text).toContain('No match in Alpha');
     expect(text).toContain('other memories');
     expect(text).toContain('Deploy');
-    expect(text).toContain(nodeUrnOf(fx.beta, 'tasks:deploy'));
+    expect(text).toContain('hrn:node:run-task-org:beta:tasks:deploy');
     // Surfaced for an explicit pick — not executed.
     expect(text).not.toContain('Deploy it');
   });
@@ -360,7 +360,7 @@ describe('hadron_run_task — execute mode (#529, appRef)', () => {
     // prefixed form) before minting, so every run stores the same canonical
     // entryNodeUrn regardless of the input ref shape. Previously only the
     // fuzzy-resolution paths did this; the URN bypass passed the raw string.
-    expect(runs[0]!.entryNodeUrn).toContain(urn);
+    expect(runs[0]!.entryNodeUrn).toContain('hrn:node:run-task-org:alpha:tasks:add-note');
     expect(runs[0]!.triggerKind).toBe('MANUAL');
     expect(runs[0]!.appId).toBe(app.id);
   });
@@ -397,6 +397,6 @@ describe('hadron_run_task — execute mode (#529, appRef)', () => {
     expect(runs).toHaveLength(1);
     // Resolved + canonicalized to the same node — not a malformed triple-colon.
     expect(runs[0]!.entryNodeUrn).not.toContain(':::');
-    expect(runs[0]!.entryNodeUrn).toContain('run-task-org::canon::tasks:ship');
+    expect(runs[0]!.entryNodeUrn).toContain('hrn:node:run-task-org:canon:tasks:ship');
   });
 });

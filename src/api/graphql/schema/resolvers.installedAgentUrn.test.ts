@@ -1,11 +1,11 @@
 /**
- * Spec 021 US1 — install URN provenance via App.installedAgentUrn.
+ * App.installedAgentUrn — grammar-v2 (#697 Stage 2, D10).
  *
- * Covers the new computed GraphQL field on App that returns the R2
- * canonical install URN combining the App's identity with its
- * installed Agent's author-org and slug. Two orgs installing same-slug
- * agents from different authors produce distinct URNs that differ at
- * the author-org segment.
+ * An installed agent stays AUTHOR-ROOTED forever: `installedAgentUrn` now returns
+ * the installed Agent's own author-rooted v2 URN (`hrn:agent:<author>:<slug>`).
+ * The v1 R2 install chain (`<installing-org>::<app>::<author-org>:<slug>`) is
+ * retired — the App's identity no longer appears in the URN. Two same-slug agents
+ * from different authors still stay distinct, now at the ROOT (author) atom.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -14,33 +14,17 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
 async function makeOrg(urn: string, name: string = urn) {
-  return db.organization.create({
-    data: { id: generateId(), name, urn },
-  });
+  return db.organization.create({ data: { id: generateId(), name, urn } });
 }
 
 async function makeAgent(orgId: string, orgUrn: string, slug: string) {
   return db.agent.create({
-    data: {
-      id: generateId(),
-      organizationId: orgId,
-      name: slug,
-      urn: `${orgUrn}:${slug}`,
-    },
+    data: { id: generateId(), organizationId: orgId, name: slug, urn: `${orgUrn}:${slug}` },
   });
 }
 
-async function makeApp(
-  orgId: string,
-  orgUrn: string,
-  slug: string,
-  agentId: string,
-) {
+async function makeApp(orgId: string, orgUrn: string, slug: string, agentId: string) {
   return db.app.create({
     data: {
       id: generateId(),
@@ -52,208 +36,96 @@ async function makeApp(
   });
 }
 
+const installedAgentUrn = (app: unknown) =>
+  (resolvers.App as Record<string, Function>).installedAgentUrn(app, {}, { db } as unknown as Context);
+
 beforeEach(async () => {
   await cleanDb(db);
 });
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe('App.installedAgentUrn — spec 021 US1', () => {
-  it('returns the R2 canonical install URN combining App + Agent', async () => {
+describe('App.installedAgentUrn — author-rooted (v2, D10)', () => {
+  it('returns the installed agent’s author-rooted v2 URN (App identity absent)', async () => {
     const hadronOrg = await makeOrg('hadronmemory.com');
     const micromentorOrg = await makeOrg('micromentor.org');
     const agent = await makeAgent(hadronOrg.id, hadronOrg.urn, 'coding-agent');
     const app = await makeApp(micromentorOrg.id, micromentorOrg.urn, 'coding-app', agent.id);
 
-    const result = await (resolvers.App as Record<string, Function>).installedAgentUrn(
-      app,
-      {},
-      { db } as unknown as Context,
-    );
-
-    expect(result).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+    // Rooted at the AUTHOR (hadronmemory.com), NOT the installing org.
+    expect(await installedAgentUrn(app)).toBe('hrn:agent:hadronmemory.com:coding-agent');
   });
 
-  it('two same-slug agents from different authors → distinct install URNs (author-org is the disambiguator)', async () => {
-    // To prove the author-org is the disambiguating segment, we hold
-    // EVERY OTHER variable fixed: same installing org, same app slug,
-    // same agent slug. Only the author-org of the agent differs.
-    //
-    // App.agentId is mutable (the data model permits re-pointing an
-    // App at a different Agent), so we mutate the App.agentId between
-    // two `installedAgentUrn` queries — if the resolver weren't
-    // incorporating author-org, both queries would return the same
-    // URN. The test would have falsely passed Codex's earlier review
-    // because the two prior fixtures had differing app slugs that
-    // masked the comparison.
+  it('two same-slug agents from different authors stay distinct at the author root', async () => {
     const hadronOrg = await makeOrg('hadronmemory.com');
     const competitorOrg = await makeOrg('competitor.com');
     const micromentorOrg = await makeOrg('micromentor.org');
-
     const hadronAgent = await makeAgent(hadronOrg.id, hadronOrg.urn, 'coding-agent');
-    const competitorAgent = await makeAgent(
-      competitorOrg.id,
-      competitorOrg.urn,
-      'coding-agent',
-    );
+    const competitorAgent = await makeAgent(competitorOrg.id, competitorOrg.urn, 'coding-agent');
 
-    const app = await makeApp(
-      micromentorOrg.id,
-      micromentorOrg.urn,
-      'coding-app',
-      hadronAgent.id,
-    );
+    const app = await makeApp(micromentorOrg.id, micromentorOrg.urn, 'coding-app', hadronAgent.id);
+    const withHadron = await installedAgentUrn(app);
 
-    const urlWithHadron = await (resolvers.App as Record<string, Function>).installedAgentUrn(
-      app,
-      {},
-      { db } as unknown as Context,
-    );
-
-    // Re-point the App to competitor.com's same-slug agent. Same App
-    // row, same App.urn, same agent slug — only the author-org differs.
-    // 023-app-shape Phase 2b: App↔Agent is N:M; swap the AppAgent rows
-    // so the "primary" (first installed) agent flips to the competitor.
+    // Re-point the App at competitor.com's same-slug agent (same App, same slug).
     await db.appAgent.deleteMany({ where: { appId: app.id } });
-    await db.appAgent.create({
-      data: { appId: app.id, agentId: competitorAgent.id },
-    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: competitorAgent.id } });
     const updatedApp = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    const withCompetitor = await installedAgentUrn(updatedApp);
 
-    const urlWithCompetitor = await (
-      resolvers.App as Record<string, Function>
-    ).installedAgentUrn(updatedApp, {}, { db } as unknown as Context);
-
-    expect(urlWithHadron).toBe(
-      'hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent',
-    );
-    expect(urlWithCompetitor).toBe(
-      'hrn:agent:micromentor.org::coding-app::competitor.com:coding-agent',
-    );
-    // The URNs differ ONLY at the author-org segment — the rest is
-    // byte-equal between the two outputs.
-    expect(urlWithHadron).not.toBe(urlWithCompetitor);
-    expect(urlWithHadron.replace('hadronmemory.com', '<author>')).toBe(
-      urlWithCompetitor.replace('competitor.com', '<author>'),
-    );
+    expect(withHadron).toBe('hrn:agent:hadronmemory.com:coding-agent');
+    expect(withCompetitor).toBe('hrn:agent:competitor.com:coding-agent');
+    // Distinct ONLY at the author root atom.
+    expect(withHadron).not.toBe(withCompetitor);
   });
 
-  it('install-by-self (installing org == author org) collapses via D11 cat 1', async () => {
+  it('install-by-self is the same author-rooted URN (no App segment to collapse)', async () => {
     const hadronOrg = await makeOrg('hadronmemory.com');
     const agent = await makeAgent(hadronOrg.id, hadronOrg.urn, 'coding-agent');
     const app = await makeApp(hadronOrg.id, hadronOrg.urn, 'coding-app', agent.id);
 
-    const result = await (resolvers.App as Record<string, Function>).installedAgentUrn(
-      app,
-      {},
-      { db } as unknown as Context,
-    );
-
-    // Cat 1 collapses the duplicated org segment.
-    expect(result).toBe('hrn:agent:hadronmemory.com::coding-app::coding-agent');
+    expect(await installedAgentUrn(app)).toBe('hrn:agent:hadronmemory.com:coding-agent');
   });
 
-  it('returns null when App has no agent attached (008 orphan path)', async () => {
+  it('drops a legacy @ owner sigil on a user-authored agent', async () => {
     const org = await makeOrg('micromentor.org');
-    // Insert an orphan App directly (no agentId) — pre-009 back-compat.
-    const orphan = await db.app.create({
-      data: {
-        id: generateId(),
-        organizationId: org.id,
-        name: 'orphan-app',
-        urn: `${org.urn}:orphan-app`,
-      },
+    const user = await db.user.create({
+      data: { id: generateId(), handle: 'holger', email: `h-${generateId()}@x.test` },
     });
+    const agent = await db.agent.create({
+      data: { id: generateId(), ownerUserId: user.id, name: 'helper', urn: '@holger:helper' },
+    });
+    const app = await makeApp(org.id, org.urn, 'my-app', agent.id);
 
-    const result = await (resolvers.App as Record<string, Function>).installedAgentUrn(
-      orphan,
-      {},
-      { db } as unknown as Context,
-    );
-
-    expect(result).toBeNull();
+    expect(await installedAgentUrn(app)).toBe('hrn:agent:holger:helper');
   });
 
-  it('uses eager-loaded agent.urn when present (no extra DB roundtrip)', async () => {
+  it('returns null when the App has no agent attached (008 orphan path)', async () => {
+    const org = await makeOrg('micromentor.org');
+    const orphan = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'orphan-app', urn: `${org.urn}:orphan-app` },
+    });
+    expect(await installedAgentUrn(orphan)).toBeNull();
+  });
+
+  it('uses the eager-loaded agent.urn when present', async () => {
     const hadronOrg = await makeOrg('hadronmemory.com');
     const micromentorOrg = await makeOrg('micromentor.org');
     const agent = await makeAgent(hadronOrg.id, hadronOrg.urn, 'coding-agent');
     const app = await makeApp(micromentorOrg.id, micromentorOrg.urn, 'coding-app', agent.id);
 
-    // Simulate the eager-include shape that APP_INCLUDE / ORG_INCLUDE
-    // would produce in a real query.
     const appWithAgent = { ...app, agent };
-    const result = await (resolvers.App as Record<string, Function>).installedAgentUrn(
-      appWithAgent,
-      {},
-      { db } as unknown as Context,
-    );
-
-    expect(result).toBe('hrn:agent:micromentor.org::coding-app::hadronmemory.com:coding-agent');
+    expect(await installedAgentUrn(appWithAgent)).toBe('hrn:agent:hadronmemory.com:coding-agent');
   });
 
-  // #520 — a single malformed app/agent URN must NOT throw. composeInstalledAgentUrn
-  // throws when a URN isn't exactly <org>::<slug>, and a thrown resolver adds an
-  // errors[] entry that makes graphql-request reject the WHOLE app(ref:)/apps read
-  // (portal 404s the app-detail page). The nullable field fails soft → null instead.
-  it('#520 — returns null (not throws) when the App URN is malformed', async () => {
-    const hadronOrg = await makeOrg('hadronmemory.com');
-    const micromentorOrg = await makeOrg('micromentor.org');
-    const agent = await makeAgent(hadronOrg.id, hadronOrg.urn, 'coding-agent');
-    // A stored app URN with more than <org>::<slug> (2 segments) — the shape
-    // the portal's slugOfUrn bug compounded — makes composeInstalledAgentUrn throw.
-    const badApp = await db.app.create({
-      data: {
-        id: generateId(),
-        organizationId: micromentorOrg.id,
-        name: 'bad-app',
-        urn: 'micromentor.org:coding-app:extra-segment',
-        appAgents: { create: { agentId: agent.id } },
-      },
-    });
-
-    // The resolver intentionally console.warns on the malformed URN — suppress
-    // it to keep test output clean, and assert it fired so the log path is
-    // covered too.
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const result = await (resolvers.App as Record<string, Function>).installedAgentUrn(
-      badApp,
-      {},
-      { db } as unknown as Context,
-    );
-    expect(result).toBeNull();
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
-  });
-
-  it('#520 — returns null when the Agent URN is malformed', async () => {
-    const hadronOrg = await makeOrg('hadronmemory.com');
-    const micromentorOrg = await makeOrg('micromentor.org');
-    // Malformed agent URN (3 segments after the prefix strip).
+  it('#520 — fails soft (null + warn) when the agent URN can’t emit v2', async () => {
+    const org = await makeOrg('micromentor.org');
+    // An un-emittable stored agent urn (empty root) makes emitInstalledAgentUrnV2
+    // throw; the nullable field must return null, not error the whole app read.
     const badAgent = await db.agent.create({
-      data: {
-        id: generateId(),
-        organizationId: hadronOrg.id,
-        name: 'coding-agent',
-        urn: 'hadronmemory.com:coding-agent:extra',
-      },
+      data: { id: generateId(), organizationId: org.id, name: 'bad', urn: ':rootless' },
     });
-    const app = await makeApp(
-      micromentorOrg.id,
-      micromentorOrg.urn,
-      'coding-app',
-      badAgent.id,
-    );
+    const app = await makeApp(org.id, org.urn, 'coding-app', badAgent.id);
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const result = await (resolvers.App as Record<string, Function>).installedAgentUrn(
-      app,
-      {},
-      { db } as unknown as Context,
-    );
-    expect(result).toBeNull();
+    expect(await installedAgentUrn(app)).toBeNull();
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });

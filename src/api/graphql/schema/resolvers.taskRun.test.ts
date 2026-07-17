@@ -15,6 +15,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { composeNodeUrn } from '../../../lib/urn.js';
+import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -28,6 +29,7 @@ let orgId: string;
 let app: { id: string; urn: string };
 let adminId: string;
 let taskUrn: string;
+let taskEntryUrnV2: string;
 let targetMemoryId: string;
 let targetMemoryUrn: string;
 
@@ -69,6 +71,9 @@ beforeEach(async () => {
     },
   });
   taskUrn = composeNodeUrn(taskMemory.urn, 'tasks:distill');
+  // The entry-node URN the resolver now emits is flat v2 (single colon),
+  // even though the request `nodeRef`/`taskRef` above stays the legacy `::` form.
+  taskEntryUrnV2 = emitNodeUrnV2(taskMemory.urn, 'tasks:distill');
   // A target memory the admin can write imports into.
   const target = await resolvers.Mutation.createMemory({}, { orgId, name: 'tr-import' }, adminCtx());
   targetMemoryId = target.id;
@@ -89,7 +94,7 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
     expect(run.status).toBe('PENDING');
     expect(run.triggerKind).toBe('MANUAL');
     expect(run.appId).toBe(app.id);
-    expect(run.entryNodeUrn).toBe(taskUrn);
+    expect(run.entryNodeUrn).toBe(taskEntryUrnV2);
   });
 
   it('without appRef renders the prompt (backward compatible)', async () => {
@@ -219,10 +224,10 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
     expect(res.jobId).toBeTruthy();
 
     const run = await db.appRun.findUniqueOrThrow({ where: { id: res.jobId! } });
-    expect(run.entryNodeUrn).toBe(taskUrn);
+    expect(run.entryNodeUrn).toBe(taskEntryUrnV2);
     expect(run.triggerKind).toBe('MANUAL');
     expect(run.appId).toBe(app.id);
-    const importedUrn = composeNodeUrn(targetMemoryUrn, 'clip:page');
+    const importedUrn = emitNodeUrnV2(targetMemoryUrn, 'clip:page');
     expect((run.eventData as Record<string, unknown>).importedNodeUrn).toBe(importedUrn);
   });
 
