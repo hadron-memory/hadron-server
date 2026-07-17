@@ -7,17 +7,17 @@ import {
   isHandleTaken,
 } from './userHandle.js';
 
-/** Minimal stand-in for the Prisma client's `user.findFirst` handle probe. */
+/**
+ * Minimal stand-in for the Prisma client's principal-pool probe (#692):
+ * isHandleTaken → checkRootAvailable queries `principal.findFirst` on the
+ * lowercase root name across ALL kinds (user + org).
+ */
 function mockDb(taken: string[] = []) {
   const set = new Set(taken.map((h) => h.toLowerCase()));
   return {
-    user: {
-      // Mirrors the case-insensitive `lower(handle)` probe used by isHandleTaken.
-      findFirst: async (args: { where: { handle: string | { equals: string } } }) => {
-        const w = args.where.handle;
-        const h = (typeof w === 'string' ? w : w.equals).toLowerCase();
-        return set.has(h) ? { id: 'x' } : null;
-      },
+    principal: {
+      findUnique: async (args: { where: { name: string } }) =>
+        set.has(args.where.name.toLowerCase()) ? { id: 'x' } : null,
     },
   } as any;
 }
@@ -29,13 +29,17 @@ describe('normalizeHandle (strict)', () => {
   });
 
   it('passes a legal lowercase handle through', () => {
-    expect(normalizeHandle('alice.dev_1-2')).toBe('alice.dev_1-2');
+    expect(normalizeHandle('alice-dev_1-2')).toBe('alice-dev_1-2');
   });
 
   it('throws on illegal characters', () => {
     expect(() => normalizeHandle('has space')).toThrow();
     expect(() => normalizeHandle('has:colon')).toThrow();
     expect(() => normalizeHandle('-leading-hyphen')).toThrow();
+  });
+
+  it('#692: throws on a dotted handle (handles are dot-free)', () => {
+    expect(() => normalizeHandle('first.last')).toThrow();
   });
 
   it('throws on a reserved word', () => {

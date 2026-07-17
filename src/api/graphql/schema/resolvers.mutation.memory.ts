@@ -1,6 +1,7 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
+import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
@@ -1445,14 +1446,19 @@ export const memoryMutations = {
         // Handle is NOT NULL (spec 047). This magic-link-provisioned app
         // end-user gets a RANDOM handle — addressed by (externalAppId,
         // externalId), not by handle.
-        user = await ctx.db.user.create({
-          data: {
-            externalAppId: ctx.appId,
-            externalId: externalUserId,
-            identityProvider: 'APP',
-            handle: await generateUniqueHandle(ctx.db),
-            createdBy: ctx.appId,
-          },
+        const appUserHandle = await generateUniqueHandle(ctx.db);
+        user = await ctx.db.$transaction(async (tx) => {
+          const u = await tx.user.create({
+            data: {
+              externalAppId: ctx.appId,
+              externalId: externalUserId,
+              identityProvider: 'APP',
+              handle: appUserHandle,
+              createdBy: ctx.appId,
+            },
+          });
+          await ensureUserPrincipal(tx, u); // #692: pool principal
+          return u;
         });
       }
 

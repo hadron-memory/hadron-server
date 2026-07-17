@@ -16,6 +16,12 @@ import { renameOwnerNamespacedUrns } from '../../../lib/ownerUrnRename.js';
 import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
 import { validateOrgSlug } from '../../../lib/urn.js';
 import {
+  mintPrincipal,
+  releasePrincipal,
+  ensureUserPrincipal,
+  RootNameTakenError,
+} from '../../../lib/principal/mintPrincipal.js';
+import {
   Prisma,
   type Role,
 } from '../../../generated/prisma/index.js';
@@ -26,6 +32,19 @@ import {
   requireOrgRole,
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
+
+/**
+ * Map a `RootNameTakenError` from the #692 principal pool to a user-facing
+ * conflict; re-throw anything else. Use as a `.catch()` on a mint transaction.
+ */
+function rethrowRootNameTaken(err: unknown): never {
+  if (err instanceof RootNameTakenError) {
+    throw new GraphQLError(`The name "${err.rootName}" is already taken.`, {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  throw err;
+}
 
 async function requireMergeUsersAccess(
   ctx: Context,
@@ -84,35 +103,47 @@ export const orgMutations = {
       // ONE transaction so a handle can never diverge from the URNs that embed
       // it (a half-rename would orphan `@<old>:…` App/Agent/Memory URNs).
       const userId = ctx.userId;
-      return ctx.db.$transaction(async (tx) => {
-        // Lock the user row FOR UPDATE before reading the current handle, so a
-        // concurrent updateMyProfile can't let us read a stale handle and then
-        // skip / mis-target the propagation (gemini review, #686 — mirrors the
-        // org-rename lock). A plain SELECT would not serialize the two writers.
-        const locked = await tx.$queryRaw<{ handle: string | null }[]>`
-          SELECT handle FROM users WHERE id = ${userId} FOR UPDATE
-        `;
-        if (locked.length === 0) throw new Error('Unauthenticated');
-        const current = locked[0];
-        const updated = await tx.user.update({
-          where: { id: userId },
-          data: {
-            ...(name !== undefined ? { name } : {}),
-            ...handleData,
-            ...(email !== undefined ? { email } : {}),
-          },
-        });
-        // Propagate only when the (normalized) handle actually changed — the
-        // rewrite is FK-scoped + idempotent, so this guard is just churn
-        // avoidance. `normalizeHandleOrNull` on the stored handle is a
-        // defensive no-op (it's already normalized) that also yields the null
-        // oldHandle the propagation uses to skip the entry_node_urn rewrites.
-        const oldHandle = normalizeHandleOrNull(current.handle);
-        if (newHandle && newHandle !== oldHandle) {
-          await renameOwnerNamespacedUrns(tx, userId, oldHandle, newHandle);
-        }
-        return updated;
-      });
+      return ctx.db
+        .$transaction(async (tx) => {
+          // Lock the user row FOR UPDATE before reading the current handle, so a
+          // concurrent updateMyProfile can't let us read a stale handle and then
+          // skip / mis-target the propagation (gemini review, #686 — mirrors the
+          // org-rename lock). A plain SELECT would not serialize the two writers.
+          const locked = await tx.$queryRaw<{ handle: string | null; principal_id: string | null }[]>`
+            SELECT handle, principal_id FROM users WHERE id = ${userId} FOR UPDATE
+          `;
+          if (locked.length === 0) throw new Error('Unauthenticated');
+          const current = locked[0];
+          // `normalizeHandleOrNull` on the stored handle is a defensive no-op
+          // (already normalized) that also yields the null oldHandle the
+          // propagation uses to skip the entry_node_urn rewrites.
+          const oldHandle = normalizeHandleOrNull(current.handle);
+          const renaming = !!newHandle && newHandle !== oldHandle;
+          // #692: on a handle change, mint the NEW root's principal first
+          // (fail-safe), tombstone the OLD name, and re-point the user.
+          let principalData: { principalId?: string } = {};
+          if (renaming) {
+            const principal = await mintPrincipal(tx, { kind: 'user', name: newHandle });
+            if (current.principal_id) await releasePrincipal(tx, current.principal_id);
+            principalData = { principalId: principal.id };
+          }
+          const updated = await tx.user.update({
+            where: { id: userId },
+            data: {
+              ...(name !== undefined ? { name } : {}),
+              ...handleData,
+              ...(email !== undefined ? { email } : {}),
+              ...principalData,
+            },
+          });
+          // Propagate only when the handle actually changed — the rewrite is
+          // FK-scoped + idempotent, so this guard is just churn avoidance.
+          if (renaming) {
+            await renameOwnerNamespacedUrns(tx, userId, oldHandle, newHandle);
+          }
+          return updated;
+        })
+        .catch(rethrowRootNameTaken);
     },
 
     updateUserRoles: async (
@@ -172,16 +203,30 @@ export const orgMutations = {
       requireRole(ctx, 'READER');
       // #376: store only a bare org slug — a scheme-prefixed / colon-bearing
       // value would later cascade a corrupt `<orgUrn>:` prefix into children.
+      // #692: a new org root must be a dotted domain (validateOrgSlug enforces).
       validateOrgSlug(urn);
-      const org = await ctx.db.organization.create({
-        data: { name, urn, isVisible: true, createdBy: ctx.userId ?? ctx.clientId ?? null },
-        include: ORG_INCLUDE,
-      });
-      if (ctx.userId) {
-        await ctx.db.orgMember.create({
-          data: { organizationId: org.id, userId: ctx.userId, role: 'OWNER', canInvite: true, createdBy: ctx.userId },
-        });
-      }
+      // #692: mint the org's principal (cross-kind pool uniqueness) and create
+      // the org + owner in ONE transaction, so a name can never be half-claimed.
+      const org = await ctx.db
+        .$transaction(async (tx) => {
+          const principal = await mintPrincipal(tx, { kind: 'org', name: urn });
+          const created = await tx.organization.create({
+            data: {
+              name,
+              urn,
+              isVisible: true,
+              principalId: principal.id,
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+          });
+          if (ctx.userId) {
+            await tx.orgMember.create({
+              data: { organizationId: created.id, userId: ctx.userId, role: 'OWNER', canInvite: true, createdBy: ctx.userId },
+            });
+          }
+          return created;
+        })
+        .catch(rethrowRootNameTaken);
       return ctx.db.organization.findUniqueOrThrow({ where: { id: org.id }, include: ORG_INCLUDE });
     },
 
@@ -246,21 +291,33 @@ export const orgMutations = {
       // urn INSIDE the transaction (FOR UPDATE) so a concurrent rename can't make
       // the rewrite source stale, then rewrite the children in the same tx so
       // they commit (or roll back) together.
-      return ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
-        const [locked] = await tx.$queryRaw<{ urn: string }[]>`
-          SELECT urn FROM organizations WHERE id = ${resolvedId} FOR UPDATE
-        `;
-        const oldUrn = locked?.urn;
-        const updated = await tx.organization.update({
-          where: { id: resolvedId },
-          data,
-          include: ORG_INCLUDE,
-        });
-        if (oldUrn && oldUrn !== urn) {
-          await propagateOrgUrnRename(tx, resolvedId, oldUrn, urn);
-        }
-        return updated;
-      });
+      return ctx.db
+        .$transaction(async (tx: Prisma.TransactionClient) => {
+          const [locked] = await tx.$queryRaw<{ urn: string; principal_id: string | null }[]>`
+            SELECT urn, principal_id FROM organizations WHERE id = ${resolvedId} FOR UPDATE
+          `;
+          const oldUrn = locked?.urn;
+          const renaming = !!oldUrn && oldUrn !== urn;
+          // #692: on a rename, mint the NEW root's principal first (fail-safe —
+          // a taken name rolls back before we touch the old), then tombstone the
+          // OLD name (kept reserved), then re-point the org.
+          let updateData: Prisma.OrganizationUncheckedUpdateInput = data;
+          if (renaming) {
+            const principal = await mintPrincipal(tx, { kind: 'org', name: urn });
+            if (locked?.principal_id) await releasePrincipal(tx, locked.principal_id);
+            updateData = { ...data, principalId: principal.id };
+          }
+          const updated = await tx.organization.update({
+            where: { id: resolvedId },
+            data: updateData,
+            include: ORG_INCLUDE,
+          });
+          if (renaming) {
+            await propagateOrgUrnRename(tx, resolvedId, oldUrn as string, urn);
+          }
+          return updated;
+        })
+        .catch(rethrowRootNameTaken);
     },
 
     deleteOrganization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
@@ -673,17 +730,24 @@ export const orgMutations = {
       const handle_ = await generateUniqueHandle(ctx.db, {
         seeds: [normalizeHandleOrNull(handle)],
       });
-      return ctx.db.user.create({
-        data: {
-          externalAppId: ctx.appId,
-          externalId,
-          identityProvider: 'APP',
-          handle: handle_,
-          name: name ?? null,
-          email: email ?? null,
-          createdBy: ctx.appId,
-        },
-      });
+      // #692: create the app-user + mint its pool principal in one transaction.
+      return ctx.db
+        .$transaction(async (tx) => {
+          const user = await tx.user.create({
+            data: {
+              externalAppId: ctx.appId,
+              externalId,
+              identityProvider: 'APP',
+              handle: handle_,
+              name: name ?? null,
+              email: email ?? null,
+              createdBy: ctx.appId,
+            },
+          });
+          await ensureUserPrincipal(tx, user);
+          return user;
+        })
+        .catch(rethrowRootNameTaken);
     },
 
 };

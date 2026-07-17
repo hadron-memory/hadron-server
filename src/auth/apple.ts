@@ -21,6 +21,7 @@ import {
 } from 'jose';
 import { db } from '../integrations/db/client.js';
 import { generateUniqueHandle, isHandleTaken } from '../lib/userHandle.js';
+import { ensureUserPrincipal, RootNameTakenError } from '../lib/principal/mintPrincipal.js';
 
 /** Identity claims extracted from a verified Apple ID token. */
 export interface AppleIdentity {
@@ -245,17 +246,23 @@ async function createFreshUser(identity: AppleIdentity, name: string | null) {
       seeds: [name, identity.email?.split('@')[0]],
     });
     try {
-      return await db.user.create({
-        data: {
-          appleId: identity.sub,
-          handle,
-          identityProvider: 'APPLE',
-          email: identity.emailVerified ? identity.email : null,
-          name,
-          roles: ['READER'],
-        },
+      // #692: create the user and mint its pool principal in ONE transaction.
+      return await db.$transaction(async (tx) => {
+        const user = await tx.user.create({
+          data: {
+            appleId: identity.sub,
+            handle,
+            identityProvider: 'APPLE',
+            email: identity.emailVerified ? identity.email : null,
+            name,
+            roles: ['READER'],
+          },
+        });
+        await ensureUserPrincipal(tx, user);
+        return user;
       });
     } catch (err: any) {
+      if (err instanceof RootNameTakenError) continue; // pool race → regenerate
       if (err?.code === 'P2002') {
         const winner = await db.user.findUnique({ where: { appleId: identity.sub } });
         if (winner) return winner;

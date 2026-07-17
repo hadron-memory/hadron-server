@@ -154,6 +154,7 @@ export async function setup() {
       ON users (lower(handle)) WHERE handle IS NOT NULL;
   `);
 
+
   // cor:api:090 (findNodes) + cor:rag:010:02: lexical FTS substrate — a STORED
   // generated tsvector (weighted A/B/C/D) + GIN index. Prisma models neither, so
   // `db push` doesn't create them; mirror post-push.sql here. Source of truth is
