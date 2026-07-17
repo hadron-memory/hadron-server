@@ -38,6 +38,20 @@ describe('resolveMemoryRef', () => {
     expect(result).toEqual({ id: memory.id });
   });
 
+  it('resolves a v2-native hrn:mem:<root>:<slug> input (#697 emission-flip round-trip)', async () => {
+    const memory = await db.memory.create({
+      data: {
+        organizationId: orgId,
+        urn: 'memref-test-v2org.com:memref-test-v2mem',
+        name: 'memref-test-v2mem',
+        class: 'knowledge',
+      },
+    });
+    // The v2 emitted form (single colon, `mem` type word) must round-trip back.
+    const result = await resolveMemoryRef(db, 'hrn:mem:memref-test-v2org.com:memref-test-v2mem');
+    expect(result).toEqual({ id: memory.id });
+  });
+
   it('resolves a bare URN-shaped reference to the row', async () => {
     const memory = await db.memory.create({
       data: {
