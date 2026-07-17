@@ -86,3 +86,17 @@ export function emitAssetUrnV2(memBareUrn: string, assetId: string): string {
 export function emitInstalledAgentUrnV2(agentBareUrn: string): string {
   return emitEntityUrnV2('agent', agentBareUrn);
 }
+
+/**
+ * Best-effort flat-v2 fallback for a node/edge URN — used ONLY on a catch path
+ * when the strict `emit{Node,Edge}UrnV2` throws (a corrupt or not-yet-v2-minted
+ * stored memory urn). Unlike the strict emitters it does NOT validate atom
+ * charset, so it can never throw; it just strips a legacy `@` owner sigil and
+ * collapses any residual `::` so the result stays single-colon, `hrn:`-prefixed
+ * v2-SHAPED (matching the emission grammar) instead of reverting to a v1 `::`
+ * form. Keeps the non-null `.urn` fields serve-and-log rather than crash-the-query.
+ */
+export function bestEffortFlatNodeUrn(type: 'node' | 'edge', memBareUrn: string, loc: string): string {
+  const mem = (memBareUrn.startsWith('@') ? memBareUrn.slice(1) : memBareUrn).replace(/::/g, ':');
+  return `hrn:${type}:${mem}:${loc}`;
+}

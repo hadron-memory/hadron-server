@@ -8,6 +8,7 @@ import {
   emitEdgeUrnV2,
   emitAssetUrnV2,
   emitInstalledAgentUrnV2,
+  bestEffortFlatNodeUrn,
 } from './urnEmit.js';
 
 describe('urnEmit (v2 emission)', () => {
@@ -47,5 +48,28 @@ describe('urnEmit (v2 emission)', () => {
 
   it('throws on a corrupt (rootless) stored form so callers can fall back', () => {
     expect(() => emitEntityUrnV2('memory', '')).toThrow();
+  });
+
+  describe('bestEffortFlatNodeUrn (catch-path fallback)', () => {
+    it('produces a single-colon hrn:node: URN for a simple stored memory urn', () => {
+      expect(bestEffortFlatNodeUrn('node', 'acme.com:mmdata', 'review:sort')).toBe(
+        'hrn:node:acme.com:mmdata:review:sort',
+      );
+    });
+
+    it('collapses a residual v1 `::` and strips a legacy `@` owner sigil', () => {
+      expect(bestEffortFlatNodeUrn('edge', '@holger:notes', 'intro:next')).toBe(
+        'hrn:edge:holger:notes:intro:next',
+      );
+      expect(bestEffortFlatNodeUrn('node', 'acme.com::mmdata', 'loc')).toBe(
+        'hrn:node:acme.com:mmdata:loc',
+      );
+    });
+
+    it('never throws on a corrupt stored form (unlike the strict emitters)', () => {
+      // A compound / not-yet-v2 stored urn that composeUrnV2 would reject still
+      // yields a best-effort string here — the whole point of the fallback.
+      expect(() => bestEffortFlatNodeUrn('node', '', 'loc')).not.toThrow();
+    });
   });
 });

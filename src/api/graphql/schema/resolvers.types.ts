@@ -13,6 +13,7 @@ import {
   emitEdgeUrnV2,
   emitAssetUrnV2,
   emitInstalledAgentUrnV2,
+  bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
@@ -45,14 +46,6 @@ import {
   assetUrn,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
-
-// #481 (Codex review): normalize a STORED memory urn to canonical form before
-// composing node/edge URNs. Legacy single-colon role-marker urns (e.g.
-// `org:agent:app-user:<id>`) would otherwise be rejected by composeNodeUrn's
-// canonicalizer (it can't know the marker:id boundary), dropping those nodes
-// to the non-parseable raw fallback. Mirrors Memory.urn's two-branch logic.
-const canonicalStoredMemoryUrn = (urn: string): string =>
-  urn.includes('::') ? urn : legacyMemoryUrnToCanonical(urn);
 
 /**
  * Resolve one editor/approver candidate string to public identifiers:
@@ -187,7 +180,11 @@ export const typeResolvers = {
         return emitNodeUrnV2(memUrn, n.loc);
       } catch (err) {
         console.warn(`[Node.urn] failed to emit v2 node urn for memory "${memUrn}":`, err);
-        return `hrn:node:${canonicalStoredMemoryUrn(memUrn)}::${n.loc}`;
+        // Best-effort flat-v2 fallback (single colon, never throws). Do NOT run
+        // the stored urn back through a canonicalizer here — it can itself throw
+        // on the same malformed value, defeating the serve-and-log posture of
+        // this non-null field.
+        return bestEffortFlatNodeUrn('node', memUrn, n.loc);
       }
     },
     // Spec 033 embedding-state DateTime fields — Prisma returns Date,
@@ -227,7 +224,9 @@ export const typeResolvers = {
         return emitEdgeUrnV2(memUrn, e.loc);
       } catch (err) {
         console.warn(`[Edge.urn] failed to emit v2 edge urn for memory "${memUrn}":`, err);
-        return `hrn:edge:${canonicalStoredMemoryUrn(memUrn)}::${e.loc}`;
+        // Best-effort flat-v2 fallback (single colon, never throws) — see the
+        // Node.urn note on not re-canonicalizing a malformed stored value.
+        return bestEffortFlatNodeUrn('edge', memUrn, e.loc);
       }
     },
   },

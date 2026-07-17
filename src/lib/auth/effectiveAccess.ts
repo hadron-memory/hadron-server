@@ -48,7 +48,7 @@ import {
   type Subject,
   type EffectiveAccessResult,
 } from '@hadron-memory/access-control';
-import { emitNodeUrnV2 } from '../urnEmit.js';
+import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../urnEmit.js';
 import { isId } from '../entityRef/shape.js';
 
 // Re-export the pure types so existing consumers of this module keep their
@@ -682,13 +682,14 @@ export async function computeEffectiveAccess(
         caps: g.caps,
       }));
       // emitNodeUrnV2 emits the flat v2 node URN; the resourceUrn is cosmetic,
-      // so fall back to a plain join rather than failing the whole query on a
-      // non-emittable stored memory URN.
+      // so fall back to a best-effort flat-v2 join (single colon, matching the
+      // emission grammar) rather than failing the whole query — or reverting to
+      // a v1 `::` form — on a non-emittable stored memory URN.
       let nodeUrn: string;
       try {
         nodeUrn = emitNodeUrnV2(resolved.memory.urn, resolved.node.loc);
       } catch {
-        nodeUrn = `hrn:node:${resolved.memory.urn}::${resolved.node.loc}`;
+        nodeUrn = bestEffortFlatNodeUrn('node', resolved.memory.urn, resolved.node.loc);
       }
       return assemble(subject.id, nodeUrn, 'node', inherited);
     }
