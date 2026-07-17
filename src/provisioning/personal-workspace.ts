@@ -3,6 +3,7 @@ import type { PrismaClient } from '../generated/prisma/client.js';
 import { APP_KEY_PREFIX } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 import { normalizeHandleOrNull } from '../lib/userHandle.js';
+import { ensureOrgPrincipal } from '../lib/principal/mintPrincipal.js';
 
 interface ProvisionResult {
   orgId: string;
@@ -94,6 +95,10 @@ export async function provisionPersonalWorkspace(
       createdBy: userId,
     },
   });
+  // #692: register the personal org in the pool (undotted slug is exempt from
+  // the dotted-root rule but still reserves its name). After the create, so the
+  // org-urn P2002 stays the personal-workspace race signal the caller tolerates.
+  await ensureOrgPrincipal(db, org);
 
   // 2. Add user as OWNER
   await db.orgMember.create({

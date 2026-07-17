@@ -204,6 +204,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_agent_name_uniq
 CREATE UNIQUE INDEX IF NOT EXISTS users_handle_lower_uniq
   ON users (lower(handle)) WHERE handle IS NOT NULL;
 
+-- ─── #692: unified principal pool — cross-kind root-name uniqueness ───────
+-- One case-insensitive namespace across user handles AND org names. NOT filtered
+-- on status: a 'released' (tombstoned) row keeps its name reserved forever
+-- (indefinite, no recycling — the inverse of a deleted_at-filtered partial
+-- unique). Prisma can't model a functional index. Synced with the
+-- 20260716140000 migration + src/test/globalSetup.ts.
+CREATE UNIQUE INDEX IF NOT EXISTS principals_name_lower_uniq
+  ON principals (lower(name));
+
 -- ─── cor:api:090 (findNodes) + cor:rag:010:02: lexical FTS substrate ─────
 -- STORED generated tsvector (weighted A/B/C/D = name/alias > loc/tags >
 -- description/abstract > content/data) + GIN index. Prisma models neither.

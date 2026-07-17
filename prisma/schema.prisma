@@ -418,6 +418,10 @@ model User {
   approvedNodeRevisions      NodeRevision[]              @relation("NodeRevisionApprover")
   // 046-usage-metering: billing attribution back-relation.
   usageEvents               UsageEvent[]
+  // #692 — the user's root principal in the unified pool (handle is the
+  // denormalized read source-of-truth, kept in sync at mint).
+  principalId               String?                    @unique @map("principal_id")
+  principal                 Principal?                 @relation("UserPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -496,8 +500,47 @@ model Organization {
   apps                App[]
   agentOrgGrants      AgentOrgGrant[]
   aiServiceConfigs    AiServiceConfig[]
+  // #692 — the org's root principal in the unified pool (urn is the denormalized
+  // read source-of-truth, kept in sync at mint).
+  principalId         String?              @unique @map("principal_id")
+  principal           Principal?           @relation("OrgPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
 
   @@map("organizations")
+}
+
+/// #692 — the unified per-server PRINCIPAL POOL. One row per root name (a user
+/// handle OR an organization name), enforcing CROSS-KIND uniqueness by
+/// constraint so a URN `<root>` atom resolves to exactly one principal without
+/// an `@` sigil or kind marker (GitHub's model). Users and Organizations FK
+/// into this; their own `handle` / `urn` columns stay the denormalized read
+/// source-of-truth, kept in sync inside the mint transaction.
+///
+/// A released root name is TOMBSTONED (`status = 'released'`, the owning
+/// user/org detached) — the row is kept, and the case-insensitive
+/// `principals_name_lower_uniq` on `lower(name)` spans ALL statuses, so a
+/// released name is reserved FOREVER (indefinite, no recycling — the identity
+/// guarantee the `@`-sigil rename-safety is replaced by). Reserved platform
+/// words (`hadron`, `platform`, …) are pre-seeded rows with `status = 'reserved'`.
+///
+/// The `lower(name)` functional unique lives in prisma/post-push.sql +
+/// src/test/globalSetup.ts (Prisma can't model it) — synced with the
+/// `<ts>_principal_pool` migration.
+model Principal {
+  id         String    @id @default(cuid())
+  /// The canonical root name, stored lowercase.
+  name       String
+  /// 'user' | 'org' | 'platform'.
+  kind       String
+  /// 'active' | 'released' (tombstone) | 'reserved' (platform word).
+  status     String    @default("active")
+  releasedAt DateTime? @map("released_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  user         User?         @relation("UserPrincipal")
+  organization Organization? @relation("OrgPrincipal")
+
+  @@map("principals")
 }
 
 /// Associates a User with an Organization. To remove a User from an

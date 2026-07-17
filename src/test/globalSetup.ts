@@ -154,6 +154,15 @@ export async function setup() {
       ON users (lower(handle)) WHERE handle IS NOT NULL;
   `);
 
+  // #692: unified principal pool — cross-kind case-insensitive root-name
+  // uniqueness across user handles AND org names. NOT status-filtered (a
+  // tombstoned name stays reserved). Synced with prisma/post-push.sql + the
+  // 20260716140000 migration.
+  await client.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS principals_name_lower_uniq
+      ON principals (lower(name));
+  `);
+
   // cor:api:090 (findNodes) + cor:rag:010:02: lexical FTS substrate — a STORED
   // generated tsvector (weighted A/B/C/D) + GIN index. Prisma models neither, so
   // `db push` doesn't create them; mirror post-push.sql here. Source of truth is

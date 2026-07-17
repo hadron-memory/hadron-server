@@ -33,7 +33,9 @@ beforeEach(async () => {
     data: {
       id: generateId(),
       name: 'org-sweep-test',
-      urn: `org-sweep-test-${Date.now()}`,
+      // #692: dotted so the updateOrganization resolver's validateOrgSlug
+      // accepts renaming it (incl. rename-to-current).
+      urn: `org-sweep-test-${Date.now()}.test`,
     },
   });
 
@@ -147,7 +149,7 @@ describe('Mutation.updateOrganization (007-entity-id-or-urn)', () => {
 });
 
 describe('Mutation.updateOrganization — URN rename propagation (#337)', () => {
-  const newUrn = 'holger-pers-renamed';
+  const newUrn = 'holger-pers-renamed.test'; // #692: org roots are dotted
 
   it('rewrites the org-slug prefix on every owned Memory/Agent/App urn', async () => {
     const oldUrn = org.urn;

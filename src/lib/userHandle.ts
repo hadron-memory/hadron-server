@@ -10,7 +10,8 @@
 
 import { randomBytes } from 'crypto';
 import type { PrismaClient } from '../generated/prisma/client.js';
-import { validateUserSlug, formatUrn } from './urn.js';
+import { validateUserSlug, validateUserHandle, formatUrn } from './urn.js';
+import { checkRootAvailable } from './principal/mintPrincipal.js';
 
 /**
  * The canonical `hrn:user:<handle>` URN for a handle, or `null` when the handle
@@ -36,7 +37,9 @@ export function userUrn(handle: string | null | undefined): string | null {
  */
 export function normalizeHandle(input: string): string {
   const handle = input.trim().toLowerCase();
-  validateUserSlug(handle); // throws on charset / reserved-word violation
+  // #692: a NEW/changed handle must be dot-free (validateUserHandle) so it stays
+  // charset-disjoint from a dotted org root in the shared principal pool.
+  validateUserHandle(handle); // throws on charset / reserved-word / dot violation
   return handle;
 }
 
@@ -49,8 +52,14 @@ export function normalizeHandle(input: string): string {
  */
 export function normalizeHandleOrNull(input: string | null | undefined): string | null {
   if (!input || !input.trim()) return null;
+  const handle = input.trim().toLowerCase();
   try {
-    return normalizeHandle(input);
+    // Deliberately LENIENT (validateUserSlug, not validateUserHandle): this
+    // normalizes EXISTING / programmatic handles for read + cascade-source use,
+    // so a grandfathered dotted handle (#692 is a create/rename rule) still
+    // normalizes rather than vanishing to null mid-rename.
+    validateUserSlug(handle);
+    return handle;
   } catch {
     return null;
   }
@@ -72,7 +81,9 @@ export function sanitizeHandleSeed(input: string | null | undefined): string | n
   const base = input
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-') // out-of-charset runs → single '-'
+    // #692: handles are DOT-FREE — drop `.` from the kept set so a derived
+    // handle (e.g. from an email local-part `first.last`) becomes `first-last`.
+    .replace(/[^a-z0-9_-]+/g, '-') // out-of-charset runs (incl. `.`) → single '-'
     .replace(/^[^a-z0-9]+/, '') // atoms must start alnum
     .replace(/[^a-z0-9]+$/, '') // …and end alnum
     .slice(0, 32)
@@ -81,22 +92,19 @@ export function sanitizeHandleSeed(input: string | null | undefined): string | n
 }
 
 /** Minimal DB surface the handle probe + generator need. */
-type HandleProbeDb = Pick<PrismaClient, 'user'>;
+type HandleProbeDb = Pick<PrismaClient, 'principal'>;
 
 /**
- * True when some user already holds this handle, matched **case-insensitively**
- * to mirror the DB's real guard — the `users_handle_lower_uniq` functional index
- * on `lower(handle)` (migration 20260624120000). A case-sensitive probe could
- * miss a legacy mixed-case row and hand back a handle the insert then rejects
- * with P2002. Exported so the OAuth signup paths can distinguish a handle
- * collision (retryable) from any other unique conflict (rethrow).
+ * True when this handle is NOT available in the unified principal pool (#692) —
+ * i.e. some user OR org already holds the name (case-insensitively, including a
+ * tombstoned/released row), or it is a reserved platform word. This replaced the
+ * users-only probe so an auto-generated handle can never collide with an org
+ * name. The `principals_name_lower_uniq` index remains the atomic backstop; this
+ * probe just avoids picking a doomed name. Exported so signup paths can
+ * distinguish a handle collision (retryable) from any other conflict.
  */
 export async function isHandleTaken(db: HandleProbeDb, handle: string): Promise<boolean> {
-  const existing = await db.user.findFirst({
-    where: { handle: { equals: handle, mode: 'insensitive' } },
-    select: { id: true },
-  });
-  return existing !== null;
+  return !(await checkRootAvailable(db, handle));
 }
 
 /**

@@ -37,6 +37,7 @@ import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError, UrnParseError } from './lib/urn.js';
 import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
+import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
@@ -271,24 +272,31 @@ export async function createServer(): Promise<Express> {
               try {
                 // upsert on githubId absorbs the provider-id race (→ update
                 // branch); a P2002 here is a handle/githubUsername collision.
-                return await db.user.upsert({
-                  where: { githubId: ghUser.id },
-                  create: {
-                    githubId: ghUser.id,
-                    githubUsername: ghUser.login,
-                    handle: ghHandle,
-                    identityProvider: 'GITHUB',
-                    name: ghUser.name,
-                    avatarUrl: ghUser.avatar_url,
-                    roles: ['READER'],
-                  },
-                  update: {
-                    githubUsername: ghUser.login,
-                    name: ghUser.name,
-                    avatarUrl: ghUser.avatar_url,
-                  },
+                // #692: mint the pool principal in the same tx (idempotent — a
+                // no-op on the update branch of an existing user).
+                return await db.$transaction(async (tx) => {
+                  const user = await tx.user.upsert({
+                    where: { githubId: ghUser.id },
+                    create: {
+                      githubId: ghUser.id,
+                      githubUsername: ghUser.login,
+                      handle: ghHandle,
+                      identityProvider: 'GITHUB',
+                      name: ghUser.name,
+                      avatarUrl: ghUser.avatar_url,
+                      roles: ['READER'],
+                    },
+                    update: {
+                      githubUsername: ghUser.login,
+                      name: ghUser.name,
+                      avatarUrl: ghUser.avatar_url,
+                    },
+                  });
+                  await ensureUserPrincipal(tx, user);
+                  return user;
                 });
               } catch (err: any) {
+                if (err instanceof RootNameTakenError && attempt < 1) continue; // pool race
                 // Only a genuine handle collision is retryable (once).
                 if (err?.code === 'P2002' && attempt < 1 && (await isHandleTaken(db, ghHandle))) {
                   continue;
@@ -779,15 +787,20 @@ export async function createServer(): Promise<Express> {
         return;
       }
 
-      // Upsert user by email
-      const user = await db.user.upsert({
-        where: { email: result.email },
-        create: {
-          email: result.email,
-          identityProvider: 'EMAIL',
-          roles: ['READER'],
-        },
-        update: {},
+      // Upsert user by email. #692: mint the pool principal (for the default
+      // random handle) in the same tx — idempotent on the update branch.
+      const user = await db.$transaction(async (tx) => {
+        const u = await tx.user.upsert({
+          where: { email: result.email },
+          create: {
+            email: result.email,
+            identityProvider: 'EMAIL',
+            roles: ['READER'],
+          },
+          update: {},
+        });
+        await ensureUserPrincipal(tx, u);
+        return u;
       });
 
       // Provision personal workspace for new users

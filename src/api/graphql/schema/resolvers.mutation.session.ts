@@ -21,6 +21,7 @@ import {
 } from '../../../lib/urn.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
+import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -173,14 +174,19 @@ export const sessionMutations = {
           // end-user gets a RANDOM handle — it's addressed by (externalAppId,
           // externalId), not by handle, and its externalId must not leak into a
           // global handle.
-          user = await ctx.db.user.create({
-            data: {
-              externalAppId: ctx.appId,
-              externalId: externalUserId,
-              identityProvider: 'APP',
-              handle: await generateUniqueHandle(ctx.db),
-              createdBy: ctx.appId,
-            },
+          const appUserHandle = await generateUniqueHandle(ctx.db);
+          user = await ctx.db.$transaction(async (tx) => {
+            const u = await tx.user.create({
+              data: {
+                externalAppId: ctx.appId,
+                externalId: externalUserId,
+                identityProvider: 'APP',
+                handle: appUserHandle,
+                createdBy: ctx.appId,
+              },
+            });
+            await ensureUserPrincipal(tx, u); // #692: pool principal
+            return u;
           });
         }
         userId = user.id;

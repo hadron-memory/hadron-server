@@ -640,9 +640,18 @@ describe('validateUserSlug', () => {
 // #376: org slugs are stored BARE; a scheme-prefixed or colon-bearing value
 // would cascade a corrupt `<orgUrn>:` prefix into every child URN.
 describe('validateOrgSlug', () => {
-  it('accepts a bare org slug (incl. dotted domain form)', () => {
+  it('accepts a bare dotted org slug', () => {
     expect(() => validateOrgSlug('acme.com')).not.toThrow();
-    expect(() => validateOrgSlug('personal-holger')).not.toThrow();
+    expect(() => validateOrgSlug('sub.acme.co.uk')).not.toThrow();
+  });
+
+  it('#692: rejects an undotted org root', () => {
+    expect(() => validateOrgSlug('personal-holger')).toThrow(UrnParseError);
+    try {
+      validateOrgSlug('acme');
+    } catch (e) {
+      expect((e as UrnParseError).reason).toBe('org-root-not-dotted');
+    }
   });
 
   it('rejects a scheme prefix with the org-specific message', () => {
