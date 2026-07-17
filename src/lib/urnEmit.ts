@@ -12,6 +12,14 @@
  * collapsing any residual `::` first, then routing through `composeUrnV2`. A
  * stored form that can't compose (corrupt / not-yet-minted-v2) is the caller's
  * problem to fall back on (see `safeCanonicalUrn`).
+ *
+ * NODE/EDGE caveat — the memory MUST be a single slug atom. A still-COMPOUND
+ * memory urn (`<root>:<agent>:app-user:<id>`, minted before the Stage-3 minting
+ * flip) emits a flat node URN whose memory boundary can't be recovered by
+ * `splitNodeUrn` (it takes the first two atoms as the memory). This is NOT a
+ * regression — the pre-flip v1 `::` form mis-split identically — and it self-
+ * heals once Stage 3 makes every memory single-atom. Simple memories (all
+ * migrated + org-owned) round-trip cleanly.
  */
 
 import { composeUrnV2, normalizeUrnForLookup } from './urn.js';

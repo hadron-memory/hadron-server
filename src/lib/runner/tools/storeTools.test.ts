@@ -106,7 +106,7 @@ describe('hadron_store_file', () => {
     expect(out.nodeUrn).toBe(urn);
     expect(out.asset.mimeType).toBe('text/markdown');
     expect(out.asset.sizeBytes).toBe(Buffer.byteLength(content));
-    expect(out.asset.urn).toBe(`${MEM_URN}:assets:${out.asset.id}`);
+    expect(out.asset.urn).toBe(`hrn:asset:${MEM_URN}:assets:${out.asset.id}`);
     // The return value carries references only — never the bytes.
     expect(JSON.stringify(out)).not.toContain('Revenue up');
 
@@ -132,7 +132,7 @@ describe('hadron_store_file', () => {
     expect(node.name).toBe('q3-report.md');
     expect((node.data as { asset: { id: string } }).asset.id).toBe(out.asset.id);
     expect((node.data as { runId: string }).runId).toBe(run.id);
-    expect(node.content).toContain(`${MEM_URN}:assets:${out.asset.id}`);
+    expect(node.content).toContain(`hrn:asset:${MEM_URN}:assets:${out.asset.id}`);
   });
 
   it('records the on-behalf-of user as uploadedBy when the run has one', async () => {

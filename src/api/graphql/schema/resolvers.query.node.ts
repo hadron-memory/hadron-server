@@ -15,6 +15,7 @@ import {
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
 import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
+import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
 import type { LexicalField } from '../../../lib/retrieval/provider.js';
@@ -970,9 +971,17 @@ export const nodeQueries = {
           .filter((c) => parentById.has(c.nodeId))
           .map((c) => {
             const p = parentById.get(c.nodeId)! as { loc: string; memory: { urn: string } };
+            // #697 Stage 2: emit the flat v2 node URN (matches Node.urn); fall
+            // back to the bare join only if the stored memory urn can't compose.
+            let parentNodeUrn: string;
+            try {
+              parentNodeUrn = emitNodeUrnV2(p.memory.urn, p.loc);
+            } catch {
+              parentNodeUrn = `${p.memory.urn}::${p.loc}`;
+            }
             return {
               parentNodeId: c.nodeId,
-              parentNodeUrn: `${p.memory.urn}::${p.loc}`,
+              parentNodeUrn,
               chunkIndex: c.chunkIndex,
               charStart: c.charStart,
               charEnd: c.charEnd,
