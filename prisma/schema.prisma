@@ -415,7 +415,7 @@ model User {
   authCodes                 AuthCode[]
   authHandoffCodes          AuthHandoffCode[]
   // #620: revisions this user approved (NodeRevision.approvedBy).
-  approvedNodeRevisions      NodeRevision[]              @relation("NodeRevisionApprover")
+  approvedNodeRevisions     NodeRevision[]             @relation("NodeRevisionApprover")
   // 046-usage-metering: billing attribution back-relation.
   usageEvents               UsageEvent[]
   // #692 — the user's root principal in the unified pool (handle is the
@@ -477,33 +477,33 @@ model Organization {
   deletedAt                    DateTime? @map("deleted_at")
   deletedBy                    String?   @map("deleted_by")
 
-  members             OrgMember[]
-  memories            Memory[]
-  agents              Agent[]
-  subscriptions       MemorySubscription[]
-  principalGrants     PrincipalGrant[]
+  members         OrgMember[]
+  memories        Memory[]
+  agents          Agent[]
+  subscriptions   MemorySubscription[]
+  principalGrants PrincipalGrant[]
   /// Org-layer action-policy link of the conjunctive chain (cor:acl:040:02):
   /// allow-list JSON `{ "allow": ["action", "prefix.*", "*"] }`. NULL = no
   /// restriction (the layer is absent, not deny-all). Snapshotted into
   /// AppRun.policy at mint — edits apply to FUTURE runs only.
-  policy              Json?
+  policy          Json?
 
-  invitations         UserInvitation[]     @relation("OrgInvitations")
-  exchangeConnections ExchangeConnection[]
-  slackConnections    SlackConnection[]
-  mcpServers          McpServer[]
+  invitations            UserInvitation[]        @relation("OrgInvitations")
+  exchangeConnections    ExchangeConnection[]
+  slackConnections       SlackConnection[]
+  mcpServers             McpServer[]
   homeAssistantInstances HomeAssistantInstance[]
-  resendSender        ResendSender?
+  resendSender           ResendSender?
   // 046-usage-metering: billing back-relations.
-  usageEvents         UsageEvent[]
-  creditLedgerEntries CreditLedgerEntry[]
-  apps                App[]
-  agentOrgGrants      AgentOrgGrant[]
-  aiServiceConfigs    AiServiceConfig[]
+  usageEvents            UsageEvent[]
+  creditLedgerEntries    CreditLedgerEntry[]
+  apps                   App[]
+  agentOrgGrants         AgentOrgGrant[]
+  aiServiceConfigs       AiServiceConfig[]
   // #692 — the org's root principal in the unified pool (urn is the denormalized
   // read source-of-truth, kept in sync at mint).
-  principalId         String?              @unique @map("principal_id")
-  principal           Principal?           @relation("OrgPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
+  principalId            String?                 @unique @map("principal_id")
+  principal              Principal?              @relation("OrgPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
 
   @@map("organizations")
 }
@@ -634,127 +634,127 @@ model Memory {
 
   /// Globally unique identifier, e.g. "baragaun.com:secureid".
   /// Derived from `org.urn + ":" + slug`.
-  urn                       String            @unique
+  urn                  String            @unique
   /// Human-friendly display name, e.g. "SecureID Service".
-  name                      String
+  name                 String
   /// One-line summary for marketplace listings and search results.
-  shortDescription          String?           @map("short_description")
+  shortDescription     String?           @map("short_description")
   /// Full description (markdown); shown when expanding a listing.
-  description               String?
+  description          String?
   /// Free-form structured metadata for this memory — a client-defined
   /// JSON bag with no server-side semantics. Written via the GraphQL
   /// createMemory / updateMemory mutations; surfaced read-only over MCP
   /// (h-list-memories renders it as a `data:` line). The MCP surface has
   /// no memory-mutation tool, so writes stay GraphQL-only. NULL when unset.
-  data                      Json?
+  data                 Json?
   /// Classification tags for search and filtering.
-  tags                      String[]
+  tags                 String[]
   /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").
-  license                   String?
+  license              String?
   /// Primary category (e.g. "Developer Tools").
-  category0                 String?           @map("category_0")
+  category0            String?           @map("category_0")
   /// Secondary category (e.g. "Backend").
-  category1                 String?           @map("category_1")
+  category1            String?           @map("category_1")
   /// Tertiary category (e.g. "Node.js").
-  category2                 String?           @map("category_2")
+  category2            String?           @map("category_2")
   /// Square icon/logo URL for listings.
-  iconUrl                   String?           @map("icon_url")
+  iconUrl              String?           @map("icon_url")
   /// Banner image URL for the detail page.
-  heroUrl                   String?           @map("hero_url")
+  heroUrl              String?           @map("hero_url")
   /// External homepage or documentation URL.
-  homeUrl                   String?           @map("home_url")
+  homeUrl              String?           @map("home_url")
   /// Git clone URL; null = DB-only mode (no git backing).
-  source                    String?
+  source               String?
   /// AES-256-GCM-encrypted access token for repos not covered by the
   /// org's GitHub App installation (e.g. personal repos, GitLab,
   /// Bitbucket). Plaintext never stored or displayed after initial entry.
-  sourceTokenEncrypted      String?           @map("source_token_encrypted")
+  sourceTokenEncrypted String?           @map("source_token_encrypted")
   /// Expiry of the stored token; server warns via MemoryLogEntry
   /// before expiration.
-  sourceTokenExpiresAt      DateTime?         @map("source_token_expires_at")
+  sourceTokenExpiresAt DateTime?         @map("source_token_expires_at")
   /// Branch to clone/pull from (default: repo default branch).
-  readBranch                String?           @map("read_branch")
+  readBranch           String?           @map("read_branch")
   /// Branch for mutations (default: "hadron-updates").
-  writeBranch               String?           @map("write_branch")
+  writeBranch          String?           @map("write_branch")
   /// 035-visibility-enum-cleanup: nullable, no default. Set only for
   /// `knowledge` (PUBLIC/ORGANIZATION) and `group` (GROUP); NULL for
   /// system/app/personal/private (enforced by chk_memory_visibility_class).
-  visibility                MemoryVisibility?
+  visibility           MemoryVisibility?
   /// Opt-in marketplace catalogue flag (cor:acl:080:04): whether this memory is
   /// advertised in the marketplace browse. DISTINCT from `visibility` — PUBLIC
   /// governs access (reachable by URN), this governs advertisement. "Unlisted
   /// but public" is valid; contributes to the owner org's discoverability
   /// (cor:acl:080:02) only when that org is activated (`isVisible = true`).
-  listedOnMarketplace       Boolean          @default(false) @map("listed_on_marketplace")
+  listedOnMarketplace  Boolean           @default(false) @map("listed_on_marketplace")
   /// Whether the memory's contents (including asset bytes) are
   /// encrypted at rest using AES-256-GCM under HADRON_ENCRYPTION_KEY.
-  isEncrypted               Boolean           @default(false) @map("is_encrypted")
+  isEncrypted          Boolean           @default(false) @map("is_encrypted")
   // 005-agent-subscription (2026-04-30): four-way memory typology. Required
   // post-migration; backfilled by the migration's UPDATE statements.
   /// Per-class governance — see MemoryClass enum doc for the four
   /// classes and their addressing rules.
-  class                     MemoryClass
+  class                MemoryClass
   /// When an anonymous (pre-account-creation) memory expires and is
   /// reaped by the janitor. NULL for non-anonymous memories.
-  anonymousExpiresAt        DateTime?         @map("anonymous_expires_at")
+  anonymousExpiresAt   DateTime?         @map("anonymous_expires_at")
   /// If true, any subscription must have a valid MemoryLicense.
-  requiresLicense           Boolean           @default(false) @map("requires_license")
+  requiresLicense      Boolean           @default(false) @map("requires_license")
   /// Last successful git sync.
-  lastSyncedAt              DateTime?         @map("last_synced_at")
-  syncStatus                SyncStatus        @default(PENDING) @map("sync_status")
+  lastSyncedAt         DateTime?         @map("last_synced_at")
+  syncStatus           SyncStatus        @default(PENDING) @map("sync_status")
   /// Error message from the last failed sync.
-  syncError                 String?           @map("sync_error")
+  syncError            String?           @map("sync_error")
   /// Number of unresolved PendingEdge records (denormalized for
   /// dashboard display).
-  pendingEdgeCount          Int               @default(0) @map("pending_edge_count")
+  pendingEdgeCount     Int               @default(0) @map("pending_edge_count")
   // 006-asset-upload-redesign (2026-05-01): per-memory upload acceptance
   // flag. Default true at the column level; system-class memories must
   // opt out explicitly at creation time. Migration backfilled existing
   // rows by class (system → false; app/knowledge/personal → true).
   /// Whether this memory accepts asset uploads. system-class memories
   /// typically opt out.
-  acceptsUploads            Boolean           @default(true) @map("accepts_uploads")
+  acceptsUploads       Boolean           @default(true) @map("accepts_uploads")
   // ─── 033-rag-vector-retrieval: per-memory vector-index config ───
   /// Opt-in: when true, this memory's nodes are vector-indexed. DB default is
   /// `false`; the **class-derived default** is applied at createMemory — a
   /// `knowledge`-class, non-encrypted memory is created with `true`, all other
   /// classes and any encrypted memory stay `false` (FR-001). Flippable per memory.
-  vectorIndexEnabled        Boolean           @default(false) @map("vector_index_enabled")
+  vectorIndexEnabled   Boolean           @default(false) @map("vector_index_enabled")
   /// What the vector index is built from. Memory property, NOT a query
   /// parameter (FR-002). Only meaningful when vectorIndexEnabled.
-  embeddingSource           EmbeddingSource   @default(abstract) @map("embedding_source")
+  embeddingSource      EmbeddingSource   @default(abstract) @map("embedding_source")
   /// Per-memory chunking dials (FR-003). NULL ⇒ platform default (512 / 64).
   /// Consulted only when embeddingSource includes chunks.
-  chunkTokens               Int?              @map("chunk_tokens")
-  chunkOverlap              Int?              @map("chunk_overlap")
+  chunkTokens          Int?              @map("chunk_tokens")
+  chunkOverlap         Int?              @map("chunk_overlap")
   /// Force fixed-size chunking, bypassing structure-aware (FR-015).
-  forceFixedSize            Boolean           @default(false) @map("force_fixed_size")
+  forceFixedSize       Boolean           @default(false) @map("force_fixed_size")
   /// #621 — cap on how many NodeRevision rows are kept per node in this
   /// memory. On each new revision the oldest overflow is pruned. Must be >= 1
   /// (chk_memory_max_rev_count_positive); default 10.
-  maxRevCount               Int               @default(10) @map("max_rev_count")
+  maxRevCount          Int               @default(10) @map("max_rev_count")
   /// Spec 041 (D-2026-07-06-B) — passphrase-derivation material for a
   /// caller-held-key encrypted memory. Parameters, NOT secrets: salt
   /// (base64) + scrypt params. NULL when the memory was encrypted with a
   /// raw data key (no passphrase) or is not encrypted.
-  kdfSalt                      String?   @map("kdf_salt")
-  kdfParams                    Json?     @map("kdf_params")
+  kdfSalt              String?           @map("kdf_salt")
+  kdfParams            Json?             @map("kdf_params")
   /// enc:v1 encryption of a fixed check string under the data key — lets
   /// every unlock verify the supplied key WITHOUT touching node rows
   /// (wrong passphrase = typed WRONG_KEY, never garbage plaintext). The
   /// server still never holds the key itself.
-  keyVerifier                  String?   @map("key_verifier")
+  keyVerifier          String?           @map("key_verifier")
 
   /// Timestamp the owner acknowledged the embedding-inversion disclosure for an
   /// ENCRYPTED memory (FR-026). NULL ⇒ not acknowledged. Gates encrypted-memory
   /// indexing via chk_memory_vector_encrypted_ack.
-  vectorIndexEncryptedAckAt DateTime?         @map("vector_index_encrypted_ack_at")
-  createdAt                 DateTime          @default(now()) @map("created_at")
-  createdBy                 String?           @map("created_by")
-  updatedAt                 DateTime          @updatedAt @map("updated_at")
-  updatedBy                 String?           @map("updated_by")
-  deletedAt                 DateTime?         @map("deleted_at")
-  deletedBy                 String?           @map("deleted_by")
+  vectorIndexEncryptedAckAt DateTime? @map("vector_index_encrypted_ack_at")
+  createdAt                 DateTime  @default(now()) @map("created_at")
+  createdBy                 String?   @map("created_by")
+  updatedAt                 DateTime  @updatedAt @map("updated_at")
+  updatedBy                 String?   @map("updated_by")
+  deletedAt                 DateTime? @map("deleted_at")
+  deletedBy                 String?   @map("deleted_by")
 
   organization             Organization?        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   nodes                    Node[]
@@ -771,6 +771,13 @@ model Memory {
   /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
   /// TODO(spec-021-cleanup): drop alongside urnNormalizedAt.
   urnMigrationFailedReason String?              @map("urn_migration_failed_reason")
+  /// #697 stored alias map: the pre-v2 (v1) URN this row was migrated FROM.
+  /// Null until the online migration flips `urn` to the flat v2 form; then a
+  /// legacy input (wikilink, export, external link) resolves to this row by
+  /// matching `legacyUrn`. Indexed, non-unique — resolution disambiguates a
+  /// rare collision to the live row, else a typed error. Transient with the
+  /// migration; TODO(#697-cleanup): drop once every reference is v2-native.
+  legacyUrn                String?              @map("legacy_urn")
 
   logEntries        MemoryLogEntry[]
   userMemoryOfAgent Agent?           @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
@@ -797,6 +804,7 @@ model Memory {
   @@index([userId])
   @@index([appId])
   @@index([ownerUserId])
+  @@index([legacyUrn])
   @@map("memories")
 }
 
@@ -1265,48 +1273,48 @@ model Session {
 /// `read | write | action-run | edge-traversal | session-summary`.
 /// Tightening to a Prisma enum is reserved for a future cleanup spec.
 model UsageEvent {
-  id         String    @id @default(cuid())
-  type       String
+  id             String    @id @default(cuid())
+  type           String
   /// Stored directly so the event survives node deletion.
-  nodeLoc    String?   @map("node_loc")
+  nodeLoc        String?   @map("node_loc")
   /// Set null on node deletion.
-  nodeId     String?   @map("node_id")
+  nodeId         String?   @map("node_id")
   /// Set null on session deletion.
-  sessionId  String?   @map("session_id")
+  sessionId      String?   @map("session_id")
   /// The App that authored this event.
-  appId      String?   @map("app_id")
+  appId          String?   @map("app_id")
   /// Key-value args when `type = 'action-run'`.
-  actionArgs Json?     @map("action_args")
+  actionArgs     Json?     @map("action_args")
   /// LLM model used for this specific event.
-  model      String?
+  model          String?
   /// Input tokens consumed.
-  tokensIn   Int?      @map("tokens_in")
+  tokensIn       Int?      @map("tokens_in")
   /// Output tokens generated.
-  tokensOut  Int?      @map("tokens_out")
+  tokensOut      Int?      @map("tokens_out")
   // ── 046-usage-metering (billing Phase 0) ──────────────────────────────
   /// The on-behalf-of user (billing attribution). Nullable — pure-App
   /// service runs have no user. Distinct from the audit `createdBy` string.
-  userId         String? @map("user_id")
+  userId         String?   @map("user_id")
   /// The billable organization. Set on every metered event so ledger
   /// attribution never needs a join through App.
-  organizationId String? @map("organization_id")
+  organizationId String?   @map("organization_id")
   /// LLM provider that served the call — `model` alone is ambiguous
   /// across providers (e.g. claude via anthropic vs bedrock).
   provider       String?
   /// AiConfigOwnerType of the API key that served the call
   /// (HADRON_SERVER | ORGANIZATION | APP | AGENT). Only HADRON_SERVER
   /// spend is platform-paid and thus debitable; BYOK is observability-only.
-  keyOwnerType   String? @map("key_owner_type")
+  keyOwnerType   String?   @map("key_owner_type")
   /// Provider cost snapshot in micro-cents (1e-8 USD), computed from the
   /// AiModelPrice row effective at event time. NULL = no price known (or the
   /// event carries no tokens). Never recomputed — prices change (FR-003).
-  costMicroCents BigInt? @map("cost_micro_cents")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  createdBy  String?   @map("created_by")
-  updatedAt  DateTime? @updatedAt @map("updated_at")
-  updatedBy  String?   @map("updated_by")
-  deletedAt  DateTime? @map("deleted_at")
-  deletedBy  String?   @map("deleted_by")
+  costMicroCents BigInt?   @map("cost_micro_cents")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
 
   node         Node?         @relation(fields: [nodeId], references: [id], onDelete: SetNull)
   session      Session?      @relation(fields: [sessionId], references: [id], onDelete: SetNull)
@@ -1422,6 +1430,9 @@ model Agent {
   /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
   /// TODO(spec-021-cleanup): drop alongside urnNormalizedAt.
   urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
+  /// #697 stored alias map: the pre-v2 (v1) URN this row was migrated FROM
+  /// (see Memory.legacyUrn). Null until the online migration flips `urn` to v2.
+  legacyUrn                String?   @map("legacy_urn")
 
   organization      Organization?       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   memoryItems       AgentMemoryItem[]
@@ -1437,6 +1448,7 @@ model Agent {
   aiServiceConfigs  AiServiceConfig[]
 
   @@index([ownerUserId])
+  @@index([legacyUrn])
   @@map("agents")
 }
 
@@ -1839,18 +1851,18 @@ model UserInvitationActivation {
 
 /// Temporary token for email verification during signup.
 model EmailVerificationToken {
-  id        String    @id @default(cuid())
-  email     String
-  token     String    @unique
-  expiresAt DateTime  @map("expires_at")
-  usedAt    DateTime? @map("used_at")
-  createdAt DateTime  @default(now()) @map("created_at")
+  id              String    @id @default(cuid())
+  email           String
+  token           String    @unique
+  expiresAt       DateTime  @map("expires_at")
+  usedAt          DateTime? @map("used_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
   /// #505 session-fixation binding: SHA-256 of the browser nonce the portal set
   /// (HttpOnly cookie) when the magic link was REQUESTED. Carried into the login
   /// handoff code's clientStateHash at verify time so the browser that redeems
   /// must be the one that requested the link. NOT NULL in practice (POST
   /// /auth/email requires clientState); nullable only for forward-compat.
-  clientStateHash String? @map("client_state_hash")
+  clientStateHash String?   @map("client_state_hash")
 
   @@index([email])
   @@map("email_verification_tokens")
@@ -1940,9 +1952,9 @@ model NodeRevision {
   node           Node  @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   approvedByUser User? @relation("NodeRevisionApprover", fields: [approvedBy], references: [id], onDelete: SetNull)
 
-  @@index([nodeId, createdAt])
   /// #696: resolve a noderev URN by its per-node revision number.
   @@unique([nodeId, revNo], map: "node_revisions_node_rev_no_uniq")
+  @@index([nodeId, createdAt])
   @@map("node_revisions")
 }
 
@@ -2009,15 +2021,15 @@ model ExchangeConnection {
   deletedAt             DateTime?  @map("deleted_at")
   deletedBy             String?    @map("deleted_by")
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization     Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connectionGrants ConnectionGrant[]
 
   @@unique([organizationId, provider, mailboxEmail])
   @@index([userId])
   // The email-events ingress resolves connections by the tool's id on every
   // inbound email — this lookup must be indexed (#396 Phase 4).
   @@index([toolConnectionId])
-  connectionGrants ConnectionGrant[]
   @@map("exchange_connections")
 }
 
@@ -2113,38 +2125,44 @@ model PrincipalGrant {
 /// The tokens live ENCRYPTED IN THE TOOL (hadrontool-slack) — core stores
 /// identity only, and no token ever appears in a GraphQL field.
 model SlackConnection {
-  id             String @id @default(cuid())
-  organizationId String @map("organization_id")
+  id               String    @id @default(cuid())
+  organizationId   String    @map("organization_id")
   /// The Hadron App that serves commands from this workspace.
-  defaultAppId   String @map("default_app_id")
+  defaultAppId     String    @map("default_app_id")
   /// The slackClient dispatch key ('slack' today).
-  provider       String @default("slack")
+  provider         String    @default("slack")
   /// The provider tool's connection id — the ops-call handle and the
   /// events-ingress resolution key.
-  toolConnectionId String @map("tool_connection_id")
+  toolConnectionId String    @map("tool_connection_id")
   /// Slack workspace (team) id, e.g. "T0123456789".
-  teamId   String @map("team_id")
-  teamName String @map("team_name")
+  teamId           String    @map("team_id")
+  teamName         String    @map("team_name")
   /// The bot's Slack USER id ("U…") — the sender on messages it posts.
-  botUserId String @map("bot_user_id")
+  botUserId        String    @map("bot_user_id")
   /// The bot's BOT id ("B…") — what bot message EVENTS carry as `bot_id`.
   /// Distinct from botUserId; the bridge loop filter needs BOTH (spec 043
   /// decision 8, PR #594 review). Don't "simplify" to one column.
-  botId String @map("bot_id")
+  botId            String    @map("bot_id")
   /// 'ACTIVE' | 'ERROR' — mirrors the tool's connection-status vocabulary
   /// (there is no sync loop here, so SyncStatus does not apply).
-  status String @default("ACTIVE")
+  status           String    @default("ACTIVE")
   /// Error message from the last permanent provider failure.
-  lastError String?   @map("last_error")
-  createdAt DateTime  @default(now()) @map("created_at")
-  createdBy String?   @map("created_by")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
-  deletedBy String?   @map("deleted_by")
+  lastError        String?   @map("last_error")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  createdBy        String?   @map("created_by")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
+  deletedBy        String?   @map("deleted_by")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   defaultApp   App          @relation(fields: [defaultAppId], references: [id], onDelete: Cascade)
 
+  // The slack-events ingress resolves connections by the tool's id on every
+  // inbound event — the routing key must be 1:1, so this is UNIQUE (PR #600
+  // review): two rows sharing a tool id would make dispatch ambiguous and
+  // risk cross-org misdelivery. Every registration mints a fresh tool id,
+  // so soft-deleted history rows never collide.
+  @@unique([toolConnectionId])
   // One LIVE connection per (org, workspace) — enforced by the PARTIAL
   // unique index `slack_connections_org_team_active_uniq WHERE deleted_at
   // IS NULL` (raw SQL: the 043 migration + prisma/post-push.sql +
@@ -2152,12 +2170,6 @@ model SlackConnection {
   // would be non-partial and make a soft-deleted row block workspace
   // re-registration forever — the apps_urn_active_uniq precedent.
   @@index([organizationId, teamId])
-  // The slack-events ingress resolves connections by the tool's id on every
-  // inbound event — the routing key must be 1:1, so this is UNIQUE (PR #600
-  // review): two rows sharing a tool id would make dispatch ambiguous and
-  // risk cross-org misdelivery. Every registration mints a fresh tool id,
-  // so soft-deleted history rows never collide.
-  @@unique([toolConnectionId])
   @@index([defaultAppId])
   @@map("slack_connections")
 }
@@ -2184,21 +2196,21 @@ model SlackEventReceipt {
 /// this immutable snapshot answers which already-authorized run principal an
 /// at-least-once event may wake.
 model WebFetchPollBinding {
-  jobId                 String   @id @map("job_id")
-  sourceRunId           String   @map("source_run_id")
-  organizationId        String   @map("organization_id")
-  appId                 String   @map("app_id")
-  agentId               String?  @map("agent_id")
-  userId                String?  @map("user_id")
-  entryNodeUrn           String   @map("entry_node_urn")
-  policy                 Json?
+  jobId              String    @id @map("job_id")
+  sourceRunId        String    @map("source_run_id")
+  organizationId     String    @map("organization_id")
+  appId              String    @map("app_id")
+  agentId            String?   @map("agent_id")
+  userId             String?   @map("user_id")
+  entryNodeUrn       String    @map("entry_node_urn")
+  policy             Json?
   /// The resolved `Secret` row a credentialed poll used (#677 — audit
   /// provenance; supersedes the #628 credentials_node_urn node scheme).
-  credentialSecretId     String?  @map("credential_secret_id")
+  credentialSecretId String?   @map("credential_secret_id")
   /// Query- and fragment-free URL for audit/event-origin validation.
-  url                    String
-  cancelledAt            DateTime? @map("cancelled_at")
-  createdAt              DateTime @default(now()) @map("created_at")
+  url                String
+  cancelledAt        DateTime? @map("cancelled_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
 
   sourceRun AppRun @relation("WebFetchPollSourceRun", fields: [sourceRunId], references: [id], onDelete: Cascade)
 
@@ -2234,29 +2246,29 @@ model WebFetchEventReceipt {
 /// and every call is gated by the policy chain as `tool.mcp__<slug>__<tool>`
 /// plus the run's action budget — this row grants nothing by itself.
 model McpServer {
-  id             String @id @default(cuid())
-  organizationId String @map("organization_id")
+  id               String   @id @default(cuid())
+  organizationId   String   @map("organization_id")
   /// Run-tool name segment (`mcp__<slug>__<tool>`); lowercase [a-z0-9-],
   /// unique per org. Keep it short — provider tool-name caps are ~64 chars.
-  slug           String
-  name           String
+  slug             String
+  name             String
   /// Streamable-HTTP MCP endpoint URL. The conduit refuses private-network
   /// hosts unless explicitly allowed (SSRF guard, dev only).
-  url            String
+  url              String
   /// AES-256-GCM-encrypted JSON object of static request headers
   /// (src/lib/tokenCrypto.ts), e.g. {"Authorization":"Bearer ..."} —
   /// v1 auth posture (no OAuth). WRITE-ONLY on the API surface: resolvers
   /// expose only a hasHeaders boolean, never the value.
-  headersEncrypted String? @map("headers_encrypted")
+  headersEncrypted String?  @map("headers_encrypted")
   /// Exposed-tool allowlist; empty = every tool the server advertises.
-  toolAllowlist  String[] @default([]) @map("tool_allowlist")
+  toolAllowlist    String[] @default([]) @map("tool_allowlist")
   /// Disabled servers fail run-tool resolution loud (unknown tool), same
   /// posture as an unregistered slug.
-  enabled        Boolean  @default(true)
-  createdAt      DateTime @default(now()) @map("created_at")
-  createdBy      String?  @map("created_by")
-  updatedAt      DateTime @updatedAt @map("updated_at")
-  updatedBy      String?  @map("updated_by")
+  enabled          Boolean  @default(true)
+  createdAt        DateTime @default(now()) @map("created_at")
+  createdBy        String?  @map("created_by")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+  updatedBy        String?  @map("updated_by")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
@@ -2275,24 +2287,24 @@ model McpServer {
 /// → org. `kind` is extensible (`generic` opaque; `webfetch-auth` typed:
 /// metadata `{ type, urlPrefix }`, origin-bound at use).
 model Secret {
-  id        String @id @default(cuid())
-  ownerType String @map("owner_type") // 'user' | 'org' | 'app' | 'memory'
-  ownerId   String @map("owner_id")
+  id             String   @id @default(cuid())
+  ownerType      String   @map("owner_type") // 'user' | 'org' | 'app' | 'memory'
+  ownerId        String   @map("owner_id")
   /// Cascade-resolution key; unique per owner; lowercase [a-z0-9-], max 64.
-  name      String
-  kind      String
+  name           String
+  kind           String
   /// The NON-secret, inspectable half — safe on every read surface. A
   /// reader can see THAT a secret exists and (webfetch-auth) WHERE it
   /// applies without decrypting.
-  metadata  Json   @default("{}")
+  metadata       Json     @default("{}")
   /// encryptToken(JSON.stringify(payload)) — AES-256-GCM under the platform
   /// key (src/lib/tokenCrypto.ts). NEVER selected into a read surface:
   /// redaction by construction, same as the aiConfig / HA / Resend / MCP
   /// registries. Rotation is overwrite (updateSecret), no versioning (v1).
-  valueEncrypted String  @map("value_encrypted")
+  valueEncrypted String   @map("value_encrypted")
   /// Key-rotation lineage headroom; unused (null) while HADRON_ENCRYPTION_KEY
   /// is the only key.
-  keyId          String? @map("key_id")
+  keyId          String?  @map("key_id")
   createdAt      DateTime @default(now()) @map("created_at")
   createdBy      String?  @map("created_by")
   updatedAt      DateTime @updatedAt @map("updated_at")
@@ -2312,8 +2324,8 @@ model Secret {
 /// hard delete by design, slug immutable because flow nodes reference it
 /// inside data.tools names.
 model HomeAssistantInstance {
-  id             String @id @default(cuid())
-  organizationId String @map("organization_id")
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
   /// Run-tool name segment (`ha__<slug>__<op>`); lowercase [a-z0-9-],
   /// unique per org. Keep it short — provider tool-name caps are ~64 chars.
   slug           String
@@ -2348,19 +2360,19 @@ model HomeAssistantInstance {
 /// already-authorized send. One sender per org keeps credential selection
 /// deterministic and outside model control.
 model ResendSender {
-  id              String  @id @default(cuid())
-  organizationId  String  @unique(map: "resend_senders_organization_id_uniq") @map("organization_id")
+  id              String   @id @default(cuid())
+  organizationId  String   @unique(map: "resend_senders_organization_id_uniq") @map("organization_id")
   /// Fixed sender identity accepted by Resend, e.g.
   /// `Hadron Agent <agent@example.com>`. Not secret.
-  fromAddress     String  @map("from_address")
+  fromAddress     String   @map("from_address")
   /// AES-256-GCM-encrypted Resend sending-access API key
   /// (src/lib/tokenCrypto.ts). WRITE-ONLY on the API surface.
-  apiKeyEncrypted String  @map("api_key_encrypted")
-  enabled         Boolean @default(true)
+  apiKeyEncrypted String   @map("api_key_encrypted")
+  enabled         Boolean  @default(true)
   createdAt       DateTime @default(now()) @map("created_at")
-  createdBy       String? @map("created_by")
+  createdBy       String?  @map("created_by")
   updatedAt       DateTime @updatedAt @map("updated_at")
-  updatedBy       String? @map("updated_by")
+  updatedBy       String?  @map("updated_by")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
@@ -2506,6 +2518,9 @@ model App {
   /// dropped with urnNormalizedAt.
   /// TODO(spec-021-cleanup): drop alongside urnNormalizedAt.
   urnMigrationFailedReason String?   @map("urn_migration_failed_reason")
+  /// #697 stored alias map: the pre-v2 (v1) URN this row was migrated FROM
+  /// (see Memory.legacyUrn). Null until the online migration flips `urn` to v2.
+  legacyUrn                String?   @map("legacy_urn")
 
   organization     Organization?     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   // 023-app-shape Phase 2b: App↔Agent is N:M through AppAgent. The
@@ -2531,6 +2546,7 @@ model App {
   // btree index on `urn`.
   @@index([urn])
   @@index([ownerUserId])
+  @@index([legacyUrn])
   @@map("apps")
 }
 
@@ -3292,33 +3308,33 @@ model ActionTicket {
 /// triple means "no cost computed", never a blocked call.
 /// String columns, no enums — validation lives in src/lib/metering.
 model AiModelPrice {
-  id                       String    @id
-  provider                 String
-  model                    String
+  id                      String    @id
+  provider                String
+  model                   String
   /// Pricing tier 1-3 (Holger, 2026-07-11): reserved room for future
   /// product tiers carrying different markups per (provider, model)
   /// WITHOUT another AiModelPrice migration. Everything defaults to and
   /// resolves tier 1 until tiers become a real product concept; the
   /// semantics of 2/3 are deliberately undefined today. Validated 1-3 in
   /// code (setAiModelPrice / getAiModelPrice), no CHECK by convention.
-  tier                     Int       @default(1)
+  tier                    Int       @default(1)
   /// Micro-cents per 1M input tokens.
-  inputMicroCentsPerMTok   BigInt    @map("input_micro_cents_per_mtok")
+  inputMicroCentsPerMTok  BigInt    @map("input_micro_cents_per_mtok")
   /// Micro-cents per 1M output tokens.
-  outputMicroCentsPerMTok  BigInt    @map("output_micro_cents_per_mtok")
+  outputMicroCentsPerMTok BigInt    @map("output_micro_cents_per_mtok")
   /// Markup applied when debiting platform-key spend at THIS tier, in
   /// basis points (2500 = 25%) — integer-exact, no float money. NULL
   /// falls back to the CREDIT_MARKUP_PERCENT env (which this column
   /// supersedes). Effective-dated with the rest of the row.
-  markupBasisPoints        Int?      @map("markup_basis_points")
+  markupBasisPoints       Int?      @map("markup_basis_points")
   /// Row applies to events at/after this instant (until a later row).
-  effectiveAt              DateTime  @map("effective_at")
-  createdAt                DateTime  @default(now()) @map("created_at")
-  createdBy                String?   @map("created_by")
-  updatedAt                DateTime? @updatedAt @map("updated_at")
-  updatedBy                String?   @map("updated_by")
-  deletedAt                DateTime? @map("deleted_at")
-  deletedBy                String?   @map("deleted_by")
+  effectiveAt             DateTime  @map("effective_at")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  createdBy               String?   @map("created_by")
+  updatedAt               DateTime? @updatedAt @map("updated_at")
+  updatedBy               String?   @map("updated_by")
+  deletedAt               DateTime? @map("deleted_at")
+  deletedBy               String?   @map("deleted_by")
 
   @@unique([provider, model, tier, effectiveAt])
   @@index([provider, model, tier])
@@ -3337,33 +3353,33 @@ model AiModelPrice {
 /// correction is an `adjustment` row — soft-delete is break-glass ops only
 /// (balance and reads exclude soft-deleted rows, codebase-wide semantic).
 model CreditLedgerEntry {
-  id              String    @id
-  organizationId  String    @map("organization_id")
+  id               String    @id
+  organizationId   String    @map("organization_id")
   /// 'grant' | 'debit' | 'adjustment' (validated in src/lib/metering).
-  kind            String
+  kind             String
   /// Signed micro-cents (1e-8 USD). Grants positive, debits negative.
-  amountMicroCents BigInt   @map("amount_micro_cents")
+  amountMicroCents BigInt    @map("amount_micro_cents")
   /// Grant expiry policy field (no enforcement in Phase 0).
-  expiresAt       DateTime? @map("expires_at")
+  expiresAt        DateTime? @map("expires_at")
   /// Provenance: e.g. ('usage-event', <UsageEvent.id>), ('admin', <userId>),
   /// later ('payment', <processor ref>).
-  sourceType      String?   @map("source_type")
-  sourceId        String?   @map("source_id")
-  note            String?
-  createdAt       DateTime  @default(now()) @map("created_at")
-  createdBy       String?   @map("created_by")
-  updatedAt       DateTime? @updatedAt @map("updated_at")
-  updatedBy       String?   @map("updated_by")
-  deletedAt       DateTime? @map("deleted_at")
-  deletedBy       String?   @map("deleted_by")
+  sourceType       String?   @map("source_type")
+  sourceId         String?   @map("source_id")
+  note             String?
+  createdAt        DateTime  @default(now()) @map("created_at")
+  createdBy        String?   @map("created_by")
+  updatedAt        DateTime? @updatedAt @map("updated_at")
+  updatedBy        String?   @map("updated_by")
+  deletedAt        DateTime? @map("deleted_at")
+  deletedBy        String?   @map("deleted_by")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  @@index([organizationId, createdAt])
   // Idempotency for at-least-once payment webhooks (hadrontool-billing):
   // one ledger row per (sourceType, sourceId); NULL-source rows unaffected
   // (Postgres unique treats NULLs as distinct).
   @@unique([sourceType, sourceId])
+  @@index([organizationId, createdAt])
   @@map("credit_ledger_entries")
 }
 
