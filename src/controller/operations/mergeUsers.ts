@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
+import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
 
 /**
  * Tables whose audit actor columns carry User.id values in normal writes.
@@ -159,6 +160,20 @@ export async function mergeUsers(
           : {}),
         updatedBy: actor,
       },
+    });
+
+    // Re-own the source's spec-047 owner-namespaced App / Agent / Memory rows
+    // onto the target: move `owner_user_id`, re-root each `@source:slug` URN to
+    // `@target:slug`, and re-mint (author-derived) any slug that would collide
+    // with a live target resource (#695). Runs here — after the target's handle
+    // is final and the source's is released — so the re-root lands on the
+    // surviving handle. `source.handle` is the ORIGINAL (author root for the
+    // re-mint disambiguator); `target.handle` is NOT NULL (spec 047).
+    await mergeOwnerNamespacedUrns(tx, {
+      sourceUserId,
+      targetUserId,
+      targetHandle: target.handle ?? source.handle,
+      sourceHandle: source.handle,
     });
 
     // Fixed-identifier statements use parameterized tagged `$executeRaw`

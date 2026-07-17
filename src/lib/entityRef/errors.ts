@@ -42,6 +42,21 @@ export class UserNotFoundError extends Error {
 }
 
 /**
+ * Surfaced by the entity-ref resolvers (#697) when a legacy URN input matches
+ * MORE THAN ONE live row through the stored alias map (`legacyUrn`). The map is
+ * non-unique, so an ambiguous legacy reference must fail LOUDLY with a typed
+ * error rather than silently resolve to an arbitrary row — a wrong resolve is
+ * worse than a not-found (the #697 acceptance criterion). GraphQL maps it to
+ * `extensions.code: 'AmbiguousLegacyUrnError'`.
+ */
+export class AmbiguousLegacyUrnError extends Error {
+  constructor(public ref: string) {
+    super(`AMBIGUOUS_LEGACY_URN: ${ref}`);
+    this.name = 'AmbiguousLegacyUrnError';
+  }
+}
+
+/**
  * Surfaced by `resolveSecretRef` when the inbound reference (cuid id or an
  * `hrn:secret:<owner>::[…::]<name>` URN, #679) does not name a secret — or
  * when a secret URN is structurally malformed (bad owner marker, wrong
