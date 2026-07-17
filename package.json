@@ -22,6 +22,7 @@
     "db:dev-from-prod": "scripts/dev-from-prod-snapshot.sh",
     "schema:export": "tsx scripts/export-graphql-sdl.mjs",
     "admin:mint-token": "tsx scripts/admin-mint-token.ts",
+    "admin:backfill-urn-v2": "tsx scripts/backfill-urn-v2.ts",
     "admin:transfer-exchange-tokens": "tsx scripts/admin-transfer-exchange-tokens.ts",
     "test": "vitest run",
     "test:watch": "vitest",
