@@ -9,14 +9,12 @@ import {
 } from '../lib/nodeRevisionSnapshot.js';
 import {
   parseUrnInput,
-  formatCanonicalUrn,
-  composeNodeUrn,
-  composeEdgeUrn,
   assertFullyQualifiedUrn,
   splitNodeUrn,
   normalizeUrnForLookup,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
+import { emitEntityUrnV2, emitNodeUrnV2, emitEdgeUrnV2 } from '../lib/urnEmit.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
@@ -418,6 +416,19 @@ export async function replaceOutgoingEdges(args: {
   });
 }
 
+/**
+ * v2 entity URN for user-facing MCP tool text (#697 emission flip). Falls back
+ * to the raw stored bare urn if a row can't compose to v2 — display strings must
+ * never crash a tool (serve-and-fall-back).
+ */
+function safeEmitEntityUrnV2(type: 'memory' | 'app', bareUrn: string): string {
+  try {
+    return emitEntityUrnV2(type, bareUrn);
+  } catch {
+    return bareUrn;
+  }
+}
+
 /** Build a full urn:node: URN from a loc and memoryId. Caches memory URNs. */
 const memoryUrnCache = new Map<string, string>();
 async function nodeUrn(loc: string, memoryId: string): Promise<string> {
@@ -427,10 +438,10 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
     memUrn = mem?.urn ?? memoryId;
     memoryUrnCache.set(memoryId, memUrn);
   }
-  // Spec 027 canonical-form node URN. Shared with the global-search node
-  // adapter via composeNodeUrn (src/lib/urn.ts) so the two surfaces can't
-  // drift on node-URN shape.
-  return composeNodeUrn(memUrn, loc);
+  // Grammar-v2 node URN (#697 emission flip). Shared with the global-search
+  // node adapter via emitNodeUrnV2 (src/lib/urnEmit.ts) so the two surfaces
+  // can't drift on node-URN shape.
+  return emitNodeUrnV2(memUrn, loc);
 }
 
 /** Build a full hrn:edge: URN from an edge loc and its memoryId (spec 037). */
@@ -441,7 +452,7 @@ async function edgeUrn(loc: string, memoryId: string): Promise<string> {
     memUrn = mem?.urn ?? memoryId;
     memoryUrnCache.set(memoryId, memUrn);
   }
-  return composeEdgeUrn(memUrn, loc);
+  return emitEdgeUrnV2(memUrn, loc);
 }
 
 // The `hadron_find_nodes` tool delegates retrieval to resolvers.Query.findNodes
@@ -911,7 +922,7 @@ export function createMcpServerInstance(
       let scope: string;
       if (auth.appId) {
         const app = await db.app.findUnique({ where: { id: auth.appId }, select: { urn: true } });
-        const who = app ? formatCanonicalUrn('app', app.urn) : auth.appId;
+        const who = app ? safeEmitEntityUrnV2('app', app.urn) : auth.appId;
         scope = auth.userId
           ? `Scope: user · active App ${who} — this App's agent memories + org-readable memories + your personal memories scoped to this App.`
           : `Scope: App key · ${who} (App-scoped) — this App's agent memories only; personal and org-readable memories require user authentication and are not shown to an App key.`;
@@ -954,7 +965,7 @@ export function createMcpServerInstance(
         // memory shows up (it's the caller's own); knowledge/app/group rows
         // keep the bare `(level)` form they've always had.
         const cls = isPersonal ? `${m.class}, ` : '';
-        const head = `- **${formatCanonicalUrn('memory', m.urn)}** — ${m.name} (${cls}${level})`;
+        const head = `- **${safeEmitEntityUrnV2('memory', m.urn)}** — ${m.name} (${cls}${level})`;
         // Free-form metadata bag (no server-side semantics). Surfaced
         // read-only on its own indented line, only when non-null so the
         // listing stays scannable — mirrors hadron_get_node's `Data: <json>`
@@ -1019,7 +1030,7 @@ export function createMcpServerInstance(
       // hadron_server_info; this is the inline hint.
       const dep = getDeploymentInfo();
       return textResult(
-        `Active memory set to: ${formatCanonicalUrn('memory', mem.urn)} ` +
+        `Active memory set to: ${safeEmitEntityUrnV2('memory', mem.urn)} ` +
           `(server: ${dep.baseUrl}, version: ${dep.version}).`,
       );
     },
@@ -1087,7 +1098,7 @@ export function createMcpServerInstance(
         });
         if (!app) return textResult('No accessible apps.');
         return textResult(
-          `1 accessible app:\n\n- **${formatCanonicalUrn('app', app.urn)}** — ${app.name} (via App Key)`,
+          `1 accessible app:\n\n- **${safeEmitEntityUrnV2('app', app.urn)}** — ${app.name} (via App Key)`,
         );
       }
 
@@ -1105,7 +1116,7 @@ export function createMcpServerInstance(
         );
       }
       const lines = apps.map(
-        (a) => `- **${formatCanonicalUrn('app', a.urn)}** — ${a.name} (role: ${a.role})`,
+        (a) => `- **${safeEmitEntityUrnV2('app', a.urn)}** — ${a.name} (role: ${a.role})`,
       );
       const header =
         apps.length === 1
@@ -1167,12 +1178,12 @@ export function createMcpServerInstance(
             appUrn: r.app.urn,
           });
           return textResult(
-            `Active App set to: **${formatCanonicalUrn('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call hadron_set_active_app again with a different identifier to switch, or hadron_list_apps to see other options.`,
+            `Active App set to: **${safeEmitEntityUrnV2('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call hadron_set_active_app again with a different identifier to switch, or hadron_list_apps to see other options.`,
           );
         }
         case 'ambiguous': {
           const candidatesText = r.candidates
-            .map((c) => `  - ${formatCanonicalUrn('app', c.urn)}`)
+            .map((c) => `  - ${safeEmitEntityUrnV2('app', c.urn)}`)
             .join('\n');
           mcpLog('warn', 'app_identifier_ambiguous', {
             userId: auth.userId,
@@ -3807,14 +3818,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // Build a canonical node URN from a memory's stored URN + a node loc, so
   // loadNodeForRun → splitNodeUrn (and, in execute mode, resolveNodeRef)
-  // recovers the same memory. Delegates to the shared composeNodeUrn, which
-  // canonicalizes BOTH stored shapes — legacy `org:memory` (single colon) and
-  // migrated `org::memory` (canonical). A naive first-colon slice mangled the
-  // latter into `org:::memory::loc`, which resolveNodeRef then rejected, so
-  // execute mode couldn't start runs for canonical-URN memories (Codex #549
-  // review). This is the same composer the GraphQL runTask path uses.
+  // recovers the same memory. Delegates to the shared emitNodeUrnV2 (#697
+  // emission flip), which composes the flat grammar-v2 node URN from the
+  // stored bare urn — accepting BOTH legacy `org:memory` (single colon) and
+  // migrated `org::memory` shapes. This is the same composer the GraphQL
+  // runTask path uses.
   function nodeUrnFromMem(memUrn: string, loc: string): string {
-    return composeNodeUrn(memUrn, loc);
+    return emitNodeUrnV2(memUrn, loc);
   }
 
   function runTaskCandidate(mem: RunTaskMem, node: RunTaskNode) {

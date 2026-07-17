@@ -14,11 +14,11 @@ import {
   assertFullyQualifiedUrn,
   UrnNotQualifiedError,
   splitNodeUrn,
-  composeNodeUrn,
   normalizeUrnForLookup,
   legacyMemoryUrnToCanonical,
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
+import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
@@ -1055,7 +1055,7 @@ export const sessionMutations = {
               where: { id: target.memoryId },
               select: { urn: true },
             });
-            const targetUrn = composeNodeUrn(targetMemory.urn, target.loc);
+            const targetUrn = emitNodeUrnV2(targetMemory.urn, target.loc);
             topicSections.push(
               `## Node: ${target.name} (${targetUrn})\n\n${target.content}`,
             );
@@ -1139,7 +1139,7 @@ export const sessionMutations = {
           extensions: { code: 'NOT_FOUND' },
         });
       }
-      return dispatch(composeNodeUrn(resolved.memory.urn, resolved.loc));
+      return dispatch(emitNodeUrnV2(resolved.memory.urn, resolved.loc));
     },
 };
 
