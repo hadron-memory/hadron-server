@@ -19,6 +19,8 @@ import {
 import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { validateNodeAgainstSchema, NodeSchemaViolation } from '../../../lib/validateNodeAgainstSchema.js';
+import type { MemorySchema } from '../../../lib/memorySchema.js';
 import {
   encryptNodeFieldsWithKey,
   decryptNodeFields,
@@ -347,6 +349,37 @@ export async function writeNodeCore(
         ...nodeFields
       } = input;
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
+
+      // #725 — enforce the memory's property schema on write. Validate the
+      // RESULTING node state (input overrides, else the existing value) so a
+      // partial update is judged on what it produces. Only a collection member
+      // (objectType set) on a schema'd memory is checked — ordinary nodes skip
+      // the schema fetch entirely. `properties` is plaintext (not encrypted), so
+      // this is safe before the encryption block below.
+      const resultObjectType =
+        input.objectType !== undefined ? input.objectType : (existing?.objectType ?? null);
+      if (resultObjectType != null && resultObjectType !== '') {
+        const memSchemaRow = await ctx.db.memory.findUnique({
+          where: { id: input.memoryId },
+          select: { schema: true },
+        });
+        const resultProps = (input.properties !== undefined ? input.properties : existing?.properties) as
+          | Record<string, unknown>
+          | null
+          | undefined;
+        try {
+          validateNodeAgainstSchema(
+            memSchemaRow?.schema as unknown as MemorySchema | null,
+            resultObjectType,
+            resultProps ?? null,
+          );
+        } catch (e) {
+          if (e instanceof NodeSchemaViolation) {
+            throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
+          }
+          throw e;
+        }
+      }
 
       // If the target memory is encrypted, encrypt content and data before
       // writing. Throws SESSION_EXPIRED if no session key is cached.
