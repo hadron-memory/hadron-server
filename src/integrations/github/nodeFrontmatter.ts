@@ -18,6 +18,7 @@ export interface FrontmatterNodeFields {
   id: string;
   name: string;
   nodeType?: string | null;
+  objectType?: string | null;
   alias?: string | null;
   description?: string | null;
   abstract?: string | null;
@@ -95,6 +96,8 @@ export function buildNodeFrontmatter(
   const frontmatter: Record<string, unknown> = { name: node.name, id: node.id };
   if (node.alias) frontmatter.alias = node.alias;
   if (node.nodeType && node.nodeType !== 'info') frontmatter.type = node.nodeType;
+  // #725 — collection discriminator; importer-consumed, so round-trip it.
+  if (node.objectType) frontmatter.objectType = node.objectType;
   if (node.description) frontmatter.description = node.description;
   // Importer-consumed → must round-trip or a re-import nulls them.
   if (node.abstract) frontmatter.abstract = node.abstract;

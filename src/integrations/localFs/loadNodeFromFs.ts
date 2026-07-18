@@ -10,6 +10,7 @@ interface NodeYaml {
   name: string;
   urn?: string;
   type?: string;
+  objectType?: string;
   description?: string;
   /** Paragraph-length summary. Spec 031. Distinct from `description`. */
   abstract?: string;
@@ -228,6 +229,7 @@ async function loadFrontmatterNode(
       loc,
       name: meta.name,
       isLink: meta.type === 'link',
+      objectType: meta.objectType ?? null, // #725 — round-trip the collection discriminator
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
       abstract,
@@ -275,6 +277,7 @@ async function loadLegacyNode(
       loc,
       name: meta.name,
       isLink: meta.type === 'link',
+      objectType: meta.objectType ?? null, // #725 — round-trip the collection discriminator
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
       abstract,

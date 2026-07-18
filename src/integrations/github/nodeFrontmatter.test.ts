@@ -51,6 +51,11 @@ describe('buildNodeFrontmatter', () => {
     expect(buildNodeFrontmatter({ ...base, nodeType: 'task' }).type).toBe('task');
   });
 
+  it('#725 — round-trips objectType (emitted when set, omitted when absent)', () => {
+    expect(buildNodeFrontmatter({ ...base, objectType: 'competitor' }).objectType).toBe('competitor');
+    expect(buildNodeFrontmatter({ ...base })).not.toHaveProperty('objectType');
+  });
+
   it('omits nullish / empty fields', () => {
     const fm = buildNodeFrontmatter({
       ...base,

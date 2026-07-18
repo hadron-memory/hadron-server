@@ -68,6 +68,7 @@ export async function handleNodeWrittenForGit(
       loc: node.loc,
       name: node.name,
       nodeType: node.nodeType,
+      objectType: node.objectType,
       alias: node.alias,
       description: node.description,
       abstract: node.abstract,

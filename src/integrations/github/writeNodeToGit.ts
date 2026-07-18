@@ -25,6 +25,8 @@ export interface NodeForGit {
    *  the importer reads it back as `isLink: type === 'link'`, so it must
    *  round-trip. */
   nodeType?: string | null;
+  /** #725 — collection discriminator; round-tripped via frontmatter `objectType`. */
+  objectType?: string | null;
   alias?: string | null;
   description?: string | null;
   /** Paragraph-length summary. Spec 031. Written to YAML frontmatter as `abstract`. */
@@ -159,6 +161,7 @@ export async function writeNodeToGit(
     id: node.id,
     name: node.name,
     nodeType: node.nodeType,
+    objectType: node.objectType,
     alias: node.alias,
     description: node.description,
     abstract: node.abstract,

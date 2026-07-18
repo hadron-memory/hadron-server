@@ -37,6 +37,7 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   // Explicit nodeType wins; otherwise exclude system-type nodes (node_type is NOT NULL, default 'info').
   if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
   else parts.push(`node_type <> 'system'`);
+  if (flt.objectType) parts.push(`object_type = ${bind(flt.objectType)}`); // #725 collection facet
   if (flt.isRunnable != null) parts.push(`is_runnable = ${bind(flt.isRunnable)}`);
   if (flt.tags && flt.tags.length) parts.push(`tags @> ARRAY[${flt.tags.map((t) => bind(t)).join(', ')}]::text[]`);
   if (flt.locPrefix) parts.push(`starts_with(loc, ${bind(flt.locPrefix)})`);

@@ -1732,6 +1732,7 @@ export const nodeMutations = {
         loc: destLoc,
         name: srcPlain.name,
         nodeType: srcPlain.nodeType,
+        objectType: srcPlain.objectType ?? undefined, // #725 — carry the collection through a clone
         isRunnable: srcPlain.isRunnable,
         description: srcPlain.description ?? undefined,
         abstract: srcPlain.abstract ?? undefined,

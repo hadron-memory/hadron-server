@@ -1608,6 +1608,8 @@ export interface NodeInput {
   id?: string;
   memoryId: string;
   nodeType?: string;
+  /** #725 — collection discriminator (e.g. "competitor"). Omit preserves; null clears. */
+  objectType?: string | null;
   isRunnable?: boolean | null;
   loc: string;
   name: string;

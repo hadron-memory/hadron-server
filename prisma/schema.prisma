@@ -920,6 +920,12 @@ model Node {
   memoryId           String    @map("memory_id")
   /// See the node-types list in the model doc. Default `info`.
   nodeType           String    @default("info") @map("node_type")
+  /// #725 — collection discriminator (the MongoDB-collection equivalent): which
+  /// domain object this node is an instance of, e.g. "competitor" / "insight".
+  /// Orthogonal to `nodeType` (the platform-kind axis). NULL for an ordinary
+  /// node. When set on a schema-governed memory it must name a declared object
+  /// type (enforced at write time — a later phase); free-form until then.
+  objectType         String?   @map("object_type")
   /// Human-friendly display name of this node.
   name               String
   /// Alternative name.
@@ -1019,6 +1025,10 @@ model Node {
   // Postgres seek to the memory's rows AND return them loc-ordered without a
   // separate sort or a full loc-index scan across other memories.
   @@index([memoryId, loc])
+  // #725 — "list all nodes of collection X in this memory" (the objectType
+  // facet). objectType is NULL for most nodes; the composite seeks a memory's
+  // typed rows directly.
+  @@index([memoryId, objectType])
   @@map("nodes")
 }
 
@@ -1913,6 +1923,8 @@ model NodeRevision {
   // content), contentHash + ownerRepo (external-sync provenance), and
   // the created/updated/deleted audit stamps.
   nodeType           String?  @map("node_type")
+  /// #725 — collection discriminator at capture time (parity with nodeType).
+  objectType         String?  @map("object_type")
   isLink             Boolean? @map("is_link")
   properties         Json?
   data               Json?
