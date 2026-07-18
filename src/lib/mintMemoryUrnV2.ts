@@ -20,13 +20,18 @@
  * shared, author-derived {@link mintLocalSlug} primitive.
  *
  * ROOT authority mirrors Task A: it is the owner PRINCIPAL (org name or user
- * handle), which for every compound provisioner is the org (these rows set
- * `organizationId`). The caller passes the bare org root (`org.urn`).
+ * handle). Most compound provisioners are org-rooted (they set `organizationId`
+ * and pass `org.urn`), but the app-mem path falls back to a user-owned App's own
+ * root atom (a user handle). The helper is root-agnostic — it composes
+ * `<root>:<slug>` for whatever bare root the caller supplies.
  *
- * COLLISION posture: the `isTaken` probe matches ANY row (live OR soft-deleted)
- * on the unique `urn`/`legacyUrn` — a soft-deleted row still occupies the unique
- * `urn` column, so aliasing around it avoids a create-time unique violation
- * rather than silently reusing a tombstoned slot. For the opaque-id provisioners
+ * COLLISION posture: the `isTaken` probe treats ANY row (live OR soft-deleted)
+ * whose `urn` OR `legacyUrn` equals the candidate as taken. `urn` is unique, so a
+ * soft-deleted row still occupies it — aliasing around it avoids a create-time
+ * unique violation rather than silently reusing a tombstoned slot; `legacyUrn` is
+ * indexed but NON-unique, and a match there means the candidate would shadow
+ * another row's stored legacy identity (which resolution checks before the
+ * `legacyUrn` fallback), so it too counts as taken. For the opaque-id provisioners
  * (app-user / anon) a collision is effectively impossible (a fresh `generateId`),
  * so the mint returns `<root>:<id>` unaliased; the named provisioners (app-mem /
  * shared) alias deterministically (`<slug>-<agent>`) instead of the pre-v2
@@ -37,7 +42,10 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { mintLocalSlug } from './mintLocalSlug.js';
 
 export interface MintMemoryUrnV2Args {
-  /** The bare pool root the memory is owned under — the org name (`acme.com`). */
+  /**
+   * The bare pool root the memory is owned under — an org name (`acme.com`) or,
+   * for a user-owned App, a user handle. Composed as `<root>:<slug>`.
+   */
   root: string;
   /**
    * The desired terminal slug: the fresh `opaqueId` for app-user/anon, or the
