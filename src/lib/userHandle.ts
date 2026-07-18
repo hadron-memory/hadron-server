@@ -70,8 +70,9 @@ export function normalizeHandleOrNull(input: string | null | undefined): string 
  * into a URN-atom-legal handle **base**, or `null` when nothing legal survives.
  *
  * Lowercases, maps every out-of-charset run to a single `-`, trims to a start/
- * end-alnum atom, and truncates to 32 chars (leaving room for a disambiguating
- * suffix — the atom cap is 64). The result is re-validated through
+ * end-alnum atom, and truncates to 32 chars (a handle-specific sub-cap that
+ * leaves room for a disambiguating suffix under the grammar's `MAX_ATOM_LEN`
+ * (64) cap — #715). The result is re-validated through
  * {@link normalizeHandleOrNull}, so a base that lands on a reserved word (e.g.
  * `system`) returns `null` and the caller falls through to the next seed. Spec
  * 047 (handle generation for the `@<handle>` owner namespace).
