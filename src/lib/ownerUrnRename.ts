@@ -3,17 +3,17 @@
  * change. The user-facing analogue of {@link propagateOrgUrnRename} (issue
  * #337); it deliberately mirrors that helper's shape and rationale.
  *
- * A user-owned App / Agent / Memory stores a bare URN namespaced under the
- * owner's handle: `@<handle>:<slug>` (canonicalizes to
- * `hrn:<type>:@<handle>::<slug>`). When the owner renames their handle, every
- * such URN must move in lockstep `@<old>:<slug>` → `@<new>:<slug>` — including a
- * user-owned agent's `@<old>:<agent>-system` memory. Node/Edge URNs are COMPOSED
+ * A user-owned App / Agent / Memory stores a URN rooted on the owner's BARE
+ * handle: `<handle>:<slug>` (#697 v2 — no `@` sigil; the principal pool makes
+ * handle/org names disjoint). When the owner renames their handle, every such
+ * URN must move in lockstep `<old>:<slug>` → `<new>:<slug>` — including a
+ * user-owned agent's `<old>:<agent>-system` memory. Node/Edge URNs are COMPOSED
  * on read from the memory URN + loc (no stored `Node.urn`), so they self-heal
  * once the parent memory URN is fixed.
  *
  * **Durable node-URN references** (spec 040 triggers — AgentSchedule /
  * AgentWebhook / WebFetchPollBinding) store a fully-qualified `entry_node_urn`
- * that embeds the handle (`@<handle>::<mem>::<loc>`) when it points at a
+ * in the v2 flat form (`hrn:node:<handle>:<mem>:<loc>`) when it points at a
  * user-owned memory's node. Those are rewritten too, or an active schedule /
  * webhook / poll would fail to resolve its target after a rename (#686 review).
  *
@@ -55,8 +55,12 @@ export async function renameOwnerNamespacedUrns(
   oldHandle: string | null,
   newHandle: string,
 ): Promise<void> {
-  const newPrefix = `@${newHandle}`; // e.g. `@new`
-  const newColon = `${newPrefix}:`; // e.g. `@new:`
+  // #697 v2: user-owned roots are the BARE handle — no `@` sigil (the principal
+  // pool makes handle/org names disjoint). Existing rows are already bare (Task A
+  // backfill dropped the sigil) and creation mints bare, so the rewrite heals any
+  // row onto the bare `<handle>` root.
+  const newPrefix = newHandle; // e.g. `new`
+  const newColon = `${newPrefix}:`; // e.g. `new:`
 
   // Reclaim any SOFT-DELETED holder already parked in the target namespace so
   // the globally-unique `urn` index can't abort the rewrite. App.urn is only
@@ -94,29 +98,31 @@ export async function renameOwnerNamespacedUrns(
       AND NOT starts_with(urn, ${newColon})
   `;
 
-  // Durable node-URN references (spec 040). The handle appears as `@<handle>::`
-  // (the handle→memory boundary of a fully-qualified node URN); replace that
-  // literal — anchored by the trailing `::` so it can't match a bare handle
-  // prefix — everywhere it occurs. No owner_user_id here, but the handle
-  // substring uniquely identifies this owner's namespace. Skipped when the old
-  // handle isn't URN-legal (nothing was namespaced under it).
+  // Durable node-URN references (spec 040). Post-#697 an entry_node_urn is the
+  // v2 flat form `hrn:node:<handle>:<mem>:<loc…>`, so the owner handle is the
+  // ROOT atom right after `hrn:node:`. A rename never re-mints the memory slug
+  // (it fails closed on a live collision), so this is a pure ROOT swap:
+  // length-anchored prefix rewrite `hrn:node:<old>:` → `hrn:node:<new>:`, which
+  // can't touch a `<handle>` substring inside the loc. No owner_user_id column
+  // here, but the handle root uniquely identifies this owner's namespace.
+  // Skipped when the old handle isn't URN-legal (nothing was namespaced under it).
   if (oldHandle) {
-    const oldBoundary = `@${oldHandle}::`;
-    const newBoundary = `@${newHandle}::`;
+    const oldPrefix = `hrn:node:${oldHandle}:`;
+    const newPrefixNode = `hrn:node:${newHandle}:`;
     await tx.$executeRaw`
       UPDATE agent_schedules
-      SET entry_node_urn = replace(entry_node_urn, ${oldBoundary}, ${newBoundary})
-      WHERE strpos(entry_node_urn, ${oldBoundary}) > 0
+      SET entry_node_urn = ${newPrefixNode} || substr(entry_node_urn, length(${oldPrefix}) + 1)
+      WHERE starts_with(entry_node_urn, ${oldPrefix})
     `;
     await tx.$executeRaw`
       UPDATE agent_webhooks
-      SET entry_node_urn = replace(entry_node_urn, ${oldBoundary}, ${newBoundary})
-      WHERE strpos(entry_node_urn, ${oldBoundary}) > 0
+      SET entry_node_urn = ${newPrefixNode} || substr(entry_node_urn, length(${oldPrefix}) + 1)
+      WHERE starts_with(entry_node_urn, ${oldPrefix})
     `;
     await tx.$executeRaw`
       UPDATE webfetch_poll_bindings
-      SET entry_node_urn = replace(entry_node_urn, ${oldBoundary}, ${newBoundary})
-      WHERE strpos(entry_node_urn, ${oldBoundary}) > 0
+      SET entry_node_urn = ${newPrefixNode} || substr(entry_node_urn, length(${oldPrefix}) + 1)
+      WHERE starts_with(entry_node_urn, ${oldPrefix})
     `;
   }
 }

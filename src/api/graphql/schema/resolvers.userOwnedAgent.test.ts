@@ -14,7 +14,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { formatCanonicalUrn } from '../../../lib/urn.js';
+import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -43,7 +44,7 @@ beforeEach(async () => {
 });
 
 describe('createAgent — user-owned (no orgId)', () => {
-  it('creates a user-owned agent + user-owned system memory with @handle URNs', async () => {
+  it('creates a user-owned agent + user-owned system memory with BARE v2 handle URNs', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
       { name: 'My Helper' },
@@ -51,15 +52,20 @@ describe('createAgent — user-owned (no orgId)', () => {
     );
     expect(agent.organizationId).toBeNull();
     expect(agent.ownerUserId).toBe(ownerId);
-    expect(agent.urn).toBe('@owner-one:my-helper');
+    // #697 v2: the user-owned root is the BARE handle — no `@` sigil.
+    expect(agent.urn).toBe('owner-one:my-helper');
     expect(agent.visibility).toBe('PERSONAL');
-    expect(formatCanonicalUrn('agent', agent.urn)).toBe('hrn:agent:@owner-one::my-helper');
+    // Round-trip (Codex P2, #720): the emitted v2 URN resolves back to this row.
+    // A stored `@owner-one:...` would emit bare (sigil stripped) and then MISS.
+    const emitted = emitEntityUrnV2('agent', agent.urn);
+    expect(emitted).toBe('hrn:agent:owner-one:my-helper');
+    expect(await resolveAgentRef(db, emitted)).toEqual({ id: agent.id });
 
     const sys = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } });
     expect(sys.class).toBe('system');
     expect(sys.organizationId).toBeNull();
     expect(sys.ownerUserId).toBe(ownerId);
-    expect(sys.urn).toBe('@owner-one:my-helper-system');
+    expect(sys.urn).toBe('owner-one:my-helper-system');
   });
 
   it('rejects a non-PERSONAL visibility for a user-owned agent', async () => {

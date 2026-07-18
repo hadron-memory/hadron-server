@@ -82,7 +82,13 @@ export const agentMutations = {
           throw new GraphQLError('Your account needs a valid handle before you can create a personal agent. Set one in your profile.', { extensions: { code: 'BAD_USER_INPUT' } });
         }
         ownerUserId = ctx.userId;
-        namespace = `@${handle}`;
+        // #697 v2: a user-owned root is the BARE handle — no `@` sigil (the
+        // per-server principal pool makes handle/org names disjoint, so the
+        // sigil is unnecessary and would break round-trip: emission strips it,
+        // so a stored `@handle:slug` can't be found from the emitted
+        // `hrn:agent:handle:slug`). The legacy `@handle:...` INPUT form still
+        // resolves migrated rows via the stored alias map (#697 Task A).
+        namespace = handle;
       }
       // #574: slugify the display name — a raw name would persist a
       // case-sensitive / space-bearing URN (and the system memory URN derives

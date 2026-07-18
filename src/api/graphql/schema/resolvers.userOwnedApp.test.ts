@@ -17,6 +17,8 @@ import { cleanDb, createDbAgentImport, createDbAgentOrgGrant } from '../../../te
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -60,7 +62,7 @@ beforeEach(async () => {
 });
 
 describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () => {
-  it('creates a user-owned App under @handle, licensed by a subscription (no org grant)', async () => {
+  it('creates a user-owned App under the bare handle root, licensed by a subscription (no org grant)', async () => {
     const app = await resolvers.Mutation.createApp(
       {},
       { agentId: publicAgentId, name: 'My Gmail' },
@@ -68,7 +70,12 @@ describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () =>
     );
     expect(app.organizationId).toBeNull();
     expect(app.ownerUserId).toBe(ownerId);
-    expect(app.urn).toBe('@appowner:my-gmail');
+    // #697 v2: the user-owned root is the BARE handle — no `@` sigil.
+    expect(app.urn).toBe('appowner:my-gmail');
+    // Round-trip (Codex P2, #720): the emitted v2 URN resolves back to this row.
+    const emittedApp = emitEntityUrnV2('app', app.urn);
+    expect(emittedApp).toBe('hrn:app:appowner:my-gmail');
+    expect(await resolveAppRef(db, emittedApp)).toEqual({ id: app.id });
 
     // The agent is linked.
     const link = await db.appAgent.findFirst({ where: { appId: app.id, agentId: publicAgentId } });

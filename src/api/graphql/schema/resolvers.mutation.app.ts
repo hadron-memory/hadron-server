@@ -164,10 +164,13 @@ export const appMutations = {
           throw new GraphQLError('Your account needs a valid handle before you can create a personal App. Set one in your profile.', { extensions: { code: 'BAD_USER_INPUT' } });
         }
         ownerUserId = ctx.userId;
-        namespace = `@${handle}`;
+        // #697 v2: user-owned root is the BARE handle — no `@` sigil (see the
+        // createAgent note). Emission strips the sigil, so a stored
+        // `@handle:slug` couldn't be resolved from the emitted bare URN.
+        namespace = handle;
       }
       // URN format matches memories and agents: "{namespace}:{slug}" — the
-      // namespace is an org domain OR `@<handle>` for a user-owned App.
+      // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
       const appUrn = `${namespace}:${deriveSlugFromName(urn ?? name)}`;
 

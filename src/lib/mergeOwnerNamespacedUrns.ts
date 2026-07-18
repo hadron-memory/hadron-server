@@ -3,13 +3,13 @@
  * D-2026-07-15-004) — the "sneaky bulk" materialization site.
  *
  * When two accounts merge, the surviving (target) user must inherit the
- * source's spec-047 owner-owned App / Agent / Memory rows. Those rows carry an
- * `@<handle>`-rooted URN (`@source:notes`), so inheriting them re-roots the URN
- * onto the target's handle (`@target:notes`). If the target already owns a
- * resource with that slug, re-rooting would collide on the globally-unique
- * `urn` index — so the LOSER (source) side gets a **locally minted,
- * deterministic, author-derived alias** via {@link mintLocalSlug}
- * (`@target:notes-source`), never a silent overwrite of the target's resource.
+ * source's owner-owned App / Agent / Memory rows. Those rows carry a
+ * handle-rooted URN (`source:notes` — v2 bare handle, no `@` sigil), so
+ * inheriting them re-roots the URN onto the target's handle (`target:notes`). If
+ * the target already owns a resource with that slug, re-rooting would collide on
+ * the globally-unique `urn` index — so the LOSER (source) side gets a **locally
+ * minted, deterministic, author-derived alias** via {@link mintLocalSlug}
+ * (`target:notes-source`), never a silent overwrite of the target's resource.
  *
  * This is the merge-time analogue of {@link renameOwnerNamespacedUrns}: same
  * three URN tables, same durable-node-URN (`entry_node_urn`) rewrite. It differs
@@ -50,22 +50,10 @@ export interface MergeOwnerUrnsArgs {
   sourceHandle: string | null;
 }
 
-/** Strip the `@<handle>` root off an owner URN, returning the trailing slug. */
+/** Strip the root (everything up to the first colon) off an owner URN. */
 function slugOf(urn: string): string {
   const colon = urn.indexOf(':');
   return colon >= 0 ? urn.slice(colon + 1) : urn;
-}
-
-/**
- * The canonical (`@handle::slug`) spelling of a stored (`@handle:slug`) memory
- * URN — the form a memory URN takes INSIDE a fully-qualified node URN
- * (`@handle::slug::loc`), where `::` separates the handle→memory and
- * memory→loc boundaries. `Memory.urn` is stored with a single colon; node URNs
- * double the first one. Mirrors `memoryUrnForms` in cloneMemory.
- */
-function canonicalMemoryUrn(storedUrn: string): string {
-  const colon = storedUrn.indexOf(':');
-  return colon === -1 ? storedUrn : `${storedUrn.slice(0, colon)}::${storedUrn.slice(colon + 1)}`;
 }
 
 /**
@@ -77,8 +65,11 @@ export async function mergeOwnerNamespacedUrns(
   tx: Prisma.TransactionClient,
   { sourceUserId, targetUserId, targetHandle, sourceHandle }: MergeOwnerUrnsArgs,
 ): Promise<void> {
-  const newRoot = `@${targetHandle}`;
-  const authorRoot = sourceHandle ? `@${sourceHandle}` : newRoot;
+  // #697 v2: user-owned roots are the BARE handle — no `@` sigil (the principal
+  // pool makes handle/org names disjoint). Existing rows are already bare (the
+  // Task A backfill dropped the sigil); creation mints bare too.
+  const newRoot = targetHandle;
+  const authorRoot = sourceHandle ?? newRoot;
 
   // ── Memories ─────────────────────────────────────────────────────────────
   // Re-root each live owned memory, re-minting on a live collision, and record
@@ -165,23 +156,25 @@ export async function mergeOwnerNamespacedUrns(
 
   // ── Durable node-URN references (spec 040) ─────────────────────────────────
   // AgentSchedule / AgentWebhook / WebFetchPollBinding store a fully-qualified
-  // `entry_node_urn` that embeds a memory URN in its CANONICAL form as
-  // `@handle::mem-slug::<loc>`. Rewrite each re-rooted memory's refs precisely
-  // (full old→new memory URN), which stays correct even when the slug was
-  // re-minted — unlike renameOwnerNamespacedUrns' blanket `@old::`→`@new::`
-  // prefix swap, which assumes the mem-slug is unchanged.
+  // `entry_node_urn`. Post-#697 these are emitted in the v2 flat form
+  // `hrn:node:<root>:<mem>:<loc…>` (single colon), so the memory URN sits right
+  // after `hrn:node:`. Prefix-swap each re-rooted memory's refs precisely (full
+  // old→new memory URN via a length-anchored `substr`, correct even when the
+  // slug was re-minted). A legacy v1-form ref (`@old::mem::loc`) is NOT rewritten
+  // here — it resolves through the re-rooted row's `legacyUrn` alias (#697), set
+  // above — so no v1 `::` boundary handling is needed.
   for (const [oldUrn, newUrn] of memRemap) {
     if (oldUrn === newUrn) continue;
-    const oldBoundary = `${canonicalMemoryUrn(oldUrn)}::`;
-    const newBoundary = `${canonicalMemoryUrn(newUrn)}::`;
+    const oldPrefix = `hrn:node:${oldUrn}:`;
+    const newPrefix = `hrn:node:${newUrn}:`;
     await tx.$executeRaw`
-      UPDATE agent_schedules SET entry_node_urn = replace(entry_node_urn, ${oldBoundary}, ${newBoundary})
-      WHERE strpos(entry_node_urn, ${oldBoundary}) > 0`;
+      UPDATE agent_schedules SET entry_node_urn = ${newPrefix} || substr(entry_node_urn, length(${oldPrefix}) + 1)
+      WHERE starts_with(entry_node_urn, ${oldPrefix})`;
     await tx.$executeRaw`
-      UPDATE agent_webhooks SET entry_node_urn = replace(entry_node_urn, ${oldBoundary}, ${newBoundary})
-      WHERE strpos(entry_node_urn, ${oldBoundary}) > 0`;
+      UPDATE agent_webhooks SET entry_node_urn = ${newPrefix} || substr(entry_node_urn, length(${oldPrefix}) + 1)
+      WHERE starts_with(entry_node_urn, ${oldPrefix})`;
     await tx.$executeRaw`
-      UPDATE webfetch_poll_bindings SET entry_node_urn = replace(entry_node_urn, ${oldBoundary}, ${newBoundary})
-      WHERE strpos(entry_node_urn, ${oldBoundary}) > 0`;
+      UPDATE webfetch_poll_bindings SET entry_node_urn = ${newPrefix} || substr(entry_node_urn, length(${oldPrefix}) + 1)
+      WHERE starts_with(entry_node_urn, ${oldPrefix})`;
   }
 }

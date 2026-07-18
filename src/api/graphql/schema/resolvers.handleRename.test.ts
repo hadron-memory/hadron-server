@@ -2,9 +2,10 @@
  * spec 047 — handle rename propagates to every user-owned entity URN.
  *
  * When a user changes their handle via updateMyProfile, their user-owned App /
- * Agent / Memory URNs (namespaced `@<handle>:<slug>`, including a user-owned
- * agent's `-system` memory) must move to `@<new>:<slug>` in lockstep. Org-owned
- * entities are untouched. Node URNs (composed on read) self-heal.
+ * Agent / Memory URNs (rooted on the bare `<handle>:<slug>` — #697 v2, no `@`
+ * sigil — including a user-owned agent's `-system` memory) must move to
+ * `<new>:<slug>` in lockstep. Org-owned entities are untouched. Node URNs
+ * (composed on read) self-heal.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -51,17 +52,17 @@ describe('updateMyProfile — handle rename URN propagation', () => {
     const agent = await resolvers.Mutation.createAgent({}, { name: 'My Agent' }, c);
     const app = await resolvers.Mutation.createApp({}, { agentId: publicAgentId, name: 'My App' }, c);
 
-    expect(agent.urn).toBe('@old-handle:my-agent');
-    expect(app.urn).toBe('@old-handle:my-app');
+    expect(agent.urn).toBe('old-handle:my-agent');
+    expect(app.urn).toBe('old-handle:my-app');
 
     await resolvers.Mutation.updateMyProfile({}, { handle: 'new-handle' }, c);
 
     const renamedAgent = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
     const renamedSys = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } });
     const renamedApp = await db.app.findUniqueOrThrow({ where: { id: app.id } });
-    expect(renamedAgent.urn).toBe('@new-handle:my-agent');
-    expect(renamedSys.urn).toBe('@new-handle:my-agent-system');
-    expect(renamedApp.urn).toBe('@new-handle:my-app');
+    expect(renamedAgent.urn).toBe('new-handle:my-agent');
+    expect(renamedSys.urn).toBe('new-handle:my-agent-system');
+    expect(renamedApp.urn).toBe('new-handle:my-app');
   });
 
   it('leaves ORG-owned entities untouched', async () => {
@@ -86,7 +87,7 @@ describe('updateMyProfile — handle rename URN propagation', () => {
     await resolvers.Mutation.updateMyProfile({}, { handle: 'new-handle' }, c);
 
     // The node's URN is composed from the (now-renamed) memory URN.
-    const node = await resolvers.Query.node(null, { ref: `hrn:node:@new-handle::my-agent-system::intro` }, c);
+    const node = await resolvers.Query.node(null, { ref: `hrn:node:new-handle:my-agent-system:intro` }, c);
     expect(node?.loc).toBe('intro');
   });
 
@@ -95,7 +96,7 @@ describe('updateMyProfile — handle rename URN propagation', () => {
     const agent = await resolvers.Mutation.createAgent({}, { name: 'My Agent' }, c);
     await resolvers.Mutation.updateMyProfile({}, { name: 'New Name' }, c);
     const still = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
-    expect(still.urn).toBe('@old-handle:my-agent');
+    expect(still.urn).toBe('old-handle:my-agent');
   });
 
   it('rewrites a durable trigger entry_node_urn that embeds the handle', async () => {
@@ -112,12 +113,12 @@ describe('updateMyProfile — handle rename URN propagation', () => {
         appId: app.id,
         name: 'nightly',
         runAt: new Date('2026-08-01T00:00:00Z'),
-        entryNodeUrn: '@old-handle::my-agent-system::intro',
+        entryNodeUrn: 'hrn:node:old-handle:my-agent-system:intro',
       },
     });
     await resolvers.Mutation.updateMyProfile({}, { handle: 'new-handle' }, ctx({ userId, roles: ['READER'] }));
     const after = await db.agentSchedule.findUniqueOrThrow({ where: { id: sched.id } });
-    expect(after.entryNodeUrn).toBe('@new-handle::my-agent-system::intro');
+    expect(after.entryNodeUrn).toBe('hrn:node:new-handle:my-agent-system:intro');
   });
 
   it('reclaims a SOFT-DELETED holder already parked in the target namespace', async () => {
@@ -126,10 +127,10 @@ describe('updateMyProfile — handle rename URN propagation', () => {
     // A dead agent already occupying the target URN (e.g. a pre-propagation
     // rename) — the globally-unique urn index would otherwise abort the rename.
     await db.agent.create({
-      data: { id: generateId(), name: 'ghost', urn: '@new-handle:my-agent', ownerUserId: userId, deletedAt: new Date() },
+      data: { id: generateId(), name: 'ghost', urn: 'new-handle:my-agent', ownerUserId: userId, deletedAt: new Date() },
     });
     await resolvers.Mutation.updateMyProfile({}, { handle: 'new-handle' }, c);
     const renamed = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
-    expect(renamed.urn).toBe('@new-handle:my-agent'); // rename succeeded, ghost reclaimed
+    expect(renamed.urn).toBe('new-handle:my-agent'); // rename succeeded, ghost reclaimed
   });
 });
