@@ -42,10 +42,10 @@ describe('compileNodeWhere — leaves', () => {
     expect(sql).toBe(`(data #>> ARRAY['k']::text[]) = $1`);
   });
 
-  it('datetime cast routes the LHS through the guard function and casts the RHS', () => {
+  it('datetime cast guards both sides through hadron_safe_timestamptz', () => {
     const { sql, params } = compile({ path: ['extractedAt'], as: 'datetime', gte: '2026-07-01T00:00:00Z' });
     expect(sql).toBe(
-      `hadron_safe_timestamptz((properties #>> ARRAY['extractedAt']::text[])) >= $1::timestamptz`,
+      `hadron_safe_timestamptz((properties #>> ARRAY['extractedAt']::text[])) >= hadron_safe_timestamptz($1)`,
     );
     expect(params).toEqual(['2026-07-01T00:00:00Z']);
   });
@@ -72,10 +72,11 @@ describe('compileNodeWhere — leaves', () => {
     expect(params).toEqual(['gap', 'technique', 'trend']);
   });
 
-  it('between emits BETWEEN with two bound values', () => {
+  it('between emits BETWEEN with two guarded bound values', () => {
     const { sql, params } = compile({ path: ['occurredAt'], as: 'datetime', between: ['2026-01-01', '2026-12-31'] });
     expect(sql).toBe(
-      `hadron_safe_timestamptz((properties #>> ARRAY['occurredAt']::text[])) BETWEEN $1::timestamptz AND $2::timestamptz`,
+      `hadron_safe_timestamptz((properties #>> ARRAY['occurredAt']::text[])) ` +
+        `BETWEEN hadron_safe_timestamptz($1) AND hadron_safe_timestamptz($2)`,
     );
     expect(params).toEqual(['2026-01-01', '2026-12-31']);
   });
@@ -97,6 +98,11 @@ describe('compileNodeWhere — leaves', () => {
     expect(params).toEqual(['true']);
   });
 
+  it("boolean cast accepts the string 'false' as false (not truthy-coerced)", () => {
+    const { params } = compile({ path: ['active'], as: 'boolean', eq: 'false' });
+    expect(params).toEqual(['false']);
+  });
+
   it('multi-segment path is inlined as a quoted text[]', () => {
     const { sql } = compile({ path: ['a', 'b', 'c'], eq: 'x' });
     expect(sql).toContain(`ARRAY['a', 'b', 'c']::text[]`);
@@ -113,7 +119,7 @@ describe('compileNodeWhere — branches', () => {
     });
     expect(sql).toBe(
       `((properties #>> ARRAY['sourceKind']::text[]) = $1 AND ` +
-        `hadron_safe_timestamptz((properties #>> ARRAY['extractedAt']::text[])) >= $2::timestamptz)`,
+        `hadron_safe_timestamptz((properties #>> ARRAY['extractedAt']::text[])) >= hadron_safe_timestamptz($2))`,
     );
     expect(params).toEqual(['substack', '2026-07-04T00:00:00Z']);
   });
@@ -182,6 +188,23 @@ describe('compileNodeWhere — validation & safety', () => {
 
   it('rejects a number cast against a non-numeric value', () => {
     expect(() => compile({ path: ['n'], as: 'number', eq: 'not-a-number' })).toThrow(NodeWhereError);
+  });
+
+  it('rejects an unparseable datetime value (no Postgres cast-error 500)', () => {
+    expect(() => compile({ path: ['d'], as: 'datetime', eq: 'not-a-date' })).toThrow(NodeWhereError);
+  });
+
+  it('rejects an unparseable datetime inside between', () => {
+    expect(() => compile({ path: ['d'], as: 'datetime', between: ['2026-01-01', 'nope'] })).toThrow(NodeWhereError);
+  });
+
+  it('rejects a non-boolean boolean-cast value (no truthiness coercion)', () => {
+    expect(() => compile({ path: ['b'], as: 'boolean', eq: 'yes' })).toThrow(NodeWhereError);
+    expect(() => compile({ path: ['b'], as: 'boolean', eq: 1 })).toThrow(NodeWhereError);
+  });
+
+  it('rejects a non-JSON-serializable contains value', () => {
+    expect(() => compile({ path: ['x'], contains: 1n as unknown })).toThrow(NodeWhereError);
   });
 
   it('enforces the max depth', () => {

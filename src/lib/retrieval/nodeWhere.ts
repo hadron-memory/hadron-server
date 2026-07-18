@@ -185,8 +185,19 @@ function asNumber(v: unknown): number {
 }
 
 function asDateString(v: unknown): string {
-  if (typeof v === 'string' && v.trim() !== '') return v;
-  throw new NodeWhereError(`expected an ISO-8601 datetime string, got ${JSON.stringify(v)}`);
+  // Reject unparseable input up front so a bad bound surfaces as BAD_USER_INPUT,
+  // not a Postgres cast error (500). The RHS is ALSO wrapped in
+  // hadron_safe_timestamptz below, so even a Date.parse/Postgres edge-case
+  // disagreement can never raise at execution time.
+  if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Date.parse(v))) return v;
+  throw new NodeWhereError(`expected a parseable ISO-8601 datetime string, got ${JSON.stringify(v)}`);
+}
+
+/** Coerce a caller value to the text a boolean-cast comparison binds. Rejects non-booleans. */
+function asBoolText(v: unknown): 'true' | 'false' {
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (v === 'true' || v === 'false') return v;
+  throw new NodeWhereError(`expected a boolean (or 'true'/'false' string), got ${JSON.stringify(v)}`);
 }
 
 /** Compile one leaf (already known to carry exactly `op`). */
@@ -215,10 +226,14 @@ function compileLeaf(
       case 'number':
         return `${bind(asNumber(v))}::numeric`;
       case 'datetime':
-        return `${bind(asDateString(v))}::timestamptz`;
+        // Guard the bound value too (symmetric with the LHS) so no datetime
+        // string can raise a cast error at execution: a clearly-bad bound is
+        // rejected by asDateString, and any residual edge-case parses to NULL.
+        return `hadron_safe_timestamptz(${bind(asDateString(v))})`;
       case 'boolean':
         // jsonb booleans render as 'true'/'false' via #>>; compare that text.
-        return bind(v ? 'true' : 'false');
+        // Reject non-booleans rather than coercing by JS truthiness.
+        return bind(asBoolText(v));
       default:
         return bind(asText(v));
     }
@@ -253,9 +268,20 @@ function compileLeaf(
       if (!Array.isArray(b) || b.length !== 2) throw new NodeWhereError('between must be a [lo, hi] array');
       return `${lhs} BETWEEN ${rhs(b[0])} AND ${rhs(b[1])}`;
     }
-    case 'contains':
+    case 'contains': {
       // jsonb containment of the JSON value at the path (GIN-accelerable at col root).
-      return `${jsonExpr} @> ${bind(JSON.stringify(node.contains))}::jsonb`;
+      // Guard the serialize: a non-serializable value (e.g. BigInt) throws in
+      // JSON.stringify, and stringify(undefined) yields JS undefined — both must
+      // surface as BAD_USER_INPUT, not a 500 / silent NULL comparison.
+      let json: string | undefined;
+      try {
+        json = JSON.stringify(node.contains);
+      } catch {
+        throw new NodeWhereError('contains value must be JSON-serializable');
+      }
+      if (json === undefined) throw new NodeWhereError('contains value must not be undefined');
+      return `${jsonExpr} @> ${bind(json)}::jsonb`;
+    }
     default:
       throw new NodeWhereError(`unknown operator: ${op}`);
   }
