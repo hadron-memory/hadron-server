@@ -6,6 +6,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   compileNodeWhere,
+  compileNodePropertySort,
+  makePropertySortComparator,
   NodeWhereError,
   WHERE_MAX_DEPTH,
   WHERE_MAX_LEAVES,
@@ -225,5 +227,116 @@ describe('compileNodeWhere — validation & safety', () => {
 
   it('rejects between without exactly two elements', () => {
     expect(() => compile({ path: ['x'], as: 'number', between: [1, 2, 3] })).toThrow(NodeWhereError);
+  });
+});
+
+describe('compileNodePropertySort — SQL ORDER BY', () => {
+  it('defaults to text extraction, ascending, NULLS LAST, loc tiebreak', () => {
+    expect(compileNodePropertySort({ path: ['stage'] })).toBe(
+      `(properties #>> ARRAY['stage']::text[]) ASC NULLS LAST, loc ASC`,
+    );
+  });
+
+  it('descending direction', () => {
+    expect(compileNodePropertySort({ path: ['stage'], direction: 'desc' })).toBe(
+      `(properties #>> ARRAY['stage']::text[]) DESC NULLS LAST, loc ASC`,
+    );
+  });
+
+  it('number cast routes through hadron_safe_numeric', () => {
+    expect(compileNodePropertySort({ path: ['score'], as: 'number', direction: 'desc' })).toBe(
+      `hadron_safe_numeric((properties #>> ARRAY['score']::text[])) DESC NULLS LAST, loc ASC`,
+    );
+  });
+
+  it('datetime cast routes through hadron_safe_timestamptz', () => {
+    expect(compileNodePropertySort({ path: ['capturedAt'], as: 'datetime' })).toBe(
+      `hadron_safe_timestamptz((properties #>> ARRAY['capturedAt']::text[])) ASC NULLS LAST, loc ASC`,
+    );
+  });
+
+  it('honors the data column and a nested path', () => {
+    expect(compileNodePropertySort({ field: 'data', path: ['a', 'b'] })).toBe(
+      `(data #>> ARRAY['a', 'b']::text[]) ASC NULLS LAST, loc ASC`,
+    );
+  });
+
+  it('respects a data-defaulting compile option', () => {
+    expect(compileNodePropertySort({ path: ['k'] }, { defaultColumn: 'data' })).toBe(
+      `(data #>> ARRAY['k']::text[]) ASC NULLS LAST, loc ASC`,
+    );
+  });
+
+  it('rejects an injection attempt in the path', () => {
+    expect(() => compileNodePropertySort({ path: [`x') --`] })).toThrow(NodeWhereError);
+  });
+
+  it('rejects an empty path', () => {
+    expect(() => compileNodePropertySort({ path: [] })).toThrow(NodeWhereError);
+  });
+
+  it('rejects an over-long path', () => {
+    expect(() => compileNodePropertySort({ path: Array.from({ length: 9 }, (_, i) => `a${i}`) })).toThrow(/path exceeds/);
+  });
+
+  it('rejects an unknown field column', () => {
+    // @ts-expect-error deliberately invalid column
+    expect(() => compileNodePropertySort({ field: 'content', path: ['x'] })).toThrow(NodeWhereError);
+  });
+
+  it('rejects an invalid direction', () => {
+    // @ts-expect-error deliberately invalid direction
+    expect(() => compileNodePropertySort({ path: ['x'], direction: 'ascending' })).toThrow(/direction/);
+  });
+});
+
+describe('makePropertySortComparator — JS mirror for the vector/hybrid re-sort', () => {
+  const row = (loc: string, properties: unknown, data: unknown = null) => ({ loc, properties, data });
+
+  it('orders text ascending, missing values last, loc tiebreak', () => {
+    const cmp = makePropertySortComparator({ path: ['stage'] });
+    const rows = [
+      row('c', {}), // missing → last
+      row('b', { stage: 'seed' }),
+      row('a', { stage: 'series-a' }),
+      row('d', { stage: 'seed' }), // ties with b → loc tiebreak (b before d)
+    ];
+    expect(rows.slice().sort(cmp).map((r) => r.loc)).toEqual(['b', 'd', 'a', 'c']);
+  });
+
+  it('missing values stay last even descending', () => {
+    const cmp = makePropertySortComparator({ path: ['stage'], direction: 'desc' });
+    const rows = [row('a', { stage: 'a' }), row('b', {}), row('c', { stage: 'z' })];
+    expect(rows.slice().sort(cmp).map((r) => r.loc)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('number cast compares numerically, not lexicographically', () => {
+    const cmp = makePropertySortComparator({ path: ['n'], as: 'number' });
+    const rows = [row('a', { n: 9 }), row('b', { n: 10 }), row('c', { n: '2' })];
+    // numeric: 2 < 9 < 10  (lexical would put '10' before '2' / '9')
+    expect(rows.slice().sort(cmp).map((r) => r.loc)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('an unparseable number sorts last', () => {
+    const cmp = makePropertySortComparator({ path: ['n'], as: 'number' });
+    const rows = [row('a', { n: 'abc' }), row('b', { n: 5 })];
+    expect(rows.slice().sort(cmp).map((r) => r.loc)).toEqual(['b', 'a']);
+  });
+
+  it('datetime cast compares chronologically', () => {
+    const cmp = makePropertySortComparator({ path: ['t'], as: 'datetime', direction: 'desc' });
+    const rows = [
+      row('a', { t: '2026-01-01T00:00:00Z' }),
+      row('b', { t: '2026-07-01T00:00:00Z' }),
+      row('c', { t: 'not-a-date' }), // unparseable → last
+    ];
+    expect(rows.slice().sort(cmp).map((r) => r.loc)).toEqual(['b', 'a', 'c']);
+  });
+
+  it('reads from the data column when field=data', () => {
+    const cmp = makePropertySortComparator({ field: 'data', path: ['k'] });
+    const rows = [row('a', { k: 'z' }, { k: 'b' }), row('b', { k: 'a' }, { k: 'a' })];
+    // ordered by data.k (a < b), NOT properties.k
+    expect(rows.slice().sort(cmp).map((r) => r.loc)).toEqual(['b', 'a']);
   });
 });

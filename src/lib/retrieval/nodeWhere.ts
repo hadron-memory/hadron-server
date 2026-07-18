@@ -148,13 +148,20 @@ export function compileNodeWhere(
   return walk(root, 1);
 }
 
-/** Build the safe JSONB path accessor SQL for a leaf. */
-function accessor(node: NodeWhere, defaultColumn: PredicateColumn): { col: PredicateColumn; pathSql: string } {
-  const col = node.field ?? defaultColumn;
+/**
+ * Validate a (column, path) pair and build the safe JSONB path accessor SQL.
+ * Shared by the `where` leaf compiler and the property-path sort compiler so
+ * both apply the same column safelist + atom charset validation + inlining.
+ */
+function buildAccessor(
+  field: PredicateColumn | undefined,
+  path: unknown,
+  defaultColumn: PredicateColumn,
+): { col: PredicateColumn; pathSql: string } {
+  const col = field ?? defaultColumn;
   if (col !== 'properties' && col !== 'data') {
     throw new NodeWhereError(`unknown field column: ${JSON.stringify(col)}`);
   }
-  const path = node.path;
   if (!Array.isArray(path) || path.length === 0) {
     throw new NodeWhereError('a leaf requires a non-empty path');
   }
@@ -169,6 +176,11 @@ function accessor(node: NodeWhere, defaultColumn: PredicateColumn): { col: Predi
   // Atoms are ATOM_RE-validated (no quote possible) → safe to inline as literals.
   const pathSql = `ARRAY[${path.map((a) => `'${a}'`).join(', ')}]::text[]`;
   return { col, pathSql };
+}
+
+/** Build the safe JSONB path accessor SQL for a leaf. */
+function accessor(node: NodeWhere, defaultColumn: PredicateColumn): { col: PredicateColumn; pathSql: string } {
+  return buildAccessor(node.field, node.path, defaultColumn);
 }
 
 /** Coerce a caller value to the SQL text used for a `text`-cast comparison. */
@@ -286,4 +298,133 @@ function compileLeaf(
     default:
       throw new NodeWhereError(`unknown operator: ${op}`);
   }
+}
+
+// ── Property-path sort (#719) ───────────────────────────────────────────────
+//
+// Order findNodes results by the value at a `properties`/`data` JSON path,
+// reusing the same leaf addressing (path + field + as) and guard-casts as the
+// `where` predicate. Two mirrored implementations share this module so their
+// semantics stay visibly in lockstep:
+//   - compileNodePropertySort → a SQL ORDER BY fragment for the browse/lexical
+//     SQL paths (filterSearch / lexicalSearch / regexSearch),
+//   - makePropertySortComparator → a JS comparator for the vector/hybrid path,
+//     which re-sorts an already-hydrated ranked candidate window in memory.
+// Both put missing/unparseable values LAST regardless of direction, and break
+// ties on `loc` ascending for stable pagination.
+
+/** Sort direction for a property-path sort. */
+export type SortDirection = 'asc' | 'desc';
+
+/** A findNodes sort by the value at a `properties`/`data` JSON path (#719). */
+export interface NodePropertySort {
+  /** JSONB column; defaults to `properties`. */
+  field?: PredicateColumn;
+  /** Path of object keys into the column, e.g. ['stage'] or ['a','b']. */
+  path?: string[];
+  /** Value typing before comparison; default `text`. number/datetime route through the DB guards. */
+  as?: PredicateCast;
+  /** Direction; default `asc`. */
+  direction?: SortDirection;
+}
+
+/** Normalize + validate a sort direction. */
+function normalizeDirection(dir: SortDirection | undefined): 'ASC' | 'DESC' {
+  if (dir === undefined || dir === 'asc') return 'ASC';
+  if (dir === 'desc') return 'DESC';
+  throw new NodeWhereError(`sort direction must be 'asc' or 'desc', got ${JSON.stringify(dir)}`);
+}
+
+/**
+ * Compile a property-path sort into a SQL ORDER BY fragment (no leading
+ * `ORDER BY`). The typed LHS routes through the same guard functions as a
+ * `where` leaf, so an unparseable number/datetime becomes NULL and — with the
+ * emitted `NULLS LAST` — sorts to the end rather than erroring. `loc ASC`
+ * breaks ties. Throws {@link NodeWhereError} on a malformed path/direction.
+ *
+ * @param sort the property sort spec.
+ * @param opts.defaultColumn column used when `field` is omitted (default `properties`).
+ */
+export function compileNodePropertySort(
+  sort: NodePropertySort,
+  opts: { defaultColumn?: PredicateColumn } = {},
+): string {
+  if (sort == null || typeof sort !== 'object' || Array.isArray(sort)) {
+    throw new NodeWhereError('sortProperty must be an object');
+  }
+  const { col, pathSql } = buildAccessor(sort.field, sort.path, opts.defaultColumn ?? 'properties');
+  const textExpr = `(${col} #>> ${pathSql})`;
+  const cast: PredicateCast = sort.as ?? 'text';
+  const lhs =
+    cast === 'number'
+      ? `hadron_safe_numeric(${textExpr})`
+      : cast === 'datetime'
+        ? `hadron_safe_timestamptz(${textExpr})`
+        : textExpr; // text + boolean both order by the extracted text
+  return `${lhs} ${normalizeDirection(sort.direction)} NULLS LAST, loc ASC`;
+}
+
+/** Read the value at a sort path from a plain `properties`/`data` object (JS mirror of `#>>`). */
+function readPath(properties: unknown, data: unknown, sort: NodePropertySort): unknown {
+  let cur: unknown = (sort.field ?? 'properties') === 'data' ? data : properties;
+  for (const seg of sort.path ?? []) {
+    if (cur == null || typeof cur !== 'object' || Array.isArray(cur)) return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
+}
+
+/**
+ * Extract the comparable sort key (number for number/datetime, string for
+ * text/boolean, or `null` when missing/unparseable) — the JS mirror of the SQL
+ * LHS + guard cast, so the vector/hybrid re-sort matches the SQL paths.
+ */
+function extractPropertySortKey(
+  properties: unknown,
+  data: unknown,
+  sort: NodePropertySort,
+): number | string | null {
+  const v = readPath(properties, data, sort);
+  if (v == null) return null;
+  switch (sort.as ?? 'text') {
+    case 'number': {
+      const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+      return Number.isFinite(n) ? n : null;
+    }
+    case 'datetime': {
+      const t = Date.parse(typeof v === 'string' ? v : String(v));
+      return Number.isNaN(t) ? null : t;
+    }
+    default:
+      // text + boolean: compare the value's text form (jsonb #>> semantics).
+      if (typeof v === 'string') return v;
+      if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+      if (typeof v === 'boolean') return v ? 'true' : 'false';
+      return null; // objects/arrays have no scalar text form → NULLS-LAST bucket
+  }
+}
+
+/**
+ * Build a comparator over hydrated node rows for the property-path sort. Missing
+ * or unparseable keys sort last (independent of direction); `loc` ascending
+ * breaks ties. Validates the direction eagerly (parity with the SQL compiler).
+ */
+export function makePropertySortComparator(
+  sort: NodePropertySort,
+): (a: { properties: unknown; data: unknown; loc: string }, b: { properties: unknown; data: unknown; loc: string }) => number {
+  const desc = normalizeDirection(sort.direction) === 'DESC';
+  return (a, b) => {
+    const ka = extractPropertySortKey(a.properties, a.data, sort);
+    const kb = extractPropertySortKey(b.properties, b.data, sort);
+    if (ka === null || kb === null) {
+      if (ka === null && kb === null) return a.loc.localeCompare(b.loc);
+      return ka === null ? 1 : -1; // NULLS LAST, both directions
+    }
+    let cmp =
+      typeof ka === 'number' && typeof kb === 'number'
+        ? ka - kb
+        : String(ka).localeCompare(String(kb));
+    if (desc) cmp = -cmp;
+    return cmp !== 0 ? cmp : a.loc.localeCompare(b.loc);
+  };
 }

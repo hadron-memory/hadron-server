@@ -8,9 +8,10 @@
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
-import type { NodeWhere } from './nodeWhere.js';
+import type { NodeWhere, NodePropertySort } from './nodeWhere.js';
 
 export type { VectorHit, ChunkHit };
+export type { NodePropertySort };
 
 /** Node fields carried in the weighted tsvector (lexical search). Ordered by weight class. */
 export type LexicalField =
@@ -59,6 +60,8 @@ export interface FilterSearchOpts {
   includeDeleted?: boolean;
   /** Deterministic browse order (default loc). */
   sort?: BrowseSort;
+  /** #719 — order by a `properties`/`data` JSON path; overrides `sort` when set. */
+  propertySort?: NodePropertySort;
   offset?: number;
   limit: number;
 }
@@ -86,6 +89,8 @@ export interface LexicalSearchOpts {
   includeDeleted?: boolean;
   /** Ordering (default relevance). */
   sort?: LexicalSort;
+  /** #719 — order by a `properties`/`data` JSON path; overrides `sort` when set. */
+  propertySort?: NodePropertySort;
   offset?: number;
   limit: number;
 }
@@ -100,6 +105,8 @@ export interface RegexSearchOpts {
   filter?: NodeSqlFilter;
   includeDeleted?: boolean;
   sort?: LexicalSort;
+  /** #719 — order by a `properties`/`data` JSON path; overrides `sort` when set. */
+  propertySort?: NodePropertySort;
   offset?: number;
   limit: number;
 }

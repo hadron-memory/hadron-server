@@ -18,11 +18,12 @@ import type {
   NodeSqlFilter,
   LexicalSort,
   BrowseSort,
+  NodePropertySort,
 } from './provider.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
 import { vectorSearchNodes, vectorSearchChunks } from '../../services/embedding/vectors.js';
 import { compileBooleanQuery } from './tsquery.js';
-import { compileNodeWhere } from './nodeWhere.js';
+import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
 
 /** Ordered parameter accumulator — appends a value and returns its `$n` placeholder. */
 function paramBuilder(seed: unknown[] = []) {
@@ -50,8 +51,12 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   return parts.length ? ' AND ' + parts.join(' AND ') : '';
 }
 
-/** ORDER BY for the no-query browse (relevance is meaningless without a query). */
-function browseOrderByClause(sort: BrowseSort | undefined): string {
+/**
+ * ORDER BY for the no-query browse (relevance is meaningless without a query).
+ * A #719 property-path sort overrides the enum ordering when present.
+ */
+function browseOrderByClause(sort: BrowseSort | undefined, propertySort?: NodePropertySort): string {
+  if (propertySort) return compileNodePropertySort(propertySort);
   switch (sort) {
     case 'seq': return 'seq ASC NULLS LAST, loc ASC';
     case 'updatedAt': return 'updated_at DESC, loc ASC';
@@ -59,8 +64,12 @@ function browseOrderByClause(sort: BrowseSort | undefined): string {
   }
 }
 
-/** ORDER BY for a lexical query. relevance → score; the rest suppress scoring. */
-function orderByClause(sort: LexicalSort | undefined): string {
+/**
+ * ORDER BY for a lexical query. relevance → score; the rest suppress scoring.
+ * A #719 property-path sort overrides the enum ordering when present.
+ */
+function orderByClause(sort: LexicalSort | undefined, propertySort?: NodePropertySort): string {
+  if (propertySort) return compileNodePropertySort(propertySort);
   switch (sort) {
     case 'loc': return 'loc ASC';
     case 'seq': return 'seq ASC NULLS LAST, loc ASC';
@@ -123,7 +132,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
     const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
     const filterSql = filterClause(opts.filter, bind);
-    const orderBy = orderByClause(opts.sort);
+    const orderBy = orderByClause(opts.sort, opts.propertySort);
     const limitPh = bind(opts.limit);
     const offsetPh = bind(opts.offset ?? 0);
     const sql = `
@@ -156,7 +165,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
     const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
     const filterSql = filterClause(opts.filter, bind);
-    const orderBy = orderByClause(opts.sort);
+    const orderBy = orderByClause(opts.sort, opts.propertySort);
     const limitPh = bind(opts.limit);
     const offsetPh = bind(opts.offset ?? 0);
     const sql = `
@@ -178,7 +187,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
     const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
     const filterSql = filterClause(opts.filter, bind);
-    const orderBy = browseOrderByClause(opts.sort);
+    const orderBy = browseOrderByClause(opts.sort, opts.propertySort);
     const limitPh = bind(opts.limit);
     const offsetPh = bind(opts.offset ?? 0);
     const sql = `
