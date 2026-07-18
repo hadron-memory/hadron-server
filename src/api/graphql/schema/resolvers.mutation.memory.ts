@@ -1,5 +1,6 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
@@ -1474,9 +1475,14 @@ export const memoryMutations = {
       });
       const opaqueId = generateId();
       const agentSlug = agentSlugFromUrn(agent.urn);
-      // #352: anon→registered promotion now writes the canonical `app-user`
-      // per-user role marker (was `user`).
-      const newUrn = `${org.urn}:${agentSlug}:app-user:${opaqueId}`;
+      // #697 Stage 3: the anon→registered promotion re-mints a FLAT single-atom
+      // v2 urn (`<org>:<opaqueId>`); the per-user `app-user` scope lives in the
+      // row columns, not the URN path. Fresh opaque id ⇒ no collision.
+      const newUrn = await mintMemoryUrnV2(ctx.db, {
+        root: org.urn,
+        desiredSlug: opaqueId,
+        authorRoot: agentSlug,
+      });
 
       // If a dataKey is provided and the memory isn't already encrypted,
       // encrypt every node in a single transaction, then flip isEncrypted.

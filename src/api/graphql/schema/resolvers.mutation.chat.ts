@@ -1,5 +1,6 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
   encryptNodeFields,
@@ -268,10 +269,15 @@ export const chatMutations = {
           });
           const opaqueId = generateId();
           const agentSlug = agentSlugFromUrn(agent.urn);
-          // #352: `app-user` is the canonical spec-021 per-user role marker.
-          // (The legacy `user` marker is a reserved type word and serves
-          // non-canonical on read.)
-          const memoryUrn = `${org.urn}:${agentSlug}:app-user:${opaqueId}`;
+          // #697 Stage 3: flat single-atom v2 urn (`<org>:<opaqueId>`). The
+          // per-user `app-user` scope lives in the row columns (class/userId/
+          // userMemoryOfAgentId/appId), not the URN path. Fresh opaque id ⇒ no
+          // collision, stored unaliased.
+          const memoryUrn = await mintMemoryUrnV2(ctx.db, {
+            root: org.urn,
+            desiredSlug: opaqueId,
+            authorRoot: agentSlug,
+          });
 
           const ownerOrgIds = (
             await ctx.db.orgMember.findMany({

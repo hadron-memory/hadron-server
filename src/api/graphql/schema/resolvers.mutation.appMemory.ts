@@ -30,6 +30,7 @@
  */
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
+import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { Prisma, type EmbeddingSource } from '../../../generated/prisma/index.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -195,22 +196,34 @@ export const appMemoryMutations = {
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
-    const memoryUrn = isUserOwned
-      ? `${app.organizationUrn}:${agentSlug}:app-user:${generateId()}`
-      : `${app.urn}:${agentSlug}:app-mem:${slug}`;
-
-    // URN uniqueness is the only dedup (no composite unique on Memory). A live
-    // collision is a conflict; a soft-deleted one is cleared and reused.
-    const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
-    if (existing) {
-      if (existing.deletedAt) {
-        await ctx.db.memory.delete({ where: { id: existing.id } });
-      } else {
-        throw new GraphQLError(`A memory with URN "${memoryUrn}" already exists.`, {
-          extensions: { code: 'MEMORY_URN_CONFLICT', urn: memoryUrn },
-        });
-      }
-    }
+    // #697 Stage 3: mint a FLAT single-atom v2 urn (`<root>:<slug>`). The
+    // app-user/app-mem scope lives in the row columns (class/appId/userId/
+    // userMemoryOfAgentId), not the URN path, so node URNs in the memory
+    // round-trip through splitNodeUrn. Root is the owning ORG (Task A FK-rooting;
+    // create sets `organizationId: app.organizationId`), falling back to the
+    // app's own root atom for a user-owned App.
+    const memRoot = app.organizationUrn ?? app.urn.split(':')[0]!;
+    // Recreate-after-delete keeps its clean slug: hard-delete an EXACT
+    // soft-deleted collision on the desired slug before minting, so the mint
+    // reuses the freed slug rather than aliasing around its own tombstone.
+    // (app-user's fresh opaque id can't collide, so this only ever fires for a
+    // named app-mem slug.)
+    const desiredSlug = isUserOwned ? generateId() : slug;
+    const tombstone = await ctx.db.memory.findFirst({
+      where: { urn: `${memRoot}:${desiredSlug}`, deletedAt: { not: null } },
+      select: { id: true },
+    });
+    if (tombstone) await ctx.db.memory.delete({ where: { id: tombstone.id } });
+    // A LIVE collision on a name-addressable app-mem slug now DETERMINISTICALLY
+    // aliases (`<slug>-<agent>`) via mintLocalSlug — replacing the pre-v2 hard
+    // MEMORY_URN_CONFLICT — so two apps/agents in one org can each name a memory
+    // the same (they differ by the `appId`/agent columns). The mint probe covers
+    // live + soft-deleted rows, so the minted urn is never already occupied.
+    const memoryUrn = await mintMemoryUrnV2(ctx.db, {
+      root: memRoot,
+      desiredSlug,
+      authorRoot: agentSlug,
+    });
 
     let memory;
     try {
@@ -244,7 +257,9 @@ export const appMemoryMutations = {
         include: MEMORY_INCLUDE,
       });
     } catch (err) {
-      // Race on the unique URN between the pre-check and the insert.
+      // Race backstop: a concurrent create claimed the just-minted urn between
+      // the mint probe and this insert (mintMemoryUrnV2 aliases around known
+      // rows, so this only fires on a genuine race, not a same-name conflict).
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         throw new GraphQLError(`A memory with URN "${memoryUrn}" already exists.`, {
           extensions: { code: 'MEMORY_URN_CONFLICT', urn: memoryUrn },

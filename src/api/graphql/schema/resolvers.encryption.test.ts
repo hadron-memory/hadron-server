@@ -571,8 +571,10 @@ describe('linkMemoryToUser with encryption', () => {
     // registered user (the anon scratch row was class='app', userId NULL).
     expect(mem?.class).toBe('private');
     expect(mem?.userId).toBeTruthy();
-    // #352: anon→user promotion writes the canonical `app-user` marker.
-    expect(mem?.urn).toContain(':app-user:');
+    // #697 Stage 3: anon→user promotion re-mints a FLAT single-atom v2 urn; the
+    // app-user scope lives in the columns, not the URN path (was `:app-user:`).
+    expect(mem?.urn?.split(':')).toHaveLength(2);
+    expect(mem?.urn).not.toContain(':anon:');
 
     // The node content AND abstract are now ciphertext (spec 031 — the
     // promotion must not leave the abstract plaintext).

@@ -83,7 +83,9 @@ describe('createMemoryInApp', () => {
     expect(mem.userId).toBeNull();
     expect(mem.userMemoryOfAgentId).toBeNull();
     expect(mem.visibility).toBeNull();
-    expect(mem.urn).toBe(`${app.urn}:coach:app-mem:shared-runbook`);
+    // #697 Stage 3: flat single-atom v2 urn `<org>:<slug>` (scope lives in the
+    // columns, not the URN path); root is the owning org.
+    expect(mem.urn).toBe(`${org.urn}:shared-runbook`);
     // Root node exists.
     expect(await db.node.count({ where: { memoryId: mem.id } })).toBe(1);
   });
@@ -100,8 +102,10 @@ describe('createMemoryInApp', () => {
     expect(mem.userMemoryOfAgentId).toBe(agent.id);
     expect(mem.visibility).toBeNull();
     // Per-owner opaque URN (not name-derived) so two members can name their own
-    // memories the same without colliding / leaking names.
-    expect(mem.urn).toMatch(/^org-a:coach:app-user:/);
+    // memories the same without colliding / leaking names. #697 Stage 3: the v2
+    // form is a FLAT single-atom `<org>:<opaqueId>` (was `<org>:coach:app-user:…`).
+    expect(mem.urn.split(':')).toHaveLength(2);
+    expect(mem.urn.startsWith(`${org.urn}:`)).toBe(true);
   });
 
   it('creates a private memory for an App member', async () => {
@@ -128,7 +132,8 @@ describe('createMemoryInApp', () => {
     expect(mem.userId).toBeNull();
     expect(mem.userMemoryOfAgentId).toBeNull();
     expect(mem.visibility).toBe('ORGANIZATION');
-    expect(mem.urn).toBe(`${app.urn}:coach:app-mem:app-docs`);
+    // #697 Stage 3: flat single-atom v2 urn `<org>:<slug>`.
+    expect(mem.urn).toBe(`${org.urn}:app-docs`);
     // Linked to the App's agent so it is readable via the App surface.
     const link = await db.agentMemoryItem.findUnique({
       where: { agentId_memoryId: { agentId: agent.id, memoryId: mem.id } },
@@ -214,14 +219,16 @@ describe('createMemoryInApp', () => {
     ).rejects.toThrow('APP_UNINSTALLED');
   });
 
-  it('rejects a duplicate URN as MEMORY_URN_CONFLICT', async () => {
+  it('deterministically aliases a duplicate app-mem name instead of conflicting (#697 Stage 3)', async () => {
+    // Pre-v2, a duplicate app-mem name threw MEMORY_URN_CONFLICT (the URN was
+    // namespaced under app+agent). v2 flattens app-mem to `<org>:<slug>`, so a
+    // live collision now DETERMINISTICALLY aliases with the agent slug via
+    // mintLocalSlug — two same-named app-mems coexist, distinguished by columns.
     const args = { appRef: app.id, agentRef: agent.id, memoryClass: 'app', name: 'Dup' };
-    await createMemoryInApp(null, args, asUser(adminUser.id));
-    await expect(
-      createMemoryInApp(null, { ...args }, asUser(adminUser.id)).catch((e) => {
-        throw new Error(code(e));
-      }),
-    ).rejects.toThrow('MEMORY_URN_CONFLICT');
+    const first = await createMemoryInApp(null, args, asUser(adminUser.id));
+    expect(first.urn).toBe(`${org.urn}:dup`);
+    const second = await createMemoryInApp(null, { ...args }, asUser(adminUser.id));
+    expect(second.urn).toBe(`${org.urn}:dup-coach`);
   });
 
   it('rejects a personal create with no authenticated user', async () => {

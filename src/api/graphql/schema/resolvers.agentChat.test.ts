@@ -296,9 +296,10 @@ describe('startChat (JWT user)', () => {
     });
     expect(mem).not.toBeNull();
     expect(mem?.visibility).toBeNull();
-    // #352: per-user runtime memories now store the canonical `app-user`
-    // role marker (was the non-canonical `user`).
-    expect(mem?.urn).toContain(':app-user:');
+    // #697 Stage 3: per-user runtime memories store a FLAT single-atom v2 urn
+    // (`<org>:<opaqueId>`); the app-user scope lives in the columns, not the URN.
+    expect(mem?.urn?.split(':')).toHaveLength(2);
+    expect(mem?.urn).not.toContain(':app-user:');
 
     // Verify the chat node exists inside that memory
     const chatNode = await db.node.findFirst({

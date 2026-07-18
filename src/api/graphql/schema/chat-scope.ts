@@ -149,6 +149,17 @@ export async function findOrCreateAppClassMemory(args: {
       `findOrCreateAppClassMemory: agentUrn "${agentUrn}" has no slug segment after the org prefix.`,
     );
   }
+  // #697 Stage 3 DEFERRED (the only compound-memory creation site not flipped to
+  // a flat single-atom v2 urn): this find-or-create keys on a DETERMINISTIC urn,
+  // which is fundamentally at odds with mintLocalSlug's order-dependent collision
+  // aliasing — a `<org>:shared` / `<org>:shared-<agent>` alias can't be recomputed
+  // for lookup. A deterministic single-atom encoding (`<app>-<agent>-shared`)
+  // would also diverge from Task A's terminal-atom collapse of existing shared
+  // rows (`<org>:shared`), orphaning them. Needs a design decision (deterministic
+  // composite slug + a backfill reconciliation, OR re-key find-or-create on the
+  // (appId, agent, class) columns so the urn can be minted freely). Until then
+  // this keeps the v1 compound form — node URNs in a `:shared` memory don't
+  // round-trip through splitNodeUrn (same known caveat as pre-flip rows).
   const urn = `${appUrn}:${agentSlug}:shared`;
 
   const existing = await db.memory.findUnique({
