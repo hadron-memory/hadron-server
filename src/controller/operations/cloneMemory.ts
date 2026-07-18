@@ -171,6 +171,9 @@ export async function cloneMemoryGraph(
           forceFixedSize: source.forceFixedSize,
           // #621 — clone inherits the source's revision cap.
           maxRevCount: source.maxRevCount,
+          // #725 — carry the property schema so the clone's copied objectType
+          // nodes stay governed (and MCP discovery keeps reporting the contract).
+          schema: jsonOrDbNull(source.schema),
           // Git-sync config intentionally NOT copied — see module doc.
           // userId only for personal/private (CHECK-enforced both ways).
           userId: args.ownerUserId,

@@ -10,6 +10,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { generateId } from '../../../lib/id.js';
+import { cloneMemoryGraph } from '../../../controller/operations/cloneMemory.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -76,6 +77,24 @@ describe('Memory.schema — write + validation', () => {
     });
     const row = await db.memory.findUniqueOrThrow({ where: { id: memId } });
     expect((row.schema as any).objectTypes.competitor).toBeDefined();
+  });
+});
+
+describe('Memory.schema — carried through a memory clone', () => {
+  it('cloneMemoryGraph copies the schema to the clone', async () => {
+    await updateMemory({ id: memId, schema: validSchema });
+    const orgId = (await db.memory.findUniqueOrThrow({ where: { id: memId } })).organizationId!;
+    const { memoryId: cloneId } = await cloneMemoryGraph(db, {
+      sourceMemoryId: memId,
+      name: 'intel-copy',
+      newUrn: 'ms-org:intel-copy',
+      targetOrganizationId: orgId,
+      ownerUserId: null,
+      groupOwnerUserId: null,
+      actorId: adminId,
+    });
+    const clone = await db.memory.findUniqueOrThrow({ where: { id: cloneId } });
+    expect((clone.schema as any).objectTypes.competitor.fields.name).toEqual({ type: 'text', required: true });
   });
 });
 
