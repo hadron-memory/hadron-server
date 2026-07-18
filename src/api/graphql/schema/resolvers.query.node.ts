@@ -502,6 +502,7 @@ export const nodeQueries = {
           memoryIds?: string[] | null;
           memoryClasses?: string[] | null;
           nodeType?: string | null;
+          objectType?: string | null;
           tags?: string[] | null;
           isRunnable?: boolean | null;
           locPrefix?: string | null;
@@ -651,6 +652,7 @@ export const nodeQueries = {
         // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
         // to the memory-class exclusion above).
         ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
+        ...(f.objectType ? { objectType: f.objectType } : {}),
         ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
         ...(f.tags?.length ? tagsFilter(f.tags) : {}),
         ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
@@ -675,6 +677,7 @@ export const nodeQueries = {
       // (the Prisma form) but adds the JSONB `where`, which Prisma can't express.
       const sqlFilter: NodeSqlFilter = {
         nodeType: f.nodeType ?? null,
+        objectType: f.objectType ?? null,
         isRunnable: f.isRunnable ?? null,
         tags: f.tags ?? null,
         locPrefix: f.locPrefix ?? null,
@@ -741,7 +744,7 @@ export const nodeQueries = {
       // A selective structured filter can drop many ranked candidates, so over-fetch
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
-        f.nodeType || f.isRunnable != null || f.tags?.length || f.locPrefix ||
+        f.nodeType || f.objectType || f.isRunnable != null || f.tags?.length || f.locPrefix ||
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where
       );
       const page = off + finalLimit;
@@ -1316,6 +1319,7 @@ export const nodeQueries = {
           memoryIds?: string[] | null;
           memoryClasses?: string[] | null;
           nodeType?: string | null;
+          objectType?: string | null;
           tags?: string[] | null;
           isRunnable?: boolean | null;
           locPrefix?: string | null;
@@ -1395,6 +1399,7 @@ export const nodeQueries = {
           memoryId: { in: memoryIds },
           ...(f.includeDeleted ? {} : { deletedAt: null }),
           ...(f.nodeType ? { nodeType: f.nodeType } : {}),
+          ...(f.objectType ? { objectType: f.objectType } : {}),
           ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
           ...(f.tags?.length ? tagsFilter(f.tags) : {}),
           ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),

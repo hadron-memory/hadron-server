@@ -33,6 +33,8 @@ export type LexicalSort = 'relevance' | 'loc' | 'seq' | 'updatedAt';
  */
 export interface NodeSqlFilter {
   nodeType?: string | null;
+  /** #725 — collection discriminator facet (which domain object; e.g. "competitor"). */
+  objectType?: string | null;
   isRunnable?: boolean | null;
   tags?: string[] | null;
   locPrefix?: string | null;

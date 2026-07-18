@@ -165,6 +165,8 @@ export const typeDefs = `#graphql
     "Restrict by memory class. SYSTEM is excluded by default; passing this (or naming a system memory in memoryIds) overrides that."
     memoryClasses: [MemoryClass!]
     nodeType: String
+    "#725 — collection facet: only nodes whose objectType equals this (e.g. \\"competitor\\")."
+    objectType: String
     tags: [String!]
     isRunnable: Boolean
     locPrefix: String
@@ -469,6 +471,8 @@ export const typeDefs = `#graphql
     id: ID!
     memoryId: String!
     nodeType: String!
+    "#725 — collection discriminator (which domain object this node is, e.g. \\"competitor\\"). NULL for an ordinary node."
+    objectType: String
     loc: String!
     "Fully-qualified node URN (hrn:node:<org>::<memory>::<loc>), composed server-side from the node's memory URN + loc (#481). Carried by every Node-returning surface (findNodes, node, appNodes, nodeBatch, mutation returns)."
     urn: String!
@@ -1930,6 +1934,8 @@ export const typeDefs = `#graphql
     """
     memoryId: String!
     nodeType: String
+    "#725 — collection discriminator (e.g. \\"competitor\\" / \\"insight\\"). NULL for an ordinary node."
+    objectType: String
     "Whether this node can be run as a task by hadron_run_task (cor:api:060)."
     isRunnable: Boolean
     loc: String!
@@ -1976,6 +1982,8 @@ export const typeDefs = `#graphql
     loc: String!
     name: String!
     nodeType: String
+    "#725 — collection discriminator (e.g. \\"competitor\\" / \\"insight\\"). NULL for an ordinary node."
+    objectType: String
     "Whether this node can be run as a task by hadron_run_task (cor:api:060)."
     isRunnable: Boolean
     alias: String
@@ -2014,6 +2022,8 @@ export const typeDefs = `#graphql
     "Omit to preserve (D4)."
     name: String
     nodeType: String
+    "#725 — collection discriminator (e.g. \\"competitor\\"). Omit to preserve; null to clear."
+    objectType: String
     "Whether this node can be run as a task by hadron_run_task (cor:api:060). Omit to preserve."
     isRunnable: Boolean
     alias: String
