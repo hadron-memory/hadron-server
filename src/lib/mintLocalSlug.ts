@@ -25,10 +25,14 @@
  * testable, and every callsite runs it inside its own transaction.
  */
 
-import { deriveSlugFromName } from './urn.js';
+import { deriveSlugFromName, MAX_ATOM_LEN } from './urn.js';
 
-/** URN-atom cap (spec cor:urn:010:01). Shared with the handle generator. */
-const MAX_SLUG_LEN = 64;
+/**
+ * URN-atom cap (spec `cor:urn:010:01`, FR-017). Sourced from the grammar lib
+ * (`MAX_ATOM_LEN`) — the single source of truth — rather than re-typing `64`
+ * (#715), so the minter can never drift from the parser's length check.
+ */
+const MAX_SLUG_LEN = MAX_ATOM_LEN;
 
 /**
  * Longest author-derived disambiguator we splice in, so the stem always keeps

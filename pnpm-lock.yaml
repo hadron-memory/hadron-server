@@ -36,8 +36,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       '@hadron-memory/urn-lib-js':
-        specifier: 0.0.9
-        version: 0.0.9
+        specifier: 0.0.10
+        version: 0.0.10
       '@modelcontextprotocol/sdk':
         specifier: ^1.27.1
         version: 1.27.1(zod@4.3.6)
@@ -716,8 +716,8 @@ packages:
   '@hadron-memory/access-control@0.3.0':
     resolution: {integrity: sha512-rEMpsY2emeckMtrFpj9uPzJQgApnDHF+pBrNczrGmI6GYo6roahYGvPxtohtSuQzi9MSQXP3Pjnzy71WZrDzVw==}
 
-  '@hadron-memory/urn-lib-js@0.0.9':
-    resolution: {integrity: sha512-RsfOSj3r2FVOhexvM9Gi2h2iA8xewrHNrvJoq+2L8AnQWwtIvv1kGSvSP/82bBrnYCVtbtGVeHYTAd3w4P3Vrg==}
+  '@hadron-memory/urn-lib-js@0.0.10':
+    resolution: {integrity: sha512-sS5KkqI62G/EzJYlziM5e1+SW+seXe4Cdm9NecEZBYnPcxZucCfBbqTa8c7PcEHFCPzsmx3GQVu0yUlG05a3oQ==}
 
   '@hono/node-server@1.19.11':
     resolution: {integrity: sha512-dr8/3zEaB+p0D2n/IUrlPF1HZm586qgJNXK1a9fhg/PzdtkK7Ksd5l312tJX2yBuALqDYBlG20QEbayqPyxn+g==}
@@ -3680,7 +3680,7 @@ snapshots:
 
   '@hadron-memory/access-control@0.3.0': {}
 
-  '@hadron-memory/urn-lib-js@0.0.9': {}
+  '@hadron-memory/urn-lib-js@0.0.10': {}
 
   '@hono/node-server@1.19.11(hono@4.12.8)':
     dependencies:
