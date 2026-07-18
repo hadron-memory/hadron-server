@@ -52,7 +52,7 @@ describe('mergeUsers — owner-namespaced URN re-own (#695)', () => {
     expect(sys.ownerUserId).toBe(target.id);
   });
 
-  it('records the pre-merge URN in legacyUrn so old @source references still resolve (#697)', async () => {
+  it('records the pre-merge URN in legacyUrn so the pre-merge reference still resolves (#697)', async () => {
     const agent = await resolvers.Mutation.createAgent({}, { name: 'Notes' }, ctxFor(source.id));
     expect(agent.urn).toBe('merge-source:notes');
 
@@ -60,9 +60,11 @@ describe('mergeUsers — owner-namespaced URN re-own (#695)', () => {
 
     const moved = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
     expect(moved.urn).toBe('merge-target:notes');
-    // The alias map now carries the pre-merge URN…
+    // The alias map carries the (bare v2) pre-merge URN…
     expect(moved.legacyUrn).toBe('merge-source:notes');
-    // …so an old owner-rooted reference redirects to the re-owned row.
+    // …so a reference to the source's pre-merge root redirects to the re-owned
+    // row. (A row born bare has no `@`-form alias; the legacy `@handle:slug`
+    // input resolves only for Task-A-migrated rows, whose legacyUrn is `@…`.)
     expect(await resolveAgentRef(db, 'hrn:agent:merge-source:notes')).toEqual({ id: agent.id });
   });
 
