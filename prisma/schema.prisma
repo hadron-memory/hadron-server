@@ -649,6 +649,15 @@ model Memory {
   /// (h-list-memories renders it as a `data:` line). The MCP surface has
   /// no memory-mutation tool, so writes stay GraphQL-only. NULL when unset.
   data                 Json?
+  /// #725 — opt-in per-memory PROPERTY SCHEMA (structured storage): the
+  /// collections (object types) this memory declares and each one's typed
+  /// fields. A dedicated column (NOT nested in `data`) so a schema'd memory is
+  /// visible at a glance. Shape + well-formedness validated by
+  /// src/lib/memorySchema.ts; authored via updateMemory (GraphQL/portal),
+  /// read-only over MCP for discovery. NULL ⇒ no schema (unstructured). Node
+  /// `properties`/`objectType` are validated against it in the enforcement
+  /// phase (a later PR) — free-form until then.
+  schema               Json?
   /// Classification tags for search and filtering.
   tags                 String[]
   /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").
