@@ -123,16 +123,25 @@ export async function mergeMemoryGraph(
   const withEdges = fields.has('EDGES');
 
   // #725/#737 — nodes landing in a schema-governed target (relocated OR folded)
-  // must satisfy the target schema. Fetch it once; assertConforms no-ops for an
+  // must satisfy the target schema. A merge is a LONG batched op; the target's
+  // schema can be tightened concurrently (an admin hardening the memory), so a
+  // single snapshot taken at the top goes stale for later batches and would let
+  // a non-conforming node fold in. Re-read the schema per relocate-page (Phase 1)
+  // and per fold-batch INSIDE its transaction (Phase 2), so enforcement always
+  // sees the schema current at write time. assertConformsAgainst no-ops for an
   // unschema'd target or a non-collection node.
-  const targetSchema = (
-    await db.memory.findUnique({ where: { id: targetMemoryId }, select: { schema: true } })
-  )?.schema as unknown as MemorySchema | null;
-  const assertConforms = (objectType: string | null, properties: unknown): void => {
+  const fetchTargetSchema = async (client: Pick<typeof db, 'memory'>): Promise<MemorySchema | null> =>
+    ((await client.memory.findUnique({ where: { id: targetMemoryId }, select: { schema: true } }))
+      ?.schema as unknown as MemorySchema | null);
+  const assertConformsAgainst = (
+    schema: MemorySchema | null,
+    objectType: string | null,
+    properties: unknown,
+  ): void => {
     const norm = normalizeObjectType(objectType);
     if (norm == null) return;
     try {
-      validateNodeAgainstSchema(targetSchema, norm, (properties ?? null) as Record<string, unknown> | null);
+      validateNodeAgainstSchema(schema, norm, (properties ?? null) as Record<string, unknown> | null);
     } catch (e) {
       if (e instanceof NodeSchemaViolation) {
         throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -183,13 +192,15 @@ export async function mergeMemoryGraph(
     if (relocateIds.length > 0) {
       // Enforce the target schema on the collection members relocating in (only
       // when the target IS schema'd — page rows are id/loc-only, so fetch the
-      // typed subset's discriminator/properties for validation).
-      if (targetSchema != null) {
+      // typed subset's discriminator/properties for validation). Re-read the
+      // schema here so a mid-merge tightening is honored (not the top-of-fn one).
+      const relocateSchema = await fetchTargetSchema(db);
+      if (relocateSchema != null) {
         const typed = await db.node.findMany({
           where: { id: { in: relocateIds }, objectType: { not: null } },
           select: { objectType: true, properties: true },
         });
-        for (const t of typed) assertConforms(t.objectType, t.properties);
+        for (const t of typed) assertConformsAgainst(relocateSchema, t.objectType, t.properties);
       }
       const relocate = await db.node.updateMany({
         where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
@@ -216,6 +227,11 @@ export async function mergeMemoryGraph(
     const batch = await db.$transaction(async (tx) => {
       let moved = 0;
       let dropped = 0;
+
+      // Read the target schema INSIDE the tx so the fold validates against the
+      // schema current at fold time (a tightening committed between batches is
+      // honored), consistent with this batch's other reads/writes.
+      const batchSchema = await fetchTargetSchema(tx);
 
       // Read the batch's rows INSIDE the transaction, constrained to their
       // expected memory + live state. Reading here (rather than before the tx)
@@ -262,7 +278,7 @@ export async function mergeMemoryGraph(
         );
         if (Object.keys(merged.changed).length > 0) {
           // #725/#737 — the folded target must still satisfy its collection.
-          assertConforms(tgt.objectType, 'properties' in merged.changed ? merged.changed.properties : tgt.properties);
+          assertConformsAgainst(batchSchema, tgt.objectType, 'properties' in merged.changed ? merged.changed.properties : tgt.properties);
           const writeData: Record<string, unknown> = { ...merged.changed, updatedBy: actorId };
           if (merged.abstractChanged) {
             writeData.abstractOriginHash = computeContentHash(

@@ -18,6 +18,7 @@ import { emitEntityUrnV2, emitNodeUrnV2, emitEdgeUrnV2 } from '../lib/urnEmit.js
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
+import { normalizeObjectType } from '../lib/enforceNodeSchema.js';
 import type { MemorySchema } from '../lib/memorySchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
@@ -4353,11 +4354,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // #725 — schema conformance: a collection member must satisfy its
         // memory's declared schema. Reports (never mutates) — this is the audit
         // backstop for pre-existing / non-write-seam non-conformance.
-        if (conformanceSchema != null && node.objectType != null) {
+        //
+        // normalizeObjectType so the audit matches write-seam semantics: a
+        // legacy blank/whitespace objectType is "no collection" (an ordinary
+        // node), not an undeclared collection — validating it raw would emit a
+        // false [schema] violation. Skip soft-deleted tombstones; a
+        // non-conforming row that's already deleted isn't actionable (the other
+        // checks retain their historical include-tombstones scope on purpose).
+        const auditObjectType = normalizeObjectType(node.objectType);
+        if (conformanceSchema != null && auditObjectType != null && node.deletedAt == null) {
           try {
             validateNodeAgainstSchema(
               conformanceSchema,
-              node.objectType,
+              auditObjectType,
               (node.properties ?? null) as Record<string, unknown> | null,
             );
           } catch (e) {

@@ -57,6 +57,18 @@ describe('hadron_validate — property-schema conformance audit (#725)', () => {
     // The conforming 'ok' node is never schema-flagged.
     expect(text).not.toMatch(/\[schema\][^\n]*ok\b/);
   });
+
+  it('does not schema-flag soft-deleted rows or legacy blank objectTypes', async () => {
+    // A non-conforming row that is already soft-deleted is not actionable.
+    await db.node.create({ data: { id: generateId(), memoryId: memId, loc: 'tomb', name: 'Tomb', objectType: 'competitor', properties: {}, deletedAt: new Date() } as any });
+    // A legacy blank/whitespace objectType means "no collection" (an ordinary
+    // node), matching write-seam normalizeObjectType — NOT an undeclared collection.
+    await db.node.create({ data: { id: generateId(), memoryId: memId, loc: 'blank', name: 'Blank', objectType: '   ', properties: {} } as any });
+
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_validate', { memoryUrn: memUrn });
+    expect(text).not.toMatch(/\[schema\][^\n]*tomb\b/);
+    expect(text).not.toMatch(/\[schema\][^\n]*blank\b/);
+  });
 });
 
 describe('restoreNodeRevision — enforces the current schema (#737)', () => {
