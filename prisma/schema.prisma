@@ -603,11 +603,13 @@ model OrgMember {
 model Memory {
   id                  String  @id @default(cuid())
   organizationId      String? @map("organization_id")
-  /// spec 047 (Phase 2b): the user TENANT owner of a user-owned Memory
-  /// (owner-namespace `@<handle>` URN). DISTINCT from `userId` (the
-  /// personal/private strict-owner). Additive + unused for now — nullable, no
-  /// XOR; the exactly-one-of `organizationId`/`ownerUserId` invariant, the
-  /// nullable-org migration, and the authz branches land together in Phase 2c.
+  /// The user TENANT owner of a user-owned Memory (rooted on the bare
+  /// `<handle>` — #697 v2, no `@` sigil). DISTINCT from `userId` (the
+  /// personal/private strict-owner). The exactly-one-of
+  /// `organizationId`/`ownerUserId` XOR is ENFORCED — `chk_memory_owner_xor` in
+  /// post-push.sql: `(organization_id IS NULL) <> (owner_user_id IS NULL)` — so
+  /// exactly one is non-null (the URN backfill dispatches owner KIND off it;
+  /// don't add a redundant ambiguity branch).
   ownerUserId         String? @map("owner_user_id")
   ownerUser           User?   @relation("MemoryTenantOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   // 008-agent-installation (2026-05-02), relaxed by 034-memory-class-access and
@@ -764,8 +766,9 @@ model Memory {
   subscriptions            MemorySubscription[]
   agentItems               AgentMemoryItem[]
   licenses                 MemoryLicense[]
-  /// Spec 021 FR-032 online URN-shape migration gate (transient). Null =
-  /// pre-canonical row; set = canonical-form row. Dropped post-migration.
+  /// Online URN-shape migration gate (spec 021 FR-032, repurposed for the #697
+  /// v1→v2 emission flip). Null = pre-normalization row; set = row normalized
+  /// onto the flat v2 form (`<root>:<slug>`, single colon). Transient.
   /// TODO(spec-021-cleanup): drop once the FR-032 migration completes.
   urnNormalizedAt          DateTime?            @map("urn_normalized_at")
   /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
@@ -1350,9 +1353,10 @@ model UsageEvent {
 model Agent {
   id                   String          @id @default(cuid())
   organizationId       String?         @map("organization_id")
-  /// spec 047 (Phase 2b): user owner of a user-owned Agent (owner-namespace
-  /// `@<handle>` URN). Additive + unused — nullable, no XOR; the org-XOR-owner
-  /// invariant + nullable-org + creation land in Phase 2c.
+  /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
+  /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
+  /// post-push.sql: `(organization_id IS NULL) <> (owner_user_id IS NULL)` — so
+  /// exactly one of `organizationId`/`ownerUserId` is non-null.
   ownerUserId          String?         @map("owner_user_id")
   ownerUser            User?           @relation("AgentOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   /// Globally unique identifier (e.g. "micromentor.org:juno");
@@ -1423,8 +1427,9 @@ model Agent {
   deletedAt            DateTime?       @map("deleted_at")
   deletedBy            String?         @map("deleted_by")
 
-  /// Spec 021 FR-032 online URN-shape migration gate (transient). Null =
-  /// pre-canonical row; set = canonical-form row. Dropped post-migration.
+  /// Online URN-shape migration gate (spec 021 FR-032, repurposed for the #697
+  /// v1→v2 emission flip). Null = pre-normalization row; set = row normalized
+  /// onto the flat v2 form (`<root>:<slug>`, single colon). Transient.
   /// TODO(spec-021-cleanup): drop once the FR-032 migration completes.
   urnNormalizedAt          DateTime? @map("urn_normalized_at")
   /// Spec 021 sentinel for data-defect rows during the FR-032 migration.
@@ -2446,9 +2451,10 @@ model App {
   /// pattern in PR #124.
   urn                   String
   organizationId        String?              @map("organization_id")
-  /// spec 047 (Phase 2b): user owner of a user-owned App (owner-namespace
-  /// `@<handle>` URN). Additive + unused — nullable, no XOR; the org-XOR-owner
-  /// invariant + nullable-org + creation land in Phase 2c.
+  /// User owner of a user-owned App (rooted on the bare `<handle>` — #697 v2, no
+  /// `@` sigil). The org/owner XOR is ENFORCED — `chk_app_owner_xor` in
+  /// post-push.sql: `(organization_id IS NULL) <> (owner_user_id IS NULL)` — so
+  /// exactly one of `organizationId`/`ownerUserId` is non-null.
   ownerUserId           String?              @map("owner_user_id")
   ownerUser             User?                @relation("AppOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
@@ -2504,10 +2510,10 @@ model App {
   /// `apps_urn_active_uniq WHERE uninstalled_at IS NULL` (declared in the
   /// 021 migration; supersedes Prisma's @unique on urn at the DB level).
   uninstalledAt            DateTime? @map("uninstalled_at")
-  /// Spec 021 FR-032 online URN-shape migration gate (transient). Null =
-  /// pre-canonical row (read through the legacy parser); set = canonical-
-  /// form row (read through the new parser). Dropped once 100% of rows
-  /// are migrated.
+  /// Online URN-shape migration gate (spec 021 FR-032, repurposed for the #697
+  /// v1→v2 emission flip; transient). Null = pre-normalization row (read
+  /// through the legacy parser); set = row normalized onto the flat v2 form
+  /// (`<root>:<slug>`, single colon). Dropped once 100% of rows are migrated.
   /// TODO(spec-021-cleanup): drop this column once the FR-032 migration
   /// completes — tracked under the spec-021 cleanup follow-up. The
   /// `apps_urn_migration_pending_idx` partial index goes with it.
