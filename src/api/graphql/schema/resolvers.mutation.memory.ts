@@ -68,6 +68,7 @@ import {
 } from '../../../lib/urn.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
+import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 import {
@@ -491,6 +492,7 @@ export const memoryMutations = {
         chunkOverlap,
         forceFixedSize,
         maxRevCount,
+        schema,
       }: {
         id: string; name?: string; urn?: string; organizationId?: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
@@ -505,11 +507,31 @@ export const memoryMutations = {
         chunkOverlap?: number | null;
         forceFixedSize?: boolean;
         maxRevCount?: number | null;
+        schema?: Record<string, unknown> | null;
       },
       ctx: Context,
     ) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+      // #725 — validate the property schema for well-formedness BEFORE it is
+      // stored: a malformed schema is BAD_USER_INPUT, never a persisted garbage
+      // blob. `null` clears it; the stored value is the normalized schema (so
+      // what's persisted is exactly the contract).
+      let schemaValue: InputJsonValue | null | undefined = undefined;
+      if (schema !== undefined) {
+        if (schema === null) {
+          schemaValue = null;
+        } else {
+          try {
+            schemaValue = validateMemorySchema(schema) as unknown as InputJsonValue;
+          } catch (e) {
+            if (e instanceof MemorySchemaError) {
+              throw new GraphQLError(`updateMemory.schema: ${e.message}`, { extensions: { code: 'BAD_USER_INPUT' } });
+            }
+            throw e;
+          }
+        }
+      }
       // If transferring to a new org, require ADMIN on the target org too
       if (newOrgId && newOrgId !== memory.organizationId) {
         await requireOrgRole(ctx, newOrgId, 'ADMIN');
@@ -625,6 +647,7 @@ export const memoryMutations = {
           // untouched; explicit null CLEARS it (same contract as Node.data /
           // Edge.data — #263).
           ...(data !== undefined ? { data: data as InputJsonValue } : {}),
+          ...(schema !== undefined ? { schema: schemaValue as InputJsonValue } : {}),
           ...(tags !== undefined ? { tags } : {}),
           ...(license !== undefined ? { license } : {}),
           ...(category0 !== undefined ? { category0 } : {}),

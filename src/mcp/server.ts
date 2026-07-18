@@ -940,7 +940,7 @@ export function createMcpServerInstance(
       const memoryIds = [...levels.keys()];
       const memories = await db.memory.findMany({
         where: { id: { in: memoryIds } },
-        select: { id: true, urn: true, name: true, data: true, class: true },
+        select: { id: true, urn: true, name: true, data: true, schema: true, class: true },
       });
 
       // #339: the displayed level MUST equal what mutating ops enforce.
@@ -975,7 +975,12 @@ export function createMcpServerInstance(
         // createMemory / updateMemory). MCP also bypasses encryption (#206),
         // but `data` is plaintext-by-design metadata, so there's no
         // decrypt-parity gap to bridge here.
-        return m.data != null ? `${head}\n  data: ${JSON.stringify(m.data)}` : head;
+        // #725 — surface the property schema read-only for discovery (which
+        // collections + typed fields this memory declares), so an agent knows
+        // what objectType/where to query. Authoring stays GraphQL-only.
+        const dataLine = m.data != null ? `\n  data: ${JSON.stringify(m.data)}` : '';
+        const schemaLine = m.schema != null ? `\n  schema: ${JSON.stringify(m.schema)}` : '';
+        return `${head}${dataLine}${schemaLine}`;
       });
 
       return textResult(`${scope}\n\n${memories.length} accessible memories:\n\n${lines.join('\n')}`);
