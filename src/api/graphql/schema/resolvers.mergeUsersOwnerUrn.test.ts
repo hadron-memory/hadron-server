@@ -130,6 +130,21 @@ describe('mergeUsers — owner-namespaced URN re-own (#695)', () => {
     expect(after.entryNodeUrn).toBe('hrn:node:merge-target:notes-system:intro');
   });
 
+  it('rewrites a BARE (scheme-less) entry_node_urn too (verbatim-stored form, #726)', async () => {
+    const agent = await resolvers.Mutation.createAgent({}, { name: 'Notes' }, ctxFor(source.id));
+    await db.node.create({ data: { id: generateId(), memoryId: agent.systemMemoryId!, loc: 'intro', name: 'Intro' } });
+    const org = await db.organization.create({ data: { id: generateId(), name: 'sched-org', urn: `sched-org-${generateId()}` } });
+    const app = await db.app.create({ data: { id: generateId(), name: 'sched-app', urn: `${org.urn}:sched-app`, organizationId: org.id } });
+    const sched = await db.agentSchedule.create({
+      data: { id: generateId(), organizationId: org.id, appId: app.id, name: 'nightly-bare', runAt: new Date('2026-08-01T00:00:00Z'), entryNodeUrn: 'merge-source:notes-system:intro' },
+    });
+
+    await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
+
+    const after = await db.agentSchedule.findUniqueOrThrow({ where: { id: sched.id } });
+    expect(after.entryNodeUrn).toBe('merge-target:notes-system:intro');
+  });
+
   it('rewrites entry_node_urn to the RE-MINTED memory URN under a collision', async () => {
     const srcAgent = await resolvers.Mutation.createAgent({}, { name: 'Notes' }, ctxFor(source.id));
     await resolvers.Mutation.createAgent({}, { name: 'Notes' }, ctxFor(target.id)); // target owns merge-target:notes(-system)

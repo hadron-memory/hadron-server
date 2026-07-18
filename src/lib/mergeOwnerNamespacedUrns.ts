@@ -56,6 +56,12 @@ function slugOf(urn: string): string {
   return colon >= 0 ? urn.slice(colon + 1) : urn;
 }
 
+/** Escape POSIX-regex metacharacters in a dynamic URN atom (a slug may legally
+ *  contain `.`), keeping the `^`-anchored entry_node_urn rewrite precise. */
+function reEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Re-own and re-root the source user's owner-namespaced App / Agent / Memory
  * rows onto the target's handle, re-minting any slug that would collide with a
@@ -156,25 +162,26 @@ export async function mergeOwnerNamespacedUrns(
 
   // ── Durable node-URN references (spec 040) ─────────────────────────────────
   // AgentSchedule / AgentWebhook / WebFetchPollBinding store a fully-qualified
-  // `entry_node_urn`. Post-#697 these are emitted in the v2 flat form
-  // `hrn:node:<root>:<mem>:<loc…>` (single colon), so the memory URN sits right
-  // after `hrn:node:`. Prefix-swap each re-rooted memory's refs precisely (full
-  // old→new memory URN via a length-anchored `substr`, correct even when the
-  // slug was re-minted). A legacy v1-form ref (`@old::mem::loc`) is NOT rewritten
-  // here — it resolves through the re-rooted row's `legacyUrn` alias (#697), set
-  // above — so no v1 `::` boundary handling is needed.
+  // `entry_node_urn` VERBATIM (validated, not normalized — resolvers.appRun.ts),
+  // so it can be any accepted v2 node form: bare `<root>:<mem>:<loc…>` OR
+  // scheme-prefixed `hrn:node:`/`urn:node:<root>:<mem>:…`. The re-rooted memory
+  // URN sits at the front (after the optional prefix). Swap the FULL old→new
+  // memory URN (correct even when the slug was re-minted) via a `^`-anchored
+  // regex, so it can't touch a matching substring inside the loc. A legacy
+  // v1-form ref (`@old::mem::loc`) is NOT rewritten — it resolves through the
+  // re-rooted row's `legacyUrn` alias (#697), set above.
   for (const [oldUrn, newUrn] of memRemap) {
     if (oldUrn === newUrn) continue;
-    const oldPrefix = `hrn:node:${oldUrn}:`;
-    const newPrefix = `hrn:node:${newUrn}:`;
+    const pattern = `^((hrn|urn):node:)?${reEscape(oldUrn)}:`;
+    const replacement = `\\1${newUrn}:`;
     await tx.$executeRaw`
-      UPDATE agent_schedules SET entry_node_urn = ${newPrefix} || substr(entry_node_urn, length(${oldPrefix}) + 1)
-      WHERE starts_with(entry_node_urn, ${oldPrefix})`;
+      UPDATE agent_schedules SET entry_node_urn = regexp_replace(entry_node_urn, ${pattern}, ${replacement})
+      WHERE entry_node_urn ~ ${pattern}`;
     await tx.$executeRaw`
-      UPDATE agent_webhooks SET entry_node_urn = ${newPrefix} || substr(entry_node_urn, length(${oldPrefix}) + 1)
-      WHERE starts_with(entry_node_urn, ${oldPrefix})`;
+      UPDATE agent_webhooks SET entry_node_urn = regexp_replace(entry_node_urn, ${pattern}, ${replacement})
+      WHERE entry_node_urn ~ ${pattern}`;
     await tx.$executeRaw`
-      UPDATE webfetch_poll_bindings SET entry_node_urn = ${newPrefix} || substr(entry_node_urn, length(${oldPrefix}) + 1)
-      WHERE starts_with(entry_node_urn, ${oldPrefix})`;
+      UPDATE webfetch_poll_bindings SET entry_node_urn = regexp_replace(entry_node_urn, ${pattern}, ${replacement})
+      WHERE entry_node_urn ~ ${pattern}`;
   }
 }

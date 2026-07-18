@@ -98,31 +98,35 @@ export async function renameOwnerNamespacedUrns(
       AND NOT starts_with(urn, ${newColon})
   `;
 
-  // Durable node-URN references (spec 040). Post-#697 an entry_node_urn is the
-  // v2 flat form `hrn:node:<handle>:<mem>:<loc…>`, so the owner handle is the
-  // ROOT atom right after `hrn:node:`. A rename never re-mints the memory slug
-  // (it fails closed on a live collision), so this is a pure ROOT swap:
-  // length-anchored prefix rewrite `hrn:node:<old>:` → `hrn:node:<new>:`, which
-  // can't touch a `<handle>` substring inside the loc. No owner_user_id column
-  // here, but the handle root uniquely identifies this owner's namespace.
-  // Skipped when the old handle isn't URN-legal (nothing was namespaced under it).
+  // Durable node-URN references (spec 040). `entry_node_urn` is stored VERBATIM
+  // (validated, not normalized — resolvers.appRun.ts), so it can be any accepted
+  // v2 node form: bare `<handle>:<mem>:<loc…>` OR scheme-prefixed
+  // `hrn:node:`/`urn:node:<handle>:…`. In every form the owner handle is the ROOT
+  // atom at the front (after the optional prefix). A rename never re-mints the
+  // memory slug (it fails closed on a live collision), so this is a pure ROOT
+  // swap — a `^`-anchored regex rewrite so it can't touch a `<handle>` substring
+  // inside the loc. A LEGACY `@<handle>::…` ref is deliberately NOT rewritten:
+  // post-v2 the target memory is bare-stored and resolves that ref through its
+  // `legacyUrn` alias (#697, set by the Task A backfill, unchanged by a rename),
+  // and rewriting it to `@<new>::` would break it. Skipped when the old handle
+  // isn't URN-legal (nothing was namespaced under it).
   if (oldHandle) {
-    const oldPrefix = `hrn:node:${oldHandle}:`;
-    const newPrefixNode = `hrn:node:${newHandle}:`;
+    const pattern = `^((hrn|urn):node:)?${reEscape(oldHandle)}:`;
+    const replacement = `\\1${newHandle}:`;
     await tx.$executeRaw`
-      UPDATE agent_schedules
-      SET entry_node_urn = ${newPrefixNode} || substr(entry_node_urn, length(${oldPrefix}) + 1)
-      WHERE starts_with(entry_node_urn, ${oldPrefix})
-    `;
+      UPDATE agent_schedules SET entry_node_urn = regexp_replace(entry_node_urn, ${pattern}, ${replacement})
+      WHERE entry_node_urn ~ ${pattern}`;
     await tx.$executeRaw`
-      UPDATE agent_webhooks
-      SET entry_node_urn = ${newPrefixNode} || substr(entry_node_urn, length(${oldPrefix}) + 1)
-      WHERE starts_with(entry_node_urn, ${oldPrefix})
-    `;
+      UPDATE agent_webhooks SET entry_node_urn = regexp_replace(entry_node_urn, ${pattern}, ${replacement})
+      WHERE entry_node_urn ~ ${pattern}`;
     await tx.$executeRaw`
-      UPDATE webfetch_poll_bindings
-      SET entry_node_urn = ${newPrefixNode} || substr(entry_node_urn, length(${oldPrefix}) + 1)
-      WHERE starts_with(entry_node_urn, ${oldPrefix})
-    `;
+      UPDATE webfetch_poll_bindings SET entry_node_urn = regexp_replace(entry_node_urn, ${pattern}, ${replacement})
+      WHERE entry_node_urn ~ ${pattern}`;
   }
+}
+
+/** Escape POSIX-regex metacharacters in a dynamic root/URN atom (a slug may
+ *  legally contain `.`). Keeps the `^`-anchored rewrites from mis-matching. */
+function reEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

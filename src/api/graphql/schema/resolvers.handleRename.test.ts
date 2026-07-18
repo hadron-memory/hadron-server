@@ -121,6 +121,29 @@ describe('updateMyProfile — handle rename URN propagation', () => {
     expect(after.entryNodeUrn).toBe('hrn:node:new-handle:my-agent-system:intro');
   });
 
+  it('rewrites a BARE (scheme-less) entry_node_urn too (verbatim-stored form)', async () => {
+    // entry_node_urn is persisted verbatim, so an accepted bare v2 node URN
+    // (no `hrn:node:` prefix) must also be re-rooted — else the trigger points
+    // at the stale root after the rename (no legacyUrn net on a rename). #726
+    // Codex P2.
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'sched-app-2', urn: `${(await db.organization.findUniqueOrThrow({ where: { id: orgId }, select: { urn: true } })).urn}:sched-app-2`, organizationId: orgId },
+    });
+    const sched = await db.agentSchedule.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        appId: app.id,
+        name: 'nightly-bare',
+        runAt: new Date('2026-08-01T00:00:00Z'),
+        entryNodeUrn: 'old-handle:my-agent-system:intro',
+      },
+    });
+    await resolvers.Mutation.updateMyProfile({}, { handle: 'new-handle' }, ctx({ userId, roles: ['READER'] }));
+    const after = await db.agentSchedule.findUniqueOrThrow({ where: { id: sched.id } });
+    expect(after.entryNodeUrn).toBe('new-handle:my-agent-system:intro');
+  });
+
   it('reclaims a SOFT-DELETED holder already parked in the target namespace', async () => {
     const c = ctx({ userId, roles: ['READER'] });
     const agent = await resolvers.Mutation.createAgent({}, { name: 'My Agent' }, c);
