@@ -3,11 +3,12 @@
 --
 -- Adds the value-cast guard functions the `where` predicate compiler emits
 -- (src/lib/retrieval/nodeWhere.ts), plus GIN indexes on the queryable JSONB
--- columns. number/datetime comparisons route BOTH sides — the LHS (stored JSON,
--- which may be junk) and the RHS (a validated caller bound) — through these
--- guards, so an unparseable value yields NULL and the row simply drops out
--- instead of raising a cast error. A search must never 500 on bad stored data
--- or a bad bound.
+-- columns. The stored-value (LHS) side of a number/datetime comparison always
+-- routes through a guard, so unparseable stored data yields NULL and the row
+-- drops out instead of raising a cast error — a search must never 500 on bad
+-- data. Bounds (the RHS) are validated in the compiler; the datetime bound is
+-- ALSO wrapped in hadron_safe_timestamptz as defense-in-depth, while the number
+-- bound is a validated JS number cast `::numeric`.
 --
 -- Mirrored in prisma/post-push.sql (dev/test DBs are `db push`-managed and never
 -- run migrations) — keep the two definitions in lockstep. Prisma models neither

@@ -268,9 +268,10 @@ CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
 -- ── #719 structured/faceted query: value-cast guard functions + JSONB GIN ────
 -- Mirrors prisma/migrations/20260718120000_where_query_helpers/migration.sql
 -- (keep in lockstep). The `where` predicate compiler (src/lib/retrieval/
--- nodeWhere.ts) routes number/datetime comparisons through these guards so an
--- unparseable stored value or bound yields NULL (row drops out) instead of
--- raising a cast error — a search must never 500 on bad data / bad input.
+-- nodeWhere.ts) routes the stored-value (LHS) side of number/datetime
+-- comparisons through these guards, so unparseable stored data yields NULL (row
+-- drops out) instead of raising a cast error. Bounds are validated in the
+-- compiler; the datetime bound is additionally guarded (defense-in-depth).
 -- Prisma models neither plpgsql functions nor GIN(jsonb_path_ops), so `db push`
 -- won't create these; this file does (idempotent CREATE OR REPLACE / IF NOT EXISTS).
 
