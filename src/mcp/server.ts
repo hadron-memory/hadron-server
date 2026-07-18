@@ -2654,10 +2654,12 @@ export function createMcpServerInstance(
         select: { isEncrypted: true, schema: true },
       });
       // #725 — enforce the property schema on the RESULTING node state (input
-      // overrides, else the existing value). Only a collection member on a
+      // overrides, else the existing value). An empty/whitespace objectType is
+      // normalized to null (no collection). Only a collection member on a
       // schema'd memory is checked; a violation is a tool error (text), not a crash.
-      const resultObjectType = objectType !== undefined ? objectType : (existing?.objectType ?? null);
-      if (resultObjectType != null && resultObjectType !== '') {
+      const resultObjectType =
+        objectType !== undefined ? (objectType.trim() || null) : (existing?.objectType ?? null);
+      if (resultObjectType != null) {
         const resultProps = (properties !== undefined ? properties : existing?.properties) as
           | Record<string, unknown>
           | null
@@ -2696,7 +2698,7 @@ export function createMcpServerInstance(
           loc,
           name,
           nodeType: nodeType ?? 'info',
-          objectType: objectType ?? null,
+          objectType: objectType?.trim() || null,
           isRunnable: isRunnable ?? null,
           description: description ?? null,
           abstract: storedAbstract,
@@ -2713,7 +2715,7 @@ export function createMcpServerInstance(
         update: {
           name,
           ...(nodeType ? { nodeType } : {}),
-          ...(objectType !== undefined ? { objectType } : {}),
+          ...(objectType !== undefined ? { objectType: objectType.trim() || null } : {}),
           ...(isRunnable !== undefined ? { isRunnable } : {}),
           description: description ?? null,
           abstract: storedAbstract,
@@ -2930,9 +2932,11 @@ export function createMcpServerInstance(
         where: { id: existing.memoryId },
         select: { isEncrypted: true, schema: true },
       });
-      // #725 — enforce the property schema on the RESULTING node state.
-      const updResultObjectType = objectType !== undefined ? objectType : (existing.objectType ?? null);
-      if (updResultObjectType != null && updResultObjectType !== '') {
+      // #725 — enforce the property schema on the RESULTING node state (empty
+      // objectType normalized to null).
+      const updResultObjectType =
+        objectType !== undefined ? (objectType.trim() || null) : (existing.objectType ?? null);
+      if (updResultObjectType != null) {
         const updResultProps = (properties !== undefined ? properties : existing.properties) as
           | Record<string, unknown>
           | null
@@ -3011,7 +3015,7 @@ export function createMcpServerInstance(
       const data: Record<string, unknown> = {};
       if (name !== undefined) data.name = name;
       if (nodeType !== undefined) data.nodeType = nodeType;
-      if (objectType !== undefined) data.objectType = objectType;
+      if (objectType !== undefined) data.objectType = objectType.trim() || null;
       if (isRunnable !== undefined) data.isRunnable = isRunnable;
       if (description !== undefined) data.description = description;
       if (normalizedAbstract !== undefined) data.abstract = normalizedAbstract;

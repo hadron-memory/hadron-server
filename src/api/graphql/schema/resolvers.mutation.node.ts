@@ -305,6 +305,40 @@ export async function writeNodeCore(
         }
       }
 
+      // #725 — an empty/whitespace objectType means "no collection" → normalize
+      // to null so it is stored as an ordinary node and can't bypass the
+      // declared-collection check as a non-null discriminator.
+      if (typeof input.objectType === 'string' && input.objectType.trim() === '') {
+        input.objectType = null;
+      }
+      // #725 — enforce the memory's property schema BEFORE any write side effect
+      // (incl. the revision snapshot below): validate the RESULTING node state
+      // (input overrides, else the existing value) so a partial update is judged
+      // on what it produces. Only a collection member on a schema'd memory is
+      // checked; ordinary nodes skip the schema fetch. `properties` is plaintext.
+      const resultObjectType =
+        input.objectType !== undefined ? input.objectType : (existing?.objectType ?? null);
+      if (resultObjectType != null) {
+        const memSchemaRow = await ctx.db.memory.findUnique({
+          where: { id: input.memoryId },
+          select: { schema: true },
+        });
+        const resultProps =
+          input.properties !== undefined ? input.properties : existing?.properties;
+        try {
+          validateNodeAgainstSchema(
+            memSchemaRow?.schema as unknown as MemorySchema | null,
+            resultObjectType,
+            (resultProps ?? null) as Record<string, unknown> | null,
+          );
+        } catch (e) {
+          if (e instanceof NodeSchemaViolation) {
+            throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
+          }
+          throw e;
+        }
+      }
+
       if (existing) {
         // Snapshot the PRE-edit state (#620: shared builder — editedBy holds
         // the user PK, the #88 `reason` rationale lands in revLabel, and
@@ -349,37 +383,6 @@ export async function writeNodeCore(
         ...nodeFields
       } = input;
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
-
-      // #725 — enforce the memory's property schema on write. Validate the
-      // RESULTING node state (input overrides, else the existing value) so a
-      // partial update is judged on what it produces. Only a collection member
-      // (objectType set) on a schema'd memory is checked — ordinary nodes skip
-      // the schema fetch entirely. `properties` is plaintext (not encrypted), so
-      // this is safe before the encryption block below.
-      const resultObjectType =
-        input.objectType !== undefined ? input.objectType : (existing?.objectType ?? null);
-      if (resultObjectType != null && resultObjectType !== '') {
-        const memSchemaRow = await ctx.db.memory.findUnique({
-          where: { id: input.memoryId },
-          select: { schema: true },
-        });
-        const resultProps = (input.properties !== undefined ? input.properties : existing?.properties) as
-          | Record<string, unknown>
-          | null
-          | undefined;
-        try {
-          validateNodeAgainstSchema(
-            memSchemaRow?.schema as unknown as MemorySchema | null,
-            resultObjectType,
-            resultProps ?? null,
-          );
-        } catch (e) {
-          if (e instanceof NodeSchemaViolation) {
-            throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
-          }
-          throw e;
-        }
-      }
 
       // If the target memory is encrypted, encrypt content and data before
       // writing. Throws SESSION_EXPIRED if no session key is cached.
@@ -2183,10 +2186,35 @@ export const nodeMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       await requireMemoryWriteAccess(ctx, resolvedMemoryId);
 
+      // #725 — this bulk path bypasses writeNodeCore, so enforce the memory's
+      // property schema on each imported node here too (a git-synced typed node
+      // must still satisfy its collection). Fetched once for the whole subtree.
+      const replaceMemSchema = (
+        await ctx.db.memory.findUnique({ where: { id: resolvedMemoryId }, select: { schema: true } })
+      )?.schema as unknown as MemorySchema | null;
+
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
         await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
 
         for (const input of nodes) {
+          // #725 — normalize an empty objectType to null, then enforce the schema.
+          if (typeof input.objectType === 'string' && input.objectType.trim() === '') {
+            input.objectType = null;
+          }
+          if (input.objectType != null) {
+            try {
+              validateNodeAgainstSchema(
+                replaceMemSchema,
+                input.objectType,
+                (input.properties ?? null) as Record<string, unknown> | null,
+              );
+            } catch (e) {
+              if (e instanceof NodeSchemaViolation) {
+                throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
+              }
+              throw e;
+            }
+          }
           // Strip non-column NodeInput fields (edges/reason) that Prisma
           // would reject, and pull out id/tags so they're set explicitly
           // (spreading input.id would otherwise override the generated id).

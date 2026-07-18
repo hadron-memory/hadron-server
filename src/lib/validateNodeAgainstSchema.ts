@@ -62,9 +62,11 @@ export function validateNodeAgainstSchema(
   properties: Record<string, unknown> | null | undefined,
 ): void {
   if (schema == null) return; // unschema'd memory → free-form
-  if (objectType == null || objectType === '') return; // not a collection member
+  if (objectType == null) return; // not a collection member (an empty string is normalized to null on write)
 
-  const def = schema.objectTypes?.[objectType];
+  const def = Object.prototype.hasOwnProperty.call(schema.objectTypes ?? {}, objectType)
+    ? schema.objectTypes[objectType]
+    : undefined;
   if (!def) {
     const declared = Object.keys(schema.objectTypes ?? {}).join(', ') || 'none';
     throw new NodeSchemaViolation(
@@ -72,6 +74,11 @@ export function validateNodeAgainstSchema(
     );
   }
 
+  // A collection member's `properties` must be a plain object (GraphQL allows
+  // scalar/array JSON there generally, but a schema'd record needs object fields).
+  if (properties != null && (typeof properties !== 'object' || Array.isArray(properties))) {
+    throw new NodeSchemaViolation(`objectType "${objectType}": properties must be an object`);
+  }
   const props: Record<string, unknown> = properties ?? {};
   for (const [name, field] of Object.entries(def.fields)) {
     const present = Object.prototype.hasOwnProperty.call(props, name) && props[name] != null;
@@ -89,7 +96,8 @@ export function validateNodeAgainstSchema(
 
   if (def.strict) {
     for (const key of Object.keys(props)) {
-      if (!(key in def.fields)) {
+      // own-property check — `in` would let inherited keys (toString, …) slip past.
+      if (!Object.prototype.hasOwnProperty.call(def.fields, key)) {
         throw new NodeSchemaViolation(`objectType "${objectType}" is strict — unknown property "${key}"`);
       }
     }

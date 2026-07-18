@@ -72,4 +72,16 @@ describe('validateNodeAgainstSchema — strict collections', () => {
   it('rejects an undeclared key when strict', () => bad('strictThing', { id: 'x', extra: 'nope' }));
   it('accepts only-declared keys when strict', () => ok('strictThing', { id: 'x' }));
   it('open (default) collections allow extra keys', () => ok('competitor', { name: 'a', extra: 'fine' }));
+  it('strict: rejects an inherited-prototype key name (own-property check)', () =>
+    bad('strictThing', { id: 'x', toString: 'nope', constructor: 'evil' }));
+});
+
+describe('validateNodeAgainstSchema — Codex hardening', () => {
+  it('rejects "" as an undeclared collection (no empty-string bypass)', () => bad('', { name: 'x' }));
+  it('rejects non-object properties for a collection member', () => {
+    bad('competitor', 'text' as unknown as Record<string, unknown>);
+    bad('competitor', [] as unknown as Record<string, unknown>);
+  });
+  it('an undeclared object type name that collides with Object.prototype is still rejected', () =>
+    bad('hasOwnProperty', { x: 1 }));
 });

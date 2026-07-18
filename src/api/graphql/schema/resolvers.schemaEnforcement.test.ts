@@ -85,6 +85,36 @@ describe('createNode — schema enforcement (GraphQL)', () => {
     const n = await createNode({ memoryId: freeMemId, loc: 'x', name: 'X', objectType: 'whatever', properties: {} });
     expect(n.objectType).toBe('whatever');
   });
+
+  it('normalizes an empty objectType to null (no bypass)', async () => {
+    const n = await createNode({ memoryId: memId, loc: 'empty', name: 'E', objectType: '  ', properties: { anything: 1 } });
+    expect(n.objectType).toBeNull(); // stored as an ordinary node, not ""
+  });
+
+  it('a rejected update leaves no revision (validate before snapshot)', async () => {
+    const n = await createNode({ memoryId: memId, loc: 'c.rev', name: 'R', objectType: 'competitor', properties: { name: 'R' } });
+    await expect(
+      (resolvers.Mutation as any).updateNode(null, { input: { memoryId: memId, loc: 'c.rev', properties: {} } }, admin()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+});
+
+describe('replaceSubtree — schema enforcement (bulk path bypasses writeNodeCore)', () => {
+  it('rejects an imported node that violates the schema', async () => {
+    await expect(
+      (resolvers.Mutation as any).replaceSubtree(
+        null,
+        {
+          ownerRepo: 'acme/repo',
+          memoryId: memId,
+          nodes: [{ memoryId: memId, loc: 'imp', name: 'I', objectType: 'competitor', properties: {} }],
+          edges: [],
+        },
+        admin(),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
 });
 
 describe('hadron_create_node — schema enforcement (MCP)', () => {
