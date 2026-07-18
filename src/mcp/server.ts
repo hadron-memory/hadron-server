@@ -4243,7 +4243,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_validate',
-    'Check a memory for broken edge references, sparse nodes, stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), and embedding-failure flags (spec 033 — nodes with `embedding_failed_at` set; covers BOTH in-flight transient failures awaiting retry AND terminal failures, including the #206 encrypted-no-plaintext perma-fail class). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (hadron_validate does not decrypt; tracked by #206).',
+    'Check a memory for broken edge references, sparse nodes, stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), embedding-failure flags (spec 033 — nodes with `embedding_failed_at` set; covers BOTH in-flight transient failures awaiting retry AND terminal failures, including the #206 encrypted-no-plaintext perma-fail class), and property-schema conformance (#725 — a node whose objectType/properties violate the memory\'s declared schema; catches records written before the schema was defined/tightened, a non-destructive audit). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (hadron_validate does not decrypt; tracked by #206).',
     {
       memoryUrn: z.string().describe('Fully-qualified memory URN, e.g. "acme.com:mmdata"'),
     },
@@ -4276,9 +4276,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // the wider blast radius of changing resolveMemoryByUrn contained.
       const memEnc = await db.memory.findUnique({
         where: { id: memory.id },
-        select: { isEncrypted: true },
+        select: { isEncrypted: true, schema: true },
       });
       const checkStale = !memEnc?.isEncrypted;
+      // #725 — property-schema conformance audit. Unlike write enforcement (which
+      // only governs new writes), this catches nodes that reached a
+      // non-conforming state some other way: written before the schema was
+      // defined/tightened, or via a path outside the write seam. Non-destructive.
+      const conformanceSchema = memEnc?.schema as unknown as MemorySchema | null;
 
       const nodes = await db.node.findMany({
         where: { memoryId: memory.id },
@@ -4344,6 +4349,21 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // reason. `?.trim() || 'unknown'` handles all three cases.
           const reason = node.embeddingError?.trim() || 'unknown';
           issues.push(`[embed-failed] ${nUrn} — ${reason}`);
+        }
+        // #725 — schema conformance: a collection member must satisfy its
+        // memory's declared schema. Reports (never mutates) — this is the audit
+        // backstop for pre-existing / non-write-seam non-conformance.
+        if (conformanceSchema != null && node.objectType != null) {
+          try {
+            validateNodeAgainstSchema(
+              conformanceSchema,
+              node.objectType,
+              (node.properties ?? null) as Record<string, unknown> | null,
+            );
+          } catch (e) {
+            if (e instanceof NodeSchemaViolation) issues.push(`[schema] ${nUrn} — ${e.message}`);
+            else throw e;
+          }
         }
       }
 

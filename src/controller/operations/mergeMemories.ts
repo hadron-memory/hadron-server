@@ -10,6 +10,10 @@ import {
   type NodeMergeField,
 } from '../../lib/nodeMerge.js';
 import { NodeAbstractTooLongError } from '../../lib/entityRef/errors.js';
+import { GraphQLError } from 'graphql';
+import { validateNodeAgainstSchema, NodeSchemaViolation } from '../../lib/validateNodeAgainstSchema.js';
+import { normalizeObjectType } from '../../lib/enforceNodeSchema.js';
+import type { MemorySchema } from '../../lib/memorySchema.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -118,6 +122,25 @@ export async function mergeMemoryGraph(
   const classifyPage = Math.max(1, Math.floor(args.classifyPageSize ?? CLASSIFY_PAGE));
   const withEdges = fields.has('EDGES');
 
+  // #725/#737 — nodes landing in a schema-governed target (relocated OR folded)
+  // must satisfy the target schema. Fetch it once; assertConforms no-ops for an
+  // unschema'd target or a non-collection node.
+  const targetSchema = (
+    await db.memory.findUnique({ where: { id: targetMemoryId }, select: { schema: true } })
+  )?.schema as unknown as MemorySchema | null;
+  const assertConforms = (objectType: string | null, properties: unknown): void => {
+    const norm = normalizeObjectType(objectType);
+    if (norm == null) return;
+    try {
+      validateNodeAgainstSchema(targetSchema, norm, (properties ?? null) as Record<string, unknown> | null);
+    } catch (e) {
+      if (e instanceof NodeSchemaViolation) {
+        throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      throw e;
+    }
+  };
+
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
   // Page the live source nodes by id (id+loc projection only — never the full
   // rows) and match each page against the target by loc. A source node whose
@@ -158,6 +181,16 @@ export async function mergeMemoryGraph(
       }
     }
     if (relocateIds.length > 0) {
+      // Enforce the target schema on the collection members relocating in (only
+      // when the target IS schema'd — page rows are id/loc-only, so fetch the
+      // typed subset's discriminator/properties for validation).
+      if (targetSchema != null) {
+        const typed = await db.node.findMany({
+          where: { id: { in: relocateIds }, objectType: { not: null } },
+          select: { objectType: true, properties: true },
+        });
+        for (const t of typed) assertConforms(t.objectType, t.properties);
+      }
       const relocate = await db.node.updateMany({
         where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
         data: { memoryId: targetMemoryId },
@@ -228,6 +261,8 @@ export async function mergeMemoryGraph(
           }),
         );
         if (Object.keys(merged.changed).length > 0) {
+          // #725/#737 — the folded target must still satisfy its collection.
+          assertConforms(tgt.objectType, 'properties' in merged.changed ? merged.changed.properties : tgt.properties);
           const writeData: Record<string, unknown> = { ...merged.changed, updatedBy: actorId };
           if (merged.abstractChanged) {
             writeData.abstractOriginHash = computeContentHash(

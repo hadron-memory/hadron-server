@@ -20,6 +20,7 @@ import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from '../../../lib/validateNodeAgainstSchema.js';
+import { enforceNodeSchemaOnWrite, normalizeObjectType } from '../../../lib/enforceNodeSchema.js';
 import type { MemorySchema } from '../../../lib/memorySchema.js';
 import {
   encryptNodeFieldsWithKey,
@@ -308,36 +309,16 @@ export async function writeNodeCore(
       // #725 — an empty/whitespace objectType means "no collection" → normalize
       // to null so it is stored as an ordinary node and can't bypass the
       // declared-collection check as a non-null discriminator.
-      if (typeof input.objectType === 'string' && input.objectType.trim() === '') {
-        input.objectType = null;
-      }
-      // #725 — enforce the memory's property schema BEFORE any write side effect
-      // (incl. the revision snapshot below): validate the RESULTING node state
-      // (input overrides, else the existing value) so a partial update is judged
-      // on what it produces. Only a collection member on a schema'd memory is
-      // checked; ordinary nodes skip the schema fetch. `properties` is plaintext.
-      const resultObjectType =
-        input.objectType !== undefined ? input.objectType : (existing?.objectType ?? null);
-      if (resultObjectType != null) {
-        const memSchemaRow = await ctx.db.memory.findUnique({
-          where: { id: input.memoryId },
-          select: { schema: true },
-        });
-        const resultProps =
-          input.properties !== undefined ? input.properties : existing?.properties;
-        try {
-          validateNodeAgainstSchema(
-            memSchemaRow?.schema as unknown as MemorySchema | null,
-            resultObjectType,
-            (resultProps ?? null) as Record<string, unknown> | null,
-          );
-        } catch (e) {
-          if (e instanceof NodeSchemaViolation) {
-            throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
-          }
-          throw e;
-        }
-      }
+      input.objectType = normalizeObjectType(input.objectType);
+      // #725 — enforce the memory's property schema through the shared seam
+      // BEFORE any write side effect (incl. the revision snapshot below), on the
+      // RESULTING node state (input overrides, else the existing value).
+      await enforceNodeSchemaOnWrite(
+        ctx.db,
+        input.memoryId,
+        input.objectType !== undefined ? input.objectType : existing?.objectType,
+        input.properties !== undefined ? input.properties : existing?.properties,
+      );
 
       if (existing) {
         // Snapshot the PRE-edit state (#620: shared builder — editedBy holds
@@ -1976,6 +1957,16 @@ export const nodeMutations = {
       }
       writeData.updatedBy = ctx.userId ?? ctx.clientId ?? null;
 
+      // #725/#737 — the merged target must still satisfy its collection's schema.
+      // objectType is untouched by a merge; `properties` is plaintext (never
+      // encrypted), so `changed.properties` (else the target's) is safe here.
+      await enforceNodeSchemaOnWrite(
+        ctx.db,
+        target.memoryId,
+        target.objectType,
+        'properties' in changed ? changed.properties : target.properties,
+      );
+
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       await ctx.db.$transaction(async (tx) => {
@@ -2273,6 +2264,16 @@ export const nodeMutations = {
       // #620 — the restored field set (legacy-sentinel-aware), shared by the
       // pre-restore snapshot's `changes` diff and the write-back.
       const restoreFields = restorableNodeFields(revision);
+
+      // #725/#737 — a restored snapshot must satisfy the CURRENT schema. Validate
+      // the resulting objectType/properties (restored value, else the node's
+      // current). Blocks restoring to a now-invalid state after a schema change.
+      await enforceNodeSchemaOnWrite(
+        ctx.db,
+        node.memoryId,
+        'objectType' in restoreFields ? (restoreFields.objectType as string | null) : node.objectType,
+        'properties' in restoreFields ? restoreFields.properties : node.properties,
+      );
 
       // Restore (+ optional truncate) in one transaction (#617) so the portal
       // never sequences restore + N deletes and can't half-apply on a crash.
