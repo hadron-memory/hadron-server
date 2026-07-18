@@ -735,19 +735,7 @@ export const nodeQueries = {
       }
 
       const q = query!.trim();
-      // Default to keyword when a `where` predicate is present (it implies a
-      // filter-first query, and `where` composes cleanly with lexical ranking);
-      // otherwise hybrid. An EXPLICIT vector/hybrid + where is rejected below.
-      const effectiveMode = mode ?? (f.where != null ? 'keyword' : 'hybrid');
-      // #719 — vector/hybrid + where is a follow-up (the JSONB predicate must be
-      // intersected into the re-fetch of the ranked candidate set). Reject rather
-      // than silently returning UNFILTERED semantic hits.
-      if (f.where != null && (effectiveMode === 'vector' || effectiveMode === 'hybrid')) {
-        throw badInput(
-          'findNodes filter.where is not yet supported with mode vector/hybrid — ' +
-            'use it with mode keyword or regex, or omit the query for a filtered browse.',
-        );
-      }
+      const effectiveMode = mode ?? 'hybrid';
       const lexFields = (fields ?? undefined) as LexicalField[] | undefined;
       const model = isEmbeddingConfigured() ? getEmbeddingClient().model : null;
       // A selective structured filter can drop many ranked candidates, so over-fetch
@@ -771,8 +759,26 @@ export const nodeQueries = {
         ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
         const rankOrder = new Map(ranked.map((r, i) => [r.nodeId, i]));
+        // #719 — compose `where` with vector/hybrid ranking: the JSONB predicate
+        // can't ride the ranking query (that runs against node_embeddings, not
+        // the nodes' JSONB), so intersect the bounded ranked candidate set with
+        // the where-satisfying subset (which also re-asserts the memory scope).
+        // Only when there ARE vector-ranked candidates (`simById` set): the
+        // keyword-only hybrid fallbacks (no_vector_index / embedding_unavailable)
+        // already applied `where` in the lexical SQL via sqlFilter, so a
+        // filterWhere there would be a redundant query.
+        let candidateIds = ranked.map((r) => r.nodeId);
+        if (f.where != null && simById != null) {
+          const allowed = new Set(
+            await provider.filterWhere({
+              db: ctx.db, ids: candidateIds, memoryIds: scopeIds,
+              where: f.where, includeDeleted: !!f.includeDeleted,
+            }),
+          );
+          candidateIds = candidateIds.filter((id) => allowed.has(id));
+        }
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: ranked.map((r) => r.nodeId) }, ...structuredWhere },
+          where: { id: { in: candidateIds }, ...structuredWhere },
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
@@ -1007,8 +1013,11 @@ export const nodeQueries = {
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
 
-      // Chunk granularity (vector only) → passages, mirroring nodeSearch. Structured
-      // node filters are not applied to passage results in v1 (chunk-level, not node-level).
+      // Chunk granularity (vector only) → passages, mirroring nodeSearch. The
+      // coarse structured node filters (nodeType/tags/…) are not applied to
+      // passage results in v1 (chunk-level, not node-level) — but a `where`
+      // predicate IS honored (#719): a passage from a parent that fails the
+      // predicate must not surface, so we drop it below.
       if (granularity === 'chunk') {
         if (effectiveMode !== 'vector') {
           throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
@@ -1020,13 +1029,24 @@ export const nodeQueries = {
         const rawChunks = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit });
         const chunkHits = (scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor))
           .slice(off, off + finalLimit);
+        // #719 — honor `where` on chunk passages: keep only passages whose PARENT
+        // node satisfies the predicate (also re-asserts the memory scope).
+        let allowedParents: Set<string> | null = null;
+        if (f.where != null) {
+          allowedParents = new Set(
+            await provider.filterWhere({
+              db: ctx.db, ids: [...new Set(chunkHits.map((c) => c.nodeId))],
+              memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+            }),
+          );
+        }
         const parents = await ctx.db.node.findMany({
           where: { id: { in: [...new Set(chunkHits.map((c) => c.nodeId))] }, deletedAt: null },
           include: { memory: { select: { urn: true } } },
         });
         const parentById = new Map(parents.map((p) => [p.id, p]));
         const passages = chunkHits
-          .filter((c) => parentById.has(c.nodeId))
+          .filter((c) => parentById.has(c.nodeId) && (allowedParents == null || allowedParents.has(c.nodeId)))
           .map((c) => {
             const p = parentById.get(c.nodeId)! as { loc: string; memory: { urn: string } };
             // #697 Stage 2: emit the flat v2 node URN (matches Node.urn); fall
