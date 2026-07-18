@@ -39,6 +39,7 @@ import { buildStorageKey, extractExtension } from '../../asset/storageKey.js';
 import { putObject, deleteObject } from '../../../integrations/r2/client.js';
 import { generateId } from '../../id.js';
 import { splitNodeUrn } from '../../urn.js';
+import { emitAssetUrnV2 } from '../../urnEmit.js';
 import { resolveFlowMemory } from '../loadFlowNode.js';
 import type { RunToolDef, RunToolContext } from './types.js';
 import type { AuthContext } from '../../../middleware/auth.js';
@@ -171,7 +172,15 @@ export const hadronStoreFile: RunToolDef = {
       assetId,
       filename,
     });
-    const assetUrn = `${memory.urn}:assets:${assetId}`;
+    // #697 Stage 2: emit the flat v2 asset URN (matches the GraphQL Asset.urn
+    // read surface); fall back to the bare form only if the stored memory urn
+    // can't compose.
+    let assetUrn: string;
+    try {
+      assetUrn = emitAssetUrnV2(memory.urn, assetId);
+    } catch {
+      assetUrn = `${memory.urn}:assets:${assetId}`;
+    }
 
     await putObject({ key: storageKey, body, contentType: mimeType });
     try {

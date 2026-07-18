@@ -259,7 +259,7 @@ describe('hadron_get_nodes — hard caps', () => {
     expect(out).toContain('returned 1 node(s)');
     expect(out).toContain('truncated');
     expect(out).toContain('Omitted');
-    expect(out).toContain(nodeUrn('big2'));
+    expect(out).toContain('hrn:node:batch-org:batchmem:big2');
   });
 });
 

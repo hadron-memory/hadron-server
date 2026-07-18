@@ -6,11 +6,15 @@ import {
   getPrimaryAgentId,
 } from '../../../lib/appAgent.js';
 import {
-  composeInstalledAgentUrn,
-  composeNodeUrn,
-  composeEdgeUrn,
   legacyMemoryUrnToCanonical,
 } from '../../../lib/urn.js';
+import {
+  emitNodeUrnV2,
+  emitEdgeUrnV2,
+  emitAssetUrnV2,
+  emitInstalledAgentUrnV2,
+  bestEffortFlatNodeUrn,
+} from '../../../lib/urnEmit.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
@@ -42,14 +46,6 @@ import {
   assetUrn,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
-
-// #481 (Codex review): normalize a STORED memory urn to canonical form before
-// composing node/edge URNs. Legacy single-colon role-marker urns (e.g.
-// `org:agent:app-user:<id>`) would otherwise be rejected by composeNodeUrn's
-// canonicalizer (it can't know the marker:id boundary), dropping those nodes
-// to the non-parseable raw fallback. Mirrors Memory.urn's two-branch logic.
-const canonicalStoredMemoryUrn = (urn: string): string =>
-  urn.includes('::') ? urn : legacyMemoryUrnToCanonical(urn);
 
 /**
  * Resolve one editor/approver candidate string to public identifiers:
@@ -179,13 +175,16 @@ export const typeResolvers = {
       // The field is String! — never null it. A missing memory row is corrupt
       // data; a canonicalization failure falls back to a raw compose (same
       // serve-and-log posture as safeCanonicalUrn).
-      if (!memUrn) return `hrn:node:unknown::${n.loc}`;
-      const canonicalMem = canonicalStoredMemoryUrn(memUrn);
+      if (!memUrn) return `hrn:node:unknown:${n.loc}`;
       try {
-        return composeNodeUrn(canonicalMem, n.loc);
+        return emitNodeUrnV2(memUrn, n.loc);
       } catch (err) {
-        console.warn(`[Node.urn] failed to canonicalize memory urn "${memUrn}":`, err);
-        return `hrn:node:${canonicalMem}::${n.loc}`;
+        console.warn(`[Node.urn] failed to emit v2 node urn for memory "${memUrn}":`, err);
+        // Best-effort flat-v2 fallback (single colon, never throws). Do NOT run
+        // the stored urn back through a canonicalizer here — it can itself throw
+        // on the same malformed value, defeating the serve-and-log posture of
+        // this non-null field.
+        return bestEffortFlatNodeUrn('node', memUrn, n.loc);
       }
     },
     // Spec 033 embedding-state DateTime fields — Prisma returns Date,
@@ -220,13 +219,14 @@ export const typeResolvers = {
     // denormalized SOURCE-side memory, which is exactly the URN's memory.
     urn: async (e: { loc: string; memoryId: string }, _: unknown, ctx: Context) => {
       const memUrn = await loadMemoryUrn(ctx, e.memoryId);
-      if (!memUrn) return `hrn:edge:unknown::${e.loc}`;
-      const canonicalMem = canonicalStoredMemoryUrn(memUrn);
+      if (!memUrn) return `hrn:edge:unknown:${e.loc}`;
       try {
-        return composeEdgeUrn(canonicalMem, e.loc);
+        return emitEdgeUrnV2(memUrn, e.loc);
       } catch (err) {
-        console.warn(`[Edge.urn] failed to canonicalize memory urn "${memUrn}":`, err);
-        return `hrn:edge:${canonicalMem}::${e.loc}`;
+        console.warn(`[Edge.urn] failed to emit v2 edge urn for memory "${memUrn}":`, err);
+        // Best-effort flat-v2 fallback (single colon, never throws) — see the
+        // Node.urn note on not re-canonicalizing a malformed stored value.
+        return bestEffortFlatNodeUrn('edge', memUrn, e.loc);
       }
     },
   },
@@ -309,7 +309,13 @@ export const typeResolvers = {
         where: { id: a.memoryId },
         select: { urn: true },
       });
-      return memory ? assetUrn(memory.urn, a.id) : `unknown:assets:${a.id}`;
+      if (!memory) return `hrn:asset:unknown:assets:${a.id}`;
+      try {
+        return emitAssetUrnV2(memory.urn, a.id);
+      } catch (err) {
+        console.warn(`[Asset.urn] failed to emit v2 asset urn for memory "${memory.urn}":`, err);
+        return assetUrn(memory.urn, a.id);
+      }
     },
   },
   Memory: {
@@ -549,17 +555,16 @@ export const typeResolvers = {
     ) => {
       const agentUrn = await readPrimaryAgentField(a, ctx, 'urn');
       if (!agentUrn) return null;
-      // #520 — fail soft: composeInstalledAgentUrn throws on a malformed app
-      // or agent URN (not exactly <org>::<slug>), and a thrown resolver adds
-      // an errors[] entry that makes graphql-request reject the WHOLE app(ref:)
-      // / apps read — one bad row 404s the portal's app-detail page. This field
-      // is nullable, so serve-and-log instead (same posture as Node.urn /
-      // Edge.urn above): warn the offending URNs and return null.
+      // #697 Stage 2 / D10: an installed agent stays AUTHOR-ROOTED forever, so
+      // its v2 URN is just the agent's own author-rooted URN — the v1
+      // `<installing-org>::<app>::<author-org>:<slug>` R2 install chain is
+      // retired. Fail soft (nullable field): a malformed stored agent urn
+      // warns + returns null rather than erroring the whole app read (#520).
       try {
-        return composeInstalledAgentUrn(a.urn, agentUrn);
+        return emitInstalledAgentUrnV2(agentUrn);
       } catch (err) {
         console.warn(
-          `[App.installedAgentUrn] failed to compose from appUrn "${a.urn}" + agentUrn "${agentUrn}":`,
+          `[App.installedAgentUrn] failed to emit v2 agent urn from "${agentUrn}":`,
           err,
         );
         return null;

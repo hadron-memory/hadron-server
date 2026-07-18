@@ -101,7 +101,7 @@ describe('selectNextEdge', () => {
     await makeEdge({ targetId: act });
     const sel = await selectNextEdge(db, { sourceNode: source, view: {} });
     expect(sel).not.toBeNull();
-    expect(sel!.targetUrn).toBe('walk-org::flowmem::flow:act');
+    expect(sel!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:act');
   });
 
   it('a documents edge with no condition NEVER routes (D-MN-4)', async () => {
@@ -121,10 +121,10 @@ describe('selectNextEdge', () => {
     await makeEdge({ targetId: defer, name: 'next.2.low' }); // fall-through
 
     const high = await selectNextEdge(db, { sourceNode: source, view: { confidence: 0.92 } });
-    expect(high!.targetUrn).toBe('walk-org::flowmem::flow:act');
+    expect(high!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:act');
 
     const low = await selectNextEdge(db, { sourceNode: source, view: { confidence: 0.4 } });
-    expect(low!.targetUrn).toBe('walk-org::flowmem::flow:defer');
+    expect(low!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:defer');
   });
 
   it('orders by numeric index, not lexical (next.2 before next.10)', async () => {
@@ -133,7 +133,7 @@ describe('selectNextEdge', () => {
     await makeEdge({ targetId: tenth, name: 'next.10' });
     await makeEdge({ targetId: second, name: 'next.2' });
     const sel = await selectNextEdge(db, { sourceNode: source, view: {} });
-    expect(sel!.targetUrn).toBe('walk-org::flowmem::flow:second');
+    expect(sel!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:second');
   });
 
   it('priority beats index (lower fires first — schema convention)', async () => {
@@ -142,7 +142,7 @@ describe('selectNextEdge', () => {
     await makeEdge({ targetId: a, name: 'next.1', priority: 5 });
     await makeEdge({ targetId: b, name: 'next.9', priority: 1 });
     const sel = await selectNextEdge(db, { sourceNode: source, view: {} });
-    expect(sel!.targetUrn).toBe('walk-org::flowmem::flow:b');
+    expect(sel!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:b');
   });
 
   it('an indexless routing name sorts after indexed ones', async () => {
@@ -151,7 +151,7 @@ describe('selectNextEdge', () => {
     await makeEdge({ targetId: bare, name: 'next' });
     await makeEdge({ targetId: indexed, name: 'next.3' });
     const sel = await selectNextEdge(db, { sourceNode: source, view: {} });
-    expect(sel!.targetUrn).toBe('walk-org::flowmem::flow:indexed');
+    expect(sel!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:indexed');
   });
 
   it('an unnamed edge routes via the derived-loc name segment', async () => {
@@ -162,7 +162,7 @@ describe('selectNextEdge', () => {
       loc: deriveEdgeLoc('flow:classify', 'next', 'flow:act'),
     });
     const sel = await selectNextEdge(db, { sourceNode: source, view: {} });
-    expect(sel!.targetUrn).toBe('walk-org::flowmem::flow:act');
+    expect(sel!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:act');
   });
 
   it('returns null when every condition is false (normal flow end, D7)', async () => {
@@ -196,7 +196,7 @@ describe('selectNextEdge', () => {
     await makeEdge({ targetId: deadTarget, name: 'next.0' }); // would win by index…
     await db.node.update({ where: { id: deadTarget }, data: { deletedAt: new Date() } });
     const sel = await selectNextEdge(db, { sourceNode: source, view: {} });
-    expect(sel!.targetUrn).toBe('walk-org::flowmem::flow:act');
+    expect(sel!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:act');
   });
 
   it('cross-memory edges compose the target URN from the TARGET memory', async () => {
@@ -211,6 +211,6 @@ describe('selectNextEdge', () => {
     });
     await makeEdge({ targetId: target.id });
     const sel = await selectNextEdge(db, { sourceNode: source, view: {} });
-    expect(sel!.targetUrn).toBe('walk-org::othermem::flow:elsewhere');
+    expect(sel!.targetUrn).toBe('hrn:node:walk-org:othermem:flow:elsewhere');
   });
 });

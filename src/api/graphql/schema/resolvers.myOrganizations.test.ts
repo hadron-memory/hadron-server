@@ -24,7 +24,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { parseUrn } from '../../../lib/urn.js';
+import { parseUrnV2 } from '../../../lib/urn.js';
 
 let org: { id: string; urn: string };
 let user: { id: string };
@@ -184,7 +184,13 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
 // `hadronmemory.com:memory:hadronmemory.com::experiments` shape a pre-fix
 // updateMemory persisted.
 describe('urn field resolvers — corrupted URN falls back to raw, never throws', () => {
-  const corrupted = 'hadronmemory.com:memory:hadronmemory.com::experiments';
+  // Empty-root form: emitEntityUrnV2 (#697 Stage 2) throws on a rootless bare
+  // urn, exercising the resolver's raw-value fallback. The leading `::` also
+  // keeps Memory.urn on its already-canonical pass-through branch (so the raw
+  // value it falls back to is this string verbatim). The v1 fixture
+  // `hadronmemory.com:memory:hadronmemory.com::experiments` now composes cleanly
+  // under the flat-v2 emitter, so it no longer triggers the catch.
+  const corrupted = '::hadronmemory.com::experiments';
 
   it('Memory.urn returns the raw value instead of throwing on a malformed URN', () => {
     expect(() => resolvers.Memory.urn({ urn: corrupted })).not.toThrow();
@@ -192,7 +198,7 @@ describe('urn field resolvers — corrupted URN falls back to raw, never throws'
   });
 
   it('Memory.urn still canonicalizes a valid legacy single-colon URN', () => {
-    expect(resolvers.Memory.urn({ urn: 'acme.com:dev' })).toBe('hrn:memory:acme.com::dev');
+    expect(resolvers.Memory.urn({ urn: 'acme.com:dev' })).toBe('hrn:mem:acme.com:dev');
   });
 
   it('Agent / App / Organization urn resolvers also fall back instead of throwing', () => {
@@ -211,20 +217,20 @@ describe('urn field resolvers — corrupted URN falls back to raw, never throws'
 // stored shape — the coverage PR #318 omitted.
 describe('Memory.urn — canonical + parseUrn round-trip for every stored shape (#352)', () => {
   const STORED: ReadonlyArray<readonly [string, string]> = [
-    ['hadronmemory.com:specs', 'hrn:memory:hadronmemory.com::specs'],
-    ['micromentor.org:coding-agent:system', 'hrn:memory:micromentor.org::coding-agent::system'],
+    ['hadronmemory.com:specs', 'hrn:mem:hadronmemory.com:specs'],
+    ['micromentor.org:coding-agent:system', 'hrn:mem:micromentor.org:coding-agent:system'],
     // Per-user, post storage-alignment (was the non-canonical `:user:`).
-    ['micromentor.org:coding-agent:app-user:abc123', 'hrn:memory:micromentor.org::coding-agent::app-user:abc123'],
-    ['micromentor.org:coding-agent:priv:abc123', 'hrn:memory:micromentor.org::coding-agent::priv:abc123'],
+    ['micromentor.org:coding-agent:app-user:abc123', 'hrn:mem:micromentor.org:coding-agent:app-user:abc123'],
+    ['micromentor.org:coding-agent:priv:abc123', 'hrn:mem:micromentor.org:coding-agent:priv:abc123'],
     // Anonymous session — boundary preserved now that `anon` is a marker.
-    ['micromentor.org:coding-agent:anon:abc123', 'hrn:memory:micromentor.org::coding-agent::anon:abc123'],
+    ['micromentor.org:coding-agent:anon:abc123', 'hrn:mem:micromentor.org:coding-agent:anon:abc123'],
   ];
 
   for (const [stored, expected] of STORED) {
     it(`serves canonical + round-trips: ${stored}`, () => {
       const served = resolvers.Memory.urn({ urn: stored });
       expect(served).toBe(expected);
-      expect(() => parseUrn(served)).not.toThrow();
+      expect(() => parseUrnV2(served)).not.toThrow();
     });
   }
 });

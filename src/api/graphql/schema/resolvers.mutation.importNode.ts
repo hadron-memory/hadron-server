@@ -17,7 +17,8 @@
 //   - No MCP tool in v1 (agent exposure parked with the web-fetch-tool stub).
 
 import { GraphQLError } from 'graphql';
-import { splitNodeUrn, composeNodeUrn } from '../../../lib/urn.js';
+import { splitNodeUrn } from '../../../lib/urn.js';
+import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { fetchWebPage } from '../../../lib/webFetch.js';
@@ -134,7 +135,7 @@ export const importNodeMutations = {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
-      const entryNodeUrn = composeNodeUrn(taskNode.memory.urn, taskNode.loc);
+      const entryNodeUrn = emitNodeUrnV2(taskNode.memory.urn, taskNode.loc);
       // Attribute the run to the importing user ONLY when the target is
       // owner-only (personal/private) — there the run needs the user's identity
       // to read the imported node and write back. For knowledge/app targets the
@@ -237,7 +238,7 @@ export const importNodeMutations = {
     // output). The imported node's URN is passed in eventData so the task can
     // target it (e.g. distill).
     if (taskRun) {
-      const importedNodeUrn = composeNodeUrn(taskRun.importedMemoryUrn, node.loc);
+      const importedNodeUrn = emitNodeUrnV2(taskRun.importedMemoryUrn, node.loc);
       const run = await mintManualRun(ctx, taskRun.app, {
         entryNodeUrn: taskRun.entryNodeUrn,
         eventData: { ...(input.taskArgs ?? {}), importedNodeUrn },

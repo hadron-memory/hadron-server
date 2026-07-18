@@ -22,12 +22,11 @@ import { searchContains, searchStartsWith } from '../../integrations/db/provider
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import {
   bestMatch,
-  canonicalUrn,
-  composeNodeUrn,
   urnMatchTier,
   urnSearchVariants,
   type FieldCandidate,
 } from './match.js';
+import { emitEntityUrnV2, emitNodeUrnV2 } from '../urnEmit.js';
 import type { GlobalSearchHit, SearchEntityType, SearchField, SearchPrincipal } from './types.js';
 import { userUrn } from '../userHandle.js';
 import { canSeeUserPersonalFields, type UserVisibilityCtx } from '../auth/userVisibility.js';
@@ -152,11 +151,24 @@ function locSuffix(urnTerm: string): string {
 function nodeUrnPair(memUrn: string | null | undefined, loc: string): { full: string; bare: string } | null {
   if (!memUrn) return null;
   try {
-    const full = composeNodeUrn(memUrn, loc);
+    const full = emitNodeUrnV2(memUrn, loc);
     const prefix = 'hrn:node:';
     return { full, bare: full.startsWith(prefix) ? full.slice(prefix.length) : full };
   } catch {
     return null;
+  }
+}
+
+/**
+ * v2 entity URN with the serve-on-failure fallback the search must not crash on:
+ * an un-v2-able stored bare urn falls back to the raw stored value (mirrors the
+ * old `canonicalUrn` try/catch posture).
+ */
+function safeEntityUrn(type: 'org' | 'memory' | 'agent' | 'app', bareUrn: string): string {
+  try {
+    return emitEntityUrnV2(type, bareUrn);
+  } catch {
+    return bareUrn;
   }
 }
 
@@ -204,7 +216,7 @@ async function searchOrganizations(ctx: AdapterCtx): Promise<GlobalSearchHit[]> 
     hits.push({
       entityType: 'organization',
       id: r.id,
-      urn: canonicalUrn('org', r.urn),
+      urn: safeEntityUrn('org', r.urn),
       name: r.name,
       description: null,
       matchedField: m.field,
@@ -246,7 +258,7 @@ async function searchMemories(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     hits.push({
       entityType: 'memory',
       id: r.id,
-      urn: canonicalUrn('memory', r.urn),
+      urn: safeEntityUrn('memory', r.urn),
       name: r.name,
       description: r.description,
       matchedField: m.field,
@@ -395,7 +407,7 @@ async function searchAgents(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     hits.push({
       entityType: 'agent',
       id: r.id,
-      urn: canonicalUrn('agent', r.urn),
+      urn: safeEntityUrn('agent', r.urn),
       name: r.name,
       description: r.description,
       matchedField: m.field,
@@ -443,7 +455,7 @@ async function searchApps(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     hits.push({
       entityType: 'app',
       id: r.id,
-      urn: canonicalUrn('app', r.urn),
+      urn: safeEntityUrn('app', r.urn),
       name: r.name,
       description: r.description,
       matchedField: m.field,

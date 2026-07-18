@@ -27,7 +27,7 @@ import {
   type MemoryLayerHandle,
 } from '../edge-conditions/index.js';
 import { buildPrismaMemoryLayer } from '../edge-conditions/prisma-memory-layer.js';
-import { normalizeUrnForLookup } from '../urn.js';
+import { emitNodeUrnV2 } from '../urnEmit.js';
 
 export interface FlowSourceNode {
   id: string;
@@ -41,7 +41,7 @@ export interface NextEdgeSelection {
   edgeId: string;
   /** The resolved routing name (`next`, `next.1.high-confidence`, …). */
   edgeName: string;
-  /** Canonical walkable URN of the target node (`<org>::<memory>::<loc>`). */
+  /** Walkable v2 URN of the target node (`hrn:node:<root>:<mem>:<loc…>`). */
   targetUrn: string;
 }
 
@@ -76,16 +76,6 @@ export function routingNameOf(edge: { name: string | null; loc: string }, source
 function routingIndexOf(name: string): number {
   const second = name.split('.')[1];
   return second != null && /^\d+$/.test(second) ? Number(second) : Number.POSITIVE_INFINITY;
-}
-
-/** `<org>::<memorySlug>::<loc>` from a stored (legacy-or-canonical) memory URN. */
-function composeNodeUrn(memoryUrn: string, loc: string): string {
-  const legacy = normalizeUrnForLookup(memoryUrn);
-  const sep = legacy.indexOf(':');
-  // A memory URN is always `<org>:<slug>`; a separator-less value would be
-  // malformed data — pass it through and let the next hop's lookup fail loud.
-  if (sep < 0) return `${legacy}::${loc}`;
-  return `${legacy.slice(0, sep)}::${legacy.slice(sep + 1)}::${loc}`;
 }
 
 /**
@@ -170,7 +160,7 @@ export async function selectNextEdge(
       return {
         edgeId: edge.id,
         edgeName: edge.routingName,
-        targetUrn: composeNodeUrn(edge.target!.memory.urn, edge.target!.loc),
+        targetUrn: emitNodeUrnV2(edge.target!.memory.urn, edge.target!.loc),
       };
     }
   }

@@ -69,7 +69,7 @@ describe('hadron_replace_text', () => {
 
     expect(text).toMatch(/Would replace 2 occurrence/i);
     expect(text).toMatch(/dry run/i);
-    expect(text).toMatch(/hrn:node:.*rg-mem::a/); // canonical URN-addressed line
+    expect(text).toMatch(/hrn:node:.*rg-mem:a/); // canonical URN-addressed line
     expect((await db.node.findUnique({ where: { id: a.id } }))?.content).toBe('cat cat');
   });
 

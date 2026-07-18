@@ -40,7 +40,9 @@ import type { AppRun } from '../generated/prisma/index.js';
 const ORG_URN = 'flow-int-org';
 const MEM_URN = `${ORG_URN}:flowmem`;
 const ENTRY = `${ORG_URN}::flowmem::flow:classify`;
-const ACT = `${ORG_URN}::flowmem::flow:act`;
+// #697 Stage 2: the runner now EMITS the v2 node URN for `curNodeUrn`
+// (`hrn:node:<root>:<mem>:<loc>`), so the checkpoint assertion expects that form.
+const ACT = `hrn:node:${ORG_URN}:flowmem:flow:act`;
 const DEFER = `${ORG_URN}::flowmem::flow:defer`;
 
 let orgId: string;
@@ -294,7 +296,7 @@ describe('3-node flow through production deps (§10)', () => {
     const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
     expect((after.failure as { code?: string }).code).toBe('NODE_LOAD_FAILED');
     expect((after.failure as { message?: string }).message).toContain('encrypted');
-    expect(after.curNodeUrn).toBe(`${ORG_URN}::vault::flow:secret`); // position preserved for audit
+    expect(after.curNodeUrn).toBe(`hrn:node:${ORG_URN}:vault:flow:secret`); // position preserved for audit
   });
 
   it('an extractionSpec writing into __-plumbing fields fails the run loudly (PR-532 Copilot)', async () => {

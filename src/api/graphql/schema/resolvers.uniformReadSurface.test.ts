@@ -462,7 +462,7 @@ describe('Node.urn / Edge.urn (#481)', () => {
   it('composes the canonical node URN from a legacy-stored memory urn', async () => {
     // memA.urn is stored legacy (`<org>:mem-a`); composition canonicalizes.
     const urn = await T.Node.urn({ loc: nodeA1.loc, memoryId: memA.id }, {}, ctx(member.id));
-    expect(urn).toBe(`hrn:node:${orgA.urn}::mem-a::${nodeA1.loc}`);
+    expect(urn).toBe(`hrn:node:${orgA.urn}:mem-a:${nodeA1.loc}`);
   });
 
   it('uses a preloaded memory relation without a DB round trip, but not a partial select missing urn', async () => {
@@ -472,7 +472,7 @@ describe('Node.urn / Edge.urn (#481)', () => {
       {},
       c,
     );
-    expect(preloaded).toBe(`hrn:node:${orgA.urn}::mem-a::${nodeA1.loc}`);
+    expect(preloaded).toBe(`hrn:node:${orgA.urn}:mem-a:${nodeA1.loc}`);
     // A partial select without urn must fall through to the loader, not
     // compose "undefined" (findings:node-memory-partial-select-truncates).
     const partial = await T.Node.urn(
@@ -480,7 +480,7 @@ describe('Node.urn / Edge.urn (#481)', () => {
       {},
       c,
     );
-    expect(partial).toBe(`hrn:node:${orgA.urn}::mem-a::${nodeA1.loc}`);
+    expect(partial).toBe(`hrn:node:${orgA.urn}:mem-a:${nodeA1.loc}`);
   });
 
   it('memoizes the memory-urn lookup per request (shared cache with Edge.urn)', async () => {
@@ -493,12 +493,12 @@ describe('Node.urn / Edge.urn (#481)', () => {
 
   it('composes the canonical edge URN (source-side memory)', async () => {
     const urn = await T.Edge.urn({ loc: edgeA.loc, memoryId: memA.id }, {}, ctx(member.id));
-    expect(urn).toBe(`hrn:edge:${orgA.urn}::mem-a::${edgeA.loc}`);
+    expect(urn).toBe(`hrn:edge:${orgA.urn}:mem-a:${edgeA.loc}`);
   });
 
   it('flows through the query surfaces: node(ref) and findNodes hits carry urn', async () => {
     const node = await Q.node(null, { ref: nodeA1.id }, ctx(member.id));
-    expect(await T.Node.urn(node, {}, ctx(member.id))).toContain(`::${nodeA1.loc}`);
+    expect(await T.Node.urn(node, {}, ctx(member.id))).toContain(`:${nodeA1.loc}`);
     const found = await Q.findNodes(null, { filter: { memoryIds: [memA.id] } }, ctx(member.id));
     expect(found.hits.length).toBeGreaterThan(0);
     const viaList = await T.Node.urn(found.hits[0].node, {}, ctx(member.id));
@@ -507,7 +507,7 @@ describe('Node.urn / Edge.urn (#481)', () => {
 
   it('never nulls the non-null field: missing memory row falls back loudly-shaped', async () => {
     const urn = await T.Node.urn({ loc: 'x', memoryId: generateId() }, {}, ctx(member.id));
-    expect(urn).toBe('hrn:node:unknown::x');
+    expect(urn).toBe('hrn:node:unknown:x');
   });
 });
 
@@ -527,10 +527,9 @@ describe('Node.urn / Edge.urn — legacy role-marker memory URNs (#481 Codex rev
       data: { id: generateId(), memoryId: mlMem.id, loc: 'ml:leaf', name: 'ml' },
     });
     const nodeUrn = await T.Node.urn({ loc: n.loc, memoryId: mlMem.id }, {}, ctx(member.id));
-    // Marker:id boundary preserved: …::agent-x::app-user:42::<loc> — the
-    // canonical form resolveNodeRef/parseUrn accept, NOT a raw single-colon
-    // fallback.
-    expect(nodeUrn).toBe(`hrn:node:${orgA.urn}::agent-x::app-user:42::ml:leaf`);
+    // v2 emission is flat, single-colon throughout:
+    // hrn:node:<org>:agent-x:app-user:42:<loc>.
+    expect(nodeUrn).toBe(`hrn:node:${orgA.urn}:agent-x:app-user:42:ml:leaf`);
     const src = await db.node.create({
       data: { id: generateId(), memoryId: mlMem.id, loc: 'ml:src', name: 's' },
     });
@@ -538,6 +537,6 @@ describe('Node.urn / Edge.urn — legacy role-marker memory URNs (#481 Codex rev
       data: { id: generateId(), memoryId: mlMem.id, sourceId: src.id, targetId: n.id, loc: 'ml:src:next' },
     });
     const edgeUrn = await T.Edge.urn({ loc: e.loc, memoryId: mlMem.id }, {}, ctx(member.id));
-    expect(edgeUrn).toBe(`hrn:edge:${orgA.urn}::agent-x::app-user:42::ml:src:next`);
+    expect(edgeUrn).toBe(`hrn:edge:${orgA.urn}:agent-x:app-user:42:ml:src:next`);
   });
 });
