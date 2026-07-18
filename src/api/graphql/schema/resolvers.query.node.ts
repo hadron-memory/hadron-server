@@ -1009,8 +1009,11 @@ export const nodeQueries = {
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
 
-      // Chunk granularity (vector only) → passages, mirroring nodeSearch. Structured
-      // node filters are not applied to passage results in v1 (chunk-level, not node-level).
+      // Chunk granularity (vector only) → passages, mirroring nodeSearch. The
+      // coarse structured node filters (nodeType/tags/…) are not applied to
+      // passage results in v1 (chunk-level, not node-level) — but a `where`
+      // predicate IS honored (#719): a passage from a parent that fails the
+      // predicate must not surface, so we drop it below.
       if (granularity === 'chunk') {
         if (effectiveMode !== 'vector') {
           throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
@@ -1022,13 +1025,24 @@ export const nodeQueries = {
         const rawChunks = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit });
         const chunkHits = (scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor))
           .slice(off, off + finalLimit);
+        // #719 — honor `where` on chunk passages: keep only passages whose PARENT
+        // node satisfies the predicate (also re-asserts the memory scope).
+        let allowedParents: Set<string> | null = null;
+        if (f.where != null) {
+          allowedParents = new Set(
+            await provider.filterWhere({
+              db: ctx.db, ids: [...new Set(chunkHits.map((c) => c.nodeId))],
+              memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+            }),
+          );
+        }
         const parents = await ctx.db.node.findMany({
           where: { id: { in: [...new Set(chunkHits.map((c) => c.nodeId))] }, deletedAt: null },
           include: { memory: { select: { urn: true } } },
         });
         const parentById = new Map(parents.map((p) => [p.id, p]));
         const passages = chunkHits
-          .filter((c) => parentById.has(c.nodeId))
+          .filter((c) => parentById.has(c.nodeId) && (allowedParents == null || allowedParents.has(c.nodeId)))
           .map((c) => {
             const p = parentById.get(c.nodeId)! as { loc: string; memory: { urn: string } };
             // #697 Stage 2: emit the flat v2 node URN (matches Node.urn); fall
