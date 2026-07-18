@@ -10,6 +10,10 @@ import {
   type NodeMergeField,
 } from '../../lib/nodeMerge.js';
 import { NodeAbstractTooLongError } from '../../lib/entityRef/errors.js';
+import { GraphQLError } from 'graphql';
+import { validateNodeAgainstSchema, NodeSchemaViolation } from '../../lib/validateNodeAgainstSchema.js';
+import { normalizeObjectType } from '../../lib/enforceNodeSchema.js';
+import type { MemorySchema } from '../../lib/memorySchema.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -118,6 +122,34 @@ export async function mergeMemoryGraph(
   const classifyPage = Math.max(1, Math.floor(args.classifyPageSize ?? CLASSIFY_PAGE));
   const withEdges = fields.has('EDGES');
 
+  // #725/#737 — nodes landing in a schema-governed target (relocated OR folded)
+  // must satisfy the target schema. A merge is a LONG batched op; the target's
+  // schema can be tightened concurrently (an admin hardening the memory), so a
+  // single snapshot taken at the top goes stale for later batches and would let
+  // a non-conforming node fold in. Re-read the schema per relocate-page (Phase 1)
+  // and per fold-batch INSIDE its transaction (Phase 2), so enforcement always
+  // sees the schema current at write time. assertConformsAgainst no-ops for an
+  // unschema'd target or a non-collection node.
+  const fetchTargetSchema = async (client: Pick<typeof db, 'memory'>): Promise<MemorySchema | null> =>
+    ((await client.memory.findUnique({ where: { id: targetMemoryId }, select: { schema: true } }))
+      ?.schema as unknown as MemorySchema | null);
+  const assertConformsAgainst = (
+    schema: MemorySchema | null,
+    objectType: string | null,
+    properties: unknown,
+  ): void => {
+    const norm = normalizeObjectType(objectType);
+    if (norm == null) return;
+    try {
+      validateNodeAgainstSchema(schema, norm, (properties ?? null) as Record<string, unknown> | null);
+    } catch (e) {
+      if (e instanceof NodeSchemaViolation) {
+        throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      throw e;
+    }
+  };
+
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
   // Page the live source nodes by id (id+loc projection only — never the full
   // rows) and match each page against the target by loc. A source node whose
@@ -158,6 +190,18 @@ export async function mergeMemoryGraph(
       }
     }
     if (relocateIds.length > 0) {
+      // Enforce the target schema on the collection members relocating in (only
+      // when the target IS schema'd — page rows are id/loc-only, so fetch the
+      // typed subset's discriminator/properties for validation). Re-read the
+      // schema here so a mid-merge tightening is honored (not the top-of-fn one).
+      const relocateSchema = await fetchTargetSchema(db);
+      if (relocateSchema != null) {
+        const typed = await db.node.findMany({
+          where: { id: { in: relocateIds }, objectType: { not: null } },
+          select: { objectType: true, properties: true },
+        });
+        for (const t of typed) assertConformsAgainst(relocateSchema, t.objectType, t.properties);
+      }
       const relocate = await db.node.updateMany({
         where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
         data: { memoryId: targetMemoryId },
@@ -183,6 +227,11 @@ export async function mergeMemoryGraph(
     const batch = await db.$transaction(async (tx) => {
       let moved = 0;
       let dropped = 0;
+
+      // Read the target schema INSIDE the tx so the fold validates against the
+      // schema current at fold time (a tightening committed between batches is
+      // honored), consistent with this batch's other reads/writes.
+      const batchSchema = await fetchTargetSchema(tx);
 
       // Read the batch's rows INSIDE the transaction, constrained to their
       // expected memory + live state. Reading here (rather than before the tx)
@@ -228,6 +277,8 @@ export async function mergeMemoryGraph(
           }),
         );
         if (Object.keys(merged.changed).length > 0) {
+          // #725/#737 — the folded target must still satisfy its collection.
+          assertConformsAgainst(batchSchema, tgt.objectType, 'properties' in merged.changed ? merged.changed.properties : tgt.properties);
           const writeData: Record<string, unknown> = { ...merged.changed, updatedBy: actorId };
           if (merged.abstractChanged) {
             writeData.abstractOriginHash = computeContentHash(
