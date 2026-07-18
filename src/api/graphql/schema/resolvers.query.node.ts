@@ -18,7 +18,8 @@ import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
-import type { LexicalField } from '../../../lib/retrieval/provider.js';
+import { compileNodeWhere, NodeWhereError, type NodeWhere } from '../../../lib/retrieval/nodeWhere.js';
+import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retrieval/provider.js';
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import {
@@ -508,6 +509,7 @@ export const nodeQueries = {
           updatedAfter?: string | null;
           updatedBefore?: string | null;
           includeDeleted?: boolean | null;
+          where?: NodeWhere | null;
         } | null;
         fields?: string[] | null;
         sort?: 'relevance' | 'loc' | 'seq' | 'updatedAt' | null;
@@ -544,6 +546,17 @@ export const nodeQueries = {
       }
       if (f.updatedBefore && Number.isNaN(Date.parse(f.updatedBefore))) {
         throw badInput('findNodes filter.updatedBefore must be a valid date string.');
+      }
+      // #719 — validate the `where` predicate up front (a throwaway compile) so a
+      // malformed/oversized tree surfaces as BAD_USER_INPUT before dispatch; the
+      // downstream compiles (filterClause / filterSearch) then can't throw.
+      if (f.where != null) {
+        try {
+          compileNodeWhere(f.where, () => '$0');
+        } catch (e) {
+          if (e instanceof NodeWhereError) throw badInput(`findNodes filter.where: ${e.message}`);
+          throw e;
+        }
       }
 
       // #463: optional single-org narrowing. Resolve + membership-gate up front
@@ -657,8 +670,41 @@ export const nodeQueries = {
 
       const hasQuery = typeof query === 'string' && query.trim() !== '';
 
+      // Structured filters for the SQL paths (the lexical modes, and the no-query
+      // browse when a `where` predicate is present). Mirrors `structuredWhere`
+      // (the Prisma form) but adds the JSONB `where`, which Prisma can't express.
+      const sqlFilter: NodeSqlFilter = {
+        nodeType: f.nodeType ?? null,
+        isRunnable: f.isRunnable ?? null,
+        tags: f.tags ?? null,
+        locPrefix: f.locPrefix ?? null,
+        createdBy: f.createdBy ?? null,
+        updatedAfter: f.updatedAfter ?? null,
+        updatedBefore: f.updatedBefore ?? null,
+        where: f.where ?? null,
+      };
+
       // ── No query → filtered list (subsumes `nodes`) ──
       if (!hasQuery) {
+        // A `where` predicate is JSONB the Prisma query can't express → run the
+        // filtered browse in SQL (ordered ids), then hydrate. The plain (no-where)
+        // browse keeps the existing Prisma path below.
+        if (f.where != null) {
+          const browseSort: BrowseSort | undefined =
+            sort === 'seq' ? 'seq' : sort === 'updatedAt' ? 'updatedAt' : undefined;
+          const ids = await provider.filterSearch({
+            db: ctx.db, memoryIds: scopeIds, filter: sqlFilter,
+            includeDeleted: !!f.includeDeleted, sort: browseSort, offset: off, limit: finalLimit,
+          });
+          const rows = await ctx.db.node.findMany({ where: { id: { in: ids } }, include: nodeInclude });
+          await decryptNodesBatch(ctx.db, rows);
+          const byId = new Map(rows.map((n) => [n.id, n]));
+          const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
+          return {
+            hits: ordered.map((n) => ({ node: n, score: null, vector: null })),
+            passages: [], total: null, reason: null, degraded: null,
+          };
+        }
         const orderBy =
           sort === 'seq' ? { seq: 'asc' as const }
           : sort === 'updatedAt' ? { updatedAt: 'desc' as const }
@@ -681,14 +727,26 @@ export const nodeQueries = {
       }
 
       const q = query!.trim();
-      const effectiveMode = mode ?? 'hybrid';
+      // Default to keyword when a `where` predicate is present (it implies a
+      // filter-first query, and `where` composes cleanly with lexical ranking);
+      // otherwise hybrid. An EXPLICIT vector/hybrid + where is rejected below.
+      const effectiveMode = mode ?? (f.where != null ? 'keyword' : 'hybrid');
+      // #719 — vector/hybrid + where is a follow-up (the JSONB predicate must be
+      // intersected into the re-fetch of the ranked candidate set). Reject rather
+      // than silently returning UNFILTERED semantic hits.
+      if (f.where != null && (effectiveMode === 'vector' || effectiveMode === 'hybrid')) {
+        throw badInput(
+          'findNodes filter.where is not yet supported with mode vector/hybrid — ' +
+            'use it with mode keyword or regex, or omit the query for a filtered browse.',
+        );
+      }
       const lexFields = (fields ?? undefined) as LexicalField[] | undefined;
       const model = isEmbeddingConfigured() ? getEmbeddingClient().model : null;
       // A selective structured filter can drop many ranked candidates, so over-fetch
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
         f.nodeType || f.isRunnable != null || f.tags?.length || f.locPrefix ||
-        f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted
+        f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where
       );
       const page = off + finalLimit;
       const fetchN = hasStructuredFilters ? Math.min(page * 5, 2000) : page;
@@ -746,17 +804,9 @@ export const nodeQueries = {
         return { hits, passages: [], total: null, reason, degraded };
       };
 
-      // Structured filters passed to the lexical SQL so keyword/regex results are
-      // filtered + sorted + paged exactly (no relevance-truncate-then-filter).
-      const sqlFilter = {
-        nodeType: f.nodeType ?? null,
-        isRunnable: f.isRunnable ?? null,
-        tags: f.tags ?? null,
-        locPrefix: f.locPrefix ?? null,
-        createdBy: f.createdBy ?? null,
-        updatedAfter: f.updatedAfter ?? null,
-        updatedBefore: f.updatedBefore ?? null,
-      };
+      // `sqlFilter` (built above, incl. the JSONB `where`) is passed to the lexical
+      // SQL so keyword/regex results are filtered + sorted + paged exactly
+      // (no relevance-truncate-then-filter).
       const lexSort = (sort ?? 'relevance') as 'relevance' | 'loc' | 'seq' | 'updatedAt';
 
       // Hydrate a ranked list the provider has ALREADY filtered/sorted/paged:

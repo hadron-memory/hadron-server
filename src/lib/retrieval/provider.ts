@@ -8,6 +8,7 @@
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
+import type { NodeWhere } from './nodeWhere.js';
 
 export type { VectorHit, ChunkHit };
 
@@ -38,6 +39,26 @@ export interface NodeSqlFilter {
   createdBy?: string | null;
   updatedAfter?: string | null;
   updatedBefore?: string | null;
+  /**
+   * Structured predicate over the `properties` / `data` JSONB columns (#719),
+   * compiled to parameterized SQL and AND-combined with the coarse filters
+   * above. See {@link file://./nodeWhere.ts}.
+   */
+  where?: NodeWhere | null;
+}
+
+/** Ordering for the no-query browse (relevance is meaningless without a query). */
+export type BrowseSort = 'loc' | 'seq' | 'updatedAt';
+
+export interface FilterSearchOpts {
+  db: PrismaClient;
+  memoryIds: string[];
+  filter?: NodeSqlFilter;
+  includeDeleted?: boolean;
+  /** Deterministic browse order (default loc). */
+  sort?: BrowseSort;
+  offset?: number;
+  limit: number;
 }
 
 export interface LexicalSearchOpts {
@@ -83,4 +104,11 @@ export interface NodeRetrievalProvider {
   regexSearch(opts: RegexSearchOpts): Promise<LexicalHit[]>;
   vectorSearch(opts: VectorSearchOpts): Promise<VectorHit[]>;
   vectorSearchChunks(opts: VectorSearchOpts): Promise<ChunkHit[]>;
+  /**
+   * No-query filtered browse (cor:api:090:02): the structured filter (incl. a
+   * `where` predicate) applied + sorted + paged in SQL, returning ordered node
+   * ids. The resolver's browse path uses this when a `where` is present (Prisma
+   * can't express the JSONB predicate); the plain no-filter browse stays Prisma.
+   */
+  filterSearch(opts: FilterSearchOpts): Promise<string[]>;
 }

@@ -107,6 +107,53 @@ export const typeDefs = `#graphql
     updatedAt
   }
 
+  "JSONB column a NodeWhere leaf reads (#719). Defaults to properties."
+  enum NodeWhereColumn {
+    properties
+    data
+  }
+
+  "How a NodeWhere leaf's extracted value is typed before comparison (#719). Default text."
+  enum NodeWhereCast {
+    text
+    number
+    datetime
+    boolean
+  }
+
+  """
+  A recursive structured predicate over a node's properties/data JSONB (#719).
+
+  A node is EITHER a branch (exactly one of and/or/not) OR a leaf (a path plus
+  exactly one operator). Leaf values are JSON scalars, bound as parameters; path
+  segments are identifier-validated. datetime/number comparisons route through
+  DB guard functions so unparseable data drops the row (never a 500). Bounded:
+  depth ≤ 4, ≤ 32 leaves, path ≤ 8 segments — a malformed/oversized tree is
+  BAD_USER_INPUT. Not yet composable with mode vector/hybrid.
+  """
+  input NodeWhereInput {
+    and: [NodeWhereInput!]
+    or: [NodeWhereInput!]
+    not: NodeWhereInput
+    "JSONB column (default properties)."
+    field: NodeWhereColumn
+    "Path of object keys into the column, e.g. ['capturedAt']."
+    path: [String!]
+    "Value typing for the comparison (default text)."
+    as: NodeWhereCast
+    eq: JSON
+    ne: JSON
+    in: [JSON!]
+    lt: JSON
+    lte: JSON
+    gt: JSON
+    gte: JSON
+    between: [JSON!]
+    exists: Boolean
+    "jsonb containment (@>) of the JSON value at the path."
+    contains: JSON
+  }
+
   """
   Structured, unscored, AND-combined filter context for findNodes (cor:api:090:02).
   """
@@ -124,6 +171,8 @@ export const typeDefs = `#graphql
     updatedBefore: String
     "Include soft-deleted nodes (default false)."
     includeDeleted: Boolean
+    "Structured predicate over the node's properties/data JSONB (#719)."
+    where: NodeWhereInput
   }
 
   "Per-hit vector-retrieval lineage (cor:api:090:04), present when a hit came from the vector index."
