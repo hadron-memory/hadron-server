@@ -17,6 +17,8 @@ import {
 import { emitEntityUrnV2, emitNodeUrnV2, emitEdgeUrnV2 } from '../lib/urnEmit.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
+import { validateNodeAgainstSchema, NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
+import type { MemorySchema } from '../lib/memorySchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -2517,6 +2519,7 @@ export function createMcpServerInstance(
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports" or "hrn:node:acme.com::mmdata::review:sort-imports". Both bare and prefixed forms accepted. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
+      objectType: z.string().optional().describe('#725 — collection this node belongs to (the domain-object discriminator, e.g. "competitor" / "insight"), orthogonal to nodeType. On a memory with a property schema, it MUST name a declared collection and the node\'s properties are validated against it; free-form on an unschema\'d memory. Omit for an ordinary node.'),
       isRunnable: z.boolean().optional().describe('Whether this node can be run as a task by hadron_run_task (cor:api:060). Defaults to not-runnable. Independent of nodeType — a runnable node may carry any nodeType.'),
       description: z.string().optional().describe('Short description'),
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
@@ -2535,7 +2538,7 @@ export function createMcpServerInstance(
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
     },
-    async ({ urn: rawUrn, name, nodeType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
       // Spec 022: enforce qualification at the API boundary. Relative-form
       // URNs (e.g., `review:sort-imports` without org+memory) reject here
       // before any DB lookup runs.
@@ -2648,8 +2651,26 @@ export function createMcpServerInstance(
       // in-closure plaintext (FR-027 prompt-drain).
       const memEncRow = await db.memory.findUnique({
         where: { id: memoryId },
-        select: { isEncrypted: true },
+        select: { isEncrypted: true, schema: true },
       });
+      // #725 — enforce the property schema on the RESULTING node state (input
+      // overrides, else the existing value). An empty/whitespace objectType is
+      // normalized to null (no collection). Only a collection member on a
+      // schema'd memory is checked; a violation is a tool error (text), not a crash.
+      const resultObjectType =
+        objectType !== undefined ? (objectType.trim() || null) : (existing?.objectType ?? null);
+      if (resultObjectType != null) {
+        const resultProps = (properties !== undefined ? properties : existing?.properties) as
+          | Record<string, unknown>
+          | null
+          | undefined;
+        try {
+          validateNodeAgainstSchema(memEncRow?.schema as unknown as MemorySchema | null, resultObjectType, resultProps ?? null);
+        } catch (e) {
+          if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
+          throw e;
+        }
+      }
       let storedContent = content ?? null;
       let storedAbstract = normalizedAbstract;
       let storedData = (nodeData ?? undefined) as unknown;
@@ -2677,6 +2698,7 @@ export function createMcpServerInstance(
           loc,
           name,
           nodeType: nodeType ?? 'info',
+          objectType: objectType?.trim() || null,
           isRunnable: isRunnable ?? null,
           description: description ?? null,
           abstract: storedAbstract,
@@ -2693,6 +2715,7 @@ export function createMcpServerInstance(
         update: {
           name,
           ...(nodeType ? { nodeType } : {}),
+          ...(objectType !== undefined ? { objectType: objectType.trim() || null } : {}),
           ...(isRunnable !== undefined ? { isRunnable } : {}),
           description: description ?? null,
           abstract: storedAbstract,
@@ -2803,6 +2826,7 @@ export function createMcpServerInstance(
       urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports"'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
+      objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
       isRunnable: z.boolean().optional().describe('Set whether this node can be run as a task by hadron_run_task. Pass true/false; omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. Spec 031.'),
@@ -2822,7 +2846,7 @@ export function createMcpServerInstance(
       })).optional().describe('Replace outgoing edges (the full set on this node)'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -2906,8 +2930,24 @@ export function createMcpServerInstance(
       // including the revision-history row below (Codex P2).
       const updMemEnc = await db.memory.findUnique({
         where: { id: existing.memoryId },
-        select: { isEncrypted: true },
+        select: { isEncrypted: true, schema: true },
       });
+      // #725 — enforce the property schema on the RESULTING node state (empty
+      // objectType normalized to null).
+      const updResultObjectType =
+        objectType !== undefined ? (objectType.trim() || null) : (existing.objectType ?? null);
+      if (updResultObjectType != null) {
+        const updResultProps = (properties !== undefined ? properties : existing.properties) as
+          | Record<string, unknown>
+          | null
+          | undefined;
+        try {
+          validateNodeAgainstSchema(updMemEnc?.schema as unknown as MemorySchema | null, updResultObjectType, updResultProps ?? null);
+        } catch (e) {
+          if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
+          throw e;
+        }
+      }
       const updKey = updMemEnc?.isEncrypted
         ? sessionKeyCache.getByMemoryId(existing.memoryId)
         : null;
@@ -2932,6 +2972,7 @@ export function createMcpServerInstance(
             changes: diffNodeChanges(existing, {
               name,
               nodeType,
+              objectType,
               isRunnable,
               description,
               abstract: normalizedAbstract,
@@ -2974,6 +3015,7 @@ export function createMcpServerInstance(
       const data: Record<string, unknown> = {};
       if (name !== undefined) data.name = name;
       if (nodeType !== undefined) data.nodeType = nodeType;
+      if (objectType !== undefined) data.objectType = objectType.trim() || null;
       if (isRunnable !== undefined) data.isRunnable = isRunnable;
       if (description !== undefined) data.description = description;
       if (normalizedAbstract !== undefined) data.abstract = normalizedAbstract;

@@ -19,6 +19,8 @@ import {
 import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { validateNodeAgainstSchema, NodeSchemaViolation } from '../../../lib/validateNodeAgainstSchema.js';
+import type { MemorySchema } from '../../../lib/memorySchema.js';
 import {
   encryptNodeFieldsWithKey,
   decryptNodeFields,
@@ -300,6 +302,40 @@ export async function writeNodeCore(
             }
             throw err;
           }
+        }
+      }
+
+      // #725 — an empty/whitespace objectType means "no collection" → normalize
+      // to null so it is stored as an ordinary node and can't bypass the
+      // declared-collection check as a non-null discriminator.
+      if (typeof input.objectType === 'string' && input.objectType.trim() === '') {
+        input.objectType = null;
+      }
+      // #725 — enforce the memory's property schema BEFORE any write side effect
+      // (incl. the revision snapshot below): validate the RESULTING node state
+      // (input overrides, else the existing value) so a partial update is judged
+      // on what it produces. Only a collection member on a schema'd memory is
+      // checked; ordinary nodes skip the schema fetch. `properties` is plaintext.
+      const resultObjectType =
+        input.objectType !== undefined ? input.objectType : (existing?.objectType ?? null);
+      if (resultObjectType != null) {
+        const memSchemaRow = await ctx.db.memory.findUnique({
+          where: { id: input.memoryId },
+          select: { schema: true },
+        });
+        const resultProps =
+          input.properties !== undefined ? input.properties : existing?.properties;
+        try {
+          validateNodeAgainstSchema(
+            memSchemaRow?.schema as unknown as MemorySchema | null,
+            resultObjectType,
+            (resultProps ?? null) as Record<string, unknown> | null,
+          );
+        } catch (e) {
+          if (e instanceof NodeSchemaViolation) {
+            throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
+          }
+          throw e;
         }
       }
 
@@ -2150,10 +2186,35 @@ export const nodeMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       await requireMemoryWriteAccess(ctx, resolvedMemoryId);
 
+      // #725 — this bulk path bypasses writeNodeCore, so enforce the memory's
+      // property schema on each imported node here too (a git-synced typed node
+      // must still satisfy its collection). Fetched once for the whole subtree.
+      const replaceMemSchema = (
+        await ctx.db.memory.findUnique({ where: { id: resolvedMemoryId }, select: { schema: true } })
+      )?.schema as unknown as MemorySchema | null;
+
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
         await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
 
         for (const input of nodes) {
+          // #725 — normalize an empty objectType to null, then enforce the schema.
+          if (typeof input.objectType === 'string' && input.objectType.trim() === '') {
+            input.objectType = null;
+          }
+          if (input.objectType != null) {
+            try {
+              validateNodeAgainstSchema(
+                replaceMemSchema,
+                input.objectType,
+                (input.properties ?? null) as Record<string, unknown> | null,
+              );
+            } catch (e) {
+              if (e instanceof NodeSchemaViolation) {
+                throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
+              }
+              throw e;
+            }
+          }
           // Strip non-column NodeInput fields (edges/reason) that Prisma
           // would reject, and pull out id/tags so they're set explicitly
           // (spreading input.id would otherwise override the generated id).
