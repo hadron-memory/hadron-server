@@ -60,4 +60,15 @@ describe('Node.objectType — collection discriminator', () => {
     const res = await findNodes({ filter: { memoryIds: [memId], objectType: 'competitor' } });
     expect(locs(res)).toEqual(['c.y']);
   });
+
+  it('a node revision versions objectType, and restore recovers it', async () => {
+    const n = await createNode({ memoryId: memId, loc: 'c.z', name: 'Z', objectType: 'competitor' });
+    // Retype the collection — the pre-edit state is snapshotted.
+    await updateNode({ memoryId: memId, loc: 'c.z', objectType: 'insight' });
+    const rev = await db.nodeRevision.findFirst({ where: { nodeId: n.id }, orderBy: { revNo: 'desc' } });
+    expect(rev?.objectType).toBe('competitor'); // captured, not lost
+    await (resolvers.Mutation as any).restoreNodeRevision(null, { revisionId: rev!.id }, admin());
+    // Back to the competitor collection.
+    expect(locs(await findNodes({ filter: { memoryIds: [memId], objectType: 'competitor' } }))).toEqual(['c.z']);
+  });
 });

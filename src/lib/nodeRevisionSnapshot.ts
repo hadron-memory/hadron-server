@@ -37,6 +37,7 @@ export interface SnapshotSourceNode {
   content: string | null;
   tags: unknown;
   nodeType: string;
+  objectType: string | null;
   isLink: boolean;
   properties: Prisma.JsonValue | null;
   data: Prisma.JsonValue | null;
@@ -112,6 +113,7 @@ export function buildNodeRevisionSnapshot(
     content: node.content,
     tags: (node.tags ?? []) as string[],
     nodeType: node.nodeType,
+    objectType: node.objectType,
     isLink: node.isLink,
     properties: jsonOrDbNull(node.properties),
     data: jsonOrDbNull(node.data),
@@ -305,6 +307,7 @@ export function restorableNodeFields(revision: {
   content: string | null;
   tags: unknown;
   nodeType: string | null;
+  objectType: string | null;
   isLink: boolean | null;
   properties: Prisma.JsonValue | null;
   data: Prisma.JsonValue | null;
@@ -326,6 +329,7 @@ export function restorableNodeFields(revision: {
   return {
     ...base,
     nodeType: revision.nodeType,
+    objectType: revision.objectType,
     isLink: revision.isLink ?? false,
     properties: revision.properties,
     data: revision.data,

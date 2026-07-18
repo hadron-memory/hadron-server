@@ -1923,6 +1923,8 @@ model NodeRevision {
   // content), contentHash + ownerRepo (external-sync provenance), and
   // the created/updated/deleted audit stamps.
   nodeType           String?  @map("node_type")
+  /// #725 — collection discriminator at capture time (parity with nodeType).
+  objectType         String?  @map("object_type")
   isLink             Boolean? @map("is_link")
   properties         Json?
   data               Json?

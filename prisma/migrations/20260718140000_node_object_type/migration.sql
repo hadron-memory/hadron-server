@@ -14,4 +14,8 @@ BEGIN;
 ALTER TABLE "nodes" ADD COLUMN "object_type" TEXT;
 CREATE INDEX "nodes_memory_id_object_type_idx" ON "nodes"("memory_id", "object_type");
 
+-- Version objectType in the NodeRevision curated subset (parity with nodeType),
+-- so restoring a pre-edit revision recovers the collection classification.
+ALTER TABLE "node_revisions" ADD COLUMN "object_type" TEXT;
+
 COMMIT;
