@@ -66,6 +66,13 @@ describe('validateNodeAgainstSchema — required + types', () => {
     ok('competitor', { name: 'a', stage: 'series-a' });
     bad('competitor', { name: 'a', stage: 'series-z' });
   });
+
+  it('text: coercible (accepts string, finite number, boolean — parity with #719 asText)', () => {
+    ok('competitor', { name: 'Letta' });
+    ok('competitor', { name: 42 });
+    ok('competitor', { name: true });
+    bad('competitor', { name: {} }); // an object is not text-coercible
+  });
 });
 
 describe('validateNodeAgainstSchema — strict collections', () => {

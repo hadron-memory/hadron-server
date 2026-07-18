@@ -35,7 +35,9 @@ export class NodeSchemaViolation extends Error {
 export function valueMatchesFieldType(field: MemorySchemaField, value: unknown): boolean {
   switch (field.type) {
     case 'text':
-      return typeof value === 'string';
+      // Coercible-to-text, matching #719 asText (string | finite number | boolean
+      // all stringify and stay queryable as text).
+      return typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value));
     case 'boolean':
       return typeof value === 'boolean' || value === 'true' || value === 'false';
     case 'number':
