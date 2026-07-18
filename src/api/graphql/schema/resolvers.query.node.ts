@@ -696,7 +696,15 @@ export const nodeQueries = {
             db: ctx.db, memoryIds: scopeIds, filter: sqlFilter,
             includeDeleted: !!f.includeDeleted, sort: browseSort, offset: off, limit: finalLimit,
           });
-          const rows = await ctx.db.node.findMany({ where: { id: { in: ids } }, include: nodeInclude });
+          // Re-assert the memory scope on hydration (defense-in-depth): the ids
+          // are already scoped by filterSearch's `memory_id IN (scopeIds)`, but
+          // re-scoping here means a concurrent cross-memory move (cf. #409) can
+          // never surface an out-of-scope node — cross-tenant reads are the
+          // first-class invariant, not a cosmetic one.
+          const rows = await ctx.db.node.findMany({
+            where: { id: { in: ids }, memoryId: { in: scopeIds } },
+            include: nodeInclude,
+          });
           await decryptNodesBatch(ctx.db, rows);
           const byId = new Map(rows.map((n) => [n.id, n]));
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
