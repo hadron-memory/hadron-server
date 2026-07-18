@@ -763,8 +763,12 @@ export const nodeQueries = {
         // can't ride the ranking query (that runs against node_embeddings, not
         // the nodes' JSONB), so intersect the bounded ranked candidate set with
         // the where-satisfying subset (which also re-asserts the memory scope).
+        // Only when there ARE vector-ranked candidates (`simById` set): the
+        // keyword-only hybrid fallbacks (no_vector_index / embedding_unavailable)
+        // already applied `where` in the lexical SQL via sqlFilter, so a
+        // filterWhere there would be a redundant query.
         let candidateIds = ranked.map((r) => r.nodeId);
-        if (f.where != null) {
+        if (f.where != null && simById != null) {
           const allowed = new Set(
             await provider.filterWhere({
               db: ctx.db, ids: candidateIds, memoryIds: scopeIds,
