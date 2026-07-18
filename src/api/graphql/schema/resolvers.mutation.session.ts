@@ -1,5 +1,6 @@
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
@@ -213,8 +214,16 @@ export const sessionMutations = {
             where: { id: agent.organizationId }, select: { urn: true },
           });
           const opaqueId = generateId();
-          // #352: canonical `app-user` per-user role marker (was `user`).
-          const memoryUrn = `${org.urn}:${agentSlugFromUrn(agent.urn)}:app-user:${opaqueId}`;
+          // #697 Stage 3: mint a FLAT single-atom v2 urn (`<org>:<opaqueId>`) —
+          // the `app-user` scope now lives in the row columns (class/userId/
+          // userMemoryOfAgentId/appId), not the URN path, so node URNs in this
+          // memory round-trip through splitNodeUrn. The opaque id can't collide,
+          // so this stores `<org>:<opaqueId>` unaliased.
+          const memoryUrn = await mintMemoryUrnV2(ctx.db, {
+            root: org.urn,
+            desiredSlug: opaqueId,
+            authorRoot: agentSlugFromUrn(agent.urn),
+          });
           const created = await ctx.db.memory.create({
             data: {
               organizationId: agent.organizationId,
@@ -254,7 +263,14 @@ export const sessionMutations = {
         });
         const opaqueId = generateId();
         const agentSlug = agentSlugFromUrn(agent.urn);
-        const memoryUrn = `${org.urn}:${agentSlug}:anon:${opaqueId}`;
+        // #697 Stage 3: flat single-atom v2 urn (`<org>:<opaqueId>`) — the anon
+        // scope lives in the row columns, not the URN path (see the app-user
+        // branch above). Fresh opaque id ⇒ no collision, stored unaliased.
+        const memoryUrn = await mintMemoryUrnV2(ctx.db, {
+          root: org.urn,
+          desiredSlug: opaqueId,
+          authorRoot: agentSlug,
+        });
         const expires = new Date(Date.now() + app.anonymousTtlDays * 24 * 60 * 60 * 1000);
         const created = await ctx.db.memory.create({
           data: {

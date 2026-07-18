@@ -310,8 +310,10 @@ describe('startAgentSession', () => {
     const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
     expect(mem?.userMemoryOfAgentId).toBe(agent.id);
     expect(mem?.visibility).toBeNull();
-    // #352: per-user memories store the canonical `app-user` marker (was `user`).
-    expect(mem?.urn).toContain(':app-user:');
+    // #697 Stage 3: per-user memories store a FLAT single-atom v2 urn
+    // (`<org>:<opaqueId>`); the app-user scope lives in the columns, not the URN.
+    expect(mem?.urn?.split(':')).toHaveLength(2);
+    expect(mem?.urn).not.toContain(':app-user:');
   });
 
   it('reuses the same memory on subsequent sessions', async () => {
@@ -342,7 +344,10 @@ describe('startAgentSession', () => {
     );
     const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
     expect(mem?.anonymousExpiresAt).not.toBeNull();
-    expect(mem?.urn).toContain(':anon:');
+    // #697 Stage 3: anon memories store a FLAT single-atom v2 urn; the anon
+    // scope lives in the columns (anonymousExpiresAt), not the URN path.
+    expect(mem?.urn?.split(':')).toHaveLength(2);
+    expect(mem?.urn).not.toContain(':anon:');
     // 7 days from now (app default)
     const secondsUntilExpiry = (mem!.anonymousExpiresAt!.getTime() - Date.now()) / 1000;
     expect(secondsUntilExpiry).toBeGreaterThan(6 * 24 * 60 * 60);
@@ -490,8 +495,9 @@ describe('linkMemoryToUser', () => {
       appCtx(app.id),
     );
     expect(linked.anonymousExpiresAt).toBeNull();
-    // #352: anon→user promotion writes the canonical `app-user` marker.
-    expect(linked.urn).toContain(':app-user:');
+    // #697 Stage 3: anon→user promotion re-mints a FLAT single-atom v2 urn; the
+    // app-user scope lives in the columns, not the URN path (was `:app-user:`).
+    expect(linked.urn.split(':')).toHaveLength(2);
     expect(linked.urn).not.toContain(':anon:');
     const user = await db.user.findFirst({
       where: { externalAppId: app.id, externalId: 'mm-new' },
@@ -543,8 +549,9 @@ describe('linkMemoryToUser', () => {
     );
     expect(linked.id).toBe(session.memoryId);
     expect(linked.anonymousExpiresAt).toBeNull();
-    // #352: canonical `app-user` marker post-promotion.
-    expect(linked.urn).toContain(':app-user:');
+    // #697 Stage 3: FLAT single-atom v2 urn post-promotion (scope in columns).
+    expect(linked.urn.split(':')).toHaveLength(2);
+    expect(linked.urn).not.toContain(':anon:');
   });
 });
 
@@ -711,11 +718,14 @@ describe('Organization memory listing', () => {
       { externalId: 'mm-42' },
       appCtx(app.id),
     );
-    await resolvers.Mutation.startAgentSession(
+    const session = await resolvers.Mutation.startAgentSession(
       {},
       { agentId: agent.id, externalUserId: 'mm-42' },
       appCtx(app.id),
     );
+    // #697 Stage 3: the per-user memory now has a FLAT single-atom urn (no
+    // `:app-user:` marker), so exclusion is asserted against its actual urn.
+    const userMem = await db.memory.findUnique({ where: { id: session.memoryId! } });
 
     // Query the organization — should show the regular memory but not the user one
     const org = await resolvers.Query.organization(
@@ -723,8 +733,9 @@ describe('Organization memory listing', () => {
       { ref: orgA.id },
       adminCtx(),
     );
-    expect(org?.memories.map((m: { urn: string }) => m.urn)).toContain('org-a:knowledge');
-    expect(org?.memories.find((m: { urn: string }) => m.urn.includes(':app-user:'))).toBeUndefined();
+    const orgMemUrns = org?.memories.map((m: { urn: string }) => m.urn) ?? [];
+    expect(orgMemUrns).toContain('org-a:knowledge');
+    expect(orgMemUrns).not.toContain(userMem!.urn);
   });
 });
 
