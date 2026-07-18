@@ -85,16 +85,4 @@ describe('findNodes where — BAD_USER_INPUT surfaces', () => {
       extensions: { code: 'BAD_USER_INPUT' },
     });
   });
-
-  it('rejects where combined with an explicit mode hybrid', async () => {
-    await expect(
-      findNodes({ query: 'insight', mode: 'hybrid', filter: { where: { path: ['sourceKind'], eq: 'substack' } } }),
-    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-  });
-
-  it('rejects where combined with an explicit mode vector', async () => {
-    await expect(
-      findNodes({ query: 'insight', mode: 'vector', filter: { where: { path: ['sourceKind'], eq: 'substack' } } }),
-    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-  });
 });

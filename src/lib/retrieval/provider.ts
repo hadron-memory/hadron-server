@@ -61,6 +61,16 @@ export interface FilterSearchOpts {
   limit: number;
 }
 
+export interface FilterWhereOpts {
+  db: PrismaClient;
+  /** Candidate node ids (e.g. a ranked vector/hybrid set) to narrow. */
+  ids: string[];
+  /** Access-scoped memory ids — re-asserted so an out-of-scope id can never survive. */
+  memoryIds: string[];
+  where: NodeWhere;
+  includeDeleted?: boolean;
+}
+
 export interface LexicalSearchOpts {
   db: PrismaClient;
   /** Boolean surface grammar (see tsquery.ts). */
@@ -111,4 +121,11 @@ export interface NodeRetrievalProvider {
    * can't express the JSONB predicate); the plain no-filter browse stays Prisma.
    */
   filterSearch(opts: FilterSearchOpts): Promise<string[]>;
+  /**
+   * Narrow a bounded candidate id set to those satisfying a JSONB `where`
+   * predicate (and re-assert the memory scope). Used to compose `where` with
+   * vector/hybrid ranking, where filtering is a post-step on the ranked set
+   * (the vector query runs against node_embeddings, not the nodes' JSONB).
+   */
+  filterWhere(opts: FilterWhereOpts): Promise<string[]>;
 }

@@ -14,6 +14,7 @@ import type {
   RegexSearchOpts,
   VectorSearchOpts,
   FilterSearchOpts,
+  FilterWhereOpts,
   NodeSqlFilter,
   LexicalSort,
   BrowseSort,
@@ -186,6 +187,26 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
         ${deletedClause}${filterSql}
       ORDER BY ${orderBy}
       LIMIT ${limitPh} OFFSET ${offsetPh}
+    `;
+    const rows = await opts.db.$queryRawUnsafe<{ id: string }[]>(sql, ...params);
+    return rows.map((r) => r.id);
+  },
+
+  async filterWhere(opts: FilterWhereOpts): Promise<string[]> {
+    if (opts.ids.length === 0 || opts.memoryIds.length === 0) return [];
+    const { params, bind } = paramBuilder();
+    // Node ids are internal cuids, but bind them anyway (never interpolate).
+    const idPh = opts.ids.map((id) => bind(id)).join(', ');
+    const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
+    const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
+    const whereSql = compileNodeWhere(opts.where, bind);
+    const sql = `
+      SELECT id
+      FROM nodes
+      WHERE id IN (${idPh})
+        AND memory_id IN (${memPh})
+        ${deletedClause}
+        AND (${whereSql})
     `;
     const rows = await opts.db.$queryRawUnsafe<{ id: string }[]>(sql, ...params);
     return rows.map((r) => r.id);

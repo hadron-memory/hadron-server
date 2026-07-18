@@ -129,7 +129,8 @@ export const typeDefs = `#graphql
   segments are identifier-validated. datetime/number comparisons route through
   DB guard functions so unparseable data drops the row (never a 500). Bounded:
   depth ≤ 4, ≤ 32 leaves, path ≤ 8 segments — a malformed/oversized tree is
-  BAD_USER_INPUT. Not yet composable with mode vector/hybrid.
+  BAD_USER_INPUT. Composes with every mode (keyword/regex/vector/hybrid) and the
+  no-query browse: it filters, then the mode ranks the survivors.
   """
   input NodeWhereInput {
     and: [NodeWhereInput!]

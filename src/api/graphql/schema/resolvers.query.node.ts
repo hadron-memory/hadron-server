@@ -735,19 +735,7 @@ export const nodeQueries = {
       }
 
       const q = query!.trim();
-      // Default to keyword when a `where` predicate is present (it implies a
-      // filter-first query, and `where` composes cleanly with lexical ranking);
-      // otherwise hybrid. An EXPLICIT vector/hybrid + where is rejected below.
-      const effectiveMode = mode ?? (f.where != null ? 'keyword' : 'hybrid');
-      // #719 — vector/hybrid + where is a follow-up (the JSONB predicate must be
-      // intersected into the re-fetch of the ranked candidate set). Reject rather
-      // than silently returning UNFILTERED semantic hits.
-      if (f.where != null && (effectiveMode === 'vector' || effectiveMode === 'hybrid')) {
-        throw badInput(
-          'findNodes filter.where is not yet supported with mode vector/hybrid — ' +
-            'use it with mode keyword or regex, or omit the query for a filtered browse.',
-        );
-      }
+      const effectiveMode = mode ?? 'hybrid';
       const lexFields = (fields ?? undefined) as LexicalField[] | undefined;
       const model = isEmbeddingConfigured() ? getEmbeddingClient().model : null;
       // A selective structured filter can drop many ranked candidates, so over-fetch
@@ -771,8 +759,22 @@ export const nodeQueries = {
         ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
         const rankOrder = new Map(ranked.map((r, i) => [r.nodeId, i]));
+        // #719 — compose `where` with vector/hybrid ranking: the JSONB predicate
+        // can't ride the ranking query (that runs against node_embeddings, not
+        // the nodes' JSONB), so intersect the bounded ranked candidate set with
+        // the where-satisfying subset (which also re-asserts the memory scope).
+        let candidateIds = ranked.map((r) => r.nodeId);
+        if (f.where != null) {
+          const allowed = new Set(
+            await provider.filterWhere({
+              db: ctx.db, ids: candidateIds, memoryIds: scopeIds,
+              where: f.where, includeDeleted: !!f.includeDeleted,
+            }),
+          );
+          candidateIds = candidateIds.filter((id) => allowed.has(id));
+        }
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: ranked.map((r) => r.nodeId) }, ...structuredWhere },
+          where: { id: { in: candidateIds }, ...structuredWhere },
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
