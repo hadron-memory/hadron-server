@@ -264,3 +264,37 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
 ) STORED;
 
 CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
+
+-- ── #719 structured/faceted query: value-cast guard functions + JSONB GIN ────
+-- Mirrors prisma/migrations/20260718120000_where_query_helpers/migration.sql
+-- (keep in lockstep). The `where` predicate compiler (src/lib/retrieval/
+-- nodeWhere.ts) routes number/datetime comparisons through these guards so an
+-- unparseable stored value or bound yields NULL (row drops out) instead of
+-- raising a cast error — a search must never 500 on bad data / bad input.
+-- Prisma models neither plpgsql functions nor GIN(jsonb_path_ops), so `db push`
+-- won't create these; this file does (idempotent CREATE OR REPLACE / IF NOT EXISTS).
+
+CREATE OR REPLACE FUNCTION hadron_safe_numeric(input text)
+RETURNS numeric
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+BEGIN
+  IF input IS NULL THEN RETURN NULL; END IF;
+  RETURN input::numeric;
+EXCEPTION WHEN others THEN
+  RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION hadron_safe_timestamptz(input text)
+RETURNS timestamptz
+LANGUAGE plpgsql STABLE PARALLEL SAFE AS $$
+BEGIN
+  IF input IS NULL THEN RETURN NULL; END IF;
+  RETURN input::timestamptz;
+EXCEPTION WHEN others THEN
+  RETURN NULL;
+END;
+$$;
+
+CREATE INDEX IF NOT EXISTS nodes_properties_gin ON nodes USING gin (properties jsonb_path_ops);
+CREATE INDEX IF NOT EXISTS nodes_data_gin ON nodes USING gin (data jsonb_path_ops);

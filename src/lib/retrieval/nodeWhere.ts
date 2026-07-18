@@ -17,11 +17,12 @@
  *  - every caller *value* goes through `bind` as a real parameter.
  *
  * Cast semantics: a leaf compares the extracted text (`#>>`) by default; `as:
- * number | datetime` route the left side through the IMMUTABLE guard functions
- * `hadron_safe_numeric` / `hadron_safe_timestamptz` (defined in
- * prisma/post-push.sql), which return NULL on unparseable input — so a junk
- * value drops the row instead of erroring the whole query. Range operators on
- * `text` are lexicographic; pass a cast for numeric/temporal ranges.
+ * number | datetime` route the comparison through the guard functions
+ * `hadron_safe_numeric` (IMMUTABLE) / `hadron_safe_timestamptz` (STABLE —
+ * session-TZ dependent), defined in prisma/post-push.sql, which return NULL on
+ * unparseable input — so a junk value drops the row instead of erroring the
+ * whole query. Range operators on `text` are lexicographic; pass a cast for
+ * numeric/temporal ranges.
  *
  * Hard caps: a rich query surface is a DoS surface (cf. #415/#437), so tree
  * depth, leaf count, and path length are bounded. A violation (or any malformed
