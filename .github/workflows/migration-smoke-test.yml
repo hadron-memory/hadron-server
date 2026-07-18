@@ -127,6 +127,10 @@ jobs:
           #     Same rationale as the HNSW index (prod needs them, prod doesn't
           #     run post-push.sql); both are whitelisted, incl. the -- AlterTable
           #     comment that accompanies the column drop.
+          #   - #719 (where-query): `nodes_properties_gin` / `nodes_data_gin` are
+          #     GIN(jsonb_path_ops) indexes Prisma can't express, so the diff wants
+          #     to DROP them. Same rationale (prod needs them, no post-push.sql on
+          #     prod); both are whitelisted.
           # Any OTHER line in the diff is real drift and must fail CI.
           # Invoke the prisma bin directly (not `pnpm prisma`): pnpm 11's
           # verify-deps-before-run preamble ("Already up to date" / "Done
@@ -143,6 +147,8 @@ jobs:
             | grep -vE '^DROP INDEX "node_embeddings_embedding_hnsw";$' \
             | grep -vE '^DROP INDEX "nodes_tsv_gin";$' \
             | grep -vE '^ALTER TABLE "nodes" DROP COLUMN "tsv";$' \
+            | grep -vE '^DROP INDEX "nodes_properties_gin";$' \
+            | grep -vE '^DROP INDEX "nodes_data_gin";$' \
             || true)
           # `|| true`: when every diff line is whitelisted the final grep matches
           # nothing and exits 1, which under `bash -e` would fail the job. An empty
