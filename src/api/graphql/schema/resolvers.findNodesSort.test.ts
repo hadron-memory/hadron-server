@@ -68,6 +68,16 @@ describe('findNodes sortProperty — no-query browse', () => {
     expect(order(res)).toEqual(['n.a', 'n.b', 'n.c', 'n.d']); // the other memory's node is out of scope
   });
 
+  it('traverses an array-crossing path (SQL #>> parity)', async () => {
+    await mkNode({ loc: 'arr.x', name: 'arr x', properties: { items: [{ rank: 7 }] } });
+    await mkNode({ loc: 'arr.y', name: 'arr y', properties: { items: [{ rank: 3 }] } });
+    const res = await findNodes({
+      filter: { locPrefix: 'arr.' },
+      sortProperty: { path: ['items', '0', 'rank'], as: 'number' },
+    });
+    expect(order(res)).toEqual(['arr.y', 'arr.x']); // 3 < 7, via SQL properties #>> {items,0,rank}
+  });
+
   it('composes a where predicate with a property sort', async () => {
     const res = await findNodes({
       filter: { where: { path: ['stage'], eq: 'series-a' } },

@@ -339,4 +339,25 @@ describe('makePropertySortComparator — JS mirror for the vector/hybrid re-sort
     // ordered by data.k (a < b), NOT properties.k
     expect(rows.slice().sort(cmp).map((r) => r.loc)).toEqual(['b', 'a']);
   });
+
+  it('traverses arrays via numeric segments, matching #>> (SQL parity)', () => {
+    const cmp = makePropertySortComparator({ path: ['items', '0', 'rank'], as: 'number' });
+    const rows = [
+      row('a', { items: [{ rank: 9 }] }),
+      row('b', { items: [{ rank: 2 }] }),
+      row('c', { items: [] }), // index 0 out of range → missing → last
+    ];
+    expect(rows.slice().sort(cmp).map((r) => r.loc)).toEqual(['b', 'a', 'c']);
+  });
+
+  it('supports negative array indices (from the end), matching #>>', () => {
+    const cmp = makePropertySortComparator({ path: ['xs', '-1'], as: 'number' });
+    const rows = [row('a', { xs: [1, 5] }), row('b', { xs: [1, 3] })];
+    expect(rows.slice().sort(cmp).map((r) => r.loc)).toEqual(['b', 'a']); // last elems 3 < 5
+  });
+
+  it('fails fast on an invalid path (no silent degrade to loc)', () => {
+    expect(() => makePropertySortComparator({ path: [] })).toThrow(NodeWhereError);
+    expect(() => makePropertySortComparator({ path: [`x') --`] })).toThrow(NodeWhereError);
+  });
 });

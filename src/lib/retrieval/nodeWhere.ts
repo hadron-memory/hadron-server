@@ -320,8 +320,13 @@ export type SortDirection = 'asc' | 'desc';
 export interface NodePropertySort {
   /** JSONB column; defaults to `properties`. */
   field?: PredicateColumn;
-  /** Path of object keys into the column, e.g. ['stage'] or ['a','b']. */
-  path?: string[];
+  /**
+   * Path of keys into the column, e.g. ['stage'] or ['a','b']. A numeric segment
+   * indexes into a JSON array (negative counts from the end), matching `#>>`.
+   * Required (mirrors the `[String!]!` GraphQL input) — the compiler + comparator
+   * both reject a missing/empty path.
+   */
+  path: string[];
   /** Value typing before comparison; default `text`. number/datetime route through the DB guards. */
   as?: PredicateCast;
   /** Direction; default `asc`. */
@@ -364,12 +369,28 @@ export function compileNodePropertySort(
   return `${lhs} ${normalizeDirection(sort.direction)} NULLS LAST, loc ASC`;
 }
 
-/** Read the value at a sort path from a plain `properties`/`data` object (JS mirror of `#>>`). */
+/**
+ * Read the value at a sort path from a plain `properties`/`data` object — the JS
+ * mirror of Postgres `jsonb #>> text[]`, including array traversal: a numeric
+ * segment indexes into a JSON array (negative counts from the end), so the
+ * vector/hybrid re-sort agrees with the SQL paths on array-crossing paths.
+ */
 function readPath(properties: unknown, data: unknown, sort: NodePropertySort): unknown {
   let cur: unknown = (sort.field ?? 'properties') === 'data' ? data : properties;
-  for (const seg of sort.path ?? []) {
-    if (cur == null || typeof cur !== 'object' || Array.isArray(cur)) return undefined;
-    cur = (cur as Record<string, unknown>)[seg];
+  for (const seg of sort.path) {
+    if (cur == null) return undefined;
+    if (Array.isArray(cur)) {
+      // #>> traverses arrays by integer subscript only (negative = from the end);
+      // a non-integer segment on an array matches nothing.
+      if (!/^-?\d+$/.test(seg)) return undefined;
+      let idx = Number(seg);
+      if (idx < 0) idx += cur.length;
+      cur = idx >= 0 && idx < cur.length ? cur[idx] : undefined;
+    } else if (typeof cur === 'object') {
+      cur = (cur as Record<string, unknown>)[seg];
+    } else {
+      return undefined; // reached a scalar mid-path
+    }
   }
   return cur;
 }
@@ -412,6 +433,10 @@ function extractPropertySortKey(
 export function makePropertySortComparator(
   sort: NodePropertySort,
 ): (a: { properties: unknown; data: unknown; loc: string }, b: { properties: unknown; data: unknown; loc: string }) => number {
+  // Validate the (field, path) pair once, so a direct caller that skips
+  // compileNodePropertySort fails fast (NodeWhereError) rather than silently
+  // degrading to a pure loc sort — parity with the SQL compiler.
+  buildAccessor(sort.field, sort.path, 'properties');
   const desc = normalizeDirection(sort.direction) === 'DESC';
   return (a, b) => {
     const ka = extractPropertySortKey(a.properties, a.data, sort);
