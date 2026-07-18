@@ -18,7 +18,14 @@ import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
-import { compileNodeWhere, NodeWhereError, type NodeWhere } from '../../../lib/retrieval/nodeWhere.js';
+import {
+  compileNodeWhere,
+  compileNodePropertySort,
+  makePropertySortComparator,
+  NodeWhereError,
+  type NodeWhere,
+  type NodePropertySort,
+} from '../../../lib/retrieval/nodeWhere.js';
 import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retrieval/provider.js';
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
@@ -493,7 +500,7 @@ export const nodeQueries = {
     findNodes: async (
       _: unknown,
       {
-        query, mode, filter, fields, sort, expand, granularity, orgId, limit, offset, minScore,
+        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore,
       }: {
         query?: string | null;
         mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
@@ -514,6 +521,7 @@ export const nodeQueries = {
         } | null;
         fields?: string[] | null;
         sort?: 'relevance' | 'loc' | 'seq' | 'updatedAt' | null;
+        sortProperty?: NodePropertySort | null;
         expand?: number | null;
         granularity?: 'node' | 'chunk' | null;
         orgId?: string | null;
@@ -556,6 +564,17 @@ export const nodeQueries = {
           compileNodeWhere(f.where, () => '$0');
         } catch (e) {
           if (e instanceof NodeWhereError) throw badInput(`findNodes filter.where: ${e.message}`);
+          throw e;
+        }
+      }
+      // #719 — validate the property-path sort up front (throwaway compile) so a
+      // malformed path/direction is BAD_USER_INPUT before dispatch. Reuses the
+      // where-leaf addressing; missing/unparseable values sort last, loc breaks ties.
+      if (sortProperty != null) {
+        try {
+          compileNodePropertySort(sortProperty);
+        } catch (e) {
+          if (e instanceof NodeWhereError) throw badInput(`findNodes sortProperty: ${e.message}`);
           throw e;
         }
       }
@@ -689,15 +708,17 @@ export const nodeQueries = {
 
       // ── No query → filtered list (subsumes `nodes`) ──
       if (!hasQuery) {
-        // A `where` predicate is JSONB the Prisma query can't express → run the
-        // filtered browse in SQL (ordered ids), then hydrate. The plain (no-where)
-        // browse keeps the existing Prisma path below.
-        if (f.where != null) {
+        // A `where` predicate (JSONB the Prisma query can't express) OR a
+        // property-path sort (an ORDER BY over a JSON path Prisma can't express)
+        // → run the filtered browse in SQL (ordered ids), then hydrate. The plain
+        // browse (no where, no property sort) keeps the Prisma path below.
+        if (f.where != null || sortProperty != null) {
           const browseSort: BrowseSort | undefined =
             sort === 'seq' ? 'seq' : sort === 'updatedAt' ? 'updatedAt' : undefined;
           const ids = await provider.filterSearch({
             db: ctx.db, memoryIds: scopeIds, filter: sqlFilter,
-            includeDeleted: !!f.includeDeleted, sort: browseSort, offset: off, limit: finalLimit,
+            includeDeleted: !!f.includeDeleted, sort: browseSort,
+            propertySort: sortProperty ?? undefined, offset: off, limit: finalLimit,
           });
           // Re-assert the memory scope on hydration (defense-in-depth): the ids
           // are already scoped by filterSearch's `memory_id IN (scopeIds)`, but
@@ -785,7 +806,14 @@ export const nodeQueries = {
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
+        // #719 — a property-path sort re-orders the ranked candidate WINDOW in
+        // memory (the vector/hybrid query ranks against node_embeddings, not the
+        // JSONB), mirroring the SQL ORDER BY the browse/lexical paths use; missing
+        // values sort last, loc breaks ties. Like the enum sort here, it orders
+        // only the retrieved candidates — not the whole corpus.
+        const propComparator = sortProperty ? makePropertySortComparator(sortProperty) : null;
         const ordered = rows.slice().sort((a, b) => {
+          if (propComparator) return propComparator(a, b);
           if (sort === 'loc') return a.loc.localeCompare(b.loc);
           if (sort === 'seq') return (a.seq ?? 0) - (b.seq ?? 0);
           if (sort === 'updatedAt') return b.updatedAt.getTime() - a.updatedAt.getTime();
@@ -889,7 +917,8 @@ export const nodeQueries = {
       if (effectiveMode === 'keyword' || effectiveMode === 'regex') {
         const common = {
           db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
-          includeDeleted: !!f.includeDeleted, sort: lexSort, offset: off, limit: finalLimit,
+          includeDeleted: !!f.includeDeleted, sort: lexSort,
+          propertySort: sortProperty ?? undefined, offset: off, limit: finalLimit,
         };
         try {
           if (effectiveMode === 'regex') {

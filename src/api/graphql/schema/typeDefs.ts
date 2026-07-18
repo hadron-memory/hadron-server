@@ -107,6 +107,33 @@ export const typeDefs = `#graphql
     updatedAt
   }
 
+  "Sort direction for a findNodes property-path sort (#719). Default asc."
+  enum SortDirection {
+    asc
+    desc
+  }
+
+  """
+  Order findNodes by the value at a properties/data JSON path (#719).
+
+  Reuses the NodeWhere leaf addressing: path into field (properties|data), typed
+  by as (text|number|datetime|boolean). number/datetime route through the same DB
+  guards, so a missing or unparseable value sorts LAST regardless of direction;
+  loc ascending breaks ties for stable pagination. Overrides the sort enum when
+  present. On vector/hybrid modes it re-orders the retrieved candidate window (the
+  ranking runs against the vector index, not the JSONB), like the sort enum does.
+  """
+  input NodePropertySort {
+    "Path of object keys into the column, e.g. ['stage']."
+    path: [String!]!
+    "JSONB column (default properties)."
+    field: NodeWhereColumn
+    "Value typing before comparison (default text)."
+    as: NodeWhereCast
+    "Direction (default asc)."
+    direction: SortDirection
+  }
+
   "JSONB column a NodeWhere leaf reads (#719). Defaults to properties."
   enum NodeWhereColumn {
     properties
@@ -2913,6 +2940,8 @@ export const typeDefs = `#graphql
       filter: NodeFilter
       fields: [NodeField!]
       sort: NodeSort
+      "#719 — order by a properties/data JSON path; overrides sort when present."
+      sortProperty: NodePropertySort
       expand: Int
       granularity: SearchGranularity
       orgId: ID
