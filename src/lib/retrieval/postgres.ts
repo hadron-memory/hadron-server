@@ -13,12 +13,15 @@ import type {
   LexicalSearchOpts,
   RegexSearchOpts,
   VectorSearchOpts,
+  FilterSearchOpts,
   NodeSqlFilter,
   LexicalSort,
+  BrowseSort,
 } from './provider.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
 import { vectorSearchNodes, vectorSearchChunks } from '../../services/embedding/vectors.js';
 import { compileBooleanQuery } from './tsquery.js';
+import { compileNodeWhere } from './nodeWhere.js';
 
 /** Ordered parameter accumulator — appends a value and returns its `$n` placeholder. */
 function paramBuilder(seed: unknown[] = []) {
@@ -39,7 +42,19 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   if (flt.createdBy) parts.push(`created_by = ${bind(flt.createdBy)}`);
   if (flt.updatedAfter) parts.push(`updated_at >= ${bind(flt.updatedAfter)}::timestamptz`);
   if (flt.updatedBefore) parts.push(`updated_at <= ${bind(flt.updatedBefore)}::timestamptz`);
+  // #719 — structured predicate over properties/data JSONB, compiled to a
+  // parameterized boolean expr sharing this query's `bind` accumulator.
+  if (flt.where) parts.push(`(${compileNodeWhere(flt.where, bind)})`);
   return parts.length ? ' AND ' + parts.join(' AND ') : '';
+}
+
+/** ORDER BY for the no-query browse (relevance is meaningless without a query). */
+function browseOrderByClause(sort: BrowseSort | undefined): string {
+  switch (sort) {
+    case 'seq': return 'seq ASC NULLS LAST, loc ASC';
+    case 'updatedAt': return 'updated_at DESC, loc ASC';
+    default: return 'loc ASC';
+  }
 }
 
 /** ORDER BY for a lexical query. relevance → score; the rest suppress scoring. */
@@ -153,6 +168,27 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     `;
     const rows = await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params);
     return rows.map((r) => ({ nodeId: r.id, score: Number(r.score) }));
+  },
+
+  async filterSearch(opts: FilterSearchOpts): Promise<string[]> {
+    if (opts.memoryIds.length === 0) return [];
+    const { params, bind } = paramBuilder();
+    const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
+    const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
+    const filterSql = filterClause(opts.filter, bind);
+    const orderBy = browseOrderByClause(opts.sort);
+    const limitPh = bind(opts.limit);
+    const offsetPh = bind(opts.offset ?? 0);
+    const sql = `
+      SELECT id
+      FROM nodes
+      WHERE memory_id IN (${memPh})
+        ${deletedClause}${filterSql}
+      ORDER BY ${orderBy}
+      LIMIT ${limitPh} OFFSET ${offsetPh}
+    `;
+    const rows = await opts.db.$queryRawUnsafe<{ id: string }[]>(sql, ...params);
+    return rows.map((r) => r.id);
   },
 
   vectorSearch(opts: VectorSearchOpts): Promise<VectorHit[]> {
