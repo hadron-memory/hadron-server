@@ -540,10 +540,11 @@ export const memoryMutations = {
       if (newOrgId && newOrgId !== memory.organizationId) {
         await requireOrgRole(ctx, newOrgId, 'ADMIN');
       }
-      // cor:acl:080:03 — un-PUBLIC-ing a memory that a PUBLIC agent links would
-      // break the congruence invariant; reject before persisting the change.
+      // cor:acl:080:03 — un-PUBLIC-ing a COVERED memory that a PUBLIC agent
+      // links would break the congruence invariant; reject before persisting.
+      // The helper excludes per-user + app-scoped memories (never public).
       if (visibility !== undefined) {
-        await assertMemoryVisibilityChangeAllowed(ctx.db, id, visibility);
+        await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
       }
       // #621 — friendly guard mirroring chk_memory_max_rev_count_positive.
       // The column is NOT NULL, so explicit `null` is rejected (omit the arg to
@@ -1218,13 +1219,14 @@ export const memoryMutations = {
       // we don't want (e.g. another agent reading the linked agent's prompts).
       const memory = await ctx.db.memory.findUniqueOrThrow({
         where: { id: resolvedMemoryId },
-        select: { class: true, visibility: true },
+        select: { class: true, visibility: true, appId: true },
       });
       if (memory.class === 'system') {
         throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
       }
       // cor:acl:080:03 — a PUBLIC agent may reference only PUBLIC knowledge:
-      // reject linking a non-per-user, non-PUBLIC memory to a PUBLIC agent.
+      // reject linking a covered (non-per-user, non-app-scoped), non-PUBLIC
+      // memory to a PUBLIC agent.
       await assertLinkAllowedForPublicAgent(agent.visibility, memory);
       // Upsert semantics (#501): granting is idempotent — re-attaching an
       // already-attached memory updates the role, and a soft-deleted grant

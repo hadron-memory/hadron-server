@@ -77,6 +77,28 @@ describe('addMemoryToAgent onto a PUBLIC agent', () => {
   });
 });
 
+describe('covered-set exclusions — app-scoped memories (#610 review / cor:acl:080:03)', () => {
+  it('app-scoped knowledge never counts: it neither blocks PUBLIC nor is blocked when linked/changed', async () => {
+    // App-scoped knowledge is App-internal even at PUBLIC (#653), so it is
+    // excluded from the covered set — the createMemoryInApp path can't leave a
+    // PUBLIC agent "linked to non-public data" in a way that matters.
+    const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app`, name: 'app' } });
+    const appMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app-know`, name: 'app-know', class: 'knowledge', visibility: 'ORGANIZATION', appId: app.id },
+    });
+    // link app-scoped knowledge, then set the agent PUBLIC → allowed (excluded)
+    await M.addMemoryToAgent({}, { agentId: agent.id, memoryId: appMem.id }, ctx());
+    expect((await M.updateAgent({}, { id: agent.id, visibility: 'PUBLIC' }, ctx())).visibility).toBe('PUBLIC');
+    // linking ANOTHER app-scoped memory to the now-PUBLIC agent → allowed
+    const appMem2 = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app-know2`, name: 'app-know2', class: 'knowledge', visibility: 'ORGANIZATION', appId: app.id },
+    });
+    await expect(M.addMemoryToAgent({}, { agentId: agent.id, memoryId: appMem2.id }, ctx())).resolves.toBeTruthy();
+    // changing the app-scoped memory's visibility while linked to the PUBLIC agent → not blocked
+    expect((await M.updateMemory({}, { id: appMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility).toBe('ORGANIZATION');
+  });
+});
+
 describe('updateMemory un-PUBLIC-ing knowledge of a PUBLIC agent', () => {
   it('is rejected while the agent stays PUBLIC', async () => {
     await M.addMemoryToAgent({}, { agentId: agent.id, memoryId: pubMem.id }, ctx());
