@@ -30,6 +30,7 @@ import { emitEntityUrnV2, emitNodeUrnV2 } from '../urnEmit.js';
 import type { GlobalSearchHit, SearchEntityType, SearchField, SearchPrincipal } from './types.js';
 import { userUrn } from '../userHandle.js';
 import { canSeeUserPersonalFields, type UserVisibilityCtx } from '../auth/userVisibility.js';
+import { discoverableOrgWhere } from '../orgDiscoverability.js';
 
 type AnyWhere = Record<string, unknown>;
 
@@ -181,19 +182,18 @@ async function searchOrganizations(ctx: AdapterCtx): Promise<GlobalSearchHit[]> 
   if (fields.has('urn')) preds.push(...urnPreds('urn', urnTerm));
   if (fields.has('name')) preds.push(textPred('name', q));
   if (preds.length === 0) return [];
-  if (principal.orgIds !== null && principal.orgIds.length === 0) return [];
 
   // #609: `isVisible` is a listing-visibility flag — a non-listable org (not an
-  // explicit `true`: an un-activated personal org `false`, or legacy/unset
-  // `null`) must not surface in discovery for anyone, platform admins included.
-  // Listable ⟺ `isVisible === true` (matching the codebase-wide `!== true`
-  // "hidden/personal" convention). Non-admin callers (`orgIds !== null`) are
-  // already confined to their own memberships. For an admin (`orgIds === null`)
-  // widen to every listable org PLUS the admin's own member orgs (viewerOrgIds),
-  // instead of the previous unrestricted `{}`.
+  // explicit `true`) must not surface for platform admins. Listable ⟺
+  // `isVisible === true`. #610 (cor:acl:080:02): a NON-admin additionally
+  // discovers any org with a public footprint (`discoverableOrgWhere`), so a
+  // non-member can find a public org — hence NO early-return on empty orgIds.
+  //   - non-admin (`orgIds !== null`): own member orgs OR any discoverable org.
+  //   - admin (`orgIds === null`): every listable org PLUS own memberships
+  //     (a superset of discoverable, so no separate discoverability term needed).
   const orgScope: Prisma.OrganizationWhereInput =
     principal.orgIds !== null
-      ? { id: { in: principal.orgIds } }
+      ? { OR: [{ id: { in: principal.orgIds } }, discoverableOrgWhere()] }
       : { OR: [{ isVisible: true }, { id: { in: principal.viewerOrgIds } }] };
 
   const rows = await ctx.db.organization.findMany({

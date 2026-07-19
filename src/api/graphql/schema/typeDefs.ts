@@ -1290,6 +1290,31 @@ export const typeDefs = `#graphql
     updatedAt: String!
   }
 
+  """
+  cor:acl:080:02 — a sanitized, non-member-safe view of a DISCOVERABLE org.
+  Deliberately a SEPARATE type from Organization: it exposes only public
+  identity + the org's public footprint, never members / private memories /
+  apps / credentials (which the full Organization's nested resolvers would leak).
+  """
+  type PublicOrganization {
+    id: ID!
+    name: String!
+    urn: String!
+    listedOnMarketplace: Boolean!
+    "The org's PUBLIC, non-app-scoped memories (sanitized refs)."
+    publicMemories: [PublicResourceRef!]!
+    "The org's PUBLIC agents (sanitized refs)."
+    publicAgents: [PublicResourceRef!]!
+  }
+
+  "A minimal, safe reference to a public resource (marketplace / discovery)."
+  type PublicResourceRef {
+    id: ID!
+    name: String!
+    urn: String!
+    description: String
+  }
+
   # Per-organization membership record for a user.
   type OrgMember {
     id: ID!
@@ -3125,6 +3150,16 @@ export const typeDefs = `#graphql
     'ref' accepts the entity's ID or URN.
     """
     organization(ref: ID!): Organization
+
+    """
+    cor:acl:080:02 — the sanitized PUBLIC view of a DISCOVERABLE organization,
+    safe for a non-member. Returns non-null only when the org is activated
+    (isVisible=true) AND exposes a public footprint (a PUBLIC memory/agent, or
+    listedOnMarketplace); otherwise null (denied is indistinguishable from
+    not-found — anti-enumeration). Never exposes members, private memories,
+    apps, or credentials. 'ref' accepts the org ID or URN.
+    """
+    publicOrganization(ref: ID!): PublicOrganization
 
     # Invitation lookup (public — no auth required, used by invite acceptance page)
     invitation(slug: String!): UserInvitation
