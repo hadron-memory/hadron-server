@@ -13,6 +13,7 @@ import { resolvers, type Context } from './resolvers.js';
 
 const Q = resolvers.Query as any;
 const PubOrg = (resolvers as any).PublicOrganization;
+const Mkt = (resolvers as any).Marketplace;
 
 let stranger: { id: string }; // member of NO org
 const ctx = (): Context => ({ db, userId: stranger.id, roles: [] });
@@ -127,5 +128,41 @@ describe('globalSearch — a non-member discovers a public org (#610)', () => {
     const orgHits = new Set(found.hits.filter((h: { entityType: string }) => h.entityType === 'organization').map((h: { id: string }) => h.id));
     expect(orgHits).toContain(pub.id);
     expect(orgHits).not.toContain(priv.id);
+  });
+});
+
+describe('Query.marketplace — the catalogue (listedOnMarketplace only, cor:acl:080:04)', () => {
+  let org: { id: string; urn: string };
+  beforeEach(async () => {
+    org = await mkOrg({ listed: true }); // listed + activated
+  });
+
+  it('is public (empty parent) and organizations lists only listed + activated orgs', async () => {
+    expect(await Q.marketplace({}, {}, ctx())).toEqual({});
+    const publicUnlisted = await mkOrg();
+    await pubMemory(publicUnlisted); // discoverable but NOT listed
+    const hiddenListed = await mkOrg({ isVisible: false, listed: true }); // listed but not activated
+    const ids = new Set((await Mkt.organizations({}, {}, ctx())).map((o: { id: string }) => o.id));
+    expect(ids).toContain(org.id);
+    expect(ids).not.toContain(publicUnlisted.id);
+    expect(ids).not.toContain(hiddenListed.id);
+  });
+
+  it('agents: only listed + PUBLIC', async () => {
+    const listedPub = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:ag1`, name: 'listed-pub', visibility: 'PUBLIC', listedOnMarketplace: true, description: 'd' } });
+    await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:ag2`, name: 'listed-org', visibility: 'ORGANIZATION', listedOnMarketplace: true } }); // not PUBLIC
+    await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:ag3`, name: 'unlisted-pub', visibility: 'PUBLIC', listedOnMarketplace: false } }); // not listed
+    expect((await Mkt.agents({}, {}, ctx())).map((a: { id: string }) => a.id)).toEqual([listedPub.id]);
+  });
+
+  it('memories: only listed + public-readable (excludes unlisted / non-public / app-scoped)', async () => {
+    const listedPub = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m1`, name: 'listed-pub', class: 'knowledge', visibility: 'PUBLIC', listedOnMarketplace: true, shortDescription: 'a listed public memory' } });
+    await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m2`, name: 'listed-org', class: 'knowledge', visibility: 'ORGANIZATION', listedOnMarketplace: true } }); // not PUBLIC
+    await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m3`, name: 'unlisted-pub', class: 'knowledge', visibility: 'PUBLIC', listedOnMarketplace: false } }); // not listed
+    const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app`, name: 'app' } });
+    await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m4`, name: 'listed-app', class: 'knowledge', visibility: 'PUBLIC', appId: app.id, listedOnMarketplace: true } }); // app-scoped
+    const mems = await Mkt.memories({}, {}, ctx());
+    expect(mems.map((m: { id: string }) => m.id)).toEqual([listedPub.id]);
+    expect(mems[0]).toMatchObject({ name: 'listed-pub', description: 'a listed public memory' });
   });
 });

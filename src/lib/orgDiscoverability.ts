@@ -18,6 +18,24 @@
 import type { Prisma } from '../generated/prisma/index.js';
 
 /**
+ * A Prisma `where` fragment matching a genuinely PUBLIC-READABLE memory —
+ * mirrors the canonical `PUBLIC` clause in `orgReadableMemory.ts`. App-scoped
+ * memories (#653), per-user holdings (`userMemoryOfAgentId` set), and
+ * personal/private are excluded even if their visibility is mis-set to PUBLIC.
+ * The single source of truth for "which memories are publicly readable", reused
+ * by the discoverability predicate and the sanitized public projections.
+ */
+export function publicReadableMemoryWhere(): Prisma.MemoryWhereInput {
+  return {
+    deletedAt: null,
+    visibility: 'PUBLIC',
+    appId: null,
+    userMemoryOfAgentId: null,
+    class: { notIn: ['personal', 'private'] },
+  };
+}
+
+/**
  * A Prisma `where` fragment matching exactly the orgs a non-member may discover.
  * Compose it (e.g. OR it with the caller's member orgs) in a read surface.
  */
@@ -27,11 +45,7 @@ export function discoverableOrgWhere(): Prisma.OrganizationWhereInput {
     isVisible: true, // activation precondition (cor:acl:080:01)
     OR: [
       { listedOnMarketplace: true }, // cor:acl:080:04
-      // A genuinely public-readable memory — mirrors the canonical predicate in
-      // orgReadableMemory.ts (the `PUBLIC` clause): app-scoped (#653), per-user
-      // holdings (`userMemoryOfAgentId` set), and personal/private are excluded
-      // even if their visibility is mis-set to PUBLIC.
-      { memories: { some: { deletedAt: null, visibility: 'PUBLIC', appId: null, userMemoryOfAgentId: null, class: { notIn: ['personal', 'private'] } } } },
+      { memories: { some: publicReadableMemoryWhere() } }, // cor:acl:080:03
       { agents: { some: { deletedAt: null, visibility: 'PUBLIC' } } },
     ],
   };

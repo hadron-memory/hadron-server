@@ -400,6 +400,12 @@ export const orgQueries = {
       });
     },
 
+    // cor:acl:080:04 — the marketplace catalogue browse. Public (no membership
+    // required). Returns an empty parent; the Marketplace field resolvers
+    // (resolvers.types.ts) fetch the listed + publicly-accessible resources as
+    // sanitized projections.
+    marketplace: async () => ({}),
+
     invitation: async (_: unknown, { slug }: { slug: string }, ctx: Context) => {
       const invite = await ctx.db.userInvitation.findUnique({
         where: { slug },

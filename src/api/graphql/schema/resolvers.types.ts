@@ -46,6 +46,23 @@ import {
   assetUrn,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
+import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
+
+/** cor:acl:080:02/04 — map a memory row to a sanitized PublicResourceRef. */
+function memoryRowToRef(m: { id: string; name: string; urn: string; shortDescription: string | null }) {
+  return {
+    id: m.id,
+    name: m.name,
+    urn: m.urn.includes('::')
+      ? safeCanonicalUrn('memory', m.urn)
+      : safeCanonicalUrn('memory', legacyMemoryUrnToCanonical(m.urn)),
+    description: m.shortDescription ?? null,
+  };
+}
+/** cor:acl:080:02/04 — map an agent row to a sanitized PublicResourceRef. */
+function agentRowToRef(a: { id: string; name: string; urn: string; description: string | null }) {
+  return { id: a.id, name: a.name, urn: safeCanonicalUrn('agent', a.urn), description: a.description ?? null };
+}
 
 /**
  * Resolve one editor/approver candidate string to public identifiers:
@@ -937,25 +954,12 @@ export const typeResolvers = {
       return safeCanonicalUrn('org', o.urn);
     },
     publicMemories: async (o: { id: string }, _: unknown, ctx: Context) => {
-      // Mirrors the canonical public-read predicate (orgReadableMemory.ts): only
-      // genuinely public-readable memories — app-scoped, per-user holdings, and
-      // personal/private are excluded even if visibility is mis-set to PUBLIC.
       const rows = await ctx.db.memory.findMany({
-        where: {
-          organizationId: o.id, deletedAt: null, visibility: 'PUBLIC',
-          appId: null, userMemoryOfAgentId: null, class: { notIn: ['personal', 'private'] },
-        },
+        where: { organizationId: o.id, ...publicReadableMemoryWhere() },
         select: { id: true, name: true, urn: true, shortDescription: true },
         orderBy: { name: 'asc' },
       });
-      return rows.map((m) => ({
-        id: m.id,
-        name: m.name,
-        urn: m.urn.includes('::')
-          ? safeCanonicalUrn('memory', m.urn)
-          : safeCanonicalUrn('memory', legacyMemoryUrnToCanonical(m.urn)),
-        description: m.shortDescription ?? null,
-      }));
+      return rows.map(memoryRowToRef);
     },
     publicAgents: async (o: { id: string }, _: unknown, ctx: Context) => {
       const rows = await ctx.db.agent.findMany({
@@ -963,12 +967,37 @@ export const typeResolvers = {
         select: { id: true, name: true, urn: true, description: true },
         orderBy: { name: 'asc' },
       });
-      return rows.map((a) => ({
-        id: a.id,
-        name: a.name,
-        urn: safeCanonicalUrn('agent', a.urn),
-        description: a.description ?? null,
-      }));
+      return rows.map(agentRowToRef);
+    },
+  },
+  // cor:acl:080:04 — the marketplace catalogue. Only listedOnMarketplace +
+  // publicly-accessible resources, as sanitized projections. The parent
+  // (Query.marketplace) is an empty object; these resolvers do the work.
+  Marketplace: {
+    organizations: (_p: unknown, _a: unknown, ctx: Context) =>
+      ctx.db.organization.findMany({
+        where: { deletedAt: null, isVisible: true, listedOnMarketplace: true },
+        select: { id: true, name: true, urn: true, listedOnMarketplace: true },
+        orderBy: { name: 'asc' },
+        take: 200,
+      }),
+    agents: async (_p: unknown, _a: unknown, ctx: Context) => {
+      const rows = await ctx.db.agent.findMany({
+        where: { deletedAt: null, listedOnMarketplace: true, visibility: 'PUBLIC' },
+        select: { id: true, name: true, urn: true, description: true },
+        orderBy: { name: 'asc' },
+        take: 200,
+      });
+      return rows.map(agentRowToRef);
+    },
+    memories: async (_p: unknown, _a: unknown, ctx: Context) => {
+      const rows = await ctx.db.memory.findMany({
+        where: { listedOnMarketplace: true, ...publicReadableMemoryWhere() },
+        select: { id: true, name: true, urn: true, shortDescription: true },
+        orderBy: { name: 'asc' },
+        take: 200,
+      });
+      return rows.map(memoryRowToRef);
     },
   },
   ExchangeConnection: {

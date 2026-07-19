@@ -1315,6 +1315,21 @@ export const typeDefs = `#graphql
     description: String
   }
 
+  """
+  cor:acl:080:04 — the marketplace catalogue: resources explicitly opted in via
+  listedOnMarketplace AND publicly accessible (activated orgs / PUBLIC agents /
+  public-readable memories). Sanitized, non-member-safe projections only;
+  browsable without membership.
+  """
+  type Marketplace {
+    "Listed, activated organizations (sanitized public view)."
+    organizations: [PublicOrganization!]!
+    "Listed, PUBLIC agents (sanitized refs)."
+    agents: [PublicResourceRef!]!
+    "Listed, public-readable memories (sanitized refs)."
+    memories: [PublicResourceRef!]!
+  }
+
   # Per-organization membership record for a user.
   type OrgMember {
     id: ID!
@@ -3160,6 +3175,13 @@ export const typeDefs = `#graphql
     apps, or credentials. 'ref' accepts the org ID or URN.
     """
     publicOrganization(ref: ID!): PublicOrganization
+
+    """
+    cor:acl:080:04 — browse the marketplace catalogue (resources opted-in via
+    listedOnMarketplace). Public: no membership required. Returns only sanitized
+    projections; never exposes members, private memories, apps, or credentials.
+    """
+    marketplace: Marketplace!
 
     # Invitation lookup (public — no auth required, used by invite acceptance page)
     invitation(slug: String!): UserInvitation
