@@ -1,5 +1,6 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
+import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
 import {
   AiServiceConfigNotFoundError,
   AiConfigValidationError,
@@ -219,6 +220,12 @@ export const agentMutations = {
       // App's readable set). Applies to a user-owned agent (ownerUserId set).
       if (agent.ownerUserId !== null && visibility !== undefined && visibility !== 'PERSONAL') {
         throw new GraphQLError('A personal (user-owned) agent must stay PERSONAL — sharing a user-owned agent is not supported yet.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      // cor:acl:080:03 — congruence invariant: an agent may become PUBLIC only
+      // if every knowledge memory it links (excluding per-user personal/private)
+      // is itself PUBLIC. Checked against the CURRENT links before persisting.
+      if (visibility === 'PUBLIC') {
+        await assertAgentPublicAllowed(ctx.db, id);
       }
       let newUrn: string | undefined;
       if (urn !== undefined) {

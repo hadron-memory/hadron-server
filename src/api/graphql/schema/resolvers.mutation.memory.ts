@@ -5,6 +5,10 @@ import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
+import {
+  assertMemoryVisibilityChangeAllowed,
+  assertLinkAllowedForPublicAgent,
+} from '../../../lib/agentPublicCongruence.js';
 import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
 import { deleteMemoryVectors } from '../../../services/embedding/vectors.js';
 import {
@@ -535,6 +539,12 @@ export const memoryMutations = {
       // If transferring to a new org, require ADMIN on the target org too
       if (newOrgId && newOrgId !== memory.organizationId) {
         await requireOrgRole(ctx, newOrgId, 'ADMIN');
+      }
+      // cor:acl:080:03 — un-PUBLIC-ing a COVERED memory that a PUBLIC agent
+      // links would break the congruence invariant; reject before persisting.
+      // The helper excludes per-user + app-scoped memories (never public).
+      if (visibility !== undefined) {
+        await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
       }
       // #621 — friendly guard mirroring chk_memory_max_rev_count_positive.
       // The column is NOT NULL, so explicit `null` is rejected (omit the arg to
@@ -1209,11 +1219,15 @@ export const memoryMutations = {
       // we don't want (e.g. another agent reading the linked agent's prompts).
       const memory = await ctx.db.memory.findUniqueOrThrow({
         where: { id: resolvedMemoryId },
-        select: { class: true },
+        select: { class: true, visibility: true, appId: true },
       });
       if (memory.class === 'system') {
         throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
       }
+      // cor:acl:080:03 — a PUBLIC agent may reference only PUBLIC knowledge:
+      // reject linking a covered (non-per-user, non-app-scoped), non-PUBLIC
+      // memory to a PUBLIC agent.
+      await assertLinkAllowedForPublicAgent(agent.visibility, memory);
       // Upsert semantics (#501): granting is idempotent — re-attaching an
       // already-attached memory updates the role, and a soft-deleted grant
       // row (which still occupies the @@unique(agentId, memoryId) slot) is
