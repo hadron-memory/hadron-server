@@ -927,6 +927,41 @@ export const typeResolvers = {
       return safeCanonicalUrn('org', o.urn);
     },
   },
+  // cor:acl:080:02 — sanitized public view of a discoverable org. Only the org's
+  // PUBLIC footprint is exposed; nothing here traverses to members / private
+  // memories / apps / credentials. The parent object is already gated to a
+  // discoverable org by Query.publicOrganization.
+  PublicOrganization: {
+    urn: (o: { urn?: string | null }) => (o.urn ? safeCanonicalUrn('org', o.urn) : ''),
+    publicMemories: async (o: { id: string }, _: unknown, ctx: Context) => {
+      const rows = await ctx.db.memory.findMany({
+        where: { organizationId: o.id, deletedAt: null, visibility: 'PUBLIC', appId: null },
+        select: { id: true, name: true, urn: true, shortDescription: true },
+        orderBy: { name: 'asc' },
+      });
+      return rows.map((m) => ({
+        id: m.id,
+        name: m.name,
+        urn: m.urn.includes('::')
+          ? safeCanonicalUrn('memory', m.urn)
+          : safeCanonicalUrn('memory', legacyMemoryUrnToCanonical(m.urn)),
+        description: m.shortDescription ?? null,
+      }));
+    },
+    publicAgents: async (o: { id: string }, _: unknown, ctx: Context) => {
+      const rows = await ctx.db.agent.findMany({
+        where: { organizationId: o.id, deletedAt: null, visibility: 'PUBLIC' },
+        select: { id: true, name: true, urn: true, description: true },
+        orderBy: { name: 'asc' },
+      });
+      return rows.map((a) => ({
+        id: a.id,
+        name: a.name,
+        urn: safeCanonicalUrn('agent', a.urn),
+        description: a.description ?? null,
+      }));
+    },
+  },
   ExchangeConnection: {
     lastSyncAt: (c: { lastSyncAt?: Date | string | null }) => toISO(c.lastSyncAt),
     createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,

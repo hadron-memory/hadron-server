@@ -19,6 +19,7 @@ import {
   type SearchPrincipal,
 } from '../../../lib/global-search/index.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
+import { discoverableOrgWhere } from '../../../lib/orgDiscoverability.js';
 import { GraphQLError } from 'graphql';
 import { searchContains } from '../../../integrations/db/provider.js';
 import {
@@ -378,6 +379,25 @@ export const orgQueries = {
         if (!isAdmin || gate?.isVisible !== true) throw new Error('Forbidden');
       }
       return ctx.db.organization.findUnique({ where: { id: resolvedId }, include: ORG_INCLUDE });
+    },
+
+    // cor:acl:080:02 — the sanitized PUBLIC view for the non-member discovery
+    // path. Returns non-null ONLY for a discoverable org (activated + public
+    // footprint); everything else — non-discoverable, unresolvable, malformed —
+    // collapses to null (denied ≡ not-found, anti-enumeration). Selects only the
+    // safe scalar fields; the PublicOrganization field resolvers expose just the
+    // org's public memories/agents, never the leaky full-Organization surface.
+    publicOrganization: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      let resolvedId: string;
+      try {
+        ({ id: resolvedId } = await resolveOrgRef(ctx.db, ref));
+      } catch {
+        return null;
+      }
+      return ctx.db.organization.findFirst({
+        where: { AND: [{ id: resolvedId }, discoverableOrgWhere()] },
+        select: { id: true, name: true, urn: true, listedOnMarketplace: true },
+      });
     },
 
     invitation: async (_: unknown, { slug }: { slug: string }, ctx: Context) => {
