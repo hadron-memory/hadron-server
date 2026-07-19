@@ -932,10 +932,19 @@ export const typeResolvers = {
   // memories / apps / credentials. The parent object is already gated to a
   // discoverable org by Query.publicOrganization.
   PublicOrganization: {
-    urn: (o: { urn?: string | null }) => (o.urn ? safeCanonicalUrn('org', o.urn) : ''),
+    urn: (o: { urn?: string | null }) => {
+      if (!o.urn) throw new Error('Organization URN is required but not found (partial query?)');
+      return safeCanonicalUrn('org', o.urn);
+    },
     publicMemories: async (o: { id: string }, _: unknown, ctx: Context) => {
+      // Mirrors the canonical public-read predicate (orgReadableMemory.ts): only
+      // genuinely public-readable memories — app-scoped, per-user holdings, and
+      // personal/private are excluded even if visibility is mis-set to PUBLIC.
       const rows = await ctx.db.memory.findMany({
-        where: { organizationId: o.id, deletedAt: null, visibility: 'PUBLIC', appId: null },
+        where: {
+          organizationId: o.id, deletedAt: null, visibility: 'PUBLIC',
+          appId: null, userMemoryOfAgentId: null, class: { notIn: ['personal', 'private'] },
+        },
         select: { id: true, name: true, urn: true, shortDescription: true },
         orderBy: { name: 'asc' },
       });

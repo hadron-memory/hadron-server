@@ -27,9 +27,11 @@ export function discoverableOrgWhere(): Prisma.OrganizationWhereInput {
     isVisible: true, // activation precondition (cor:acl:080:01)
     OR: [
       { listedOnMarketplace: true }, // cor:acl:080:04
-      // app-scoped PUBLIC memories are App-internal (never public-readable, #653)
-      // — require appId: null so only a genuinely public memory counts.
-      { memories: { some: { deletedAt: null, visibility: 'PUBLIC', appId: null } } },
+      // A genuinely public-readable memory — mirrors the canonical predicate in
+      // orgReadableMemory.ts (the `PUBLIC` clause): app-scoped (#653), per-user
+      // holdings (`userMemoryOfAgentId` set), and personal/private are excluded
+      // even if their visibility is mis-set to PUBLIC.
+      { memories: { some: { deletedAt: null, visibility: 'PUBLIC', appId: null, userMemoryOfAgentId: null, class: { notIn: ['personal', 'private'] } } } },
       { agents: { some: { deletedAt: null, visibility: 'PUBLIC' } } },
     ],
   };

@@ -82,6 +82,17 @@ describe('Query.publicOrganization — the discoverability gate', () => {
     expect(await Q.publicOrganization({}, { ref: org.id }, ctx())).toBeNull();
   });
 
+  it('a per-user holding (userMemoryOfAgentId set) mis-set to PUBLIC is not a footprint (review)', async () => {
+    const org = await mkOrg();
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:ag`, name: 'ag', visibility: 'ORGANIZATION' } });
+    await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:holding`, name: 'holding', class: 'knowledge', visibility: 'PUBLIC', userMemoryOfAgentId: agent.id },
+    });
+    // The canonical public-read predicate excludes per-user holdings even at
+    // PUBLIC — so this must NOT make the org discoverable.
+    expect(await Q.publicOrganization({}, { ref: org.id }, ctx())).toBeNull();
+  });
+
   it('unresolvable / malformed ref → null', async () => {
     expect(await Q.publicOrganization({}, { ref: 'no-such-org' }, ctx())).toBeNull();
   });
