@@ -56,6 +56,7 @@ import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import {
   ancestorLocs,
   lockAncestorsForCreate,
+  lockAncestorsForCreateMany,
   lockNodeForDelete,
 } from '../../../lib/nodeSubtreeLock.js';
 import {
@@ -1801,6 +1802,12 @@ export const nodeMutations = {
       const isSameSlot = destMemoryId === source.memoryId && destLoc === source.loc;
 
       return ctx.db.$transaction(async (tx) => {
+        // #664/#752: moving a node INTO a subtree is the same orphan vector as a
+        // create there — a concurrent non-recursive delete of a destination
+        // ancestor could count zero descendants, then this move lands the row
+        // under it. Lock the destination's ancestor path (moving OUT can't
+        // orphan, so the source side needs nothing). Root-level dest → no-op.
+        await lockAncestorsForCreate(tx, destMemoryId, destLoc);
         if (!isSameSlot) {
           // Fail loudly on collision — a DIFFERENT live node already occupies
           // the destination slot (a soft-deleted occupant is ignored; the move
@@ -2339,6 +2346,20 @@ export const nodeMutations = {
       )?.schema as unknown as MemorySchema | null;
 
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
+        // #664/#752: this bulk create bypasses the locked writeNodeCore path, so
+        // a concurrent non-recursive delete of an ancestor could miss the rows
+        // inserted below. Lock the ancestor path of every incoming loc (deduped,
+        // root→leaf) BEFORE the deleteMany's row locks — the delete path takes
+        // its advisory lock before its row locks, so acquiring advisory-first
+        // here too avoids a lock-order inversion (advisory→row vs row→advisory)
+        // that could deadlock. READ COMMITTED (the tx default) is required so an
+        // ancestor-delete's count sees these rows post-commit.
+        await lockAncestorsForCreateMany(
+          tx,
+          resolvedMemoryId,
+          nodes.map((n) => n.loc).filter((l): l is string => typeof l === 'string' && l !== ''),
+        );
+
         await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
 
         for (const input of nodes) {

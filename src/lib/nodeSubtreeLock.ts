@@ -85,6 +85,38 @@ export async function lockAncestorsForCreate(
 }
 
 /**
+ * Batch form of {@link lockAncestorsForCreate} for a BULK insert of many nodes
+ * (e.g. `replaceSubtree`, a git-graph sync). Dedupes the ancestor set across all
+ * `locs` and acquires each lock exactly once in a single sorted (root→leaf)
+ * pass — the same consistent global order the single-loc helper uses, so a bulk
+ * insert can't deadlock against a concurrent create/delete or another bulk
+ * insert. Locs with no ancestor (root-level) contribute nothing.
+ *
+ * MUST run inside the same READ COMMITTED transaction as the inserts.
+ */
+export async function lockAncestorsForCreateMany(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  locs: string[],
+): Promise<void> {
+  const ancestors = new Set<string>();
+  for (const loc of locs) {
+    for (const ancestor of ancestorLocs(loc)) ancestors.add(ancestor);
+  }
+  // Sort so every caller acquires shared ancestors in one global order. Length
+  // first keeps it root→leaf (a parent's loc is a prefix, hence shorter, than
+  // its child's); the lexical tiebreak makes the order total & stable (returns
+  // 0 on equal to satisfy the comparator contract, though the Set makes ties
+  // impossible in practice).
+  const ordered = [...ancestors].sort(
+    (a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0),
+  );
+  for (const ancestor of ordered) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${ancestor}))`;
+  }
+}
+
+/**
  * Acquire the transaction-scoped advisory lock for DELETING the node at `loc`,
  * keyed identically to the lock a descendant-create takes on this loc as one of
  * its ancestors (#664). A delete therefore blocks — and is blocked by — any

@@ -11,6 +11,7 @@ import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
+import { lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import type { Memory, Organization } from '../../generated/prisma/index.js';
 
 const execFile = promisify(execFileCb);
@@ -103,6 +104,17 @@ export const syncGraphFromGithub = async (
       plaintext: { content: string | null; abstract: string | null };
     }> = [];
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
+      // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
+      // bypassing the locked create surfaces. Lock the ancestor path of every
+      // synced loc (deduped, root→leaf) up front so a concurrent non-recursive
+      // delete of an ancestor in this memory can't count zero descendants and
+      // then miss the rows this sync commits. READ COMMITTED (the tx default) is
+      // required so that delete's count sees these rows once the sync commits.
+      await lockAncestorsForCreateMany(
+        tx,
+        graph.id,
+        fsGraph.nodes.map((n) => n.loc).filter((l): l is string => typeof l === 'string' && l !== ''),
+      );
       const upsertedIds: string[] = [];
       // File frontmatter ids already claimed in THIS run — a second file
       // carrying the same id (a copied file) must not be treated as a move

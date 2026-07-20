@@ -3687,6 +3687,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           };
 
       const result: MoveResult = await db.$transaction(async (tx) => {
+        // #664/#752: moving a node INTO a subtree is the same orphan vector as
+        // creating there — lock the destination's ancestor path first (matching
+        // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),
+        // so a concurrent non-recursive delete of a destination ancestor can't
+        // count zero descendants and then let this move land under it. Taken
+        // before any row-locking statement to keep advisory-before-row ordering
+        // consistent with the delete path (no lock-order inversion).
+        await lockAncestorsForCreate(tx, toMemory.id, toLoc);
         if (!isSameSlot) {
           const existingTarget = await tx.node.findUnique({
             where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
