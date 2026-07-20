@@ -19,7 +19,8 @@ import {
   type SearchPrincipal,
 } from '../../../lib/global-search/index.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
-import { discoverableOrgWhere } from '../../../lib/orgDiscoverability.js';
+import { discoverableOrgWhere, publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
+import { orgRowToRef, agentRowToRef, memoryRowToRef } from './publicRefs.js';
 import { GraphQLError } from 'graphql';
 import { searchContains } from '../../../integrations/db/provider.js';
 import {
@@ -400,11 +401,77 @@ export const orgQueries = {
       });
     },
 
-    // cor:acl:080:04 — the marketplace catalogue browse. Public (no membership
-    // required). Returns an empty parent; the Marketplace field resolvers
-    // (resolvers.types.ts) fetch the listed + publicly-accessible resources as
-    // sanitized projections.
-    marketplace: async () => ({}),
+    // cor:acl:080:04 — the marketplace catalogue. Public (no membership). Each is
+    // a paginated { items, total } of sanitized flat refs, ordered (name, id) for
+    // stable paging. Only listedOnMarketplace + publicly-accessible resources; a
+    // resource's own listing controls its presence — an org card links out to
+    // publicOrganization(ref:) for the full (public) footprint.
+    marketplaceOrganizations: async (
+      _: unknown,
+      { limit, offset }: { limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const take = clampListTake(limit);
+      const skip = Math.max(0, offset ?? 0);
+      const where = { deletedAt: null, isVisible: true, listedOnMarketplace: true } as const;
+      const [total, rows] = await Promise.all([
+        ctx.db.organization.count({ where }),
+        take === 0
+          ? Promise.resolve([])
+          : ctx.db.organization.findMany({
+              where,
+              select: { id: true, name: true, urn: true },
+              orderBy: [{ name: 'asc' }, { id: 'asc' }],
+              skip,
+              take,
+            }),
+      ]);
+      return { items: rows.map(orgRowToRef), total };
+    },
+    marketplaceAgents: async (
+      _: unknown,
+      { limit, offset }: { limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const take = clampListTake(limit);
+      const skip = Math.max(0, offset ?? 0);
+      const where = { deletedAt: null, listedOnMarketplace: true, visibility: 'PUBLIC' } as const;
+      const [total, rows] = await Promise.all([
+        ctx.db.agent.count({ where }),
+        take === 0
+          ? Promise.resolve([])
+          : ctx.db.agent.findMany({
+              where,
+              select: { id: true, name: true, urn: true, description: true },
+              orderBy: [{ name: 'asc' }, { id: 'asc' }],
+              skip,
+              take,
+            }),
+      ]);
+      return { items: rows.map(agentRowToRef), total };
+    },
+    marketplaceMemories: async (
+      _: unknown,
+      { limit, offset }: { limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const take = clampListTake(limit);
+      const skip = Math.max(0, offset ?? 0);
+      const where = { listedOnMarketplace: true, ...publicReadableMemoryWhere() };
+      const [total, rows] = await Promise.all([
+        ctx.db.memory.count({ where }),
+        take === 0
+          ? Promise.resolve([])
+          : ctx.db.memory.findMany({
+              where,
+              select: { id: true, name: true, urn: true, shortDescription: true },
+              orderBy: [{ name: 'asc' }, { id: 'asc' }],
+              skip,
+              take,
+            }),
+      ]);
+      return { items: rows.map(memoryRowToRef), total };
+    },
 
     invitation: async (_: unknown, { slug }: { slug: string }, ctx: Context) => {
       const invite = await ctx.db.userInvitation.findUnique({
