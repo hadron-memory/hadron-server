@@ -31,6 +31,7 @@ import { resendSenderQueries } from './resolvers.query.resendSender.js';
 import { secretMutations, secretQueries } from './resolvers.secret.js';
 
 import { nodeMutations } from './resolvers.mutation.node.js';
+import { objectQueries, objectMutations } from './resolvers.object.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
 import { meteringMutations, meteringQueries } from './resolvers.metering.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
@@ -53,6 +54,7 @@ export const resolvers = {
   ...typeResolvers,
   Query: {
     ...nodeQueries,
+    ...objectQueries,
     ...edgeQueries,
     ...assetQueries,
     ...memoryQueries,
@@ -73,6 +75,7 @@ export const resolvers = {
   },
   Mutation: {
     ...nodeMutations,
+    ...objectMutations,
     ...appRunMutations,
     ...meteringMutations,
     ...connectionGrantMutations,

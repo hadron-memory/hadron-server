@@ -2857,6 +2857,16 @@ export const typeDefs = `#graphql
     bytes: Int!
   }
 
+  """
+  #745 — a page of objects from the object store. Each object is a flat JSON
+  record { id, type, ...fields } (the projection of a node). 'total' is the full
+  match count (null when unbounded).
+  """
+  type ObjectList {
+    objects: [JSON!]!
+    total: Int
+  }
+
   type Query {
     """
     Resolve a fully-qualified, \`hrn:<type>:\`-prefixed Hadron URN (legacy \`urn:\` scheme also accepted) to the ids
@@ -2975,6 +2985,35 @@ export const typeDefs = `#graphql
       "Optional absolute relevance floor (cor:api:090 / #497): drop ranked hits whose score is below this value. Scores are NOT comparable across modes, so the meaningful scale differs per mode (keyword ts_rank is roughly 0..a-few; vector cosine similarity is 0..1; hybrid is a small RRF fraction) — pick a floor for the mode in use. Ignored on the no-query browse list (unscored) and never trims expand-neighbours. A floor returns fewer hits, never weaker ones."
       minScore: Float
     ): FindNodesResult!
+
+    """
+    #745 — read one object by its id (the object store's flat projection of a
+    node). Returns a JSON object { id, type, ...fields } or null if not
+    found/inaccessible. The object store is the legible sugar surface over
+    structured storage (an object IS a node); see createObject / findObjects.
+    """
+    object(ref: ID!): JSON
+
+    """
+    #745 — query a collection. Returns objects of the given type (the collection
+    / node objectType) in the memory, projected flat. 'match' is an equality
+    shorthand ({ field: value }) desugared to a where predicate with each field's
+    cast inferred from the memory schema; 'where' is the full #719 predicate
+    (ANDed with match); 'sort' is a single-field shorthand desugared to a
+    property-path sort.
+    """
+    findObjects(
+      memoryRef: String!
+      type: String!
+      "Equality shorthand: { field: value, ... } becomes an AND of eq predicates (cast inferred from the schema)."
+      match: JSON
+      "Full #719 structured predicate over the object's fields (ANDed with match)."
+      where: JSON
+      "Single-field sort shorthand, e.g. { fundingUsd: desc-as-a-string }."
+      sort: JSON
+      limit: Int
+      offset: Int
+    ): ObjectList!
 
     """
     Cross-entity global search across organizations, memories, nodes, agents,
@@ -3704,6 +3743,29 @@ export const typeDefs = `#graphql
     # (per-memory write auth, an active session on an encrypted memory, revision
     # history, git mirror). Returns the updated node.
     updateNodeProperties(nodeRef: ID!, properties: JSON!, reason: String): Node!
+
+    # #745 — Object store: the legible sugar surface over structured storage.
+    # An object IS a node; these ops are thin projections onto createNode /
+    # updateNodeProperties / deleteNode, inheriting all their invariants
+    # (auth, encryption, schema conformance, revisions, atomic merge).
+
+    # Create an object in a collection. 'type' is the collection (node
+    # objectType); 'fields' are the flat, typed properties (validated against
+    # the memory schema when the collection is declared). The node's loc is
+    # auto-derived (<type>:<key ?? generated-id>) and hidden; pass 'key' for a
+    # human-meaningful id, 'name' to override the derived node name. 'id' and
+    # 'type' are reserved and cannot be field names. Returns the flat object.
+    createObject(memoryRef: String!, type: String!, fields: JSON!, key: String, name: String): JSON!
+
+    # Merge fields into an existing object (server-side atomic shallow merge +
+    # schema conformance on the result). 'ref' is the object id (or node URN);
+    # 'fields' wins on key collision, unmentioned keys preserved. Returns the
+    # updated flat object.
+    updateObject(ref: ID!, fields: JSON!, reason: String): JSON!
+
+    # Delete an object (soft by default; 'hard: true' removes the row). 'ref' is
+    # the object id (or node URN). Returns true on success.
+    deleteObject(ref: ID!, hard: Boolean): Boolean!
 
     # Bulk search-and-replace text across selected nodes (literal or regex).
     # Honors per-memory write auth, encryption, revision history, abstract
