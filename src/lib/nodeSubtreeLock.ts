@@ -105,8 +105,12 @@ export async function lockAncestorsForCreateMany(
   }
   // Sort so every caller acquires shared ancestors in one global order. Length
   // first keeps it root→leaf (a parent's loc is a prefix, hence shorter, than
-  // its child's); the lexical tiebreak just makes the order total & stable.
-  const ordered = [...ancestors].sort((a, b) => a.length - b.length || (a < b ? -1 : 1));
+  // its child's); the lexical tiebreak makes the order total & stable (returns
+  // 0 on equal to satisfy the comparator contract, though the Set makes ties
+  // impossible in practice).
+  const ordered = [...ancestors].sort(
+    (a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0),
+  );
   for (const ancestor of ordered) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${ancestor}))`;
   }

@@ -2346,18 +2346,21 @@ export const nodeMutations = {
       )?.schema as unknown as MemorySchema | null;
 
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
-        await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
-
         // #664/#752: this bulk create bypasses the locked writeNodeCore path, so
         // a concurrent non-recursive delete of an ancestor could miss the rows
         // inserted below. Lock the ancestor path of every incoming loc (deduped,
-        // root→leaf) across the inserts. READ COMMITTED (the tx default) is
-        // required so an ancestor-delete's count sees these rows post-commit.
+        // root→leaf) BEFORE the deleteMany's row locks — the delete path takes
+        // its advisory lock before its row locks, so acquiring advisory-first
+        // here too avoids a lock-order inversion (advisory→row vs row→advisory)
+        // that could deadlock. READ COMMITTED (the tx default) is required so an
+        // ancestor-delete's count sees these rows post-commit.
         await lockAncestorsForCreateMany(
           tx,
           resolvedMemoryId,
           nodes.map((n) => n.loc).filter((l): l is string => typeof l === 'string' && l !== ''),
         );
+
+        await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
 
         for (const input of nodes) {
           // #725 — normalize an empty objectType to null, then enforce the schema.
