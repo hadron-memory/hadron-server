@@ -64,6 +64,12 @@ describe('deriveObjectLoc', () => {
     expect(deriveObjectLoc('competitor', undefined, () => 'GEN')).toBe('competitor:GEN');
     expect(deriveObjectLoc('competitor', '  ', () => 'GEN')).toBe('competitor:GEN');
   });
+  it('rejects a colon in the key (would inject loc hierarchy → undeletable parent)', () => {
+    expect(() => deriveObjectLoc('competitor', 'a:b', () => 'GEN')).toThrow(/single segment/);
+  });
+  it('rejects a colon in the type', () => {
+    expect(() => deriveObjectLoc('a:b', 'k', () => 'GEN')).toThrow(/single segment/);
+  });
 });
 
 describe('deriveObjectName', () => {

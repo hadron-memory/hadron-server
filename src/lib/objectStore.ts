@@ -74,8 +74,20 @@ export function isPlainObject(v: unknown): v is Record<string, unknown> {
  * unsafe `type`/`key` surfaces as a typed error there.
  */
 export function deriveObjectLoc(type: string, key: string | undefined, genId: () => string): string {
-  const suffix = key != null && key.trim() !== '' ? key.trim() : genId();
-  return `${type}:${suffix}`;
+  // `type` and `key` each become a SINGLE loc segment. A ':' (the loc hierarchy
+  // delimiter) would inject extra segments — making one object a descendant of
+  // another (e.g. key "a" → "type:a", key "a:b" → "type:a:b"), which then can't
+  // be deleted through the flat object API (deleteObject is non-recursive, and
+  // deleteNode refuses NODE_HAS_DESCENDANTS). Reject it here; validateLoc handles
+  // the rest of the charset downstream.
+  if (type.includes(':')) {
+    throw new ObjectStoreError(`type must be a single segment (no ":"): ${JSON.stringify(type)}`);
+  }
+  const trimmed = key != null ? key.trim() : '';
+  if (trimmed !== '' && trimmed.includes(':')) {
+    throw new ObjectStoreError(`key must be a single segment (no ":"): ${JSON.stringify(key)}`);
+  }
+  return `${type}:${trimmed !== '' ? trimmed : genId()}`;
 }
 
 /**

@@ -81,6 +81,11 @@ describe('createObject', () => {
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
+  it('rejects a colon in the natural key (no injected loc hierarchy)', async () => {
+    await expect(createObject({ memoryRef: memId, type: 'competitor', fields: { name: 'n' }, key: 'a:b' }))
+      .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+
   it('enforces the memory schema (inherited from createNode)', async () => {
     await setSchema(competitorSchema);
     // Missing the required `name`.

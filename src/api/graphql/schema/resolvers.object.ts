@@ -76,12 +76,13 @@ export const objectMutations = {
     const t = requireType(type);
     const f = fields ?? {};
     if (!isPlainObject(f)) throw badInput('`fields` must be a JSON object.');
+    let loc: string;
     try {
       assertNoReservedKeys(f);
+      loc = deriveObjectLoc(t, key ?? undefined, generateId);
     } catch (e) {
       mapObjectError(e);
     }
-    const loc = deriveObjectLoc(t, key ?? undefined, generateId);
     const nodeName = deriveObjectName(t, f, name ?? undefined);
     const node = await nodeMutations.createNode(
       _,
