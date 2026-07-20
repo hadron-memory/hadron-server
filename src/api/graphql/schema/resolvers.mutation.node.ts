@@ -867,6 +867,127 @@ export const nodeMutations = {
       );
     },
 
+    // #742 — server-side shallow-merge of a node's structured `properties`
+    // (the schema-governed JSONB column), the `updateNodeProperties` analogue of
+    // updateNodeData. It exists so a caller (CLI `--properties-merge`, the future
+    // `updateObject`) can patch a few fields without a read-modify-write race.
+    //
+    // `properties` is ALWAYS plaintext — never encrypted at rest (only
+    // abstract/content/data are; src/lib/nodeCrypto.ts) — so the MERGE reads the
+    // real object with no decrypt, and the schema-conformance check needs no key.
+    // But the WRITE still routes through the session-gated core (writeNodeCore
+    // round-trips the node's encrypted fields), so — like updateNodeData and every
+    // other write — an encrypted memory requires an active session. The one thing
+    // it adds over updateNodeData: `properties` is schema-governed, so writeNodeCore
+    // runs enforceNodeSchemaOnWrite on the MERGED result and rejects a violation.
+    updateNodeProperties: async (
+      _: unknown,
+      { nodeRef, properties, reason }: { nodeRef: string; properties: unknown; reason?: string | null },
+      ctx: Context,
+    ) => {
+      // The patch must be a JSON object — the operation merges keys, so an
+      // array / scalar / null has no sensible "apply onto existing properties"
+      // meaning (mirrors updateNodeData's `data` contract).
+      if (properties == null || typeof properties !== 'object' || Array.isArray(properties)) {
+        throw new GraphQLError('updateNodeProperties: `properties` must be a JSON object.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+
+      // Resolve the node (ID or fully-qualified URN — same dispatch as
+      // updateNodeData / mergeNodes). A genuine miss → NODE_NOT_FOUND.
+      let resolvedId: string;
+      try {
+        ({ id: resolvedId } = await resolveNodeRef(ctx.db, nodeRef));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) {
+          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          });
+        }
+        throw e;
+      }
+      // Pre-auth: read only what authorization needs; the properties payload is
+      // read only AFTER write access is confirmed (mirrors updateNodeData).
+      const meta = await ctx.db.node.findUnique({
+        where: { id: resolvedId },
+        select: { id: true, memoryId: true, deletedAt: true },
+      });
+      if (!meta || meta.deletedAt) {
+        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+        });
+      }
+      await requireMemoryWriteAccess(ctx, meta.memoryId);
+
+      // Encrypted memory: require an active session up front (mirrors
+      // updateNodeData / writeNodeCore) so a missing key fails with a typed
+      // SESSION_EXPIRED rather than writeNodeCore's bare throw. `properties`
+      // itself is plaintext, but the write round-trips the node's encrypted
+      // fields, so the key is still required to persist.
+      const memEnc = await getMemoryEncryptionInfo(ctx.db, meta.memoryId);
+      if (memEnc.isEncrypted && !sessionKeyCache.getByMemoryId(memEnc.id)) {
+        throw new GraphQLError(
+          `SESSION_EXPIRED: memory ${memEnc.id} is encrypted but no active session key is available.`,
+          { extensions: { code: 'SESSION_EXPIRED', memoryId: memEnc.id } },
+        );
+      }
+
+      // The READ→merge→WRITE must be atomic, or two concurrent merges patching
+      // distinct keys lose each other (both read the same base, last write wins —
+      // #746 review, Codex P1). Serialize per-node with a transaction-scoped
+      // advisory lock: any other updateNodeProperties on this node blocks until
+      // this one's write commits, then reads the fresh base.
+      //
+      // The lock is held by this short tx; writeNodeCore runs on the POOLED
+      // connection (not this tx) on purpose — it fires a `void enqueueNodeEmbedding
+      // (ctx.db)` that would break against a closing tx client — so the tx only
+      // does the lock + the fresh read + delegate, and the lock releases when the
+      // closure (incl. the awaited writeNodeCore) returns.
+      return ctx.db.$transaction(async (lockTx) => {
+        await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${meta.id}))`;
+
+        // Fresh read UNDER the lock — the merge base can't be stale. `properties`
+        // is plaintext at rest, so no decrypt.
+        const fresh = await lockTx.node.findUnique({
+          where: { id: meta.id },
+          select: { loc: true, ownerRepo: true, properties: true },
+        });
+        if (!fresh) {
+          // Lost a race with a concurrent delete.
+          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          });
+        }
+
+        // Shallow merge: the patch wins on key collision; absent keys preserved.
+        // A node with no properties yet takes the patch as-is.
+        const existing = fresh.properties;
+        const merged =
+          existing != null && typeof existing === 'object' && !Array.isArray(existing)
+            ? { ...(existing as Record<string, unknown>), ...(properties as Record<string, unknown>) }
+            : (properties as Record<string, unknown>);
+
+        // Delegate the write to the core in update mode. Anchor on the immutable
+        // PK (targetNodeId), not (memoryId, loc): a concurrent move that frees this
+        // loc could otherwise make the loc-keyed write hit the wrong row (PR-460).
+        // writeNodeCore runs enforceNodeSchemaOnWrite on the merged `properties`,
+        // so a merge that breaks the memory's schema surfaces as BAD_USER_INPUT.
+        return writeNodeCore(
+          {
+            memoryId: meta.memoryId,
+            loc: fresh.loc,
+            properties: merged,
+            ...(fresh.ownerRepo != null ? { ownerRepo: fresh.ownerRepo } : {}),
+            ...(reason != null ? { reason } : {}),
+          },
+          ctx,
+          'update',
+          { targetNodeId: meta.id },
+        );
+      });
+    },
+
     // Bulk literal/regex search-and-replace across selected nodes. Reuses the
     // single-write invariants from upsertNode (per-memory write auth,
     // decrypt→replace→re-encrypt, NodeRevision snapshot, abstractOriginHash
