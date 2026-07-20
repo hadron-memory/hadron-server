@@ -56,6 +56,7 @@ import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import {
   ancestorLocs,
   lockAncestorsForCreate,
+  lockAncestorsForCreateMany,
   lockNodeForDelete,
 } from '../../../lib/nodeSubtreeLock.js';
 import {
@@ -1801,6 +1802,12 @@ export const nodeMutations = {
       const isSameSlot = destMemoryId === source.memoryId && destLoc === source.loc;
 
       return ctx.db.$transaction(async (tx) => {
+        // #664/#752: moving a node INTO a subtree is the same orphan vector as a
+        // create there — a concurrent non-recursive delete of a destination
+        // ancestor could count zero descendants, then this move lands the row
+        // under it. Lock the destination's ancestor path (moving OUT can't
+        // orphan, so the source side needs nothing). Root-level dest → no-op.
+        await lockAncestorsForCreate(tx, destMemoryId, destLoc);
         if (!isSameSlot) {
           // Fail loudly on collision — a DIFFERENT live node already occupies
           // the destination slot (a soft-deleted occupant is ignored; the move
@@ -2340,6 +2347,17 @@ export const nodeMutations = {
 
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
         await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
+
+        // #664/#752: this bulk create bypasses the locked writeNodeCore path, so
+        // a concurrent non-recursive delete of an ancestor could miss the rows
+        // inserted below. Lock the ancestor path of every incoming loc (deduped,
+        // root→leaf) across the inserts. READ COMMITTED (the tx default) is
+        // required so an ancestor-delete's count sees these rows post-commit.
+        await lockAncestorsForCreateMany(
+          tx,
+          resolvedMemoryId,
+          nodes.map((n) => n.loc).filter((l): l is string => typeof l === 'string' && l !== ''),
+        );
 
         for (const input of nodes) {
           // #725 — normalize an empty objectType to null, then enforce the schema.

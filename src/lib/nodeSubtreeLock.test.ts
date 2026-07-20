@@ -3,6 +3,7 @@ import type { Prisma } from '../generated/prisma/index.js';
 import {
   ancestorLocs,
   lockAncestorsForCreate,
+  lockAncestorsForCreateMany,
   lockNodeForDelete,
 } from './nodeSubtreeLock.js';
 
@@ -48,6 +49,32 @@ describe('lockAncestorsForCreate', () => {
     const { tx, calls } = makeTxSpy();
     await lockAncestorsForCreate(tx, 'mem1', 'a');
     expect(calls).toEqual([]);
+  });
+});
+
+describe('lockAncestorsForCreateMany', () => {
+  it('dedupes the ancestor set across locs and acquires each once, root→leaf', async () => {
+    const { tx, calls } = makeTxSpy();
+    // `a:b` and `a:c` share ancestor `a`; `a:b:d` adds `a:b`. Union = {a, a:b}.
+    await lockAncestorsForCreateMany(tx, 'mem1', ['a:b', 'a:c', 'a:b:d']);
+    expect(calls).toEqual([
+      { key1: 'mem1', key2: 'a' },
+      { key1: 'mem1', key2: 'a:b' },
+    ]);
+  });
+
+  it('acquires nothing when every loc is root-level', async () => {
+    const { tx, calls } = makeTxSpy();
+    await lockAncestorsForCreateMany(tx, 'mem1', ['a', 'b', 'c']);
+    expect(calls).toEqual([]);
+  });
+
+  it('takes the same key a matching delete takes (parity across the batch)', async () => {
+    const { tx, calls } = makeTxSpy();
+    await lockAncestorsForCreateMany(tx, 'mem1', ['x:y:z']);
+    const del = makeTxSpy();
+    await lockNodeForDelete(del.tx, 'mem1', 'x:y');
+    expect(calls).toContainEqual(del.calls[0]);
   });
 });
 
