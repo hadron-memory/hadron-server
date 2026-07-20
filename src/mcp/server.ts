@@ -27,6 +27,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
+import { ancestorLocs, lockAncestorsForCreate, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import {
   resolveAppForRequest,
@@ -1267,7 +1268,7 @@ export function createMcpServerInstance(
         return textResult('Write access denied for this memory.');
       }
 
-      await db.node.upsert({
+      const upsertArgs = {
         where: { loc_memoryId: { loc, memoryId } },
         create: {
           id: generateId(),
@@ -1287,7 +1288,20 @@ export function createMcpServerInstance(
           content,
           tags: tags ?? [],
         },
-      });
+      };
+      // #664 (Model A — see nodeSubtreeLock.ts): a section node is a hierarchy
+      // parent, so creating it under a concurrently-deleted grandparent is
+      // exactly the orphan race. Serialize against an ancestor-delete by holding
+      // advisory locks on the ancestor path across the upsert, matching the
+      // hadron_create_node / createNode paths. Root-level locs skip the tx.
+      if (ancestorLocs(loc).length === 0) {
+        await db.node.upsert(upsertArgs);
+      } else {
+        await db.$transaction(async (tx) => {
+          await lockAncestorsForCreate(tx, memoryId, loc);
+          await tx.node.upsert(upsertArgs);
+        });
+      }
 
       const urn = await nodeUrn(loc, memoryId);
       return textResult(`Node saved: ${urn}`);
@@ -2691,7 +2705,7 @@ export function createMcpServerInstance(
         storedData = enc.data ?? undefined;
       }
 
-      const upserted = await db.node.upsert({
+      const upsertArgs = {
         where: { loc_memoryId: { loc, memoryId } },
         create: {
           id: existing?.id ?? generateId(),
@@ -2734,7 +2748,20 @@ export function createMcpServerInstance(
           // Resurrect a soft-deleted node on write (#543).
           ...(isResurrect ? { deletedAt: null, deletedBy: null } : {}),
         } as any,
-      });
+      };
+      // #664 (Model A — see nodeSubtreeLock.ts): serialize this create against a
+      // concurrent ancestor-delete by holding advisory locks on the node's
+      // ancestor path across the upsert, matching the GraphQL createNode path.
+      // A root-level loc has no ancestor to coordinate against, so it skips the
+      // transaction. READ COMMITTED (the default) is required so the delete's
+      // descendant count sees this row once our commit releases the lock.
+      const upserted =
+        ancestorLocs(loc).length === 0
+          ? await db.node.upsert(upsertArgs)
+          : await db.$transaction(async (tx) => {
+              await lockAncestorsForCreate(tx, memoryId, loc);
+              return tx.node.upsert(upsertArgs);
+            });
 
       if (resolvedEdges !== null) {
         await replaceOutgoingEdges({
@@ -3407,9 +3434,15 @@ export function createMcpServerInstance(
   // cascading would silently mutate data the caller doesn't own.
   //
   // Atomicity: descendant-count → refuse-or-act runs inside a single
-  // db.$transaction so a descendant created mid-flight either appears
-  // in the recursive scope or causes the refusal to fire — never a
-  // half-complete state where the descendant is silently orphaned.
+  // transaction (#664) so a descendant created mid-flight either appears in the
+  // recursive scope or causes the refusal to fire — never a half-complete state
+  // where the descendant is silently orphaned. An advisory lock on this node's
+  // loc (taken first, keyed identically to the lock every descendant-create
+  // holds on it as an ancestor — see nodeSubtreeLock.ts) closes the
+  // count-then-act race: a concurrent descendant-create either commits before
+  // the lock (counted → refused) or waits until this delete commits (create
+  // after delete — tolerated). READ COMMITTED (the default) is required so the
+  // count runs on a fresh snapshot taken after the lock is granted.
 
   server.tool(
     'hadron_delete_node',
@@ -3462,6 +3495,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { ok: true; descendantCount: number };
 
       const result: DeleteResult = await db.$transaction(async (tx) => {
+        await lockNodeForDelete(tx, memory.id, loc);
         // Descendants by URN hierarchy: loc startsWith node.loc + ':'.
         // Soft-delete refuses based on LIVE descendants; hard-delete
         // refuses based on the union (a tombstoned descendant still has
