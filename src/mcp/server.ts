@@ -3148,6 +3148,128 @@ export function createMcpServerInstance(
     },
   );
 
+  // ── Object store (#745): hadron_create_object / _get_object / _update_object
+  //    / _delete_object / _find_objects ─────────────────────────────────────
+  //
+  // The legible sugar surface over structured storage — an object IS a node.
+  // Each tool delegates to a GraphQL object resolver (createObject / object /
+  // updateObject / deleteObject / findObjects), which is itself a thin
+  // projection over the node write/read paths, so auth, encryption, schema
+  // conformance, revisions and the atomic merge have ONE implementation.
+  // Objects are flat JSON records { id, type, ...fields }.
+
+  const objectCtx = (): Context => ({
+    db,
+    clientId: auth.clientId ?? undefined,
+    userId: auth.userId ?? undefined,
+    appId: auth.appId ?? undefined,
+    sessionId: auth.sessionId ?? undefined,
+    roles: auth.roles as Context['roles'],
+    organizationId: auth.organizationId ?? undefined,
+  });
+
+  server.tool(
+    'hadron_create_object',
+    'Create a structured object (record) in a collection — the object store\'s legible surface over structured storage. `type` is the collection (e.g. "competitor"); `fields` are the flat, typed properties. On a memory with a declared schema for the collection, the fields are validated against it (an error is returned on a violation). The node loc/name are auto-derived and hidden; pass `key` for a human-meaningful id. Returns the flat object { id, type, ...fields }. "id" and "type" are reserved and cannot be field names.',
+    {
+      memoryUrn: z.string().describe('Memory to create the object in — a fully-qualified URN (org::memory) or an ID.'),
+      type: z.string().describe('The collection this object belongs to (e.g. "competitor"). A single segment (no ":").'),
+      fields: z.record(z.string(), z.unknown()).describe('The object\'s flat fields (typed properties). "id"/"type" are reserved.'),
+      key: z.string().optional().describe('Optional natural id → a human-meaningful loc (<type>:<key>); a single segment (no ":"). Omit for an auto-generated id.'),
+      name: z.string().optional().describe('Optional display name for the underlying node (defaults to a name/title field, else the type).'),
+    },
+    async ({ memoryUrn, type, fields, key, name }) => {
+      try {
+        const obj = await resolvers.Mutation.createObject(
+          {},
+          { memoryRef: memoryUrn, type, fields: fields ?? {}, key, name },
+          objectCtx(),
+        );
+        return textResult(JSON.stringify(obj, null, 2));
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'create failed'}`);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_get_object',
+    'Read one object by id (or node URN) from the object store, as a flat JSON record { id, type, ...fields }. Returns "Object not found." when it does not exist, is inaccessible, or the node is not an object (has no collection).',
+    {
+      ref: z.string().describe('Object id (or a fully-qualified node URN).'),
+    },
+    async ({ ref }) => {
+      try {
+        const obj = await resolvers.Query.object({}, { ref }, objectCtx());
+        return obj ? textResult(JSON.stringify(obj, null, 2)) : textResult('Object not found.');
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'read failed'}`);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_update_object',
+    'Merge fields into an existing object (server-side ATOMIC shallow merge — the patch wins on key collision, unmentioned fields preserved). On a schema-governed collection the merged result is validated. Returns the updated flat object. "id" and "type" are reserved and cannot be field names.',
+    {
+      ref: z.string().describe('Object id (or a fully-qualified node URN).'),
+      fields: z.record(z.string(), z.unknown()).describe('Fields to merge in. "id"/"type" are reserved.'),
+      reason: z.string().optional().describe('Optional rationale, recorded in revision history.'),
+    },
+    async ({ ref, fields, reason }) => {
+      try {
+        const obj = await resolvers.Mutation.updateObject({}, { ref, fields: fields ?? {}, reason }, objectCtx());
+        return textResult(JSON.stringify(obj, null, 2));
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'update failed'}`);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_delete_object',
+    'Delete an object (soft by default — it disappears from reads/queries; pass hard:true to permanently remove the row).',
+    {
+      ref: z.string().describe('Object id (or a fully-qualified node URN).'),
+      hard: z.boolean().optional().describe('Permanently remove the row (default false = soft delete).'),
+    },
+    async ({ ref, hard }) => {
+      try {
+        await resolvers.Mutation.deleteObject({}, { ref, hard }, objectCtx());
+        return textResult(`Object deleted${hard ? ' (hard)' : ''}: ${ref}`);
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'delete failed'}`);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_find_objects',
+    'Query a collection in a memory. Returns { objects, total } — objects of `type` as flat records, plus the full match count for paging with limit/offset. `match` is an equality shorthand ({ field: value }) with each field\'s cast inferred from the memory schema; `where` is the full #719 structured predicate (ANDed with match; same grammar as hadron_find_nodes\' where); `sort` is a single-field shorthand ({ field: "asc" | "desc" }).',
+    {
+      memoryUrn: z.string().describe('Memory to query — a fully-qualified URN (org::memory) or an ID.'),
+      type: z.string().describe('The collection to query (e.g. "competitor").'),
+      match: z.record(z.string(), z.unknown()).optional().describe('Equality shorthand: { field: value, ... } → an AND of eq predicates (cast inferred from the schema).'),
+      where: z.record(z.string(), z.unknown()).optional().describe('Full #719 structured predicate over the object\'s fields (ANDed with match).'),
+      sort: z.record(z.string(), z.unknown()).optional().describe('Single-field sort: { field: "asc" | "desc" }, e.g. { "fundingUsd": "desc" }.'),
+      limit: z.number().optional(),
+      offset: z.number().optional(),
+    },
+    async ({ memoryUrn, type, match, where, sort, limit, offset }) => {
+      try {
+        const result = await resolvers.Query.findObjects(
+          {},
+          { memoryRef: memoryUrn, type, match: match ?? undefined, where: (where ?? undefined) as NodeWhere | undefined, sort: sort ?? undefined, limit, offset },
+          objectCtx(),
+        );
+        // Return { objects, total } so agents can page deterministically with limit/offset.
+        return textResult(JSON.stringify({ objects: result.objects, total: result.total }, null, 2));
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'query failed'}`);
+      }
+    },
+  );
+
   // ── hadron_replace_text ──────────────────────────────────────────────
   //
   // Bulk literal/regex search-and-replace across many nodes at once. Delegates
