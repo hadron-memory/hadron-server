@@ -954,10 +954,12 @@ export const nodeMutations = {
           ? { ...(existing as Record<string, unknown>), ...(properties as Record<string, unknown>) }
           : (properties as Record<string, unknown>);
 
-      // Delegate to the core in update mode, addressing by the existing
-      // (memoryId, loc); omitted fields (objectType included) preserve. writeNodeCore
-      // runs enforceNodeSchemaOnWrite on the merged `properties`, so a merge that
-      // breaks the memory's schema surfaces as BAD_USER_INPUT.
+      // Delegate to the core in update mode. Anchor the write to the immutable
+      // PK (targetNodeId) rather than (memoryId, loc): a concurrent move that
+      // frees this loc for another node could otherwise make the loc-keyed write
+      // hit the wrong row (PR-460). Omitted fields (objectType included) preserve;
+      // writeNodeCore runs enforceNodeSchemaOnWrite on the merged `properties`, so
+      // a merge that breaks the memory's schema surfaces as BAD_USER_INPUT.
       return writeNodeCore(
         {
           memoryId: meta.memoryId,
@@ -968,6 +970,7 @@ export const nodeMutations = {
         },
         ctx,
         'update',
+        { targetNodeId: meta.id },
       );
     },
 

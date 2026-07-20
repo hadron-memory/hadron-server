@@ -5,9 +5,11 @@
  * gating, a revision snapshot on write, and — the one thing updateNodeData
  * doesn't do — schema-conformance enforcement on the MERGED result.
  *
- * The encrypted-memory case (properties merges + enforces schema with NO active
- * session, because properties is plaintext at rest) lives in
- * resolvers.encryption.test.ts, which already has the session scaffolding.
+ * The encrypted-memory cases live in resolvers.encryption.test.ts (which has the
+ * session scaffolding): the merge reads/returns `properties` in the clear
+ * (plaintext at rest), but — because the write routes through the session-gated
+ * core — an encrypted memory still needs an active session (in-session merge
+ * succeeds; no session throws SESSION_EXPIRED).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
