@@ -1248,7 +1248,7 @@ export function createMcpServerInstance(
         return textResult('Write access denied for this memory.');
       }
 
-      await db.node.upsert({
+      const upsertArgs = {
         where: { loc_memoryId: { loc, memoryId } },
         create: {
           id: generateId(),
@@ -1268,7 +1268,20 @@ export function createMcpServerInstance(
           content,
           tags: tags ?? [],
         },
-      });
+      };
+      // #664 (Model A — see nodeSubtreeLock.ts): a section node is a hierarchy
+      // parent, so creating it under a concurrently-deleted grandparent is
+      // exactly the orphan race. Serialize against an ancestor-delete by holding
+      // advisory locks on the ancestor path across the upsert, matching the
+      // hadron_create_node / createNode paths. Root-level locs skip the tx.
+      if (ancestorLocs(loc).length === 0) {
+        await db.node.upsert(upsertArgs);
+      } else {
+        await db.$transaction(async (tx) => {
+          await lockAncestorsForCreate(tx, memoryId, loc);
+          await tx.node.upsert(upsertArgs);
+        });
+      }
 
       const urn = await nodeUrn(loc, memoryId);
       return textResult(`Node saved: ${urn}`);
