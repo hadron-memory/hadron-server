@@ -61,7 +61,9 @@ import {
 import {
   type Context,
   getAccessibleMemoryIds,
+  mapToolDriveFile,
   requireRole,
+  runOwnedEmailOperation,
   throwOnInvalidCondition,
   throwOnReservedExtractionSpec,
   requireMemoryWriteAccess,
@@ -73,6 +75,7 @@ import {
   type EdgeInput,
   type MergeNodesInput,
 } from './resolvers.helpers.js';
+import { type ToolDriveFile } from '../../../lib/emailClient.js';
 
 // ── Shared node-write core (spec 039 Phase 0 D1) ────────────────────────────
 //
@@ -2545,6 +2548,64 @@ export const nodeMutations = {
       await requireMemoryWriteAccess(ctx, node.memoryId);
       const { count } = await ctx.db.nodeRevision.deleteMany({ where: { nodeId } });
       return count;
+    },
+
+    // #749 — export a node's markdown as a NEW Google Doc via the drive
+    // capability tool. Reads the node (same gate as nodeExport: accessible
+    // memory, decrypted content, content falls back to `# name`), then runs
+    // the owner-only `create-doc` operation on the caller's drive
+    // connection (create-doc has no ConnectionGrant scope mapping, so App /
+    // headless callers are denied fail-closed — decision 2, #749). The doc
+    // is always NEW: the tool's drive.file scope cannot touch existing
+    // files, and no update surface exists.
+    exportNodeToGoogleDoc: async (
+      _: unknown,
+      {
+        nodeRef,
+        connectionRef,
+        folderId,
+        title,
+      }: { nodeRef: string; connectionRef: string; folderId?: string | null; title?: string | null },
+      ctx: Context,
+    ) => {
+      let nodeId: string;
+      try {
+        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) {
+          throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+        }
+        throw e;
+      }
+      const node = await ctx.db.node.findUnique({ where: { id: nodeId } });
+      if (!node || node.deletedAt) {
+        throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+      }
+      const accessibleIds = await getAccessibleMemoryIds(ctx);
+      if (accessibleIds !== null && !accessibleIds.includes(node.memoryId)) {
+        // Denied and not-found are indistinguishable on purpose (nodeById parity).
+        throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+      }
+      // A locked encrypted node must be a typed refusal, never a silent
+      // ciphertext export — decryptNodesBatch's leave-as-ciphertext posture
+      // would ship the encrypted blob to Google as "markdown" (PR-751 Codex
+      // review). Require the key, then decryptNodeFields does the work.
+      const memEncInfo = await getMemoryEncryptionInfo(ctx.db, node.memoryId);
+      if (memEncInfo.isEncrypted && !sessionKeyCache.getByMemoryId(node.memoryId)) {
+        throw new GraphQLError(
+          `SESSION_EXPIRED: memory ${node.memoryId} is encrypted but no active session key is available.`,
+          { extensions: { code: 'SESSION_EXPIRED', memoryId: node.memoryId } },
+        );
+      }
+      decryptNodeFields(node, memEncInfo);
+      const markdown = node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
+
+      const { file } = await runOwnedEmailOperation<{ file: ToolDriveFile }>(ctx, connectionRef, 'create-doc', {
+        title: title?.trim() || node.name,
+        markdown,
+        folderId: folderId ?? undefined,
+      });
+      return mapToolDriveFile(file);
     },
 
 };

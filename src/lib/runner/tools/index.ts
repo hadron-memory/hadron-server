@@ -15,6 +15,7 @@ import { SEARCH_TOOLS } from './searchTools.js';
 import { SMS_TOOLS } from './smsTools.js';
 import { EMAIL_TOOLS } from './emailTools.js';
 import { SECRET_TOOLS } from './secretTools.js';
+import { DRIVE_TOOLS } from './driveTools.js';
 
 export { AuthorFailError };
 export { hadronReadNode, hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
@@ -26,6 +27,7 @@ export { webSearchTool } from './searchTools.js';
 export { hadronSendSms } from './smsTools.js';
 export { hadronSendEmail } from './emailTools.js';
 export { hadronReadSecret } from './secretTools.js';
+export { driveSearch, driveGetFile, driveExportFile } from './driveTools.js';
 export type { RunToolDef, RunToolContext };
 
 /** The author's printf — lands on the hop's trail element (D-TL-2). */
@@ -82,6 +84,7 @@ const REGISTRY = new Map<string, RunToolDef>(
     ...SMS_TOOLS,
     ...EMAIL_TOOLS,
     ...SECRET_TOOLS,
+    ...DRIVE_TOOLS,
   ].map((t) => [t.name, t]),
 );
 

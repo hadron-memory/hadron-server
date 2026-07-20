@@ -72,6 +72,11 @@ import {
   getGoogleCalRedirectUri,
   isGoogleCalConnectConfigured,
 } from './integrations/googleCal/auth.js';
+import {
+  buildGoogleDriveAuthUrl,
+  getGoogleDriveRedirectUri,
+  isGoogleDriveConnectConfigured,
+} from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
 
 export async function createServer(): Promise<Express> {
@@ -1271,6 +1276,21 @@ export async function createServer(): Promise<Express> {
     isConfigured: isGoogleCalConnectConfigured,
     // The calendar tool has no folder-subscription surface (no event plane
     // in v1) — don't POST a doomed inbox subscription on every connect.
+    subscribeInbox: false,
+  });
+  // Google Drive = hadrontool-google-drive — a DRIVE connection on the same
+  // rails (ExchangeConnection row, provider 'google-drive'). Its own OAuth
+  // client again: drive.readonly is a RESTRICTED scope (Gmail-tier CASA,
+  // #750) and must not touch the login/gmail/calendar clients — see
+  // googleDrive/auth.ts.
+  mountMailboxConnectRoutes(app, {
+    provider: 'google-drive',
+    routeName: 'google-drive',
+    buildAuthUrl: buildGoogleDriveAuthUrl,
+    getRedirectUri: getGoogleDriveRedirectUri,
+    logPrefix: 'google-drive-oauth',
+    isConfigured: isGoogleDriveConnectConfigured,
+    // No folder-subscription surface (no event plane in v1).
     subscribeInbox: false,
   });
 

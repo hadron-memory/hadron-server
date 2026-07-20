@@ -11,6 +11,8 @@ import { GraphQLError } from 'graphql';
 import {
   type ToolCalendarEvent,
   type ToolCalendarInfo,
+  type ToolDriveExport,
+  type ToolDriveFile,
   type ToolEmailFolder,
   type ToolEmailMessage,
   type ToolScheduleFreeBusy,
@@ -23,6 +25,7 @@ import {
   sessionScopeFilter,
   SESSION_INCLUDE,
   mapToolCalendarEvent,
+  mapToolDriveFile,
   runOwnedEmailOperation,
 } from './resolvers.helpers.js';
 
@@ -353,6 +356,92 @@ export const sessionQueries = {
         },
       );
       return result.schedules;
+    },
+
+    // ── Drive reads (hadrontool-google-drive, #749) ────────────────────
+    // Same gate as the mail/calendar surfaces (requireEmailConnection via
+    // runOwnedEmailOperation): interactive owner, or an App holding a
+    // ConnectionGrant with the drive.read scope. The tool's wire shapes map
+    // 1:1 onto the GraphQL types (kind is already uppercase-safe — the enum
+    // mapping happens via mapToolDriveFile like the calendar surface).
+
+    driveFiles: async (
+      _: unknown,
+      {
+        connectionRef,
+        folderId,
+        query,
+        nameContains,
+        mimeType,
+        modifiedAfter,
+        top,
+        pageToken,
+      }: {
+        connectionRef: string;
+        folderId?: string | null;
+        query?: string | null;
+        nameContains?: string | null;
+        mimeType?: string | null;
+        modifiedAfter?: string | null;
+        top?: number | null;
+        pageToken?: string | null;
+      },
+      ctx: Context,
+    ) => {
+      // A plain folder listing and a criteria search are ONE GraphQL field
+      // (the tool splits them so a sibling can, too): any search criterion
+      // routes to search-files, bare folder browsing to list-files.
+      const searching = Boolean(query || nameContains || mimeType || modifiedAfter);
+      const input: Record<string, unknown> = {
+        folderId: folderId ?? undefined,
+        // The tool caps top at 100 — clamp instead of surfacing a
+        // validation error (the exchangeMessages precedent).
+        top: Math.max(1, Math.min(top ?? (searching ? 25 : 50), 100)),
+        pageToken: pageToken ?? undefined,
+      };
+      if (searching) {
+        input.query = query ?? undefined;
+        input.nameContains = nameContains ?? undefined;
+        input.mimeType = mimeType ?? undefined;
+        input.modifiedAfter = modifiedAfter ?? undefined;
+      }
+      const page = await runOwnedEmailOperation<{ files: ToolDriveFile[]; nextPageToken: string | null }>(
+        ctx,
+        connectionRef,
+        searching ? 'search-files' : 'list-files',
+        input,
+      );
+      return { files: page.files.map(mapToolDriveFile), nextPageToken: page.nextPageToken };
+    },
+
+    driveFile: async (
+      _: unknown,
+      { connectionRef, fileId }: { connectionRef: string; fileId: string },
+      ctx: Context,
+    ) => {
+      const { file } = await runOwnedEmailOperation<{ file: ToolDriveFile }>(ctx, connectionRef, 'get-file', {
+        fileId,
+      });
+      return mapToolDriveFile(file);
+    },
+
+    driveFileExport: async (
+      _: unknown,
+      { connectionRef, fileId, format }: { connectionRef: string; fileId: string; format?: string | null },
+      ctx: Context,
+    ) => {
+      const result = await runOwnedEmailOperation<{ export: ToolDriveExport; file: ToolDriveFile }>(
+        ctx,
+        connectionRef,
+        'export-file',
+        { fileId, format: format ? format.toLowerCase() : undefined },
+      );
+      return {
+        content: result.export.content,
+        mimeType: result.export.mimeType,
+        format: result.export.format.toUpperCase(),
+        file: mapToolDriveFile(result.file),
+      };
     },
 };
 
