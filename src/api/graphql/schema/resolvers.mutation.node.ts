@@ -933,45 +933,59 @@ export const nodeMutations = {
         );
       }
 
-      // Post-auth: read the addressing fields + the current `properties`. No
-      // decrypt needed — `properties` is plaintext at rest.
-      const row = await ctx.db.node.findUnique({
-        where: { id: meta.id },
-        select: { loc: true, ownerRepo: true, properties: true },
-      });
-      if (!row) {
-        // Lost a race with a concurrent delete between the two reads.
-        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+      // The READ→merge→WRITE must be atomic, or two concurrent merges patching
+      // distinct keys lose each other (both read the same base, last write wins —
+      // #746 review, Codex P1). Serialize per-node with a transaction-scoped
+      // advisory lock: any other updateNodeProperties on this node blocks until
+      // this one's write commits, then reads the fresh base.
+      //
+      // The lock is held by this short tx; writeNodeCore runs on the POOLED
+      // connection (not this tx) on purpose — it fires a `void enqueueNodeEmbedding
+      // (ctx.db)` that would break against a closing tx client — so the tx only
+      // does the lock + the fresh read + delegate, and the lock releases when the
+      // closure (incl. the awaited writeNodeCore) returns.
+      return ctx.db.$transaction(async (lockTx) => {
+        await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${meta.id}))`;
+
+        // Fresh read UNDER the lock — the merge base can't be stale. `properties`
+        // is plaintext at rest, so no decrypt.
+        const fresh = await lockTx.node.findUnique({
+          where: { id: meta.id },
+          select: { loc: true, ownerRepo: true, properties: true },
         });
-      }
+        if (!fresh) {
+          // Lost a race with a concurrent delete.
+          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          });
+        }
 
-      // Shallow merge: the patch wins on key collision; absent keys preserved.
-      // A node with no properties yet takes the patch as-is.
-      const existing = row.properties;
-      const merged =
-        existing != null && typeof existing === 'object' && !Array.isArray(existing)
-          ? { ...(existing as Record<string, unknown>), ...(properties as Record<string, unknown>) }
-          : (properties as Record<string, unknown>);
+        // Shallow merge: the patch wins on key collision; absent keys preserved.
+        // A node with no properties yet takes the patch as-is.
+        const existing = fresh.properties;
+        const merged =
+          existing != null && typeof existing === 'object' && !Array.isArray(existing)
+            ? { ...(existing as Record<string, unknown>), ...(properties as Record<string, unknown>) }
+            : (properties as Record<string, unknown>);
 
-      // Delegate to the core in update mode. Anchor the write to the immutable
-      // PK (targetNodeId) rather than (memoryId, loc): a concurrent move that
-      // frees this loc for another node could otherwise make the loc-keyed write
-      // hit the wrong row (PR-460). Omitted fields (objectType included) preserve;
-      // writeNodeCore runs enforceNodeSchemaOnWrite on the merged `properties`, so
-      // a merge that breaks the memory's schema surfaces as BAD_USER_INPUT.
-      return writeNodeCore(
-        {
-          memoryId: meta.memoryId,
-          loc: row.loc,
-          properties: merged,
-          ...(row.ownerRepo != null ? { ownerRepo: row.ownerRepo } : {}),
-          ...(reason != null ? { reason } : {}),
-        },
-        ctx,
-        'update',
-        { targetNodeId: meta.id },
-      );
+        // Delegate the write to the core in update mode. Anchor on the immutable
+        // PK (targetNodeId), not (memoryId, loc): a concurrent move that frees this
+        // loc could otherwise make the loc-keyed write hit the wrong row (PR-460).
+        // writeNodeCore runs enforceNodeSchemaOnWrite on the merged `properties`,
+        // so a merge that breaks the memory's schema surfaces as BAD_USER_INPUT.
+        return writeNodeCore(
+          {
+            memoryId: meta.memoryId,
+            loc: fresh.loc,
+            properties: merged,
+            ...(fresh.ownerRepo != null ? { ownerRepo: fresh.ownerRepo } : {}),
+            ...(reason != null ? { reason } : {}),
+          },
+          ctx,
+          'update',
+          { targetNodeId: meta.id },
+        );
+      });
     },
 
     // Bulk literal/regex search-and-replace across selected nodes. Reuses the

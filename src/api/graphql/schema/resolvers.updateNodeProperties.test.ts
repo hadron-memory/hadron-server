@@ -82,6 +82,15 @@ describe('updateNodeProperties — merge semantics', () => {
     expect(reread!.properties).toEqual({ a: 1, b: 2 });
   });
 
+  it('concurrent merges of distinct keys do not lose each other (atomic under the advisory lock)', async () => {
+    const node = await makeNode('conc', { base: 0 });
+    // Both patch different keys concurrently; without per-node serialization one
+    // would clobber the other (read-modify-write race). Both must survive.
+    await Promise.all([call(node.id, { x: 1 }), call(node.id, { y: 2 })]);
+    const reread = await db.node.findUnique({ where: { id: node.id } });
+    expect(reread!.properties).toEqual({ base: 0, x: 1, y: 2 });
+  });
+
   it('leaves `data` untouched (properties and data are distinct columns)', async () => {
     const node = await db.node.create({
       data: { id: generateId(), memoryId: memory.id, loc: 'n5b', name: 'n5b', properties: { a: 1 } as never, data: { keep: true } as never },
