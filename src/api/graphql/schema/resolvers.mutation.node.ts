@@ -50,7 +50,11 @@ import {
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
-import { runSerializable } from '../../../lib/serializableTxn.js';
+import {
+  ancestorLocs,
+  lockAncestorsForCreate,
+  lockNodeForDelete,
+} from '../../../lib/nodeSubtreeLock.js';
 import {
   mergeNodeFields,
   ALL_NODE_MERGE_FIELDS,
@@ -476,28 +480,48 @@ export async function writeNodeCore(
       } as Prisma.NodeUncheckedUpdateInput;
       let node;
       try {
-        node =
-          mode === 'update'
-            ? await ctx.db.node.update({
-                where: opts?.targetNodeId
-                  ? { id: opts.targetNodeId }
-                  : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-                data: updatePayload,
-                include,
-              })
-            : await ctx.db.node.upsert({
-                where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-                create: {
-                  ...nodeFieldsClean,
-                  id,
-                  tags,
-                  createdBy,
-                  ...hashPayload,
-                  ...(seqForCreate != null ? { seq: seqForCreate } : {}),
-                } as Prisma.NodeUncheckedCreateInput,
-                update: updatePayload,
-                include,
-              });
+        if (mode === 'update') {
+          node = await ctx.db.node.update({
+            where: opts?.targetNodeId
+              ? { id: opts.targetNodeId }
+              : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+            data: updatePayload,
+            include,
+          });
+        } else {
+          // Create/upsert. A new node placed into a subtree must be serialized
+          // against a concurrent ancestor-delete's descendant count, or the
+          // delete can miss it and orphan it under a now-missing prefix (#664,
+          // Model A — see nodeSubtreeLock.ts). Hold advisory locks on the node's
+          // ancestor path across the write; the delete side locks its own loc.
+          // A root-level loc has no ancestor to coordinate against, so it skips
+          // the transaction. READ COMMITTED (the default) is REQUIRED: the count
+          // on the delete side must see this row once our commit releases the
+          // lock, which a frozen SERIALIZABLE snapshot would not guarantee.
+          // `satisfies` (not a `: NodeUpsertArgs` annotation) so the literal
+          // `include` type is preserved and both upsert calls below still infer
+          // the edge relations onto the result (`node.outgoingEdges`).
+          const upsertArgs = {
+            where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+            create: {
+              ...nodeFieldsClean,
+              id,
+              tags,
+              createdBy,
+              ...hashPayload,
+              ...(seqForCreate != null ? { seq: seqForCreate } : {}),
+            } as Prisma.NodeUncheckedCreateInput,
+            update: updatePayload,
+            include,
+          } satisfies Prisma.NodeUpsertArgs;
+          node =
+            ancestorLocs(input.loc).length === 0
+              ? await ctx.db.node.upsert(upsertArgs)
+              : await ctx.db.$transaction(async (tx) => {
+                  await lockAncestorsForCreate(tx, input.memoryId, input.loc);
+                  return tx.node.upsert(upsertArgs);
+                });
+        }
       } catch (e) {
         if (
           e instanceof Prisma.PrismaClientKnownRequestError &&
@@ -1264,12 +1288,16 @@ export const nodeMutations = {
       };
       try {
         // The count and the delete run in one transaction (parity with
-        // hadron_delete_node). SERIALIZABLE isolation (#664) closes the
-        // count-then-act race: a descendant concurrently inserted into this
-        // subtree after the count conflicts on commit, aborting one side with
-        // SQLSTATE 40001, which runSerializable retries — so a non-recursive
-        // delete can't orphan a just-inserted child under a now-missing prefix.
-        await runSerializable(ctx.db, async (tx) => {
+        // hadron_delete_node). #664: an advisory lock on this node's loc — taken
+        // first, as the matching key any descendant-create locks as an ancestor
+        // (nodeSubtreeLock.ts) — closes the count-then-act race. A concurrent
+        // create of a descendant either commits before this lock (so the count
+        // below sees it and refuses) or blocks until this delete commits (so it
+        // lands under an already-deleted prefix — the tolerated create-after-
+        // delete case). READ COMMITTED (the default) is required so the count
+        // runs on a fresh snapshot taken after the lock is granted.
+        await ctx.db.$transaction(async (tx) => {
+          await lockNodeForDelete(tx, memoryId, node.loc);
           const useSubtree = !!recursive;
           if (!useSubtree) {
             // Non-recursive: refuse rather than silently orphan a subtree under a
