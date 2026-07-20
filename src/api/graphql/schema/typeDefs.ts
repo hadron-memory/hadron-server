@@ -3003,13 +3003,14 @@ export const typeDefs = `#graphql
     property-path sort.
     """
     findObjects(
+      "Memory ID or fully-qualified URN (hrn:memory:...) — relative refs are rejected (spec 022)."
       memoryRef: String!
       type: String!
       "Equality shorthand: { field: value, ... } becomes an AND of eq predicates (cast inferred from the schema)."
       match: JSON
       "Full #719 structured predicate over the object's fields (ANDed with match)."
       where: JSON
-      "Single-field sort shorthand, e.g. { fundingUsd: desc-as-a-string }."
+      "Single-field sort: a map of one field to the direction string 'asc' or 'desc', e.g. { fundingUsd: 'desc' }."
       sort: JSON
       limit: Int
       offset: Int
@@ -3749,12 +3750,14 @@ export const typeDefs = `#graphql
     # updateNodeProperties / deleteNode, inheriting all their invariants
     # (auth, encryption, schema conformance, revisions, atomic merge).
 
-    # Create an object in a collection. 'type' is the collection (node
-    # objectType); 'fields' are the flat, typed properties (validated against
-    # the memory schema when the collection is declared). The node's loc is
-    # auto-derived (<type>:<key ?? generated-id>) and hidden; pass 'key' for a
-    # human-meaningful id, 'name' to override the derived node name. 'id' and
-    # 'type' are reserved and cannot be field names. Returns the flat object.
+    # Create an object in a collection. 'memoryRef' is a memory ID or
+    # fully-qualified URN (relative refs are rejected, spec 022). 'type' is the
+    # collection (node objectType); 'fields' are the flat, typed properties
+    # (validated against the memory schema when the collection is declared). The
+    # node's loc is auto-derived (<type>:<key ?? generated-id>) and hidden; pass
+    # 'key' for a human-meaningful id (a single segment, no ':'), 'name' to
+    # override the derived node name. 'id' and 'type' are reserved and cannot be
+    # field names. Returns the flat object.
     createObject(memoryRef: String!, type: String!, fields: JSON!, key: String, name: String): JSON!
 
     # Merge fields into an existing object (server-side atomic shallow merge +

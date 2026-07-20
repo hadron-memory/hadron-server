@@ -16,7 +16,7 @@
  */
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
-import type { Context } from './resolvers.helpers.js';
+import { type Context, getAccessibleMemoryIds } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { nodeMutations } from './resolvers.mutation.node.js';
 import { nodeQueries } from './resolvers.query.node.js';
@@ -44,13 +44,18 @@ function mapObjectError(e: unknown): never {
 }
 
 /**
- * Best-effort read of a memory's property schema, for cast inference only (the
- * actual data access is gated by the delegated findNodes). Returns null when the
- * ref doesn't resolve — casts then fall back to value/text inference.
+ * Best-effort read of a memory's property schema, for cast inference only.
+ * Access-gated: only reads the schema of a memory the caller can access (so it
+ * can't disclose schema structure for a guessed id/URN), returning null
+ * identically for inaccessible / nonexistent — casts then fall back to value/text
+ * inference. The actual data access is separately gated by the delegated
+ * findNodes; this is defense-in-depth on the schema disclosure.
  */
 async function readMemorySchema(ctx: Context, memoryRef: string): Promise<MemorySchema | null> {
   try {
     const { id } = await resolveMemoryRef(ctx.db, memoryRef);
+    const accessible = await getAccessibleMemoryIds(ctx);
+    if (accessible !== null && !accessible.includes(id)) return null; // no disclosure
     const row = await ctx.db.memory.findUnique({ where: { id }, select: { schema: true } });
     return (row?.schema as unknown as MemorySchema | null) ?? null;
   } catch {
@@ -58,12 +63,12 @@ async function readMemorySchema(ctx: Context, memoryRef: string): Promise<Memory
   }
 }
 
-/** Require a non-empty string `type` (the collection). */
+/** Require a non-empty string `type` (the collection); returns it trimmed. */
 function requireType(type: unknown): string {
   if (typeof type !== 'string' || type.trim() === '') {
     throw badInput('`type` (the collection) is required.');
   }
-  return type;
+  return type.trim();
 }
 
 export const objectMutations = {
@@ -121,10 +126,14 @@ export const objectMutations = {
 };
 
 export const objectQueries = {
-  /** Read one object by id → node(ref:), projected flat. Null when not found/inaccessible. */
+  /**
+   * Read one object by id → node(ref:), projected flat. Null when not
+   * found/inaccessible, OR when the node isn't an object (no objectType): the
+   * object store only surfaces collection records, not arbitrary nodes.
+   */
   object: async (_: unknown, { ref }: { ref: string }, ctx: Context): Promise<StoredObject | null> => {
     const node = await nodeQueries.node(_, { ref }, ctx);
-    return node ? projectNodeToObject(node) : null;
+    return node && node.objectType != null ? projectNodeToObject(node) : null;
   },
 
   /** Query a collection → findNodes with the objectType facet + desugared match/where + sort. */

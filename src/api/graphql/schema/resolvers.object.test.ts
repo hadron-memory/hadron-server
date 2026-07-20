@@ -101,6 +101,11 @@ describe('getObject / updateObject / deleteObject', () => {
     expect(await getObject(generateId())).toBeNull();
   });
 
+  it('returns null for a non-object node (no objectType) — the store only surfaces collection records', async () => {
+    const n = await db.node.create({ data: { id: generateId(), memoryId: memId, loc: 'plain:note', name: 'plain' } as any });
+    expect(await getObject(n.id)).toBeNull();
+  });
+
   it('merges fields (patch wins, unmentioned preserved) and returns the flat object', async () => {
     const obj = await createObject({ memoryRef: memId, type: 'competitor', fields: { name: 'Letta', stage: 'seed' } });
     const updated = await updateObject({ ref: obj.id, fields: { stage: 'series-a', fundingUsd: 10 } });

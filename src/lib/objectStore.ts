@@ -80,14 +80,15 @@ export function deriveObjectLoc(type: string, key: string | undefined, genId: ()
   // be deleted through the flat object API (deleteObject is non-recursive, and
   // deleteNode refuses NODE_HAS_DESCENDANTS). Reject it here; validateLoc handles
   // the rest of the charset downstream.
-  if (type.includes(':')) {
+  const t = type.trim();
+  if (t.includes(':')) {
     throw new ObjectStoreError(`type must be a single segment (no ":"): ${JSON.stringify(type)}`);
   }
   const trimmed = key != null ? key.trim() : '';
   if (trimmed !== '' && trimmed.includes(':')) {
     throw new ObjectStoreError(`key must be a single segment (no ":"): ${JSON.stringify(key)}`);
   }
-  return `${type}:${trimmed !== '' ? trimmed : genId()}`;
+  return `${t}:${trimmed !== '' ? trimmed : genId()}`;
 }
 
 /**
