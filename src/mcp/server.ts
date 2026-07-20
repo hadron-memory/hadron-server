@@ -3245,7 +3245,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_find_objects',
-    'Query a collection in a memory. Returns objects of `type` as flat records. `match` is an equality shorthand ({ field: value }) with each field\'s cast inferred from the memory schema; `where` is the full #719 structured predicate (ANDed with match; same grammar as hadron_find_nodes\' where); `sort` is a single-field shorthand ({ field: "asc" | "desc" }).',
+    'Query a collection in a memory. Returns { objects, total } — objects of `type` as flat records, plus the full match count for paging with limit/offset. `match` is an equality shorthand ({ field: value }) with each field\'s cast inferred from the memory schema; `where` is the full #719 structured predicate (ANDed with match; same grammar as hadron_find_nodes\' where); `sort` is a single-field shorthand ({ field: "asc" | "desc" }).',
     {
       memoryUrn: z.string().describe('Memory to query — a fully-qualified URN (org::memory) or an ID.'),
       type: z.string().describe('The collection to query (e.g. "competitor").'),
@@ -3259,10 +3259,11 @@ export function createMcpServerInstance(
       try {
         const result = await resolvers.Query.findObjects(
           {},
-          { memoryRef: memoryUrn, type, match: match ?? undefined, where: (where ?? undefined) as never, sort: sort ?? undefined, limit, offset },
+          { memoryRef: memoryUrn, type, match: match ?? undefined, where: (where ?? undefined) as NodeWhere | undefined, sort: sort ?? undefined, limit, offset },
           objectCtx(),
         );
-        return textResult(JSON.stringify(result.objects, null, 2));
+        // Return { objects, total } so agents can page deterministically with limit/offset.
+        return textResult(JSON.stringify({ objects: result.objects, total: result.total }, null, 2));
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'query failed'}`);
       }
