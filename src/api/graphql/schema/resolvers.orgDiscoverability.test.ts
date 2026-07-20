@@ -129,3 +129,60 @@ describe('globalSearch — a non-member discovers a public org (#610)', () => {
     expect(orgHits).not.toContain(priv.id);
   });
 });
+
+describe('marketplace catalogue queries (listedOnMarketplace only, cor:acl:080:04)', () => {
+  let org: { id: string; urn: string };
+  beforeEach(async () => {
+    org = await mkOrg({ listed: true }); // listed + activated
+  });
+
+  it('marketplaceOrganizations: listed + activated only; flat refs; { items, total }', async () => {
+    const publicUnlisted = await mkOrg();
+    await pubMemory(publicUnlisted); // discoverable but NOT listed
+    const hiddenListed = await mkOrg({ isVisible: false, listed: true }); // listed but not activated
+    const page = await Q.marketplaceOrganizations({}, {}, ctx());
+    const ids = new Set(page.items.map((o: { id: string }) => o.id));
+    expect(ids).toContain(org.id);
+    expect(ids).not.toContain(publicUnlisted.id);
+    expect(ids).not.toContain(hiddenListed.id);
+    expect(page.total).toBe(1);
+    // Catalogue org entry is a FLAT ref — no nested publicMemories/publicAgents
+    // (which would advertise unlisted resources). Drill-down is publicOrganization.
+    expect(Object.keys(page.items[0]).sort()).toEqual(['description', 'id', 'name', 'urn']);
+  });
+
+  it('marketplaceAgents: only listed + PUBLIC', async () => {
+    const listedPub = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:ag1`, name: 'listed-pub', visibility: 'PUBLIC', listedOnMarketplace: true, description: 'd' } });
+    await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:ag2`, name: 'listed-org', visibility: 'ORGANIZATION', listedOnMarketplace: true } }); // not PUBLIC
+    await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:ag3`, name: 'unlisted-pub', visibility: 'PUBLIC', listedOnMarketplace: false } }); // not listed
+    const page = await Q.marketplaceAgents({}, {}, ctx());
+    expect(page.items.map((a: { id: string }) => a.id)).toEqual([listedPub.id]);
+    expect(page.total).toBe(1);
+  });
+
+  it('marketplaceMemories: only listed + public-readable (excludes unlisted / non-public / app-scoped)', async () => {
+    const listedPub = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m1`, name: 'listed-pub', class: 'knowledge', visibility: 'PUBLIC', listedOnMarketplace: true, shortDescription: 'a listed public memory' } });
+    await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m2`, name: 'listed-org', class: 'knowledge', visibility: 'ORGANIZATION', listedOnMarketplace: true } }); // not PUBLIC
+    await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m3`, name: 'unlisted-pub', class: 'knowledge', visibility: 'PUBLIC', listedOnMarketplace: false } }); // not listed
+    const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app`, name: 'app' } });
+    await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m4`, name: 'listed-app', class: 'knowledge', visibility: 'PUBLIC', appId: app.id, listedOnMarketplace: true } }); // app-scoped
+    const page = await Q.marketplaceMemories({}, {}, ctx());
+    expect(page.items.map((m: { id: string }) => m.id)).toEqual([listedPub.id]);
+    expect(page.items[0]).toMatchObject({ name: 'listed-pub', description: 'a listed public memory' });
+    expect(page.total).toBe(1);
+  });
+
+  it('paginates: limit/offset slice a stable (name,id)-ordered list with the full total', async () => {
+    // 3 listed public agents named A/B/C → deterministic order.
+    for (const n of ['Agent A', 'Agent B', 'Agent C']) {
+      await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:${generateId()}`, name: n, visibility: 'PUBLIC', listedOnMarketplace: true } });
+    }
+    const p1 = await Q.marketplaceAgents({}, { limit: 2, offset: 0 }, ctx());
+    const p2 = await Q.marketplaceAgents({}, { limit: 2, offset: 2 }, ctx());
+    expect([p1.total, p2.total]).toEqual([3, 3]);
+    expect(p1.items.map((a: { name: string }) => a.name)).toEqual(['Agent A', 'Agent B']);
+    expect(p2.items.map((a: { name: string }) => a.name)).toEqual(['Agent C']);
+    // limit: 0 → count-only page
+    expect(await Q.marketplaceAgents({}, { limit: 0 }, ctx())).toMatchObject({ items: [], total: 3 });
+  });
+});

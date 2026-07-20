@@ -1315,6 +1315,12 @@ export const typeDefs = `#graphql
     description: String
   }
 
+  "A paginated page of sanitized public resource refs (marketplace catalogue)."
+  type PublicResourceRefPage {
+    items: [PublicResourceRef!]!
+    total: Int!
+  }
+
   # Per-organization membership record for a user.
   type OrgMember {
     id: ID!
@@ -3200,6 +3206,20 @@ export const typeDefs = `#graphql
     apps, or credentials. 'ref' accepts the org ID or URN.
     """
     publicOrganization(ref: ID!): PublicOrganization
+
+    """
+    cor:acl:080:04 — browse the marketplace catalogue: resources opted-in via
+    listedOnMarketplace AND publicly accessible. Public (no membership required);
+    sanitized flat refs only (never members / private data / credentials). One
+    paginated query per resource type; ordered by (name, id) for stable paging.
+    - marketplaceOrganizations: activated (isVisible=true) + listed orgs.
+    - marketplaceAgents: listed + visibility=PUBLIC agents.
+    - marketplaceMemories: listed + public-readable memories.
+    Drill into an org's public footprint via publicOrganization(ref:).
+    """
+    marketplaceOrganizations(limit: Int, offset: Int): PublicResourceRefPage!
+    marketplaceAgents(limit: Int, offset: Int): PublicResourceRefPage!
+    marketplaceMemories(limit: Int, offset: Int): PublicResourceRefPage!
 
     # Invitation lookup (public — no auth required, used by invite acceptance page)
     invitation(slug: String!): UserInvitation
