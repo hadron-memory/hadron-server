@@ -1966,8 +1966,11 @@ export const typeDefs = `#graphql
     kind: DriveFileKind!
     "The provider MIME type — informational; kind is the neutral field."
     mimeType: String!
+    # Float, not Int: GraphQL Int is 32-bit signed and Drive files routinely
+    # exceed 2 GiB (PR-751 Copilot review). Byte counts are exact integers
+    # well inside Float's 2^53 safe range.
     "Byte size; null for provider-native documents and folders."
-    size: Int
+    size: Float
     webLink: String
     "Parent folder ids."
     parents: [ID!]!

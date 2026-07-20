@@ -185,7 +185,12 @@ export const driveExportFile: RunToolDef = {
       format: exported.format,
       mimeType: exported.mimeType,
       truncated,
-      content: truncated ? exported.content.slice(0, MAX_EXPORT_CHARS) : exported.content,
+      // The marker makes the cut visible IN the content itself — the model
+      // (or a human reading the trail) must never mistake a truncated
+      // document for a complete one (PR-751 Copilot review).
+      content: truncated
+        ? `${exported.content.slice(0, MAX_EXPORT_CHARS)}\n\n[TRUNCATED by drive_export_file at ${MAX_EXPORT_CHARS} characters — the document continues (${exported.content.length} total)]`
+        : exported.content,
     };
   },
 };

@@ -282,6 +282,32 @@ describe('exportNodeToGoogleDoc', () => {
     expect(vi.mocked(runEmailOperation)).not.toHaveBeenCalled();
   });
 
+  it('refuses a locked encrypted node with SESSION_EXPIRED — never ships ciphertext to Google', async () => {
+    const encryptedMemory = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        urn: 'driveorg.test:vault',
+        name: 'vault',
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
+        isEncrypted: true,
+      },
+    });
+    const lockedNode = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: encryptedMemory.id,
+        loc: 'secret',
+        name: 'Secret note',
+        content: 'enc:v1:AAAA-not-real-ciphertext',
+      },
+    });
+    const r = await run(EXPORT_MUTATION(lockedNode.id, connectionId), { userId: owner.id, roles: ['READER'] });
+    expect(r.errors?.[0]?.extensions?.code).toBe('SESSION_EXPIRED');
+    expect(vi.mocked(runEmailOperation)).not.toHaveBeenCalled();
+  });
+
   it('answers not-found for a node outside the caller\'s memory access (denied ≡ not-found)', async () => {
     const outsider = await db.user.create({
       data: { id: generateId(), handle: 'outsider', githubId: 9303, githubUsername: 'outsider', name: 'Out' },

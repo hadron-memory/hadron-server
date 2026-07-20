@@ -25,7 +25,6 @@ import type { MemorySchema } from '../../../lib/memorySchema.js';
 import {
   encryptNodeFieldsWithKey,
   decryptNodeFields,
-  decryptNodesBatch,
   getMemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, splitNodeUrn } from '../../../lib/urn.js';
@@ -2587,7 +2586,18 @@ export const nodeMutations = {
         // Denied and not-found are indistinguishable on purpose (nodeById parity).
         throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
       }
-      await decryptNodesBatch(ctx.db, [node]);
+      // A locked encrypted node must be a typed refusal, never a silent
+      // ciphertext export — decryptNodesBatch's leave-as-ciphertext posture
+      // would ship the encrypted blob to Google as "markdown" (PR-751 Codex
+      // review). Require the key, then decryptNodeFields does the work.
+      const memEncInfo = await getMemoryEncryptionInfo(ctx.db, node.memoryId);
+      if (memEncInfo.isEncrypted && !sessionKeyCache.getByMemoryId(node.memoryId)) {
+        throw new GraphQLError(
+          `SESSION_EXPIRED: memory ${node.memoryId} is encrypted but no active session key is available.`,
+          { extensions: { code: 'SESSION_EXPIRED', memoryId: node.memoryId } },
+        );
+      }
+      decryptNodeFields(node, memEncInfo);
       const markdown = node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
 
       const { file } = await runOwnedEmailOperation<{ file: ToolDriveFile }>(ctx, connectionRef, 'create-doc', {
