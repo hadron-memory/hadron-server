@@ -20,6 +20,7 @@ export const CONNECTION_GRANT_SCOPES = [
   'mail.send',
   'calendar.freebusy',
   'calendar.read',
+  'drive.read',
 ] as const;
 
 export type ConnectionGrantScope = (typeof CONNECTION_GRANT_SCOPES)[number];
@@ -57,6 +58,15 @@ export const OPERATION_SCOPES: Readonly<Record<string, ConnectionGrantScope>> = 
   'list-events': 'calendar.read',
   'get-event': 'calendar.read',
   'list-calendars': 'calendar.read',
+  // drive (hadrontool-google-drive, #749; a future ms-drive sibling reuses
+  // the same names). The one drive MUTATION (create-doc) is deliberately
+  // absent — owner-only in v1 until a drive.write vocabulary is a product
+  // decision, same posture as the mailbox/calendar mutations.
+  'list-files': 'drive.read',
+  'search-files': 'drive.read',
+  'get-file': 'drive.read',
+  'export-file': 'drive.read',
+  'download-file': 'drive.read',
 });
 
 /** The scope an operation requires, or `undefined` when it is owner-only. */

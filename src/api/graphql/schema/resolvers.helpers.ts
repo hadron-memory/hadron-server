@@ -3,7 +3,7 @@
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
-import { runEmailOperation, type ToolCalendarEvent } from '../../../lib/emailClient.js';
+import { runEmailOperation, type ToolCalendarEvent, type ToolDriveFile } from '../../../lib/emailClient.js';
 import { scopeForOperation } from '../../../lib/emailOperationScopes.js';
 import {
   AiServiceConfigNotFoundError,
@@ -1267,6 +1267,15 @@ export function mapToolCalendarEvent(e: ToolCalendarEvent) {
     attendees: e.attendees.map((a) => ({ ...a, response: a.response.toUpperCase() })),
     myResponse: e.myResponse ? e.myResponse.toUpperCase() : null,
   };
+}
+
+/**
+ * Map a tool DriveFile (lowercase kind vocabulary on the wire) to the
+ * GraphQL shape (DriveFileKind enum values are uppercase). The ONE mapper
+ * every drive surface uses — the calendar-event mapper's sibling (#749).
+ */
+export function mapToolDriveFile(f: ToolDriveFile) {
+  return { ...f, kind: f.kind.toUpperCase() };
 }
 
 // ---------------------------------------------------------------------------

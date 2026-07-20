@@ -21,6 +21,8 @@ import { GraphQLError } from 'graphql';
  *   GMAIL_TOOL_TOKEN        shared bearer token (optional; sent when set)
  *   GOOGLE_CAL_TOOL_URL     e.g. http://hadrontool-google-cal:8080 (required)
  *   GOOGLE_CAL_TOOL_TOKEN   shared bearer token (optional; sent when set)
+ *   GOOGLE_DRIVE_TOOL_URL   e.g. http://hadrontool-google-drive:8080 (required)
+ *   GOOGLE_DRIVE_TOOL_TOKEN shared bearer token (optional; sent when set)
  *
  * Error surface: EMAIL_TOOL_NOT_CONFIGURED / EMAIL_TOOL_UNREACHABLE /
  * EMAIL_TOOL_ERROR as GraphQL extensions.code — plus pass-through of the
@@ -41,6 +43,7 @@ const PROVIDER_TOOLS: Record<string, ProviderToolConfig> = {
   'ms-exchange': { urlEnv: 'MS_EXCHANGE_TOOL_URL', tokenEnv: 'MS_EXCHANGE_TOOL_TOKEN' },
   gmail: { urlEnv: 'GMAIL_TOOL_URL', tokenEnv: 'GMAIL_TOOL_TOKEN' },
   'google-cal': { urlEnv: 'GOOGLE_CAL_TOOL_URL', tokenEnv: 'GOOGLE_CAL_TOOL_TOKEN' },
+  'google-drive': { urlEnv: 'GOOGLE_DRIVE_TOOL_URL', tokenEnv: 'GOOGLE_DRIVE_TOOL_TOKEN' },
 };
 
 /** Resolve a provider's tool base URL + token; typed error when unknown/unconfigured. */
@@ -195,6 +198,36 @@ export interface ToolScheduleFreeBusy {
   id: string;
   busy: { start: string; end: string }[];
   error: string | null;
+}
+
+// ── Drive tool shapes (hadrontool-google-drive; provider-neutral) ───────
+// The drive sibling of the calendar shapes: what the drive tool's surfaces
+// return (#749). A future ms-drive tool (OneDrive/SharePoint over Graph)
+// must return the same shapes byte-for-byte.
+
+/** Provider-neutral file kind. */
+export type ToolDriveFileKind = 'folder' | 'document' | 'spreadsheet' | 'presentation' | 'file';
+
+/** Provider-neutral file shape the drive tool returns. */
+export interface ToolDriveFile {
+  id: string;
+  name: string;
+  kind: ToolDriveFileKind;
+  /** The provider MIME type — informational; `kind` is the neutral field. */
+  mimeType: string;
+  /** Byte size; null for provider-native documents and folders. */
+  size: number | null;
+  webLink: string | null;
+  parents: string[];
+  createdAt: string | null;
+  modifiedAt: string | null;
+}
+
+/** The exported text representation from the tool's export-file operation. */
+export interface ToolDriveExport {
+  content: string;
+  mimeType: string;
+  format: 'markdown' | 'text' | 'html';
 }
 
 /**

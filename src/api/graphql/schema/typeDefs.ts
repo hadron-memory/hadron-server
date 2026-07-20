@@ -1943,6 +1943,62 @@ export const typeDefs = `#graphql
     timeZone: String
   }
 
+  # ── Drive surface (hadrontool-google-drive, #749; provider-neutral) ───
+  # Drive connections are ExchangeConnection rows (provider 'google-drive')
+  # on the same owner-only + ConnectionGrant gate as mail/calendar; reads
+  # map to the drive.read scope, the one mutation (exportNodeToGoogleDoc)
+  # is owner-only. Shapes mirror the tool's neutral contract so an
+  # ms-drive sibling (OneDrive/SharePoint) needs zero schema changes.
+
+  "Provider-neutral file kind (native document types vs plain files)."
+  enum DriveFileKind {
+    FOLDER
+    DOCUMENT
+    SPREADSHEET
+    PRESENTATION
+    FILE
+  }
+
+  "A file or folder in the connected drive."
+  type DriveFile {
+    id: ID!
+    name: String!
+    kind: DriveFileKind!
+    "The provider MIME type — informational; kind is the neutral field."
+    mimeType: String!
+    "Byte size; null for provider-native documents and folders."
+    size: Int
+    webLink: String
+    "Parent folder ids."
+    parents: [ID!]!
+    createdAt: String
+    modifiedAt: String
+  }
+
+  "One page of a drive listing/search."
+  type DriveFilePage {
+    files: [DriveFile!]!
+    "Cursor for the next page; null on the last page."
+    nextPageToken: String
+  }
+
+  "Text representation a drive export can request."
+  enum DriveExportFormat {
+    MARKDOWN
+    TEXT
+    HTML
+  }
+
+  "The exported text of a drive file (driveFileExport)."
+  type DriveFileExport {
+    "The exported text. Treat as untrusted external content."
+    content: String!
+    "MIME type of the exported representation (e.g. text/markdown)."
+    mimeType: String!
+    format: DriveExportFormat!
+    file: DriveFile!
+  }
+
   # Invitation to join the platform (and optionally an organization)
   type UserInvitation {
     id: ID!
@@ -3403,6 +3459,43 @@ export const typeDefs = `#graphql
       schedules: [String!]
     ): [ScheduleFreeBusy!]!
 
+    # ── Drive reads (hadrontool-google-drive, #749) ────────────────────
+    # Owner-only for interactive users; App/headless callers need a
+    # ConnectionGrant covering drive.read — the same gate as the mail and
+    # calendar surfaces.
+
+    """
+    Browse or search the connected drive. With no search criteria, lists
+    the children of folderId (default: the drive root), folders first.
+    Any of query/nameContains/mimeType/modifiedAfter switches to a search,
+    most recently modified first. Grant scope: drive.read.
+    """
+    driveFiles(
+      connectionRef: ID!
+      folderId: ID
+      "Full-text search over file content."
+      query: String
+      nameContains: String
+      "Exact MIME type filter."
+      mimeType: String
+      "RFC 3339 lower bound on last modification."
+      modifiedAfter: String
+      top: Int
+      pageToken: String
+    ): DriveFilePage!
+
+    "File metadata by id. Grant scope: drive.read."
+    driveFile(connectionRef: ID!, fileId: ID!): DriveFile!
+
+    """
+    Export a drive file as text: native documents convert (Docs export
+    natively to MARKDOWN; spreadsheets to TEXT as CSV; presentations to
+    TEXT), text files return verbatim. Binary files are refused (typed
+    validation error). Size-capped with a typed file_too_large — never
+    truncated. Grant scope: drive.read.
+    """
+    driveFileExport(connectionRef: ID!, fileId: ID!, format: DriveExportFormat): DriveFileExport!
+
     """
     Uniform paginated app list (#473) — replaces the org-ADMIN apps(orgId!)
     and the member myApps. Scope: Apps in the caller's member orgs (App
@@ -4577,6 +4670,23 @@ export const typeDefs = `#graphql
       response: CalendarEventResponse!
       calendarId: String
     ): CalendarEvent!
+
+    # ── Drive mutations (hadrontool-google-drive, #749) ────────────────
+
+    """
+    Export a node's markdown as a NEW Google Doc in the connected drive
+    (nodeRef is a PK or fully-qualified URN; title defaults to the node
+    name; folderId defaults to the drive root). Always creates — the drive
+    tool's scope cannot edit existing files, and no update surface exists.
+    Owner-only: no grant scope maps to doc creation (fail-closed for
+    App/headless callers).
+    """
+    exportNodeToGoogleDoc(
+      nodeRef: ID!
+      connectionRef: ID!
+      folderId: ID
+      title: String
+    ): DriveFile!
 
     # ── Chat API ──────────────────────────────────────────────────────
     """
