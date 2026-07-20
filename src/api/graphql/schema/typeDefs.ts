@@ -3691,6 +3691,20 @@ export const typeDefs = `#graphql
     # history, git mirror). Returns the updated node.
     updateNodeData(nodeRef: ID!, data: JSON!, reason: String): Node!
 
+    # #742 - Shallow-merge a JSON patch into a node's structured 'properties'
+    # (the schema-governed JSONB column, DISTINCT from 'data'). The patch's
+    # top-level keys are written over the node's existing 'properties' (patch
+    # wins on collision); unmentioned keys are preserved; a node with no
+    # 'properties' takes the patch verbatim. 'properties' must be a JSON object
+    # (not an array or scalar). 'nodeRef' is a node ID or fully-qualified URN.
+    # On a schema-governed memory the MERGED result is validated against the
+    # memory's schema (BAD_USER_INPUT on a violation). 'properties' is plaintext
+    # at rest (never encrypted), so the merge + conformance check need no key —
+    # but the write still honors the same single-write invariants as updateNode
+    # (per-memory write auth, an active session on an encrypted memory, revision
+    # history, git mirror). Returns the updated node.
+    updateNodeProperties(nodeRef: ID!, properties: JSON!, reason: String): Node!
+
     # Bulk search-and-replace text across selected nodes (literal or regex).
     # Honors per-memory write auth, encryption, revision history, abstract
     # staleness, and re-embedding. Supports dryRun preview.

@@ -345,6 +345,55 @@ describe('createNode with encryption', () => {
       ),
     ).rejects.toThrow(/SESSION_EXPIRED/);
   });
+
+  it('#742 — updateNodeProperties merges plaintext `properties` in-session on an encrypted memory', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const session = await resolvers.Mutation.startAgentSession(
+      {},
+      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      appCtx(secretApp.id),
+    );
+    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const node = await resolvers.Mutation.createNode(
+      {},
+      { input: { memoryId: session.memoryId!, loc: 'profile', name: 'profile', properties: { a: 1 } } },
+      sessionCtx,
+    );
+    const res = await (resolvers.Mutation as any).updateNodeProperties(
+      {},
+      { nodeRef: node.id, properties: { b: 2 } },
+      sessionCtx,
+    );
+    // properties is plaintext at rest — merged + returned in the clear.
+    expect(res.properties).toEqual({ a: 1, b: 2 });
+    const reread = await db.node.findUnique({ where: { id: node.id } });
+    expect(reread!.properties).toEqual({ a: 1, b: 2 });
+  });
+
+  it('#742 — updateNodeProperties throws SESSION_EXPIRED on an encrypted memory with no active session (the write round-trips the encrypted fields)', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const session = await resolvers.Mutation.startAgentSession(
+      {},
+      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      appCtx(secretApp.id),
+    );
+    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const node = await resolvers.Mutation.createNode(
+      {},
+      { input: { memoryId: session.memoryId!, loc: 'profile', name: 'profile', properties: { a: 1 } } },
+      sessionCtx,
+    );
+    // End the session — key evicted.
+    await resolvers.Mutation.endAgentSession({}, { sessionId: session.id }, appCtx(secretApp.id));
+
+    await expect(
+      (resolvers.Mutation as any).updateNodeProperties(
+        {},
+        { nodeRef: node.id, properties: { b: 2 } },
+        appCtx(secretApp.id, { roles: ['ADMIN'] }),
+      ),
+    ).rejects.toThrow(/SESSION_EXPIRED/);
+  });
 });
 
 // ---------------------------------------------------------------------------
