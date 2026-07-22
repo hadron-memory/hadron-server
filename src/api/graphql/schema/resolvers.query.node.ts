@@ -62,6 +62,8 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 
 export const nodeQueries = {
+    // Spec: cor:api:180 — cross-entity URN resolution
+    // (:00 surface & result shape, :01 resolution semantics).
     resolveUrn: async (_: unknown, { urn }: { urn: string }, ctx: Context) => {
       const isGlobalAdmin =
         !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
