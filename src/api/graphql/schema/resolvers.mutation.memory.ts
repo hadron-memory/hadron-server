@@ -1,7 +1,7 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
-import { generateUniqueHandle } from '../../../lib/userHandle.js';
+import { generateUniqueHandle, ensureUserHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
@@ -252,7 +252,8 @@ export const memoryMutations = {
         embeddingSource,
         maxRevCount,
       }: {
-        orgId: string; name: string;
+        // spec 047: OPTIONAL — omitted ⇒ user-owned (caller's `@handle` namespace).
+        orgId?: string | null; name: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
@@ -273,8 +274,19 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      // spec 047 — user-owned tenancy: omitting `orgId` creates the memory in
+      // the authenticated caller's own `@<handle>` namespace (organizationId
+      // NULL, ownerUserId = caller) instead of under an org. The two paths
+      // diverge on owner resolution, authorization, and URN root below.
+      const userOwned = orgId == null;
+      if (userOwned && !ctx.userId) {
+        throw new GraphQLError(
+          'Creating a user-owned memory (no orgId) requires an authenticated user (the creator is the owner).',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      const resolvedOrgId = userOwned ? null : (await resolveOrgRef(ctx.db, orgId!)).id;
 
       // #621 — friendly guard mirroring chk_memory_max_rev_count_positive.
       // Explicit `null` is rejected (there is no "null" cap — omit the arg to
@@ -300,23 +312,33 @@ export const memoryMutations = {
         );
       }
 
-      // Authorization (034-memory-class-access): org-shared classes
-      // (knowledge/group) require org ADMIN; owner-owned classes
-      // (personal/private) require only that the creator is an authenticated
-      // member of the org *container* — the memory is theirs, not the org's,
-      // and access is owner-only by class.
-      if (isUserOwned) {
-        if (!ctx.userId) {
-          throw new GraphQLError(
-            'Creating a personal/private memory requires an authenticated user (the creator is the owner).',
-            { extensions: { code: 'UNAUTHENTICATED' } },
-          );
-        }
-        // Require ACTUAL membership of the org container — NOT requireOrgRole,
-        // whose global ADMIN/OWNER bypass would let a platform admin create a
-        // personal/private memory in an org they don't belong to.
+      // spec 047 — the org-less (user-owned) path supports ONLY the owner-only
+      // classes `personal`/`private`. `knowledge`/`group` are org-shared: their
+      // read audience is visibility-scoped to org members, which is meaningless
+      // without an org — so they still require `orgId`.
+      if (userOwned && !isUserOwned) {
+        throw new GraphQLError(
+          `A user-owned memory (no orgId) must be class 'personal' or 'private'; ` +
+            `'${requestedClass}' is org-shared — pass orgId to create it.`,
+          { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' } },
+        );
+      }
+
+      // Authorization (034-memory-class-access + 047-user-owned-tenancy):
+      // - user-owned (no org): the caller IS the owner — nothing more to check.
+      // - org-shared classes (knowledge/group): require the org.create grant.
+      // - org-anchored personal/private: require ACTUAL membership of the org
+      //   *container* — the memory is theirs, not the org's, but it lives in the
+      //   org's namespace.
+      if (userOwned) {
+        // Owner is the authenticated caller (verified above); no org, no
+        // membership to check. The memory is theirs outright.
+      } else if (isUserOwned) {
+        // NOT requireOrgRole, whose global ADMIN/OWNER bypass would let a
+        // platform admin create a personal/private memory in an org they don't
+        // belong to.
         const orgMembership = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: ctx.userId } },
+          where: { organizationId_userId: { organizationId: resolvedOrgId!, userId: ctx.userId! } },
         });
         if (!orgMembership || orgMembership.deletedAt) {
           throw new GraphQLError(
@@ -328,7 +350,7 @@ export const memoryMutations = {
         // Grant-model gate (design:grant-model P2a): role bundle union
         // individual grants. Behavior-equivalent to the former
         // requireOrgRole(ADMIN) until a memory.create grant row exists.
-        await requireOrgAction(ctx, resolvedOrgId, 'memory.create');
+        await requireOrgAction(ctx, resolvedOrgId!, 'memory.create');
       }
       // 023-app-shape US4: group-class memories must carry GROUP
       // visibility (enforced by the chk_memory_group_visibility CHECK
@@ -356,10 +378,19 @@ export const memoryMutations = {
         );
       }
 
-      const memOrg = await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId }, select: { urn: true } });
+      // The URN root is the owner principal's bare namespace atom — an org
+      // domain (`baragaun.com`) or, for the user-owned path, the caller's
+      // handle (`holger`). ensureUserHandle mints+persists a handle if the
+      // owner has none, since the URN can't root on a missing handle. Both
+      // yield the BARE stored form `<root>:<slug>` (single colon, no `hrn:mem:`
+      // prefix — the display layer adds that); storing the rendered form is the
+      // double-prefix footgun the chk_memory_urn_not_prefixed guardrail blocks.
+      const memRoot = userOwned
+        ? await ensureUserHandle(ctx.db, ctx.userId!)
+        : (await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId! }, select: { urn: true } })).urn;
       // #574: slugify the display name — a raw name would persist a
       // case-sensitive / space-bearing URN that can't round-trip through parseUrn.
-      const memoryUrn = `${memOrg.urn}:${deriveSlugFromName(name)}`;
+      const memoryUrn = `${memRoot}:${deriveSlugFromName(name)}`;
       // Check for existing memory with the same URN
       const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
       if (existing) {
@@ -378,7 +409,13 @@ export const memoryMutations = {
         const created = await tx.memory.create({
           data: {
             id: generateId(),
+            // spec 047 owner XOR (chk_memory_owner_xor): exactly one of
+            // organizationId / ownerUserId. Org path → org set, ownerUserId
+            // NULL. User-owned path → org NULL, ownerUserId = caller (the tenant
+            // owner, distinct from `userId` — the strict personal/private owner
+            // set just below for those classes).
             organizationId: resolvedOrgId,
+            ownerUserId: userOwned ? ctx.userId : null,
             urn: memoryUrn,
             name,
             shortDescription,

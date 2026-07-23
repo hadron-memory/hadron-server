@@ -151,3 +151,35 @@ export async function generateUniqueHandle(
   }
   throw new Error('generateUniqueHandle: could not find a free handle');
 }
+
+/** DB surface for {@link ensureUserHandle}: the handle probe plus the `user`
+ * delegate it reads the current handle from and persists a generated one to. */
+type EnsureHandleDb = HandleProbeDb & Pick<PrismaClient, 'user'>;
+
+/**
+ * Return the user's canonical handle, generating and persisting one when the
+ * row has none (a grandfathered pre-#325 / pre-spec-047 user). This is the
+ * "the caller owns something in their own `@handle` namespace" entry point —
+ * a user-owned Memory/App/Agent URN roots on the owner's handle, so the handle
+ * must exist before that URN can be minted.
+ *
+ * Idempotent and safe to call on every user-owned create: a user that already
+ * has a URN-legal handle short-circuits with a single read; only the
+ * handle-less case writes. Seeds the generated handle from the user's name then
+ * email local-part (same readable-stem preference as the signup paths), falling
+ * back to a random handle when neither is usable.
+ */
+export async function ensureUserHandle(db: EnsureHandleDb, userId: string): Promise<string> {
+  const user = await db.user.findUniqueOrThrow({
+    where: { id: userId },
+    select: { handle: true, name: true, email: true },
+  });
+  const existing = userUrn(user.handle) ? user.handle!.toLowerCase() : null;
+  if (existing) return existing;
+
+  const handle = await generateUniqueHandle(db, {
+    seeds: [user.name, user.email ? user.email.split('@')[0] : null],
+  });
+  await db.user.update({ where: { id: userId }, data: { handle } });
+  return handle;
+}
