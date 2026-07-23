@@ -71,17 +71,24 @@ describe('createMemory — user-owned (no orgId)', () => {
     expect(mem.urn).toBe('dana:secrets');
   });
 
-  it('auto-generates + persists a handle when the owner has none, and roots the URN on it', async () => {
+  it('roots the URN on the user handle (DB-default when unset) and links a pool principal', async () => {
+    // handle is NON-NULL (schema default), so `handleless` already has a
+    // DB-generated handle; ensureUserHandle roots the URN on it and guarantees
+    // the pool principal exists (the #762 review gap).
+    const before = await db.user.findUniqueOrThrow({ where: { id: handleless.id } });
+    expect(before.handle).toBeTruthy();
+    expect(before.principalId).toBeNull(); // created off the signup path — no principal yet
+
     const mem = await resolvers.Mutation.createMemory(
       null,
       { name: 'notes', memoryClass: 'personal' } as any,
       asHandleless(),
     );
-    const user = await db.user.findUniqueOrThrow({ where: { id: handleless.id } });
-    expect(user.handle).toBeTruthy(); // generated + persisted
+    const after = await db.user.findUniqueOrThrow({ where: { id: handleless.id } });
     expect(mem.ownerUserId).toBe(handleless.id);
-    expect(mem.urn).toBe(`${user.handle}:notes`);
+    expect(mem.urn).toBe(`${after.handle.toLowerCase()}:notes`);
     expect(mem.urn.startsWith('hrn:')).toBe(false);
+    expect(after.principalId).toBeTruthy(); // ensureUserPrincipal linked the pool row
   });
 
   it('rejects org-shared classes on the org-less path (knowledge needs an org)', async () => {
@@ -134,6 +141,31 @@ describe('chk_memory_urn_not_prefixed guardrail', () => {
     // A correct bare-form update is still allowed.
     await expect(
       db.$executeRawUnsafe(`UPDATE memories SET urn = 'dana:renamed' WHERE id = $1`, mem.id),
+    ).resolves.toBeGreaterThanOrEqual(1);
+  });
+
+  it('is case-insensitive (a mixed-case HRN:MEM: prefix cannot slip past)', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      null,
+      { name: 'casetest', memoryClass: 'personal' } as any,
+      asHandled(),
+    );
+    await expect(
+      db.$executeRawUnsafe(`UPDATE memories SET urn = 'HRN:MEM:dana:casetest' WHERE id = $1`, mem.id),
+    ).rejects.toThrow(/chk_memory_urn_not_prefixed/);
+  });
+
+  it('does NOT reject a legitimate bare root of "hrn" (guard is narrowed to the memory display prefix)', async () => {
+    // #762 review (Codex): a user whose handle is literally `hrn` has a valid
+    // bare URN `hrn:<slug>` that must stay writable — only the rendered
+    // `hrn:mem:` / `hrn:memory:` display form is forbidden.
+    const mem = await resolvers.Mutation.createMemory(
+      null,
+      { name: 'narrowtest', memoryClass: 'personal' } as any,
+      asHandled(),
+    );
+    await expect(
+      db.$executeRawUnsafe(`UPDATE memories SET urn = 'hrn:narrowtest' WHERE id = $1`, mem.id),
     ).resolves.toBeGreaterThanOrEqual(1);
   });
 });
