@@ -185,6 +185,27 @@ ALTER TABLE memories
   ADD CONSTRAINT chk_memory_owner_xor
   CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
 
+-- URN-shape guardrail (spec 047 follow-up). memories.urn stores the BARE v2
+-- form `<root>:<slug>` (single colon, NO scheme prefix); the display layer
+-- (emitEntityUrnV2) prepends `hrn:mem:`. Storing the already-rendered form via
+-- a raw UPDATE double-prefixes it (`hrn:mem:hrn:mem:holger:jens`), which fails
+-- parseUrn and gets SILENTLY dropped from the portal's memory listing. This
+-- rejects that class of write at the source — including hand-edits that bypass
+-- the app layer.
+--   * Matches only the rendered MEMORY display prefix (`hrn:mem:` / legacy
+--     `hrn:memory:`), NOT every `hrn:` — a user whose handle is literally `hrn`
+--     has a legitimate bare root `hrn:<slug>` that must remain writable (#762).
+--   * lower() so a mixed-case `HRN:MEM:` hand-edit can't slip past (#762).
+--   * NOT VALID: enforced on every INSERT/UPDATE but does not re-check
+--     pre-existing rows, so it can never fail this idempotent re-run on a DB
+--     that already holds a legacy oddity. (A later VALIDATE CONSTRAINT, after a
+--     data audit, can promote it to fully validated.)
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_urn_not_prefixed;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_urn_not_prefixed
+  CHECK (lower(urn) NOT LIKE 'hrn:mem:%' AND lower(urn) NOT LIKE 'hrn:memory:%') NOT VALID;
+
 -- Per-owner name uniqueness (Prisma cannot express partial uniques).
 CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_server_name_uniq
   ON ai_service_configs (hadron_server_id, name) WHERE hadron_server_id IS NOT NULL;

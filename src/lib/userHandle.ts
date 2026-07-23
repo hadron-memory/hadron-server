@@ -11,7 +11,7 @@
 import { randomBytes } from 'crypto';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { validateUserSlug, validateUserHandle, formatUrn } from './urn.js';
-import { checkRootAvailable } from './principal/mintPrincipal.js';
+import { checkRootAvailable, ensureUserPrincipal, RootNameTakenError } from './principal/mintPrincipal.js';
 
 /**
  * The canonical `hrn:user:<handle>` URN for a handle, or `null` when the handle
@@ -150,4 +150,64 @@ export async function generateUniqueHandle(
     if (legal && !(await isHandleTaken(db, legal))) return legal;
   }
   throw new Error('generateUniqueHandle: could not find a free handle');
+}
+
+/** DB surface for {@link ensureUserHandle}: the handle probe, the `user`
+ * delegate it reads/persists the handle on, plus what {@link ensureUserPrincipal}
+ * needs to mint+link the pool principal. */
+type EnsureHandleDb = HandleProbeDb & Pick<PrismaClient, 'user'>;
+
+/**
+ * Return the user's canonical (lowercase) handle and guarantee the unified
+ * principal-pool row (#692) exists for it. This is the "the caller owns
+ * something in their own `@handle` namespace" entry point — a user-owned
+ * Memory/App/Agent URN roots on the owner's handle, and the pool principal is
+ * the uniqueness authority, so both must exist before that URN is minted.
+ *
+ * `User.handle` is NON-NULL (schema `@default(dbgenerated(...))`), so every user
+ * already has a handle — there is no handle-less user to fill and no
+ * observe-null-then-generate race (a point raised in #762 review that the
+ * NOT-NULL column rules out). The common path therefore just canonicalizes the
+ * existing handle and, via the idempotent {@link ensureUserPrincipal}, links its
+ * pool principal (a user created off the signup path can have the default handle
+ * but no principal — the gap #762 review flagged). A grandfathered mixed-case
+ * legacy handle is rooted on its **lowercase** form (matching `userUrn`) but is
+ * NOT rewritten in place — identity is not mutated as a side effect of memory
+ * creation.
+ *
+ * The fallback loop handles only the rare grandfathered handle that is not
+ * URN-legal at all (pre-#325): a URN cannot root on it, so a fresh legal handle
+ * is minted through the pool (atomic claim) and persisted.
+ */
+export async function ensureUserHandle(db: EnsureHandleDb, userId: string): Promise<string> {
+  const user = await db.user.findUniqueOrThrow({
+    where: { id: userId },
+    select: { id: true, handle: true, name: true, email: true, principalId: true },
+  });
+
+  // Common path: the (always-present) handle is URN-legal. Root on its lowercase
+  // form and make sure the pool principal exists so root and pool never drift.
+  const canonical = userUrn(user.handle) ? user.handle.toLowerCase() : null;
+  if (canonical) {
+    await ensureUserPrincipal(db, { id: user.id, handle: canonical, principalId: user.principalId });
+    return canonical;
+  }
+
+  // Rare: a grandfathered non-URN-legal handle (pre-#325). A URN can't root on
+  // it, so mint a fresh legal handle through the pool (the create is the atomic
+  // claim — RootNameTakenError ⇒ retry) and persist it.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = await generateUniqueHandle(db, {
+      seeds: [user.name, user.email ? user.email.split('@')[0] : null],
+    });
+    try {
+      await ensureUserPrincipal(db, { id: user.id, handle: candidate, principalId: null });
+    } catch (err) {
+      if (err instanceof RootNameTakenError) continue;
+      throw err;
+    }
+    await db.user.update({ where: { id: userId }, data: { handle: candidate } });
+    return candidate;
+  }
+  throw new Error('ensureUserHandle: could not assign a URN-legal handle');
 }

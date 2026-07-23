@@ -4181,7 +4181,15 @@ export const typeDefs = `#graphql
     Agent.systemMemoryId / the App install path.
     """
     createMemory(
-      orgId: ID!
+      """
+      Owning organization. OPTIONAL (spec 047 — user-owned tenancy): when
+      OMITTED, the memory is owned by the authenticated caller in their own
+      handle namespace (organizationId NULL, ownerUserId = caller), and its URN
+      roots on the caller's handle (hrn:mem:<handle>:<slug>) rather than an org
+      domain. The org-less path supports only the owner-only classes 'personal'
+      and 'private'; pass orgId for 'knowledge' / 'group'.
+      """
+      orgId: ID
       name: String!
       shortDescription: String
       description: String
