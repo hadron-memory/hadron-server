@@ -1,5 +1,6 @@
 import crypto from 'crypto';
-import { ApolloServer } from '@apollo/server';
+import * as Sentry from '@sentry/node';
+import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
@@ -78,6 +79,27 @@ import {
   isGoogleDriveConnectConfigured,
 } from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
+
+// Report only unexpected GraphQL faults to Sentry. Typed client errors carry a
+// stable `extensions.code` (BAD_USER_INPUT, URN_NOT_QUALIFIED, NOT_FOUND, …)
+// shaped in `formatError` below — those are caller mistakes, not server faults,
+// and must not flood the issue stream. An error with no code, or the generic
+// INTERNAL_SERVER_ERROR, is what we want to see.
+const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
+  async requestDidStart() {
+    return {
+      async didEncounterErrors(ctx) {
+        for (const err of ctx.errors) {
+          const code = err.extensions?.code as string | undefined;
+          if (code && code !== 'INTERNAL_SERVER_ERROR') continue;
+          Sentry.captureException(err.originalError ?? err, {
+            tags: { graphql_operation: ctx.operationName ?? 'anonymous' },
+          });
+        }
+      },
+    };
+  },
+};
 
 export async function createServer(): Promise<Express> {
   const app = express();
@@ -984,6 +1006,7 @@ export async function createServer(): Promise<Express> {
   const apollo = new ApolloServer({
     typeDefs,
     resolvers,
+    plugins: [sentryApolloPlugin],
     formatError: (formattedError, error) => {
       // Spec 022: surface UrnNotQualifiedError with a stable error code so
       // external callers can branch on it programmatically. The unwrap
@@ -1428,6 +1451,13 @@ export async function createServer(): Promise<Express> {
       // The unreachable-broker case already logged inside getBusClient().
     });
   }
+
+  // Sentry — must be the last middleware, after every route/controller is
+  // mounted, so it observes errors forwarded via next(err) from the auth,
+  // OAuth, webhook and schema-discovery routes. GraphQL resolver errors do not
+  // reach here (Apollo handles them internally) — they are captured by
+  // sentryApolloPlugin instead. No-op when SENTRY_DSN is unset.
+  Sentry.setupExpressErrorHandler(app);
 
   return app;
 }

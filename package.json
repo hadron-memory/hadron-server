@@ -44,6 +44,7 @@
     "@nats-io/jetstream": "^3.4.0",
     "@nats-io/transport-node": "^3.4.0",
     "@prisma/client": "^6.19.2",
+    "@sentry/node": "^10.67.0",
     "@types/pg": "^8.20.0",
     "ai": "^7.0.14",
     "bcrypt": "^5.1.1",
