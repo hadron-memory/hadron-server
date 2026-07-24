@@ -56,10 +56,13 @@ import {
   NodeNotFoundError,
   EncryptedVectorIndexNotAcknowledgedError,
   InvalidChunkConfigError,
+  UserNotFoundError,
+  AmbiguousUserRefError,
 } from '../../../lib/entityRef/errors.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
@@ -94,6 +97,51 @@ import {
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
+
+/**
+ * #769 — resolve the grantee of a memory-share mutation to a definite user id.
+ * Prefer the new `granteeRef` (id / email / handle / `hrn:user:` URN, resolved
+ * server-side against the full user table so a cross-org personal share works),
+ * falling back to the deprecated `granteeId` PK for existing callers. Exactly
+ * one must be supplied. A ref that resolves to no user surfaces NOT_FOUND rather
+ * than the caller-facing controller error.
+ */
+async function resolveGranteeId(
+  ctx: Context,
+  args: { granteeRef?: string | null; granteeId?: string | null },
+): Promise<string> {
+  const ref = args.granteeRef?.trim();
+  // Mutually exclusive: passing both is a caller mistake, and silently
+  // preferring one contradicts the schema (PR #774 review).
+  if (ref && args.granteeId) {
+    throw new GraphQLError('Pass either granteeRef or granteeId, not both.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  if (ref) {
+    try {
+      const { id } = await resolveUserRefOrEmail(ctx.db, ref);
+      return id;
+    } catch (e) {
+      if (e instanceof UserNotFoundError) {
+        throw new GraphQLError(`No user matches granteeRef "${ref}".`, {
+          extensions: { code: 'NOT_FOUND' },
+        });
+      }
+      if (e instanceof AmbiguousUserRefError) {
+        throw new GraphQLError(
+          `granteeRef "${ref}" matches more than one account (differing only by email case). Use the exact-case email, the handle, or the id.`,
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+      throw e;
+    }
+  }
+  if (args.granteeId) return args.granteeId;
+  throw new GraphQLError('A grantee is required: pass granteeRef (or the deprecated granteeId).', {
+    extensions: { code: 'BAD_USER_INPUT' },
+  });
+}
 
 export const memoryMutations = {
     mergeMemories: async (
@@ -1722,9 +1770,10 @@ export const memoryMutations = {
       _: unknown,
       {
         memoryId,
+        granteeRef,
         granteeId,
         role,
-      }: { memoryId: string; granteeId: string; role: MemoryShareRoleType },
+      }: { memoryId: string; granteeRef?: string | null; granteeId?: string | null; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
@@ -1732,11 +1781,15 @@ export const memoryMutations = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
+      // Caller-authority gate FIRST, then grantee resolution — so an unauthorized
+      // caller always gets FORBIDDEN and can't use the NOT_FOUND-vs-FORBIDDEN
+      // difference as a user-enumeration oracle (mirrors createPrincipalGrant).
       await requireMemorySharePrincipal(ctx, memoryId);
+      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
       try {
         const memoryShare = await createMemoryShare(ctx.db, {
           memoryId,
-          granteeId,
+          granteeId: resolvedGranteeId,
           role,
           actorId: ctx.userId,
         });
@@ -1758,7 +1811,11 @@ export const memoryMutations = {
     // 023-app-shape US3 — revoke an existing MemoryShare. Idempotent.
     revokeMemoryShare: async (
       _: unknown,
-      { memoryId, granteeId }: { memoryId: string; granteeId: string },
+      {
+        memoryId,
+        granteeRef,
+        granteeId,
+      }: { memoryId: string; granteeRef?: string | null; granteeId?: string | null },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
@@ -1767,8 +1824,10 @@ export const memoryMutations = {
         });
       }
       await requireMemorySharePrincipal(ctx, memoryId);
-      await revokeMemoryShare(ctx.db, { memoryId, granteeId });
-      return { memoryId, granteeId };
+      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
+      await revokeMemoryShare(ctx.db, { memoryId, granteeId: resolvedGranteeId });
+      // Return the RESOLVED grantee PK so the client can correlate the revocation.
+      return { memoryId, granteeId: resolvedGranteeId };
     },
 
     // 023-app-shape US3 — change the role on an existing MemoryShare.
@@ -1778,9 +1837,10 @@ export const memoryMutations = {
       _: unknown,
       {
         memoryId,
+        granteeRef,
         granteeId,
         role,
-      }: { memoryId: string; granteeId: string; role: MemoryShareRoleType },
+      }: { memoryId: string; granteeRef?: string | null; granteeId?: string | null; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
@@ -1789,10 +1849,11 @@ export const memoryMutations = {
         });
       }
       await requireMemorySharePrincipal(ctx, memoryId);
+      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
       try {
         const memoryShare = await updateMemoryShareRole(ctx.db, {
           memoryId,
-          granteeId,
+          granteeId: resolvedGranteeId,
           role,
           actorId: ctx.userId,
         });
