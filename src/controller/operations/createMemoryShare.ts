@@ -59,6 +59,25 @@ export class MemoryShareGranteeMissingError extends Error {
   }
 }
 
+/**
+ * An ORG-OWNED personal memory (organizationId set) may be shared only with a
+ * current member of that same org (#778). A free-standing (org-less) personal
+ * memory has no such restriction — its owner may share it with anyone. This
+ * keeps a share from handing a cross-org user the full org-owned Memory, whose
+ * nested `organization → apps → keys/members` fields would otherwise leak the
+ * owning org's secrets (the #552 nested-read-gate class).
+ */
+export class CrossOrgShareNotAllowedError extends Error {
+  constructor(organizationId: string) {
+    super(
+      `An org-owned personal memory can only be shared with a member of its ` +
+        `organization (${organizationId}). To share with someone outside the org, ` +
+        `use a free-standing personal memory (created without an orgId).`,
+    );
+    this.name = 'CrossOrgShareNotAllowedError';
+  }
+}
+
 export async function createMemoryShare(
   db: PrismaClient,
   args: {
@@ -72,7 +91,14 @@ export async function createMemoryShare(
 ): Promise<MemoryShare> {
   const memory = await db.memory.findUnique({
     where: { id: args.memoryId },
-    select: { id: true, class: true, userId: true, deletedAt: true },
+    select: {
+      id: true,
+      class: true,
+      userId: true,
+      organizationId: true,
+      userMemoryOfAgentId: true,
+      deletedAt: true,
+    },
   });
   if (!memory || memory.deletedAt) {
     throw new MemoryNotFoundForShareError(args.memoryId);
@@ -94,6 +120,24 @@ export async function createMemoryShare(
   });
   if (!grantee || grantee.deletedAt) {
     throw new MemoryShareGranteeMissingError(args.granteeId);
+  }
+  // #778 — a plain org-owned personal memory stays inside its org: the grantee
+  // MUST be a current member of the memory's org. A free-standing (org-less)
+  // personal memory skips this check. AGENT-SCOPED personal memories
+  // (userMemoryOfAgentId set — the spec-023 per-pairing App/mentor pattern) are
+  // ALSO exempt: their sharing is governed by AppMember + AgentSubscription (the
+  // resolveMemoryAuthorization predicate), not org membership, and they are never
+  // surfaced through the portal's sharedWithMe list / read gate (both exclude
+  // userMemoryOfAgentId rows), so no cross-org portal leak arises. findFirst +
+  // deletedAt: null so a REVOKED membership no longer qualifies.
+  if (memory.organizationId !== null && memory.userMemoryOfAgentId === null) {
+    const member = await db.orgMember.findFirst({
+      where: { organizationId: memory.organizationId, userId: args.granteeId, deletedAt: null },
+      select: { userId: true },
+    });
+    if (!member) {
+      throw new CrossOrgShareNotAllowedError(memory.organizationId);
+    }
   }
   // FR-019: grantor = principal, always. The acting party is `actorId`
   // recorded in `createdBy` — distinct from `grantorId`.

@@ -8,9 +8,11 @@ import {
   requireRole,
   clampListTake,
   getAccessibleMemoryIds,
+  granteeShareAccess,
   resolveOrgScope,
   MEMORY_INCLUDE,
 } from './resolvers.helpers.js';
+import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 
 // Graph-view fetch (issue #466): default page size + hard cap for the slim
 // memoryNodes / memoryEdges lists. Large enough to fill the graph in a few
@@ -117,9 +119,13 @@ export const memoryQueries = {
       if (!memory || memory.deletedAt) return null;
       // 034-memory-class-access: owner-owned personal/private are owner-only —
       // no ADMIN/OWNER bypass, no org-member path. Check before the org logic.
+      // #778: a MemoryShare grantee may ALSO open a personal memory shared with
+      // them (private is never shareable). granteeShareAccess mirrors the create
+      // rule — an org-owned personal share requires current org membership.
       if (memory.class === 'personal' || memory.class === 'private') {
-        if (!ctx.userId || memory.userId !== ctx.userId) throw new Error('Forbidden');
-        return memory;
+        if (ctx.userId && memory.userId === ctx.userId) return memory;
+        if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return memory;
+        throw new Error('Forbidden');
       }
       // spec 047: a USER-owned memory (ownerUserId set — e.g. a user-owned
       // agent's system/knowledge memory) is STRICTLY owner-only, even for a
@@ -227,25 +233,28 @@ export const memoryQueries = {
         return { items, total };
       };
 
-      // #778 — filter.sharedWithMe: the distinct set of memories shared WITH
-      // the caller via MemoryShare (the caller is a grantee) — the portal's
+      // #778 — filter.sharedWithMe: the distinct set of personal memories shared
+      // WITH the caller via MemoryShare (the caller is a grantee) — the portal's
       // "Memories shared with me" tab. This is its OWN slice, not part of the
       // owned/org union: a grantee is never their own grantor, so it naturally
-      // excludes owned memories. Because access here comes from the grantee row
-      // (a personal/private memory that is otherwise owner-only, org NULL), it
-      // is NOT narrowed by the active org — like the caller's own personal
-      // memories, a shared memory shows regardless of which org is selected.
-      // App-key callers (ctx.appId, no ctx.userId) get an empty page — sharing
-      // is a user-to-user concept.
+      // excludes owned memories. Only `personal` is shareable, so the class is
+      // fixed (the default classFilter is subsumed). The membership gate mirrors
+      // granteeShareAccess / the create rule — an org-owned personal share shows
+      // only while the caller is a current member of that org, so the list stays
+      // in lockstep with what Query.memory will actually open (a legacy/revoked
+      // cross-org share is neither listed nor openable). App-key callers
+      // (ctx.appId, no ctx.userId) get an empty page — sharing is user-to-user.
       if (f.sharedWithMe) {
         if (!ctx.userId) return empty;
+        const memberOrgIds = await getMemberOrgIds(ctx.db, ctx.userId);
         return page({
           deletedAt: null,
+          class: 'personal',
           userMemoryOfAgentId: null,
-          ...classFilter,
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
           // `shares` is the Prisma relation field on Memory → MemoryShare.
           shares: { some: { granteeId: ctx.userId } },
+          OR: [{ organizationId: null }, { organizationId: { in: memberOrgIds } }],
         });
       }
 

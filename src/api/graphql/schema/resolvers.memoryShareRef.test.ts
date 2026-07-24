@@ -45,8 +45,12 @@ beforeEach(async () => {
   grantee = { id: g.id, handle, email };
 });
 
+// #778: cross-org sharing (this suite's whole point — sharing with a user
+// OUTSIDE the caller's org) is allowed only for FREE-STANDING personal memories.
+// An org-owned personal memory may be shared only within its org. So these
+// fixtures omit orgId → the memory is owned by the caller directly (org-less).
 async function sharablePersonal(name = 'sharable') {
-  return M.createMemory(null, { orgId: org.id, name, memoryClass: 'personal' }, asOwner());
+  return M.createMemory(null, { name, memoryClass: 'personal' }, asOwner());
 }
 
 describe('createMemoryShare — granteeRef resolution (#769)', () => {

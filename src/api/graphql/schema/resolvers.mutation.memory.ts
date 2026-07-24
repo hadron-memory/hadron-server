@@ -16,6 +16,7 @@ import {
   InvalidMemoryClassForShareError,
   MemoryNotFoundForShareError,
   MemoryShareGranteeMissingError,
+  CrossOrgShareNotAllowedError,
 } from '../../../controller/operations/createMemoryShare.js';
 import { cloneMemoryGraph } from '../../../controller/operations/cloneMemory.js';
 import { extractParentNodeGraph } from '../../../controller/operations/extractParentNode.js';
@@ -1798,7 +1799,8 @@ export const memoryMutations = {
         if (
           e instanceof InvalidMemoryClassForShareError ||
           e instanceof MemoryNotFoundForShareError ||
-          e instanceof MemoryShareGranteeMissingError
+          e instanceof MemoryShareGranteeMissingError ||
+          e instanceof CrossOrgShareNotAllowedError
         ) {
           throw new GraphQLError((e as Error).message, {
             extensions: { code: (e as Error).name },
