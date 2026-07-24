@@ -5129,7 +5129,10 @@ export const typeDefs = `#graphql
     """
     createMemoryShare(
       memoryId: ID!
-      granteeId: ID!
+      "#769 — the grantee as a reference resolved server-side: a user id, email, handle, or hrn:user:<handle> URN. Resolution sees the full user table, so a cross-org personal-memory share works by email/handle. Supply this OR granteeId."
+      granteeRef: String
+      "Deprecated (#769): the grantee's user PK. Use granteeRef, which also accepts email / handle / URN."
+      granteeId: ID @deprecated(reason: "Use granteeRef (accepts id / email / handle / hrn:user URN).")
       role: MemoryShareRole!
     ): CreateMemorySharePayload!
 
@@ -5142,7 +5145,9 @@ export const typeDefs = `#graphql
     """
     revokeMemoryShare(
       memoryId: ID!
-      granteeId: ID!
+      "#769 — the grantee as a server-resolved reference (id / email / handle / hrn:user URN). Supply this OR granteeId."
+      granteeRef: String
+      granteeId: ID @deprecated(reason: "Use granteeRef (accepts id / email / handle / hrn:user URN).")
     ): RevokeMemorySharePayload!
 
     """
@@ -5154,7 +5159,9 @@ export const typeDefs = `#graphql
     """
     updateMemoryShareRole(
       memoryId: ID!
-      granteeId: ID!
+      "#769 — the grantee as a server-resolved reference (id / email / handle / hrn:user URN). Supply this OR granteeId."
+      granteeRef: String
+      granteeId: ID @deprecated(reason: "Use granteeRef (accepts id / email / handle / hrn:user URN).")
       role: MemoryShareRole!
     ): UpdateMemoryShareRolePayload!
 

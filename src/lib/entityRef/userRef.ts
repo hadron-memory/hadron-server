@@ -51,3 +51,36 @@ export async function resolveUserRef(
   }
   return { id: user.id };
 }
+
+/**
+ * Superset of {@link resolveUserRef} that ALSO accepts an **email address**
+ * (#769). Email is the natural way to name a grantee who is outside your org —
+ * you know their address, not their handle — and it is not a legal URN atom /
+ * handle (contains `@`), so it never collides with the handle path. Resolution
+ * runs server-side against the full user table, so the memory-share mutations
+ * can grant to a user the caller can't otherwise see (cross-org personal share).
+ *
+ * Precedence: an email-shaped, non-scheme-prefixed ref matches the unique
+ * `email` column case-insensitively; everything else (bare ID, handle,
+ * `hrn:user:<handle>` URN) falls through to `resolveUserRef`. Throws
+ * `UserNotFoundError` on a genuine miss, same as `resolveUserRef`.
+ */
+export async function resolveUserRefOrEmail(
+  db: Pick<PrismaClient, 'user'>,
+  ref: string,
+  options?: { includeDeleted?: boolean },
+): Promise<{ id: string }> {
+  const trimmed = ref.trim();
+  if (trimmed.includes('@') && !/^(hrn|urn):/i.test(trimmed)) {
+    const user = await db.user.findFirst({
+      where: {
+        email: { equals: trimmed, mode: 'insensitive' },
+        ...(options?.includeDeleted ? {} : { deletedAt: null }),
+      },
+      select: { id: true },
+    });
+    if (!user) throw new UserNotFoundError(ref);
+    return { id: user.id };
+  }
+  return resolveUserRef(db, trimmed, options);
+}
