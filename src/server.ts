@@ -783,7 +783,11 @@ export async function createServer(): Promise<Express> {
       // is intentionally no longer supported — the fixation defense requires it.)
       // Custom redirect (e.g., from invite link) takes priority; otherwise the
       // portal's default landing (it branches on `isNew` itself for onboarding).
-      const dest = redirectParam ? redirectParam : '/';
+      // `redirectParam` rides in the emailed verify URL, so validate it with the
+      // strict server-local-path predicate before using it as the post-login
+      // redirect — a tampered `&redirect=https://evil` must not become an open
+      // redirect (PR #770 review, Copilot). Falls back to `/` when not local.
+      const dest = redirectParam && isServerLocalPath(redirectParam) ? redirectParam : '/';
       const code = await issueLoginCode({
         userId: user.id,
         redirect: dest,

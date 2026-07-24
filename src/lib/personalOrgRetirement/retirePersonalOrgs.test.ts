@@ -190,4 +190,43 @@ describe('retirePersonalOrgs — refuse-and-report guardrail', () => {
     expect(report.skipReason).toMatch(/single-member/);
     expect(await db.organization.findUnique({ where: { id: org.id } })).not.toBeNull();
   });
+
+  it('skips a hidden single-OWNER org whose createdBy does not prove it is a scaffold', async () => {
+    // A hidden, single-OWNER org with NULL createdBy is NOT provably an
+    // auto-provisioned personal workspace — it must be skipped, not deleted.
+    const user = await db.user.create({ data: { handle: 'ivan', roles: ['READER'] } });
+    await ensureUserPrincipal(db, { id: user.id, handle: 'ivan', principalId: null });
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'ivan-hidden', urn: 'ivan-hidden', isVisible: false }, // createdBy omitted → null
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: user.id, role: 'OWNER', createdBy: user.id },
+    });
+
+    const [report] = await retirePersonalOrgs(db);
+    expect(report.action).toBe('skipped');
+    expect(report.skipReason).toMatch(/createdBy/);
+    expect(await db.organization.findUnique({ where: { id: org.id } })).not.toBeNull();
+  });
+
+  it('skips (does not orphan) an org with org-scoped run state (an AppRun)', async () => {
+    const { org, app, agent } = await seedPersonalOrg('judy');
+    await db.appRun.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        appId: app.id,
+        entryNodeUrn: `judy-org:my-agent:start`,
+        triggerKind: 'MANUAL',
+      },
+    });
+
+    const [report] = await retirePersonalOrgs(db);
+    expect(report.action).toBe('skipped');
+    expect(report.skipReason).toMatch(/side-data/);
+    expect(report.sideData).toMatchObject({ app_runs: 1 });
+    // Nothing re-homed or orphaned.
+    expect(await db.organization.findUnique({ where: { id: org.id } })).not.toBeNull();
+    expect((await db.agent.findUnique({ where: { id: agent.id } }))!.organizationId).toBe(org.id);
+  });
 });

@@ -44,13 +44,25 @@ import { normalizeHandleOrNull } from '../userHandle.js';
 const PERSONAL_AUTHOR = 'personal';
 
 /**
- * Tables an `Organization` delete would `onDelete: Cascade` and whose presence
- * therefore means a personal org is NOT a clean scaffold — deleting it would
- * destroy real data (a live connection, a registered integration's encrypted
- * creds, a billing-ledger row, or a cross-org grant). An org with any of these
- * is skipped for manual handling rather than migrated. (`org_members` and the
- * `usage_events` SetNull are the only cascades left after a scaffold delete and
- * are benign, so they are deliberately absent here.)
+ * Tables whose presence means a personal org is NOT a clean scaffold — deleting
+ * it (or re-homing its App off it) would destroy or break real data. An org with
+ * any of these is skipped for manual handling rather than migrated. Two groups:
+ *
+ *  - **Cascade-destructive** (`onDelete: Cascade` off the org): a live connection,
+ *    a registered integration's encrypted creds, a billing-ledger row, or a
+ *    cross-org grant. Deleting the org would silently destroy them.
+ *  - **Org-scoped run state with NO org FK** (a bare `organization_id` scalar):
+ *    durable triggers (`agent_schedules` / `agent_webhooks` /
+ *    `webfetch_poll_bindings`) and run records (`app_runs` / `action_tickets`).
+ *    An org delete never touches these (no FK), so re-homing the App to
+ *    `organizationId = NULL` would leave them pointing at the deleted org —
+ *    e.g. `schedulerTick` passes a schedule's stale `organizationId` to
+ *    `mintAppRun`, which rejects it against the now-org-less App, so an enabled
+ *    schedule fails forever. `organization_id` is NON-NULL on these, so they
+ *    can't be re-homed to match the App; refuse-and-report is the safe move.
+ *
+ * (`org_members` and the `usage_events` SetNull are the only cascades left after
+ * a scaffold delete and are benign, so they are deliberately absent here.)
  */
 const SIDE_DATA_TABLES: ReadonlyArray<{ table: string; orgCol: string }> = [
   { table: 'exchange_connections', orgCol: 'organization_id' },
@@ -63,6 +75,12 @@ const SIDE_DATA_TABLES: ReadonlyArray<{ table: string; orgCol: string }> = [
   { table: 'agent_org_grants', orgCol: 'org_id' }, // NB: org_id, not organization_id
   { table: 'principal_grants', orgCol: 'organization_id' },
   { table: 'ai_service_configs', orgCol: 'organization_id' },
+  // Org-scoped run state with no org FK — orphaned (not cascaded) on delete.
+  { table: 'agent_schedules', orgCol: 'organization_id' },
+  { table: 'agent_webhooks', orgCol: 'organization_id' },
+  { table: 'webfetch_poll_bindings', orgCol: 'organization_id' },
+  { table: 'app_runs', orgCol: 'organization_id' },
+  { table: 'action_tickets', orgCol: 'organization_id' },
 ];
 
 /** A single URN re-root: the pre-migration URN and its re-rooted replacement. */
@@ -177,8 +195,12 @@ async function retireOneOrg(
   if (members[0].role !== 'OWNER') {
     return { ...base, skipReason: `sole member role is ${members[0].role}, not OWNER` };
   }
-  if (org.createdBy && org.createdBy !== ownerUserId) {
-    return { ...base, skipReason: 'createdBy does not match the sole owner' };
+  // Require createdBy === owner. `createdBy` is nullable, and a NULL value does
+  // NOT prove an auto-provisioned personal workspace (personal-workspace.ts
+  // always set it), so a hidden single-OWNER org with NULL/mismatched createdBy
+  // is skipped rather than deleted (PR #770 review, Codex/Copilot P1).
+  if (org.createdBy !== ownerUserId) {
+    return { ...base, skipReason: 'createdBy does not match the sole owner (or is unset)' };
   }
 
   // 2. Owner has a URN-legal handle (the re-root target root). Guaranteed
