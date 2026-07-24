@@ -37,8 +37,9 @@ import type {
 export class InvalidMemoryClassForShareError extends Error {
   constructor(memoryId: string, actualClass: string) {
     super(
-      `Memory ${memoryId} has class='${actualClass}'; MemoryShare applies ` +
-        `only to personal-class memories (spec 023 FR-018).`,
+      `Cannot share memory ${memoryId}: only personal-class memories can be ` +
+        `shared with an individual user, but this memory is class='${actualClass}' ` +
+        `(spec 023 FR-018). Check Memory.shareable before attempting a share.`,
     );
     this.name = 'InvalidMemoryClassForShareError';
   }
