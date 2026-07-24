@@ -87,9 +87,8 @@ export interface SearchPrincipal {
   /**
    * The caller's OWN member org ids (admin or not); [] for App-Key /
    * unauthenticated. Unlike `orgIds`, never the null "unrestricted" sentinel.
-   * The Organization slice uses it for the #609 hidden-org carve-out: an admin
-   * (`orgIds === null`) sees only LISTABLE orgs (`isVisible` not explicitly
-   * false) plus the hidden orgs they themselves belong to.
+   * (Spec 048 dropped `isVisible`, so the Organization slice's former hidden-org
+   * carve-out is gone — an admin now sees every org; retained for callers/tests.)
    */
   viewerOrgIds: string[];
   /**

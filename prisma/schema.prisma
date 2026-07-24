@@ -308,8 +308,9 @@ enum AssetScanStatus {
 // ─── Models ────────────────────────────────────────────────────────────
 
 /// A person who uses Hadron, authenticated via GitHub OAuth (or email
-/// in future). N:N to Organization via OrgMember. Every user has a
-/// personal organization (auto-created on signup, isVisible=false).
+/// in future). N:N to Organization via OrgMember. (Spec 048: signup no
+/// longer auto-creates a personal organization — an individual owns
+/// Apps/Agents/Memories directly via spec 047 user-owned tenancy.)
 ///
 /// **Invitation chain**: UserInvitationActivation links each User back
 /// to their UserInvitation, whose senderUserId points to the inviter,
@@ -429,9 +430,6 @@ model User {
 
 /// A company, team, or group that owns memories and has members.
 /// Must have at least one OrgMember with role OWNER (can have many).
-/// Every user has a personal organization (auto-created on signup,
-/// `isVisible: false`) — see
-/// `hadron-concept/hadron-specs/General/Personal Organizations.md` (sister repo).
 model Organization {
   id                           String    @id @default(cuid())
   name                         String
@@ -439,27 +437,11 @@ model Organization {
   /// "micromentor.org". Serves as the namespace for all resources
   /// owned by this org (URN prefix).
   urn                          String    @unique
-  /// Listing visibility for the org as an entity: whether it is surfaced in
-  /// an org list / switcher / discovery — for its own member(s) AND everyone
-  /// else. `false` hides the org from EVERY user's listing (the owner's own
-  /// list, other users, and platform admins alike); it is never shown while
-  /// hidden. A hidden org is invisible to non-members — not listed, not
-  /// searchable, and not resolvable by ref, even for a platform admin. It does
-  /// NOT gate a MEMBER's read: a member still resolves and reads their org
-  /// directly regardless of `isVisible` (visibility is not membership). An
-  /// auto-created personal org starts `false` (invisible to all) so a
-  /// brand-new user with only their personal org is never shown org UI
-  /// ("consumer mode"). It flips to `true` when the user activates org mode —
-  /// creating another org, or converting their personal org into a real one
-  /// to onboard coworkers — after which it lists normally. Genuine per-org
-  /// state, not derivable from the user's org count. Listable ⟺ an explicit
-  /// `true`; both `false` and unset (`null`) are hidden, matching the
-  /// codebase-wide `isVisible !== true` "hidden/personal" convention.
-  isVisible                    Boolean?  @map("is_visible")
   /// Opt-in marketplace catalogue flag (cor:acl:080:04): whether this org is
   /// advertised in the marketplace browse. DISTINCT from access/visibility —
   /// it governs advertisement, not who may read the org. Contributes to
-  /// non-member discoverability (cor:acl:080:02) only when `isVisible = true`.
+  /// non-member discoverability (cor:acl:080:02). (Spec 048 dropped the former
+  /// `isVisible` listing flag with the auto-personal org — every org now lists.)
   listedOnMarketplace          Boolean   @default(false) @map("listed_on_marketplace")
   /// GitHub App installation id. Used to mint ephemeral tokens
   /// (1-hour expiry) for memory git-sync against repos within this
@@ -695,7 +677,7 @@ model Memory {
   /// advertised in the marketplace browse. DISTINCT from `visibility` — PUBLIC
   /// governs access (reachable by URN), this governs advertisement. "Unlisted
   /// but public" is valid; contributes to the owner org's discoverability
-  /// (cor:acl:080:02) only when that org is activated (`isVisible = true`).
+  /// (cor:acl:080:02).
   listedOnMarketplace  Boolean           @default(false) @map("listed_on_marketplace")
   /// Whether the memory's contents (including asset bytes) are
   /// encrypted at rest using AES-256-GCM under HADRON_ENCRYPTION_KEY.

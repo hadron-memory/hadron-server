@@ -23,7 +23,6 @@
     "schema:export": "tsx scripts/export-graphql-sdl.mjs",
     "admin:mint-token": "tsx scripts/admin-mint-token.ts",
     "admin:backfill-urn-v2": "tsx scripts/backfill-urn-v2.ts",
-    "admin:retire-personal-orgs": "tsx scripts/retire-personal-orgs.ts",
     "admin:transfer-exchange-tokens": "tsx scripts/admin-transfer-exchange-tokens.ts",
     "test": "vitest run",
     "test:watch": "vitest",

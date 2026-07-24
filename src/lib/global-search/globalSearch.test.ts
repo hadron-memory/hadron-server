@@ -359,35 +359,18 @@ describe('globalSearch — org scope (issue #463)', () => {
   });
 });
 
-describe('globalSearch — hidden orgs are not discoverable, even by admins (#609)', () => {
-  it("hides an isVisible=false org from an admin's search; the owner still finds it", async () => {
-    const listable = await db.organization.create({
-      data: { id: generateId(), name: 'Zephyr Listed', urn: `zephyr-list-${generateId()}`, isVisible: true },
+describe('globalSearch — an admin finds every matching org (spec 048)', () => {
+  it('surfaces all matching orgs to an admin (isVisible dropped — no hidden orgs)', async () => {
+    const one = await db.organization.create({
+      data: { id: generateId(), name: 'Zephyr One', urn: `zephyr-one-${generateId()}` },
     });
-    const hidden = await db.organization.create({
-      data: { id: generateId(), name: 'Zephyr Hidden', urn: `zephyr-hid-${generateId()}`, isVisible: false },
+    const two = await db.organization.create({
+      data: { id: generateId(), name: 'Zephyr Two', urn: `zephyr-two-${generateId()}` },
     });
-    await db.orgMember.create({ data: { organizationId: hidden.id, userId: fx.viewer, role: 'OWNER' } });
-
-    // Admin (member of neither): the listable org, never the hidden one.
+    // Every org is listable now, so a platform admin's search returns them all.
     const asAdmin = ids(byType((await globalSearch(db, { query: 'Zephyr' }, adminP())).hits, 'organization'));
-    expect(asAdmin).toContain(listable.id);
-    expect(asAdmin).not.toContain(hidden.id);
-
-    // The hidden org's own member still finds it.
-    const ownerP: SearchPrincipal = { ...viewerP(), orgIds: [fx.orgA, hidden.id], viewerOrgIds: [fx.orgA, hidden.id] };
-    const asOwner = ids(byType((await globalSearch(db, { query: 'Zephyr' }, ownerP)).hits, 'organization'));
-    expect(asOwner).toContain(hidden.id);
-  });
-
-  it('an admin still finds a hidden org they are a member of (viewerOrgIds)', async () => {
-    const hidden = await db.organization.create({
-      data: { id: generateId(), name: 'Zephyr AdminOwned', urn: `zephyr-ao-${generateId()}`, isVisible: false },
-    });
-    await db.orgMember.create({ data: { organizationId: hidden.id, userId: fx.admin, role: 'OWNER' } });
-    const adminMemberP: SearchPrincipal = { ...adminP(), viewerOrgIds: [hidden.id] };
-    const found = ids(byType((await globalSearch(db, { query: 'Zephyr' }, adminMemberP)).hits, 'organization'));
-    expect(found).toContain(hidden.id);
+    expect(asAdmin).toContain(one.id);
+    expect(asAdmin).toContain(two.id);
   });
 });
 

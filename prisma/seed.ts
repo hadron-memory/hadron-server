@@ -54,7 +54,6 @@ async function main() {
       id: generateId(),
       name: 'Platform Co',
       urn: 'platform-co',
-      isVisible: true,
     },
   });
   const acmeOrg = await db.organization.create({
@@ -62,7 +61,6 @@ async function main() {
       id: generateId(),
       name: 'Acme Corp',
       urn: 'acme-corp',
-      isVisible: true,
     },
   });
   const mentorOrg = await db.organization.create({
@@ -70,7 +68,6 @@ async function main() {
       id: generateId(),
       name: 'Mentor Co',
       urn: 'mentor-co',
-      isVisible: true,
     },
   });
   const clientOrg = await db.organization.create({
@@ -78,7 +75,6 @@ async function main() {
       id: generateId(),
       name: 'Client Co',
       urn: 'client-co',
-      isVisible: true,
     },
   });
   console.log(`  Created 4 orgs: platform-co, acme-corp, mentor-co, client-co`);

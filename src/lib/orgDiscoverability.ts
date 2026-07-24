@@ -1,13 +1,15 @@
 /**
  * cor:acl:080:02 — non-member organization discoverability.
  *
- * A caller who is NOT a member of an org may see/discover it iff the org is
- * ACTIVATED (`isVisible === true`, the cor:acl:080:01 precondition) AND exposes a
- * public footprint — it owns a PUBLIC, non-app-scoped memory or a PUBLIC agent
+ * A caller who is NOT a member of an org may see/discover it iff the org exposes
+ * a public footprint — it owns a PUBLIC, non-app-scoped memory or a PUBLIC agent
  * (cor:acl:080:03 `hasPublicResources`), OR it is `listedOnMarketplace`
- * (cor:acl:080:04). A hidden org (`isVisible !== true`) is never discoverable,
- * even with a public resource. Membership is independent and always grants
- * access; this bounds only NON-member reach. The subscription branch is deferred.
+ * (cor:acl:080:04). Membership is independent and always grants access; this
+ * bounds only NON-member reach. The subscription branch is deferred.
+ *
+ * Spec 048: the `isVisible` activation precondition was dropped with the
+ * auto-personal org — every remaining org is a real (activated) org, so
+ * `listedOnMarketplace` + public resources are the sole discovery axes.
  *
  * NOTE: this predicate decides only whether the org ENTITY is discoverable. It
  * must never be used to widen access to the full `Organization` object (whose
@@ -42,7 +44,6 @@ export function publicReadableMemoryWhere(): Prisma.MemoryWhereInput {
 export function discoverableOrgWhere(): Prisma.OrganizationWhereInput {
   return {
     deletedAt: null,
-    isVisible: true, // activation precondition (cor:acl:080:01)
     OR: [
       { listedOnMarketplace: true }, // cor:acl:080:04
       { memories: { some: publicReadableMemoryWhere() } }, // cor:acl:080:03
