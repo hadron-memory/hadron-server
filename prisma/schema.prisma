@@ -435,6 +435,7 @@ model User {
 /// data provider feeding the combined `dashboardWidgetData` query.
 enum DashboardWidgetType {
   MEMORY_STATS
+  AGENT_STATS
 }
 
 /// A widget the user has placed on their /app/dashboard grid (#772) —

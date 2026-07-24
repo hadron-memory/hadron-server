@@ -17,6 +17,7 @@ import { GraphQLError } from 'graphql';
 import type { Context } from './resolvers.helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { memoryQueries } from './resolvers.query.memory.js';
+import { agentQueries } from './resolvers.query.agent.js';
 
 const SPAN_MIN = 1;
 const SPAN_MAX = 12;
@@ -38,6 +39,16 @@ const WIDGET_DATA_PROVIDERS = new Map<string, (ctx: Context) => Promise<Record<s
       // — one scoping code path, no drift.
       const { total } = await memoryQueries.memories(null, { limit: 0 }, ctx);
       return { memoryCount: total };
+    },
+  ],
+  [
+    'AGENT_STATS',
+    async (ctx) => {
+      // Same shape as MEMORY_STATS: the uniform `agents()` resolver's default
+      // (no orgId) view counts the caller's member-org agents PLUS their own
+      // user-owned agents, so `agentCount` matches the portal's agent list.
+      const { total } = await agentQueries.agents(null, { limit: 0 }, ctx);
+      return { agentCount: total };
     },
   ],
 ]);

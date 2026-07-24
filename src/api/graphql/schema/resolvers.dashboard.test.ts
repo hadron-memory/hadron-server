@@ -131,6 +131,25 @@ describe('dashboardWidgetData — combined data', () => {
     expect(data[0]).toMatchObject({ type: 'MEMORY_STATS', data: { memoryCount: 2 } });
   });
 
+  it('returns agent-stats data whose agentCount matches the caller agents() total', async () => {
+    // Two user-owned (org-less) agents the caller has.
+    for (const n of ['dw-agent-a', 'dw-agent-b']) {
+      await db.agent.create({
+        data: {
+          id: generateId(),
+          ownerUserId: user.id,
+          urn: `dw-agent-${generateId().slice(-8)}`,
+          name: n,
+        },
+      });
+    }
+    await M.setDashboardWidgets(null, { widgets: [{ type: 'AGENT_STATS', span: 4 }] }, ctx(user.id));
+
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    expect(data).toHaveLength(1);
+    expect(data[0]).toMatchObject({ type: 'AGENT_STATS', data: { agentCount: 2 } });
+  });
+
   it('emits one entry per activated TYPE even if placed more than once', async () => {
     await M.setDashboardWidgets(
       null,
