@@ -2934,6 +2934,7 @@ export const typeDefs = `#graphql
   "#772 — the kinds of widget placeable on a user's /app/dashboard grid."
   enum DashboardWidgetType {
     MEMORY_STATS
+    AGENT_STATS
   }
 
   "One widget the caller has placed on their /app/dashboard grid (#772)."
