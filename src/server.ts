@@ -43,10 +43,6 @@ import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPri
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
-import {
-  provisionPersonalWorkspace,
-  hasPersonalWorkspace,
-} from './provisioning/personal-workspace.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
@@ -278,6 +274,10 @@ export async function createServer(): Promise<Express> {
     }
 
     try {
+      // #627 / spec 048: `isNew` is derived from whether THIS callback created
+      // the user row (`createdAt` on/after `startedAt`, captured before the
+      // lookup). App and DB share a host clock, so the comparison is exact.
+      const startedAt = Date.now();
       const ghToken = await exchangeCode(code);
       const ghUser = await fetchUser(ghToken);
 
@@ -352,24 +352,9 @@ export async function createServer(): Promise<Express> {
             }
           })();
 
-      // Provision personal workspace for new users
-      let isNew = !(await hasPersonalWorkspace(db, user.id));
-      if (isNew) {
-        try {
-          await provisionPersonalWorkspace(
-            db,
-            user.id,
-            user.name ?? user.githubUsername ?? 'My Workspace',
-          );
-        } catch (err: any) {
-          // P2002 = unique constraint violation — another concurrent request already provisioned
-          if (err?.code === 'P2002') {
-            isNew = false;
-          } else {
-            throw err;
-          }
-        }
-      }
+      // #627 / spec 048: no workspace is provisioned at signup (the auto-personal
+      // org is retired). `isNew` is now purely an onboarding hint for the portal.
+      const isNew = user.createdAt.getTime() >= startedAt;
 
       // Issue JWT
       const jwt = await signJwt({
@@ -398,13 +383,10 @@ export async function createServer(): Promise<Express> {
       // only; see src/middleware/auth.ts), so this doesn't bypass
       // the explicit Bearer-token requirement at the MCP boundary.
       //
-      // **New-user handling differs from the standard flow**: the
-      // standard flow redirects new users to /app/setup; Option-C
-      // honors the caller's returnTo regardless of isNew, because
-      // the OAuth flow (the only Option-C caller in v1) needs to
-      // remain on the AS domain. Onboarding gating for new OAuth
-      // users is a Phase 2 concern (the consent screen can check
-      // user state and surface a setup hint inline).
+      // **Option-C honors the caller's returnTo regardless of isNew**,
+      // because the OAuth flow (the only Option-C caller in v1) needs to
+      // remain on the AS domain. Onboarding gating for new OAuth users is
+      // a Phase 2 concern (the consent screen can check user state inline).
       if (pending.returnTo) {
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
@@ -426,7 +408,7 @@ export async function createServer(): Promise<Express> {
       // GitHub-flow clientState binds the finishing browser (session fixation).
       const handoffCode = await issueLoginCode({
         userId: user.id,
-        redirect: isNew ? '/app/setup' : pending.redirect,
+        redirect: pending.redirect,
         isNew,
         clientState: pending.clientState ?? null,
       });
@@ -523,6 +505,9 @@ export async function createServer(): Promise<Express> {
     }
 
     try {
+      // #627 / spec 048: `isNew` derived from user-creation time (see the GitHub
+      // callback). Captured before the lookup.
+      const startedAt = Date.now();
       // Identity comes from the VERIFIED ID-token claims (issuer, audience,
       // signature against Google's JWKS) — never a bare decode.
       const idToken = await exchangeGoogleCode(code);
@@ -531,24 +516,9 @@ export async function createServer(): Promise<Express> {
       // Match order per #581: by googleId → by verified email (link) → create.
       const user = await resolveGoogleUser(identity);
 
-      // Provision personal workspace for new users — same block as the GitHub
-      // callback, including the concurrent-provision P2002 tolerance.
-      let isNew = !(await hasPersonalWorkspace(db, user.id));
-      if (isNew) {
-        try {
-          await provisionPersonalWorkspace(
-            db,
-            user.id,
-            user.name ?? user.email ?? 'My Workspace',
-          );
-        } catch (err: any) {
-          if (err?.code === 'P2002') {
-            isNew = false;
-          } else {
-            throw err;
-          }
-        }
-      }
+      // #627 / spec 048: no workspace provisioned at signup; `isNew` is an
+      // onboarding hint only.
+      const isNew = user.createdAt.getTime() >= startedAt;
 
       // Same claim shape POST /auth/session rebuilds from the user row.
       const jwt = await signJwt({
@@ -576,7 +546,7 @@ export async function createServer(): Promise<Express> {
       // #477 Sink 1: single-use handoff code; the JWT never rides a URL.
       const handoffCode = await issueLoginCode({
         userId: user.id,
-        redirect: isNew ? '/app/setup' : pending.redirect,
+        redirect: pending.redirect,
         isNew,
         clientState: pending.clientState ?? null,
       });
@@ -689,6 +659,9 @@ export async function createServer(): Promise<Express> {
     }
 
     try {
+      // #627 / spec 048: `isNew` derived from user-creation time (see the GitHub
+      // callback). Captured before the lookup.
+      const startedAt = Date.now();
       // Identity comes from the VERIFIED ID-token claims (issuer, audience,
       // signature against Apple's JWKS) — never a bare decode.
       const idToken = await exchangeAppleCode(code);
@@ -700,25 +673,9 @@ export async function createServer(): Promise<Express> {
       // Match order per #584: by appleId → by verified email (link) → create.
       const user = await resolveAppleUser(identity, name);
 
-      // Provision personal workspace for new users — same block as the
-      // GitHub/Google callbacks, including the concurrent-provision P2002
-      // tolerance.
-      let isNew = !(await hasPersonalWorkspace(db, user.id));
-      if (isNew) {
-        try {
-          await provisionPersonalWorkspace(
-            db,
-            user.id,
-            user.name ?? user.email ?? 'My Workspace',
-          );
-        } catch (err: any) {
-          if (err?.code === 'P2002') {
-            isNew = false;
-          } else {
-            throw err;
-          }
-        }
-      }
+      // #627 / spec 048: no workspace provisioned at signup; `isNew` is an
+      // onboarding hint only.
+      const isNew = user.createdAt.getTime() >= startedAt;
 
       // Same claim shape POST /auth/session rebuilds from the user row.
       const jwt = await signJwt({
@@ -746,7 +703,7 @@ export async function createServer(): Promise<Express> {
       // #477 Sink 1: single-use handoff code; the JWT never rides a URL.
       const handoffCode = await issueLoginCode({
         userId: user.id,
-        redirect: isNew ? '/app/setup' : pending.redirect,
+        redirect: pending.redirect,
         isNew,
         clientState: pending.clientState ?? null,
       });
@@ -821,6 +778,9 @@ export async function createServer(): Promise<Express> {
     }
 
     try {
+      // #627 / spec 048: `isNew` derived from user-creation time (see the GitHub
+      // callback). Captured before the upsert.
+      const startedAt = Date.now();
       const result = await verifyMagicLink(token, db);
       if (!result) {
         res.status(400).json({ error: 'Invalid or expired token' });
@@ -853,15 +813,9 @@ export async function createServer(): Promise<Express> {
         return u;
       });
 
-      // Provision personal workspace for new users
-      const isNew = !(await hasPersonalWorkspace(db, user.id));
-      if (isNew) {
-        await provisionPersonalWorkspace(
-          db,
-          user.id,
-          user.name ?? user.email ?? 'My Workspace',
-        );
-      }
+      // #627 / spec 048: no workspace provisioned at signup; `isNew` is an
+      // onboarding hint only.
+      const isNew = user.createdAt.getTime() >= startedAt;
 
       // #477 Sink 1: hand off via a single-use code, not the JWT-in-URL.
       // #505 session-fixation binding: the handoff code inherits the
@@ -871,8 +825,13 @@ export async function createServer(): Promise<Express> {
       // REQUESTED the link is the only one that can complete sign-in. (This
       // makes email magic links same-browser-only by design; cross-device open
       // is intentionally no longer supported — the fixation defense requires it.)
-      // Custom redirect (e.g., from invite link) takes priority, then setup for new users.
-      const dest = redirectParam ? redirectParam : isNew ? '/app/setup' : '/';
+      // Custom redirect (e.g., from invite link) takes priority; otherwise the
+      // portal's default landing (it branches on `isNew` itself for onboarding).
+      // `redirectParam` rides in the emailed verify URL, so validate it with the
+      // strict server-local-path predicate before using it as the post-login
+      // redirect — a tampered `&redirect=https://evil` must not become an open
+      // redirect (PR #770 review, Copilot). Falls back to `/` when not local.
+      const dest = redirectParam && isServerLocalPath(redirectParam) ? redirectParam : '/';
       const code = await issueLoginCode({
         userId: user.id,
         redirect: dest,
@@ -963,6 +922,12 @@ export async function createServer(): Promise<Express> {
 
   // ---------------------------------------------------------------------------
   // Setup info (returns API key for first-time setup)
+  //
+  // LEGACY (spec 048): signup no longer provisions a personal workspace, so no
+  // new PendingSetup rows are written. This endpoint stays only to serve any
+  // pre-existing unconsumed row; it answers { hasSetup: false } otherwise. Retire
+  // it together with the PendingSetup model and the portal /app/setup route once
+  // open-question #2 (drop the table now vs. later) is decided.
   // ---------------------------------------------------------------------------
 
   app.get('/setup/info', async (req, res) => {
@@ -1005,9 +970,8 @@ export async function createServer(): Promise<Express> {
       res.json({
         hasSetup: true,
         apiKey: setup.rawKeyEncrypted, // TODO: decrypt when encryption is added
-        // App-keyed identity for the new workspace. provisionPersonalWorkspace
-        // is App-only since Phase 3a-1 of 003-station-to-app, so PendingSetup
-        // rows always carry appId.
+        // App-keyed identity — every PendingSetup row carries appId (App-only
+        // since Phase 3a-1 of 003-station-to-app).
         appId: setup.appId,
         orgId: membership?.organization.id,
         orgName: membership?.organization.name,

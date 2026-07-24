@@ -45,7 +45,8 @@ export interface IssueLoginCodeArgs {
   userId: string;
   /** Portal-local path to land on after the cookie is seated. */
   redirect: string;
-  /** Whether the user was just provisioned (drives the /app/setup redirect). */
+  /** Whether THIS callback created the user row — an onboarding hint the portal
+   *  branches on (spec 048: nothing is provisioned off it server-side). */
   isNew: boolean;
   /**
    * Raw browser nonce the portal set as an HttpOnly cookie at login start
