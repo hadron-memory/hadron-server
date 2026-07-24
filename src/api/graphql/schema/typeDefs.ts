@@ -2931,6 +2931,35 @@ export const typeDefs = `#graphql
     total: Int
   }
 
+  "#772 — the kinds of widget placeable on a user's /app/dashboard grid."
+  enum DashboardWidgetType {
+    MEMORY_STATS
+  }
+
+  "One widget the caller has placed on their /app/dashboard grid (#772)."
+  type DashboardWidget {
+    id: ID!
+    type: DashboardWidgetType!
+    "Columns spanned on the 12-col desktop grid."
+    span: Int!
+    "0-based sort order among the caller's widgets."
+    position: Int!
+  }
+
+  "Combined data for one activated widget type — the portal fans this out by type (#772)."
+  type DashboardWidgetData {
+    type: DashboardWidgetType!
+    "The widget-specific payload (e.g. memory-stats => { memoryCount })."
+    data: JSON!
+  }
+
+  "One widget in a setDashboardWidgets selection; grid position is the array order."
+  input DashboardWidgetInput {
+    type: DashboardWidgetType!
+    "Columns to span (1-12); clamped server-side. Defaults to 4 when omitted."
+    span: Int
+  }
+
   type Query {
     """
     Resolve a fully-qualified, \`hrn:<type>:\`-prefixed Hadron URN (legacy \`urn:\` scheme also accepted) to the ids
@@ -3314,6 +3343,11 @@ export const typeDefs = `#graphql
     limit: 0 -> count only.
     """
     memories(filter: MemoryFilter, orgId: ID, limit: Int, offset: Int): MemoriesPage!
+
+    "#772 — the caller's placed dashboard widgets, ordered by position. Empty for a non-user (App-key) caller."
+    dashboardWidgets: [DashboardWidget!]!
+    "#772 — combined data for all of the caller's activated widget types, in one request. Empty for a non-user caller."
+    dashboardWidgetData: [DashboardWidgetData!]!
 
     """
     Exchange connections for an org.
@@ -3817,6 +3851,14 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+    """
+    #772 — replace the caller's entire dashboard widget selection. Grid position
+    is the array order; span defaults to 4 and is clamped to 1-12. Covers both
+    create and update (the layout is always saved as a whole). Returns the new
+    selection. Requires an authenticated user.
+    """
+    setDashboardWidgets(widgets: [DashboardWidgetInput!]!): [DashboardWidget!]!
+
     """
     Create a single node. Rejects with NodeLocConflictError when a live node
     already exists at (memoryId, loc) — creating is create-only (spec 039

@@ -29,6 +29,7 @@ import { mcpQueries } from './resolvers.query.mcp.js';
 import { homeAssistantQueries } from './resolvers.query.homeAssistant.js';
 import { resendSenderQueries } from './resolvers.query.resendSender.js';
 import { secretMutations, secretQueries } from './resolvers.secret.js';
+import { dashboardQueries, dashboardMutations } from './resolvers.dashboard.js';
 
 import { nodeMutations } from './resolvers.mutation.node.js';
 import { objectQueries, objectMutations } from './resolvers.object.js';
@@ -68,6 +69,7 @@ export const resolvers = {
     ...homeAssistantQueries,
     ...resendSenderQueries,
     ...secretQueries,
+    ...dashboardQueries,
     ...appRunQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
@@ -76,6 +78,7 @@ export const resolvers = {
   Mutation: {
     ...nodeMutations,
     ...objectMutations,
+    ...dashboardMutations,
     ...appRunMutations,
     ...meteringMutations,
     ...connectionGrantMutations,

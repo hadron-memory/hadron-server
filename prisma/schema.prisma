@@ -419,6 +419,8 @@ model User {
   approvedNodeRevisions     NodeRevision[]             @relation("NodeRevisionApprover")
   // 046-usage-metering: billing attribution back-relation.
   usageEvents               UsageEvent[]
+  // #772: the user's placed /app/dashboard widgets (user-scoped layout config).
+  dashboardWidgets          DashboardWidget[]
   // #692 — the user's root principal in the unified pool (handle is the
   // denormalized read source-of-truth, kept in sync at mint).
   principalId               String?                    @unique @map("principal_id")
@@ -426,6 +428,36 @@ model User {
 
   @@unique([externalAppId, externalId])
   @@map("users")
+}
+
+/// The kinds of widget that can be placed on a user's /app/dashboard grid
+/// (#772). Add a member when a new widget ships; each type has a server-side
+/// data provider feeding the combined `dashboardWidgetData` query.
+enum DashboardWidgetType {
+  MEMORY_STATS
+}
+
+/// A widget the user has placed on their /app/dashboard grid (#772) —
+/// user-scoped layout configuration, one row per placed widget, ordered by
+/// `position`. Owner-only: no org, no sharing. The whole set is read via
+/// `dashboardWidgets` and replaced atomically via `setDashboardWidgets`.
+model DashboardWidget {
+  id        String              @id @default(cuid())
+  userId    String              @map("user_id")
+  type      DashboardWidgetType
+  /// Columns to span on the 12-col desktop grid (clamped on smaller screens).
+  span      Int                 @default(4)
+  /// 0-based sort order among the user's widgets.
+  position  Int                 @default(0)
+  createdAt DateTime            @default(now()) @map("created_at")
+  createdBy String?             @map("created_by")
+  updatedAt DateTime            @updatedAt @map("updated_at")
+  updatedBy String?             @map("updated_by")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, position])
+  @@map("dashboard_widgets")
 }
 
 /// A company, team, or group that owns memories and has members.
