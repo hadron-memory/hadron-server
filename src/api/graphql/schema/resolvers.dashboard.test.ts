@@ -57,6 +57,20 @@ describe('setDashboardWidgets + dashboardWidgets', () => {
     expect(firstIds).not.toContain(again[0].id);
   });
 
+  it('serializes concurrent replace-all writes for the same user (no duplicate union)', async () => {
+    // Both start from an empty layout — the exact race the per-user advisory
+    // lock closes (each deleteMany hits zero rows, so without the lock both
+    // createMany would commit → a union with duplicate positions).
+    await Promise.all([
+      M.setDashboardWidgets(null, { widgets: [{ type: 'MEMORY_STATS', span: 3 }] }, ctx(user.id)),
+      M.setDashboardWidgets(null, { widgets: [{ type: 'MEMORY_STATS', span: 9 }] }, ctx(user.id)),
+    ]);
+    const rows = await Q.dashboardWidgets(null, {}, ctx(user.id));
+    // Last-writer-wins: exactly one widget survives, never a union of both.
+    expect(rows).toHaveLength(1);
+    expect([3, 9]).toContain(rows[0].span);
+  });
+
   it('defaults span to 4 and clamps out-of-range spans to 1-12', async () => {
     const saved = await M.setDashboardWidgets(
       null,

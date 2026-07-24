@@ -25,17 +25,22 @@ const SPAN_DEFAULT = 4;
 /**
  * Server-side data provider per widget type — the source for `dashboardWidgetData`.
  * Add an entry when a new widget ships. Each provider runs under the caller's
- * `Context`, so its data is already access-scoped.
+ * `Context`, so its data is already access-scoped. A `Map` (not a plain object)
+ * so `.has()`/`.get()` can't be fooled by inherited props like `toString` /
+ * `__proto__` when a caller bypasses GraphQL enum validation (PR #773 review).
  */
-const WIDGET_DATA_PROVIDERS: Record<string, (ctx: Context) => Promise<Record<string, unknown>>> = {
-  MEMORY_STATS: async (ctx) => {
-    // Reuse the uniform `memories()` list resolver (limit:0 => count-only page,
-    // no rows fetched) so `memoryCount` matches the portal's memory list exactly
-    // — one scoping code path, no drift.
-    const { total } = await memoryQueries.memories(null, { limit: 0 }, ctx);
-    return { memoryCount: total };
-  },
-};
+const WIDGET_DATA_PROVIDERS = new Map<string, (ctx: Context) => Promise<Record<string, unknown>>>([
+  [
+    'MEMORY_STATS',
+    async (ctx) => {
+      // Reuse the uniform `memories()` list resolver (limit:0 => count-only page,
+      // no rows fetched) so `memoryCount` matches the portal's memory list exactly
+      // — one scoping code path, no drift.
+      const { total } = await memoryQueries.memories(null, { limit: 0 }, ctx);
+      return { memoryCount: total };
+    },
+  ],
+]);
 
 /** Clamp a client-supplied span into the grid's 1-12 range; default when unset. */
 function clampSpan(span?: number | null): number {
@@ -70,7 +75,7 @@ export const dashboardQueries = {
     for (const w of widgets) {
       if (seen.has(w.type)) continue;
       seen.add(w.type);
-      const provider = WIDGET_DATA_PROVIDERS[w.type];
+      const provider = WIDGET_DATA_PROVIDERS.get(w.type);
       if (!provider) continue;
       out.push({ type: w.type, data: await provider(ctx) });
     }
@@ -96,13 +101,19 @@ export const dashboardMutations = {
     // The enum arg is validated by GraphQL, but guard defensively for callers
     // that bypass schema validation (createTestableMcpServer parity, #312).
     for (const w of widgets) {
-      if (!(w.type in WIDGET_DATA_PROVIDERS)) {
+      if (!WIDGET_DATA_PROVIDERS.has(w.type)) {
         throw new GraphQLError(`Unknown widget type: ${w.type}`, {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
     }
     return ctx.db.$transaction(async (tx) => {
+      // Serialize replace-all writes for THIS user. Without it, two concurrent
+      // saves of a previously-empty layout each delete zero rows (no conflicting
+      // row lock) and both createMany commit → a union with duplicate positions
+      // instead of last-writer-wins (PR #773 review). The transaction-scoped
+      // advisory lock makes the second save wait for the first to commit.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('dashboard_widgets'), hashtext(${userId}))`;
       await tx.dashboardWidget.deleteMany({ where: { userId } });
       if (widgets.length > 0) {
         await tx.dashboardWidget.createMany({
