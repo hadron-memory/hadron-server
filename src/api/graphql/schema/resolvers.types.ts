@@ -458,6 +458,20 @@ export const typeResolvers = {
         orderBy: { createdAt: 'asc' },
       });
     },
+    // #778: the CALLER'S OWN share of this memory (they are the grantee),
+    // or null. Grantee-readable, and safe where `shares` is not: it reads at
+    // most the single row keyed on the composite PK (memoryId, ctx.userId), so
+    // it can never surface a co-grantee. Row existence IS the gate — a row only
+    // exists for a personal-class memory the caller was granted, so no class
+    // check is needed. null for a non-grantee or an App-key caller (no userId).
+    // Lets the portal render "Shared by @grantor" + the role on each
+    // shared-with-me row (MemoryShare exposes grantor + role).
+    myShare: async (g: { id: string }, _: unknown, ctx: Context) => {
+      if (!ctx.userId) return null;
+      return ctx.db.memoryShare.findUnique({
+        where: { memoryId_granteeId: { memoryId: g.id, granteeId: ctx.userId } },
+      });
+    },
     // 023-app-shape US4: team membership rows on this memory. Empty
     // for non-group-class memories. Visible to current members (any
     // role), ADMIN/OWNER of the memory's owning org, and platform

@@ -338,6 +338,16 @@ export const typeDefs = `#graphql
     memoryClasses: [MemoryClass!]
     "Restrict by visibility. PUBLIC selects the marketplace slice (see above)."
     visibility: MemoryVisibility
+    """
+    true selects the distinct set of memories shared WITH the caller
+    via MemoryShare (the caller is a grantee) — the portal's
+    Memories-shared-with-me tab. This is its own slice, NOT part of the
+    caller's owned/org union: a grantee is never their own grantor, so
+    it excludes owned memories. App-key callers get an empty page
+    (sharing is a user-to-user concept). See Memory.myShare for the
+    per-row grantor + role.
+    """
+    sharedWithMe: Boolean
   }
 
   "Filter for the uniform organizations() list (#473)."
@@ -1448,6 +1458,15 @@ export const typeDefs = `#graphql
     ADMIN/OWNER of the memory's owning org.
     """
     shares: [MemoryShare!]!
+    """
+    The caller's OWN share of this memory (they are the grantee), or
+    null. Grantee-readable — unlike shares (principal / org-admin only),
+    this returns at most the single MemoryShare row keyed
+    (memoryId, callerId), so it never leaks co-grantees. null for a
+    non-grantee or an App-key caller. Lets the portal render
+    Shared-by-@grantor + the role on each shared-with-me row.
+    """
+    myShare: MemoryShare
     """
     023-app-shape US4: team membership rows on this memory. Non-empty
     only when class = group (FR-027). Visible to any current member

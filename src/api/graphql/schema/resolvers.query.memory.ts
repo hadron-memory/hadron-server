@@ -180,7 +180,11 @@ export const memoryQueries = {
         limit,
         offset,
       }: {
-        filter?: { memoryClasses?: string[] | null; visibility?: string | null } | null;
+        filter?: {
+          memoryClasses?: string[] | null;
+          visibility?: string | null;
+          sharedWithMe?: boolean | null;
+        } | null;
         orgId?: string | null;
         limit?: number | null;
         offset?: number | null;
@@ -222,6 +226,28 @@ export const memoryQueries = {
         ]);
         return { items, total };
       };
+
+      // #778 — filter.sharedWithMe: the distinct set of memories shared WITH
+      // the caller via MemoryShare (the caller is a grantee) — the portal's
+      // "Memories shared with me" tab. This is its OWN slice, not part of the
+      // owned/org union: a grantee is never their own grantor, so it naturally
+      // excludes owned memories. Because access here comes from the grantee row
+      // (a personal/private memory that is otherwise owner-only, org NULL), it
+      // is NOT narrowed by the active org — like the caller's own personal
+      // memories, a shared memory shows regardless of which org is selected.
+      // App-key callers (ctx.appId, no ctx.userId) get an empty page — sharing
+      // is a user-to-user concept.
+      if (f.sharedWithMe) {
+        if (!ctx.userId) return empty;
+        return page({
+          deletedAt: null,
+          userMemoryOfAgentId: null,
+          ...classFilter,
+          ...(f.visibility ? { visibility: f.visibility as any } : {}),
+          // `shares` is the Prisma relation field on Memory → MemoryShare.
+          shares: { some: { granteeId: ctx.userId } },
+        });
+      }
 
       // filter.visibility: PUBLIC — the marketplace slice (the old
       // publicMemories): every PUBLIC memory, readable by any caller, so the
