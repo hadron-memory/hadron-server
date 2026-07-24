@@ -29,6 +29,8 @@ if (dsn) {
     tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0),
   });
   console.log(`[sentry] initialized (environment=${environment})`);
-} else {
+} else if (process.env.NODE_ENV !== 'test') {
+  // Informative for a real boot with no DSN configured; stays silent under
+  // vitest so the test/CI logs aren't flooded on every server boot.
   console.log('[sentry] SENTRY_DSN not set — error reporting disabled');
 }
