@@ -80,6 +80,9 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // user.deleteMany() doesn't cascade to it — clear it explicitly or rows leak
   // across tests (#505/#511). authHandoffCode DOES cascade via its user FK.
   await db.emailVerificationToken.deleteMany();
+  // #772: user-scoped dashboard widget config (cascades from user, but cleared
+  // explicitly to keep cleanup order predictable).
+  await db.dashboardWidget.deleteMany();
   await db.user.deleteMany();
   // #692: the principal pool. users/orgs FK it (onDelete SetNull), so it clears
   // last; otherwise reserved/tombstoned rows leak across tests and collide.
