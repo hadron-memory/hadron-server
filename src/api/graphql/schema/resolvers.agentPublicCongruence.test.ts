@@ -30,7 +30,7 @@ const mkMemory = (visibility: 'PUBLIC' | 'ORGANIZATION', slug: string) =>
 
 beforeEach(async () => {
   await cleanDb(db);
-  org = await db.organization.create({ data: { id: generateId(), name: 'cong', urn: `cong-${Date.now()}`, isVisible: true } });
+  org = await db.organization.create({ data: { id: generateId(), name: 'cong', urn: `cong-${Date.now()}` } });
   admin = await db.user.create({ data: { id: generateId(), githubId: 56001, githubUsername: 'cong-admin', roles: [] } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:agent`, name: 'cong-agent', visibility: 'ORGANIZATION' } });

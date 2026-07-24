@@ -1271,7 +1271,6 @@ export const typeDefs = `#graphql
     urn: String!
     "Org-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateOrganization."
     policy: JSON
-    isVisible: Boolean
     "cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement, not access)."
     listedOnMarketplace: Boolean!
     githubInstallationId: Int
@@ -3258,11 +3257,11 @@ export const typeDefs = `#graphql
 
     """
     cor:acl:080:02 — the sanitized PUBLIC view of a DISCOVERABLE organization,
-    safe for a non-member. Returns non-null only when the org is activated
-    (isVisible=true) AND exposes a public footprint (a PUBLIC memory/agent, or
-    listedOnMarketplace); otherwise null (denied is indistinguishable from
-    not-found — anti-enumeration). Never exposes members, private memories,
-    apps, or credentials. 'ref' accepts the org ID or URN.
+    safe for a non-member. Returns non-null only when the org exposes a public
+    footprint (a PUBLIC memory/agent, or listedOnMarketplace); otherwise null
+    (denied is indistinguishable from not-found — anti-enumeration). Never
+    exposes members, private memories, apps, or credentials. 'ref' accepts the
+    org ID or URN.
     """
     publicOrganization(ref: ID!): PublicOrganization
 
@@ -3271,7 +3270,7 @@ export const typeDefs = `#graphql
     listedOnMarketplace AND publicly accessible. Public (no membership required);
     sanitized flat refs only (never members / private data / credentials). One
     paginated query per resource type; ordered by (name, id) for stable paging.
-    - marketplaceOrganizations: activated (isVisible=true) + listed orgs.
+    - marketplaceOrganizations: listedOnMarketplace orgs.
     - marketplaceAgents: listed + visibility=PUBLIC agents.
     - marketplaceMemories: listed + public-readable memories.
     Drill into an org's public footprint via publicOrganization(ref:).
@@ -4116,7 +4115,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateOrganization(id: ID!, name: String, urn: String, isVisible: Boolean, listedOnMarketplace: Boolean, policy: JSON): Organization!
+    updateOrganization(id: ID!, name: String, urn: String, listedOnMarketplace: Boolean, policy: JSON): Organization!
 
     """
     Soft-delete an Organization.
@@ -4458,13 +4457,6 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     pushMemoryToGit(id: ID!): Boolean!
-
-    """
-    Add a public memory to the current user's personal workspace.
-
-    Accepts the entity's ID or URN.
-    """
-    addToMyMemories(memoryId: ID!): Boolean!
 
     # Exchange integration (connection created via OAuth at /auth/microsoft)
     deleteExchangeConnection(id: ID!): Boolean!

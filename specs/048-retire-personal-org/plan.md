@@ -230,6 +230,36 @@ governed by `listedOnMarketplace` (+ public resources).**
   wholly about `isVisible=false`); update `cor:dmo:010:03` / `cor:dmo:040:01`,
   which still describe an "auto-created invisible personal organization."
 
+### Phase D implementation (2026-07-24)
+
+Shipped on the `048-phase-d` branch (stacked on `048`; **deploys only after the
+prod `--apply`**):
+
+- **`isVisible` dropped** — the field (schema), the column (migration
+  `20260724120000_drop_org_is_visible`), and every code gate. New model: all orgs
+  are listable to members/admins/global-search; non-member/public discovery is
+  governed solely by `listedOnMarketplace` + public resources
+  (`orgDiscoverability`). Rewired: `orgDiscoverability.ts`,
+  `global-search/entities.ts` (admin → all orgs), `resolvers.query.org.ts`
+  (admin list + `organization(ref:)` gate + marketplace), `resolvers.mutation.org.ts`
+  (create/update), `typeDefs.ts`. Semantic tests rewritten to the new model
+  (orgDiscoverability / globalSearch / uniformReadSurface).
+- **`addToMyMemories` removed** (Holger's call) — it bookmarked a public memory by
+  subscribing the user's *personal org*, which no longer exists;
+  `MemorySubscription` has no user-scoped form. Resolver + typeDef + test deleted.
+  **Portal must drop its `addToMyMemories` call** (follow-up issue).
+- **`/setup/info` endpoint removed.** `PendingSetup` model kept for now (its drop
+  is a trivial later migration; nothing writes it post-Phase-A).
+- **Phase B migration tooling retired** — `retirePersonalOrgs.*` +
+  `scripts/retire-personal-orgs.ts` deleted. It selected candidates by
+  `isVisible: { not: true }` (the load-bearing personal-vs-real discriminator), so
+  once the column is dropped it can neither compile nor function; it is a spent
+  one-shot. **Operational window:** run the prod `--apply` (from PR #770) AFTER
+  #770 deploys and BEFORE this branch deploys; the tooling lives in #770's history.
+- **Deferred to merge-time:** the Hadron spec/convention node updates
+  (retire `cor:acl:080:01`, rewrite `cor:acl:080` around `listedOnMarketplace`,
+  retire `conventions:personal-org-marker`, fix `cor:dmo:010:03` / `cor:dmo:040:01`).
+
 ## Authorization (first-class review criteria)
 
 - User-owned Agent/App/Memory is **owner-only** (no membership, no ADMIN bypass)

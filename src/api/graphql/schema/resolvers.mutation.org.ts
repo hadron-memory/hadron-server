@@ -214,7 +214,6 @@ export const orgMutations = {
             data: {
               name,
               urn,
-              isVisible: true,
               principalId: principal.id,
               createdBy: ctx.userId ?? ctx.clientId ?? null,
             },
@@ -236,10 +235,9 @@ export const orgMutations = {
         id,
         name,
         urn,
-        isVisible,
         listedOnMarketplace,
         policy,
-      }: { id: string; name?: string; urn?: string; isVisible?: boolean; listedOnMarketplace?: boolean; policy?: unknown },
+      }: { id: string; name?: string; urn?: string; listedOnMarketplace?: boolean; policy?: unknown },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
@@ -268,7 +266,6 @@ export const orgMutations = {
       const data = {
         ...(name ? { name } : {}),
         ...(urn ? { urn } : {}),
-        ...(isVisible !== undefined ? { isVisible } : {}),
         // NOT NULL column: treat an explicit null like an omitted arg (no
         // change) rather than letting Prisma attempt a NULL write (Copilot #688).
         ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),

@@ -77,7 +77,7 @@ describe('ensureUserPrincipal / ensureOrgPrincipal — idempotent', () => {
 
   it('ensureOrgPrincipal mints for an undotted personal-org slug (exempt from the dotted rule)', async () => {
     const org = await db.organization.create({
-      data: { id: generateId(), name: 'p', urn: 'personal-abc123', isVisible: false },
+      data: { id: generateId(), name: 'p', urn: 'personal-abc123' },
     });
     await ensureOrgPrincipal(db, org);
     const p = await db.principal.findFirstOrThrow({ where: { kind: 'org', name: 'personal-abc123' } });

@@ -23,7 +23,7 @@ let agent: { id: string };
 beforeEach(async () => {
   await cleanDb(db);
   org = await db.organization.create({
-    data: { id: generateId(), name: 'mkt', urn: `mkt-${Date.now()}`, isVisible: true },
+    data: { id: generateId(), name: 'mkt', urn: `mkt-${Date.now()}` },
   });
   admin = await db.user.create({
     data: { id: generateId(), githubId: 55001, githubUsername: 'mkt-admin', roles: [] },

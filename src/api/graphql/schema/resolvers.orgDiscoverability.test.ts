@@ -1,7 +1,9 @@
 /**
  * cor:acl:080:02 (#610 Phase 3) — non-member organization discoverability.
  *   - Query.publicOrganization returns a sanitized view ONLY for a discoverable
- *     org (activated + public footprint), else null (anti-enumeration).
+ *     org (a public footprint OR listedOnMarketplace), else null
+ *     (anti-enumeration). Spec 048 dropped the former `isVisible` activation
+ *     precondition with the auto-personal org.
  *   - It never exposes members / private memories / apps / credentials.
  *   - globalSearch surfaces a discoverable org to a non-member.
  */
@@ -17,14 +19,13 @@ const PubOrg = (resolvers as any).PublicOrganization;
 let stranger: { id: string }; // member of NO org
 const ctx = (): Context => ({ db, userId: stranger.id, roles: [] });
 
-async function mkOrg(opts: { name?: string; isVisible?: boolean | null; listed?: boolean } = {}) {
+async function mkOrg(opts: { name?: string; listed?: boolean } = {}) {
   const slug = `disco-${generateId()}`;
   return db.organization.create({
     data: {
       id: generateId(),
       name: opts.name ?? slug,
       urn: slug,
-      isVisible: opts.isVisible === undefined ? true : opts.isVisible,
       listedOnMarketplace: opts.listed ?? false,
     },
   });
@@ -48,7 +49,7 @@ beforeEach(async () => {
 });
 
 describe('Query.publicOrganization — the discoverability gate', () => {
-  it('null for an activated org with no public footprint and not listed', async () => {
+  it('null for an org with no public footprint and not listed', async () => {
     const org = await mkOrg();
     expect(await Q.publicOrganization({}, { ref: org.id }, ctx())).toBeNull();
   });
@@ -67,12 +68,6 @@ describe('Query.publicOrganization — the discoverability gate', () => {
     const b = await mkOrg();
     await pubAgent(b);
     expect((await Q.publicOrganization({}, { ref: b.id }, ctx()))?.id).toBe(b.id);
-  });
-
-  it('NULL for a hidden org even with a PUBLIC memory (activation precondition)', async () => {
-    const org = await mkOrg({ isVisible: false });
-    await pubMemory(org);
-    expect(await Q.publicOrganization({}, { ref: org.id }, ctx())).toBeNull();
   });
 
   it('an app-scoped PUBLIC memory does not make the org discoverable', async () => {
@@ -122,7 +117,7 @@ describe('PublicOrganization field resolvers — sanitized footprint only', () =
 describe('globalSearch — a non-member discovers a public org (#610)', () => {
   it('finds a discoverable org, not a non-discoverable one', async () => {
     const pub = await mkOrg({ name: 'Zenith Discoverable Co', listed: true });
-    const priv = await mkOrg({ name: 'Zenith Private Co' }); // activated but no footprint
+    const priv = await mkOrg({ name: 'Zenith Private Co' }); // no public footprint, not listed
     const found = await Q.globalSearch({}, { query: 'Zenith' }, ctx());
     const orgHits = new Set(found.hits.filter((h: { entityType: string }) => h.entityType === 'organization').map((h: { id: string }) => h.id));
     expect(orgHits).toContain(pub.id);
@@ -133,18 +128,16 @@ describe('globalSearch — a non-member discovers a public org (#610)', () => {
 describe('marketplace catalogue queries (listedOnMarketplace only, cor:acl:080:04)', () => {
   let org: { id: string; urn: string };
   beforeEach(async () => {
-    org = await mkOrg({ listed: true }); // listed + activated
+    org = await mkOrg({ listed: true }); // listed
   });
 
-  it('marketplaceOrganizations: listed + activated only; flat refs; { items, total }', async () => {
+  it('marketplaceOrganizations: listedOnMarketplace only; flat refs; { items, total }', async () => {
     const publicUnlisted = await mkOrg();
     await pubMemory(publicUnlisted); // discoverable but NOT listed
-    const hiddenListed = await mkOrg({ isVisible: false, listed: true }); // listed but not activated
     const page = await Q.marketplaceOrganizations({}, {}, ctx());
     const ids = new Set(page.items.map((o: { id: string }) => o.id));
     expect(ids).toContain(org.id);
     expect(ids).not.toContain(publicUnlisted.id);
-    expect(ids).not.toContain(hiddenListed.id);
     expect(page.total).toBe(1);
     // Catalogue org entry is a FLAT ref — no nested publicMemories/publicAgents
     // (which would advertise unlisted resources). Drill-down is publicOrganization.

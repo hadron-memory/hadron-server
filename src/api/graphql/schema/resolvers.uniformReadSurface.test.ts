@@ -35,14 +35,13 @@ const ctx = (userId?: string, roles: Context['roles'] = ['READER']): Context =>
 
 beforeEach(async () => {
   await cleanDb(db);
-  // Listable (visible) orgs — createOrganization sets isVisible: true; the
-  // admin `organizations` browse only returns listable orgs (+ own memberships),
-  // #609.
+  // Spec 048 dropped `isVisible` — every org is listable, so the admin
+  // `organizations` browse returns them all.
   orgA = await db.organization.create({
-    data: { id: generateId(), name: 'uni-a', urn: `uni-a-${Date.now()}`, isVisible: true },
+    data: { id: generateId(), name: 'uni-a', urn: `uni-a-${Date.now()}` },
   });
   orgB = await db.organization.create({
-    data: { id: generateId(), name: 'uni-b', urn: `uni-b-${Date.now()}`, isVisible: true },
+    data: { id: generateId(), name: 'uni-b', urn: `uni-b-${Date.now()}` },
   });
   member = await db.user.create({
     data: { id: generateId(), githubId: 47101, githubUsername: 'uni-member', handle: 'uni-member' },
@@ -363,44 +362,35 @@ describe('Query.organizations / Query.users — merged list semantics', () => {
     expect(await Q.organizations(null, { limit: 0 }, ctx(member.id))).toMatchObject({ total: 1 });
   });
 
-  it('organizations: non-listable (isVisible false OR null) orgs are hidden — even from an admin (#609)', async () => {
-    // Only an explicit `true` is listable. A `false` org (un-activated personal)
-    // and a legacy `null` (unset) org the admin is NOT a member of must both be
-    // excluded from the admin browse.
-    const hidden = await db.organization.create({
-      data: { id: generateId(), name: 'uni-hidden', urn: `uni-hidden-${Date.now()}`, isVisible: false },
+  it('organizations: an admin browse returns every org (spec 048 — isVisible dropped)', async () => {
+    const other1 = await db.organization.create({
+      data: { id: generateId(), name: 'uni-other1', urn: `uni-other1-${Date.now()}` },
     });
-    const legacyNull = await db.organization.create({
-      data: { id: generateId(), name: 'uni-null', urn: `uni-null-${Date.now()}` }, // isVisible omitted → null
+    const other2 = await db.organization.create({
+      data: { id: generateId(), name: 'uni-other2', urn: `uni-other2-${Date.now()}` },
     });
     const adminCtx = ctx(admin.id, ['ADMIN']);
-    const before = await Q.organizations(null, {}, adminCtx);
-    expect(before.total).toBe(2); // only the two isVisible=true orgs
-    const beforeIds = before.items.map((o: { id: string }) => o.id);
-    expect(beforeIds).not.toContain(hidden.id);
-    expect(beforeIds).not.toContain(legacyNull.id);
-    // The admin's OWN membership still surfaces a hidden org they belong to.
-    await db.orgMember.create({
-      data: { id: generateId(), organizationId: hidden.id, userId: admin.id, role: 'READER' },
-    });
-    const after = await Q.organizations(null, {}, adminCtx);
-    expect(after.items.map((o: { id: string }) => o.id)).toContain(hidden.id);
+    const res = await Q.organizations(null, {}, adminCtx);
+    const idsSeen = res.items.map((o: { id: string }) => o.id);
+    // orgA + orgB (beforeEach) + the two just created — no org is hidden now.
+    expect(idsSeen).toEqual(expect.arrayContaining([orgA.id, orgB.id, other1.id, other2.id]));
+    expect(res.total).toBeGreaterThanOrEqual(4);
   });
 
-  it('organization(ref): a non-member admin cannot resolve a hidden org; a member can (#609)', async () => {
-    const hidden = await db.organization.create({
-      data: { id: generateId(), name: 'uni-ref-hidden', urn: `uni-ref-hidden-${Date.now()}`, isVisible: false },
+  it('organization(ref): a non-member admin resolves any org; a non-admin non-member cannot (spec 048)', async () => {
+    const other = await db.organization.create({
+      data: { id: generateId(), name: 'uni-ref-other', urn: `uni-ref-other-${Date.now()}` },
     });
     const adminCtx = ctx(admin.id, ['ADMIN']);
-    // Non-member admin: denied on the hidden org...
-    await expect(Q.organization(null, { ref: hidden.id }, adminCtx)).rejects.toThrow(/forbidden/i);
-    // ...but still resolves a listable (isVisible=true) org they aren't a member of.
-    expect((await Q.organization(null, { ref: orgA.id }, adminCtx))?.id).toBe(orgA.id);
-    // A member resolves their own hidden org regardless of listing visibility.
+    // Non-member admin resolves any org — every org is listable now.
+    expect((await Q.organization(null, { ref: other.id }, adminCtx))?.id).toBe(other.id);
+    // A non-admin non-member is still Forbidden (membership is the read gate).
+    await expect(Q.organization(null, { ref: other.id }, ctx(member.id))).rejects.toThrow(/forbidden/i);
+    // ...but a member resolves their own org.
     await db.orgMember.create({
-      data: { id: generateId(), organizationId: hidden.id, userId: member.id, role: 'OWNER' },
+      data: { id: generateId(), organizationId: other.id, userId: member.id, role: 'OWNER' },
     });
-    expect((await Q.organization(null, { ref: hidden.id }, ctx(member.id)))?.id).toBe(hidden.id);
+    expect((await Q.organization(null, { ref: other.id }, ctx(member.id)))?.id).toBe(other.id);
   });
 
   it('users: admin full list is paginated with an exact total', async () => {

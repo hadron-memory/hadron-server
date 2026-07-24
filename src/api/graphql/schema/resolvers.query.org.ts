@@ -316,20 +316,10 @@ export const orgQueries = {
         !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
       let where: Record<string, unknown>;
       if (isPlatformAdmin && !filter?.memberOnly) {
-        // #609: `isVisible` is a listing-visibility flag — a non-listable org
-        // (anything but an explicit `true`, i.e. an un-activated personal org
-        // `false`, or a legacy/unset `null`) must not surface in ANY user's org
-        // listing, platform admins included. Listable ⟺ `isVisible === true`,
-        // matching the codebase-wide `!== true` "hidden/personal" convention.
-        // Admin reach is every listable org PLUS the admin's own memberships (so
-        // a hidden org they belong to still resolves for them). This is a
-        // listing filter, NOT an access gate: members still read hidden orgs
-        // directly via `organization(ref:)`.
-        const memberOrgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
-        where = {
-          deletedAt: null,
-          OR: [{ isVisible: true }, { id: { in: memberOrgIds } }],
-        };
+        // Spec 048: `isVisible` was dropped with the auto-personal org — every
+        // org is now a real (listable) org, so a platform admin's default org
+        // listing is simply every non-deleted org.
+        where = { deletedAt: null };
       } else {
         // Membership scope — for non-admins (unchanged default) and for any
         // caller with filter.memberOnly (a no-op for non-admins, whose default
@@ -367,17 +357,10 @@ export const orgQueries = {
           }))
         : false;
       if (!isMember) {
-        // #609: a non-listable org (isVisible !== true — an un-activated
-        // personal org, or a legacy null) is invisible to non-members, platform
-        // admins included: not listed, not searchable, and not resolvable by
-        // ref. Only a listable org (isVisible === true) is admin-reachable
-        // without membership. Members always resolve their own org regardless of
-        // listing visibility (isVisible gates listing, not a member's read).
-        const gate = await ctx.db.organization.findUnique({
-          where: { id: resolvedId },
-          select: { isVisible: true },
-        });
-        if (!isAdmin || gate?.isVisible !== true) throw new Error('Forbidden');
+        // Spec 048: `isVisible` was dropped with the auto-personal org. Every org
+        // is now listable, so a platform admin may resolve any org by ref; a
+        // non-admin non-member is still Forbidden (membership is the read gate).
+        if (!isAdmin) throw new Error('Forbidden');
       }
       return ctx.db.organization.findUnique({ where: { id: resolvedId }, include: ORG_INCLUDE });
     },
@@ -413,7 +396,7 @@ export const orgQueries = {
     ) => {
       const take = clampListTake(limit);
       const skip = Math.max(0, offset ?? 0);
-      const where = { deletedAt: null, isVisible: true, listedOnMarketplace: true } as const;
+      const where = { deletedAt: null, listedOnMarketplace: true } as const;
       const [total, rows] = await Promise.all([
         ctx.db.organization.count({ where }),
         take === 0

@@ -53,7 +53,7 @@ async function buildFourOrgFixture(): Promise<FourOrgFixture> {
     data: { id: generateId(), name: 'OrgC', urn: 'org-c' },
   });
   const personalAlice = await db.organization.create({
-    data: { id: generateId(), name: 'personal-alice', urn: 'personal-alice', isVisible: false },
+    data: { id: generateId(), name: 'personal-alice', urn: 'personal-alice' },
   });
   const alice = await db.user.create({ data: { id: generateId(), githubId: 70001, githubUsername: 'alice' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: personalAlice.id, userId: alice.id, role: 'OWNER' } });

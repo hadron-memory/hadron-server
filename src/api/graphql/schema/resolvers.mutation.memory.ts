@@ -1438,58 +1438,6 @@ export const memoryMutations = {
       return true;
     },
 
-    addToMyMemories: async (_: unknown, { memoryId }: { memoryId: string }, ctx: Context) => {
-      requireRole(ctx, 'READER');
-      if (!ctx.userId) throw new Error('Authentication required');
-
-      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-
-      // Verify the memory is public
-      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-      if (memory.visibility !== 'PUBLIC') throw new Error('Memory is not public');
-
-      // Find user's personal org (deletedAt: null — a revoked personal-org
-      // membership must not route a subscription into a workspace the user
-      // can no longer read).
-      const membership = await ctx.db.orgMember.findFirst({
-        where: {
-          userId: ctx.userId,
-          deletedAt: null,
-          organization: { isVisible: { not: true } },
-        },
-        include: { organization: { include: { agents: true } } },
-      });
-      if (!membership) throw new Error('No personal workspace found');
-
-      const org = membership.organization;
-      const agent = org.agents[0];
-      if (!agent) throw new Error('No default agent found');
-
-      // Create memory subscription (personal org subscribes to the memory)
-      await ctx.db.memorySubscription.upsert({
-        where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: org.id } },
-        create: {
-          id: generateId(),
-          memoryId: resolvedMemoryId,
-          organizationId: org.id,
-          role: 'READER',
-          activated: true,
-          createdBy: ctx.userId ?? null,
-        },
-        update: {},
-      });
-
-      // Add memory to the default agent
-      await ctx.db.agentMemoryItem.upsert({
-        where: { agentId_memoryId: { agentId: agent.id, memoryId: resolvedMemoryId } },
-        create: { id: generateId(), agentId: agent.id, memoryId: resolvedMemoryId, createdBy: ctx.userId ?? null },
-        update: {},
-      });
-
-      return true;
-    },
-
     // ── Exchange integration mutations ──────────────────────────────────
     // Connection is created via OAuth at /auth/microsoft (no GraphQL mutation needed)
 
