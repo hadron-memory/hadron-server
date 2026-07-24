@@ -1,3 +1,4 @@
+import './instrument.js'; // Sentry — must be imported before any other module
 import 'dotenv/config';
 import { createServer } from './server.js';
 import { controller } from './controller/controller.js';

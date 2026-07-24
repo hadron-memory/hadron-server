@@ -1,5 +1,6 @@
 import crypto from 'crypto';
-import { ApolloServer } from '@apollo/server';
+import * as Sentry from '@sentry/node';
+import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
@@ -78,6 +79,45 @@ import {
   isGoogleDriveConnectConfigured,
 } from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
+
+// Report only unexpected GraphQL faults to Sentry — caller mistakes must not
+// flood the issue stream.
+//
+// Timing gotcha: `didEncounterErrors` fires DURING execution, before
+// `formatError` reshapes the response. So the typed client errors that
+// `formatError` maps to stable codes (URN_NOT_QUALIFIED, BAD_USER_INPUT,
+// AmbiguousLegacyUrnError) do NOT yet carry those codes here — Apollo has them
+// as the default INTERNAL_SERVER_ERROR. We therefore classify the *original*
+// error against the same types `formatError` handles, then fall back to the
+// error code for Apollo's own client-error classes (validation, parse, …).
+const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
+  async requestDidStart() {
+    return {
+      async didEncounterErrors(ctx) {
+        for (const err of ctx.errors) {
+          const original = err.originalError ?? err;
+          // Expected client errors reshaped by formatError — skip (they look
+          // like INTERNAL_SERVER_ERROR at this stage).
+          if (
+            original instanceof UrnNotQualifiedError ||
+            original instanceof UrnParseError ||
+            original instanceof AmbiguousLegacyUrnError
+          ) {
+            continue;
+          }
+          // Apollo's own client-error codes (GRAPHQL_VALIDATION_FAILED,
+          // GRAPHQL_PARSE_FAILED, BAD_USER_INPUT, …) are already on the raw
+          // error and are never server faults.
+          const code = err.extensions?.code as string | undefined;
+          if (code && code !== 'INTERNAL_SERVER_ERROR') continue;
+          Sentry.captureException(original, {
+            tags: { graphql_operation: ctx.operationName ?? 'anonymous' },
+          });
+        }
+      },
+    };
+  },
+};
 
 export async function createServer(): Promise<Express> {
   const app = express();
@@ -397,6 +437,7 @@ export async function createServer(): Promise<Express> {
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('OAuth callback error:', err);
+      Sentry.captureException(err);
       res.status(500).json({ error: 'OAuth authentication failed' });
     }
   });
@@ -546,6 +587,7 @@ export async function createServer(): Promise<Express> {
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('Google OAuth callback error:', err);
+      Sentry.captureException(err);
       res.status(500).json({ error: 'OAuth authentication failed' });
     }
   });
@@ -715,6 +757,7 @@ export async function createServer(): Promise<Express> {
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('Apple OAuth callback error:', err);
+      Sentry.captureException(err);
       res.status(500).json({ error: 'OAuth authentication failed' });
     }
   });
@@ -765,6 +808,7 @@ export async function createServer(): Promise<Express> {
       res.json({ ok: true });
     } catch (err) {
       console.error('Email auth error:', err);
+      Sentry.captureException(err);
       res.status(500).json({ error: 'Failed to send verification email' });
     }
   });
@@ -842,6 +886,7 @@ export async function createServer(): Promise<Express> {
       res.redirect(callbackUrl.toString());
     } catch (err) {
       console.error('Email verify error:', err);
+      Sentry.captureException(err);
       res.status(500).json({ error: 'Email verification failed' });
     }
   });
@@ -984,6 +1029,7 @@ export async function createServer(): Promise<Express> {
   const apollo = new ApolloServer({
     typeDefs,
     resolvers,
+    plugins: [sentryApolloPlugin],
     formatError: (formattedError, error) => {
       // Spec 022: surface UrnNotQualifiedError with a stable error code so
       // external callers can branch on it programmatically. The unwrap
@@ -1151,6 +1197,7 @@ export async function createServer(): Promise<Express> {
       res.json({ ok: true });
     } catch (err) {
       console.error('Reload error:', err);
+      Sentry.captureException(err);
       res.status(500).json({ error: 'Reload failed' });
     }
   });
@@ -1428,6 +1475,13 @@ export async function createServer(): Promise<Express> {
       // The unreachable-broker case already logged inside getBusClient().
     });
   }
+
+  // Sentry — must be the last middleware, after every route/controller is
+  // mounted, so it observes errors forwarded via next(err) from the auth,
+  // OAuth, webhook and schema-discovery routes. GraphQL resolver errors do not
+  // reach here (Apollo handles them internally) — they are captured by
+  // sentryApolloPlugin instead. No-op when SENTRY_DSN is unset.
+  Sentry.setupExpressErrorHandler(app);
 
   return app;
 }
