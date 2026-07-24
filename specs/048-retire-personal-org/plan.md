@@ -153,6 +153,32 @@ shape; do NOT reuse `renameOwnerNamespacedUrns`.**
   from the org root (or a fixed `-personal` seed) rather than a `sourceHandle`.
   `AppKey` / `AppAgent` ride the App id (not URN-bearing) — untouched.
 
+### Two schema findings (Phase B implementation, 2026-07-24)
+
+1. **Org-less connections are NOT shipped.** `ExchangeConnection.organizationId`
+   is still `String` **non-null** with `onDelete: Cascade` (spec 047 Phase 5
+   didn't land). So a personal connection can't be re-homed org-less, and an
+   org-delete would cascade it away. Rather than block Phase B on Phase 5, the
+   migration **refuses** (skips + reports) any org with a live connection.
+2. **An org-delete cascades into 14 tables.** Re-homing Agent/App/Memory (null
+   `organizationId` first) is safe, but the `DELETE organization` itself
+   cascades everything else keyed to the org. Benign after a scaffold delete:
+   `org_members` (the sole row) + `usage_events` (SetNull). Destructive if
+   present: `exchange_connections`, `slack_connections`, `mcp_servers`,
+   `home_assistant_instances`, `resend_senders`, `credit_ledger_entries`,
+   `memory_subscriptions`, `agent_org_grants` (col `org_id`, not
+   `organization_id`), `principal_grants`, `ai_service_configs`.
+
+**Guardrail (Holger, 2026-07-24): refuse-and-report.** The migration re-homes
+only clean scaffold orgs and SKIPS any org with a non-single-OWNER shape, an
+owner with no URN-legal handle, or any row in those destructive tables — never a
+silent cascade-delete. A dev-DB dry-run confirmed both branches fire on real data
+(a `createdBy` mismatch and an `agent_org_grants: 2` org were correctly skipped),
+and that some personal orgs DO carry a `my-agent-system` memory (re-rooted fine).
+Implementation: `src/lib/personalOrgRetirement/retirePersonalOrgs.ts` +
+`scripts/retire-personal-orgs.ts` (`pnpm admin:retire-personal-orgs`, dry-run by
+default; `--apply` to write).
+
 ### Pre-migration collision audit
 
 Before running Phase B, query the 12 owners for any existing user-owned entity
