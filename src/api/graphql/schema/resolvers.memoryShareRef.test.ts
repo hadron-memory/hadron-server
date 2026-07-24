@@ -163,3 +163,46 @@ describe('granteeRef edge cases (#774 review)', () => {
     ).rejects.toThrow(/not both/);
   });
 });
+
+describe('Memory.shareable derived signal (#766)', () => {
+  const Mem = resolvers.Memory as any;
+
+  it('is true for a personal-class memory', async () => {
+    const mem = await sharablePersonal('shareable-yes');
+    // From a fully-loaded graphroot (class present).
+    expect(await Mem.shareable({ id: mem.id, class: 'personal' }, {}, asOwner())).toBe(true);
+  });
+
+  it('is false for a non-personal (knowledge) memory', async () => {
+    // Class present on the graphroot → resolved without a db read.
+    expect(await Mem.shareable({ id: 'irrelevant', class: 'knowledge' }, {}, asOwner())).toBe(false);
+  });
+
+  it('fetches class when the query path did not load it (partial-select-safe)', async () => {
+    const mem = await sharablePersonal('shareable-partial');
+    expect(await Mem.shareable({ id: mem.id }, {}, asOwner())).toBe(true);
+  });
+});
+
+describe('createMemoryShare non-personal error (#766)', () => {
+  it('names the rule and the offending class', async () => {
+    // Use an owner-held private memory: the caller-authority guard passes
+    // (memory.userId === caller) so the class check actually runs and throws
+    // InvalidMemoryClassForShareError (a non-owned class like knowledge would
+    // short-circuit to FORBIDDEN first — see mentor-isolation.test.ts).
+    const priv = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.id}:owner:private-766`,
+        name: 'owner private',
+        class: 'private',
+        visibility: null,
+        userId: owner.id,
+      },
+    });
+    await expect(
+      M.createMemoryShare(null, { memoryId: priv.id, granteeRef: grantee.handle, role: 'reader' }, asOwner()),
+    ).rejects.toThrow(/only personal-class memories can be shared.*class='private'/s);
+  });
+});

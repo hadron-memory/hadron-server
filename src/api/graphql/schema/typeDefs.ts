@@ -1370,6 +1370,14 @@ export const typeDefs = `#graphql
     listedOnMarketplace: Boolean!
     # 005-agent-subscription: four-way memory typology
     class: MemoryClass!
+    """
+    #766 — derived shareability signal: true iff this memory can be shared
+    with an individual user via MemoryShare, i.e. class = 'personal'
+    (spec 023 FR-018). Lets the CLI and portal surface or gate the share
+    action before a createMemoryShare attempt rather than discovering
+    InvalidMemoryClassForShareError at execution time.
+    """
+    shareable: Boolean!
     # 006-asset-upload-redesign: per-memory upload-acceptance gate.
     # Default true for app/knowledge/personal-class memories; false for
     # system-class. Org admins or memory owners can flip via the

@@ -366,6 +366,21 @@ export const typeResolvers = {
       }
       return null;
     },
+    // #766 — derived shareability signal. A memory can be shared with an
+    // individual user via MemoryShare only when class = 'personal' (spec 023
+    // FR-018); this lets the CLI/portal gate the share action up front instead
+    // of surfacing InvalidMemoryClassForShareError at execution time.
+    shareable: async (g: { id: string; class?: string }, _: unknown, ctx: Context) => {
+      // Partial-select-safe: some query paths select Memory without `class`
+      // (mirrors the `shares` resolver). Fetch it rather than defaulting to
+      // false for a real personal memory.
+      if (g.class !== undefined) return g.class === 'personal';
+      const m = await ctx.db.memory.findUnique({
+        where: { id: g.id },
+        select: { class: true },
+      });
+      return m?.class === 'personal';
+    },
     // For system-class memories, find the agent that owns this memory.
     // Returns null for regular knowledge memories. We use a findFirst because
     // there's no FK from Memory → Agent — the relationship is expressed on
