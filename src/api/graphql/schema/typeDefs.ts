@@ -327,17 +327,31 @@ export const typeDefs = `#graphql
 
   """
   Filter for the uniform memories() list (#473). All clauses AND-combine and
-  only ever narrow the caller's accessible scope — with one documented scope
-  SELECTION: visibility: PUBLIC switches from the caller's own union
-  (org-owned + org-subscribed + own personal/private) to the public
-  marketplace slice (every PUBLIC memory — the old publicMemories query).
-  Both slices are readable by the caller, so this never widens access.
+  only ever narrow the caller's accessible scope — with two documented slice
+  SELECTIONS, each switching which readable set the list draws from (never
+  widening access beyond what the caller may already read):
+    - visibility: PUBLIC switches from the caller's own union (org-owned +
+      org-subscribed + own personal/private) to the public marketplace slice
+      (every PUBLIC memory — the old publicMemories query).
+    - sharedWithMe: true switches to the memories shared WITH the caller via
+      MemoryShare (the caller is a grantee) — the portal's
+      Memories-shared-with-me tab.
   """
   input MemoryFilter {
     "Restrict to exactly these classes. Omitted, the noisy agent system class is hidden by default; pass it explicitly to surface system memories."
     memoryClasses: [MemoryClass!]
     "Restrict by visibility. PUBLIC selects the marketplace slice (see above)."
     visibility: MemoryVisibility
+    """
+    true selects the distinct set of memories shared WITH the caller
+    via MemoryShare (the caller is a grantee) — the portal's
+    Memories-shared-with-me tab. This is its own slice, NOT part of the
+    caller's owned/org union: a grantee is never their own grantor, so
+    it excludes owned memories. App-key callers get an empty page
+    (sharing is a user-to-user concept). See Memory.myShare for the
+    per-row grantor + role.
+    """
+    sharedWithMe: Boolean
   }
 
   "Filter for the uniform organizations() list (#473)."
@@ -1448,6 +1462,15 @@ export const typeDefs = `#graphql
     ADMIN/OWNER of the memory's owning org.
     """
     shares: [MemoryShare!]!
+    """
+    The caller's OWN share of this memory (they are the grantee), or
+    null. Grantee-readable — unlike shares (principal / org-admin only),
+    this returns at most the single MemoryShare row keyed
+    (memoryId, callerId), so it never leaks co-grantees. null for a
+    non-grantee or an App-key caller. Lets the portal render
+    Shared-by-@grantor + the role on each shared-with-me row.
+    """
+    myShare: MemoryShare
     """
     023-app-shape US4: team membership rows on this memory. Non-empty
     only when class = group (FR-027). Visible to any current member
@@ -5120,6 +5143,13 @@ export const typeDefs = `#graphql
     predicate but not by this GraphQL surface — see the deferred
     policy discussion linked from joinApp.ts.
 
+    Share-audience rule (#778): a plain ORG-OWNED personal memory
+    (organizationId set, no agent scope) may be shared ONLY with a
+    current member of that org; a FREE-STANDING (org-less) personal
+    memory may be shared with any user. Agent-scoped personal memories
+    (the spec-023 per-pairing App pattern) are exempt — their audience
+    is governed by AppMember + AgentSubscription, not org membership.
+
     Error codes (extensions.code, Error.name style):
       - UNAUTHENTICATED — no logged-in user in context.
       - FORBIDDEN — caller is not the Memory's principal. The
@@ -5131,6 +5161,8 @@ export const typeDefs = `#graphql
       - MemoryShareGranteeMissingError — granteeId doesn't resolve to
         an existing User. Only reachable when the caller passes the
         principal guard.
+      - CrossOrgShareNotAllowedError — the grantee is not a member of an
+        org-owned personal memory's org (the #778 audience rule above).
       - InvalidMemoryClassForShareError / MemoryNotFoundForShareError —
         defined on the controller for completeness; functionally
         unreachable via this GraphQL mutation in v1 because the

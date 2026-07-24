@@ -21,6 +21,7 @@ import {
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
+import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
   formatCanonicalUrn,
   type CanonicalUrnType,
@@ -479,6 +480,54 @@ export async function resolveOrgScope(
 // ── Memory access control ──────────────────────────────────────────────
 
 /**
+ * Does `userId` reach a PERSONAL memory through a MemoryShare grant (#778)?
+ *
+ * The single-memory counterpart of the grantee clause in
+ * `getAccessibleMemoryIds` — used by `Query.memory` (read) and
+ * `requireMemoryWriteAccess` (writer shares). Mirrors the share rule in
+ * `createMemoryShare`: an org-owned personal memory is shareable only within its
+ * org, so a grantee must ALSO be a current member of that org. This keeps the
+ * read/write gate in lockstep with the create rule and means a legacy or
+ * revoked-membership cross-org share can't admit a non-member (which would also
+ * expose the org's nested app/key/member objects via `Memory.organization`).
+ *
+ * Only `personal` is shareable (`private` never is), and agent-scoped personal
+ * "holding" memories (`userMemoryOfAgentId` set) are deliberately excluded here
+ * — their share additionally requires an active AgentSubscription
+ * (resolveMemoryAuthorization step 3c), which this portal surface doesn't model;
+ * excluding them is the safe, no-regression direction.
+ *
+ * @param opts.requireWrite when true, only a `writer` share qualifies.
+ */
+export async function granteeShareAccess(
+  db: Context['db'],
+  userId: string,
+  memory: {
+    id: string;
+    class: string;
+    organizationId: string | null;
+    userMemoryOfAgentId: string | null;
+  },
+  opts?: { requireWrite?: boolean },
+): Promise<boolean> {
+  if (memory.class !== 'personal' || memory.userMemoryOfAgentId !== null) return false;
+  const share = await db.memoryShare.findUnique({
+    where: { memoryId_granteeId: { memoryId: memory.id, granteeId: userId } },
+    select: { role: true },
+  });
+  if (!share) return false;
+  if (opts?.requireWrite && share.role !== 'writer') return false;
+  // Free-standing (org-less) personal memory — the share alone admits.
+  if (memory.organizationId === null) return true;
+  // Org-owned — the grantee must still be a current member of the org.
+  const member = await db.orgMember.findFirst({
+    where: { organizationId: memory.organizationId, userId, deletedAt: null },
+    select: { userId: true },
+  });
+  return !!member;
+}
+
+/**
  * Returns the memory IDs accessible to the current caller, or null if the
  * caller has unrestricted access (global ADMIN/OWNER).
  *
@@ -577,8 +626,26 @@ export async function getAccessibleMemoryIds(
       },
       select: { id: true },
     });
+    // #778 — personal memories shared WITH the caller (they are a grantee).
+    // Only `personal` is shareable; agent-scoped holdings are excluded (see
+    // granteeShareAccess). Org-owned shares are additionally membership-gated so
+    // a legacy/revoked cross-org share can't admit a non-member — mirrors the
+    // create rule and keeps this node-read gate in lockstep with Query.memory.
+    const memberOrgIds = await getMemberOrgIds(ctx.db, ctx.userId);
+    const sharedWithMe = await ctx.db.memory.findMany({
+      where: {
+        ...scope,
+        deletedAt: null,
+        class: 'personal',
+        userMemoryOfAgentId: null,
+        shares: { some: { granteeId: ctx.userId } },
+        OR: [{ organizationId: null }, { organizationId: { in: memberOrgIds } }],
+      },
+      select: { id: true },
+    });
     const accessibleIds = new Set(orgPublicIds);
     for (const g of ownAndHoldings as { id: string }[]) accessibleIds.add(g.id);
+    for (const g of sharedWithMe as { id: string }[]) accessibleIds.add(g.id);
     return [...accessibleIds];
   }
 
@@ -692,13 +759,24 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
 
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
-    select: { organizationId: true, ownerUserId: true, userId: true, class: true, appId: true },
+    select: {
+      id: true,
+      organizationId: true,
+      ownerUserId: true,
+      userId: true,
+      class: true,
+      appId: true,
+      userMemoryOfAgentId: true,
+    },
   });
 
   // 034-memory-class-access: owner-owned personal/private memories are
-  // owner-only to write — no ADMIN/OWNER bypass, no org-role path.
+  // owner-only to write — no ADMIN/OWNER bypass, no org-role path — EXCEPT a
+  // #778 `writer` MemoryShare grantee on a personal memory (private is never
+  // shareable, so this only widens personal).
   if (memory.class === 'personal' || memory.class === 'private') {
     if (memory.userId === ctx.userId) return;
+    if (await granteeShareAccess(ctx.db, ctx.userId, memory, { requireWrite: true })) return;
     throw new Error('Forbidden: no write access to this memory');
   }
 
