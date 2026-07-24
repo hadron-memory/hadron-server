@@ -42,6 +42,21 @@ export class UserNotFoundError extends Error {
 }
 
 /**
+ * Thrown when an email ref matches MORE THAN ONE live account case-insensitively
+ * (#774 review). `User.email` is only case-sensitively unique and `createAppUser`
+ * stores the caller's email verbatim, so `Alice@x.com` and `alice@x.com` can
+ * coexist. Rather than resolve to an arbitrary account (a wrong-grantee hazard on
+ * a share), the resolver rejects the ambiguous ref — the caller can disambiguate
+ * with the exact-case email, the handle, or the id.
+ */
+export class AmbiguousUserRefError extends Error {
+  constructor(public ref: string) {
+    super(`AMBIGUOUS_USER_REF: ${ref}`);
+    this.name = 'AmbiguousUserRefError';
+  }
+}
+
+/**
  * Surfaced by the entity-ref resolvers (#697) when a legacy URN input matches
  * MORE THAN ONE live row through the stored alias map (`legacyUrn`). The map is
  * non-unique, so an ambiguous legacy reference must fail LOUDLY with a typed

@@ -128,3 +128,38 @@ describe('revoke / update by granteeRef (#769)', () => {
     expect(memoryShare.role).toBe('writer');
   });
 });
+
+describe('granteeRef edge cases (#774 review)', () => {
+  it('rejects an ambiguous case-insensitive email, but an exact-case match wins', async () => {
+    const mem = await sharablePersonal('amb');
+    // Two accounts differing ONLY by email case (email is case-sensitively unique).
+    const lower = await db.user.create({
+      data: { id: generateId(), handle: `amb-l-${generateId().slice(-6)}`, email: 'amb@example.com', roles: ['READER'] },
+    });
+    await db.user.create({
+      data: { id: generateId(), handle: `amb-u-${generateId().slice(-6)}`, email: 'Amb@example.com', roles: ['READER'] },
+    });
+    // No exact-case row for the all-caps form → two insensitive matches → reject.
+    await expect(
+      M.createMemoryShare(null, { memoryId: mem.id, granteeRef: 'AMB@example.com', role: 'reader' }, asOwner()),
+    ).rejects.toThrow(/more than one account/);
+    // The exact-case email disambiguates to that specific account.
+    const { memoryShare } = await M.createMemoryShare(
+      null,
+      { memoryId: mem.id, granteeRef: 'amb@example.com', role: 'reader' },
+      asOwner(),
+    );
+    expect(memoryShare.granteeId).toBe(lower.id);
+  });
+
+  it('rejects passing both granteeRef and granteeId', async () => {
+    const mem = await sharablePersonal('both');
+    await expect(
+      M.createMemoryShare(
+        null,
+        { memoryId: mem.id, granteeRef: grantee.handle, granteeId: grantee.id, role: 'reader' },
+        asOwner(),
+      ),
+    ).rejects.toThrow(/not both/);
+  });
+});

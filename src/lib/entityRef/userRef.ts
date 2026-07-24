@@ -20,7 +20,7 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
-import { UserNotFoundError } from './errors.js';
+import { UserNotFoundError, AmbiguousUserRefError } from './errors.js';
 
 export async function resolveUserRef(
   db: Pick<PrismaClient, 'user'>,
@@ -60,10 +60,17 @@ export async function resolveUserRef(
  * runs server-side against the full user table, so the memory-share mutations
  * can grant to a user the caller can't otherwise see (cross-org personal share).
  *
- * Precedence: an email-shaped, non-scheme-prefixed ref matches the unique
- * `email` column case-insensitively; everything else (bare ID, handle,
- * `hrn:user:<handle>` URN) falls through to `resolveUserRef`. Throws
- * `UserNotFoundError` on a genuine miss, same as `resolveUserRef`.
+ * Precedence: an email-shaped, non-scheme-prefixed ref matches the `email`
+ * column case-insensitively; everything else (bare ID, handle, `hrn:user:<handle>`
+ * URN) falls through to `resolveUserRef`. Throws `UserNotFoundError` on a genuine
+ * miss.
+ *
+ * Email ambiguity (#774 review): `User.email` is only case-sensitively unique and
+ * `createAppUser` stores it verbatim, so `Alice@x.com` and `alice@x.com` can both
+ * exist. An EXACT (case-sensitive) match always wins; a single case-insensitive
+ * match is used; but two accounts differing only by case throw
+ * `AmbiguousUserRefError` rather than resolving to an arbitrary one (wrong-grantee
+ * hazard on a share).
  */
 export async function resolveUserRefOrEmail(
   db: Pick<PrismaClient, 'user'>,
@@ -72,15 +79,24 @@ export async function resolveUserRefOrEmail(
 ): Promise<{ id: string }> {
   const trimmed = ref.trim();
   if (trimmed.includes('@') && !/^(hrn|urn):/i.test(trimmed)) {
-    const user = await db.user.findFirst({
-      where: {
-        email: { equals: trimmed, mode: 'insensitive' },
-        ...(options?.includeDeleted ? {} : { deletedAt: null }),
-      },
+    const liveOnly = options?.includeDeleted ? {} : { deletedAt: null };
+    // Exact (case-sensitive) first — `email` is case-sensitively unique, so this
+    // is unambiguous when it hits.
+    const exact = await db.user.findFirst({
+      where: { email: trimmed, ...liveOnly },
       select: { id: true },
     });
-    if (!user) throw new UserNotFoundError(ref);
-    return { id: user.id };
+    if (exact) return { id: exact.id };
+    // No exact match — fall back to case-insensitive, but reject (never pick
+    // arbitrarily) if two accounts differ only by case.
+    const matches = await db.user.findMany({
+      where: { email: { equals: trimmed, mode: 'insensitive' }, ...liveOnly },
+      select: { id: true },
+      take: 2,
+    });
+    if (matches.length === 0) throw new UserNotFoundError(ref);
+    if (matches.length > 1) throw new AmbiguousUserRefError(ref);
+    return { id: matches[0].id };
   }
   return resolveUserRef(db, trimmed, options);
 }

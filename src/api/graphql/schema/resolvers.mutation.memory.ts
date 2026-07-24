@@ -57,6 +57,7 @@ import {
   EncryptedVectorIndexNotAcknowledgedError,
   InvalidChunkConfigError,
   UserNotFoundError,
+  AmbiguousUserRefError,
 } from '../../../lib/entityRef/errors.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
@@ -110,6 +111,13 @@ async function resolveGranteeId(
   args: { granteeRef?: string | null; granteeId?: string | null },
 ): Promise<string> {
   const ref = args.granteeRef?.trim();
+  // Mutually exclusive: passing both is a caller mistake, and silently
+  // preferring one contradicts the schema (PR #774 review).
+  if (ref && args.granteeId) {
+    throw new GraphQLError('Pass either granteeRef or granteeId, not both.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
   if (ref) {
     try {
       const { id } = await resolveUserRefOrEmail(ctx.db, ref);
@@ -119,6 +127,12 @@ async function resolveGranteeId(
         throw new GraphQLError(`No user matches granteeRef "${ref}".`, {
           extensions: { code: 'NOT_FOUND' },
         });
+      }
+      if (e instanceof AmbiguousUserRefError) {
+        throw new GraphQLError(
+          `granteeRef "${ref}" matches more than one account (differing only by email case). Use the exact-case email, the handle, or the id.`,
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
       }
       throw e;
     }
