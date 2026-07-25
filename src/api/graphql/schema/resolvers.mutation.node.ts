@@ -34,6 +34,13 @@ import {
 } from '../../../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import {
+  moveNodeSubtree,
+  lockSourceForMove,
+  SubtreeMoveCollisionError,
+  SubtreeMoveIntoSelfError,
+  SubtreeMoveSourceChangedError,
+} from '../../../lib/nodeSubtreeMove.js';
+import {
   NodeLocConflictError,
   NodeNotFoundError,
   NodeAbstractTooLongError,
@@ -1777,11 +1784,19 @@ export const nodeMutations = {
 
     // #564 — relocate a node, identified by `sourceRef` (PK or fully-qualified
     // URN). The destination is either a full `targetUrn` (new memory + loc) or a
-    // `targetMemoryRef` (same loc, new memory) — exactly one. The node keeps its
-    // stable id, so every incoming/outgoing edge reference stays valid. Fails
-    // loudly (NODE_ALREADY_EXISTS) if a DIFFERENT live node occupies the
-    // destination slot. Requires write access to BOTH memories (review:
-    // entity-ref-args #3).
+    // `targetMemoryRef` (same loc, new memory) — exactly one. Every node keeps
+    // its stable id, so incoming/outgoing edge references stay valid. Fails
+    // loudly (NODE_ALREADY_EXISTS) if any node already occupies a destination
+    // slot. Requires write access to BOTH memories (review:entity-ref-args #3).
+    //
+    // #768: a SAME-MEMORY move rebases the node's whole loc-SUBTREE with it. A
+    // node's parent/child relation is expressed by its loc prefix (`a:b` parents
+    // `a:b:c`) and its URN is `<memoryUrn>::<loc>` — so relocating only the named
+    // node stranded every descendant at its old loc, leaving their computed URNs
+    // pointing under a parent path that no longer exists. A CROSS-memory move of
+    // a node with descendants is rejected (it would turn the subtree's boundary
+    // edges into ungated cross-memory edges — use extractParentNodeToMemory); a
+    // cross-memory LEAF move keeps the single-node behavior.
     moveNode: async (
       _: unknown,
       { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
@@ -1792,53 +1807,105 @@ export const nodeMutations = {
         ctx, source, targetUrn, targetMemoryRef,
       );
 
-      // The row leaves the source memory and lands in the destination — write
+      // The node leaves the source memory and lands in the destination — write
       // access to both (a same-memory move checks once).
       await requireMemoryWriteAccess(ctx, source.memoryId);
-      if (destMemoryId !== source.memoryId) {
+      const crossMemory = destMemoryId !== source.memoryId;
+      if (crossMemory) {
         await requireMemoryWriteAccess(ctx, destMemoryId);
       }
 
-      const isSameSlot = destMemoryId === source.memoryId && destLoc === source.loc;
+      const isSameSlot = !crossMemory && destLoc === source.loc;
 
-      return ctx.db.$transaction(async (tx) => {
-        // #664/#752: moving a node INTO a subtree is the same orphan vector as a
-        // create there — a concurrent non-recursive delete of a destination
-        // ancestor could count zero descendants, then this move lands the row
-        // under it. Lock the destination's ancestor path (moving OUT can't
-        // orphan, so the source side needs nothing). Root-level dest → no-op.
-        await lockAncestorsForCreate(tx, destMemoryId, destLoc);
-        if (!isSameSlot) {
-          // Fail loudly on collision — a DIFFERENT live node already occupies
-          // the destination slot (a soft-deleted occupant is ignored; the move
-          // will land in the freed slot as the unique constraint permits).
-          const occupant = await tx.node.findUnique({
-            where: { loc_memoryId: { loc: destLoc, memoryId: destMemoryId } },
-          });
-          if (occupant && occupant.id !== source.id && !occupant.deletedAt) {
-            throw new GraphQLError(
-              `A live node already occupies loc "${destLoc}" in the destination memory.`,
-              { extensions: { code: 'NODE_ALREADY_EXISTS', loc: destLoc, memoryId: destMemoryId } },
-            );
-          }
-        }
-        // Pre-move NodeRevision snapshot — a loc/memory change is audit-worthy.
-        // The snapshot belongs to the SOURCE memory (#602): the node is about
-        // to leave it, and this snapshot's content lived there (the builder
-        // stamps source.memoryId).
-        await createNodeRevision(
-          tx,
-          buildNodeRevisionSnapshot(source, editorFromAuth(ctx), {
-            changes: diffNodeChanges(source, { loc: destLoc, memoryId: destMemoryId }),
-          }),
+      const withEdges = {
+        outgoingEdges: { include: { target: true } },
+        incomingEdges: { include: { source: true } },
+      } as const;
+
+      try {
+        return await ctx.db.$transaction(
+          async (tx) => {
+            // #664/#752: moving a node INTO a subtree is the same orphan vector as
+            // a create there — a concurrent non-recursive delete of a destination
+            // ancestor could count zero descendants, then this move lands the row
+            // under it. Lock the destination ancestor path. Root-level → no-op.
+            await lockAncestorsForCreate(tx, destMemoryId, destLoc);
+
+            if (isSameSlot) {
+              return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
+            }
+
+            if (crossMemory) {
+              // #768: cross-memory relocation of a SUBTREE isn't supported here —
+              // moving descendants into another memory turns their boundary edges
+              // into cross-memory edges whose endpoints resolve without a
+              // per-endpoint access check. Refuse rather than strand or leak; use
+              // extractParentNodeToMemory for a cross-memory subtree move.
+              //
+              // Lock + revalidate the source FIRST so the descendant count can't
+              // race a concurrent same-memory move of this node (which would move
+              // it — and its descendants — to a new prefix, leaving the count here
+              // reading an empty old prefix and admitting a now-parented node).
+              await lockSourceForMove(tx, source);
+              const descendantCount = await tx.node.count({
+                where: { memoryId: source.memoryId, deletedAt: null, loc: { startsWith: `${source.loc}:` } },
+              });
+              if (descendantCount > 0) {
+                throw new GraphQLError(
+                  `Cannot move a node with ${descendantCount} descendant(s) to another memory. ` +
+                    `Move it within its memory, or use the extractParentNodeToMemory mutation to relocate the subtree.`,
+                  { extensions: { code: 'BAD_USER_INPUT', descendantCount } },
+                );
+              }
+              // Single-node (leaf) cross-memory move — fail loud on a collision.
+              const occupant = await tx.node.findUnique({
+                where: { loc_memoryId: { loc: destLoc, memoryId: destMemoryId } },
+              });
+              if (occupant && occupant.id !== source.id && !occupant.deletedAt) {
+                throw new GraphQLError(
+                  `A live node already occupies loc "${destLoc}" in the destination memory.`,
+                  { extensions: { code: 'NODE_ALREADY_EXISTS', loc: destLoc, memoryId: destMemoryId } },
+                );
+              }
+              await createNodeRevision(
+                tx,
+                buildNodeRevisionSnapshot(source, editorFromAuth(ctx), {
+                  changes: diffNodeChanges(source, { loc: destLoc, memoryId: destMemoryId }),
+                }),
+              );
+              return tx.node.update({
+                where: { id: source.id },
+                data: { loc: destLoc, memoryId: destMemoryId },
+                include: withEdges,
+              });
+            }
+
+            // Same-memory move → rebase the whole loc-subtree via the shared
+            // helper (it locks + revalidates the source itself).
+            await moveNodeSubtree(tx, { source, destLoc, editor: editorFromAuth(ctx) });
+            return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
+          },
+          // A large subtree touches many rows; the default 5s interactive-txn
+          // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
+          { timeout: 120_000 },
         );
-        // Move BY ID (stable across moves; keeps every edge reference intact).
-        return tx.node.update({
-          where: { id: source.id },
-          data: { loc: destLoc, memoryId: destMemoryId },
-          include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
-        });
-      });
+      } catch (e) {
+        // Map the shared helper's typed errors (thrown from either branch) to the
+        // GraphQL surface.
+        if (e instanceof SubtreeMoveCollisionError) {
+          throw new GraphQLError(
+            `A node already occupies loc "${e.loc}" in the destination memory.`,
+            { extensions: { code: 'NODE_ALREADY_EXISTS', loc: e.loc, memoryId: e.memoryId } },
+          );
+        }
+        if (e instanceof SubtreeMoveIntoSelfError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
+        }
+        if (e instanceof SubtreeMoveSourceChangedError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'CONFLICT', nodeId: e.nodeId } });
+        }
+        throw e;
+      }
     },
 
     // #564 — clone a node to a new location, returning the NEW node (fresh id).

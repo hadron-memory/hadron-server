@@ -28,6 +28,13 @@ import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { ancestorLocs, lockAncestorsForCreate, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
+import {
+  moveNodeSubtree,
+  lockSourceForMove,
+  SubtreeMoveCollisionError,
+  SubtreeMoveIntoSelfError,
+  SubtreeMoveSourceChangedError,
+} from '../lib/nodeSubtreeMove.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import {
   resolveAppForRequest,
@@ -3609,9 +3616,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
 Collision policy: if a live node already occupies \`targetUrn\`, the call refuses with a URN_ALREADY_EXISTS error. Pass \`overwrite: true\` to soft-delete the existing target first; the evicted row is re-stamped to \`<loc>__deleted-<full-id>\` so the unique \`(loc, memoryId)\` constraint doesn't block. Hard-overwrite isn't supported — call hadron_delete_node (hard: true) on the target first if you need that.
 
-Descendants of the source node are NOT moved automatically — they remain at their original locs and become children of an implicit parent at the old prefix. Move them explicitly if needed.
+Descendants move WITH the node on a SAME-MEMORY move (#768): a node's loc-subtree (every node whose loc is prefixed by \`<loc>:\`) is rebased onto the new loc, so children's URNs follow the parent. Nodes keep their stable IDs, so every edge reference stays valid; an edge's own loc/URN is a derived denormalization that is NOT rewritten by a move, so continue to address a moved node's edges by their existing (pre-move) URN. A collision at any DESCENDANT slot refuses the whole move (overwrite only evicts the explicitly-named target loc). Moving a node that HAS descendants to ANOTHER memory is refused — this tool does not relocate a subtree across memories (the extractParentNodeToMemory GraphQL mutation does); move it within its memory, or move the descendants first. A cross-memory move of a leaf node is fine.
 
-Atomicity: collision-evict → NodeRevision snapshot → row move all run inside a single db.$transaction so a partial failure cannot leave the URN slot empty.
+Atomicity: collision-evict → per-node NodeRevision snapshot → subtree move all run inside a single db.$transaction so a partial failure cannot leave the URN slot empty.
 
 On success returns the moved node's record: new URN, name, type, tags, edge counts, and immediate-child count (empty sections omitted).`,
     {
@@ -3673,6 +3680,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // same slot — `id` is stable across moves.
       type MoveResult =
         | { refused: 'urn-exists'; targetUrn: string }
+        | { refused: 'cross-memory-subtree'; descendantCount: number }
         | {
             ok: true;
             moved: {
@@ -3686,96 +3694,170 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             childCount: number;
           };
 
-      const result: MoveResult = await db.$transaction(async (tx) => {
-        // #664/#752: moving a node INTO a subtree is the same orphan vector as
-        // creating there — lock the destination's ancestor path first (matching
-        // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),
-        // so a concurrent non-recursive delete of a destination ancestor can't
-        // count zero descendants and then let this move land under it. Taken
-        // before any row-locking statement to keep advisory-before-row ordering
-        // consistent with the delete path (no lock-order inversion).
-        await lockAncestorsForCreate(tx, toMemory.id, toLoc);
-        if (!isSameSlot) {
-          const existingTarget = await tx.node.findUnique({
-            where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
-          });
-          if (existingTarget && !existingTarget.deletedAt && !overwrite) {
-            const targetUrn = await nodeUrn(toLoc, toMemory.id);
-            return { refused: 'urn-exists', targetUrn };
-          }
-          if (existingTarget) {
-            // Re-stamp the occupant out of the way. Use the FULL id —
-            // UUIDv7's first 6 bytes are the ms timestamp, so the
-            // previous 8-char slice was timestamp-only entropy and two
-            // nodes ever stamped within a ~65s window of timestamp-
-            // collision-territory shared the same suffix. PR-189 review
-            // flagged this as exactly the failure mode this collision-
-            // policy work was meant to eliminate.
-            const archivedLoc = `${toLoc}__deleted-${existingTarget.id}`;
-            await tx.node.update({
-              where: { id: existingTarget.id },
-              data: {
-                loc: archivedLoc,
-                ...(existingTarget.deletedAt
-                  ? {}
-                  : {
-                      deletedAt: new Date(),
-                      deletedBy: auth.userId ?? auth.clientId ?? null,
-                    }),
-              },
+      let result: MoveResult;
+      try {
+        result = await db.$transaction(async (tx) => {
+          // #664/#752: moving a node INTO a subtree is the same orphan vector as
+          // creating there — lock the destination's ancestor path first (matching
+          // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),
+          // so a concurrent non-recursive delete of a destination ancestor can't
+          // count zero descendants and then let this move land under it. Taken
+          // before any row-locking statement to keep advisory-before-row ordering
+          // consistent with the delete path (no lock-order inversion).
+          await lockAncestorsForCreate(tx, toMemory.id, toLoc);
+
+          if (isSameSlot) {
+            // Same-slot "move" — normalize the node's name to the loc leaf, as
+            // before. Nothing to cascade (destLoc === the current loc).
+            const newName = toLoc.split(':').pop()!;
+            await createNodeRevision(tx, {
+              id: generateId(),
+              ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
+                changes: diffNodeChanges(existing, { loc: toLoc, name: newName, memoryId: toMemory.id }),
+              }),
             });
+            await tx.node.update({
+              where: { id: existing.id },
+              data: { loc: toLoc, name: newName, memoryId: toMemory.id },
+            });
+          } else {
+            const crossMemory = toMemory.id !== fromMemory.id;
+
+            // #768: a CROSS-memory move of a node with descendants is refused —
+            // relocating the subtree into another memory would turn its boundary
+            // edges into cross-memory edges whose endpoints resolve without a
+            // per-endpoint access check. Use extractParentNodeToMemory for that.
+            // A cross-memory LEAF move is fine (single node, below).
+            if (crossMemory) {
+              // Lock + revalidate the source before counting, so the descendant
+              // count can't race a concurrent same-memory move of this node
+              // (moveNodeSubtree does the same on the same-memory branch below).
+              await lockSourceForMove(tx, existing);
+              const descendantCount = await tx.node.count({
+                where: { memoryId: fromMemory.id, deletedAt: null, loc: { startsWith: `${fromLoc}:` } },
+              });
+              if (descendantCount > 0) return { refused: 'cross-memory-subtree', descendantCount };
+            }
+
+            // Collision policy for the EXPLICITLY-named target loc: a live
+            // occupant refuses unless overwrite:true, which soft-deletes it and
+            // re-stamps its loc out of the way so the (loc, memoryId) unique
+            // doesn't block. Use the FULL id in the archived loc — UUIDv7's first
+            // 6 bytes are the ms timestamp, so an 8-char slice was timestamp-only
+            // entropy (PR-189). Descendant-slot collisions are always refused —
+            // moveNodeSubtree throws SubtreeMoveCollisionError (caught below).
+            const existingTarget = await tx.node.findUnique({
+              where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
+            });
+            if (existingTarget && !existingTarget.deletedAt && !overwrite) {
+              const targetUrn = await nodeUrn(toLoc, toMemory.id);
+              return { refused: 'urn-exists', targetUrn };
+            }
+            if (existingTarget) {
+              const archivedLoc = `${toLoc}__deleted-${existingTarget.id}`;
+              await tx.node.update({
+                where: { id: existingTarget.id },
+                data: {
+                  loc: archivedLoc,
+                  ...(existingTarget.deletedAt
+                    ? {}
+                    : { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null }),
+                },
+              });
+            }
+
+            if (crossMemory) {
+              // Single-node (leaf) cross-memory move — the long-standing behavior
+              // (name normalized to the loc leaf). No subtree to cascade.
+              const newName = toLoc.split(':').pop()!;
+              await createNodeRevision(tx, {
+                id: generateId(),
+                ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
+                  changes: diffNodeChanges(existing, { loc: toLoc, name: newName, memoryId: toMemory.id }),
+                }),
+              });
+              await tx.node.update({
+                where: { id: existing.id },
+                data: { loc: toLoc, name: newName, memoryId: toMemory.id },
+              });
+            } else {
+              // #768: same-memory move — rebase the whole loc-subtree via the
+              // shared helper (the ONE implementation the GraphQL moveNode
+              // resolver also uses). renameSourceLeaf sets the moved node's name
+              // to the loc leaf (this tool's long-standing behavior); it writes a
+              // NodeRevision per moved node and re-derives intra-subtree edge locs.
+              await moveNodeSubtree(tx, {
+                source: existing,
+                destLoc: toLoc,
+                editor: editorFromAuth(auth),
+                renameSourceLeaf: true,
+              });
+            }
           }
-        }
 
-        // NodeRevision snapshot of the pre-move state — mirrors the
-        // pattern hadron_update_node already follows. Loc / name / memoryId
-        // changes are audit-worthy. The snapshot belongs to the SOURCE
-        // memory (#602) — the builder stamps existing.memoryId. #620 —
-        // shared builder; `changes` records the addressing fields the
-        // move rewrites.
-        const newName = toLoc.split(':').pop()!;
-        await createNodeRevision(tx, {
-          id: generateId(),
-          ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
-            changes: diffNodeChanges(existing, {
-              loc: toLoc,
-              name: newName,
+          // Move BY ID — id is stable across moves, so this refetch can't race a
+          // concurrent move into the same slot.
+          const moved = await tx.node.findUniqueOrThrow({
+            where: { id: existing.id },
+            include: {
+              outgoingEdges: {
+                where: { target: { deletedAt: null } },
+                select: { id: true },
+              },
+              incomingEdges: {
+                where: { source: { deletedAt: null } },
+                select: { id: true },
+              },
+            },
+          });
+
+          // Immediate children now living under the destination loc (the moved
+          // descendants plus any that were pre-staged there).
+          const childCount = await tx.node.count({
+            where: {
               memoryId: toMemory.id,
-            }),
-          }),
-        });
-
-        // Move BY ID — see comment above the transaction.
-        const moved = await tx.node.update({
-          where: { id: existing.id },
-          data: { loc: toLoc, name: newName, memoryId: toMemory.id },
-          include: {
-            outgoingEdges: {
-              where: { target: { deletedAt: null } },
-              select: { id: true },
+              loc: { startsWith: toLoc + ':' },
+              deletedAt: null,
             },
-            incomingEdges: {
-              where: { source: { deletedAt: null } },
-              select: { id: true },
-            },
-          },
-        });
+          });
 
-        const childCount = await tx.node.count({
-          where: {
-            memoryId: toMemory.id,
-            loc: { startsWith: toLoc + ':' },
-            deletedAt: null,
-          },
-        });
-
-        return { ok: true, moved, childCount };
-      });
+          return { ok: true, moved, childCount };
+        },
+        // A large same-memory subtree touches many rows (two updates + a revision
+        // per node); the default 5s interactive-txn timeout is too tight — match
+        // the GraphQL moveNode path so inputs that succeed there don't time out
+        // here (mirrors extractParentNodeGraph / cloneMemory).
+        { timeout: 120_000 });
+      } catch (e) {
+        // A descendant-slot collision (or a move-into-own-subtree) aborts the
+        // whole transaction — including any overwrite eviction — and surfaces as
+        // a refusal, not a partial move.
+        if (e instanceof SubtreeMoveCollisionError) {
+          return textResult(
+            `URN_ALREADY_EXISTS: A node already occupies loc "${e.loc}" in the destination memory ` +
+              `(a descendant slot of this move). Free it first, then retry.`,
+          );
+        }
+        if (e instanceof SubtreeMoveIntoSelfError) {
+          return textResult('Cannot move a node into its own subtree.');
+        }
+        if (e instanceof SubtreeMoveSourceChangedError) {
+          return textResult('The node was moved concurrently; re-read it and retry.');
+        }
+        throw e;
+      }
 
       const fromUrn = await nodeUrn(fromLoc, fromMemory.id);
       const toUrn = await nodeUrn(toLoc, toMemory.id);
 
       if ('refused' in result) {
+        if (result.refused === 'cross-memory-subtree') {
+          return textResult(
+            `CROSS_MEMORY_SUBTREE: "${fromUrn}" has ${result.descendantCount} descendant(s), so it ` +
+              `can't be moved to another memory with this tool. Move it within its memory, or ` +
+              `relocate the subtree with the extractParentNodeToMemory GraphQL mutation.`,
+          );
+        }
         return textResult(
           `URN_ALREADY_EXISTS: A live node already occupies "${result.targetUrn}". ` +
             `Pass overwrite: true to soft-delete it first and move into its place, ` +
@@ -3802,9 +3884,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         lines.push(`Edges: ${outgoing} outgoing, ${incoming} incoming.`);
       }
       if (childCount > 0) {
-        lines.push(
-          `Children: ${childCount} immediate descendant(s) (NOT moved — still under the old prefix).`,
-        );
+        lines.push(`Children: ${childCount} immediate descendant(s).`);
       }
 
       return textResult(lines.join('\n'));

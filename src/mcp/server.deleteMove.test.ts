@@ -364,13 +364,10 @@ describe('hadron_move_node — return record (#185 F1)', () => {
     expect(outgoing[0].targetId).toBe(fx.nodes.edgeTarget.id);
   });
 
-  it('descendants do NOT move with the source (documented; child count line absent)', async () => {
-    // The `relocate:src:child` orphan stays under its old prefix and
-    // becomes a child of an implicit `relocate:src` parent (the F4 fix
-    // in PR-188 renders that gracefully). The Children: line in the
-    // move record reports descendants of the NEW loc, which is 0
-    // here — and 0 sections are omitted.
-    await db.node.create({
+  it('descendants MOVE with the source, rebased under the new loc (#768)', async () => {
+    // The `relocate:src:child` descendant is rebased to `relocated:child` so its
+    // computed URN follows the parent (it must NOT be stranded at the old prefix).
+    const child = await db.node.create({
       data: {
         id: generateId(),
         memoryId: fx.memory.id,
@@ -388,13 +385,16 @@ describe('hadron_move_node — return record (#185 F1)', () => {
     });
 
     expect(text).toMatch(/Moved/);
-    expect(text).not.toMatch(/Children:/);
-    // The orphan record still sits at its old loc, unaffected.
+    expect(text).toMatch(/Children: 1 immediate descendant/);
+    // The descendant kept its id but was rebased under the new parent loc.
+    const moved = await db.node.findUniqueOrThrow({ where: { id: child.id } });
+    expect(moved.loc).toBe('relocated:child');
+    // Nothing left stranded at the old prefix.
     expect(
       await db.node.findFirst({
         where: { loc: 'relocate:src:child', memoryId: fx.memory.id, deletedAt: null },
       }),
-    ).not.toBeNull();
+    ).toBeNull();
   });
 
   it('surfaces a non-zero Children count when the new loc already had descendants pre-staged', async () => {
