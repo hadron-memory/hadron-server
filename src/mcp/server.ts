@@ -32,6 +32,7 @@ import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
   SubtreeMoveIntoSelfError,
+  SubtreeMoveSourceChangedError,
 } from '../lib/nodeSubtreeMove.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import {
@@ -3614,7 +3615,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
 Collision policy: if a live node already occupies \`targetUrn\`, the call refuses with a URN_ALREADY_EXISTS error. Pass \`overwrite: true\` to soft-delete the existing target first; the evicted row is re-stamped to \`<loc>__deleted-<full-id>\` so the unique \`(loc, memoryId)\` constraint doesn't block. Hard-overwrite isn't supported — call hadron_delete_node (hard: true) on the target first if you need that.
 
-Descendants move WITH the node (#768): a node's loc-subtree (every node whose loc is prefixed by \`<loc>:\`) is rebased onto the new loc, and edges wholly inside the subtree have their loc re-derived — so children's URNs follow the parent. A collision at any DESCENDANT slot refuses the whole move (overwrite only evicts the explicitly-named target loc).
+Descendants move WITH the node on a SAME-MEMORY move (#768): a node's loc-subtree (every node whose loc is prefixed by \`<loc>:\`) is rebased onto the new loc, and edges whose source moved have their loc re-derived — so children's URNs follow the parent. A collision at any DESCENDANT slot refuses the whole move (overwrite only evicts the explicitly-named target loc). Moving a node that HAS descendants to ANOTHER memory is refused (use the extractParentNode operation for a cross-memory subtree move); a cross-memory move of a leaf node is fine.
 
 Atomicity: collision-evict → per-node NodeRevision snapshot → subtree move all run inside a single db.$transaction so a partial failure cannot leave the URN slot empty.
 
@@ -3678,6 +3679,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // same slot — `id` is stable across moves.
       type MoveResult =
         | { refused: 'urn-exists'; targetUrn: string }
+        | { refused: 'cross-memory-subtree'; descendantCount: number }
         | {
             ok: true;
             moved: {
@@ -3718,6 +3720,20 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               data: { loc: toLoc, name: newName, memoryId: toMemory.id },
             });
           } else {
+            const crossMemory = toMemory.id !== fromMemory.id;
+
+            // #768: a CROSS-memory move of a node with descendants is refused —
+            // relocating the subtree into another memory would turn its boundary
+            // edges into cross-memory edges whose endpoints resolve without a
+            // per-endpoint access check. Use extractParentNode for that. A
+            // cross-memory LEAF move is fine (single node, below).
+            if (crossMemory) {
+              const descendantCount = await tx.node.count({
+                where: { memoryId: fromMemory.id, deletedAt: null, loc: { startsWith: `${fromLoc}:` } },
+              });
+              if (descendantCount > 0) return { refused: 'cross-memory-subtree', descendantCount };
+            }
+
             // Collision policy for the EXPLICITLY-named target loc: a live
             // occupant refuses unless overwrite:true, which soft-deletes it and
             // re-stamps its loc out of the way so the (loc, memoryId) unique
@@ -3745,18 +3761,33 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               });
             }
 
-            // #768: relocate the whole loc-subtree (descendants + intra-subtree
-            // edges) via the shared helper — the ONE implementation the GraphQL
-            // moveNode resolver also uses. renameSourceLeaf sets the moved node's
-            // name to the loc leaf (this tool's long-standing behavior); it
-            // writes a NodeRevision per moved node.
-            await moveNodeSubtree(tx, {
-              source: existing,
-              destMemoryId: toMemory.id,
-              destLoc: toLoc,
-              editor: editorFromAuth(auth),
-              renameSourceLeaf: true,
-            });
+            if (crossMemory) {
+              // Single-node (leaf) cross-memory move — the long-standing behavior
+              // (name normalized to the loc leaf). No subtree to cascade.
+              const newName = toLoc.split(':').pop()!;
+              await createNodeRevision(tx, {
+                id: generateId(),
+                ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
+                  changes: diffNodeChanges(existing, { loc: toLoc, name: newName, memoryId: toMemory.id }),
+                }),
+              });
+              await tx.node.update({
+                where: { id: existing.id },
+                data: { loc: toLoc, name: newName, memoryId: toMemory.id },
+              });
+            } else {
+              // #768: same-memory move — rebase the whole loc-subtree via the
+              // shared helper (the ONE implementation the GraphQL moveNode
+              // resolver also uses). renameSourceLeaf sets the moved node's name
+              // to the loc leaf (this tool's long-standing behavior); it writes a
+              // NodeRevision per moved node and re-derives intra-subtree edge locs.
+              await moveNodeSubtree(tx, {
+                source: existing,
+                destLoc: toLoc,
+                editor: editorFromAuth(auth),
+                renameSourceLeaf: true,
+              });
+            }
           }
 
           // Move BY ID — id is stable across moves, so this refetch can't race a
@@ -3800,6 +3831,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (e instanceof SubtreeMoveIntoSelfError) {
           return textResult('Cannot move a node into its own subtree.');
         }
+        if (e instanceof SubtreeMoveSourceChangedError) {
+          return textResult('The node was moved concurrently; re-read it and retry.');
+        }
         throw e;
       }
 
@@ -3807,6 +3841,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const toUrn = await nodeUrn(toLoc, toMemory.id);
 
       if ('refused' in result) {
+        if (result.refused === 'cross-memory-subtree') {
+          return textResult(
+            `CROSS_MEMORY_SUBTREE: "${fromUrn}" has ${result.descendantCount} descendant(s), so it ` +
+              `can't be moved to another memory here. Move it within its memory, or use the ` +
+              `extractParentNode operation to relocate the subtree.`,
+          );
+        }
         return textResult(
           `URN_ALREADY_EXISTS: A live node already occupies "${result.targetUrn}". ` +
             `Pass overwrite: true to soft-delete it first and move into its place, ` +
