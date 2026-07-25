@@ -92,6 +92,20 @@ describe('Edge.source / Edge.target cross-memory gate (#781)', () => {
     expect((await E.target(e, {}, ctx(admin.id, ['ADMIN'])))?.id).toBe(nodeB.id);
   });
 
+  it('resolves endpoints of a same-memory SYSTEM edge for an org member (#781 review P2)', async () => {
+    // getAccessibleMemoryIds omits app/system-class org memories, but an org
+    // member reaches them via appNodes / Query.memory's org-member fast-path —
+    // which isMemoryReadableRow honors. The gate must not null these endpoints.
+    const sysMem = await db.memory.create({
+      data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:sys`, name: 'sys', class: 'system', visibility: null },
+    });
+    const s1 = await createDbNode(db, { loc: 's1', memoryId: sysMem.id });
+    const s2 = await createDbNode(db, { loc: 's2', memoryId: sysMem.id });
+    const e = { id: generateId(), memoryId: sysMem.id, sourceId: s1.id, targetId: s2.id, name: 'rel' };
+    expect((await E.source(e, {}, ctx(member.id)))?.id).toBe(s1.id);
+    expect((await E.target(e, {}, ctx(member.id)))?.id).toBe(s2.id);
+  });
+
   it('a caller who can read NEITHER memory gets null for both', async () => {
     const stranger = await db.user.create({ data: { id: generateId(), githubId: 90103, githubUsername: 'eg-stranger' } });
     const e = crossEdge();
