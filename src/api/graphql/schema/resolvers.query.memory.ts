@@ -147,7 +147,9 @@ export const memoryQueries = {
       // turned that Forbidden into an HTTP 500 (issue #362). The org-member
       // fast-path is kept because getAccessibleMemoryIds (via
       // getOrgReadableMemoryIds) intentionally omits app/system-class org
-      // memories, which members can still open here as they do today.
+      // memories, which members can still open here as they do today. NOTE this
+      // record-level fast-path is INTENTIONALLY broader than the node-content
+      // gate the Edge endpoint check uses (#781) — see isMemoryReadableCached.
       if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
         // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no
         // longer grants access — matches getOrgReadableMemoryIds' own

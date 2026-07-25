@@ -54,6 +54,11 @@ export interface Context {
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.
   edgeEndpointNodeCache?: Map<string, Promise<unknown>>;
+  // Request-scoped memo for per-memory READ-access checks (#781) — gates
+  // Edge.source/target endpoint resolution on a cross-memory read. A graph
+  // response's edges overwhelmingly share a few endpoint memories, so each
+  // distinct memory is checked once per request (see canReadMemoryCached).
+  memoryReadCache?: Map<string, Promise<boolean>>;
   // Request-scoped memo for Node.urn / Edge.urn composition (#481) — a list
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
@@ -119,6 +124,37 @@ export function loadEdgeEndpointNode(ctx: Context, id: string): Promise<unknown>
   if (!pending) {
     pending = ctx.db.node.findUnique({ where: { id } });
     cache.set(id, pending);
+  }
+  return pending;
+}
+
+/**
+ * Per-request memoized NODE-CONTENT read check for a single memory (#781). Backs
+ * the Edge.source/target CROSS-memory endpoint gate: a cross-memory edge (source
+ * in memory A, target in memory B) must NOT let a caller who can read only A
+ * resolve the B-side node — `edge`/`edges` authorize on the denormalized
+ * `Edge.memoryId` and Node.incomingEdges reaches edges whose memoryId the caller
+ * never authorized, while the endpoint resolvers historically loaded the node by
+ * FK with no re-check.
+ *
+ * Uses the NODE-CONTENT gate `getAccessibleMemoryIds` — the same predicate
+ * nodeById / memoryAccessFilter use — deliberately NOT Query.memory's
+ * record-level org-member fast-path (which admits app/system memory RECORDS to
+ * org members but must not expose their node CONTENT — getOrgReadableMemoryIds
+ * excludes app-scoped rows via `appId: null`). Consequence (security-first,
+ * fail-safe): a cross-memory endpoint reachable ONLY via appNodes' App-install
+ * grant is nulled rather than leaked; folding the App-install scope into a
+ * complete node-read gate is the tracked follow-up (#781). Memoized per distinct
+ * memory since a graph response's edges share a few endpoint memories.
+ */
+export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<boolean> {
+  const cache = (ctx.memoryReadCache ??= new Map<string, Promise<boolean>>());
+  let pending = cache.get(memoryId);
+  if (!pending) {
+    pending = getAccessibleMemoryIds(ctx, memoryId).then(
+      (ids) => ids === null || ids.includes(memoryId),
+    );
+    cache.set(memoryId, pending);
   }
   return pending;
 }

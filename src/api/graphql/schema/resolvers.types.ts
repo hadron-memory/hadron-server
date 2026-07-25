@@ -31,6 +31,7 @@ import {
 import {
   type Context,
   loadEdgeEndpointNode,
+  isMemoryReadableCached,
   loadMemoryUrn,
   loadAppUrn,
   defaultAiConfigOf,
@@ -48,6 +49,66 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
+
+/** An edge endpoint's memoryId (preloaded relation, or a memoized FK load). */
+async function edgeEndpointMemoryId(
+  ctx: Context,
+  preloaded: unknown,
+  endpointId: string,
+): Promise<string | null> {
+  const pre = preloaded as { memoryId?: string } | null | undefined;
+  if (pre && typeof pre.memoryId === 'string') return pre.memoryId;
+  const node = (await loadEdgeEndpointNode(ctx, endpointId)) as { memoryId?: string } | null;
+  return node && typeof node.memoryId === 'string' ? node.memoryId : null;
+}
+
+/**
+ * #781 — resolve an edge endpoint (source/target), gating a CROSS-memory
+ * endpoint on the caller's read access.
+ *
+ * Every surface that hands the caller this Edge authorized the memory it was
+ * scoped to — `edges`/`edge` and Node.outgoingEdges authorize on `Edge.memoryId`
+ * (the source-side memory), Node.incomingEdges via the parent (target) node's
+ * read, appNodes via the App. So the skip-the-check fast path is valid ONLY when
+ * BOTH endpoints AND the edge all sit in one memory (`src == tgt == e.memoryId`):
+ * that single memory is the authorized one, so both endpoints are safe (this is
+ * the overwhelming majority, and it keeps appNodes system/app same-memory graphs
+ * working). Crucially this also refuses the shortcut when `Edge.memoryId` is
+ * STALE relative to the endpoints — a cross-memory node move can leave an A→B
+ * edge's memoryId at A while both endpoints now live in B; without the
+ * `== e.memoryId` clause an A-only reader would get both B nodes.
+ *
+ * Otherwise the requested endpoint is gated on its OWN memory via the
+ * node-content gate (getAccessibleMemoryIds, see isMemoryReadableCached).
+ * Denied ≡ null.
+ */
+async function resolveEdgeEndpoint(
+  ctx: Context,
+  e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown },
+  side: 'source' | 'target',
+): Promise<unknown | null> {
+  const wantId = side === 'source' ? e.sourceId : e.targetId;
+  const wantPre = side === 'source' ? e.source : e.target;
+  const otherId = side === 'source' ? e.targetId : e.sourceId;
+  const otherPre = side === 'source' ? e.target : e.source;
+
+  // The requested endpoint node — preloaded (even partially), else memoized FK.
+  const pre = wantPre as { memoryId?: string } | null | undefined;
+  const node =
+    pre && typeof pre.memoryId === 'string'
+      ? pre
+      : ((await loadEdgeEndpointNode(ctx, wantId)) as { memoryId?: string } | null);
+  if (!node || typeof node.memoryId !== 'string') return null;
+
+  // Fast path: the edge and BOTH endpoints share one memory ⇒ that authorized
+  // memory holds both endpoints, no per-endpoint check needed.
+  const otherMem = await edgeEndpointMemoryId(ctx, otherPre, otherId);
+  if (node.memoryId === e.memoryId && otherMem === e.memoryId) return node;
+
+  // Cross-memory (or a stale/mismatched Edge.memoryId) → gate this endpoint on
+  // its own memory's node-content access.
+  return (await isMemoryReadableCached(ctx, node.memoryId)) ? node : null;
+}
 
 /**
  * Resolve one editor/approver candidate string to public identifiers:
@@ -197,25 +258,28 @@ export const typeResolvers = {
       toISO(n.embeddingFailedAt),
   },
   Edge: {
-    // `Edge.source` / `Edge.target` are non-null (`Node!`) in the schema, but
-    // callers preload only the relevant endpoint per direction (e.g. nodeById
-    // does `outgoingEdges: { include: { target: true } }` — source is NOT
-    // loaded — and the mirror for incomingEdges). A client selecting the
-    // unloaded side would otherwise resolve to null, violate the non-null
-    // field, and bubble up to error the WHOLE query (e.g. the portal edge
-    // detail page selecting `source` on an outgoing edge → 500). Lazily load
-    // the endpoint by FK when it wasn't preloaded — same pattern as
-    // Node.memory. The fast path (preloaded) returns the relation unchanged.
-    //
-    // The lazy path runs once per Edge in a list, and edges commonly SHARE an
-    // endpoint — e.g. `nodeById { outgoingEdges { source } }`, where every
-    // edge's source is the same parent node. `loadEdgeEndpointNode` memoizes
-    // the fetch in a request-scoped cache on the Context so each node is read
-    // at most once per request (no N+1 of identical findUnique). PR #381 review.
-    source: (e: { sourceId: string; source?: unknown }, _: unknown, ctx: Context) =>
-      e.source ?? loadEdgeEndpointNode(ctx, e.sourceId),
-    target: (e: { targetId: string; target?: unknown }, _: unknown, ctx: Context) =>
-      e.target ?? loadEdgeEndpointNode(ctx, e.targetId),
+    // `Edge.source` / `Edge.target` are NULLABLE (`Node`) in the schema, for two
+    // reasons:
+    //   (1) callers preload only the relevant endpoint per direction (e.g.
+    //       nodeById does `outgoingEdges: { include: { target: true } }` — source
+    //       is NOT loaded — and the mirror for incomingEdges). The unloaded side
+    //       is lazily loaded by FK, memoized per request (edges in a list share
+    //       endpoints — e.g. every outgoing edge of one node shares its source),
+    //       so each endpoint node is read at most once per request. #381.
+    //   (2) #781 — cross-memory endpoint gate. A cross-memory edge (source in
+    //       memory A, target in memory B) is reachable by a caller who can read
+    //       only ONE side (e.g. Node.incomingEdges surfaces an edge whose source
+    //       lives in a memory the caller never authorized). The endpoint
+    //       resolvers previously loaded the node by FK with no re-check, leaking
+    //       the far node's data across tenants. resolveEdgeEndpoint gates a
+    //       CROSS-memory endpoint on the caller's read access to its OWN memory;
+    //       a SAME-memory edge's endpoints sit in the already-authorized memory
+    //       (every surface that surfaced this edge authorized that memory), so
+    //       they need no per-endpoint check. Denied ≡ null.
+    source: (e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context) =>
+      resolveEdgeEndpoint(ctx, e, 'source'),
+    target: (e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context) =>
+      resolveEdgeEndpoint(ctx, e, 'target'),
     // #481 parity — edges are loc-addressed peers of nodes (spec 037), so
     // they carry their fully-qualified URN the same way. Edge.memoryId is the
     // denormalized SOURCE-side memory, which is exactly the URN's memory.
