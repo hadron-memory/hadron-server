@@ -22,11 +22,13 @@
  *
  * It rebases every node in the subtree (`<source.loc>` and each
  * `<source.loc>:…` descendant, on `:` path boundaries) onto `destLoc`, writes a
- * pre-move NodeRevision for each, moves the rows BY ID (stable — every edge
- * reference stays valid), and re-derives the loc of edges whose SOURCE moved
- * (their derived loc `<sourceLoc>:<name>:<targetLoc>` embeds the changed source
- * loc). Everything stays in the one memory, so no `memoryId` — on nodes, edges,
- * or embeddings — ever changes, and there is no cross-tenant surface.
+ * pre-move NodeRevision for each, and moves the rows BY ID (stable — every edge
+ * reference stays valid). Everything stays in the one memory, so no `memoryId`
+ * ever changes and there is no cross-tenant surface. EDGES are left untouched:
+ * their loc is a derived denormalization, references are by stable id (the graph
+ * stays intact), and re-deriving edge locs on a move — with its collision +
+ * incoming/outgoing symmetry — is out of scope for the #768 rename fix (folded
+ * into #781), exactly as a single-node move has always left them.
  *
  * The CALLER owns everything around it: write-authorization, the destination
  * ancestor lock (`lockAncestorsForCreate`), the same-slot no-op short-circuit,
@@ -36,7 +38,6 @@
  * MUST live in the same memory it's moving within.
  */
 
-import { deriveEdgeLoc } from './edgeLoc.js';
 import { lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
 import {
@@ -168,38 +169,12 @@ export async function moveNodeSubtree(
     await tx.node.update({ where: { id: n.id }, data: changed });
   }
 
-  // Edges whose SOURCE moved: re-derive the loc from the rebased source + the
-  // target's loc (rebased when the target also moved, else its current loc), so
-  // the denormalized edge loc stays consistent with the endpoints. memoryId is
-  // never touched — this is a same-memory move, so every such edge stays in this
-  // memory (no cross-tenant exposure; see the module doc). A numeric suffix
-  // disambiguates the rare derived-loc collision (mirrors extractParentNode).
-  const outgoing = await tx.edge.findMany({
-    where: { deletedAt: null, sourceId: { in: [...movedIds] } },
-  });
-  if (outgoing.length > 0) {
-    const outsideTargetIds = [
-      ...new Set(outgoing.map((e) => e.targetId).filter((id) => !movedIds.has(id))),
-    ];
-    const outsideTargetLoc = new Map<string, string>();
-    if (outsideTargetIds.length > 0) {
-      const rows = await tx.node.findMany({
-        where: { id: { in: outsideTargetIds } },
-        select: { id: true, loc: true },
-      });
-      for (const r of rows) outsideTargetLoc.set(r.id, r.loc);
-    }
-    const usedLocs = new Set<string>();
-    for (const e of outgoing) {
-      const tgtLoc = newLocById.get(e.targetId) ?? outsideTargetLoc.get(e.targetId);
-      if (tgtLoc == null) continue; // target vanished (defensive; shouldn't happen)
-      const base = deriveEdgeLoc(newLocById.get(e.sourceId)!, e.name, tgtLoc);
-      let loc = base;
-      for (let k = 2; usedLocs.has(loc); k++) loc = `${base}:${k}`;
-      usedLocs.add(loc);
-      await tx.edge.update({ where: { id: e.id }, data: { loc } });
-    }
-  }
+  // Edges are intentionally left untouched (their loc is a derived
+  // denormalization of the endpoint locs). Edge references are by stable id, so
+  // the graph stays intact; only an edge's derived `loc`/URN goes stale — exactly
+  // as a single-node move has always left it. Re-deriving edge locs on a move
+  // opens up (loc, memoryId) collision handling and incoming/outgoing symmetry
+  // that is out of scope for the #768 rename fix; it's folded into #781.
 
   return { movedCount: subtree.length };
 }

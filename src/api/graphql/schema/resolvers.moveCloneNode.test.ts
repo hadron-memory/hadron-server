@@ -138,17 +138,19 @@ describe('moveNode subtree cascade (#768)', () => {
     expect(await locsIn(memA.id)).toEqual(['findings:auth-v2', 'findings:security', 'findings:security:oauth']);
   });
 
-  it('re-derives the loc of an edge whose source moved (same-memory rename)', async () => {
+  it('keeps edge references intact across a same-memory subtree rename', async () => {
+    // Edge locs are a derived denormalization left untouched by a move (#781);
+    // the reference (source/target ids) must stay valid so the graph is intact.
     const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
     const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
     const e = await edge(parent.id, child.id, memA.id, 'p:rel:p:c');
 
     await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnA('q') }, asUser());
-    const movedEdge = await db.edge.findUniqueOrThrow({ where: { id: e.id } });
-    expect(movedEdge.loc).toBe('q:rel:q:c'); // re-derived from the rebased endpoints
-    expect(movedEdge.memoryId).toBe(memA.id); // same-memory move — memoryId unchanged
-    expect(movedEdge.sourceId).toBe(parent.id); // endpoints unchanged (stable ids)
-    expect(movedEdge.targetId).toBe(child.id);
+    const stillThere = await db.edge.findUniqueOrThrow({ where: { id: e.id } });
+    expect(stillThere.sourceId).toBe(parent.id);
+    expect(stillThere.targetId).toBe(child.id);
+    // Endpoints were rebased; the edge still connects them by id.
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('q:c');
   });
 
   it('refuses a CROSS-memory move of a node that has descendants (#768 scope)', async () => {
