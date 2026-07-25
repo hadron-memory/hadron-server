@@ -54,6 +54,11 @@ export interface Context {
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.
   edgeEndpointNodeCache?: Map<string, Promise<unknown>>;
+  // Request-scoped memo for per-memory READ-access checks (#781) — gates
+  // Edge.source/target endpoint resolution on a cross-memory read. A graph
+  // response's edges overwhelmingly share a few endpoint memories, so each
+  // distinct memory is checked once per request (see canReadMemoryCached).
+  memoryReadCache?: Map<string, Promise<boolean>>;
   // Request-scoped memo for Node.urn / Edge.urn composition (#481) — a list
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
@@ -119,6 +124,35 @@ export function loadEdgeEndpointNode(ctx: Context, id: string): Promise<unknown>
   if (!pending) {
     pending = ctx.db.node.findUnique({ where: { id } });
     cache.set(id, pending);
+  }
+  return pending;
+}
+
+/**
+ * Per-request memoized READ-access check for a single memory (#781). Backs the
+ * Edge.source/target endpoint gate: a cross-memory edge (source in memory A,
+ * target in memory B) must NOT let a caller who can read only A resolve the
+ * B-side node — `edge`/`edges` authorize on the denormalized `Edge.memoryId`
+ * and Node.incomingEdges reaches edges whose memoryId the caller never
+ * authorized, while the endpoint resolvers historically loaded the node by FK
+ * with no re-check.
+ *
+ * Routes through the SHARED gate `getAccessibleMemoryIds` (the same predicate
+ * nodeById / memoryAccessFilter / Query.memory use), NOT the MCP `canReadMemory`
+ * — so PUBLIC/anonymous, org-member, platform-admin, subscription, personal-
+ * owner and grantee access all resolve identically to the rest of the read
+ * surface (no bespoke-gate drift). Scoped point-check (`onlyMemoryId`) so it's an
+ * indexed lookup, memoized per distinct memory since a graph response's edges
+ * overwhelmingly share a few endpoint memories.
+ */
+export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<boolean> {
+  const cache = (ctx.memoryReadCache ??= new Map<string, Promise<boolean>>());
+  let pending = cache.get(memoryId);
+  if (!pending) {
+    pending = getAccessibleMemoryIds(ctx, memoryId).then(
+      (ids) => ids === null || ids.includes(memoryId),
+    );
+    cache.set(memoryId, pending);
   }
   return pending;
 }

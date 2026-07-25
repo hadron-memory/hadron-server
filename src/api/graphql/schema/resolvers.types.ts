@@ -31,6 +31,7 @@ import {
 import {
   type Context,
   loadEdgeEndpointNode,
+  isMemoryReadableCached,
   loadMemoryUrn,
   loadAppUrn,
   defaultAiConfigOf,
@@ -48,6 +49,31 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
+
+/**
+ * #781 — resolve an edge endpoint (source/target) ONLY if the caller can read
+ * its memory. Uses the preloaded relation when present, else lazily loads the
+ * node by FK (memoized). Returns null when the endpoint's memory isn't readable
+ * by the caller — closing the cross-memory endpoint leak (see the Edge resolver
+ * note). Same-memory endpoints pass a single memoized check.
+ */
+async function gateEdgeEndpoint(
+  ctx: Context,
+  preloaded: unknown,
+  endpointId: string,
+): Promise<unknown | null> {
+  const pre = preloaded as { memoryId?: string } | null | undefined;
+  // Gate on the endpoint's memory. Prefer the preloaded relation, but if it's
+  // absent OR a partial select without memoryId (some internal paths preload
+  // `{ target: { select: { loc } } }`), load the full row by FK (memoized) so we
+  // never fail a legitimate endpoint closed for lack of the scoping column.
+  const node =
+    pre && typeof pre.memoryId === 'string'
+      ? pre
+      : ((await loadEdgeEndpointNode(ctx, endpointId)) as { memoryId?: string } | null);
+  if (!node || typeof node.memoryId !== 'string') return null;
+  return (await isMemoryReadableCached(ctx, node.memoryId)) ? node : null;
+}
 
 /**
  * Resolve one editor/approver candidate string to public identifiers:
@@ -197,25 +223,29 @@ export const typeResolvers = {
       toISO(n.embeddingFailedAt),
   },
   Edge: {
-    // `Edge.source` / `Edge.target` are non-null (`Node!`) in the schema, but
-    // callers preload only the relevant endpoint per direction (e.g. nodeById
-    // does `outgoingEdges: { include: { target: true } }` — source is NOT
-    // loaded — and the mirror for incomingEdges). A client selecting the
-    // unloaded side would otherwise resolve to null, violate the non-null
-    // field, and bubble up to error the WHOLE query (e.g. the portal edge
-    // detail page selecting `source` on an outgoing edge → 500). Lazily load
-    // the endpoint by FK when it wasn't preloaded — same pattern as
-    // Node.memory. The fast path (preloaded) returns the relation unchanged.
-    //
-    // The lazy path runs once per Edge in a list, and edges commonly SHARE an
-    // endpoint — e.g. `nodeById { outgoingEdges { source } }`, where every
-    // edge's source is the same parent node. `loadEdgeEndpointNode` memoizes
-    // the fetch in a request-scoped cache on the Context so each node is read
-    // at most once per request (no N+1 of identical findUnique). PR #381 review.
+    // `Edge.source` / `Edge.target` are NULLABLE (`Node`) in the schema, for two
+    // reasons:
+    //   (1) callers preload only the relevant endpoint per direction (e.g.
+    //       nodeById does `outgoingEdges: { include: { target: true } }` — source
+    //       is NOT loaded — and the mirror for incomingEdges). The unloaded side
+    //       is lazily loaded by FK, memoized per request (edges in a list share
+    //       endpoints — e.g. every outgoing edge of one node shares its source),
+    //       so each endpoint node is read at most once per request. #381.
+    //   (2) #781 — cross-memory endpoint gate. A cross-memory edge (source in
+    //       memory A, target in memory B) is reachable by a caller who can read
+    //       only ONE side: `edge`/`edges` authorize on the denormalized
+    //       `Edge.memoryId`, and Node.incomingEdges reaches edges whose memoryId
+    //       the caller never authorized. The endpoint resolvers previously loaded
+    //       the node by FK with no re-check, leaking the far node's data across
+    //       tenants. Now each endpoint resolves to null unless the caller can
+    //       read that endpoint's OWN memory (isMemoryReadableCached, routed
+    //       through the shared getAccessibleMemoryIds gate — memoized, so a
+    //       same-memory graph pays one check). Denied ≡ null (no existence
+    //       oracle beyond the edge the caller already saw).
     source: (e: { sourceId: string; source?: unknown }, _: unknown, ctx: Context) =>
-      e.source ?? loadEdgeEndpointNode(ctx, e.sourceId),
+      gateEdgeEndpoint(ctx, e.source, e.sourceId),
     target: (e: { targetId: string; target?: unknown }, _: unknown, ctx: Context) =>
-      e.target ?? loadEdgeEndpointNode(ctx, e.targetId),
+      gateEdgeEndpoint(ctx, e.target, e.targetId),
     // #481 parity — edges are loc-addressed peers of nodes (spec 037), so
     // they carry their fully-qualified URN the same way. Edge.memoryId is the
     // denormalized SOURCE-side memory, which is exactly the URN's memory.
