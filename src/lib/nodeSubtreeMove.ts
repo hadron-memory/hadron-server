@@ -81,6 +81,46 @@ export interface MoveNodeSubtreeResult {
 }
 
 /**
+ * Acquire the source-subtree advisory locks and revalidate the source row.
+ * Shared by {@link moveNodeSubtree} (the same-memory subtree move) AND the
+ * callers' cross-memory LEAF path, so EVERY move that reads or relocates from
+ * `source.loc` serializes the same way. Without this, a path that resolves the
+ * source before the transaction (all of them) and then reads/counts under
+ * `source.loc` races a concurrent move of that node: the concurrent move can
+ * commit `p → q` first, this path then sees an empty `p:` prefix and acts on a
+ * stale snapshot — stranding descendants (they're now under `q:`) or defeating
+ * the cross-memory descendant guard.
+ *
+ * Locks (a) the source's ANCESTOR path — so a concurrent move of a DESCENDANT,
+ * which locks its own ancestors (including `source.loc`), contends here — and
+ * (b) `source.loc` itself — matching the key a descendant CREATE locks as its
+ * ancestor. Then re-reads the row by id and throws
+ * {@link SubtreeMoveSourceChangedError} if it was relocated/deleted meanwhile.
+ * The caller must already hold the DESTINATION ancestor lock. Two moves that
+ * relocate into each other's subtrees can still deadlock on these keys —
+ * Postgres detects and aborts one (self-healing; moves are infrequent).
+ */
+export async function lockSourceForMove(
+  tx: Prisma.TransactionClient,
+  source: { id: string; loc: string; memoryId: string },
+): Promise<void> {
+  await lockAncestorsForCreate(tx, source.memoryId, source.loc);
+  await lockNodeForDelete(tx, source.memoryId, source.loc);
+  const fresh = await tx.node.findUnique({
+    where: { id: source.id },
+    select: { loc: true, memoryId: true, deletedAt: true },
+  });
+  if (
+    !fresh ||
+    fresh.deletedAt ||
+    fresh.loc !== source.loc ||
+    fresh.memoryId !== source.memoryId
+  ) {
+    throw new SubtreeMoveSourceChangedError(source.id);
+  }
+}
+
+/**
  * Relocate `source` and its loc-subtree to `destLoc` within the SAME memory. See
  * the module doc for the caller's responsibilities. Throws
  * {@link SubtreeMoveIntoSelfError} / {@link SubtreeMoveCollisionError} /
@@ -109,38 +149,10 @@ export async function moveNodeSubtree(
     throw new SubtreeMoveIntoSelfError(destLoc);
   }
 
-  // Serialize this move against concurrent creates/moves anywhere in the source
-  // subtree, on two advisory keys:
-  //   - `source.loc` itself (lockNodeForDelete): a create of `source.loc:x` locks
-  //     `source.loc` as its ancestor, so it either commits before the descendant
-  //     read below (swept in) or blocks until this move completes (lands under
-  //     the moved prefix).
-  //   - the source's ANCESTOR path (lockAncestorsForCreate): a concurrent move of
-  //     a DESCENDANT (e.g. `source.loc:c`) locks its own ancestors — which
-  //     include `source.loc` — so it contends with THIS move's `source.loc` lock.
-  //     Without this, an ancestor move and a descendant move take disjoint exact
-  //     locks, both snapshot overlapping rows, and the later writer pulls the
-  //     descendant out of the earlier move's subtree (PR #780 review P1). Now one
-  //     blocks the other; the loser re-reads and either sees the moved prefix or
-  //     aborts via the source revalidation below.
-  // The caller has already locked the DESTINATION ancestor path. Two moves that
-  // relocate into each other's subtrees can still deadlock on these keys —
-  // Postgres detects and aborts one (self-healing; moves are infrequent).
-  await lockAncestorsForCreate(tx, memoryId, source.loc);
-  await lockNodeForDelete(tx, memoryId, source.loc);
-
-  // Revalidate the source AFTER the lock: a concurrent move of the SAME node
-  // could have relocated it between the caller's pre-transaction resolve and
-  // this lock, leaving `source.loc` empty. Proceeding would move the node by id
-  // while its descendants (now under the other destination) are missed and
-  // stranded — the very bug this fixes. Abort so the caller can retry.
-  const fresh = await tx.node.findUnique({
-    where: { id: source.id },
-    select: { loc: true, memoryId: true, deletedAt: true },
-  });
-  if (!fresh || fresh.deletedAt || fresh.loc !== source.loc || fresh.memoryId !== memoryId) {
-    throw new SubtreeMoveSourceChangedError(source.id);
-  }
+  // Lock the source subtree + revalidate the source (shared with the callers'
+  // cross-memory leaf path — see lockSourceForMove). The caller already holds
+  // the destination ancestor lock.
+  await lockSourceForMove(tx, source);
 
   // The subtree: the source node's descendants, on ':' path boundaries (so
   // `findings:auth` doesn't sweep in `findings:auth-v2`).

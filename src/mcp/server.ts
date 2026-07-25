@@ -30,6 +30,7 @@ import { db } from '../integrations/db/client.js';
 import { ancestorLocs, lockAncestorsForCreate, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import {
   moveNodeSubtree,
+  lockSourceForMove,
   SubtreeMoveCollisionError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
@@ -3728,6 +3729,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // per-endpoint access check. Use extractParentNodeToMemory for that.
             // A cross-memory LEAF move is fine (single node, below).
             if (crossMemory) {
+              // Lock + revalidate the source before counting, so the descendant
+              // count can't race a concurrent same-memory move of this node
+              // (moveNodeSubtree does the same on the same-memory branch below).
+              await lockSourceForMove(tx, existing);
               const descendantCount = await tx.node.count({
                 where: { memoryId: fromMemory.id, deletedAt: null, loc: { startsWith: `${fromLoc}:` } },
               });
