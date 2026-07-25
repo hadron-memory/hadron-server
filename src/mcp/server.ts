@@ -3615,7 +3615,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
 Collision policy: if a live node already occupies \`targetUrn\`, the call refuses with a URN_ALREADY_EXISTS error. Pass \`overwrite: true\` to soft-delete the existing target first; the evicted row is re-stamped to \`<loc>__deleted-<full-id>\` so the unique \`(loc, memoryId)\` constraint doesn't block. Hard-overwrite isn't supported — call hadron_delete_node (hard: true) on the target first if you need that.
 
-Descendants move WITH the node on a SAME-MEMORY move (#768): a node's loc-subtree (every node whose loc is prefixed by \`<loc>:\`) is rebased onto the new loc, so children's URNs follow the parent. Nodes keep their stable IDs, so every edge reference stays valid; an edge's own loc/URN is a derived denormalization that is NOT rewritten by a move, so continue to address a moved node's edges by their existing (pre-move) URN. A collision at any DESCENDANT slot refuses the whole move (overwrite only evicts the explicitly-named target loc). Moving a node that HAS descendants to ANOTHER memory is refused (use the extractParentNode operation for a cross-memory subtree move); a cross-memory move of a leaf node is fine.
+Descendants move WITH the node on a SAME-MEMORY move (#768): a node's loc-subtree (every node whose loc is prefixed by \`<loc>:\`) is rebased onto the new loc, so children's URNs follow the parent. Nodes keep their stable IDs, so every edge reference stays valid; an edge's own loc/URN is a derived denormalization that is NOT rewritten by a move, so continue to address a moved node's edges by their existing (pre-move) URN. A collision at any DESCENDANT slot refuses the whole move (overwrite only evicts the explicitly-named target loc). Moving a node that HAS descendants to ANOTHER memory is refused — this tool does not relocate a subtree across memories (the extractParentNodeToMemory GraphQL mutation does); move it within its memory, or move the descendants first. A cross-memory move of a leaf node is fine.
 
 Atomicity: collision-evict → per-node NodeRevision snapshot → subtree move all run inside a single db.$transaction so a partial failure cannot leave the URN slot empty.
 
@@ -3725,8 +3725,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // #768: a CROSS-memory move of a node with descendants is refused —
             // relocating the subtree into another memory would turn its boundary
             // edges into cross-memory edges whose endpoints resolve without a
-            // per-endpoint access check. Use extractParentNode for that. A
-            // cross-memory LEAF move is fine (single node, below).
+            // per-endpoint access check. Use extractParentNodeToMemory for that.
+            // A cross-memory LEAF move is fine (single node, below).
             if (crossMemory) {
               const descendantCount = await tx.node.count({
                 where: { memoryId: fromMemory.id, deletedAt: null, loc: { startsWith: `${fromLoc}:` } },
@@ -3844,8 +3844,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (result.refused === 'cross-memory-subtree') {
           return textResult(
             `CROSS_MEMORY_SUBTREE: "${fromUrn}" has ${result.descendantCount} descendant(s), so it ` +
-              `can't be moved to another memory here. Move it within its memory, or use the ` +
-              `extractParentNode operation to relocate the subtree.`,
+              `can't be moved to another memory with this tool. Move it within its memory, or ` +
+              `relocate the subtree with the extractParentNodeToMemory GraphQL mutation.`,
           );
         }
         return textResult(

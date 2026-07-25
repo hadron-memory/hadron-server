@@ -38,7 +38,7 @@
  * MUST live in the same memory it's moving within.
  */
 
-import { lockNodeForDelete } from './nodeSubtreeLock.js';
+import { lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
 import {
   buildNodeRevisionSnapshot,
@@ -109,12 +109,24 @@ export async function moveNodeSubtree(
     throw new SubtreeMoveIntoSelfError(destLoc);
   }
 
-  // Serialize against a concurrent create/move under the source subtree. A
-  // create of `source.loc:x` locks `source.loc` as its ancestor
-  // (lockAncestorsForCreate), so acquiring the SAME advisory key here means such
-  // a create either commits before the descendant read below (and is swept into
-  // the move) or blocks until the move completes (and lands under the moved
-  // prefix). The caller has already locked the DESTINATION ancestor path.
+  // Serialize this move against concurrent creates/moves anywhere in the source
+  // subtree, on two advisory keys:
+  //   - `source.loc` itself (lockNodeForDelete): a create of `source.loc:x` locks
+  //     `source.loc` as its ancestor, so it either commits before the descendant
+  //     read below (swept in) or blocks until this move completes (lands under
+  //     the moved prefix).
+  //   - the source's ANCESTOR path (lockAncestorsForCreate): a concurrent move of
+  //     a DESCENDANT (e.g. `source.loc:c`) locks its own ancestors — which
+  //     include `source.loc` — so it contends with THIS move's `source.loc` lock.
+  //     Without this, an ancestor move and a descendant move take disjoint exact
+  //     locks, both snapshot overlapping rows, and the later writer pulls the
+  //     descendant out of the earlier move's subtree (PR #780 review P1). Now one
+  //     blocks the other; the loser re-reads and either sees the moved prefix or
+  //     aborts via the source revalidation below.
+  // The caller has already locked the DESTINATION ancestor path. Two moves that
+  // relocate into each other's subtrees can still deadlock on these keys —
+  // Postgres detects and aborts one (self-healing; moves are infrequent).
+  await lockAncestorsForCreate(tx, memoryId, source.loc);
   await lockNodeForDelete(tx, memoryId, source.loc);
 
   // Revalidate the source AFTER the lock: a concurrent move of the SAME node

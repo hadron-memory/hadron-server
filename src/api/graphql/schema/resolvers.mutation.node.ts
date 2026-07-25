@@ -1794,7 +1794,7 @@ export const nodeMutations = {
     // node stranded every descendant at its old loc, leaving their computed URNs
     // pointing under a parent path that no longer exists. A CROSS-memory move of
     // a node with descendants is rejected (it would turn the subtree's boundary
-    // edges into ungated cross-memory edges — use extractParentNode); a
+    // edges into ungated cross-memory edges — use extractParentNodeToMemory); a
     // cross-memory LEAF move keeps the single-node behavior.
     moveNode: async (
       _: unknown,
@@ -1839,14 +1839,14 @@ export const nodeMutations = {
             // moving descendants into another memory turns their boundary edges
             // into cross-memory edges whose endpoints resolve without a
             // per-endpoint access check. Refuse rather than strand or leak; use
-            // extractParentNode for a cross-memory subtree move.
+            // extractParentNodeToMemory for a cross-memory subtree move.
             const descendantCount = await tx.node.count({
               where: { memoryId: source.memoryId, deletedAt: null, loc: { startsWith: `${source.loc}:` } },
             });
             if (descendantCount > 0) {
               throw new GraphQLError(
                 `Cannot move a node with ${descendantCount} descendant(s) to another memory. ` +
-                  `Move it within its memory, or use extractParentNode to relocate the subtree.`,
+                  `Move it within its memory, or use the extractParentNodeToMemory mutation to relocate the subtree.`,
                 { extensions: { code: 'BAD_USER_INPUT', descendantCount } },
               );
             }
