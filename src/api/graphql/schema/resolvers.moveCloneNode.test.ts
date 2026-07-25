@@ -178,7 +178,7 @@ describe('moveNode subtree cascade (#768)', () => {
     expect(await db.nodeEmbedding.findFirst({ where: { nodeId: child.id } })).toBeNull();
   });
 
-  it('cross-memory into a VECTOR-INDEXED memory deletes source vectors + queues a re-index (#781)', async () => {
+  it('cross-memory into a VECTOR-INDEXED memory deletes source vectors + queues a re-index, resetting retry state (#781)', async () => {
     const indexed = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'mc-org:mc/idx', name: 'mc/idx', class: 'knowledge', visibility: 'ORGANIZATION', vectorIndexEnabled: true },
     });
@@ -187,14 +187,45 @@ describe('moveNode subtree cascade (#768)', () => {
     await db.nodeEmbedding.create({
       data: { nodeId: child.id, memoryId: memA.id, kind: 'abstract', provider: 'local', model: 'test', dim: 768 },
     });
+    // The child previously EXHAUSTED its embedding retries — a bare pending stamp
+    // wouldn't reschedule it (drainEmbeddingQueue filters max-attempts rows).
+    await db.node.update({
+      where: { id: child.id },
+      data: { embeddingAttempts: 9, embeddingFailedAt: new Date(), embeddingError: 'boom' },
+    });
 
     await M.moveNode(null, { sourceRef: parent.id, targetUrn: `${indexed.urn}:q` }, asUser());
-    // Source vector deleted; the moved node is stamped for the worker to rebuild
-    // under the destination's policy.
-    expect(await db.nodeEmbedding.findFirst({ where: { nodeId: child.id } })).toBeNull();
+    expect(await db.nodeEmbedding.findFirst({ where: { nodeId: child.id } })).toBeNull(); // source vector gone
     const c = await db.node.findUniqueOrThrow({ where: { id: child.id } });
     expect(c.memoryId).toBe(indexed.id);
-    expect(c.embeddingPendingAt).not.toBeNull();
+    expect(c.embeddingPendingAt).not.toBeNull(); // queued for the worker
+    expect(c.embeddingAttempts).toBe(0); // retry state reset so it actually schedules
+    expect(c.embeddingFailedAt).toBeNull();
+    expect(c.embeddingError).toBeNull();
+  });
+
+  it('cross-memory into a NON-indexed memory clears the embedding marker (invalidates in-flight jobs) (#781)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    // Simulate an in-flight embed job's pending marker on the child.
+    await db.node.update({ where: { id: child.id }, data: { embeddingPendingAt: new Date() } });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser()); // memB not indexed
+    const c = await db.node.findUniqueOrThrow({ where: { id: child.id } });
+    expect(c.memoryId).toBe(memB.id);
+    // Marker cleared → any in-flight source-side job is invalidated (latest-wins).
+    expect(c.embeddingPendingAt).toBeNull();
+  });
+
+  it('cross-memory transfers Memory.pendingEdgeCount credit for moved nodes (#781)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    await db.pendingEdge.create({ data: { id: generateId(), sourceId: child.id, targetId: 'unresolved:ref', name: 'rel' } });
+    await db.memory.update({ where: { id: memA.id }, data: { pendingEdgeCount: 1 } });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memA.id } })).pendingEdgeCount).toBe(0);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memB.id } })).pendingEdgeCount).toBe(1);
   });
 
   it('refuses a cross-memory move when the destination is ENCRYPTED (#781 v1)', async () => {

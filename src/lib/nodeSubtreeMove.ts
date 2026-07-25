@@ -26,9 +26,13 @@
  *     (the enforceNodeSchemaOnWrite gate) before any write.
  *   - Every moved node's `memoryId` becomes `destMemoryId`.
  *   - The moved nodes' `NodeEmbedding` rows are DELETED and re-indexed under the
- *     destination policy (`embeddingPendingAt` stamped when the dest indexes; the
- *     embedding worker rebuilds the correct kinds) — not blindly relabeled,
- *     since source and dest embedding policies can differ.
+ *     destination policy (not blindly relabeled, since policies can differ). The
+ *     embedding markers are always re-stamped (fresh `embeddingPendingAt` +
+ *     reset retry state when the dest indexes, cleared to null when it doesn't) —
+ *     this also invalidates any in-flight source-side embed job so it can't
+ *     re-insert a source-tagged vector for a node that has left the memory.
+ *   - `Memory.pendingEdgeCount` credit for the moved subtree's live PendingEdges
+ *     moves from the source memory to the destination.
  *   - Edges whose SOURCE moved follow it: `Edge.memoryId` (the denormalized
  *     source-side memory) becomes `destMemoryId` and the loc is re-derived from
  *     the rebased source + the target's loc (rebased when the target also moved),
@@ -292,20 +296,49 @@ export async function moveNodeSubtree(
   }
 
   // ── Cross-memory carry-over ─────────────────────────────────────────────
+  const movedIdList = [...movedIds];
+
   // Embeddings are re-indexed under the DESTINATION policy, not blindly
   // relabeled: the source vectors were built under the source memory's policy
   // (kind/embeddingSource/chunking), which may differ. Delete the moved nodes'
   // vectors (removing them from the source's candidate window and clearing any
-  // wrong-policy rows), then — if the destination indexes — stamp
-  // `embeddingPendingAt` so the embedding worker rebuilds the correct kinds
-  // under the destination's policy (or, if the destination doesn't index, the
-  // rows simply stay gone). Content is plaintext here (encrypted memories are
-  // refused above).
-  await tx.nodeEmbedding.deleteMany({ where: { nodeId: { in: [...movedIds] } } });
-  if (destVectorIndexEnabled) {
-    await tx.node.updateMany({
-      where: { id: { in: [...movedIds] } },
-      data: { embeddingPendingAt: new Date() },
+  // wrong-policy rows), then re-stamp the embedding markers for EVERY moved node
+  // — always, even when the destination doesn't index:
+  //   - it changes `embeddingPendingAt`, which INVALIDATES any in-flight
+  //     source-side embed job (embedNode's latest-wins guard) so it can't
+  //     re-insert a source-tagged vector for a node that has left the memory;
+  //   - it resets the retry state (attempts/failed/error), or a node that had
+  //     exhausted its retries would be filtered out of drainEmbeddingQueue and
+  //     never re-index at the destination.
+  // When the destination indexes, `embeddingPendingAt` is fresh so the worker
+  // rebuilds the correct kinds; when it doesn't, the marker is cleared to null
+  // (nothing to rebuild — the vectors just stay deleted). Content is plaintext
+  // here (encrypted memories are refused above).
+  await tx.nodeEmbedding.deleteMany({ where: { nodeId: { in: movedIdList } } });
+  await tx.node.updateMany({
+    where: { id: { in: movedIdList } },
+    data: {
+      embeddingPendingAt: destVectorIndexEnabled ? new Date() : null,
+      embeddingFailedAt: null,
+      embeddingError: null,
+      embeddingAttempts: 0,
+    },
+  });
+
+  // PendingEdge rows follow their source node by FK (no memoryId column), but the
+  // denormalized Memory.pendingEdgeCount does not — move the credit from the
+  // source memory to the destination for every live pending edge the subtree owns.
+  const movedPending = await tx.pendingEdge.count({
+    where: { sourceId: { in: movedIdList }, deletedAt: null },
+  });
+  if (movedPending > 0) {
+    await tx.memory.update({
+      where: { id: srcMemoryId },
+      data: { pendingEdgeCount: { decrement: movedPending } },
+    });
+    await tx.memory.update({
+      where: { id: destMemoryId },
+      data: { pendingEdgeCount: { increment: movedPending } },
     });
   }
 
