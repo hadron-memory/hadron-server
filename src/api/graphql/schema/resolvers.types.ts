@@ -50,28 +50,56 @@ import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 
-/**
- * #781 — resolve an edge endpoint (source/target) ONLY if the caller can read
- * its memory. Uses the preloaded relation when present, else lazily loads the
- * node by FK (memoized). Returns null when the endpoint's memory isn't readable
- * by the caller — closing the cross-memory endpoint leak (see the Edge resolver
- * note). Same-memory endpoints pass a single memoized check.
- */
-async function gateEdgeEndpoint(
+/** An edge endpoint's memoryId (preloaded relation, or a memoized FK load). */
+async function edgeEndpointMemoryId(
   ctx: Context,
   preloaded: unknown,
   endpointId: string,
-): Promise<unknown | null> {
+): Promise<string | null> {
   const pre = preloaded as { memoryId?: string } | null | undefined;
-  // Gate on the endpoint's memory. Prefer the preloaded relation, but if it's
-  // absent OR a partial select without memoryId (some internal paths preload
-  // `{ target: { select: { loc } } }`), load the full row by FK (memoized) so we
-  // never fail a legitimate endpoint closed for lack of the scoping column.
+  if (pre && typeof pre.memoryId === 'string') return pre.memoryId;
+  const node = (await loadEdgeEndpointNode(ctx, endpointId)) as { memoryId?: string } | null;
+  return node && typeof node.memoryId === 'string' ? node.memoryId : null;
+}
+
+/**
+ * #781 — resolve an edge endpoint (source/target), gating a CROSS-memory
+ * endpoint on the caller's read access.
+ *
+ * Every surface that hands the caller this Edge already authorized the memory it
+ * came from: `edges`/`edge` via `getAccessibleMemoryIds`, `Node.outgoingEdges`/
+ * `incomingEdges` via the parent node's read, `appNodes` via the App. So for a
+ * SAME-memory edge (both endpoints in one memory) that authorized memory IS the
+ * endpoints' memory — both are safe, no per-endpoint check needed (this is the
+ * overwhelming majority, and it's what keeps appNodes system/app-memory graphs
+ * and other org-member-fast-path reads working). Only a CROSS-memory edge can
+ * expose a node in a memory the caller never authorized (e.g. the far side of a
+ * cross-memory edge reached via incomingEdges), so the requested endpoint is
+ * gated on its OWN memory via the shared read predicate. Denied ≡ null.
+ */
+async function resolveEdgeEndpoint(
+  ctx: Context,
+  e: { sourceId: string; targetId: string; source?: unknown; target?: unknown },
+  side: 'source' | 'target',
+): Promise<unknown | null> {
+  const wantId = side === 'source' ? e.sourceId : e.targetId;
+  const wantPre = side === 'source' ? e.source : e.target;
+  const otherId = side === 'source' ? e.targetId : e.sourceId;
+  const otherPre = side === 'source' ? e.target : e.source;
+
+  // The requested endpoint node — preloaded (even partially), else memoized FK.
+  const pre = wantPre as { memoryId?: string } | null | undefined;
   const node =
     pre && typeof pre.memoryId === 'string'
       ? pre
-      : ((await loadEdgeEndpointNode(ctx, endpointId)) as { memoryId?: string } | null);
+      : ((await loadEdgeEndpointNode(ctx, wantId)) as { memoryId?: string } | null);
   if (!node || typeof node.memoryId !== 'string') return null;
+
+  // Same-memory edge → both endpoints are in the already-authorized memory.
+  const otherMem = await edgeEndpointMemoryId(ctx, otherPre, otherId);
+  if (otherMem !== null && otherMem === node.memoryId) return node;
+
+  // Cross-memory (or the other endpoint is unresolvable) → gate this endpoint.
   return (await isMemoryReadableCached(ctx, node.memoryId)) ? node : null;
 }
 
@@ -233,19 +261,18 @@ export const typeResolvers = {
     //       so each endpoint node is read at most once per request. #381.
     //   (2) #781 — cross-memory endpoint gate. A cross-memory edge (source in
     //       memory A, target in memory B) is reachable by a caller who can read
-    //       only ONE side: `edge`/`edges` authorize on the denormalized
-    //       `Edge.memoryId`, and Node.incomingEdges reaches edges whose memoryId
-    //       the caller never authorized. The endpoint resolvers previously loaded
-    //       the node by FK with no re-check, leaking the far node's data across
-    //       tenants. Now each endpoint resolves to null unless the caller can
-    //       read that endpoint's OWN memory (isMemoryReadableCached, routed
-    //       through the shared getAccessibleMemoryIds gate — memoized, so a
-    //       same-memory graph pays one check). Denied ≡ null (no existence
-    //       oracle beyond the edge the caller already saw).
-    source: (e: { sourceId: string; source?: unknown }, _: unknown, ctx: Context) =>
-      gateEdgeEndpoint(ctx, e.source, e.sourceId),
-    target: (e: { targetId: string; target?: unknown }, _: unknown, ctx: Context) =>
-      gateEdgeEndpoint(ctx, e.target, e.targetId),
+    //       only ONE side (e.g. Node.incomingEdges surfaces an edge whose source
+    //       lives in a memory the caller never authorized). The endpoint
+    //       resolvers previously loaded the node by FK with no re-check, leaking
+    //       the far node's data across tenants. resolveEdgeEndpoint gates a
+    //       CROSS-memory endpoint on the caller's read access to its OWN memory;
+    //       a SAME-memory edge's endpoints sit in the already-authorized memory
+    //       (every surface that surfaced this edge authorized that memory), so
+    //       they need no per-endpoint check. Denied ≡ null.
+    source: (e: { sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context) =>
+      resolveEdgeEndpoint(ctx, e, 'source'),
+    target: (e: { sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context) =>
+      resolveEdgeEndpoint(ctx, e, 'target'),
     // #481 parity — edges are loc-addressed peers of nodes (spec 037), so
     // they carry their fully-qualified URN the same way. Edge.memoryId is the
     // denormalized SOURCE-side memory, which is exactly the URN's memory.

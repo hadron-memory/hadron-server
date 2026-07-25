@@ -26,7 +26,13 @@ const edge = resolvers.Edge as unknown as {
 
 let mem: { id: string };
 let parent: { id: string; loc: string };
+let child: { id: string; loc: string };
 let ctx: Context;
+
+// A realistic same-memory edge — both endpoints in `mem` (the gate leaves
+// same-memory endpoints ungated, so these tests exercise the lazy-load +
+// memoization mechanics, not the cross-memory denial).
+const sameMemEdge = () => ({ sourceId: parent.id, targetId: child.id });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -37,26 +43,28 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:m`, name: 'm', class: 'knowledge', visibility: 'ORGANIZATION' },
   });
   parent = await createDbNode(db, { loc: 'parent', memoryId: mem.id });
+  child = await createDbNode(db, { loc: 'child', memoryId: mem.id });
   ctx = { db, userId: member.id, roles: ['READER'] }; // can read `mem`
 });
 
 afterEach(() => vi.restoreAllMocks());
 
 describe('Edge.source / Edge.target resolvers', () => {
-  it('returns a preloaded (readable) endpoint without an endpoint DB fetch', async () => {
+  it('returns preloaded endpoints without any DB fetch (both sides preloaded)', async () => {
     const spy = vi.spyOn(db.node, 'findUnique');
-    const preloaded = { id: parent.id, loc: 'parent', memoryId: mem.id };
+    const source = { id: parent.id, loc: 'parent', memoryId: mem.id };
+    const target = { id: child.id, loc: 'child', memoryId: mem.id };
 
-    const out = await edge.source({ sourceId: parent.id, source: preloaded }, null, ctx);
+    const out = await edge.source({ ...sameMemEdge(), source, target }, null, ctx);
 
     expect((out as { id: string }).id).toBe(parent.id);
-    expect(spy).not.toHaveBeenCalled(); // gate uses the preloaded memoryId; no node fetch
+    // Both endpoint memoryIds come from the preloaded relations — no node fetch.
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('lazily loads source by FK when it was not preloaded (the 500 fix)', async () => {
     const spy = vi.spyOn(db.node, 'findUnique');
-    // e.g. an OUTGOING edge from nodeById: only `target` was included.
-    const out = await edge.source({ sourceId: parent.id }, null, ctx);
+    const out = await edge.source(sameMemEdge(), null, ctx);
 
     expect((out as { id: string }).id).toBe(parent.id);
     expect(spy).toHaveBeenCalledWith({ where: { id: parent.id } });
@@ -64,24 +72,26 @@ describe('Edge.source / Edge.target resolvers', () => {
 
   it('lazily loads target by FK when it was not preloaded', async () => {
     const spy = vi.spyOn(db.node, 'findUnique');
-    const out = await edge.target({ targetId: parent.id }, null, ctx);
+    const out = await edge.target(sameMemEdge(), null, ctx);
 
-    expect((out as { id: string }).id).toBe(parent.id);
-    expect(spy).toHaveBeenCalledWith({ where: { id: parent.id } });
+    expect((out as { id: string }).id).toBe(child.id);
+    expect(spy).toHaveBeenCalledWith({ where: { id: child.id } });
   });
 
-  it('memoizes per request: edges sharing an endpoint fetch it once (no N+1)', async () => {
-    // The shape that motivated this: nodeById { outgoingEdges { source } } —
-    // every outgoing edge's source is the same parent node.
+  it('memoizes endpoint fetches per request (no N+1 across edges sharing endpoints)', async () => {
+    // Three edges over the same (parent → child) pair: the source and target
+    // nodes must each be fetched at most once for the whole request, not per edge.
     const spy = vi.spyOn(db.node, 'findUnique');
 
     const results = await Promise.all([
-      edge.source({ sourceId: parent.id }, null, ctx),
-      edge.source({ sourceId: parent.id }, null, ctx),
-      edge.source({ sourceId: parent.id }, null, ctx),
+      edge.source(sameMemEdge(), null, ctx),
+      edge.source(sameMemEdge(), null, ctx),
+      edge.source(sameMemEdge(), null, ctx),
     ]);
 
     expect(results.map((r) => (r as { id: string }).id)).toEqual([parent.id, parent.id, parent.id]);
-    expect(spy).toHaveBeenCalledTimes(1); // one Context = one request → endpoint fetched once
+    // parent (the resolved source) + child (loaded once to classify same-memory),
+    // each memoized → 2 fetches total, not 3× that.
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });
