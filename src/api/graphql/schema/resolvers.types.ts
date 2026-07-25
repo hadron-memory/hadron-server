@@ -66,20 +66,25 @@ async function edgeEndpointMemoryId(
  * #781 — resolve an edge endpoint (source/target), gating a CROSS-memory
  * endpoint on the caller's read access.
  *
- * Every surface that hands the caller this Edge already authorized the memory it
- * came from: `edges`/`edge` via `getAccessibleMemoryIds`, `Node.outgoingEdges`/
- * `incomingEdges` via the parent node's read, `appNodes` via the App. So for a
- * SAME-memory edge (both endpoints in one memory) that authorized memory IS the
- * endpoints' memory — both are safe, no per-endpoint check needed (this is the
- * overwhelming majority, and it's what keeps appNodes system/app-memory graphs
- * and other org-member-fast-path reads working). Only a CROSS-memory edge can
- * expose a node in a memory the caller never authorized (e.g. the far side of a
- * cross-memory edge reached via incomingEdges), so the requested endpoint is
- * gated on its OWN memory via the shared read predicate. Denied ≡ null.
+ * Every surface that hands the caller this Edge authorized the memory it was
+ * scoped to — `edges`/`edge` and Node.outgoingEdges authorize on `Edge.memoryId`
+ * (the source-side memory), Node.incomingEdges via the parent (target) node's
+ * read, appNodes via the App. So the skip-the-check fast path is valid ONLY when
+ * BOTH endpoints AND the edge all sit in one memory (`src == tgt == e.memoryId`):
+ * that single memory is the authorized one, so both endpoints are safe (this is
+ * the overwhelming majority, and it keeps appNodes system/app same-memory graphs
+ * working). Crucially this also refuses the shortcut when `Edge.memoryId` is
+ * STALE relative to the endpoints — a cross-memory node move can leave an A→B
+ * edge's memoryId at A while both endpoints now live in B; without the
+ * `== e.memoryId` clause an A-only reader would get both B nodes.
+ *
+ * Otherwise the requested endpoint is gated on its OWN memory via the
+ * node-content gate (getAccessibleMemoryIds, see isMemoryReadableCached).
+ * Denied ≡ null.
  */
 async function resolveEdgeEndpoint(
   ctx: Context,
-  e: { sourceId: string; targetId: string; source?: unknown; target?: unknown },
+  e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown },
   side: 'source' | 'target',
 ): Promise<unknown | null> {
   const wantId = side === 'source' ? e.sourceId : e.targetId;
@@ -95,11 +100,13 @@ async function resolveEdgeEndpoint(
       : ((await loadEdgeEndpointNode(ctx, wantId)) as { memoryId?: string } | null);
   if (!node || typeof node.memoryId !== 'string') return null;
 
-  // Same-memory edge → both endpoints are in the already-authorized memory.
+  // Fast path: the edge and BOTH endpoints share one memory ⇒ that authorized
+  // memory holds both endpoints, no per-endpoint check needed.
   const otherMem = await edgeEndpointMemoryId(ctx, otherPre, otherId);
-  if (otherMem !== null && otherMem === node.memoryId) return node;
+  if (node.memoryId === e.memoryId && otherMem === e.memoryId) return node;
 
-  // Cross-memory (or the other endpoint is unresolvable) → gate this endpoint.
+  // Cross-memory (or a stale/mismatched Edge.memoryId) → gate this endpoint on
+  // its own memory's node-content access.
   return (await isMemoryReadableCached(ctx, node.memoryId)) ? node : null;
 }
 
@@ -269,9 +276,9 @@ export const typeResolvers = {
     //       a SAME-memory edge's endpoints sit in the already-authorized memory
     //       (every surface that surfaced this edge authorized that memory), so
     //       they need no per-endpoint check. Denied ≡ null.
-    source: (e: { sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context) =>
+    source: (e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context) =>
       resolveEdgeEndpoint(ctx, e, 'source'),
-    target: (e: { sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context) =>
+    target: (e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context) =>
       resolveEdgeEndpoint(ctx, e, 'target'),
     // #481 parity — edges are loc-addressed peers of nodes (spec 037), so
     // they carry their fully-qualified URN the same way. Edge.memoryId is the

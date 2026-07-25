@@ -92,10 +92,11 @@ describe('Edge.source / Edge.target cross-memory gate (#781)', () => {
     expect((await E.target(e, {}, ctx(admin.id, ['ADMIN'])))?.id).toBe(nodeB.id);
   });
 
-  it('resolves endpoints of a same-memory SYSTEM edge for an org member (#781 review P2)', async () => {
-    // getAccessibleMemoryIds omits app/system-class org memories, but an org
-    // member reaches them via appNodes / Query.memory's org-member fast-path —
-    // which isMemoryReadableRow honors. The gate must not null these endpoints.
+  it('resolves endpoints of a same-memory SYSTEM edge via the fast path (#781 review P2)', async () => {
+    // getAccessibleMemoryIds omits app/system-class org memories (reachable via
+    // appNodes' broader auth), so a per-endpoint node-content check would null
+    // them. The same-memory fast path (edge + both endpoints share one memory)
+    // returns them without a per-endpoint check — no over-restriction.
     const sysMem = await db.memory.create({
       data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:sys`, name: 'sys', class: 'system', visibility: null },
     });
@@ -104,6 +105,18 @@ describe('Edge.source / Edge.target cross-memory gate (#781)', () => {
     const e = { id: generateId(), memoryId: sysMem.id, sourceId: s1.id, targetId: s2.id, name: 'rel' };
     expect((await E.source(e, {}, ctx(member.id)))?.id).toBe(s1.id);
     expect((await E.target(e, {}, ctx(member.id)))?.id).toBe(s2.id);
+  });
+
+  it('does NOT apply the fast path when Edge.memoryId is STALE vs the endpoints (#781 review P1)', async () => {
+    // A cross-memory node move can leave an A→B edge's memoryId at A while both
+    // endpoints now live in B. Edge/edges still authorize it as memory A, so a
+    // caller who can read only A must NOT get the B nodes via the same-memory
+    // shortcut. Both endpoints are in memB (unreadable) but edge.memoryId = memA.
+    const b1 = await createDbNode(db, { loc: 'b1', memoryId: memB.id });
+    const b2 = await createDbNode(db, { loc: 'b2', memoryId: memB.id });
+    const staleEdge = { id: generateId(), memoryId: memA.id, sourceId: b1.id, targetId: b2.id, name: 'rel' };
+    expect(await E.source(staleEdge, {}, ctx(member.id))).toBeNull(); // memB, gated
+    expect(await E.target(staleEdge, {}, ctx(member.id))).toBeNull();
   });
 
   it('a caller who can read NEITHER memory gets null for both', async () => {

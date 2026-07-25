@@ -129,82 +129,31 @@ export function loadEdgeEndpointNode(ctx: Context, id: string): Promise<unknown>
 }
 
 /**
- * Read-authorization predicate for a single loaded memory row — the shared core
- * of `Query.memory`'s gate, so the two can't drift (the review:urn-handling /
- * "reuse the shared access gate" invariant). Mirrors `Query.memory` exactly:
- *   - personal/private: owner (`userId`), or a personal-class MemoryShare grantee
- *     (#778 granteeShareAccess) — no admin/org bypass.
- *   - spec 047 user-owned (`ownerUserId` set): strictly the owner.
- *   - platform ADMIN/OWNER: yes.
- *   - a current member of the memory's owning org: yes (this ADMITS system/app
- *     org memories that `getAccessibleMemoryIds` intentionally omits — the same
- *     fast-path Query.memory and appNodes rely on).
- *   - else the shared `getAccessibleMemoryIds` set: PUBLIC/anon, cross-org
- *     subscription, App-session scope.
- * The caller supplies the row's authorization fields (already loaded).
- */
-export async function isMemoryReadableRow(
-  ctx: Context,
-  m: {
-    id: string;
-    class: string;
-    userId: string | null;
-    ownerUserId: string | null;
-    organizationId: string | null;
-    userMemoryOfAgentId: string | null;
-  },
-): Promise<boolean> {
-  if (m.class === 'personal' || m.class === 'private') {
-    if (ctx.userId && m.userId === ctx.userId) return true;
-    if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, m))) return true;
-    return false;
-  }
-  if (m.ownerUserId !== null) return !!ctx.userId && m.ownerUserId === ctx.userId;
-  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
-  if (ctx.userId && m.organizationId) {
-    const member = await ctx.db.orgMember.findFirst({
-      where: { organizationId: m.organizationId, userId: ctx.userId, deletedAt: null },
-      select: { userId: true },
-    });
-    if (member) return true;
-  }
-  const ids = await getAccessibleMemoryIds(ctx, m.id);
-  return ids === null || ids.includes(m.id);
-}
-
-/** Fetch a memory by id and apply {@link isMemoryReadableRow}. False for a missing/deleted row. */
-export async function isMemoryReadableById(ctx: Context, memoryId: string): Promise<boolean> {
-  const m = await ctx.db.memory.findUnique({
-    where: { id: memoryId },
-    select: {
-      id: true,
-      class: true,
-      userId: true,
-      ownerUserId: true,
-      organizationId: true,
-      userMemoryOfAgentId: true,
-      deletedAt: true,
-    },
-  });
-  if (!m || m.deletedAt) return false;
-  return isMemoryReadableRow(ctx, m);
-}
-
-/**
- * Per-request memoized wrapper of {@link isMemoryReadableById} (#781). Backs the
- * Edge.source/target endpoint gate: a cross-memory edge (source in memory A,
- * target in memory B) must NOT let a caller who can read only A resolve the
- * B-side node — `edge`/`edges` authorize on the denormalized `Edge.memoryId` and
- * Node.incomingEdges reaches edges whose memoryId the caller never authorized,
- * while the endpoint resolvers historically loaded the node by FK with no
- * re-check. Memoized per distinct memory since a graph response's edges
- * overwhelmingly share a few endpoint memories.
+ * Per-request memoized NODE-CONTENT read check for a single memory (#781). Backs
+ * the Edge.source/target CROSS-memory endpoint gate: a cross-memory edge (source
+ * in memory A, target in memory B) must NOT let a caller who can read only A
+ * resolve the B-side node — `edge`/`edges` authorize on the denormalized
+ * `Edge.memoryId` and Node.incomingEdges reaches edges whose memoryId the caller
+ * never authorized, while the endpoint resolvers historically loaded the node by
+ * FK with no re-check.
+ *
+ * Uses the NODE-CONTENT gate `getAccessibleMemoryIds` — the same predicate
+ * nodeById / memoryAccessFilter use — deliberately NOT Query.memory's
+ * record-level org-member fast-path (which admits app/system memory RECORDS to
+ * org members but must not expose their node CONTENT — getOrgReadableMemoryIds
+ * excludes app-scoped rows via `appId: null`). Consequence (security-first,
+ * fail-safe): a cross-memory endpoint reachable ONLY via appNodes' App-install
+ * grant is nulled rather than leaked; folding the App-install scope into a
+ * complete node-read gate is the tracked follow-up (#781). Memoized per distinct
+ * memory since a graph response's edges share a few endpoint memories.
  */
 export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<boolean> {
   const cache = (ctx.memoryReadCache ??= new Map<string, Promise<boolean>>());
   let pending = cache.get(memoryId);
   if (!pending) {
-    pending = isMemoryReadableById(ctx, memoryId);
+    pending = getAccessibleMemoryIds(ctx, memoryId).then(
+      (ids) => ids === null || ids.includes(memoryId),
+    );
     cache.set(memoryId, pending);
   }
   return pending;

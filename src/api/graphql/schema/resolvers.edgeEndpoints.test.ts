@@ -29,10 +29,10 @@ let parent: { id: string; loc: string };
 let child: { id: string; loc: string };
 let ctx: Context;
 
-// A realistic same-memory edge — both endpoints in `mem` (the gate leaves
-// same-memory endpoints ungated, so these tests exercise the lazy-load +
+// A realistic same-memory edge — both endpoints AND the edge in `mem` (the gate
+// leaves such endpoints ungated, so these tests exercise the lazy-load +
 // memoization mechanics, not the cross-memory denial).
-const sameMemEdge = () => ({ sourceId: parent.id, targetId: child.id });
+const sameMemEdge = () => ({ memoryId: mem.id, sourceId: parent.id, targetId: child.id });
 
 beforeEach(async () => {
   await cleanDb(db);
