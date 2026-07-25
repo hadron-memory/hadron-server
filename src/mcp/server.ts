@@ -3822,7 +3822,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           });
 
           return { ok: true, moved, childCount };
-        });
+        },
+        // A large same-memory subtree touches many rows (two updates + a revision
+        // per node); the default 5s interactive-txn timeout is too tight — match
+        // the GraphQL moveNode path so inputs that succeed there don't time out
+        // here (mirrors extractParentNodeGraph / cloneMemory).
+        { timeout: 120_000 });
       } catch (e) {
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as
