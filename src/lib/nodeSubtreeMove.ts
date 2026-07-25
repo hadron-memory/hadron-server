@@ -154,9 +154,19 @@ export async function moveNodeSubtree(
   const blocker = occupants.find((o) => !movedIds.has(o.id));
   if (blocker) throw new SubtreeMoveCollisionError(blocker.loc, memoryId);
 
-  // Pre-move NodeRevision + row move for every node. New locs share the
-  // destination prefix and are disjoint from the old locs, so per-row update
-  // order never trips the (loc, memoryId) unique mid-transaction.
+  // Move every node in two phases so per-row updates never trip the
+  // (loc, memoryId) unique mid-transaction. A rebased loc is NOT always disjoint
+  // from the old subtree: moving a node UP into a (possibly virtual) ancestor
+  // slot maps a descendant onto a sibling's old loc — e.g. `a:b` → `a` sends the
+  // grandchild `a:b:b` to `a:b`, the source's own old slot. Phase 1 parks every
+  // moved node at a unique temp loc (freeing all old slots); phase 2 writes the
+  // final locs + a pre-move NodeRevision. The snapshot/diff read the original
+  // `n` (its pre-move loc), so temp parking doesn't affect audit history. Temp
+  // locs mirror deleteNode's `__deleted-<id>` re-stamp — id-unique, and outside
+  // any real loc namespace.
+  for (const n of subtree) {
+    await tx.node.update({ where: { id: n.id }, data: { loc: `__moving-${n.id}` } });
+  }
   const leaf = destLoc.split(':').pop()!;
   for (const n of subtree) {
     const newLoc = newLocById.get(n.id)!;

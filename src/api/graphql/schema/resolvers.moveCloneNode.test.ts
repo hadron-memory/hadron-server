@@ -191,6 +191,19 @@ describe('moveNode subtree cascade (#768)', () => {
     expect(await locsIn(memA.id)).toEqual(['p', 'p:c', 'q:c']);
   });
 
+  it('moves a node UP into a virtual-ancestor slot with an overlapping descendant loc', async () => {
+    // `a:b` → `a` (no real node at `a`) with a grandchild `a:b:b`: the rebased
+    // grandchild loc `a:b` overlaps the source's OWN old loc, so a naive per-row
+    // update would trip the (loc, memoryId) unique. The two-phase move handles it.
+    const parent = await createDbNode(db, { loc: 'a:b', memoryId: memA.id });
+    const grandchild = await createDbNode(db, { loc: 'a:b:b', memoryId: memA.id });
+
+    const moved = await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnA('a') }, asUser());
+    expect(moved.loc).toBe('a');
+    expect((await db.node.findUniqueOrThrow({ where: { id: grandchild.id } })).loc).toBe('a:b');
+    expect(await locsIn(memA.id)).toEqual(['a', 'a:b']);
+  });
+
   it('records a NodeRevision for each moved descendant (audit)', async () => {
     const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
     const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
