@@ -13,22 +13,27 @@
  * It rebases every node in the subtree (`<source.loc>` and each
  * `<source.loc>:…` descendant, on `:` path boundaries) onto `destLoc`, writes a
  * pre-move NodeRevision for each, moves the rows BY ID (stable — every edge
- * reference stays valid), and re-derives the loc (+ memoryId, for a cross-memory
- * move) of edges wholly INSIDE the subtree.
+ * reference stays valid), carries the moved nodes' embedding rows to the
+ * destination (cross-memory), and rewrites every edge whose SOURCE moved
+ * (re-derived loc + destination memoryId).
+ *
+ * Every edge whose source moves MUST follow it: Edge.memoryId denormalizes the
+ * source node's memory and edge reads authorize on it, so a stale value is a
+ * cross-tenant read path (#780 review P1). Edges whose source did NOT move (an
+ * incoming boundary edge, source outside the subtree) keep their memoryId — it's
+ * already correct — and their loc; re-deriving that loc would need the unmoved
+ * source's memory context, the same limitation a single-node move always had.
  *
  * The CALLER owns everything around it: write-authorization to both memories,
  * the destination ancestor lock (lockAncestorsForCreate), the same-slot no-op
  * short-circuit, any overwrite/eviction of the destination slot, and the
  * post-move fetch/return shape. `source` MUST be the full live node row (all
  * revisioned fields loaded — buildNodeRevisionSnapshot needs them).
- *
- * Boundary-crossing edges (only one endpoint in the subtree) keep their loc and
- * memory — re-deriving one needs the unmoved endpoint's memory context, the same
- * limitation a single-node move has always had.
  */
 
 import { Prisma } from '../generated/prisma/index.js';
 import { deriveEdgeLoc } from './edgeLoc.js';
+import { lockNodeForDelete } from './nodeSubtreeLock.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -89,6 +94,17 @@ export async function moveNodeSubtree(
   if (destMemoryId === source.memoryId && destLoc.startsWith(`${source.loc}:`)) {
     throw new SubtreeMoveIntoSelfError(destLoc);
   }
+  const crossMemory = destMemoryId !== source.memoryId;
+
+  // Serialize against a concurrent create under the source subtree. A create of
+  // `source.loc:x` locks `source.loc` as its ancestor (lockAncestorsForCreate),
+  // so acquiring the SAME advisory key here means such a create either commits
+  // before this descendant read (and is swept into the move) or blocks until the
+  // move completes (and lands under the already-moved prefix). Without it a
+  // create racing the read below is omitted and stranded at the old prefix — the
+  // very bug #768 fixes. The caller has already locked the DESTINATION ancestor
+  // path; this adds the source side.
+  await lockNodeForDelete(tx, source.memoryId, source.loc);
 
   // The subtree: the source node's descendants, on ':' path boundaries (so
   // `findings:auth` doesn't sweep in `findings:auth-v2`). Read BEFORE any write
@@ -134,21 +150,49 @@ export async function moveNodeSubtree(
     await tx.node.update({ where: { id: n.id }, data: changed });
   }
 
-  // Edges wholly INSIDE the subtree (both endpoints moved) follow it: their
-  // derived loc is recomputed from the rebased endpoint locs and, for a
-  // cross-memory move, they relocate to the destination memory. A numeric suffix
-  // disambiguates the rare derived-loc collision (mirrors extractParentNode).
-  if (descendants.length > 0) {
-    const intraEdges = await tx.edge.findMany({
-      where: {
-        deletedAt: null,
-        sourceId: { in: [...movedIds] },
-        targetId: { in: [...movedIds] },
-      },
+  // Embeddings follow the node on a cross-memory move. NodeEmbedding.memoryId is
+  // independently denormalized and vector retrieval filters on it, so a moved
+  // node would otherwise be invisible to destination-memory search and pollute
+  // the source memory's candidate window. The unique key is
+  // (nodeId, kind, chunkIndex) — memoryId isn't in it — so this can't collide.
+  // Same-memory move: memoryId is unchanged, nothing to do.
+  if (crossMemory) {
+    await tx.nodeEmbedding.updateMany({
+      where: { nodeId: { in: [...movedIds] } },
+      data: { memoryId: destMemoryId },
     });
+  }
+
+  // Edges whose SOURCE moved follow it. Edge.memoryId denormalizes the SOURCE
+  // node's memory, edge reads authorize on that column, and Edge.source/target
+  // load the endpoint WITHOUT a re-check (resolvers.types.ts). So leaving a moved
+  // node's outgoing edge at the old memoryId would let an old-memory reader
+  // resolve Edge.source to the moved (destination-memory) node — a cross-tenant
+  // read path. Set memoryId to the destination and re-derive the loc from the
+  // rebased source + the target's loc (rebased when the target also moved, else
+  // its current loc). Every such edge currently sits in the source memory, so
+  // the mover (who has write access to it) may rewrite it. Edges whose source did
+  // NOT move keep their memoryId (already correct) and loc.
+  const outgoing = await tx.edge.findMany({
+    where: { deletedAt: null, sourceId: { in: [...movedIds] } },
+  });
+  if (outgoing.length > 0) {
+    const outsideTargetIds = [
+      ...new Set(outgoing.map((e) => e.targetId).filter((id) => !movedIds.has(id))),
+    ];
+    const outsideTargetLoc = new Map<string, string>();
+    if (outsideTargetIds.length > 0) {
+      const rows = await tx.node.findMany({
+        where: { id: { in: outsideTargetIds } },
+        select: { id: true, loc: true },
+      });
+      for (const r of rows) outsideTargetLoc.set(r.id, r.loc);
+    }
     const usedLocs = new Set<string>();
-    for (const e of intraEdges) {
-      const base = deriveEdgeLoc(newLocById.get(e.sourceId)!, e.name, newLocById.get(e.targetId)!);
+    for (const e of outgoing) {
+      const tgtLoc = newLocById.get(e.targetId) ?? outsideTargetLoc.get(e.targetId);
+      if (tgtLoc == null) continue; // target vanished (defensive; shouldn't happen)
+      const base = deriveEdgeLoc(newLocById.get(e.sourceId)!, e.name, tgtLoc);
       let loc = base;
       for (let k = 2; usedLocs.has(loc); k++) loc = `${base}:${k}`;
       usedLocs.add(loc);

@@ -161,6 +161,36 @@ describe('moveNode subtree cascade (#768)', () => {
     expect(movedEdge.targetId).toBe(child.id);
   });
 
+  it('an outgoing boundary edge follows the moved source cross-memory (no stale memoryId, #780 P1)', async () => {
+    // parent → outside, where `outside` is NOT in the subtree. After moving the
+    // parent to memB, the edge's denormalized memoryId MUST follow the source to
+    // memB — leaving it at memA would let a memA-only reader resolve Edge.source
+    // to the moved (memB) node (Edge.source does no re-check).
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const outside = await createDbNode(db, { loc: 'outside', memoryId: memA.id });
+    const e = await edge(parent.id, outside.id, memA.id, 'p:rel:outside');
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    const moved = await db.edge.findUniqueOrThrow({ where: { id: e.id } });
+    expect(moved.memoryId).toBe(memB.id); // follows the moved source out of memA
+    expect(moved.loc).toBe('q:rel:outside'); // re-derived: source rebased, target unchanged
+    expect(moved.sourceId).toBe(parent.id);
+    expect(moved.targetId).toBe(outside.id);
+  });
+
+  it('carries a moved node\'s embeddings to the destination memory (cross-memory, #780 P2)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    // A denormalized embedding row (vector column is nullable — omit it).
+    await db.nodeEmbedding.create({
+      data: { nodeId: child.id, memoryId: memA.id, kind: 'abstract', provider: 'local', model: 'test', dim: 768 },
+    });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    const emb = await db.nodeEmbedding.findFirstOrThrow({ where: { nodeId: child.id } });
+    expect(emb.memoryId).toBe(memB.id); // vector retrieval filters on this column
+  });
+
   it('rejects moving a node into its own subtree', async () => {
     const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
     await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
