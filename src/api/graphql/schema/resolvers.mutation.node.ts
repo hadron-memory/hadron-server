@@ -34,6 +34,11 @@ import {
 } from '../../../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import {
+  moveNodeSubtree,
+  SubtreeMoveCollisionError,
+  SubtreeMoveIntoSelfError,
+} from '../../../lib/nodeSubtreeMove.js';
+import {
   NodeLocConflictError,
   NodeNotFoundError,
   NodeAbstractTooLongError,
@@ -1777,11 +1782,18 @@ export const nodeMutations = {
 
     // #564 — relocate a node, identified by `sourceRef` (PK or fully-qualified
     // URN). The destination is either a full `targetUrn` (new memory + loc) or a
-    // `targetMemoryRef` (same loc, new memory) — exactly one. The node keeps its
-    // stable id, so every incoming/outgoing edge reference stays valid. Fails
-    // loudly (NODE_ALREADY_EXISTS) if a DIFFERENT live node occupies the
-    // destination slot. Requires write access to BOTH memories (review:
-    // entity-ref-args #3).
+    // `targetMemoryRef` (same loc, new memory) — exactly one. Every node keeps
+    // its stable id, so incoming/outgoing edge references stay valid. Fails
+    // loudly (NODE_ALREADY_EXISTS) if any node already occupies a destination
+    // slot. Requires write access to BOTH memories (review:entity-ref-args #3).
+    //
+    // #768: a node's loc-SUBTREE moves WITH it. A node's parent/child relation
+    // is expressed by its loc prefix (`a:b` is the parent of `a:b:c`) and its
+    // URN is `<memoryUrn>::<loc>` — so relocating only the named node stranded
+    // every descendant at its old loc, leaving their computed URNs pointing under
+    // a parent path that no longer exists. moveNode now rebases the whole subtree
+    // (`<source.loc>` and every `<source.loc>:…` descendant) onto the destination
+    // and re-derives the loc of edges wholly inside the subtree.
     moveNode: async (
       _: unknown,
       { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
@@ -1792,8 +1804,8 @@ export const nodeMutations = {
         ctx, source, targetUrn, targetMemoryRef,
       );
 
-      // The row leaves the source memory and lands in the destination — write
-      // access to both (a same-memory move checks once).
+      // The subtree leaves the source memory and lands in the destination —
+      // write access to both (a same-memory move checks once).
       await requireMemoryWriteAccess(ctx, source.memoryId);
       if (destMemoryId !== source.memoryId) {
         await requireMemoryWriteAccess(ctx, destMemoryId);
@@ -1801,44 +1813,54 @@ export const nodeMutations = {
 
       const isSameSlot = destMemoryId === source.memoryId && destLoc === source.loc;
 
-      return ctx.db.$transaction(async (tx) => {
-        // #664/#752: moving a node INTO a subtree is the same orphan vector as a
-        // create there — a concurrent non-recursive delete of a destination
-        // ancestor could count zero descendants, then this move lands the row
-        // under it. Lock the destination's ancestor path (moving OUT can't
-        // orphan, so the source side needs nothing). Root-level dest → no-op.
-        await lockAncestorsForCreate(tx, destMemoryId, destLoc);
-        if (!isSameSlot) {
-          // Fail loudly on collision — a DIFFERENT live node already occupies
-          // the destination slot (a soft-deleted occupant is ignored; the move
-          // will land in the freed slot as the unique constraint permits).
-          const occupant = await tx.node.findUnique({
-            where: { loc_memoryId: { loc: destLoc, memoryId: destMemoryId } },
-          });
-          if (occupant && occupant.id !== source.id && !occupant.deletedAt) {
-            throw new GraphQLError(
-              `A live node already occupies loc "${destLoc}" in the destination memory.`,
-              { extensions: { code: 'NODE_ALREADY_EXISTS', loc: destLoc, memoryId: destMemoryId } },
-            );
+      return ctx.db.$transaction(
+        async (tx) => {
+          // #664/#752: moving a node INTO a subtree is the same orphan vector as a
+          // create there — a concurrent non-recursive delete of a destination
+          // ancestor could count zero descendants, then this move lands the row
+          // under it. Lock the destination's ancestor path (moving OUT can't
+          // orphan, so the source side needs nothing). Root-level dest → no-op.
+          await lockAncestorsForCreate(tx, destMemoryId, destLoc);
+
+          if (!isSameSlot) {
+            // #768: relocate the whole loc-subtree (descendants + intra-subtree
+            // edges) via the shared helper, so children's URNs follow the parent.
+            try {
+              await moveNodeSubtree(tx, {
+                source,
+                destMemoryId,
+                destLoc,
+                editor: editorFromAuth(ctx),
+              });
+            } catch (e) {
+              if (e instanceof SubtreeMoveCollisionError) {
+                throw new GraphQLError(
+                  `A node already occupies loc "${e.loc}" in the destination memory.`,
+                  { extensions: { code: 'NODE_ALREADY_EXISTS', loc: e.loc, memoryId: e.memoryId } },
+                );
+              }
+              if (e instanceof SubtreeMoveIntoSelfError) {
+                throw new GraphQLError(e.message, {
+                  extensions: { code: 'BAD_USER_INPUT', loc: e.loc },
+                });
+              }
+              throw e;
+            }
           }
-        }
-        // Pre-move NodeRevision snapshot — a loc/memory change is audit-worthy.
-        // The snapshot belongs to the SOURCE memory (#602): the node is about
-        // to leave it, and this snapshot's content lived there (the builder
-        // stamps source.memoryId).
-        await createNodeRevision(
-          tx,
-          buildNodeRevisionSnapshot(source, editorFromAuth(ctx), {
-            changes: diffNodeChanges(source, { loc: destLoc, memoryId: destMemoryId }),
-          }),
-        );
-        // Move BY ID (stable across moves; keeps every edge reference intact).
-        return tx.node.update({
-          where: { id: source.id },
-          data: { loc: destLoc, memoryId: destMemoryId },
-          include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
-        });
-      });
+
+          // Return the moved source node with its (post-move) edges.
+          return tx.node.findUniqueOrThrow({
+            where: { id: source.id },
+            include: {
+              outgoingEdges: { include: { target: true } },
+              incomingEdges: { include: { source: true } },
+            },
+          });
+        },
+        // A large subtree touches many rows; the default 5s interactive-txn
+        // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
+        { timeout: 120_000 },
+      );
     },
 
     // #564 — clone a node to a new location, returning the NEW node (fresh id).

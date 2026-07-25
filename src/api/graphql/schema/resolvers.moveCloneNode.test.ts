@@ -104,6 +104,91 @@ describe('moveNode (#564)', () => {
   });
 });
 
+// #768 — a node's loc-subtree (its descendants, and edges wholly inside it)
+// moves WITH it, so children's computed URNs follow the renamed/relocated parent.
+describe('moveNode subtree cascade (#768)', () => {
+  const locsIn = async (memoryId: string) =>
+    (await db.node.findMany({ where: { memoryId, deletedAt: null }, select: { loc: true } }))
+      .map((n) => n.loc)
+      .sort();
+
+  it('rebases descendant locs on a same-memory rename', async () => {
+    const parent = await createDbNode(db, { loc: 'findings:auth', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'findings:auth:oauth', memoryId: memA.id });
+    const grandchild = await createDbNode(db, { loc: 'findings:auth:oauth:pkce', memoryId: memA.id });
+
+    const moved = await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnA('findings:security') }, asUser());
+    expect(moved.loc).toBe('findings:security');
+    // Descendants keep their ids but are rebased under the new parent loc.
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('findings:security:oauth');
+    expect((await db.node.findUniqueOrThrow({ where: { id: grandchild.id } })).loc).toBe(
+      'findings:security:oauth:pkce',
+    );
+  });
+
+  it('does NOT sweep in a sibling that merely shares a loc prefix (: boundary)', async () => {
+    const parent = await createDbNode(db, { loc: 'findings:auth', memoryId: memA.id });
+    await createDbNode(db, { loc: 'findings:auth:oauth', memoryId: memA.id });
+    const sibling = await createDbNode(db, { loc: 'findings:auth-v2', memoryId: memA.id });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnA('findings:security') }, asUser());
+    // `findings:auth-v2` is a sibling, not a descendant — untouched.
+    expect((await db.node.findUniqueOrThrow({ where: { id: sibling.id } })).loc).toBe('findings:auth-v2');
+    expect(await locsIn(memA.id)).toEqual(['findings:auth-v2', 'findings:security', 'findings:security:oauth']);
+  });
+
+  it('relocates the whole subtree to another memory (targetUrn)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    const movedChild = await db.node.findUniqueOrThrow({ where: { id: child.id } });
+    expect(movedChild.memoryId).toBe(memB.id);
+    expect(movedChild.loc).toBe('q:c');
+    expect(await locsIn(memA.id)).toEqual([]); // nothing left behind in the source
+  });
+
+  it('re-derives the loc of an intra-subtree edge and moves it cross-memory', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    const e = await edge(parent.id, child.id, memA.id, 'p:rel:p:c');
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    const movedEdge = await db.edge.findUniqueOrThrow({ where: { id: e.id } });
+    expect(movedEdge.loc).toBe('q:rel:q:c'); // re-derived from the rebased endpoints
+    expect(movedEdge.memoryId).toBe(memB.id); // follows the subtree into the dest memory
+    expect(movedEdge.sourceId).toBe(parent.id); // endpoints unchanged (stable ids)
+    expect(movedEdge.targetId).toBe(child.id);
+  });
+
+  it('rejects moving a node into its own subtree', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    await expect(
+      M.moveNode(null, { sourceRef: parent.id, targetUrn: urnA('p:c:under-self') }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+
+  it('fails loudly when a DESCENDANT would collide at the destination', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    // A live node already sits where the rebased child would land.
+    await createDbNode(db, { loc: 'q:c', memoryId: memA.id });
+    await expect(
+      M.moveNode(null, { sourceRef: parent.id, targetUrn: urnA('q') }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'NODE_ALREADY_EXISTS' } });
+    // The subtree stayed put — the whole move is one transaction.
+    expect(await locsIn(memA.id)).toEqual(['p', 'p:c', 'q:c']);
+  });
+
+  it('records a NodeRevision for each moved descendant (audit)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnA('p2') }, asUser());
+    expect(await db.nodeRevision.count({ where: { nodeId: child.id } })).toBeGreaterThan(0);
+  });
+});
+
 describe('cloneNode (#564)', () => {
   it('clones fields to a NEW node (fresh id), leaving the source intact', async () => {
     const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'hello' });
