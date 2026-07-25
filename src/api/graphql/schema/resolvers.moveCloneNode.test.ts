@@ -208,6 +208,22 @@ describe('moveNode subtree cascade (#768)', () => {
     expect(incEdge.targetId).toBe(parent.id);
   });
 
+  it('cross-memory: disambiguates a moved edge loc past pre-existing suffixed variants (#784 review)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    const e = await edge(parent.id, child.id, memA.id, 'p:rel:p:c'); // → base q:rel:q:c after move
+    // Pre-stage memB edges occupying BOTH the base loc AND its :2 variant.
+    const x = await createDbNode(db, { loc: 'x', memoryId: memB.id });
+    const y = await createDbNode(db, { loc: 'y', memoryId: memB.id });
+    await edge(x.id, y.id, memB.id, 'q:rel:q:c');
+    await edge(x.id, y.id, memB.id, 'q:rel:q:c:2');
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    const moved = await db.edge.findUniqueOrThrow({ where: { id: e.id } });
+    expect(moved.memoryId).toBe(memB.id);
+    expect(moved.loc).toBe('q:rel:q:c:3'); // base and :2 both taken → :3 (no P2002)
+  });
+
   it('still allows a CROSS-memory move of a LEAF node', async () => {
     const leaf = await createDbNode(db, { loc: 'lonely', memoryId: memA.id });
     const moved = await M.moveNode(null, { sourceRef: leaf.id, targetUrn: urnB('lonely-in-b') }, asUser());

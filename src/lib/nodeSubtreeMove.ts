@@ -254,14 +254,21 @@ export async function moveNodeSubtree(
     };
   });
 
-  // Pre-existing destination edges that already hold a candidate loc (live OR
-  // tombstoned — the (loc, memoryId) unique is full). The moved edges are still
-  // in the source memory here, so they aren't matched.
-  const bases = desired.map((d) => d.base).filter((b): b is string => b != null);
+  // Pre-existing destination edges that already hold a candidate loc — the exact
+  // base OR a numeric-suffixed variant (`<base>:2`, …), since the disambiguation
+  // loop below emits those. Missing the suffixed variants would let the loop pick
+  // a `<base>:2` that already exists → (loc, memoryId) unique violation (live OR
+  // tombstoned — the index is full). `startsWith <base>:` over-matches unrelated
+  // deeper locs, which is harmless (we only ever avoid taken locs). The moved
+  // edges are still in the source memory here, so they aren't matched.
+  const bases = [...new Set(desired.map((d) => d.base).filter((b): b is string => b != null))];
   const taken = new Set<string>();
   if (bases.length > 0) {
     const rows = await tx.edge.findMany({
-      where: { memoryId: destMemoryId, loc: { in: bases } },
+      where: {
+        memoryId: destMemoryId,
+        OR: [{ loc: { in: bases } }, ...bases.map((b) => ({ loc: { startsWith: `${b}:` } }))],
+      },
       select: { loc: true },
     });
     for (const r of rows) taken.add(r.loc);
