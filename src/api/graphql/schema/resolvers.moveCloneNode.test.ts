@@ -153,11 +153,11 @@ describe('moveNode subtree cascade (#768)', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('q:c');
   });
 
-  it('relocates a whole subtree ACROSS memories, carrying nodes + embeddings (#781)', async () => {
+  it('relocates a whole subtree ACROSS memories; re-indexes embeddings under the dest policy (#781)', async () => {
     const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
     const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
     const grandchild = await createDbNode(db, { loc: 'p:c:d', memoryId: memA.id });
-    // A denormalized embedding on the child (vector column nullable — omit it).
+    // A denormalized source embedding on the child (vector column nullable — omit).
     await db.nodeEmbedding.create({
       data: { nodeId: child.id, memoryId: memA.id, kind: 'abstract', provider: 'local', model: 'test', dim: 768 },
     });
@@ -173,8 +173,58 @@ describe('moveNode subtree cascade (#768)', () => {
       expect(n.loc).toBe(loc);
     }
     expect(await locsIn(memA.id)).toEqual([]); // nothing stranded in the source
-    // Embedding carried to the destination memory (vector search filters on it).
-    expect((await db.nodeEmbedding.findFirstOrThrow({ where: { nodeId: child.id } })).memoryId).toBe(memB.id);
+    // The source-policy embedding is DELETED (not blindly relabeled). memB isn't
+    // vector-indexed, so nothing is re-queued; the row is simply gone.
+    expect(await db.nodeEmbedding.findFirst({ where: { nodeId: child.id } })).toBeNull();
+  });
+
+  it('cross-memory into a VECTOR-INDEXED memory deletes source vectors + queues a re-index (#781)', async () => {
+    const indexed = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'mc-org:mc/idx', name: 'mc/idx', class: 'knowledge', visibility: 'ORGANIZATION', vectorIndexEnabled: true },
+    });
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    await db.nodeEmbedding.create({
+      data: { nodeId: child.id, memoryId: memA.id, kind: 'abstract', provider: 'local', model: 'test', dim: 768 },
+    });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: `${indexed.urn}:q` }, asUser());
+    // Source vector deleted; the moved node is stamped for the worker to rebuild
+    // under the destination's policy.
+    expect(await db.nodeEmbedding.findFirst({ where: { nodeId: child.id } })).toBeNull();
+    const c = await db.node.findUniqueOrThrow({ where: { id: child.id } });
+    expect(c.memoryId).toBe(indexed.id);
+    expect(c.embeddingPendingAt).not.toBeNull();
+  });
+
+  it('refuses a cross-memory move when the destination is ENCRYPTED (#781 v1)', async () => {
+    const enc = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'mc-org:mc/enc', name: 'mc/enc', class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true },
+    });
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    await expect(
+      M.moveNode(null, { sourceRef: parent.id, targetUrn: `${enc.urn}:q` }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    // Refused before any write — the subtree stayed in memA.
+    expect(await locsIn(memA.id)).toEqual(['p', 'p:c']);
+  });
+
+  it('refuses a cross-memory move that violates the destination SCHEMA (#781)', async () => {
+    // A schema-governed dest: objectType "widget" must have a required "size" field.
+    const schema = { objectTypes: { widget: { fields: { size: { type: 'text', required: true } } } } };
+    const governed = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'mc-org:mc/gov', name: 'mc/gov', class: 'knowledge', visibility: 'ORGANIZATION', schema },
+    });
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    // A descendant with the governed objectType but missing the required prop.
+    await db.node.create({
+      data: { id: generateId(), memoryId: memA.id, loc: 'p:bad', name: 'bad', nodeType: 'info', tags: [], objectType: 'widget', properties: {} },
+    });
+    await expect(
+      M.moveNode(null, { sourceRef: parent.id, targetUrn: `${governed.urn}:q` }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await locsIn(memA.id)).toEqual(['p', 'p:bad']); // nothing moved
   });
 
   it('cross-memory: an intra-subtree edge follows (memoryId + re-derived loc)', async () => {

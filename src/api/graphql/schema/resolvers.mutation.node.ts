@@ -38,6 +38,8 @@ import {
   SubtreeMoveCollisionError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
+  CrossMemoryMoveEncryptedError,
+  SubtreeMoveSchemaViolationError,
 } from '../../../lib/nodeSubtreeMove.js';
 import {
   NodeLocConflictError,
@@ -1861,6 +1863,12 @@ export const nodeMutations = {
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           throw new GraphQLError(e.message, { extensions: { code: 'CONFLICT', nodeId: e.nodeId } });
+        }
+        if (
+          e instanceof CrossMemoryMoveEncryptedError ||
+          e instanceof SubtreeMoveSchemaViolationError
+        ) {
+          throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
         }
         throw e;
       }

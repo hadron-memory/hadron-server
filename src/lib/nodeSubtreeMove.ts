@@ -17,10 +17,18 @@
  * UP to `a` sends grandchild `a:b:b` onto the source's old `a:b` slot — never
  * trips the `(loc, memoryId)` unique mid-transaction.
  *
- * **Cross-memory (`destMemoryId` ≠ the source's memory):**
+ * **Cross-memory (`destMemoryId` ≠ the source's memory):** crossing a memory
+ * boundary must respect the DESTINATION's write-path invariants:
+ *   - REFUSED (v1) when either memory is encrypted — moving plaintext into an
+ *     encrypted dest / ciphertext out of an encrypted source needs per-node
+ *     re-encryption (cloneNode's path; #781 follow-up).
+ *   - Every moved node is validated against the destination's collection SCHEMA
+ *     (the enforceNodeSchemaOnWrite gate) before any write.
  *   - Every moved node's `memoryId` becomes `destMemoryId`.
- *   - The moved nodes' `NodeEmbedding` rows are carried to `destMemoryId`
- *     (denormalized; vector retrieval filters on `node_embeddings.memory_id`).
+ *   - The moved nodes' `NodeEmbedding` rows are DELETED and re-indexed under the
+ *     destination policy (`embeddingPendingAt` stamped when the dest indexes; the
+ *     embedding worker rebuilds the correct kinds) — not blindly relabeled,
+ *     since source and dest embedding policies can differ.
  *   - Edges whose SOURCE moved follow it: `Edge.memoryId` (the denormalized
  *     source-side memory) becomes `destMemoryId` and the loc is re-derived from
  *     the rebased source + the target's loc (rebased when the target also moved),
@@ -41,6 +49,9 @@
 import { deriveEdgeLoc } from './edgeLoc.js';
 import { lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
+import { normalizeObjectType } from './enforceNodeSchema.js';
+import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
+import type { MemorySchema } from './memorySchema.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -73,6 +84,31 @@ export class SubtreeMoveSourceChangedError extends Error {
   constructor(public readonly nodeId: string) {
     super('The node was moved concurrently; retry the move.');
     this.name = 'SubtreeMoveSourceChangedError';
+  }
+}
+
+/**
+ * A cross-memory move touches an ENCRYPTED memory (source or destination). v1
+ * refuses these: moving plaintext into an encrypted memory would leave it
+ * plaintext at rest, and moving ciphertext out would bind it to the source key
+ * (undecryptable with the destination key). Per-node decrypt/re-encrypt (as
+ * cloneNode does) is the tracked follow-up (#781).
+ */
+export class CrossMemoryMoveEncryptedError extends Error {
+  constructor() {
+    super(
+      'Cannot move a subtree across memories when either memory is encrypted. ' +
+        'Move it within its memory, or clone the nodes into the destination.',
+    );
+    this.name = 'CrossMemoryMoveEncryptedError';
+  }
+}
+
+/** A moved node violates the destination memory's collection schema. */
+export class SubtreeMoveSchemaViolationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SubtreeMoveSchemaViolationError';
   }
 }
 
@@ -181,6 +217,52 @@ export async function moveNodeSubtree(
   const blocker = occupants.find((o) => !movedIds.has(o.id));
   if (blocker) throw new SubtreeMoveCollisionError(blocker.loc, destMemoryId);
 
+  // Cross-memory pre-checks — crossing a memory boundary must respect the
+  // DESTINATION's encryption + schema (the write-path invariants), so validate
+  // BEFORE any write (a throw rolls the whole tx back). destMem also carries
+  // vectorIndexEnabled for the embedding step below.
+  let destVectorIndexEnabled = false;
+  if (crossMemory) {
+    const [srcMem, destMem] = await Promise.all([
+      tx.memory.findUnique({ where: { id: srcMemoryId }, select: { isEncrypted: true } }),
+      tx.memory.findUnique({
+        where: { id: destMemoryId },
+        select: { isEncrypted: true, vectorIndexEnabled: true, schema: true },
+      }),
+    ]);
+    // Encryption: v1 refuses a cross-memory move touching an encrypted memory
+    // (would leave plaintext at rest in an encrypted dest, or carry
+    // source-key-bound ciphertext the dest key can't read). #781 follow-up.
+    if (srcMem?.isEncrypted || destMem?.isEncrypted) {
+      throw new CrossMemoryMoveEncryptedError();
+    }
+    destVectorIndexEnabled = destMem?.vectorIndexEnabled ?? false;
+    // Schema: a schema-governed destination rejects nodes with undeclared
+    // objectType / invalid properties — the same enforceNodeSchemaOnWrite gate
+    // every normal write applies. Validate every moved node up front.
+    const destSchema = (destMem?.schema ?? null) as MemorySchema | null;
+    if (destSchema) {
+      for (const n of subtree) {
+        const objectType = normalizeObjectType(n.objectType);
+        if (objectType == null) continue; // ordinary node — nothing to enforce
+        try {
+          validateNodeAgainstSchema(
+            destSchema,
+            objectType,
+            (n.properties ?? null) as Record<string, unknown> | null,
+          );
+        } catch (e) {
+          if (e instanceof NodeSchemaViolation) {
+            throw new SubtreeMoveSchemaViolationError(
+              `Node "${n.loc}" does not satisfy the destination memory's schema: ${e.message}`,
+            );
+          }
+          throw e;
+        }
+      }
+    }
+  }
+
   // Move every node in two phases so per-row updates never trip the
   // (loc, memoryId) unique mid-transaction — a same-memory rebase can overlap
   // the source subtree (moving `a:b` → `a` sends grandchild `a:b:b` onto the
@@ -210,16 +292,22 @@ export async function moveNodeSubtree(
   }
 
   // ── Cross-memory carry-over ─────────────────────────────────────────────
-  // Embeddings follow the node: NodeEmbedding.memoryId is denormalized and
-  // vector retrieval filters on it. The vectors are content-based and unchanged,
-  // so moving the rows (rather than deleting + re-embedding) keeps the node
-  // searchable in the destination and out of the source's candidate window. The
-  // unique key is (nodeId, kind, chunkIndex) — memoryId isn't in it — so this
-  // can't collide.
-  await tx.nodeEmbedding.updateMany({
-    where: { nodeId: { in: [...movedIds] } },
-    data: { memoryId: destMemoryId },
-  });
+  // Embeddings are re-indexed under the DESTINATION policy, not blindly
+  // relabeled: the source vectors were built under the source memory's policy
+  // (kind/embeddingSource/chunking), which may differ. Delete the moved nodes'
+  // vectors (removing them from the source's candidate window and clearing any
+  // wrong-policy rows), then — if the destination indexes — stamp
+  // `embeddingPendingAt` so the embedding worker rebuilds the correct kinds
+  // under the destination's policy (or, if the destination doesn't index, the
+  // rows simply stay gone). Content is plaintext here (encrypted memories are
+  // refused above).
+  await tx.nodeEmbedding.deleteMany({ where: { nodeId: { in: [...movedIds] } } });
+  if (destVectorIndexEnabled) {
+    await tx.node.updateMany({
+      where: { id: { in: [...movedIds] } },
+      data: { embeddingPendingAt: new Date() },
+    });
+  }
 
   // Edges whose SOURCE moved follow it (Edge.memoryId denormalizes the source's
   // memory). Re-derive the loc from the rebased source + the target's loc
