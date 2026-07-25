@@ -153,18 +153,62 @@ describe('moveNode subtree cascade (#768)', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('q:c');
   });
 
-  it('refuses a CROSS-memory move of a node that has descendants (#768 scope)', async () => {
+  it('relocates a whole subtree ACROSS memories, carrying nodes + embeddings (#781)', async () => {
     const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
     const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
-    await expect(
-      M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser()),
-    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-    // Nothing moved — the whole thing is refused up front.
-    expect(await locsIn(memA.id)).toEqual(['p', 'p:c']);
-    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).memoryId).toBe(memA.id);
+    const grandchild = await createDbNode(db, { loc: 'p:c:d', memoryId: memA.id });
+    // A denormalized embedding on the child (vector column nullable — omit it).
+    await db.nodeEmbedding.create({
+      data: { nodeId: child.id, memoryId: memA.id, kind: 'abstract', provider: 'local', model: 'test', dim: 768 },
+    });
+
+    const moved = await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    expect(moved.id).toBe(parent.id); // stable id
+    expect(moved.memoryId).toBe(memB.id);
+    expect(moved.loc).toBe('q');
+    // Descendants followed, rebased, into memB.
+    for (const [id, loc] of [[child.id, 'q:c'], [grandchild.id, 'q:c:d']] as const) {
+      const n = await db.node.findUniqueOrThrow({ where: { id } });
+      expect(n.memoryId).toBe(memB.id);
+      expect(n.loc).toBe(loc);
+    }
+    expect(await locsIn(memA.id)).toEqual([]); // nothing stranded in the source
+    // Embedding carried to the destination memory (vector search filters on it).
+    expect((await db.nodeEmbedding.findFirstOrThrow({ where: { nodeId: child.id } })).memoryId).toBe(memB.id);
   });
 
-  it('still allows a CROSS-memory move of a LEAF node (single-node path)', async () => {
+  it('cross-memory: an intra-subtree edge follows (memoryId + re-derived loc)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    const e = await edge(parent.id, child.id, memA.id, 'p:rel:p:c');
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    const moved = await db.edge.findUniqueOrThrow({ where: { id: e.id } });
+    expect(moved.memoryId).toBe(memB.id); // follows the subtree into the dest memory
+    expect(moved.loc).toBe('q:rel:q:c'); // re-derived from the rebased endpoints
+    expect(moved.sourceId).toBe(parent.id); // endpoints unchanged (stable ids)
+    expect(moved.targetId).toBe(child.id);
+  });
+
+  it('cross-memory: an OUTGOING boundary edge follows the moved source, INCOMING stays', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const outside = await createDbNode(db, { loc: 'outside', memoryId: memA.id }); // stays in memA
+    const out = await edge(parent.id, outside.id, memA.id, 'p:rel:outside'); // source moves
+    const inc = await edge(outside.id, parent.id, memA.id, 'outside:rel:p'); // target moves
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    // Outgoing edge (source moved) → memoryId=memB, loc re-derived (target loc unchanged).
+    const outEdge = await db.edge.findUniqueOrThrow({ where: { id: out.id } });
+    expect(outEdge.memoryId).toBe(memB.id);
+    expect(outEdge.loc).toBe('q:rel:outside');
+    // Incoming edge (source stayed in memA) → memoryId unchanged; it's now a
+    // legitimate cross-memory edge (memA → memB), gated at read time.
+    const incEdge = await db.edge.findUniqueOrThrow({ where: { id: inc.id } });
+    expect(incEdge.memoryId).toBe(memA.id);
+    expect(incEdge.targetId).toBe(parent.id);
+  });
+
+  it('still allows a CROSS-memory move of a LEAF node', async () => {
     const leaf = await createDbNode(db, { loc: 'lonely', memoryId: memA.id });
     const moved = await M.moveNode(null, { sourceRef: leaf.id, targetUrn: urnB('lonely-in-b') }, asUser());
     expect(moved.memoryId).toBe(memB.id);

@@ -629,6 +629,37 @@ describe('hadron_move_node — cross-memory move + permission denial', () => {
     ).toBeNull();
   });
 
+  it('relocates a whole SUBTREE across memories (#781)', async () => {
+    const otherMemory = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: (await db.organization.findFirst())!.id, name: 'sister-sub' },
+      { db, roles: ['ADMIN'], userId: fx.admin.id } as Context,
+    );
+    // Give the move source a descendant so the move carries a subtree.
+    const child = await db.node.create({
+      data: { id: generateId(), memoryId: fx.memory.id, loc: 'relocate:src:kid', name: 'Kid', nodeType: 'info', tags: [] },
+    });
+
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
+      targetUrn: `urn:node:${otherMemory.urn}:imported`,
+    });
+
+    expect(text).toMatch(/Moved/);
+    expect(text).toMatch(/Children: 1 immediate descendant/);
+    // The descendant followed, rebased, into the other memory.
+    const movedChild = await db.node.findUniqueOrThrow({ where: { id: child.id } });
+    expect(movedChild.memoryId).toBe(otherMemory.id);
+    expect(movedChild.loc).toBe('imported:kid');
+    // Nothing stranded in the source memory.
+    expect(
+      await db.node.findFirst({
+        where: { loc: { startsWith: 'relocate:src' }, memoryId: fx.memory.id, deletedAt: null },
+      }),
+    ).toBeNull();
+  });
+
   it('refuses with "write access denied for source memory" when the caller lacks source write', async () => {
     const srv = createTestableMcpServer(viewerAuth());
     const text = await srv.callToolText('hadron_move_node', {

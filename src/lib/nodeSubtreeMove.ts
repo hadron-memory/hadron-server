@@ -1,43 +1,44 @@
 /**
- * moveNodeSubtree — rebase a node AND its loc-subtree WITHIN one memory (#768).
+ * moveNodeSubtree — rebase a node AND its loc-subtree, within one memory OR
+ * across memories (#768 same-memory rename; #781 cross-memory relocation).
  *
  * A node's parent/child relationship is expressed by its loc PREFIX (`a:b` is
- * the parent of `a:b:c`) and its URN is `<memoryUrn>::<loc>`. So renaming a node
- * — the old moveNode / hadron_move_node behavior of relocating only the named
- * node — stranded every descendant at its original loc, leaving their computed
- * URNs pointing under a parent path that no longer exists (issue #768). This
+ * the parent of `a:b:c`) and its URN is `<memoryUrn>::<loc>`. So relocating only
+ * the named node stranded every descendant at its original loc, leaving their
+ * computed URNs pointing under a parent path that no longer exists (#768). This
  * helper is the ONE shared implementation both the GraphQL `moveNode` resolver
- * and the MCP `hadron_move_node` tool call for a SAME-MEMORY move, so the two
- * surfaces can't drift.
+ * and the MCP `hadron_move_node` tool call, so the two surfaces can't drift.
  *
- * **Same-memory only, by design.** Cross-memory relocation of a subtree is NOT
- * handled here: moving descendants into another memory turns the subtree's
- * boundary edges into cross-memory edges whose endpoints (`Edge.source` /
- * `Edge.target`) are resolved WITHOUT a per-endpoint access check, so a reader
- * of one memory could reach a node in the other — a systemic concern that
- * belongs with `extractParentNode` (purpose-built for cross-memory subtree
- * moves) and a dedicated Edge-endpoint gating fix, tracked separately. The
- * callers reject a cross-memory move that carries descendants and fall back to
- * their single-node path for a cross-memory LEAF move.
+ * It gathers the subtree (`<source.loc>` and each `<source.loc>:…` descendant,
+ * on `:` path boundaries), rebases every loc onto `destLoc`, writes a pre-move
+ * NodeRevision for each, and moves the rows BY ID (stable — every edge reference
+ * stays valid). Nodes move in two phases (park at a unique temp loc, then the
+ * final loc) so a rebase that overlaps the source subtree — e.g. moving `a:b`
+ * UP to `a` sends grandchild `a:b:b` onto the source's old `a:b` slot — never
+ * trips the `(loc, memoryId)` unique mid-transaction.
  *
- * It rebases every node in the subtree (`<source.loc>` and each
- * `<source.loc>:…` descendant, on `:` path boundaries) onto `destLoc`, writes a
- * pre-move NodeRevision for each, and moves the rows BY ID (stable — every edge
- * reference stays valid). Everything stays in the one memory, so no `memoryId`
- * ever changes and there is no cross-tenant surface. EDGES are left untouched:
- * their loc is a derived denormalization, references are by stable id (the graph
- * stays intact), and re-deriving edge locs on a move — with its collision +
- * incoming/outgoing symmetry — is out of scope for the #768 rename fix (folded
- * into #781), exactly as a single-node move has always left them.
+ * **Cross-memory (`destMemoryId` ≠ the source's memory):**
+ *   - Every moved node's `memoryId` becomes `destMemoryId`.
+ *   - The moved nodes' `NodeEmbedding` rows are carried to `destMemoryId`
+ *     (denormalized; vector retrieval filters on `node_embeddings.memory_id`).
+ *   - Edges whose SOURCE moved follow it: `Edge.memoryId` (the denormalized
+ *     source-side memory) becomes `destMemoryId` and the loc is re-derived from
+ *     the rebased source + the target's loc (rebased when the target also moved),
+ *     disambiguated against sibling and pre-existing destination edges so the
+ *     `(loc, memoryId)` unique never trips. A boundary edge whose source did NOT
+ *     move keeps its memoryId (its source didn't move) — it simply becomes a
+ *     legitimate cross-memory edge, whose endpoints are gated by #783.
+ * Same-memory moves change no `memoryId` and leave edges untouched (an edge's
+ * loc is a derived denormalization; references are by stable id, so the graph
+ * stays intact — same-memory edge-loc rebasing is the separate #781 concern).
  *
- * The CALLER owns everything around it: write-authorization, the destination
+ * The CALLER owns: write-authorization to BOTH memories, the destination
  * ancestor lock (`lockAncestorsForCreate`), the same-slot no-op short-circuit,
- * the cross-memory guard, any overwrite/eviction of the destination slot, and
- * the post-move fetch/return shape. `source` MUST be the full live node row
- * (all revisioned fields loaded — `buildNodeRevisionSnapshot` needs them) and
- * MUST live in the same memory it's moving within.
+ * any overwrite/eviction of the destination slot, and the post-move fetch/return
+ * shape. `source` MUST be the full live node row (all revisioned fields loaded).
  */
 
+import { deriveEdgeLoc } from './edgeLoc.js';
 import { lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
 import {
@@ -82,14 +83,12 @@ export interface MoveNodeSubtreeResult {
 
 /**
  * Acquire the source-subtree advisory locks and revalidate the source row.
- * Shared by {@link moveNodeSubtree} (the same-memory subtree move) AND the
- * callers' cross-memory LEAF path, so EVERY move that reads or relocates from
- * `source.loc` serializes the same way. Without this, a path that resolves the
- * source before the transaction (all of them) and then reads/counts under
- * `source.loc` races a concurrent move of that node: the concurrent move can
- * commit `p → q` first, this path then sees an empty `p:` prefix and acts on a
- * stale snapshot — stranding descendants (they're now under `q:`) or defeating
- * the cross-memory descendant guard.
+ * Shared by {@link moveNodeSubtree} AND the callers' single-node paths, so EVERY
+ * move that reads or relocates from `source.loc` serializes the same way.
+ * Without this, a path that resolves the source before the transaction (all of
+ * them) and then reads/counts under `source.loc` races a concurrent move of that
+ * node: the concurrent move can commit `p → q` first, this path then sees an
+ * empty `p:` prefix and acts on a stale snapshot — stranding descendants.
  *
  * Locks (a) the source's ANCESTOR path — so a concurrent move of a DESCENDANT,
  * which locks its own ancestors (including `source.loc`), contends here — and
@@ -121,16 +120,19 @@ export async function lockSourceForMove(
 }
 
 /**
- * Relocate `source` and its loc-subtree to `destLoc` within the SAME memory. See
- * the module doc for the caller's responsibilities. Throws
- * {@link SubtreeMoveIntoSelfError} / {@link SubtreeMoveCollisionError} /
- * {@link SubtreeMoveSourceChangedError}; the caller maps these to its surface.
+ * Relocate `source` and its loc-subtree to `destLoc` (in `destMemoryId`, which
+ * defaults to the source's own memory). See the module doc for the caller's
+ * responsibilities. Throws {@link SubtreeMoveIntoSelfError} /
+ * {@link SubtreeMoveCollisionError} / {@link SubtreeMoveSourceChangedError}; the
+ * caller maps these to its surface.
  */
 export async function moveNodeSubtree(
   tx: Prisma.TransactionClient,
   opts: {
     source: SnapshotSourceNode;
     destLoc: string;
+    /** Destination memory. Omit / equal to source.memoryId for a same-memory move. */
+    destMemoryId?: string;
     editor: SnapshotEditor;
     /**
      * Also set the moved SOURCE node's `name` to destLoc's leaf atom (the MCP
@@ -141,23 +143,24 @@ export async function moveNodeSubtree(
   },
 ): Promise<MoveNodeSubtreeResult> {
   const { source, destLoc, editor, renameSourceLeaf } = opts;
-  const memoryId = source.memoryId;
+  const srcMemoryId = source.memoryId;
+  const destMemoryId = opts.destMemoryId ?? srcMemoryId;
+  const crossMemory = destMemoryId !== srcMemoryId;
 
   // A node can't be moved INTO its own subtree — the rebase would fold the loc
-  // prefix onto itself.
-  if (destLoc.startsWith(`${source.loc}:`)) {
+  // prefix onto itself. Only possible within one memory.
+  if (!crossMemory && destLoc.startsWith(`${source.loc}:`)) {
     throw new SubtreeMoveIntoSelfError(destLoc);
   }
 
-  // Lock the source subtree + revalidate the source (shared with the callers'
-  // cross-memory leaf path — see lockSourceForMove). The caller already holds
+  // Lock the source subtree + revalidate the source. The caller already holds
   // the destination ancestor lock.
   await lockSourceForMove(tx, source);
 
   // The subtree: the source node's descendants, on ':' path boundaries (so
   // `findings:auth` doesn't sweep in `findings:auth-v2`).
   const descendants = await tx.node.findMany({
-    where: { memoryId, deletedAt: null, loc: { startsWith: `${source.loc}:` } },
+    where: { memoryId: srcMemoryId, deletedAt: null, loc: { startsWith: `${source.loc}:` } },
   });
   const subtree: SnapshotSourceNode[] = [source, ...descendants];
   // Rebase a source-subtree loc onto the destination: source.loc → destLoc,
@@ -172,22 +175,20 @@ export async function moveNodeSubtree(
   // destination slot. Live OR soft-deleted blocks: the (loc, memoryId) unique
   // index is full, so a tombstone at the target still rejects the write.
   const occupants = await tx.node.findMany({
-    where: { memoryId, loc: { in: [...newLocById.values()] } },
+    where: { memoryId: destMemoryId, loc: { in: [...newLocById.values()] } },
     select: { id: true, loc: true },
   });
   const blocker = occupants.find((o) => !movedIds.has(o.id));
-  if (blocker) throw new SubtreeMoveCollisionError(blocker.loc, memoryId);
+  if (blocker) throw new SubtreeMoveCollisionError(blocker.loc, destMemoryId);
 
   // Move every node in two phases so per-row updates never trip the
-  // (loc, memoryId) unique mid-transaction. A rebased loc is NOT always disjoint
-  // from the old subtree: moving a node UP into a (possibly virtual) ancestor
-  // slot maps a descendant onto a sibling's old loc — e.g. `a:b` → `a` sends the
-  // grandchild `a:b:b` to `a:b`, the source's own old slot. Phase 1 parks every
-  // moved node at a unique temp loc (freeing all old slots); phase 2 writes the
-  // final locs + a pre-move NodeRevision. The snapshot/diff read the original
-  // `n` (its pre-move loc), so temp parking doesn't affect audit history. Temp
-  // locs mirror deleteNode's `__deleted-<id>` re-stamp — id-unique, and outside
-  // any real loc namespace.
+  // (loc, memoryId) unique mid-transaction — a same-memory rebase can overlap
+  // the source subtree (moving `a:b` → `a` sends grandchild `a:b:b` onto the
+  // source's old `a:b` slot). Phase 1 parks each node at a unique temp loc;
+  // phase 2 writes the final loc (+ destination memory) and a pre-move
+  // NodeRevision. The snapshot/diff read the original `n` (its pre-move loc), so
+  // temp parking doesn't affect audit history. Temp locs mirror deleteNode's
+  // `__deleted-<id>` re-stamp — id-unique, outside any real loc namespace.
   for (const n of subtree) {
     await tx.node.update({ where: { id: n.id }, data: { loc: `__moving-${n.id}` } });
   }
@@ -195,7 +196,7 @@ export async function moveNodeSubtree(
   for (const n of subtree) {
     const newLoc = newLocById.get(n.id)!;
     const rename = renameSourceLeaf === true && n.id === source.id;
-    const changed = { loc: newLoc, ...(rename ? { name: leaf } : {}) };
+    const changed = { loc: newLoc, memoryId: destMemoryId, ...(rename ? { name: leaf } : {}) };
     await createNodeRevision(
       tx,
       buildNodeRevisionSnapshot(n, editor, { changes: diffNodeChanges(n, changed) }),
@@ -203,12 +204,76 @@ export async function moveNodeSubtree(
     await tx.node.update({ where: { id: n.id }, data: changed });
   }
 
-  // Edges are intentionally left untouched (their loc is a derived
-  // denormalization of the endpoint locs). Edge references are by stable id, so
-  // the graph stays intact; only an edge's derived `loc`/URN goes stale — exactly
-  // as a single-node move has always left it. Re-deriving edge locs on a move
-  // opens up (loc, memoryId) collision handling and incoming/outgoing symmetry
-  // that is out of scope for the #768 rename fix; it's folded into #781.
+  if (!crossMemory) {
+    // Same-memory: no memoryId changes anywhere, edges left untouched (#768).
+    return { movedCount: subtree.length };
+  }
+
+  // ── Cross-memory carry-over ─────────────────────────────────────────────
+  // Embeddings follow the node: NodeEmbedding.memoryId is denormalized and
+  // vector retrieval filters on it. The vectors are content-based and unchanged,
+  // so moving the rows (rather than deleting + re-embedding) keeps the node
+  // searchable in the destination and out of the source's candidate window. The
+  // unique key is (nodeId, kind, chunkIndex) — memoryId isn't in it — so this
+  // can't collide.
+  await tx.nodeEmbedding.updateMany({
+    where: { nodeId: { in: [...movedIds] } },
+    data: { memoryId: destMemoryId },
+  });
+
+  // Edges whose SOURCE moved follow it (Edge.memoryId denormalizes the source's
+  // memory). Re-derive the loc from the rebased source + the target's loc
+  // (rebased if the target also moved, else its current loc), and relocate the
+  // edge to the destination memory. Edges whose source did NOT move keep their
+  // memoryId (their source stayed) — they simply become cross-memory edges,
+  // gated at read time by #783.
+  const outgoing = await tx.edge.findMany({
+    where: { deletedAt: null, sourceId: { in: [...movedIds] } },
+  });
+  if (outgoing.length === 0) return { movedCount: subtree.length };
+
+  // Target locs for boundary targets (targets outside the moved set).
+  const outsideTargetIds = [
+    ...new Set(outgoing.map((e) => e.targetId).filter((id) => !movedIds.has(id))),
+  ];
+  const outsideTargetLoc = new Map<string, string>();
+  if (outsideTargetIds.length > 0) {
+    const rows = await tx.node.findMany({
+      where: { id: { in: outsideTargetIds } },
+      select: { id: true, loc: true },
+    });
+    for (const r of rows) outsideTargetLoc.set(r.id, r.loc);
+  }
+
+  // Desired base loc per moved edge (null target loc ⇒ skip defensively).
+  const desired = outgoing.map((e) => {
+    const tgtLoc = newLocById.get(e.targetId) ?? outsideTargetLoc.get(e.targetId);
+    return {
+      id: e.id,
+      base: tgtLoc == null ? null : deriveEdgeLoc(newLocById.get(e.sourceId)!, e.name, tgtLoc),
+    };
+  });
+
+  // Pre-existing destination edges that already hold a candidate loc (live OR
+  // tombstoned — the (loc, memoryId) unique is full). The moved edges are still
+  // in the source memory here, so they aren't matched.
+  const bases = desired.map((d) => d.base).filter((b): b is string => b != null);
+  const taken = new Set<string>();
+  if (bases.length > 0) {
+    const rows = await tx.edge.findMany({
+      where: { memoryId: destMemoryId, loc: { in: bases } },
+      select: { loc: true },
+    });
+    for (const r of rows) taken.add(r.loc);
+  }
+
+  for (const d of desired) {
+    if (d.base == null) continue; // target vanished — leave the edge as-is
+    let loc = d.base;
+    for (let k = 2; taken.has(loc); k++) loc = `${d.base}:${k}`;
+    taken.add(loc);
+    await tx.edge.update({ where: { id: d.id }, data: { loc, memoryId: destMemoryId } });
+  }
 
   return { movedCount: subtree.length };
 }
