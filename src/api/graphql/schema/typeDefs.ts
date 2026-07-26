@@ -379,6 +379,19 @@ export const typeDefs = `#graphql
     ownedByMe: Boolean
   }
 
+  """
+  Filter for the publicAgents() marketplace slice (#551). ONLY 'type' narrows.
+  Deliberately a SEPARATE, narrower input from AgentFilter: the slice is PUBLIC
+  by definition (so 'visibility' is meaningless) and a PUBLIC agent is never
+  user-owned (user-owned agents are strictly PERSONAL, spec 047), so an
+  'ownedByMe' here would always be empty — rejecting it at the schema keeps a
+  client from applying the filter uniformly and silently getting cross-org
+  marketplace agents (#782 Codex review).
+  """
+  input PublicAgentFilter {
+    type: AgentType
+  }
+
   "Filter for the uniform apps() list (#473). Clauses AND-combine."
   input AppFilter {
     """
@@ -3652,7 +3665,7 @@ export const typeDefs = `#graphql
     member/admin-gated (null / [] for outsiders). Name-ascending order
     (id tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
     """
-    publicAgents(filter: AgentFilter, limit: Int, offset: Int): AgentsPage!
+    publicAgents(filter: PublicAgentFilter, limit: Int, offset: Int): AgentsPage!
     # 005-agent-subscription FR-005: AgentSubscriptions held by the
     # authenticated user. Read-only in v1.
     myAgentSubscriptions: [AgentSubscription!]!

@@ -174,7 +174,8 @@ describe('user-owned agent — read/list/audit surfaces are owner-only', () => {
     expect(ownerList.total).toBe(1);
 
     // Platform admin: ownedByMe collapses the fetch-everything list to the
-    // admin's own org-less agents (here: none) — NOT the whole agents table.
+    // admin's OWN org-less agents (here: just othersAgent, which otherId owns)
+    // — NOT the whole agents table.
     const adminList = await resolvers.Query.agents(
       null, { filter: { ownedByMe: true } }, ctx({ userId: otherId, roles: ['ADMIN'] }),
     );
