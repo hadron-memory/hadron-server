@@ -29,6 +29,7 @@ import {
   resolveAppleUser,
 } from './auth/index.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
+import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { resolveAuthContext } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
@@ -849,6 +850,10 @@ export async function createServer(): Promise<Express> {
       res.status(500).json({ error: 'Email verification failed' });
     }
   });
+
+  // #792 — dev-only login (triple-gated: DEV_LOGIN_ENABLED + non-production
+  // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
+  mountDevLoginRoutes(app, db);
 
   // #477 Sink 1 — login handoff exchange. The portal's server `load` (NOT the
   // browser) POSTs the one-time code from /auth/callback?code=… here and gets
