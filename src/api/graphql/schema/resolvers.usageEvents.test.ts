@@ -95,17 +95,17 @@ beforeEach(async () => {
     data: { id: generateId(), memoryId: otherMemory.id, loc: 'alpha', name: 'alpha' },
   });
 
-  // Events carry both nodeLoc (loc/bare-loc path) and nodeId (memory + per-node
-  // FK paths), mirroring how the MCP ingest writes them.
+  // Events carry nodeLoc (loc/bare-loc path), nodeId (per-node FK path), and
+  // memoryId (#796 memory scoping) — mirroring how the MCP ingest writes them.
   await db.usageEvent.createMany({
     data: [
-      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: alphaNode.id },
-      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: alphaNode.id },
-      { id: generateId(), type: 'write', nodeLoc: 'alpha', nodeId: alphaNode.id },
-      { id: generateId(), type: 'read', nodeLoc: 'beta', nodeId: betaNode.id },
-      { id: generateId(), type: 'read', nodeLoc: 'gamma', nodeId: gammaNode.id },
+      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: alphaNode.id, memoryId: memory.id },
+      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: alphaNode.id, memoryId: memory.id },
+      { id: generateId(), type: 'write', nodeLoc: 'alpha', nodeId: alphaNode.id, memoryId: memory.id },
+      { id: generateId(), type: 'read', nodeLoc: 'beta', nodeId: betaNode.id, memoryId: memory.id },
+      { id: generateId(), type: 'read', nodeLoc: 'gamma', nodeId: gammaNode.id, memoryId: otherMemory.id },
       // otherMemory's alpha — same loc as memory's alpha, different memory/node.
-      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: otherAlphaNode.id },
+      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: otherAlphaNode.id, memoryId: otherMemory.id },
     ],
   });
 });

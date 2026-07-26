@@ -1,5 +1,12 @@
 // memoryQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { GraphQLError } from 'graphql';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import {
+  getUsageActivity,
+  isValidTimeZone,
+  resolveWindow,
+  type UsageActivityBucketSize,
+} from '../../../lib/usageActivity.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { deserializeTags } from '../../../integrations/db/provider.js';
@@ -55,6 +62,66 @@ async function resolveReadableMemoryId(ctx: Context, memoryRef: string): Promise
 }
 
 export const memoryQueries = {
+    /**
+     * #796 — read/write activity counts bucketed by time.
+     *
+     * Two scopes. Default (no `memoryRef`): the caller's OWN events across
+     * everything they touched — needs only an authenticated user, since a user
+     * reading their own activity discloses nothing. With `memoryRef`: every
+     * user's events attributed to that memory, gated on MEMORY READ ACCESS,
+     * the same gate `memoryUsageSummary` and `usageEvents(memoryId:)` use, so
+     * the three memory-scoped usage surfaces stay in parity. That reveals other
+     * users' activity VOLUMES to any reader of the memory — a deliberate call
+     * (Holger, #796), and strictly less than the per-node counts
+     * `memoryUsageSummary` already exposes to the same audience.
+     *
+     * Denied and nonexistent are indistinguishable — both `[]`.
+     */
+    usageActivity: async (
+      _: unknown,
+      {
+        from,
+        to,
+        bucket,
+        memoryRef,
+        timeZone,
+      }: {
+        from?: string | null;
+        to?: string | null;
+        bucket?: UsageActivityBucketSize | null;
+        memoryRef?: string | null;
+        timeZone?: string | null;
+      },
+      ctx: Context,
+    ) => {
+      const tz = timeZone ?? 'UTC';
+      if (!isValidTimeZone(tz)) {
+        throw new GraphQLError(`Unknown IANA time zone: ${tz}`, {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      const window = resolveWindow(from, to);
+      if (!window) {
+        throw new GraphQLError(
+          'Invalid window: `from` and `to` must be ISO-8601 timestamps with from < to.',
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+
+      const scope = { ...window, bucket: bucket ?? 'DAY', timeZone: tz } as const;
+
+      if (memoryRef) {
+        const resolvedId = await resolveReadableMemoryId(ctx, memoryRef);
+        if (!resolvedId) return [];
+        return getUsageActivity(ctx.db, { ...scope, memoryId: resolvedId });
+      }
+
+      // Own-activity scope. An App-key caller has no userId, so there is no
+      // "own activity" to report — empty, not an error (as dashboardWidgets).
+      if (!ctx.userId) return [];
+      return getUsageActivity(ctx.db, { ...scope, userId: ctx.userId });
+    },
+
     memoryUsageSummary: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
       // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
@@ -70,22 +137,21 @@ export const memoryQueries = {
         return [];
       }
 
-      // #253: scope via the UsageEvent→Node relation, not `nodeLoc: { in: locs }`.
-      // FK-precise (no cross-memory loc collision — a node named `alpha` in
-      // another memory no longer inflates this memory's counts), a single query,
-      // and no IN-parameter limit on large memories. Like usageEvents post-#251
-      // this excludes events with a null nodeId (orphaned after node deletion,
-      // or the older recordUsage path's ambiguous loc lookup) — arguably more
-      // correct, since an unattributable event shouldn't count toward a memory.
+      // #796: scope on the `memoryId` COLUMN. This was #253's UsageEvent→Node
+      // relation join, which kept the FK precision the older `nodeLoc: { in: locs }`
+      // scoping lacked (a node named `alpha` in another memory no longer inflates
+      // this memory's counts) but paid for it with silent data loss: `nodeId` is
+      // SetNull, so deleting a node erased its whole read/write history from the
+      // memory. The column is FK-precise AND survives node deletion, so counts
+      // can only go UP relative to the join — never down. Events written before
+      // the backfill whose node was already gone stay unattributable.
       //
-      // `nodeLoc: { not: null }` restores a guarantee the old loc-IN scoping had
-      // implicitly: the result feeds UsageSummaryEntry.nodeLoc (String!), so a
-      // null-nodeLoc group (an event with nodeId set but nodeLoc null) would
-      // violate the schema at the GraphQL layer. The IN-filter could never
-      // produce one; the relation filter can, so exclude it explicitly.
+      // `nodeLoc: { not: null }` still guards the schema: the result feeds
+      // UsageSummaryEntry.nodeLoc (String!), and an event can carry a memoryId
+      // with a null nodeLoc.
       const rows = await ctx.db.usageEvent.groupBy({
         by: ['nodeLoc', 'type'],
-        where: { node: { memoryId: resolvedMemoryId }, nodeLoc: { not: null } },
+        where: { memoryId: resolvedMemoryId, nodeLoc: { not: null } },
         _count: { id: true },
       });
       return rows.map((r: { nodeLoc: string | null; type: string; _count: { id: number } }) => ({

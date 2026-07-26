@@ -75,9 +75,9 @@ beforeEach(async () => {
 
   await db.usageEvent.createMany({
     data: [
-      { id: generateId(), type: 'read', nodeLoc: 'a-loc', nodeId: nodeA.id },
-      { id: generateId(), type: 'read', nodeLoc: 'b-loc', nodeId: nodeB.id },
-      { id: generateId(), type: 'read', nodeLoc: 'p-loc', nodeId: nodeP.id },
+      { id: generateId(), type: 'read', nodeLoc: 'a-loc', nodeId: nodeA.id, memoryId: memA.id },
+      { id: generateId(), type: 'read', nodeLoc: 'b-loc', nodeId: nodeB.id, memoryId: memB.id },
+      { id: generateId(), type: 'read', nodeLoc: 'p-loc', nodeId: nodeP.id, memoryId: privMem.id },
     ],
   });
 

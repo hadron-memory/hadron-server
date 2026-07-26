@@ -108,6 +108,10 @@ export const sessionMutations = {
           type: event.type,
           nodeLoc: event.nodeLoc,
           nodeId: node?.id,
+          // #796: derived from the same row `nodeId` comes from, so it inherits
+          // this path's documented cross-memory loc ambiguity and nothing more.
+          // Keeping it derived leaves UsageEventInput unchanged.
+          memoryId: node?.memoryId,
           actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
           appId: ctx.appId,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
@@ -1086,6 +1090,7 @@ export const sessionMutations = {
               type: 'action-run',
               nodeLoc: loc,
               nodeId: node.id,
+              memoryId: node.memoryId, // #796
               appId: ctx.appId ?? null,
               createdBy: ctx.userId ?? null,
               sessionId: ctx.sessionId ?? null,

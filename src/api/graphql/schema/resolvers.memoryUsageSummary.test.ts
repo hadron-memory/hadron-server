@@ -66,11 +66,11 @@ beforeEach(async () => {
   // nodeId are intentionally excluded from the summary).
   await db.usageEvent.createMany({
     data: [
-      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: alphaNode.id },
-      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: alphaNode.id },
-      { id: generateId(), type: 'write', nodeLoc: 'alpha', nodeId: alphaNode.id },
-      { id: generateId(), type: 'read', nodeLoc: 'beta', nodeId: betaNode.id },
-      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: otherAlphaNode.id }, // otherMemory
+      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: alphaNode.id, memoryId: memory.id },
+      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: alphaNode.id, memoryId: memory.id },
+      { id: generateId(), type: 'write', nodeLoc: 'alpha', nodeId: alphaNode.id, memoryId: memory.id },
+      { id: generateId(), type: 'read', nodeLoc: 'beta', nodeId: betaNode.id, memoryId: memory.id },
+      { id: generateId(), type: 'read', nodeLoc: 'alpha', nodeId: otherAlphaNode.id, memoryId: otherMemory.id },
     ],
   });
 

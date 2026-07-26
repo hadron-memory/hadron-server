@@ -1824,6 +1824,9 @@ export function createMcpServerInstance(
           type: 'read',
           nodeLoc: loc,
           nodeId: node.id,
+          // #796: attributed directly so the event stays counted for this
+          // memory after the node is deleted (nodeId is SetNull).
+          memoryId: node.memoryId,
           appId: auth.appId ?? null,
           // 046-usage-metering FR-001: user attribution when the
           // authenticated principal is a user (createdBy unchanged).
@@ -2033,6 +2036,7 @@ export function createMcpServerInstance(
           type: 'read',
           nodeLoc: n.loc,
           nodeId: n.id,
+          memoryId: n.memoryId, // #796 (as in hadron_get_node's event)
           appId: auth.appId ?? null,
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
@@ -2817,6 +2821,7 @@ export function createMcpServerInstance(
           type: 'write',
           nodeLoc: loc,
           nodeId: upserted.id,
+          memoryId, // #796 (as in hadron_get_node's event)
           appId: auth.appId ?? null,
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
@@ -3102,6 +3107,7 @@ export function createMcpServerInstance(
           type: 'write',
           nodeLoc: loc,
           nodeId: existing.id,
+          memoryId: existing.memoryId, // #796 (as in hadron_get_node's event)
           appId: auth.appId ?? null,
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
@@ -3942,6 +3948,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           type: 'action-run',
           nodeLoc: loc,
           nodeId: node.id,
+          memoryId: node.memoryId, // #796 (as in hadron_get_node's event)
           appId: auth.appId ?? null,
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
