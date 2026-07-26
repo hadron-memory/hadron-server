@@ -731,7 +731,12 @@ const CODE_CHALLENGE_MIN_LENGTH = 43;
 const CODE_CHALLENGE_MAX_LENGTH = 128;
 const CODE_CHALLENGE_CHARSET = /^[A-Za-z0-9\-._~]+$/;
 const RESOURCE_MAX_LENGTH = 2048;
-const LOGIN_PROVIDERS = new Set(['github', 'google']);
+// 'apple' joined for App Store guideline 4.8 (#794): apps offering
+// third-party login must offer Sign in with Apple. /auth/apple implements
+// the same Option-C return_to round-trip as github/google (its callback is
+// a form POST, but return_to rides the pending-state entry, not the URL).
+// Requires the APPLE_* env quad in the deployment, else /auth/apple 503s.
+const LOGIN_PROVIDERS = new Set(['github', 'google', 'apple']);
 
 /** True iff `v` is a valid PKCE S256 code_challenge per RFC 7636 §4.2. */
 function isValidCodeChallenge(v: string): boolean {
