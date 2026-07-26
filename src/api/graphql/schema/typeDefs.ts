@@ -3044,7 +3044,7 @@ export const typeDefs = `#graphql
     config: JSON
   }
 
-  "Combined data for one activated widget type — the portal fans this out by type (#772)."
+  "Data for ONE placed widget — the portal fans this out by widgetId (#797)."
   type DashboardWidgetData {
     "The placement this payload belongs to — fan out by this, not by type (#797)."
     widgetId: ID!
@@ -3478,7 +3478,7 @@ export const typeDefs = `#graphql
 
     "#772 — the caller's placed dashboard widgets, ordered by position. Empty for a non-user (App-key) caller."
     dashboardWidgets: [DashboardWidget!]!
-    "#772 — combined data for all of the caller's activated widget types, in one request. Empty for a non-user caller."
+    "#797 — data for each of the caller's PLACED widgets, in position order, one entry per placement built from its own config. Empty for a non-user caller."
     dashboardWidgetData: [DashboardWidgetData!]!
 
     """

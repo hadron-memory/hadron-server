@@ -21,6 +21,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 
 const Q = resolvers.Query as any;
+const M = resolvers.Mutation as any;
 
 let memA: { id: string; urn: string };
 let memB: { id: string };
@@ -277,6 +278,31 @@ describe('usageActivity — scoping and auth', () => {
   it('returns [] for an App-key caller (no user, so no own activity)', async () => {
     await seed({ count: 3, type: 'read', at: daysAgo(1), userId: member.id });
     expect(await Q.usageActivity(null, {}, asAppKey())).toEqual([]);
+  });
+});
+
+describe('usageActivity — events recorded through the API surface it (PR #799 review)', () => {
+  it('counts a read recorded via the recordUsage mutation in the recorder own activity', async () => {
+    // End-to-end through the WRITE path rather than a seeded row: recordUsage
+    // set only the audit `createdBy` string and no `userId`, so a signed-in
+    // user's events were invisible to the own-activity scope. Seeding rows
+    // directly could never catch that.
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId: memA.id, loc: 'recorded', name: 'recorded' },
+    });
+
+    await M.recordUsage(null, { event: { type: 'read', nodeLoc: 'recorded' } }, asMember());
+
+    const written = await db.usageEvent.findFirstOrThrow({ where: { nodeLoc: 'recorded' } });
+    expect(written.userId).toBe(member.id);
+    expect(written.memoryId).toBe(memA.id);
+    expect(written.nodeId).toBe(node.id);
+
+    // Visible in BOTH scopes without any direct row seeding.
+    expect(totals(await Q.usageActivity(null, {}, asMember())).reads).toBe(1);
+    expect(totals(await Q.usageActivity(null, { memoryRef: memA.id }, asMember())).reads).toBe(1);
+    // And not in another user's own activity.
+    expect(totals(await Q.usageActivity(null, {}, asOutsider())).reads).toBe(0);
   });
 });
 

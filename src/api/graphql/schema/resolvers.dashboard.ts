@@ -25,6 +25,10 @@ import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { isPlainObject } from '../../../lib/objectStore.js';
+import {
+  isUsageActivityBucketSize,
+  type UsageActivityBucketSize,
+} from '../../../lib/usageActivity.js';
 import { memoryQueries } from './resolvers.query.memory.js';
 import { agentQueries } from './resolvers.query.agent.js';
 
@@ -53,7 +57,7 @@ const WINDOW_DAYS_DEFAULT = 7;
 function readUsageActivityConfig(config: unknown): {
   windowDays: number;
   memoryRef?: string;
-  bucket?: string;
+  bucket?: UsageActivityBucketSize;
   timeZone?: string;
 } {
   const c = isPlainObject(config) ? config : {};
@@ -65,7 +69,10 @@ function readUsageActivityConfig(config: unknown): {
   return {
     windowDays,
     memoryRef: typeof c.memoryRef === 'string' && c.memoryRef ? c.memoryRef : undefined,
-    bucket: typeof c.bucket === 'string' ? c.bucket : undefined,
+    // Whitelisted, NOT passed through: nothing validates this string on the way
+    // in (it is raw config JSON, never a GraphQL enum), so an unknown value
+    // would otherwise reach the aggregation. Falls back to the query default.
+    bucket: isUsageActivityBucketSize(c.bucket) ? c.bucket : undefined,
     timeZone: typeof c.timeZone === 'string' ? c.timeZone : undefined,
   };
 }
@@ -122,7 +129,7 @@ const WIDGET_DATA_PROVIDERS = new Map<
           {
             from: from.toISOString(),
             to: to.toISOString(),
-            bucket: bucket as never,
+            bucket,
             memoryRef,
             timeZone,
           },

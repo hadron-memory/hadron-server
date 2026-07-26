@@ -357,6 +357,30 @@ describe('dashboardWidgetData — per-instance config (#797)', () => {
     ]);
   });
 
+  it('whitelists config.bucket instead of passing an arbitrary string through', async () => {
+    // config is raw JSON — nothing GraphQL-validates `bucket` on the way in, so
+    // an unknown value must fall back to the default rather than reach the
+    // aggregation (PR #799 review, Copilot).
+    await M.setDashboardWidgets(
+      null,
+      {
+        widgets: [
+          w({ type: 'USAGE_ACTIVITY', config: { bucket: 'MONTH' } }),
+          w({ type: 'USAGE_ACTIVITY', config: { bucket: 'DROP TABLE nodes' } }),
+          w({ type: 'USAGE_ACTIVITY', config: { bucket: '__proto__' } }),
+        ],
+      },
+      ctx(user.id),
+    );
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    // All three succeed — the bad ones silently use the DAY default, and none
+    // reports invalidConfig (they never reached the query as a bad value).
+    expect(data).toHaveLength(3);
+    expect(
+      data.every((d: { data: { invalidConfig?: boolean } }) => !d.data.invalidConfig),
+    ).toBe(true);
+  });
+
   it('degrades one misconfigured placement without failing the whole payload', async () => {
     await M.setDashboardWidgets(
       null,

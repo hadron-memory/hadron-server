@@ -32,6 +32,12 @@ const BUCKET_FIELD: Record<UsageActivityBucketSize, string> = {
   MONTH: 'month',
 };
 
+/** True when `v` names a bucket size. For callers whose input never passed
+ *  through GraphQL enum validation — e.g. widget `config`, which is raw JSON. */
+export function isUsageActivityBucketSize(v: unknown): v is UsageActivityBucketSize {
+  return typeof v === 'string' && Object.hasOwn(BUCKET_FIELD, v);
+}
+
 /** Default window when the caller names neither bound: the last 7 days. */
 export const DEFAULT_WINDOW_DAYS = 7;
 
@@ -66,6 +72,13 @@ export interface UsageActivityBucket {
   writes: number;
 }
 
+/**
+ * Render an instant as the naive UTC literal Postgres should compare against a
+ * `timestamp WITHOUT time zone` column (`2026-07-26T20:50:34.637`). See the
+ * binding note in {@link getUsageActivity} for why a JS Date can't be used.
+ */
+const toNaiveUtc = (d: Date): string => d.toISOString().replace('Z', '');
+
 /** True when `tz` is a zone this runtime's ICU data knows. */
 export function isValidTimeZone(tz: string): boolean {
   try {
@@ -98,6 +111,13 @@ export async function getUsageActivity(
     ? Prisma.sql`e.memory_id = ${scope.memoryId}`
     : Prisma.sql`e.user_id = ${scope.userId}`;
 
+  // Defense in depth for a SHARED service: the GraphQL enum guards the query
+  // path, but the widget provider's bucket comes from raw config JSON. Without
+  // this an unknown value binds `undefined` into date_trunc and surfaces as an
+  // opaque driver error instead of a clear one.
+  if (!isUsageActivityBucketSize(scope.bucket)) {
+    throw new Error(`Unknown usage-activity bucket size: ${String(scope.bucket)}`);
+  }
   const field = BUCKET_FIELD[scope.bucket];
 
   // The DOUBLE `AT TIME ZONE` is load-bearing — do not "simplify" it to one.
@@ -113,13 +133,21 @@ export async function getUsageActivity(
   //
   // Counts come back as bigint (Postgres COUNT) and must be Number()-cast —
   // JSON can't serialize a BigInt and GraphQL Int wants a number.
+  //
+  // The window bounds are bound as NAIVE-UTC strings cast to `timestamp`, not as
+  // JS Dates. Prisma binds a Date as `timestamp WITH time zone`, and comparing
+  // the naive `created_at` column against a timestamptz makes Postgres coerce
+  // the column using the SESSION time zone — so on a UTC-7 server the newest
+  // ~7 hours of events silently fell outside their own window (correct on a UTC
+  // server, wrong everywhere else). Keeping the COLUMN bare rather than wrapping
+  // it also preserves the (user_id|memory_id, created_at) index range scan.
   const rows = await db.$queryRaw<Array<{ date: string; reads: bigint; writes: bigint }>>`
     SELECT to_char(date_trunc(${field}, (e.created_at AT TIME ZONE 'UTC') AT TIME ZONE ${scope.timeZone}), 'YYYY-MM-DD') AS date,
            COUNT(*) FILTER (WHERE e.type = 'read')  AS reads,
            COUNT(*) FILTER (WHERE e.type = 'write') AS writes
     FROM usage_events e
-    WHERE e.created_at >= ${scope.from}
-      AND e.created_at < ${scope.to}
+    WHERE e.created_at >= ${toNaiveUtc(scope.from)}::timestamp
+      AND e.created_at < ${toNaiveUtc(scope.to)}::timestamp
       AND e.type IN ('read', 'write')
       AND e.deleted_at IS NULL
       AND ${scopePredicate}
