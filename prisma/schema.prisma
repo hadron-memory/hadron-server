@@ -448,6 +448,12 @@ model DashboardWidget {
   type      DashboardWidgetType
   /// Columns to span on the 12-col desktop grid (clamped on smaller screens).
   span      Int                 @default(4)
+  /// Rows to span on the fixed-height row grid (#788; clamped server-side to 1-4).
+  rowSpan   Int                 @default(1) @map("row_span")
+  /// Widget-instance settings, shape widget-defined (#788) — e.g. a stats
+  /// widget scoped to one org. Stored + round-tripped only; no server-side
+  /// behavior until dashboardWidgetData goes per-instance.
+  config    Json?
   /// 0-based sort order among the user's widgets.
   position  Int                 @default(0)
   createdAt DateTime            @default(now()) @map("created_at")
