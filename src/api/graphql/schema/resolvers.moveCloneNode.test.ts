@@ -153,18 +153,182 @@ describe('moveNode subtree cascade (#768)', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('q:c');
   });
 
-  it('refuses a CROSS-memory move of a node that has descendants (#768 scope)', async () => {
+  it('relocates a whole subtree ACROSS memories; re-indexes embeddings under the dest policy (#781)', async () => {
     const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
     const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
-    await expect(
-      M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser()),
-    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-    // Nothing moved — the whole thing is refused up front.
-    expect(await locsIn(memA.id)).toEqual(['p', 'p:c']);
-    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).memoryId).toBe(memA.id);
+    const grandchild = await createDbNode(db, { loc: 'p:c:d', memoryId: memA.id });
+    // A denormalized source embedding on the child (vector column nullable — omit).
+    await db.nodeEmbedding.create({
+      data: { nodeId: child.id, memoryId: memA.id, kind: 'abstract', provider: 'local', model: 'test', dim: 768 },
+    });
+
+    const moved = await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    expect(moved.id).toBe(parent.id); // stable id
+    expect(moved.memoryId).toBe(memB.id);
+    expect(moved.loc).toBe('q');
+    // Descendants followed, rebased, into memB.
+    for (const [id, loc] of [[child.id, 'q:c'], [grandchild.id, 'q:c:d']] as const) {
+      const n = await db.node.findUniqueOrThrow({ where: { id } });
+      expect(n.memoryId).toBe(memB.id);
+      expect(n.loc).toBe(loc);
+    }
+    expect(await locsIn(memA.id)).toEqual([]); // nothing stranded in the source
+    // The source-policy embedding is DELETED (not blindly relabeled). memB isn't
+    // vector-indexed, so nothing is re-queued; the row is simply gone.
+    expect(await db.nodeEmbedding.findFirst({ where: { nodeId: child.id } })).toBeNull();
   });
 
-  it('still allows a CROSS-memory move of a LEAF node (single-node path)', async () => {
+  it('cross-memory into a VECTOR-INDEXED memory deletes source vectors + queues a re-index, resetting retry state (#781)', async () => {
+    const indexed = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'mc-org:mc/idx', name: 'mc/idx', class: 'knowledge', visibility: 'ORGANIZATION', vectorIndexEnabled: true },
+    });
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    await db.nodeEmbedding.create({
+      data: { nodeId: child.id, memoryId: memA.id, kind: 'abstract', provider: 'local', model: 'test', dim: 768 },
+    });
+    // The child previously EXHAUSTED its embedding retries — a bare pending stamp
+    // wouldn't reschedule it (drainEmbeddingQueue filters max-attempts rows).
+    await db.node.update({
+      where: { id: child.id },
+      data: { embeddingAttempts: 9, embeddingFailedAt: new Date(), embeddingError: 'boom' },
+    });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: `${indexed.urn}:q` }, asUser());
+    expect(await db.nodeEmbedding.findFirst({ where: { nodeId: child.id } })).toBeNull(); // source vector gone
+    const c = await db.node.findUniqueOrThrow({ where: { id: child.id } });
+    expect(c.memoryId).toBe(indexed.id);
+    expect(c.embeddingPendingAt).not.toBeNull(); // queued for the worker
+    expect(c.embeddingAttempts).toBe(0); // retry state reset so it actually schedules
+    expect(c.embeddingFailedAt).toBeNull();
+    expect(c.embeddingError).toBeNull();
+  });
+
+  it('cross-memory into a NON-indexed memory clears the embedding marker (invalidates in-flight jobs) (#781)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    // Simulate an in-flight embed job's pending marker on the child.
+    await db.node.update({ where: { id: child.id }, data: { embeddingPendingAt: new Date() } });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser()); // memB not indexed
+    const c = await db.node.findUniqueOrThrow({ where: { id: child.id } });
+    expect(c.memoryId).toBe(memB.id);
+    // Marker cleared → any in-flight source-side job is invalidated (latest-wins).
+    expect(c.embeddingPendingAt).toBeNull();
+  });
+
+  it('cross-memory transfers Memory.pendingEdgeCount credit for moved nodes (#781)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    await db.pendingEdge.create({ data: { id: generateId(), sourceId: child.id, targetId: 'unresolved:ref', name: 'rel' } });
+    await db.memory.update({ where: { id: memA.id }, data: { pendingEdgeCount: 1 } });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memA.id } })).pendingEdgeCount).toBe(0);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memB.id } })).pendingEdgeCount).toBe(1);
+  });
+
+  it('refuses a cross-memory move when the destination is ENCRYPTED (#781 v1)', async () => {
+    const enc = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'mc-org:mc/enc', name: 'mc/enc', class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true },
+    });
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    await expect(
+      M.moveNode(null, { sourceRef: parent.id, targetUrn: `${enc.urn}:q` }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    // Refused before any write — the subtree stayed in memA.
+    expect(await locsIn(memA.id)).toEqual(['p', 'p:c']);
+  });
+
+  it('refuses a cross-memory move when either memory is GIT-BACKED (#781 v1)', async () => {
+    const git = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'mc-org:mc/git', name: 'mc/git', class: 'knowledge', visibility: 'ORGANIZATION', source: 'https://github.com/acme/repo.git' },
+    });
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    await expect(
+      M.moveNode(null, { sourceRef: parent.id, targetUrn: `${git.urn}:q` }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await locsIn(memA.id)).toEqual(['p', 'p:c']); // nothing moved
+  });
+
+  it('refuses moving a CHAT subtree across memories (#781 v1)', async () => {
+    const chatRoot = await db.node.create({
+      data: { id: generateId(), memoryId: memA.id, loc: 'chat1', name: 'Chat', nodeType: 'info', tags: [], data: { scope: 'private' } },
+    });
+    await createDbNode(db, { loc: 'chat1:msg', memoryId: memA.id });
+    await expect(
+      M.moveNode(null, { sourceRef: chatRoot.id, targetUrn: urnB('q') }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: chatRoot.id } })).memoryId).toBe(memA.id);
+  });
+
+  it('refuses a cross-memory move that violates the destination SCHEMA (#781)', async () => {
+    // A schema-governed dest: objectType "widget" must have a required "size" field.
+    const schema = { objectTypes: { widget: { fields: { size: { type: 'text', required: true } } } } };
+    const governed = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'mc-org:mc/gov', name: 'mc/gov', class: 'knowledge', visibility: 'ORGANIZATION', schema },
+    });
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    // A descendant with the governed objectType but missing the required prop.
+    await db.node.create({
+      data: { id: generateId(), memoryId: memA.id, loc: 'p:bad', name: 'bad', nodeType: 'info', tags: [], objectType: 'widget', properties: {} },
+    });
+    await expect(
+      M.moveNode(null, { sourceRef: parent.id, targetUrn: `${governed.urn}:q` }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await locsIn(memA.id)).toEqual(['p', 'p:bad']); // nothing moved
+  });
+
+  it('cross-memory: an intra-subtree edge follows (memoryId + re-derived loc)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    const e = await edge(parent.id, child.id, memA.id, 'p:rel:p:c');
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    const moved = await db.edge.findUniqueOrThrow({ where: { id: e.id } });
+    expect(moved.memoryId).toBe(memB.id); // follows the subtree into the dest memory
+    expect(moved.loc).toBe('q:rel:q:c'); // re-derived from the rebased endpoints
+    expect(moved.sourceId).toBe(parent.id); // endpoints unchanged (stable ids)
+    expect(moved.targetId).toBe(child.id);
+  });
+
+  it('cross-memory: an OUTGOING boundary edge follows the moved source, INCOMING stays', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const outside = await createDbNode(db, { loc: 'outside', memoryId: memA.id }); // stays in memA
+    const out = await edge(parent.id, outside.id, memA.id, 'p:rel:outside'); // source moves
+    const inc = await edge(outside.id, parent.id, memA.id, 'outside:rel:p'); // target moves
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    // Outgoing edge (source moved) → memoryId=memB, loc re-derived (target loc unchanged).
+    const outEdge = await db.edge.findUniqueOrThrow({ where: { id: out.id } });
+    expect(outEdge.memoryId).toBe(memB.id);
+    expect(outEdge.loc).toBe('q:rel:outside');
+    // Incoming edge (source stayed in memA) → memoryId unchanged; it's now a
+    // legitimate cross-memory edge (memA → memB), gated at read time.
+    const incEdge = await db.edge.findUniqueOrThrow({ where: { id: inc.id } });
+    expect(incEdge.memoryId).toBe(memA.id);
+    expect(incEdge.targetId).toBe(parent.id);
+  });
+
+  it('cross-memory: disambiguates a moved edge loc past pre-existing suffixed variants (#784 review)', async () => {
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    const e = await edge(parent.id, child.id, memA.id, 'p:rel:p:c'); // → base q:rel:q:c after move
+    // Pre-stage memB edges occupying BOTH the base loc AND its :2 variant.
+    const x = await createDbNode(db, { loc: 'x', memoryId: memB.id });
+    const y = await createDbNode(db, { loc: 'y', memoryId: memB.id });
+    await edge(x.id, y.id, memB.id, 'q:rel:q:c');
+    await edge(x.id, y.id, memB.id, 'q:rel:q:c:2');
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+    const moved = await db.edge.findUniqueOrThrow({ where: { id: e.id } });
+    expect(moved.memoryId).toBe(memB.id);
+    expect(moved.loc).toBe('q:rel:q:c:3'); // base and :2 both taken → :3 (no P2002)
+  });
+
+  it('still allows a CROSS-memory move of a LEAF node', async () => {
     const leaf = await createDbNode(db, { loc: 'lonely', memoryId: memA.id });
     const moved = await M.moveNode(null, { sourceRef: leaf.id, targetUrn: urnB('lonely-in-b') }, asUser());
     expect(moved.memoryId).toBe(memB.id);
