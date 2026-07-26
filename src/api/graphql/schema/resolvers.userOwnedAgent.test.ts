@@ -147,6 +147,53 @@ describe('user-owned agent — read/list/audit surfaces are owner-only', () => {
     expect(adminList.items.map((a: { id: string }) => a.id)).not.toContain(agent.id);
   });
 
+  // #782 — the owner-only "My agents" slice: agents(filter: { ownedByMe: true })
+  // returns ONLY the caller's own user-owned (org-less) agents, for every
+  // caller including a platform admin (no fetch-everything-then-filter, no
+  // admin cross-tenant reach).
+  it('Query.agents(ownedByMe): returns only the caller’s own org-less agents, admin included', async () => {
+    const mine = await makeUserOwnedAgent();
+    // An org-owned agent the admin would otherwise see in the unscoped list.
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'SomeOrg', urn: `someorg-${generateId()}` },
+    });
+    const orgAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Org Agent', urn: `${org.urn}:org-agent`, organizationId: org.id, visibility: 'ORGANIZATION' },
+    });
+    // Another user's user-owned agent.
+    const othersAgent = await resolvers.Mutation.createAgent(
+      {}, { name: 'Others Helper' }, ctx({ userId: otherId, roles: ['READER'] }),
+    );
+
+    // Owner: sees only their own.
+    const ownerList = await resolvers.Query.agents(
+      null, { filter: { ownedByMe: true } }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    const ownerIds = ownerList.items.map((a: { id: string }) => a.id);
+    expect(ownerIds).toEqual([mine.id]);
+    expect(ownerList.total).toBe(1);
+
+    // Platform admin: ownedByMe collapses the fetch-everything list to the
+    // admin's OWN org-less agents (here: just othersAgent, which otherId owns)
+    // — NOT the whole agents table.
+    const adminList = await resolvers.Query.agents(
+      null, { filter: { ownedByMe: true } }, ctx({ userId: otherId, roles: ['ADMIN'] }),
+    );
+    const adminIds = adminList.items.map((a: { id: string }) => a.id);
+    expect(adminIds).toContain(othersAgent.id); // the admin's OWN user-owned agent
+    expect(adminIds).not.toContain(mine.id); // not another user's
+    expect(adminIds).not.toContain(orgAgent.id); // not org-owned
+  });
+
+  it('Query.agents(ownedByMe): App-key caller (no user) gets an empty page', async () => {
+    await makeUserOwnedAgent();
+    const res = await resolvers.Query.agents(
+      null, { filter: { ownedByMe: true } }, ctx({ appId: 'some-app', roles: ['READER'] }),
+    );
+    expect(res.items).toEqual([]);
+    expect(res.total).toBe(0);
+  });
+
   it('effectiveAccess: owner has full access; a platform admin has none', async () => {
     const agent = await makeUserOwnedAgent();
     const agentUrn = `hrn:agent:${agent.urn}`;
