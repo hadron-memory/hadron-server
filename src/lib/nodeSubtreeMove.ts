@@ -19,9 +19,11 @@
  *
  * **Cross-memory (`destMemoryId` ≠ the source's memory):** crossing a memory
  * boundary must respect the DESTINATION's write-path invariants:
- *   - REFUSED (v1) when either memory is encrypted — moving plaintext into an
- *     encrypted dest / ciphertext out of an encrypted source needs per-node
- *     re-encryption (cloneNode's path; #781 follow-up).
+ *   - REFUSED (v1, CrossMemoryMoveUnsupportedError; #781 follow-ups) when either
+ *     memory is ENCRYPTED (needs per-node re-encryption, cloneNode's path), when
+ *     either is GIT-BACKED (the move isn't mirrored to the repos, so a sync would
+ *     re-mint the rows), or when the subtree contains a CHAT-root (its data.scope
+ *     is tied to the memory class).
  *   - Every moved node is validated against the destination's collection SCHEMA
  *     (the enforceNodeSchemaOnWrite gate) before any write.
  *   - Every moved node's `memoryId` becomes `destMemoryId`.
@@ -92,19 +94,17 @@ export class SubtreeMoveSourceChangedError extends Error {
 }
 
 /**
- * A cross-memory move touches an ENCRYPTED memory (source or destination). v1
- * refuses these: moving plaintext into an encrypted memory would leave it
- * plaintext at rest, and moving ciphertext out would bind it to the source key
- * (undecryptable with the destination key). Per-node decrypt/re-encrypt (as
- * cloneNode does) is the tracked follow-up (#781).
+ * A cross-memory move hits a case v1 doesn't support and refuses (rather than
+ * silently corrupting): an ENCRYPTED memory (needs per-node decrypt/re-encrypt,
+ * cloneNode's path), a GIT-BACKED memory (needs a move-aware mirror on both
+ * repos, else the next sync re-mints the moved rows), or a CHAT subtree (its
+ * data.scope invariants are class-specific). All are tracked follow-ups (#781).
+ * The message names the specific reason.
  */
-export class CrossMemoryMoveEncryptedError extends Error {
-  constructor() {
-    super(
-      'Cannot move a subtree across memories when either memory is encrypted. ' +
-        'Move it within its memory, or clone the nodes into the destination.',
-    );
-    this.name = 'CrossMemoryMoveEncryptedError';
+export class CrossMemoryMoveUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CrossMemoryMoveUnsupportedError';
   }
 }
 
@@ -228,17 +228,45 @@ export async function moveNodeSubtree(
   let destVectorIndexEnabled = false;
   if (crossMemory) {
     const [srcMem, destMem] = await Promise.all([
-      tx.memory.findUnique({ where: { id: srcMemoryId }, select: { isEncrypted: true } }),
+      tx.memory.findUnique({ where: { id: srcMemoryId }, select: { isEncrypted: true, source: true } }),
       tx.memory.findUnique({
         where: { id: destMemoryId },
-        select: { isEncrypted: true, vectorIndexEnabled: true, schema: true },
+        select: { isEncrypted: true, source: true, vectorIndexEnabled: true, schema: true },
       }),
     ]);
     // Encryption: v1 refuses a cross-memory move touching an encrypted memory
     // (would leave plaintext at rest in an encrypted dest, or carry
     // source-key-bound ciphertext the dest key can't read). #781 follow-up.
     if (srcMem?.isEncrypted || destMem?.isEncrypted) {
-      throw new CrossMemoryMoveEncryptedError();
+      throw new CrossMemoryMoveUnsupportedError(
+        'Cannot move a subtree across memories when either memory is encrypted. ' +
+          'Move it within its memory, or clone the nodes into the destination.',
+      );
+    }
+    // Git-backed: a cross-memory move only touches DB rows; it does not remove
+    // the source repo files or write them to the destination repo. The next sync
+    // would re-mint the "moved" rows from the stale source frontmatter (or the
+    // destination sync would overwrite the DB-only state). Refuse until a
+    // move-aware mirror exists. #781 follow-up.
+    if (srcMem?.source != null || destMem?.source != null) {
+      throw new CrossMemoryMoveUnsupportedError(
+        'Cannot move a subtree across memories when either memory is Git-backed ' +
+          '(the move is not mirrored to the repositories). Move it within its memory.',
+      );
+    }
+    // Chat: a chat-root node carries a class-specific `data.scope` invariant
+    // (validateChatScopeInvariants) — moving it to a different memory class can
+    // make the chat unusable (CHAT_MEMORY_OUT_OF_SCOPE). Refuse a subtree that
+    // contains a chat-root. #781 follow-up.
+    const hasChatRoot = subtree.some((n) => {
+      const d = n.data as { scope?: unknown } | null;
+      return d != null && typeof d === 'object' && !Array.isArray(d) && (d.scope === 'private' || d.scope === 'shared');
+    });
+    if (hasChatRoot) {
+      throw new CrossMemoryMoveUnsupportedError(
+        'Cannot move a chat across memories — its scope is tied to the memory class. ' +
+          'Move it within its memory.',
+      );
     }
     destVectorIndexEnabled = destMem?.vectorIndexEnabled ?? false;
     // Schema: a schema-governed destination rejects nodes with undeclared

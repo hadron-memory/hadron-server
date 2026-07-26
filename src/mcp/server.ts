@@ -33,7 +33,7 @@ import {
   SubtreeMoveCollisionError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
-  CrossMemoryMoveEncryptedError,
+  CrossMemoryMoveUnsupportedError,
   SubtreeMoveSchemaViolationError,
 } from '../lib/nodeSubtreeMove.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
@@ -3815,7 +3815,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return textResult('The node was moved concurrently; re-read it and retry.');
         }
         if (
-          e instanceof CrossMemoryMoveEncryptedError ||
+          e instanceof CrossMemoryMoveUnsupportedError ||
           e instanceof SubtreeMoveSchemaViolationError
         ) {
           return textResult(e.message);

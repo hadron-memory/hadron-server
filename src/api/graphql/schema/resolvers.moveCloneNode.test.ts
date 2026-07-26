@@ -241,6 +241,29 @@ describe('moveNode subtree cascade (#768)', () => {
     expect(await locsIn(memA.id)).toEqual(['p', 'p:c']);
   });
 
+  it('refuses a cross-memory move when either memory is GIT-BACKED (#781 v1)', async () => {
+    const git = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'mc-org:mc/git', name: 'mc/git', class: 'knowledge', visibility: 'ORGANIZATION', source: 'https://github.com/acme/repo.git' },
+    });
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+    await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+    await expect(
+      M.moveNode(null, { sourceRef: parent.id, targetUrn: `${git.urn}:q` }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await locsIn(memA.id)).toEqual(['p', 'p:c']); // nothing moved
+  });
+
+  it('refuses moving a CHAT subtree across memories (#781 v1)', async () => {
+    const chatRoot = await db.node.create({
+      data: { id: generateId(), memoryId: memA.id, loc: 'chat1', name: 'Chat', nodeType: 'info', tags: [], data: { scope: 'private' } },
+    });
+    await createDbNode(db, { loc: 'chat1:msg', memoryId: memA.id });
+    await expect(
+      M.moveNode(null, { sourceRef: chatRoot.id, targetUrn: urnB('q') }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: chatRoot.id } })).memoryId).toBe(memA.id);
+  });
+
   it('refuses a cross-memory move that violates the destination SCHEMA (#781)', async () => {
     // A schema-governed dest: objectType "widget" must have a required "size" field.
     const schema = { objectTypes: { widget: { fields: { size: { type: 'text', required: true } } } } };
