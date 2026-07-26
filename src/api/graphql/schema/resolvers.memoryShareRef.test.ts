@@ -112,10 +112,10 @@ describe('createMemoryShare — granteeRef resolution (#769)', () => {
 });
 
 describe('revoke / update by granteeRef (#769)', () => {
-  it('revokeMemoryShare resolves the ref and returns the resolved PK', async () => {
+  it('deleteMemoryShare resolves the ref and returns the resolved PK', async () => {
     const mem = await sharablePersonal('revoke');
     await M.createMemoryShare(null, { memoryId: mem.id, granteeRef: grantee.email, role: 'reader' }, asOwner());
-    const res = await M.revokeMemoryShare(null, { memoryId: mem.id, granteeRef: grantee.handle }, asOwner());
+    const res = await M.deleteMemoryShare(null, { memoryRef: mem.id, granteeRef: grantee.handle }, asOwner());
     expect(res.granteeId).toBe(grantee.id);
     expect(await db.memoryShare.findFirst({ where: { memoryId: mem.id, granteeId: grantee.id } })).toBeNull();
   });

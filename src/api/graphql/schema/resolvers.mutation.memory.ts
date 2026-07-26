@@ -21,7 +21,7 @@ import {
 import { cloneMemoryGraph } from '../../../controller/operations/cloneMemory.js';
 import { extractParentNodeGraph } from '../../../controller/operations/extractParentNode.js';
 import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
-import { revokeMemoryShare } from '../../../controller/operations/revokeMemoryShare.js';
+import { deleteMemoryShare } from '../../../controller/operations/deleteMemoryShare.js';
 import {
   updateMemoryShareRole,
   MemoryShareNotFoundError,
@@ -65,6 +65,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   agentSlugFromUrn,
@@ -95,6 +96,8 @@ import {
   requireMemoryMemberOwner,
   requireMemoryMemberOwnerOrSelf,
   requireMemorySharePrincipal,
+  isMemorySharePrincipal,
+  memoryShareForbidden,
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
@@ -1810,26 +1813,86 @@ export const memoryMutations = {
       }
     },
 
-    // 023-app-shape US3 — revoke an existing MemoryShare. Idempotent.
-    revokeMemoryShare: async (
+    // 023-app-shape US3 — delete an existing MemoryShare. Idempotent.
+    // #785: principal-OR-self. The memory's principal may delete any
+    // grantee's row; a grantee may delete THEIR OWN row (the
+    // stop-sharing-with-me path the portal needs), and omitting the
+    // grantee entirely means "mine".
+    deleteMemoryShare: async (
       _: unknown,
       {
-        memoryId,
+        memoryRef,
         granteeRef,
         granteeId,
-      }: { memoryId: string; granteeRef?: string | null; granteeId?: string | null },
+      }: { memoryRef: string; granteeRef?: string | null; granteeId?: string | null },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
-        throw new GraphQLError('revokeMemoryShare requires an authenticated user', {
+        throw new GraphQLError('deleteMemoryShare requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
-      await requireMemorySharePrincipal(ctx, memoryId);
-      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
-      await revokeMemoryShare(ctx.db, { memoryId, granteeId: resolvedGranteeId });
-      // Return the RESOLVED grantee PK so the client can correlate the revocation.
-      return { memoryId, granteeId: resolvedGranteeId };
+      // Resolve LENIENTLY: an unknown memoryRef must not answer differently
+      // from an unauthorized one, or any logged-in user could probe which
+      // memory ids / URNs exist (PR-786 review, Codex P2 + Copilot). Only a
+      // missing row is swallowed — a malformed URN is a caller-shape error and
+      // still throws, since it reveals nothing about what exists.
+      //
+      // includeDeleted: a grantee must be able to detach from a memory whose
+      // owner soft-deleted it — otherwise the row is stranded (the same
+      // reasoning leaveApp applies to a dead App). It does NOT widen the
+      // principal path: isMemorySharePrincipal still reports false for a
+      // soft-deleted memory, so the owner-side FORBIDDEN is unchanged.
+      let resolvedMemoryId: string | null = null;
+      try {
+        resolvedMemoryId = (
+          await resolveMemoryRef(ctx.db, memoryRef, { includeDeleted: true })
+        ).id;
+      } catch (e) {
+        if (!(e instanceof MemoryNotFoundError)) throw e;
+      }
+      if (resolvedMemoryId === null) throw memoryShareForbidden();
+      // The authority answer is needed BEFORE the grantee is resolved, because
+      // a non-principal must fail identically whether or not the named grantee
+      // exists — otherwise the NOT_FOUND-vs-FORBIDDEN difference becomes a
+      // user-enumeration oracle (the ordering rule createMemoryShare states).
+      const isPrincipal = await isMemorySharePrincipal(ctx, resolvedMemoryId);
+      // No grantee named ⇒ the caller means their own share ("leave").
+      const wantsSelf = !granteeRef?.trim() && !granteeId;
+      let resolvedGranteeId: string;
+      if (wantsSelf) {
+        resolvedGranteeId = ctx.userId;
+      } else {
+        try {
+          resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
+        } catch (e) {
+          if (!isPrincipal) throw memoryShareForbidden();
+          throw e;
+        }
+      }
+      if (!isPrincipal) {
+        if (resolvedGranteeId !== ctx.userId) throw memoryShareForbidden();
+        // On the self path the SHARE ROW is the authorization — the caller has
+        // no other claim on this memory. Requiring it is what keeps the
+        // outcome uniform: non-participant and nonexistent-memory both answer
+        // FORBIDDEN, so success never doubles as an existence probe. The cost
+        // is that self-removal is idempotent only up to the row's lifetime —
+        // repeating a successful leave answers FORBIDDEN (already left), while
+        // the PRINCIPAL's delete stays idempotent exactly as it was pre-785.
+        const ownShare = await ctx.db.memoryShare.findUnique({
+          where: {
+            memoryId_granteeId: { memoryId: resolvedMemoryId, granteeId: ctx.userId },
+          },
+          select: { memoryId: true },
+        });
+        if (!ownShare) throw memoryShareForbidden();
+      }
+      await deleteMemoryShare(ctx.db, {
+        memoryId: resolvedMemoryId,
+        granteeId: resolvedGranteeId,
+      });
+      // Return the RESOLVED PKs so the client can correlate the deletion.
+      return { memoryId: resolvedMemoryId, granteeId: resolvedGranteeId };
     },
 
     // 023-app-shape US3 — change the role on an existing MemoryShare.
