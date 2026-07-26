@@ -362,6 +362,22 @@ describe('GET /oauth/authorize — Option-C sign-in (FR-007)', () => {
     expect(returnTo).toContain(`client_id=${testClientId}`);
   });
 
+  it('login_provider=apple → redirect to /auth/apple with the full return_to', async () => {
+    // #794: App Store guideline 4.8 — the iOS app must be able to route the
+    // unauthenticated leg through Sign in with Apple.
+    const q = buildAuthorizeQuery({ login_provider: 'apple' });
+    const res = await getAuthorize(q, { cookie: null });
+
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get('location')!, baseUrl);
+    expect(url.pathname).toBe('/auth/apple');
+    const returnTo = url.searchParams.get('return_to');
+    expect(returnTo).not.toBeNull();
+    expect(returnTo).toMatch(/^\/oauth\/authorize\?/);
+    expect(returnTo).toContain('login_provider=apple');
+    expect(returnTo).toContain(`client_id=${testClientId}`);
+  });
+
   it('unknown login_provider → OAuth invalid_request, never an auth-route redirect', async () => {
     const res = await getAuthorize(
       buildAuthorizeQuery({ login_provider: 'not-a-provider' }),
