@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { deleteToolConnection } from '../../lib/emailClient.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
@@ -80,7 +81,16 @@ export async function deleteUserAccount(
 ): Promise<void> {
   for (let attempt = 1; ; attempt++) {
     try {
-      await runDeletionTxn(db, targetUserId, actorUserId);
+      const toolConnections = await runDeletionTxn(db, targetUserId, actorUserId);
+      // Provider-sidecar teardown AFTER the commit: the tools hold their own
+      // copy of the OAuth credential + change subscriptions, so deleting the
+      // core ExchangeConnection rows alone would leave those live. Outside
+      // the transaction (external I/O must not ride a retried SERIALIZABLE
+      // body) and fire-and-forget per the deleteToolConnection contract —
+      // the DB effect is already durable, a dead sidecar must log, not fail.
+      for (const c of toolConnections) {
+        void deleteToolConnection(c.provider, c.toolConnectionId);
+      }
       return;
     } catch (e) {
       const serializationAbort =
@@ -100,8 +110,8 @@ async function runDeletionTxn(
   db: PrismaClient,
   targetUserId: string,
   actorUserId: string,
-): Promise<void> {
-  await db.$transaction(
+): Promise<Array<{ provider: string; toolConnectionId: string }>> {
+  return db.$transaction(
     async (tx) => {
       const now = new Date();
       // Lock + liveness re-check under the lock (mergeUsers precedent):
@@ -196,7 +206,12 @@ async function runDeletionTxn(
       await tx.authCode.deleteMany({ where: { userId: targetUserId } });
       await tx.authHandoffCode.deleteMany({ where: { userId: targetUserId } });
       // Provider mailbox/calendar/drive tokens; ConnectionGrants on these
-      // connections cascade with them.
+      // connections cascade with them. Collect provider+toolConnectionId
+      // first — the caller tears the sidecar copies down post-commit.
+      const toolConnections = await tx.exchangeConnection.findMany({
+        where: { userId: targetUserId, toolConnectionId: { not: null } },
+        select: { provider: true, toolConnectionId: true },
+      });
       await tx.exchangeConnection.deleteMany({ where: { userId: targetUserId } });
       // Grants the target issued on connections that survive elsewhere
       // (defensive — connections are owner-keyed, so normally swept above).
@@ -241,11 +256,17 @@ async function runDeletionTxn(
           externalAppId: null,
           linkedAt: null,
           policy: Prisma.DbNull,
+          // releasePrincipal tombstones the pool row but leaves detaching to
+          // the caller — clear the FK so the scrubbed user no longer points
+          // at a released principal.
+          principalId: null,
           deletedAt: now,
           deletedBy: actorUserId,
           updatedBy: actorUserId,
         },
       });
+
+      return toolConnections as Array<{ provider: string; toolConnectionId: string }>;
     },
     {
       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,

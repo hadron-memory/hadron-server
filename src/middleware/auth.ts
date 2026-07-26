@@ -77,7 +77,7 @@ export async function resolveAuthContext(
   // JWTs have the form header.payload.signature — three base64url segments.
   const isJwt = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token);
   if (isJwt) {
-    return resolveJwt(token);
+    return resolveJwt(token, db);
   }
   return {};
 }
@@ -263,9 +263,18 @@ export async function mintUserApiKey(
   return { rawKey, userApiKey };
 }
 
-async function resolveJwt(token: string): Promise<AuthContext> {
+async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext> {
   try {
     const payload = await verifyJwt(token);
+    // Liveness check: a JWT is self-contained, so without this a deleted
+    // user's token would keep authenticating until it expires (deleteUser
+    // #662 must cut off ALL credentials immediately — the API-key paths
+    // already check deletedAt on their lookup row).
+    const user = await db.user.findFirst({
+      where: { id: payload.sub, deletedAt: null },
+      select: { id: true },
+    });
+    if (!user) return {};
     const clientId = payload.githubUsername
       ? `github:${payload.githubUsername}`
       : `email:${payload.email}`;

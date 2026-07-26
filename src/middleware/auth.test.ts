@@ -43,12 +43,22 @@ describe('resolveAuthContext', () => {
   });
 
   it('resolves a valid JWT to user context', async () => {
+    // The liveness check (#662) resolves the subject against the users
+    // table, so the row must exist and be undeleted.
+    await db.user.create({
+      data: { id: 'user-1', handle: 'alice', githubUsername: 'alice', githubId: 1, roles: ['ADMIN'] },
+    });
     const token = await makeJwt({ sub: 'user-1', githubUsername: 'alice', roles: ['ADMIN'], githubId: 1 });
     const ctx = await resolveAuthContext(makeReq(`Bearer ${token}`), db);
 
     expect(ctx.clientId).toBe('github:alice');
     expect(ctx.userId).toBe('user-1');
     expect(ctx.roles).toEqual(['ADMIN']);
+  });
+
+  it('returns empty context for a JWT whose subject does not exist or is deleted', async () => {
+    const token = await makeJwt({ sub: 'ghost', githubUsername: 'ghost', roles: ['READER'], githubId: 3 });
+    expect(await resolveAuthContext(makeReq(`Bearer ${token}`), db)).toEqual({});
   });
 
   it('returns empty context for an expired JWT', async () => {

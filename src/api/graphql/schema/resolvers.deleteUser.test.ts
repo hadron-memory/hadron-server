@@ -23,6 +23,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { mintUserApiKey, resolveAuthContext } from '../../../middleware/auth.js';
+import { signJwt } from '../../../auth/jwt.js';
 import { resolvers, type Context } from './resolvers.js';
 
 let seq = 0;
@@ -152,6 +153,19 @@ describe('Mutation.deleteUser — self-delete happy path (org-less user)', () =>
     // Deleted users no longer authenticate (middleware keys on deletedAt +
     // revokedAt) — the exact contract the iOS app relies on post-deletion.
     expect(await resolveAuthContext(bearerReq(rawKey), db)).toEqual({});
+  });
+
+  it('a still-valid JWT of the deleted user stops authenticating immediately', async () => {
+    // JWTs are self-contained (resolveJwt verifies the signature, not a DB
+    // row), so without the liveness check a deleted user's session token
+    // would keep working until exp — the Codex P1 on PR #800.
+    const user = await makeUser();
+    const jwt = await signJwt({ sub: user.id, roles: ['CONTRIBUTOR'] });
+    expect((await resolveAuthContext(bearerReq(jwt), db)).userId).toBe(user.id);
+
+    await resolvers.Mutation.deleteUser({}, {}, userCtx(user));
+
+    expect(await resolveAuthContext(bearerReq(jwt), db)).toEqual({});
   });
 });
 
