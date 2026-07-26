@@ -2,7 +2,6 @@
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
-import { deleteSecretsForOwner } from '../../../lib/secrets.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
@@ -14,6 +13,11 @@ import {
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { renameOwnerNamespacedUrns } from '../../../lib/ownerUrnRename.js';
 import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import {
+  deleteUserAccount,
+  SoleOrgOwnerError,
+} from '../../../controller/operations/deleteUser.js';
+import { softDeleteOrganizationCore } from '../../../controller/operations/softDeleteOrganization.js';
 import { validateOrgSlug } from '../../../lib/urn.js';
 import {
   mintPrincipal,
@@ -193,6 +197,66 @@ export const orgMutations = {
       });
     },
 
+    /**
+     * deleteUser — self-serve account deletion (#662; Apple 5.1.1(v)).
+     * CRUD-named principal-OR-self delete (conventions:crud-mutation-naming):
+     * omitted userRef means "me"; a platform ADMIN/OWNER may name another
+     * user. The heavy lifting (org auto-resolve, owned-data erasure, scrub)
+     * lives in controller/operations/deleteUser.ts.
+     */
+    deleteUser: async (
+      _: unknown,
+      { userRef }: { userRef?: string | null },
+      ctx: Context,
+    ) => {
+      // A user credential is REQUIRED — an App key has no "me" and no
+      // platform role axis, so it cannot delete accounts.
+      if (!ctx.userId) {
+        throw new GraphQLError('deleteUser requires an authenticated user', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      const forbidden = () =>
+        new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+      // NON-throwing boolean principal check FIRST: the owner-or-self shape
+      // must resolve the target before it can authorize, so every resolution
+      // failure has to collapse into the same FORBIDDEN for non-principals —
+      // otherwise NOT_FOUND-vs-FORBIDDEN becomes a user-enumeration oracle
+      // (conventions:crud-mutation-naming, the deleteMemoryShare trap).
+      const platformAdmin = isPlatformAdmin(ctx);
+      let targetUserId: string;
+      if (!userRef?.trim()) {
+        // Omitted target = "me" (the self-service path; needs no role — a
+        // platform admin's own admin bit never blocks their own deletion).
+        targetUserId = ctx.userId;
+      } else {
+        try {
+          ({ id: targetUserId } = await resolveUserRef(ctx.db, userRef));
+        } catch (error) {
+          // Non-principals get ONE indistinguishable error whether the named
+          // user exists, doesn't exist, or the ref is malformed. Principals
+          // get the real resolution error.
+          if (!platformAdmin) throw forbidden();
+          throw error;
+        }
+      }
+      if (!platformAdmin && targetUserId !== ctx.userId) throw forbidden();
+      try {
+        await deleteUserAccount(ctx.db, { targetUserId, actorUserId: ctx.userId });
+      } catch (error) {
+        if (error instanceof SoleOrgOwnerError) {
+          throw new GraphQLError(error.message, {
+            extensions: {
+              code: 'SOLE_ORG_OWNER',
+              organizations: error.organizations.map((o) => ({ id: o.id, name: o.name })),
+            },
+          });
+        }
+        throw error;
+      }
+      return true;
+    },
+
     // ── Organization management ─────────────────────────────────────────
 
     createOrganization: async (
@@ -322,18 +386,11 @@ export const orgMutations = {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
       // Atomically soft-delete the org and hard-delete its org-scoped secrets
-      // (#677). App-/memory-scoped secrets under the org are cleaned up when
-      // those entities are themselves deleted — this removes only the org's
-      // own secrets, mirroring the non-cascading org soft-delete. The
-      // updateMany deletedAt-null guard keeps the original deletedAt under a
-      // concurrent double-delete; the secret sweep runs unconditionally
-      // (idempotent) so a straggler raced in during deletion is still removed.
+      // (#677) — the ONE org soft-delete cascade, shared with deleteUser's
+      // sole-member-org branch (see softDeleteOrganizationCore for the
+      // idempotency + secret-sweep rationale).
       await ctx.db.$transaction(async (tx) => {
-        await tx.organization.updateMany({
-          where: { id: resolvedId, deletedAt: null },
-          data: { deletedAt: new Date() },
-        });
-        await deleteSecretsForOwner(tx, 'org', resolvedId);
+        await softDeleteOrganizationCore(tx, resolvedId);
       });
       return true;
     },
