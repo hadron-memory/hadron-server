@@ -230,6 +230,7 @@ export async function embedNode(
         type: 'embedding',
         nodeLoc: node.loc,
         nodeId,
+        memoryId: memory.id, // #796
         organizationId: memory.organizationId,
         provider: usedClient.provider,
         model: usedClient.model,

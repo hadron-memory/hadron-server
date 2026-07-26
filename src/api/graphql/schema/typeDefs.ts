@@ -673,6 +673,10 @@ export const typeDefs = `#graphql
     id: ID!
     type: String!
     nodeLoc: String
+    # Memory the event is attributed to (#796). Stored at write time, so it
+    # outlives the node — null only for events written before the backfill
+    # whose node was already deleted, or paths with no memory in scope.
+    memoryId: String
     actionArgs: JSON
     # Caller identity — the App that authored this event.
     appId: String
@@ -2765,6 +2769,21 @@ export const typeDefs = `#graphql
     count: Int!
   }
 
+  "One time bucket of read+write activity (#796)."
+  type UsageActivityBucket {
+    "Bucket start as YYYY-MM-DD, in the requested timeZone."
+    date: String!
+    reads: Int!
+    writes: Int!
+  }
+
+  "Bucket width for usageActivity (#796)."
+  enum UsageActivityBucketSize {
+    DAY
+    WEEK
+    MONTH
+  }
+
   scalar JSON
 
   # ─── Assets ──────────────────────────────────────────────────────
@@ -3008,6 +3027,7 @@ export const typeDefs = `#graphql
   enum DashboardWidgetType {
     MEMORY_STATS
     AGENT_STATS
+    USAGE_ACTIVITY
   }
 
   "One widget the caller has placed on their /app/dashboard grid (#772)."
@@ -3024,8 +3044,10 @@ export const typeDefs = `#graphql
     config: JSON
   }
 
-  "Combined data for one activated widget type — the portal fans this out by type (#772)."
+  "Data for ONE placed widget — the portal fans this out by widgetId (#797)."
   type DashboardWidgetData {
+    "The placement this payload belongs to — fan out by this, not by type (#797)."
+    widgetId: ID!
     type: DashboardWidgetType!
     "The widget-specific payload (e.g. memory-stats => { memoryCount })."
     data: JSON!
@@ -3313,6 +3335,32 @@ export const typeDefs = `#graphql
     """
     memoryUsageSummary(memoryRef: ID!): [UsageSummaryEntry!]!
 
+    """
+    #796 — read/write activity counts, bucketed by time.
+
+    Default scope is the caller's OWN events across everything they touched;
+    pass memoryRef to switch to all users' events attributed to that memory,
+    which requires read access to it. A memory the caller cannot read is
+    indistinguishable from one that does not exist (both empty).
+
+    Only non-empty buckets are returned — zero-fill the window client-side.
+    Counts only events of type read and write. Window bounds are ISO-8601
+    strings: from is INCLUSIVE, to is EXCLUSIVE, so adjacent windows tile
+    without double-counting. Defaults to the 7 days ending now; a span longer
+    than 366 days is clamped by moving from forward.
+    """
+    usageActivity(
+      "Window start, inclusive. Default: to minus 7 days."
+      from: String
+      "Window end, exclusive. Default: now."
+      to: String
+      bucket: UsageActivityBucketSize = DAY
+      "Switch scope to all users of this memory (ID or URN)."
+      memoryRef: ID
+      "IANA zone deciding where bucket boundaries fall. Default UTC."
+      timeZone: String
+    ): [UsageActivityBucket!]!
+
     # Sessions, most recent first
     sessions(type: String, repo: String, customerId: String, limit: Int, offset: Int): [Session!]!
     session(id: ID!): Session
@@ -3430,7 +3478,7 @@ export const typeDefs = `#graphql
 
     "#772 — the caller's placed dashboard widgets, ordered by position. Empty for a non-user (App-key) caller."
     dashboardWidgets: [DashboardWidget!]!
-    "#772 — combined data for all of the caller's activated widget types, in one request. Empty for a non-user caller."
+    "#797 — data for each of the caller's PLACED widgets, in position order, one entry per placement built from its own config. Empty for a non-user caller."
     dashboardWidgetData: [DashboardWidgetData!]!
 
     """

@@ -115,9 +115,10 @@ export const sessionQueries = {
       //     degrading to a loc filter that returns [].
       //   - bare loc (unprefixed AND fails node-URN qualification — a node URN
       //     needs ≥3 segments) → exact nodeLoc match, like nodeUsage(loc).
-      //     Cross-memory: UsageEvent has no memoryId, so this matches that loc
-      //     in every memory; it does NOT validate node existence (a filter, not
-      //     a lookup, so an unknown loc yields [] rather than NODE_NOT_FOUND).
+      //     Cross-memory: the loc alone names no memory, so this matches that
+      //     loc in EVERY readable memory (the memory scoping below still
+      //     applies); it does NOT validate node existence (a filter, not a
+      //     lookup, so an unknown loc yields [] rather than NODE_NOT_FOUND).
       let nodeIdFilter: string | undefined;
       let nodeLocExact: string | undefined;
       if (nodeId) {
@@ -161,14 +162,13 @@ export const sessionQueries = {
       // type contract rather than a live code path today.
       const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
 
-      // Per-memory scoping (issue #249): filter on the UsageEvent→Node relation
-      // by the resolved memory. FK-precise (no cross-memory nodeLoc collision)
-      // and a single SQL query — unlike fetching every node loc and using
-      // `nodeLoc: { in }`, which collides on shared locs and can blow the
-      // IN-parameter limit on large memories. Like the nodeId path, it excludes
-      // events with a null nodeId (orphaned / legacy). memoryUsageSummary uses
-      // the same relation-scoping approach (aligned in #253).
-      let memoryNodeFilter: { memoryId: string } | undefined;
+      // Per-memory scoping (issue #249, moved onto the column in #796): filter
+      // on `UsageEvent.memoryId` directly. This was a UsageEvent→Node relation
+      // join, which was FK-precise (no cross-memory nodeLoc collision) but
+      // dropped every event whose node had since been deleted — `nodeId` is
+      // SetNull, so a memory silently lost that history. The column keeps the
+      // precision and survives deletion. memoryUsageSummary moved in lockstep.
+      let memoryScopeId: string | undefined;
       if (memoryId) {
         // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
         const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
@@ -178,23 +178,31 @@ export const sessionQueries = {
         if (accessibleMemoryIds !== null && !accessibleMemoryIds.includes(resolvedMemoryId)) {
           return [];
         }
-        memoryNodeFilter = { memoryId: resolvedMemoryId };
+        memoryScopeId = resolvedMemoryId;
       }
 
-      // Resolve the UsageEvent→Node relation filter:
+      // Resolve the memory filter:
       //  - memoryId scoped path → the single, already access-checked memory.
       //  - otherwise → the caller's full accessible-memory set (#250). This
       //    bounds both the global feed and any bare-loc nodeId filter to
       //    readable memories. A `null` accessible set = unrestricted.
-      const nodeRelationFilter: { memoryId: string } | { memoryId: { in: string[] } } | undefined =
-        memoryNodeFilter ??
-        (accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : undefined);
+      //
+      // Either way an event with a NULL memoryId is excluded, exactly as the
+      // relation filter excluded an event with a null nodeId — `IN` never
+      // matches NULL — so this widens results only to events already
+      // attributed to a memory the caller can read.
+      const memoryFilter: { memoryId: string } | { memoryId: { in: string[] } } | undefined =
+        memoryScopeId !== undefined
+          ? { memoryId: memoryScopeId }
+          : accessibleMemoryIds !== null
+            ? { memoryId: { in: accessibleMemoryIds } }
+            : undefined;
 
       return ctx.db.usageEvent.findMany({
         where: {
           ...(type ? { type } : {}),
           ...(nodeIdFilter ? { nodeId: nodeIdFilter } : {}),
-          ...(nodeRelationFilter ? { node: nodeRelationFilter } : {}),
+          ...(memoryFilter ?? {}),
           // nodeId-as-bare-loc → exact nodeLoc match (the supported loc filter
           // since the deprecated nodeLoc substring arg was removed in #252).
           ...(nodeLocExact ? { nodeLoc: nodeLocExact } : {}),

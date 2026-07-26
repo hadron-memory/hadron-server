@@ -436,6 +436,7 @@ model User {
 enum DashboardWidgetType {
   MEMORY_STATS
   AGENT_STATS
+  USAGE_ACTIVITY
 }
 
 /// A widget the user has placed on their /app/dashboard grid (#772) —
@@ -1322,6 +1323,14 @@ model UsageEvent {
   nodeLoc        String?   @map("node_loc")
   /// Set null on node deletion.
   nodeId         String?   @map("node_id")
+  /// Memory the event is attributed to (#796). Stored DIRECTLY at write time
+  /// like `nodeLoc` — deliberately NO relation, unlike this model's five other
+  /// FKs. Those are all `SetNull`, and memory-scoped analytics used to reach
+  /// the memory by joining through `node`, so deleting a node silently erased
+  /// the event from its memory's history. A `SetNull` FK here would recreate
+  /// that loss one level up (on memory deletion), which is exactly what this
+  /// column exists to prevent.
+  memoryId       String?   @map("memory_id")
   /// Set null on session deletion.
   sessionId      String?   @map("session_id")
   /// The App that authored this event.
@@ -1370,7 +1379,12 @@ model UsageEvent {
   @@index([createdAt])
   @@index([sessionId])
   @@index([appId])
-  @@index([userId])
+  /// #796 — the two `usageActivity` scopes. Both are composite on `createdAt`
+  /// so the bucketed aggregation is an index range scan; the composite
+  /// `(userId, createdAt)` also prefix-covers the plain `userId` lookups the
+  /// bare index used to serve, so that one was dropped.
+  @@index([userId, createdAt])
+  @@index([memoryId, createdAt])
   @@index([organizationId, createdAt])
   @@map("usage_events")
 }

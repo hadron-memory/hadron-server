@@ -23,6 +23,9 @@ export const createUsageEvent = async (
         type: event.type,
         nodeLoc: event.nodeLoc ?? null,
         nodeId: node?.id,
+        // #796: derived from the same row `nodeId` comes from — inherits this
+        // path's cross-memory loc ambiguity and nothing more (as in recordUsage).
+        memoryId: node?.memoryId,
         actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
         appId: event.appId ?? null,
         createdBy: event.appId ?? null,

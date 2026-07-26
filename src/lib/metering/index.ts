@@ -150,6 +150,14 @@ export interface LlmUsageParams {
   type: string;
   nodeLoc?: string | null;
   nodeId?: string | null;
+  /**
+   * Memory to attribute the event to (#796) — stored directly so it survives
+   * node deletion. Omitted by the `app-run` caller: the flow runner addresses
+   * nodes by URN through `deps.loadNodeSpec`, whose `RunNodeSpec` carries no
+   * memory id, so populating it would cost a per-hop lookup for an event type
+   * no memory-scoped surface counts today.
+   */
+  memoryId?: string | null;
   sessionId?: string | null;
   appId?: string | null;
   /** On-behalf-of user (FR-001); null for pure-App service runs. */
@@ -194,6 +202,7 @@ export async function recordLlmUsage(
         type: params.type,
         nodeLoc: params.nodeLoc ?? null,
         nodeId: params.nodeId ?? null,
+        memoryId: params.memoryId ?? null,
         sessionId: params.sessionId ?? null,
         appId: params.appId ?? null,
         userId: params.userId ?? null,

@@ -87,6 +87,13 @@ that drift is what the deprecated `hadron_dev` row above warns about).
 > **`pnpm db:dev-setup`** (push **then** `post-push.sql`, which rebuilds the
 > HNSW index) to sync schema without wiping, or **`pnpm db:dev-reset`** for a
 > clean wipe + reseed. Both follow `.env`.
+>
+> `pnpm db:test-setup` rebuilds the `hadron_test` template the same way, and
+> needs `--accept-data-loss` for the same reason (added #796): post-push.sql
+> also creates the `nodes.tsv` GENERATED column, which Prisma can't model, so a
+> push against an established test DB always proposes dropping it and aborts on
+> the prompt. Both objects are rebuilt by post-push.sql moments later, and
+> neither holds row data — `tsv` is derived from other columns.
 
 ## Common commands
 

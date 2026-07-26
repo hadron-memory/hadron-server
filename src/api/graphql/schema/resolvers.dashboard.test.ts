@@ -264,14 +264,164 @@ describe('dashboardWidgetData — combined data', () => {
     expect(data[0]).toMatchObject({ type: 'AGENT_STATS', data: { agentCount: 2 } });
   });
 
-  it('emits one entry per activated TYPE even if placed more than once', async () => {
-    await M.setDashboardWidgets(null, { widgets: [w(), w()] }, ctx(user.id));
+  it('emits one entry per PLACEMENT, keyed by row id, in position order (#797)', async () => {
+    // Was one-entry-per-TYPE before #797. Duplicate placements of a type are
+    // now distinct entries, which is what makes duplicating a widget useful.
+    const saved = await M.setDashboardWidgets(null, { widgets: [w(), w()] }, ctx(user.id));
     const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
-    expect(data).toHaveLength(1);
-    expect(data[0].type).toBe('MEMORY_STATS');
+    expect(data).toHaveLength(2);
+    expect(data.map((d: { widgetId: string }) => d.widgetId)).toEqual([saved[0].id, saved[1].id]);
+    expect(data.every((d: { type: string }) => d.type === 'MEMORY_STATS')).toBe(true);
   });
 
   it('is empty when the user has no widgets', async () => {
     expect(await Q.dashboardWidgetData(null, {}, ctx(user.id))).toEqual([]);
+  });
+
+  // NOT TESTED, deliberately: "a placement whose type has no provider is
+  // skipped". The branch is unreachable from a test. Writing a DB-only enum
+  // label doesn't work — the Prisma client validates enum values on READ and
+  // throws before the resolver's provider lookup runs. Reaching it needs a
+  // member in schema.prisma's enum with no entry in WIDGET_DATA_PROVIDERS,
+  // i.e. a regenerated client, which a test can't do at runtime. The guard
+  // stays because that state is real mid-development (enum member added before
+  // its provider is written) and the mutation's allowlist can't catch it.
+});
+
+describe('dashboardWidgetData — per-instance config (#797)', () => {
+  /** Seed `count` read events for the user, `daysAgo` days back. */
+  const seedReads = async (count: number, daysAgo: number, memoryId?: string) => {
+    const at = new Date(Date.now() - daysAgo * 86_400_000);
+    await db.usageEvent.createMany({
+      data: Array.from({ length: count }, () => ({
+        id: generateId(),
+        type: 'read',
+        userId: user.id,
+        memoryId: memoryId ?? null,
+        createdAt: at,
+      })),
+    });
+  };
+
+  it('gives two placements of one type DIFFERENT data from their own configs', async () => {
+    await seedReads(2, 1); // inside both windows
+    await seedReads(3, 20); // inside the 30-day window only
+
+    const saved = await M.setDashboardWidgets(
+      null,
+      {
+        widgets: [
+          w({ type: 'USAGE_ACTIVITY', config: { windowDays: 7 } }),
+          w({ type: 'USAGE_ACTIVITY', config: { windowDays: 30 } }),
+        ],
+      },
+      ctx(user.id),
+    );
+
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    expect(data).toHaveLength(2);
+    expect(data[0].widgetId).toBe(saved[0].id);
+    expect(data[1].widgetId).toBe(saved[1].id);
+
+    const totalReads = (d: { data: { buckets: { reads: number }[] } }) =>
+      d.data.buckets.reduce((n, b) => n + b.reads, 0);
+    expect(data[0].data.windowDays).toBe(7);
+    expect(totalReads(data[0])).toBe(2);
+    expect(data[1].data.windowDays).toBe(30);
+    expect(totalReads(data[1])).toBe(5);
+  });
+
+  it('falls back to defaults when a placement has no config', async () => {
+    await seedReads(1, 1);
+    await M.setDashboardWidgets(null, { widgets: [w({ type: 'USAGE_ACTIVITY' })] }, ctx(user.id));
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    expect(data[0].data.windowDays).toBe(7);
+    expect(data[0].data.invalidConfig).toBeUndefined();
+  });
+
+  it('clamps an out-of-range windowDays and ignores a non-object config', async () => {
+    await M.setDashboardWidgets(
+      null,
+      {
+        widgets: [
+          w({ type: 'USAGE_ACTIVITY', config: { windowDays: 9999 } }),
+          w({ type: 'USAGE_ACTIVITY', config: { windowDays: 0 } }),
+          w({ type: 'USAGE_ACTIVITY', config: 'not-an-object' }),
+        ],
+      },
+      ctx(user.id),
+    );
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    expect(data.map((d: { data: { windowDays: number } }) => d.data.windowDays)).toEqual([
+      90, 1, 7,
+    ]);
+  });
+
+  it('whitelists config.bucket instead of passing an arbitrary string through', async () => {
+    // config is raw JSON — nothing GraphQL-validates `bucket` on the way in, so
+    // an unknown value must fall back to the default rather than reach the
+    // aggregation (PR #799 review, Copilot).
+    await M.setDashboardWidgets(
+      null,
+      {
+        widgets: [
+          w({ type: 'USAGE_ACTIVITY', config: { bucket: 'MONTH' } }),
+          w({ type: 'USAGE_ACTIVITY', config: { bucket: 'DROP TABLE nodes' } }),
+          w({ type: 'USAGE_ACTIVITY', config: { bucket: '__proto__' } }),
+        ],
+      },
+      ctx(user.id),
+    );
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    // All three succeed — the bad ones silently use the DAY default, and none
+    // reports invalidConfig (they never reached the query as a bad value).
+    expect(data).toHaveLength(3);
+    expect(
+      data.every((d: { data: { invalidConfig?: boolean } }) => !d.data.invalidConfig),
+    ).toBe(true);
+  });
+
+  it('degrades one misconfigured placement without failing the whole payload', async () => {
+    await M.setDashboardWidgets(
+      null,
+      {
+        widgets: [
+          w({ type: 'USAGE_ACTIVITY', config: { timeZone: 'Mars/Olympus_Mons' } }),
+          w({ type: 'MEMORY_STATS' }),
+        ],
+      },
+      ctx(user.id),
+    );
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    expect(data).toHaveLength(2);
+    expect(data[0].data).toMatchObject({ buckets: [], invalidConfig: true });
+    // The sibling widget is unaffected — that's the point.
+    expect(data[1].data).toHaveProperty('memoryCount');
+  });
+
+  it('returns empty buckets for a memoryRef the caller cannot read', async () => {
+    const otherOrg = await db.organization.create({
+      data: { id: generateId(), name: 'dw-other-org', urn: `dw-other-${generateId().slice(-8)}` },
+    });
+    const foreign = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: otherOrg.id,
+        urn: `${otherOrg.urn}:secret`,
+        name: 'secret',
+        class: 'knowledge',
+      },
+    });
+    await seedReads(4, 1, foreign.id);
+
+    await M.setDashboardWidgets(
+      null,
+      { widgets: [w({ type: 'USAGE_ACTIVITY', config: { memoryRef: foreign.id } })] },
+      ctx(user.id),
+    );
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    // Not a fallback to the caller's own activity — that would mislabel one
+    // user's data as the memory's. Empty, indistinguishable from nonexistent.
+    expect(data[0].data.buckets).toEqual([]);
   });
 });
