@@ -3016,8 +3016,12 @@ export const typeDefs = `#graphql
     type: DashboardWidgetType!
     "Columns spanned on the 12-col desktop grid."
     span: Int!
+    "Rows spanned on the fixed-height row grid (#788)."
+    rowSpan: Int!
     "0-based sort order among the caller's widgets."
     position: Int!
+    "Widget-instance settings; shape is widget-defined (#788)."
+    config: JSON
   }
 
   "Combined data for one activated widget type — the portal fans this out by type (#772)."
@@ -3029,9 +3033,15 @@ export const typeDefs = `#graphql
 
   "One widget in a setDashboardWidgets selection; grid position is the array order."
   input DashboardWidgetInput {
+    "When set and owned by the caller, update that placement in place (id survives the save); otherwise create a new one (#788)."
+    id: ID
     type: DashboardWidgetType!
-    "Columns to span (1-12); clamped server-side. Defaults to 4 when omitted."
-    span: Int
+    "Columns to span (1-12) on the 12-col grid; clamped server-side."
+    span: Int!
+    "Rows to span (1-4); clamped server-side (#788)."
+    rowSpan: Int!
+    "Widget-instance settings; shape is widget-defined (#788)."
+    config: JSON
   }
 
   type Query {
