@@ -15,9 +15,12 @@
  * Three hard gates, ALL required per-request:
  *   1. DEV_LOGIN_ENABLED=true  — explicit opt-in, never set in a deployed env.
  *   2. NODE_ENV !== 'production' — belt and braces if the flag leaks.
- *   3. Host header is localhost/127.0.0.1 — the RAW Host header, not
- *      req.hostname, which honors X-Forwarded-Host under `trust proxy` and
- *      would let a proxied request forge localhost.
+ *   3. The request is genuinely local: the TCP peer address is loopback
+ *      (req.socket.remoteAddress — src/index.ts listens on all interfaces, and
+ *      a LAN/tunnel peer fully controls its Host header, so the header alone
+ *      is no proof of locality; PR #793 review) AND the RAW Host header is
+ *      localhost/127.0.0.1 (raw, not req.hostname, which honors
+ *      X-Forwarded-Host under `trust proxy`).
  *
  * When any gate fails the handler calls next(), so the request falls through
  * to Express's default 404 — byte-identical to a route that doesn't exist
@@ -29,6 +32,7 @@
 
 import type { Express, Request } from 'express';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { resolveUserRefOrEmail } from '../lib/entityRef/userRef.js';
 import { issueLoginCode } from './authHandoff.js';
 import { isServerLocalPath } from './server-local-path.js';
 
@@ -44,8 +48,19 @@ function devLoginEnabled(): boolean {
   );
 }
 
-/** Gate 3: the RAW Host header (port stripped) names the loopback host. */
-function isLocalhostRequest(req: Request): boolean {
+/** The loopback peer addresses Node reports for a local TCP connection. */
+const LOOPBACK_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+/**
+ * Gate 3: the connection is genuinely local. The TCP peer address must be
+ * loopback — the one signal a remote caller cannot forge (the server listens
+ * on all interfaces, so a LAN peer could otherwise just send `Host:
+ * localhost`) — and the RAW Host header must name the loopback host (so a
+ * proxied/forwarded request that happens to originate on this machine still
+ * doesn't qualify).
+ */
+export function isLocalhostRequest(req: Pick<Request, 'headers' | 'socket'>): boolean {
+  if (!LOOPBACK_PEERS.has(req.socket.remoteAddress ?? '')) return false;
   const host = req.headers.host?.replace(/:\d+$/, '').toLowerCase();
   return host === 'localhost' || host === '127.0.0.1';
 }
@@ -78,12 +93,23 @@ export function mountDevLoginRoutes(app: Express, db: PrismaClient): void {
       return;
     }
 
+    // Keep the surface email-only (never a handle/ID resolver): a non-email
+    // input must not fall through to resolveUserRef's URN path.
+    if (!email.includes('@')) {
+      res.status(400).json({ error: 'email query param must be an email address' });
+      return;
+    }
+
     // Existing users only — never auto-create (unlike the magic-link verify
     // upsert; a dev convenience must not become a user-minting surface).
-    const user = await db.user.findUnique({
-      where: { email: email.trim().toLowerCase() },
-    });
-    if (!user) {
+    // Shared resolver (#769/#774 semantics): exact case-sensitive match wins,
+    // single case-insensitive match falls back, a case-only pair is rejected
+    // as ambiguous — `User.email` is only case-sensitively unique and some
+    // surfaces store it verbatim (PR #793 review).
+    let userId: string;
+    try {
+      ({ id: userId } = await resolveUserRefOrEmail(db, email));
+    } catch {
       res.status(404).json({ error: 'No user with that email' });
       return;
     }
@@ -100,7 +126,7 @@ export function mountDevLoginRoutes(app: Express, db: PrismaClient): void {
     // from the authoritative user row, so claims stay in lockstep with the
     // real flows. Unbound (no clientStateHash) — see the module docstring.
     const code = await issueLoginCode({
-      userId: user.id,
+      userId,
       redirect: dest,
       isNew: false,
     });

@@ -15,6 +15,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import type { AddressInfo } from 'node:net';
 import { createServer as createHttpServer, request as httpRequest, type Server } from 'node:http';
 import { createServer } from '../../server.js';
+import { isLocalhostRequest } from '../../auth/devLogin.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 
@@ -106,6 +107,29 @@ describe('GET /auth/dev/login — gates', () => {
   });
 });
 
+describe('isLocalhostRequest — peer-address gate (PR #793 review)', () => {
+  const fakeReq = (remoteAddress: string | undefined, host: string) =>
+    ({ headers: { host }, socket: { remoteAddress } }) as Parameters<
+      typeof isLocalhostRequest
+    >[0];
+
+  it('accepts loopback peers naming the loopback host', () => {
+    expect(isLocalhostRequest(fakeReq('127.0.0.1', 'localhost:4000'))).toBe(true);
+    expect(isLocalhostRequest(fakeReq('::1', '127.0.0.1:4000'))).toBe(true);
+    expect(isLocalhostRequest(fakeReq('::ffff:127.0.0.1', 'localhost'))).toBe(true);
+  });
+
+  it('rejects a remote peer even when it forges Host: localhost', () => {
+    expect(isLocalhostRequest(fakeReq('192.168.1.50', 'localhost:4000'))).toBe(false);
+    expect(isLocalhostRequest(fakeReq('10.0.0.7', '127.0.0.1'))).toBe(false);
+    expect(isLocalhostRequest(fakeReq(undefined, 'localhost'))).toBe(false);
+  });
+
+  it('rejects a loopback peer with a non-local Host header', () => {
+    expect(isLocalhostRequest(fakeReq('127.0.0.1', 'hadronmemory.com'))).toBe(false);
+  });
+});
+
 describe('GET /auth/dev/login — behavior with gates open', () => {
   it('400s without an email param', async () => {
     const res = await devLogin({});
@@ -154,6 +178,40 @@ describe('GET /auth/dev/login — behavior with gates open', () => {
   it('matches the email case-insensitively with surrounding whitespace', async () => {
     const res = await devLogin({ email: '  Dev-Login@Example.COM ' });
     expect(res.status).toBe(302);
+  });
+
+  it('resolves an exact-case match for a verbatim-stored mixed-case email', async () => {
+    // createAppUser/updateMyProfile store email verbatim (PR #793 review) —
+    // the exact-match-first path must reach such a row.
+    const mixed = await db.user.create({
+      data: { email: 'Mixed.Case@Example.com', identityProvider: 'EMAIL', roles: ['READER'] },
+    });
+    const res = await devLogin({ email: 'Mixed.Case@Example.com' });
+    expect(res.status).toBe(302);
+    const code = new URL(res.headers.get('location')!).searchParams.get('code');
+    const session = await fetch(`${baseUrl}/auth/session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    const { token } = (await session.json()) as { token: string };
+    const payload = JSON.parse(
+      Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
+    ) as { sub: string };
+    expect(payload.sub).toBe(mixed.id);
+  });
+
+  it('404s when two accounts differ only by email case (never picks arbitrarily)', async () => {
+    await db.user.create({
+      data: { email: 'DEV-LOGIN@example.com', identityProvider: 'EMAIL', roles: ['READER'] },
+    });
+    const res = await devLogin({ email: 'dev-LOGIN@example.com' });
+    expect(res.status).toBe(404);
+  });
+
+  it('400s on a non-email value (never a handle/ID resolver)', async () => {
+    const res = await devLogin({ email: 'some-handle' });
+    expect(res.status).toBe(400);
   });
 
   it('honors a server-local redirect param', async () => {
