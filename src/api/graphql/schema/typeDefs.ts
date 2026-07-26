@@ -4235,6 +4235,34 @@ export const typeDefs = `#graphql
     # of an organization they administer. The resulting merge is global.
     mergeUsers(input: MergeUsersInput!): User!
 
+    """
+    Delete a user account (self-serve account deletion, Apple 5.1.1(v) /
+    GDPR erasure posture). Requires a user credential (JWT or hdr_user key);
+    App-key callers are rejected.
+
+    Omitting userRef deletes the CALLER's own account (no role needed).
+    A platform ADMIN/OWNER may name another user; userRef accepts the
+    user's ID, handle, or hrn:user:<handle> URN. Any other caller naming a
+    target receives the same FORBIDDEN error whether or not that user
+    exists (no user-enumeration oracle).
+
+    Org memberships auto-resolve: an org where the target is the only
+    active OWNER but which still has OTHER active members BLOCKS deletion
+    (error code SOLE_ORG_OWNER, extensions.organizations lists the
+    blockers - transfer ownership first, nothing is deleted); an org where
+    the target is the ONLY active member is soft-deleted with the account;
+    plain memberships are revoked.
+
+    Owned data is hard-erased: personal/private and user-owned memories,
+    user-owned Apps and Agents (with their standard delete cascades),
+    sessions, OAuth/handoff codes, provider connections, grants, shares,
+    subscriptions, widgets and user secrets; API keys are revoked. The
+    User row itself is kept for audit/billing FK integrity but scrubbed
+    (identity fields nulled, handle replaced with a random deleted-...
+    value) and soft-deleted; a deleted account can no longer authenticate.
+    """
+    deleteUser(userRef: ID): Boolean!
+
     # Organization management
     createOrganization(name: String!, urn: String!): Organization!
 
