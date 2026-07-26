@@ -5187,20 +5187,30 @@ export const typeDefs = `#graphql
     """
     023-app-shape US3 — delete a MemoryShare. Per FR-022, revocation
     takes effect on the next read (there's no "deactivated" state;
-    just a row delete). Idempotent — deleting a share that does not
-    exist succeeds. Renamed from revokeMemoryShare in #785.
+    just a row delete). Renamed from revokeMemoryShare in #785.
 
     Caller-authority rule (#785) — principal OR self, the same shape
     removeMemoryMember uses:
       - The memory's principal (memory.userId) may delete ANY grantee
-        row on their memory.
+        row on their memory. Idempotent: deleting a share that is
+        already gone succeeds.
       - A GRANTEE may delete THEIR OWN row — the
         stop-sharing-with-me / leave path. Omit granteeRef entirely and
         the mutation targets the caller's own share.
-      - Anyone else gets FORBIDDEN, and so does a principal-path caller
-        whose granteeRef resolves to nobody: an unauthorized caller can
-        never tell an existing user from a missing one (no
-        user-enumeration oracle).
+      - Everyone else gets FORBIDDEN.
+
+    On the self path the SHARE ROW itself is the authorization, so that
+    path is idempotent only up to the row's lifetime: repeating a
+    successful leave answers FORBIDDEN (you already left). That is what
+    keeps every unauthorized outcome identical — a caller who is
+    neither principal nor grantee cannot tell "no such memory" from
+    "not shared with me" from "not yours", by error code or by the
+    difference between an error and a successful no-op. The same rule
+    covers the grantee reference: a non-principal caller gets FORBIDDEN
+    whether the named user exists or not, so neither memories nor
+    users can be enumerated here. (A principal, who by definition
+    already knows the memory exists, still gets NOT_FOUND for a
+    granteeRef that resolves to nobody.)
 
     A grantee may leave a memory whose owner has soft-deleted it (the
     row would otherwise be stranded); the principal path still treats a

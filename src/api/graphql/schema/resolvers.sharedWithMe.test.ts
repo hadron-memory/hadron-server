@@ -321,12 +321,38 @@ describe('deleteMemoryShare — grantee self-removal (#785)', () => {
     expect(await rowExists(freeShared.id, grantee.id)).toBeNull();
   });
 
-  it('is idempotent — a second call, and a non-grantee\'s self-call, both no-op', async () => {
+  it('stays idempotent for the PRINCIPAL — deleting an already-gone row succeeds', async () => {
+    const asOwner = ctx(owner.id);
+    await M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeId: grantee.id }, asOwner);
+    await expect(
+      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeId: grantee.id }, asOwner),
+    ).resolves.toEqual({ memoryId: freeShared.id, granteeId: grantee.id });
+  });
+
+  it('self path is authorized BY the row — a repeat leave, and a non-grantee\'s self-call, both FORBIDDEN', async () => {
     await M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(grantee.id));
+    // Already left: no row left to authorize the call.
     await expect(M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(grantee.id)))
-      .resolves.toEqual({ memoryId: freeShared.id, granteeId: grantee.id });
+      .rejects.toThrow(/not authorized to manage shares/);
+    // Never a grantee: must not get a successful no-op, which would confirm
+    // the memory exists (PR-786 review).
     await expect(M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(stranger.id)))
-      .resolves.toEqual({ memoryId: freeShared.id, granteeId: stranger.id });
+      .rejects.toThrow(/not authorized to manage shares/);
+  });
+
+  it('an unknown memory answers FORBIDDEN, not NOT_FOUND — no memory-existence probe', async () => {
+    // The three outcomes an unauthorized caller could otherwise tell apart:
+    // nonexistent id, nonexistent URN, and a real memory they have no share on.
+    const missingId = generateId();
+    for (const c of [ctx(stranger.id), ctx(owner.id), ctx(grantee.id)]) {
+      await expect(M.deleteMemoryShare(null, { memoryRef: missingId }, c))
+        .rejects.toThrow(/not authorized to manage shares/);
+      await expect(M.deleteMemoryShare(null, { memoryRef: `hrn:memory:${org.urn}::no-such-memory` }, c))
+        .rejects.toThrow(/not authorized to manage shares/);
+    }
+    // ...and a REAL memory the caller has nothing to do with fails identically.
+    await expect(M.deleteMemoryShare(null, { memoryRef: granteeOwned.id }, ctx(stranger.id)))
+      .rejects.toThrow(/not authorized to manage shares/);
   });
 
   it('a grantee may NOT delete a CO-GRANTEE\'s row', async () => {

@@ -65,6 +65,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   agentSlugFromUrn,
@@ -1831,14 +1832,26 @@ export const memoryMutations = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
+      // Resolve LENIENTLY: an unknown memoryRef must not answer differently
+      // from an unauthorized one, or any logged-in user could probe which
+      // memory ids / URNs exist (PR-786 review, Codex P2 + Copilot). Only a
+      // missing row is swallowed — a malformed URN is a caller-shape error and
+      // still throws, since it reveals nothing about what exists.
+      //
       // includeDeleted: a grantee must be able to detach from a memory whose
       // owner soft-deleted it — otherwise the row is stranded (the same
       // reasoning leaveApp applies to a dead App). It does NOT widen the
       // principal path: isMemorySharePrincipal still reports false for a
       // soft-deleted memory, so the owner-side FORBIDDEN is unchanged.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef, {
-        includeDeleted: true,
-      });
+      let resolvedMemoryId: string | null = null;
+      try {
+        resolvedMemoryId = (
+          await resolveMemoryRef(ctx.db, memoryRef, { includeDeleted: true })
+        ).id;
+      } catch (e) {
+        if (!(e instanceof MemoryNotFoundError)) throw e;
+      }
+      if (resolvedMemoryId === null) throw memoryShareForbidden();
       // The authority answer is needed BEFORE the grantee is resolved, because
       // a non-principal must fail identically whether or not the named grantee
       // exists — otherwise the NOT_FOUND-vs-FORBIDDEN difference becomes a
@@ -1857,8 +1870,22 @@ export const memoryMutations = {
           throw e;
         }
       }
-      if (!isPrincipal && resolvedGranteeId !== ctx.userId) {
-        throw memoryShareForbidden();
+      if (!isPrincipal) {
+        if (resolvedGranteeId !== ctx.userId) throw memoryShareForbidden();
+        // On the self path the SHARE ROW is the authorization — the caller has
+        // no other claim on this memory. Requiring it is what keeps the
+        // outcome uniform: non-participant and nonexistent-memory both answer
+        // FORBIDDEN, so success never doubles as an existence probe. The cost
+        // is that self-removal is idempotent only up to the row's lifetime —
+        // repeating a successful leave answers FORBIDDEN (already left), while
+        // the PRINCIPAL's delete stays idempotent exactly as it was pre-785.
+        const ownShare = await ctx.db.memoryShare.findUnique({
+          where: {
+            memoryId_granteeId: { memoryId: resolvedMemoryId, granteeId: ctx.userId },
+          },
+          select: { memoryId: true },
+        });
+        if (!ownShare) throw memoryShareForbidden();
       }
       await deleteMemoryShare(ctx.db, {
         memoryId: resolvedMemoryId,
