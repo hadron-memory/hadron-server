@@ -117,7 +117,11 @@ export const agentQueries = {
         limit,
         offset,
       }: {
-        filter?: { type?: string | null; visibility?: string | null } | null;
+        filter?: {
+          type?: string | null;
+          visibility?: string | null;
+          ownedByMe?: boolean | null;
+        } | null;
         orgId?: string | null;
         limit?: number | null;
         offset?: number | null;
@@ -127,38 +131,48 @@ export const agentQueries = {
       const take = clampListTake(limit);
       const skip = Math.max(0, offset ?? 0);
       const f = filter ?? {};
-      const scope = await resolveOrgScope(ctx, orgId);
-      if (!scope) return { items: [], total: 0 };
-      const scopedToOrg = scope.scopedOrgId != null;
       const filters = {
         deletedAt: null,
         ...(f.type ? { type: f.type as never } : {}),
         ...(f.visibility ? { visibility: f.visibility as never } : {}),
       };
-      // Admin unscoped reach applies only WITHOUT an orgId — the active-org
-      // selection is a membership concept (cor:api:100:01).
       let where: Record<string, unknown>;
-      if (isPlatformAdmin(ctx) && !scopedToOrg) {
-        // Every live agent EXCEPT another user's user-owned agent — spec 047
-        // strict ownership: a user-owned (org NULL, ownerUserId set) agent is
-        // owner-only, so even a platform admin doesn't see someone else's in
-        // the list (their OWN still show). "org-owned OR mine" as a flat OR is
-        // clearer + more index-friendly than a nested NOT/AND (gemini review,
-        // #682).
-        where = {
-          ...filters,
-          OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
-        };
+      if (f.ownedByMe) {
+        // #782 — the caller's OWN user-owned (org-less) agents only, for ALL
+        // callers INCLUDING platform ADMIN/OWNER: owner scope is never an
+        // admin-bypass surface (mirrors the owner-only personal/private
+        // memories slice). Org-less by definition, so orgId is not consulted;
+        // App-key callers (no ctx.userId) get an empty page.
+        if (!ctx.userId) return { items: [], total: 0 };
+        where = { ...filters, organizationId: null, ownerUserId: ctx.userId };
       } else {
-        // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
-        // caller's OWN user-owned agents (org NULL) — otherwise a personal
-        // agent the caller just created is invisible in their agent list. A
-        // specific-org selection excludes them (they belong to no org).
-        const ownerClauses: Record<string, unknown>[] = [
-          { organizationId: { in: scope.memberOrgIds } },
-        ];
-        if (!scopedToOrg && ctx.userId) ownerClauses.push({ ownerUserId: ctx.userId });
-        where = { ...filters, OR: ownerClauses };
+        const scope = await resolveOrgScope(ctx, orgId);
+        if (!scope) return { items: [], total: 0 };
+        const scopedToOrg = scope.scopedOrgId != null;
+        // Admin unscoped reach applies only WITHOUT an orgId — the active-org
+        // selection is a membership concept (cor:api:100:01).
+        if (isPlatformAdmin(ctx) && !scopedToOrg) {
+          // Every live agent EXCEPT another user's user-owned agent — spec 047
+          // strict ownership: a user-owned (org NULL, ownerUserId set) agent is
+          // owner-only, so even a platform admin doesn't see someone else's in
+          // the list (their OWN still show). "org-owned OR mine" as a flat OR is
+          // clearer + more index-friendly than a nested NOT/AND (gemini review,
+          // #682).
+          where = {
+            ...filters,
+            OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
+          };
+        } else {
+          // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
+          // caller's OWN user-owned agents (org NULL) — otherwise a personal
+          // agent the caller just created is invisible in their agent list. A
+          // specific-org selection excludes them (they belong to no org).
+          const ownerClauses: Record<string, unknown>[] = [
+            { organizationId: { in: scope.memberOrgIds } },
+          ];
+          if (!scopedToOrg && ctx.userId) ownerClauses.push({ ownerUserId: ctx.userId });
+          where = { ...filters, OR: ownerClauses };
+        }
       }
       const [total, items] = await Promise.all([
         ctx.db.agent.count({ where }),

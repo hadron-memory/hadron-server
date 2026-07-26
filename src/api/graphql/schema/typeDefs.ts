@@ -368,6 +368,28 @@ export const typeDefs = `#graphql
   input AgentFilter {
     type: AgentType
     visibility: AgentVisibility
+    """
+    #782 — true restricts the list to the caller's OWN user-owned (org-less)
+    agents: organizationId IS NULL AND ownerUserId = the caller. For ALL
+    callers INCLUDING platform ADMIN/OWNER (owner scope is never an
+    admin-bypass surface), mirroring the owner-only personal/private memories
+    slice. Org-less by definition, so orgId is not consulted. App-key callers
+    (no user context) get an empty page. Powers the portal's "My agents".
+    """
+    ownedByMe: Boolean
+  }
+
+  "Filter for the uniform apps() list (#473). Clauses AND-combine."
+  input AppFilter {
+    """
+    #782 — true restricts the list to the caller's OWN user-owned (org-less)
+    apps: organizationId IS NULL AND ownerUserId = the caller. For ALL callers
+    INCLUDING platform ADMIN/OWNER (owner scope is never an admin-bypass
+    surface), mirroring the owner-only personal/private memories slice.
+    Org-less by definition, so orgId is not consulted. App-key callers (no
+    user context) get an empty page. Powers the portal's "My apps".
+    """
+    ownedByMe: Boolean
   }
 
   """
@@ -3578,9 +3600,10 @@ export const typeDefs = `#graphql
     ADMIN/OWNER unscoped get every live App. orgId follows cor:api:100:01
     (member -> scope, non-member -> empty page, no disclosure, no admin
     bypass). Name-ascending order (id tiebreak); limit default 50 / cap 200;
-    limit: 0 -> count only.
+    limit: 0 -> count only. filter.ownedByMe (#782) narrows to the caller's own
+    user-owned (org-less) Apps for every caller including platform admins.
     """
-    apps(orgId: ID, limit: Int, offset: Int): AppsPage!
+    apps(filter: AppFilter, orgId: ID, limit: Int, offset: Int): AppsPage!
 
     """
     Fetch an App (member of the App's org, or platform ADMIN — the myApps
@@ -3609,8 +3632,9 @@ export const typeDefs = `#graphql
     member orgs; platform ADMIN/OWNER unscoped get every live Agent. orgId
     follows cor:api:100:01 (member -> scope, non-member -> empty page, no
     disclosure, no admin bypass). filter narrows by type / visibility.
-    Name-ascending order (id tiebreak); limit default 50 / cap 200;
-    limit: 0 -> count only.
+    filter.ownedByMe (#782) narrows to the caller's own user-owned (org-less)
+    agents for every caller including platform admins. Name-ascending order
+    (id tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
     """
     agents(filter: AgentFilter, orgId: ID, limit: Int, offset: Int): AgentsPage!
 

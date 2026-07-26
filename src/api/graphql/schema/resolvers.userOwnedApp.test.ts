@@ -134,6 +134,52 @@ describe('Query.apps — user-owned App listing', () => {
     const adminList = await resolvers.Query.apps(null, {}, ctx({ userId: otherId, roles: ['ADMIN'] }));
     expect(adminList.items.map((a: { id: string }) => a.id)).not.toContain(app.id);
   });
+
+  // #782 — the owner-only "My apps" slice: apps(filter: { ownedByMe: true })
+  // returns ONLY the caller's own user-owned (org-less) Apps, for every caller
+  // including a platform admin (no fetch-everything-then-filter, no admin
+  // cross-tenant reach).
+  it('Query.apps(ownedByMe): returns only the caller’s own org-less Apps, admin included', async () => {
+    const mine = await resolvers.Mutation.createApp(
+      {}, { agentId: publicAgentId, name: 'Mine' }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    // An org-owned App the admin would otherwise see in the unscoped list.
+    const orgApp = await db.app.create({
+      data: { id: generateId(), name: 'Org App', urn: `${pubOrgId}-app-${generateId()}`, organizationId: pubOrgId },
+    });
+    // Another user's user-owned App.
+    const othersApp = await resolvers.Mutation.createApp(
+      {}, { agentId: publicAgentId, name: 'Others' }, ctx({ userId: otherId, roles: ['READER'] }),
+    );
+
+    // Owner: sees only their own.
+    const ownerList = await resolvers.Query.apps(
+      null, { filter: { ownedByMe: true } }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    expect(ownerList.items.map((a: { id: string }) => a.id)).toEqual([mine.id]);
+    expect(ownerList.total).toBe(1);
+
+    // Platform admin: ownedByMe returns the admin's own org-less Apps only —
+    // NOT the whole apps table.
+    const adminList = await resolvers.Query.apps(
+      null, { filter: { ownedByMe: true } }, ctx({ userId: otherId, roles: ['ADMIN'] }),
+    );
+    const adminIds = adminList.items.map((a: { id: string }) => a.id);
+    expect(adminIds).toContain(othersApp.id); // the admin's OWN user-owned App
+    expect(adminIds).not.toContain(mine.id); // not another user's
+    expect(adminIds).not.toContain(orgApp.id); // not org-owned
+  });
+
+  it('Query.apps(ownedByMe): App-key caller (no user) gets an empty page', async () => {
+    await resolvers.Mutation.createApp(
+      {}, { agentId: publicAgentId, name: 'Mine' }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    const res = await resolvers.Query.apps(
+      null, { filter: { ownedByMe: true } }, ctx({ appId: 'some-app', roles: ['READER'] }),
+    );
+    expect(res.items).toEqual([]);
+    expect(res.total).toBe(0);
+  });
 });
 
 describe('user-owned App is owner-only (blocker 3 — no platform-admin bypass)', () => {
