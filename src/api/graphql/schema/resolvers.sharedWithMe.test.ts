@@ -266,3 +266,122 @@ describe('Memory.myShare — #778', () => {
     expect(s2.role).toBe('writer');
   });
 });
+
+// ─── deleteMemoryShare — principal OR self (#785) ───────────────────────────
+describe('deleteMemoryShare — grantee self-removal (#785)', () => {
+  const rowExists = (memoryId: string, granteeId: string) =>
+    db.memoryShare.findUnique({ where: { memoryId_granteeId: { memoryId, granteeId } } });
+
+  it('a grantee removes their OWN share by omitting the grantee entirely', async () => {
+    const res = await M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(grantee.id));
+    expect(res).toEqual({ memoryId: freeShared.id, granteeId: grantee.id });
+    expect(await rowExists(freeShared.id, grantee.id)).toBeNull();
+  });
+
+  it('the memory drops off the caller\'s sharedWithMe list on the next read', async () => {
+    await M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(grantee.id));
+    const page = await Q.memories(null, { filter: { sharedWithMe: true } }, ctx(grantee.id));
+    expect(page.items.map((m: { id: string }) => m.id).sort())
+      .toEqual([orgShared.id, writerShared.id].sort());
+    await expect(Q.memory(null, { ref: freeShared.id }, ctx(grantee.id))).rejects.toThrow('Forbidden');
+  });
+
+  it('a grantee may also name THEMSELVES explicitly (granteeRef / granteeId)', async () => {
+    await M.deleteMemoryShare(
+      null, { memoryRef: freeShared.id, granteeRef: 'sw-grantee' }, ctx(grantee.id),
+    );
+    expect(await rowExists(freeShared.id, grantee.id)).toBeNull();
+
+    await M.deleteMemoryShare(
+      null, { memoryRef: writerShared.id, granteeId: grantee.id }, ctx(grantee.id),
+    );
+    expect(await rowExists(writerShared.id, grantee.id)).toBeNull();
+  });
+
+  it('accepts the memory by URN as well as by id', async () => {
+    // A fully-qualified (org::memory) URN — what resolveMemoryRef requires.
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:urn-shared`,
+        name: 'urn-shared', class: 'personal', visibility: null, userId: owner.id,
+      },
+      select: { id: true, urn: true },
+    });
+    await share(mem.id, grantee.id, owner.id, 'reader');
+    const res = await M.deleteMemoryShare(
+      null, { memoryRef: `hrn:memory:${org.urn}::urn-shared` }, ctx(grantee.id),
+    );
+    expect(res.memoryId).toBe(mem.id);
+    expect(await rowExists(mem.id, grantee.id)).toBeNull();
+  });
+
+  it('a grantee may leave a memory the owner has SOFT-DELETED (no stranded row)', async () => {
+    await db.memory.update({ where: { id: freeShared.id }, data: { deletedAt: new Date() } });
+    await M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(grantee.id));
+    expect(await rowExists(freeShared.id, grantee.id)).toBeNull();
+  });
+
+  it('is idempotent — a second call, and a non-grantee\'s self-call, both no-op', async () => {
+    await M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(grantee.id));
+    await expect(M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(grantee.id)))
+      .resolves.toEqual({ memoryId: freeShared.id, granteeId: grantee.id });
+    await expect(M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(stranger.id)))
+      .resolves.toEqual({ memoryId: freeShared.id, granteeId: stranger.id });
+  });
+
+  it('a grantee may NOT delete a CO-GRANTEE\'s row', async () => {
+    const grantee2 = await db.user.create({
+      data: { id: generateId(), githubId: 78105, githubUsername: 'sw-grantee3', handle: 'sw-grantee3' },
+    });
+    await share(freeShared.id, grantee2.id, owner.id, 'reader');
+    await expect(
+      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeId: grantee2.id }, ctx(grantee.id)),
+    ).rejects.toThrow(/not authorized to manage shares/);
+    expect(await rowExists(freeShared.id, grantee2.id)).not.toBeNull();
+    // ...and the caller's own row is untouched by the failed call.
+    expect(await rowExists(freeShared.id, grantee.id)).not.toBeNull();
+  });
+
+  it('a stranger may NOT delete someone else\'s row', async () => {
+    await expect(
+      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeId: grantee.id }, ctx(stranger.id)),
+    ).rejects.toThrow(/not authorized to manage shares/);
+    expect(await rowExists(freeShared.id, grantee.id)).not.toBeNull();
+  });
+
+  it('the PRINCIPAL still deletes any grantee\'s row (owner path unchanged)', async () => {
+    const res = await M.deleteMemoryShare(
+      null, { memoryRef: freeShared.id, granteeRef: 'sw-grantee' }, ctx(owner.id),
+    );
+    expect(res).toEqual({ memoryId: freeShared.id, granteeId: grantee.id });
+    expect(await rowExists(freeShared.id, grantee.id)).toBeNull();
+  });
+
+  it('the principal path still refuses a SOFT-DELETED memory', async () => {
+    await db.memory.update({ where: { id: freeShared.id }, data: { deletedAt: new Date() } });
+    await expect(
+      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeId: grantee.id }, ctx(owner.id)),
+    ).rejects.toThrow(/not authorized to manage shares/);
+  });
+
+  it('gives an unauthorized caller FORBIDDEN for an unknown grantee too (no enumeration oracle)', async () => {
+    // Unauthorized + grantee exists, and unauthorized + grantee does NOT exist,
+    // must be indistinguishable. The principal, by contrast, gets NOT_FOUND.
+    await expect(
+      M.deleteMemoryShare(
+        null, { memoryRef: freeShared.id, granteeRef: 'nobody@nowhere.example' }, ctx(stranger.id),
+      ),
+    ).rejects.toThrow(/not authorized to manage shares/);
+    await expect(
+      M.deleteMemoryShare(
+        null, { memoryRef: freeShared.id, granteeRef: 'nobody@nowhere.example' }, ctx(owner.id),
+      ),
+    ).rejects.toThrow(/No user matches granteeRef/);
+  });
+
+  it('rejects an unauthenticated caller with UNAUTHENTICATED', async () => {
+    await expect(
+      M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(undefined)),
+    ).rejects.toThrow(/requires an authenticated user/);
+  });
+});

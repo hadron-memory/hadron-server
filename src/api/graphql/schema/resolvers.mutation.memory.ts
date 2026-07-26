@@ -21,7 +21,7 @@ import {
 import { cloneMemoryGraph } from '../../../controller/operations/cloneMemory.js';
 import { extractParentNodeGraph } from '../../../controller/operations/extractParentNode.js';
 import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
-import { revokeMemoryShare } from '../../../controller/operations/revokeMemoryShare.js';
+import { deleteMemoryShare } from '../../../controller/operations/deleteMemoryShare.js';
 import {
   updateMemoryShareRole,
   MemoryShareNotFoundError,
@@ -95,6 +95,8 @@ import {
   requireMemoryMemberOwner,
   requireMemoryMemberOwnerOrSelf,
   requireMemorySharePrincipal,
+  isMemorySharePrincipal,
+  memoryShareForbidden,
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
@@ -1810,26 +1812,60 @@ export const memoryMutations = {
       }
     },
 
-    // 023-app-shape US3 — revoke an existing MemoryShare. Idempotent.
-    revokeMemoryShare: async (
+    // 023-app-shape US3 — delete an existing MemoryShare. Idempotent.
+    // #785: principal-OR-self. The memory's principal may delete any
+    // grantee's row; a grantee may delete THEIR OWN row (the
+    // stop-sharing-with-me path the portal needs), and omitting the
+    // grantee entirely means "mine".
+    deleteMemoryShare: async (
       _: unknown,
       {
-        memoryId,
+        memoryRef,
         granteeRef,
         granteeId,
-      }: { memoryId: string; granteeRef?: string | null; granteeId?: string | null },
+      }: { memoryRef: string; granteeRef?: string | null; granteeId?: string | null },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
-        throw new GraphQLError('revokeMemoryShare requires an authenticated user', {
+        throw new GraphQLError('deleteMemoryShare requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
-      await requireMemorySharePrincipal(ctx, memoryId);
-      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
-      await revokeMemoryShare(ctx.db, { memoryId, granteeId: resolvedGranteeId });
-      // Return the RESOLVED grantee PK so the client can correlate the revocation.
-      return { memoryId, granteeId: resolvedGranteeId };
+      // includeDeleted: a grantee must be able to detach from a memory whose
+      // owner soft-deleted it — otherwise the row is stranded (the same
+      // reasoning leaveApp applies to a dead App). It does NOT widen the
+      // principal path: isMemorySharePrincipal still reports false for a
+      // soft-deleted memory, so the owner-side FORBIDDEN is unchanged.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef, {
+        includeDeleted: true,
+      });
+      // The authority answer is needed BEFORE the grantee is resolved, because
+      // a non-principal must fail identically whether or not the named grantee
+      // exists — otherwise the NOT_FOUND-vs-FORBIDDEN difference becomes a
+      // user-enumeration oracle (the ordering rule createMemoryShare states).
+      const isPrincipal = await isMemorySharePrincipal(ctx, resolvedMemoryId);
+      // No grantee named ⇒ the caller means their own share ("leave").
+      const wantsSelf = !granteeRef?.trim() && !granteeId;
+      let resolvedGranteeId: string;
+      if (wantsSelf) {
+        resolvedGranteeId = ctx.userId;
+      } else {
+        try {
+          resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
+        } catch (e) {
+          if (!isPrincipal) throw memoryShareForbidden();
+          throw e;
+        }
+      }
+      if (!isPrincipal && resolvedGranteeId !== ctx.userId) {
+        throw memoryShareForbidden();
+      }
+      await deleteMemoryShare(ctx.db, {
+        memoryId: resolvedMemoryId,
+        granteeId: resolvedGranteeId,
+      });
+      // Return the RESOLVED PKs so the client can correlate the deletion.
+      return { memoryId: resolvedMemoryId, granteeId: resolvedGranteeId };
     },
 
     // 023-app-shape US3 — change the role on an existing MemoryShare.

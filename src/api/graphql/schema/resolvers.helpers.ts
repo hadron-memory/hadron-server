@@ -1000,12 +1000,14 @@ export async function readPrimaryAgentField(
 
 // ─── 023-app-shape US3 — MemoryShare caller-authority guard ────────────
 //
-// All three MemoryShare mutations (create / revoke / update-role)
-// share the same v1 rule: caller MUST be the Memory's principal
-// (`memory.userId`). The Agent-mediated path (App backend acting on
-// behalf via MCP) is supported by the access-control predicate but
-// not by this GraphQL surface — see joinApp.ts header for the
-// broader policy discussion.
+// createMemoryShare / updateMemoryShareRole share the v1 rule: caller
+// MUST be the Memory's principal (`memory.userId`). deleteMemoryShare
+// widens that to principal-OR-self (#785) — a grantee may delete their
+// OWN row, mirroring requireMemoryMemberOwnerOrSelf — so it consumes
+// the boolean `isMemorySharePrincipal` instead of the throwing guard.
+// The Agent-mediated path (App backend acting on behalf via MCP) is
+// supported by the access-control predicate but not by this GraphQL
+// surface — see joinApp.ts header for the broader policy discussion.
 
 // ─── 023-app-shape US4 — MemoryMember caller-authority guards ──────────
 //
@@ -1063,6 +1065,34 @@ export async function requireMemoryMemberOwnerOrSelf(
   await requireMemoryMemberOwner(ctx, memoryId);
 }
 
+/**
+ * Is the caller the Memory's principal (`memory.userId`)? Boolean form of
+ * `requireMemorySharePrincipal`, for the one surface that must know the
+ * answer BEFORE it decides how to fail (deleteMemoryShare, #785).
+ * A soft-deleted or missing memory is never "principal".
+ */
+export async function isMemorySharePrincipal(
+  ctx: Context,
+  memoryId: string,
+): Promise<boolean> {
+  if (!ctx.userId) return false;
+  const memory = await ctx.db.memory.findUnique({
+    where: { id: memoryId },
+    select: { userId: true, deletedAt: true },
+  });
+  return !!memory && !memory.deletedAt && memory.userId === ctx.userId;
+}
+
+export function memoryShareForbidden(): GraphQLError {
+  // Uniform message + code for every unauthorized share path — the
+  // don't-leak-metadata rule: "memory doesn't exist", "memory is
+  // soft-deleted", "not personal-class", and "you're not the principal"
+  // are indistinguishable to the caller.
+  return new GraphQLError('You are not authorized to manage shares on this memory.', {
+    extensions: { code: 'FORBIDDEN' },
+  });
+}
+
 export async function requireMemorySharePrincipal(
   ctx: Context,
   memoryId: string,
@@ -1072,20 +1102,8 @@ export async function requireMemorySharePrincipal(
       extensions: { code: 'UNAUTHENTICATED' },
     });
   }
-  const memory = await ctx.db.memory.findUnique({
-    where: { id: memoryId },
-    select: { userId: true, class: true, deletedAt: true },
-  });
-  if (!memory || memory.deletedAt) {
-    // Surface a generic FORBIDDEN rather than leaking memory existence.
-    throw new GraphQLError('You are not authorized to manage shares on this memory.', {
-      extensions: { code: 'FORBIDDEN' },
-    });
-  }
-  if (memory.userId !== ctx.userId) {
-    throw new GraphQLError('You are not authorized to manage shares on this memory.', {
-      extensions: { code: 'FORBIDDEN' },
-    });
+  if (!(await isMemorySharePrincipal(ctx, memoryId))) {
+    throw memoryShareForbidden();
   }
 }
 

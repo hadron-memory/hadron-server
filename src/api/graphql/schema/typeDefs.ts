@@ -987,7 +987,12 @@ export const typeDefs = `#graphql
     memoryShare: MemoryShare!
   }
 
-  type RevokeMemorySharePayload {
+  """
+  Return shape for deleteMemoryShare. Both fields are RESOLVED primary
+  keys, so a caller who passed a URN / email / handle can correlate the
+  deletion. granteeId is the caller themselves on the self-removal path.
+  """
+  type DeleteMemorySharePayload {
     memoryId: ID!
     granteeId: ID!
   }
@@ -5180,18 +5185,34 @@ export const typeDefs = `#graphql
     ): CreateMemorySharePayload!
 
     """
-    023-app-shape US3 — revoke a MemoryShare. Per FR-022, revocation
+    023-app-shape US3 — delete a MemoryShare. Per FR-022, revocation
     takes effect on the next read (there's no "deactivated" state;
-    just a row delete). Idempotent.
+    just a row delete). Idempotent — deleting a share that does not
+    exist succeeds. Renamed from revokeMemoryShare in #785.
 
-    Caller-authority rule matches createMemoryShare.
+    Caller-authority rule (#785) — principal OR self, the same shape
+    removeMemoryMember uses:
+      - The memory's principal (memory.userId) may delete ANY grantee
+        row on their memory.
+      - A GRANTEE may delete THEIR OWN row — the
+        stop-sharing-with-me / leave path. Omit granteeRef entirely and
+        the mutation targets the caller's own share.
+      - Anyone else gets FORBIDDEN, and so does a principal-path caller
+        whose granteeRef resolves to nobody: an unauthorized caller can
+        never tell an existing user from a missing one (no
+        user-enumeration oracle).
+
+    A grantee may leave a memory whose owner has soft-deleted it (the
+    row would otherwise be stranded); the principal path still treats a
+    soft-deleted memory as FORBIDDEN.
     """
-    revokeMemoryShare(
-      memoryId: ID!
-      "#769 — the grantee as a server-resolved reference (id / email / handle / hrn:user URN). Supply this OR granteeId."
+    deleteMemoryShare(
+      "The memory, by id or URN (#785)."
+      memoryRef: ID!
+      "#769 — the grantee as a server-resolved reference (id / email / handle / hrn:user URN). Supply this OR granteeId. Omit BOTH to target the caller's own share (self-removal)."
       granteeRef: String
       granteeId: ID @deprecated(reason: "Use granteeRef (accepts id / email / handle / hrn:user URN).")
-    ): RevokeMemorySharePayload!
+    ): DeleteMemorySharePayload!
 
     """
     023-app-shape US3 — change the role on an existing MemoryShare.

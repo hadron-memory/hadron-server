@@ -226,16 +226,16 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     expect(await canRead(fx.memWithBId, fx.aliceId)).toBe(true);
   });
 
-  it('revokeMemoryShare takes effect on the next read (FR-022)', async () => {
+  it('deleteMemoryShare takes effect on the next read (FR-022)', async () => {
     await resolvers.Mutation.createMemoryShare(
       {},
       { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'reader' },
       userCtx(fx.aliceId),
     );
     expect(await canRead(fx.memWithAId, fx.mentorAId)).toBe(true);
-    await resolvers.Mutation.revokeMemoryShare(
+    await resolvers.Mutation.deleteMemoryShare(
       {},
-      { memoryId: fx.memWithAId, granteeId: fx.mentorAId },
+      { memoryRef: fx.memWithAId, granteeId: fx.mentorAId },
       userCtx(fx.aliceId),
     );
     // Next read denied — no cached share state.
@@ -278,11 +278,11 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     expect(rows.length).toBe(1);
   });
 
-  it('revokeMemoryShare is idempotent — no-op when no row exists', async () => {
+  it('deleteMemoryShare is idempotent — no-op when no row exists', async () => {
     await expect(
-      resolvers.Mutation.revokeMemoryShare(
+      resolvers.Mutation.deleteMemoryShare(
         {},
-        { memoryId: fx.memWithAId, granteeId: fx.mentorAId },
+        { memoryRef: fx.memWithAId, granteeId: fx.mentorAId },
         userCtx(fx.aliceId),
       ),
     ).resolves.toMatchObject({
