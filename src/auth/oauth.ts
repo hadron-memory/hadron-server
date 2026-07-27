@@ -1202,30 +1202,37 @@ async function handleAuthorizeEmailCodePost(req: Request, res: Response): Promis
     return;
   }
 
-  const config = reviewDemoConfig()!;
-  const user = await db.user.findFirst({
-    where: { email: { equals: config.email, mode: 'insensitive' }, deletedAt: null },
-  });
-  if (!user) {
-    fail();
-    return;
-  }
+  // Express 4 does not catch async rejections — a transient DB/pool
+  // failure here must become a 500, not an unhandled rejection.
+  try {
+    const config = reviewDemoConfig()!;
+    const user = await db.user.findFirst({
+      where: { email: { equals: config.email, mode: 'insensitive' }, deletedAt: null },
+    });
+    if (!user) {
+      fail();
+      return;
+    }
 
-  const jwt = await signJwt({
-    sub: user.id,
-    roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
-    ...(user.email ? { email: user.email } : {}),
-  });
-  const { exp } = decodeJwt(jwt);
-  const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-  res.cookie('hadron_token', jwt, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    maxAge,
-    path: '/',
-  });
-  res.redirect(returnTo as string);
+    const jwt = await signJwt({
+      sub: user.id,
+      roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+      ...(user.email ? { email: user.email } : {}),
+    });
+    const { exp } = decodeJwt(jwt);
+    const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
+    res.cookie('hadron_token', jwt, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge,
+      path: '/',
+    });
+    res.redirect(returnTo as string);
+  } catch (err) {
+    console.error('OAuth demo-code sign-in error:', err);
+    res.status(500).json({ error: 'Sign-in failed' });
+  }
 }
 
 // ── /oauth/token (FR-013, FR-015) ────────────────────────────────────
