@@ -3,7 +3,9 @@ import { Resend } from 'resend';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 
-const TOKEN_EXPIRY_MINUTES = 15;
+/** Magic-link lifetime. Exported so the OAuth email-entry pages (#804)
+ *  can surface the same number without hardcoding a drift-prone copy. */
+export const TOKEN_EXPIRY_MINUTES = 15;
 
 let resend: Resend | null = null;
 
@@ -23,6 +25,14 @@ export async function sendMagicLink(
   /** #505: SHA-256 of the portal's request-time browser nonce, persisted so the
    *  handoff code minted at verify time binds to the requesting browser. */
   clientStateHash?: string,
+  /** #804 Option-C: a strict server-local path (caller MUST have validated it
+   *  with `isServerLocalPath`) appended to the verify URL as `return_to`. At
+   *  verify time this routes sign-in through the server-origin cookie path
+   *  (hadron_token + 302 to return_to) instead of the portal handoff — the
+   *  OAuth /oauth/authorize email leg. Mutually exclusive with
+   *  `clientStateHash` in practice: Option-C links open out-of-band (possibly
+   *  a different browser), so a browser binding is impossible by design. */
+  returnTo?: string,
 ): Promise<void> {
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + TOKEN_EXPIRY_MINUTES * 60 * 1000);
@@ -46,6 +56,7 @@ export async function sendMagicLink(
     process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
   let verifyUrl = `${baseUrl}/auth/email/verify?token=${token}`;
   if (redirect) verifyUrl += `&redirect=${encodeURIComponent(redirect)}`;
+  if (returnTo) verifyUrl += `&return_to=${encodeURIComponent(returnTo)}`;
 
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
 

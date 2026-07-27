@@ -41,6 +41,12 @@ import { decodeJwt } from 'jose';
 import { db } from '../integrations/db/client.js';
 import { verifyJwt } from './jwt.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
+import {
+  EMAIL_ENTRY_TEMPLATE,
+  EMAIL_SENT_TEMPLATE,
+} from './email-entry.template.js';
+import { sendMagicLink, TOKEN_EXPIRY_MINUTES } from './email.js';
+import { isServerLocalPath } from './server-local-path.js';
 import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.js';
 
 /**
@@ -500,19 +506,26 @@ interface ConsentParams {
 }
 
 /**
- * Render the consent HTML. All values are HTML-escaped before
- * substitution; `clientName` and `resource` in particular are
- * attacker-influenced (DCR-supplied / caller-supplied) so escaping
- * is load-bearing for the XSS posture.
+ * Substitute `{{placeholder}}` values into a server-hosted HTML
+ * template. ALL values are HTML-escaped before substitution — none of
+ * the templates has a raw-insertion point, and several values are
+ * attacker-influenced (DCR-supplied `clientName`, caller-supplied
+ * `resource`, form-supplied `email`), so escaping here is load-bearing
+ * for the XSS posture.
  */
-export function renderConsent(params: ConsentParams): string {
-  let html = CONSENT_TEMPLATE;
+function renderTemplate(template: string, params: Record<string, string>): string {
+  let html = template;
   for (const [key, value] of Object.entries(params)) {
     const placeholder = `{{${key}}}`;
     const safe = escapeHtml(value ?? '');
     html = html.split(placeholder).join(safe);
   }
   return html;
+}
+
+/** Render the consent HTML (spec 025 Phase 2C). */
+export function renderConsent(params: ConsentParams): string {
+  return renderTemplate(CONSENT_TEMPLATE, { ...params });
 }
 
 /**
@@ -736,7 +749,14 @@ const RESOURCE_MAX_LENGTH = 2048;
 // the same Option-C return_to round-trip as github/google (its callback is
 // a form POST, but return_to rides the pending-state entry, not the URL).
 // Requires the APPLE_* env quad in the deployment, else /auth/apple 503s.
-const LOGIN_PROVIDERS = new Set(['github', 'google', 'apple']);
+// 'email' joined for #804: the non-OAuth magic-link sign-in (hadron-ios's
+// password-less leg). Unlike the redirect providers, the unauthenticated
+// email leg renders a server-hosted email-entry page (see
+// buildHandleAuthorizeGet) that drives the existing Resend magic-link flow
+// with return_to carrying the full authorize URL; GET /auth/email/verify
+// honors that return_to by setting the hadron_token cookie and 302ing back
+// here (src/server.ts).
+const LOGIN_PROVIDERS = new Set(['github', 'google', 'apple', 'email']);
 
 /** True iff `v` is a valid PKCE S256 code_challenge per RFC 7636 §4.2. */
 function isValidCodeChallenge(v: string): boolean {
@@ -803,6 +823,24 @@ function buildHandleAuthorizeGet(
     // 2. Sign-in check. Not signed in → Option-C bounce.
     const userId = await getUserIdFromCookie(req);
     if (!userId) {
+      // #804: the email leg has no provider to redirect to — render the
+      // server-hosted email-entry page instead. Its form POSTs the address
+      // to /oauth/authorize/email (CSRF-protected, same double-submit
+      // utilities as the consent POST) with a hidden return_to carrying
+      // the FULL original authorize URL, so the tapped magic link lands
+      // back here with the hadron_token cookie set and the standard
+      // consent + code/PKCE dance completes.
+      if (loginProvider === 'email') {
+        const csrfToken = csrf.generateCsrfToken(req, res);
+        res.type('html').send(
+          renderTemplate(EMAIL_ENTRY_TEMPLATE, {
+            clientName,
+            returnTo: req.originalUrl,
+            csrfToken,
+          }),
+        );
+        return;
+      }
       // req.originalUrl is the path + query that hit Express
       // (e.g., `/oauth/authorize?client_id=…&state=…`). The
       // selected auth handler's `isServerLocalPath` predicate
@@ -965,6 +1003,101 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   // /token handler atomically claims it via updateMany-with-conditional.
   const url = buildRedirectWithParams(redirectUri, { code: rawCode, state });
   res.redirect(302, url);
+}
+
+// ── /oauth/authorize/email (#804 — magic-link sign-in leg) ───────────
+
+/**
+ * Upper bound for the submitted address. RFC 5321's path limit is 320
+ * octets (64 local + '@' + 255 domain); anything longer is garbage and
+ * would only bloat the EmailVerificationToken row / the Resend call.
+ */
+const EMAIL_MAX_LENGTH = 320;
+
+/**
+ * Per-IP limiter for the magic-link send triggered from the OAuth
+ * email-entry page. The existing send path (POST /auth/email) is
+ * portal-gated by the mandatory #505 `client_state` nonce; this
+ * endpoint is reachable by anyone who can render the entry page, so it
+ * needs its own brake against being used as an email bomb / Resend
+ * quota drain. 10 sends / 15 min / IP comfortably covers a human
+ * retrying a typo'd address. `skipFailedRequests` uncounts 4xx/5xx so
+ * CSRF failures and validation 400s don't consume the send budget —
+ * only requests that actually reached Resend do.
+ *
+ * Same in-process MemoryStore caveat as the DCR limiters above
+ * (per-worker counters in a multi-worker deploy — acceptable, the
+ * limit exists to stop abuse-shaped bursts, not to enforce a quota).
+ */
+export function buildAuthorizeEmailRateLimit() {
+  return rateLimit({
+    windowMs: 15 * 60_000,
+    limit: 10,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    skipFailedRequests: true,
+    message: RATE_LIMITED_BODY,
+  });
+}
+
+/**
+ * `POST /oauth/authorize/email` — the email-entry form target (#804).
+ * CSRF middleware has already validated `_csrf` (or rejected with 403).
+ *
+ * Validation:
+ *   - `email` — non-empty string ≤ 320 chars after trim. Deliberately
+ *     NO existence check and no further format validation: semantics
+ *     must match POST /auth/email exactly (a link is sent to ANY
+ *     address; the user row is upserted at verify time), so unknown
+ *     addresses are indistinguishable from known ones here.
+ *   - `return_to` — the hidden field carrying the original authorize
+ *     URL. Strict server-local-path predicate, same as the
+ *     github/google/apple `return_to` legs (open-redirect defense: the
+ *     value is echoed into the emailed verify link and later drives a
+ *     redirect + cookie write).
+ *
+ * On success renders the "Check your email" page. The magic link's
+ * verify handler (GET /auth/email/verify, src/server.ts) recognizes
+ * the Option-C `return_to` and completes sign-in on THIS origin.
+ */
+async function handleAuthorizeEmailPost(req: Request, res: Response): Promise<void> {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+
+  const email = typeof body.email === 'string' ? body.email.trim() : '';
+  if (email.length === 0 || email.length > EMAIL_MAX_LENGTH) {
+    res.status(400).json({ error: 'Email is required' });
+    return;
+  }
+
+  const returnTo = body.return_to;
+  if (!isServerLocalPath(returnTo)) {
+    res.status(400).json({
+      error:
+        'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
+    });
+    return;
+  }
+
+  try {
+    // No `redirect` (that's the portal-handoff landing) and no
+    // `clientStateHash` (#505 binding is impossible here by design —
+    // the link opens out-of-band, possibly in a different browser; the
+    // verify handler's Option-C branch mints no handoff code, so there
+    // is nothing to bind — same exemption as the github/google/apple
+    // Option-C legs).
+    await sendMagicLink(email, db, undefined, undefined, returnTo);
+  } catch (err) {
+    console.error('OAuth email-entry send error:', err);
+    res.status(500).json({ error: 'Failed to send verification email' });
+    return;
+  }
+
+  res.type('html').send(
+    renderTemplate(EMAIL_SENT_TEMPLATE, {
+      email,
+      expiryMinutes: String(TOKEN_EXPIRY_MINUTES),
+    }),
+  );
 }
 
 // ── /oauth/token (FR-013, FR-015) ────────────────────────────────────
@@ -1291,6 +1424,7 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
  *   - POST /oauth/register                            (Phase 2B)
  *   - GET  /oauth/authorize                           (Phase 2C)
  *   - POST /oauth/authorize                           (Phase 2C, CSRF-protected)
+ *   - POST /oauth/authorize/email                     (#804, CSRF-protected + rate-limited)
  *   - POST /oauth/token                               (Phase 2D)
  */
 export function buildOAuthRouter(): Router {
@@ -1325,6 +1459,19 @@ export function buildOAuthRouter(): Router {
     express.urlencoded({ extended: false }),
     csrf.doubleCsrfProtection,
     handleAuthorizePost,
+  );
+
+  // /oauth/authorize/email (#804): the email-entry form target. Rate
+  // limit first (cheap reject; counts only successful sends via
+  // skipFailedRequests), then the form-body parser, then CSRF — the
+  // same double-submit utilities as the consent POST, so the token
+  // minted by the GET's email branch validates here.
+  router.post(
+    '/oauth/authorize/email',
+    buildAuthorizeEmailRateLimit(),
+    express.urlencoded({ extended: false }),
+    csrf.doubleCsrfProtection,
+    handleAuthorizeEmailPost,
   );
 
   // /oauth/token: form-encoded (RFC 6749 §4.1.3); unauthenticated
