@@ -5,6 +5,7 @@ import {
   getUsageActivity,
   isValidTimeZone,
   resolveWindow,
+  MAX_MEMORY_SCOPE_REFS,
   type UsageActivityBucketSize,
 } from '../../../lib/usageActivity.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -63,19 +64,31 @@ async function resolveReadableMemoryId(ctx: Context, memoryRef: string): Promise
 
 export const memoryQueries = {
     /**
-     * #796 — read/write activity counts bucketed by time.
+     * #796 — read/write activity counts bucketed by time. #805 widened the
+     * memory scope from one memory to a union of several.
      *
-     * Two scopes. Default (no `memoryRef`): the caller's OWN events across
+     * Two scopes. Default (no `memoryRefs`): the caller's OWN events across
      * everything they touched — needs only an authenticated user, since a user
-     * reading their own activity discloses nothing. With `memoryRef`: every
-     * user's events attributed to that memory, gated on MEMORY READ ACCESS,
-     * the same gate `memoryUsageSummary` and `usageEvents(memoryId:)` use, so
-     * the three memory-scoped usage surfaces stay in parity. That reveals other
-     * users' activity VOLUMES to any reader of the memory — a deliberate call
-     * (Holger, #796), and strictly less than the per-node counts
-     * `memoryUsageSummary` already exposes to the same audience.
+     * reading their own activity discloses nothing. With `memoryRefs`: every
+     * user's events attributed to ANY of those memories, each ref gated on
+     * MEMORY READ ACCESS — the same gate `memoryUsageSummary` and
+     * `usageEvents(memoryId:)` use, so the three memory-scoped usage surfaces
+     * stay in parity. That reveals other users' activity VOLUMES to any reader
+     * of the memory — a deliberate call (Holger, #796), and strictly less than
+     * the per-node counts `memoryUsageSummary` already exposes to the same
+     * audience.
      *
-     * Denied and nonexistent are indistinguishable — both `[]`.
+     * Denied and nonexistent are indistinguishable — a ref the caller can't
+     * read is silently DROPPED from the union rather than failing the query
+     * (#805), which keeps the anti-enumeration posture: a list of 3 refs
+     * answers identically whether the third is foreign, deleted, or a PK that
+     * never existed. Consequence worth knowing at the call site: the result
+     * doesn't say WHICH refs contributed. A malformed ref still throws — a
+     * shape error discloses nothing about what exists.
+     *
+     * Passing `memoryRefs` at all selects the memory scope, so an explicitly
+     * EMPTY list is the empty union (`[]`), never a silent fallback to own
+     * activity — that would mislabel one user's data as the memories'.
      */
     usageActivity: async (
       _: unknown,
@@ -83,13 +96,13 @@ export const memoryQueries = {
         from,
         to,
         bucket,
-        memoryRef,
+        memoryRefs,
         timeZone,
       }: {
         from?: string | null;
         to?: string | null;
         bucket?: UsageActivityBucketSize | null;
-        memoryRef?: string | null;
+        memoryRefs?: string[] | null;
         timeZone?: string | null;
       },
       ctx: Context,
@@ -110,10 +123,24 @@ export const memoryQueries = {
 
       const scope = { ...window, bucket: bucket ?? 'DAY', timeZone: tz } as const;
 
-      if (memoryRef) {
-        const resolvedId = await resolveReadableMemoryId(ctx, memoryRef);
-        if (!resolvedId) return [];
-        return getUsageActivity(ctx.db, { ...scope, memoryId: resolvedId });
+      if (memoryRefs) {
+        // Loud on the QUERY path: an over-long list is caller error, and the
+        // gate below is one resolve + one access check per ref. The widget
+        // provider truncates instead — its list is untrusted config JSON.
+        if (memoryRefs.length > MAX_MEMORY_SCOPE_REFS) {
+          throw new GraphQLError(
+            `Too many memoryRefs (max ${MAX_MEMORY_SCOPE_REFS}).`,
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
+        // Dedupe on the RESOLVED id, not the ref string: the same memory named
+        // once by PK and once by URN must not be resolved (or counted) twice.
+        const resolved = await Promise.all(
+          [...new Set(memoryRefs)].map((ref) => resolveReadableMemoryId(ctx, ref)),
+        );
+        const memoryIds = [...new Set(resolved.filter((id): id is string => id !== null))];
+        if (memoryIds.length === 0) return [];
+        return getUsageActivity(ctx.db, { ...scope, memoryIds });
       }
 
       // Own-activity scope. An App-key caller has no userId, so there is no

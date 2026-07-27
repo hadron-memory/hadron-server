@@ -48,6 +48,14 @@ export const DEFAULT_WINDOW_DAYS = 7;
  */
 export const MAX_WINDOW_DAYS = 366;
 
+/**
+ * Cap on how many memories one memory-scoped request may union over (#805).
+ * The list rides in from a GraphQL arg AND from widget `config` JSON, so both
+ * entry points bound it — the query rejects an over-long list, the widget
+ * provider truncates one (untrusted config must degrade, never fail).
+ */
+export const MAX_MEMORY_SCOPE_REFS = 20;
+
 export interface UsageActivityScope {
   /** Window start, INCLUSIVE. */
   from: Date;
@@ -59,10 +67,13 @@ export interface UsageActivityScope {
   /** Own-activity scope: events attributed to this user, across every memory. */
   userId?: string;
   /**
-   * Memory scope: every user's events attributed to this memory. Takes
-   * precedence over `userId` when both are set. MUST be pre-authorized.
+   * Memory scope (#805): every user's events attributed to ANY of these
+   * memories — a UNION, still one read/write series. Takes precedence over
+   * `userId` when both are set. Every id MUST be pre-authorized, and the list
+   * MUST be non-empty (an empty union has no rows to count, so the caller
+   * short-circuits to `[]` rather than building a degenerate predicate).
    */
-  memoryId?: string;
+  memoryIds?: string[];
 }
 
 export interface UsageActivityBucket {
@@ -106,9 +117,19 @@ export async function getUsageActivity(
   scope: UsageActivityScope,
 ): Promise<UsageActivityBucket[]> {
   // A memory scope and a user scope are alternatives, never an intersection:
-  // "all users of this memory" is the documented meaning of passing memoryId.
-  const scopePredicate = scope.memoryId
-    ? Prisma.sql`e.memory_id = ${scope.memoryId}`
+  // "all users of these memories" is the documented meaning of passing memoryIds.
+  //
+  // The union is an IN over the `memory_id` COLUMN, so it stays a range scan on
+  // (memory_id, created_at) and — because every event carries exactly ONE
+  // memory_id — the counts are the sum of the per-memory scopes with no
+  // double-counting (#805). An empty list is a caller bug, not an empty union:
+  // `IN ()` isn't valid SQL, and silently widening to the user scope would
+  // mislabel one user's activity as the memories'.
+  if (scope.memoryIds && scope.memoryIds.length === 0) {
+    throw new Error('usageActivity memory scope requires at least one memoryId');
+  }
+  const scopePredicate = scope.memoryIds
+    ? Prisma.sql`e.memory_id IN (${Prisma.join(scope.memoryIds)})`
     : Prisma.sql`e.user_id = ${scope.userId}`;
 
   // Defense in depth for a SHARED service: the GraphQL enum guards the query

@@ -425,3 +425,145 @@ describe('dashboardWidgetData — per-instance config (#797)', () => {
     expect(data[0].data.buckets).toEqual([]);
   });
 });
+
+describe('dashboardWidgetData — usage-activity multi-memory config (#805)', () => {
+  /** Read events attributed to the user but to NO memory (own-activity only). */
+  const seedReadsForUser = async (count: number) => {
+    await db.usageEvent.createMany({
+      data: Array.from({ length: count }, () => ({
+        id: generateId(),
+        type: 'read',
+        userId: user.id,
+        createdAt: new Date(Date.now() - 86_400_000),
+      })),
+    });
+  };
+
+  /** A memory the `user` can read, plus `reads` read events attributed to it. */
+  const readableMemory = async (name: string, reads: number) => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: `dw-${name}-org`, urn: `dw-${name}-${generateId().slice(-8)}` },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: user.id, role: 'READER' },
+    });
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:${name}`,
+        name,
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    await db.usageEvent.createMany({
+      data: Array.from({ length: reads }, () => ({
+        id: generateId(),
+        type: 'read',
+        userId: user.id,
+        memoryId: memory.id,
+        createdAt: new Date(Date.now() - 86_400_000),
+      })),
+    });
+    return memory;
+  };
+
+  const totalReads = (d: { data: { buckets: { reads: number }[] } }) =>
+    d.data.buckets.reduce((n, b) => n + b.reads, 0);
+
+  it('unions the memories named in config.memoryRefs', async () => {
+    const m1 = await readableMemory('multi-a', 2);
+    const m2 = await readableMemory('multi-b', 3);
+    await readableMemory('multi-c', 9); // readable but NOT named — must not count
+
+    await M.setDashboardWidgets(
+      null,
+      { widgets: [w({ type: 'USAGE_ACTIVITY', config: { memoryRefs: [m1.id, m2.id] } })] },
+      ctx(user.id),
+    );
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    expect(totalReads(data[0])).toBe(5);
+    expect(data[0].data.invalidConfig).toBeUndefined();
+  });
+
+  it('reads a legacy single memoryRef config as a one-element union (no data migration)', async () => {
+    // Placements saved before #805 still carry the scalar key; they must keep
+    // scoping exactly as before rather than silently widening to own activity.
+    const m1 = await readableMemory('legacy', 4);
+    await seedReadsForUser(6); // own activity the legacy scope must NOT pick up
+
+    await M.setDashboardWidgets(
+      null,
+      { widgets: [w({ type: 'USAGE_ACTIVITY', config: { memoryRef: m1.id } })] },
+      ctx(user.id),
+    );
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    expect(totalReads(data[0])).toBe(4);
+  });
+
+  it('prefers memoryRefs over a legacy memoryRef when a config carries both', async () => {
+    const legacy = await readableMemory('both-legacy', 2);
+    const current = await readableMemory('both-current', 7);
+
+    await M.setDashboardWidgets(
+      null,
+      {
+        widgets: [
+          w({
+            type: 'USAGE_ACTIVITY',
+            config: { memoryRef: legacy.id, memoryRefs: [current.id] },
+          }),
+        ],
+      },
+      ctx(user.id),
+    );
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    expect(totalReads(data[0])).toBe(7);
+  });
+
+  it('truncates an over-long memoryRefs list instead of failing the widget', async () => {
+    // The QUERY rejects >20 refs; config JSON is untrusted, so the provider
+    // clamps — one bad placement must never take down the shared payload.
+    const m1 = await readableMemory('clamped', 3);
+    const filler = Array.from({ length: 25 }, () => generateId());
+
+    await M.setDashboardWidgets(
+      null,
+      {
+        widgets: [
+          w({ type: 'USAGE_ACTIVITY', config: { memoryRefs: [m1.id, ...filler] } }),
+          w({ type: 'MEMORY_STATS' }),
+        ],
+      },
+      ctx(user.id),
+    );
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    expect(data).toHaveLength(2);
+    // Truncated to the first 20 — m1 leads the list, so its events survive and
+    // the widget renders rather than reporting invalidConfig.
+    expect(data[0].data.invalidConfig).toBeUndefined();
+    expect(totalReads(data[0])).toBe(3);
+    expect(data[1].data).toHaveProperty('memoryCount');
+  });
+
+  it('drops non-string entries, and a list left empty stays an EMPTY union', async () => {
+    await seedReadsForUser(5);
+    await M.setDashboardWidgets(
+      null,
+      {
+        widgets: [
+          w({ type: 'USAGE_ACTIVITY', config: { memoryRefs: [42, null, ''] } }),
+          // Not an array at all → no memory scope is named → own activity.
+          w({ type: 'USAGE_ACTIVITY', config: { memoryRefs: 'not-a-list' } }),
+        ],
+      },
+      ctx(user.id),
+    );
+    const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
+    // A garbage list must not silently relabel the caller's own activity as
+    // some memory's — it stays the union of nothing.
+    expect(data[0].data.buckets).toEqual([]);
+    expect(totalReads(data[1])).toBe(5);
+  });
+});

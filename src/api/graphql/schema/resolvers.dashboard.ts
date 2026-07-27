@@ -19,6 +19,11 @@
  *     of one type with different configs must receive different data, which the
  *     per-type contract could not express — and it is what makes a duplicate
  *     placement of a type genuinely useful.
+ *
+ *  3. **Presets** (#806) — named, saved widget configurations
+ *     (`DashboardWidgetPreset`), a palette the portal COPIES from when seeding
+ *     a placement's `config`. Same owner-only posture as the placements, plain
+ *     `create/update/delete` CRUD per conventions:crud-mutation-naming.
  */
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -27,6 +32,7 @@ import { generateId } from '../../../lib/id.js';
 import { isPlainObject } from '../../../lib/objectStore.js';
 import {
   isUsageActivityBucketSize,
+  MAX_MEMORY_SCOPE_REFS,
   type UsageActivityBucketSize,
 } from '../../../lib/usageActivity.js';
 import { memoryQueries } from './resolvers.query.memory.js';
@@ -38,13 +44,41 @@ const SPAN_DEFAULT = 4;
 const ROW_SPAN_MIN = 1;
 const ROW_SPAN_MAX = 4;
 const ROW_SPAN_DEFAULT = 1;
-/** Per-instance `config` cap — matches the secrets metadata cap (modest, layout-config-sized). */
+/**
+ * `config` cap — matches the secrets metadata cap (modest, layout-config-sized).
+ * Shared by a placement's config and a preset's (#806), since a preset becomes
+ * a placement's config verbatim; one budget, no way to smuggle a bigger blob in
+ * through the preset door.
+ */
 const MAX_CONFIG_JSON_LENGTH = 4 * 1024;
 
 /** Usage-activity widget window bounds (#796/#797), in days. */
 const WINDOW_DAYS_MIN = 1;
 const WINDOW_DAYS_MAX = 90;
 const WINDOW_DAYS_DEFAULT = 7;
+
+/**
+ * Normalize the widget config's memory scope (#805). Returns `undefined` when
+ * the config names no memory scope at all (⇒ the caller's own activity), and
+ * an array — possibly empty — when it does, since the query treats a present
+ * list as "memory scope" and an absent one as "own activity".
+ *
+ * A pre-#805 placement stored `memoryRef: "<one ref>"`; reading it as a
+ * one-element list is what lets those rows keep working with no data migration.
+ * `memoryRefs` wins when both are present.
+ */
+function readMemoryRefs(c: Record<string, unknown>): string[] | undefined {
+  if (Array.isArray(c.memoryRefs)) {
+    // Non-strings/empties are dropped rather than passed to the resolver, where
+    // a non-string would blow up ref parsing. An array that survives as empty
+    // stays an EMPTY memory scope, not a fallback to own activity — a garbage
+    // list must not silently relabel one user's data as the memories'.
+    const refs = c.memoryRefs.filter((r): r is string => typeof r === 'string' && r.length > 0);
+    return [...new Set(refs)].slice(0, MAX_MEMORY_SCOPE_REFS);
+  }
+  const single = c.memoryRef;
+  return typeof single === 'string' && single ? [single] : undefined;
+}
 
 /**
  * Read the usage-activity widget's `config`, treating every field as untrusted
@@ -56,7 +90,7 @@ const WINDOW_DAYS_DEFAULT = 7;
  */
 function readUsageActivityConfig(config: unknown): {
   windowDays: number;
-  memoryRef?: string;
+  memoryRefs?: string[];
   bucket?: UsageActivityBucketSize;
   timeZone?: string;
 } {
@@ -68,7 +102,7 @@ function readUsageActivityConfig(config: unknown): {
       : WINDOW_DAYS_DEFAULT;
   return {
     windowDays,
-    memoryRef: typeof c.memoryRef === 'string' && c.memoryRef ? c.memoryRef : undefined,
+    memoryRefs: readMemoryRefs(c),
     // Whitelisted, NOT passed through: nothing validates this string on the way
     // in (it is raw config JSON, never a GraphQL enum), so an unknown value
     // would otherwise reach the aggregation. Falls back to the query default.
@@ -86,8 +120,9 @@ function readUsageActivityConfig(config: unknown): {
  * `toString` / `__proto__` when a caller bypasses GraphQL enum validation
  * (PR #773 review).
  *
- * NOTE this map doubles as `setDashboardWidgets`'s settable-type allowlist —
- * registering a provider is what makes a type placeable.
+ * NOTE this map doubles as the settable-type allowlist for `setDashboardWidgets`
+ * AND for presets (#806) — registering a provider is what makes a type placeable
+ * and preset-able, so neither surface can name a widget that cannot be rendered.
  */
 const WIDGET_DATA_PROVIDERS = new Map<
   string,
@@ -120,7 +155,7 @@ const WIDGET_DATA_PROVIDERS = new Map<
       // it (the MEMORY_STATS idiom) so the widget inherits the query's window
       // defaults AND its memory read gate — a config naming a memory the caller
       // can't read yields empty buckets, exactly as the query would.
-      const { windowDays, memoryRef, bucket, timeZone } = readUsageActivityConfig(config);
+      const { windowDays, memoryRefs, bucket, timeZone } = readUsageActivityConfig(config);
       const to = new Date();
       const from = new Date(to.getTime() - windowDays * 86_400_000);
       try {
@@ -130,7 +165,7 @@ const WIDGET_DATA_PROVIDERS = new Map<
             from: from.toISOString(),
             to: to.toISOString(),
             bucket,
-            memoryRef,
+            memoryRefs,
             timeZone,
           },
           ctx,
@@ -156,6 +191,85 @@ function clampSpan(span?: number | null): number {
 function clampRowSpan(rowSpan?: number | null): number {
   if (rowSpan == null || !Number.isFinite(rowSpan)) return ROW_SPAN_DEFAULT;
   return Math.min(ROW_SPAN_MAX, Math.max(ROW_SPAN_MIN, Math.trunc(rowSpan)));
+}
+
+/** Preset name bounds (#806) — measured AFTER trimming. */
+const PRESET_NAME_MAX_LENGTH = 60;
+
+const badInput = (message: string) =>
+  new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
+
+/**
+ * The caller's user id, or UNAUTHENTICATED. Presets are strictly user-scoped,
+ * so an App-key caller has nothing to write — the same posture as
+ * `setDashboardWidgets` (the READ side answers empty instead, per
+ * `dashboardWidgets`).
+ */
+function requireUserId(ctx: Context): string {
+  if (!ctx.userId) {
+    throw new GraphQLError('Authentication required', { extensions: { code: 'UNAUTHENTICATED' } });
+  }
+  return ctx.userId;
+}
+
+/** Reject a type with no registered provider — the same allowlist that decides
+ *  what `setDashboardWidgets` may place, so a preset can never name a widget
+ *  that cannot be rendered. Guards callers that bypass GraphQL enum validation. */
+function requirePresetType(type: string): void {
+  if (!WIDGET_DATA_PROVIDERS.has(type)) {
+    throw badInput(`Unknown widget type: ${type}`);
+  }
+}
+
+/** Trim + bound a preset name. */
+function normalizePresetName(name: string): string {
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (!trimmed) throw badInput('name is required.');
+  if (trimmed.length > PRESET_NAME_MAX_LENGTH) {
+    throw badInput(`name is too long (max ${PRESET_NAME_MAX_LENGTH} characters).`);
+  }
+  return trimmed;
+}
+
+/**
+ * Validate a preset's `config`. Stricter than a placement's: a preset exists to
+ * BE a config, so a scalar or array is a client bug rather than something to
+ * round-trip. Same 4KB budget.
+ */
+function validatePresetConfig(config: unknown): Prisma.InputJsonValue {
+  // isPlainObject already rejects arrays as well as scalars/null.
+  if (!isPlainObject(config)) {
+    throw badInput('config must be a JSON object.');
+  }
+  if (JSON.stringify(config).length > MAX_CONFIG_JSON_LENGTH) {
+    throw badInput(`config is too large (max ${MAX_CONFIG_JSON_LENGTH} JSON chars).`);
+  }
+  return config as Prisma.InputJsonValue;
+}
+
+/** True for the unique-violation Prisma raises on (user_id, type, name). */
+function isUniqueViolation(e: unknown): boolean {
+  return (e as { code?: string })?.code === 'P2002';
+}
+
+const presetNameConflict = (name: string) =>
+  badInput(`A preset named "${name}" already exists for this widget type.`);
+
+/**
+ * Load the caller's OWN preset by PK, or throw NOT_FOUND. Another user's id and
+ * an id that never existed answer identically — a preset is owner-only, so the
+ * mutations must not become a probe for other users' rows.
+ */
+async function requireOwnPreset(ctx: Context, userId: string, presetRef: string) {
+  const preset = await ctx.db.dashboardWidgetPreset.findFirst({
+    where: { id: presetRef, userId },
+  });
+  if (!preset) {
+    throw new GraphQLError('Dashboard widget preset not found', {
+      extensions: { code: 'NOT_FOUND' },
+    });
+  }
+  return preset;
 }
 
 export const dashboardQueries = {
@@ -202,6 +316,23 @@ export const dashboardQueries = {
         return { widgetId: w.id, type: w.type, data: await pending };
       }),
     );
+  },
+
+  /**
+   * #806 — the caller's saved widget configurations, name-ordered, optionally
+   * narrowed to one widget type. Owner-only: empty for a non-user caller, and
+   * never another user's rows.
+   */
+  dashboardWidgetPresets: async (
+    _: unknown,
+    { type }: { type?: string | null },
+    ctx: Context,
+  ) => {
+    if (!ctx.userId) return [];
+    return ctx.db.dashboardWidgetPreset.findMany({
+      where: { userId: ctx.userId, ...(type ? { type: type as never } : {}) },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+    });
   },
 };
 
@@ -296,5 +427,78 @@ export const dashboardMutations = {
         orderBy: [{ position: 'asc' }, { id: 'asc' }],
       });
     });
+  },
+
+  /**
+   * #806 — save a named widget configuration. The name is unique per
+   * (caller, widget type); a collision is BAD_USER_INPUT so the portal can
+   * surface it inline next to the name field.
+   */
+  createDashboardWidgetPreset: async (
+    _: unknown,
+    { type, name, config }: { type: string; name: string; config: unknown },
+    ctx: Context,
+  ) => {
+    const userId = requireUserId(ctx);
+    requirePresetType(type);
+    const trimmed = normalizePresetName(name);
+    const validated = validatePresetConfig(config);
+    try {
+      return await ctx.db.dashboardWidgetPreset.create({
+        data: { id: generateId(), userId, type: type as never, name: trimmed, config: validated },
+      });
+    } catch (e) {
+      // The unique index is the real arbiter — a check-then-create would let two
+      // concurrent saves of the same name both pass the check.
+      if (isUniqueViolation(e)) throw presetNameConflict(trimmed);
+      throw e;
+    }
+  },
+
+  /**
+   * #806 — rename a preset and/or replace its settings. Partial: an omitted
+   * field is left alone. `type` is immutable — a preset's config is only
+   * meaningful for the widget it was saved from, so retyping would carry
+   * nonsense settings across; delete and re-create instead.
+   */
+  updateDashboardWidgetPreset: async (
+    _: unknown,
+    { presetRef, name, config }: { presetRef: string; name?: string | null; config?: unknown },
+    ctx: Context,
+  ) => {
+    const userId = requireUserId(ctx);
+    const existing = await requireOwnPreset(ctx, userId, presetRef);
+    const trimmed = name != null ? normalizePresetName(name) : undefined;
+    // `config: null` is "leave it alone", not "clear it" — the column is
+    // non-null, and a preset with no settings has nothing to apply.
+    const validated = config != null ? validatePresetConfig(config) : undefined;
+    if (trimmed === undefined && validated === undefined) return existing;
+    try {
+      return await ctx.db.dashboardWidgetPreset.update({
+        where: { id: existing.id },
+        data: {
+          ...(trimmed !== undefined ? { name: trimmed } : {}),
+          ...(validated !== undefined ? { config: validated } : {}),
+        },
+      });
+    } catch (e) {
+      if (isUniqueViolation(e)) throw presetNameConflict(trimmed ?? existing.name);
+      throw e;
+    }
+  },
+
+  /**
+   * #806 — delete one of the caller's presets. Placements already seeded from
+   * it are untouched (apply copies the config; there is no live link).
+   */
+  deleteDashboardWidgetPreset: async (
+    _: unknown,
+    { presetRef }: { presetRef: string },
+    ctx: Context,
+  ) => {
+    const userId = requireUserId(ctx);
+    const existing = await requireOwnPreset(ctx, userId, presetRef);
+    await ctx.db.dashboardWidgetPreset.delete({ where: { id: existing.id } });
+    return true;
   },
 };

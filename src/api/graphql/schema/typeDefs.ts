@@ -3053,6 +3053,22 @@ export const typeDefs = `#graphql
     data: JSON!
   }
 
+  """
+  #806 — a named, saved widget configuration. A palette entry: applying one
+  COPIES its config into a placement, so later edits to the preset do not reach
+  placements already seeded from it, and deleting it never orphans a placement.
+  Owner-only — no org, no sharing.
+  """
+  type DashboardWidgetPreset {
+    id: ID!
+    "The widget type this configuration belongs to. Immutable after creation."
+    type: DashboardWidgetType!
+    "Display name, unique among the caller's presets for this type."
+    name: String!
+    "The saved settings, shape widget-defined — becomes a placement's config verbatim."
+    config: JSON!
+  }
+
   "One widget in a setDashboardWidgets selection; grid position is the array order."
   input DashboardWidgetInput {
     "When set and owned by the caller, update that placement in place (id survives the save); otherwise create a new one (#788)."
@@ -3339,9 +3355,17 @@ export const typeDefs = `#graphql
     #796 — read/write activity counts, bucketed by time.
 
     Default scope is the caller's OWN events across everything they touched;
-    pass memoryRef to switch to all users' events attributed to that memory,
-    which requires read access to it. A memory the caller cannot read is
-    indistinguishable from one that does not exist (both empty).
+    pass memoryRefs to switch to all users' events attributed to ANY of those
+    memories (#805), each of which requires read access. The result is the
+    UNION as a single read/write series, not a per-memory breakdown; since every
+    event carries exactly one memory, the union equals the sum of the separate
+    scopes with no double-counting.
+
+    A ref the caller cannot read — or that does not exist — is silently dropped
+    from the union rather than failing the query, so the result never reveals
+    which of the named memories exist. Passing an empty list therefore yields
+    an empty result, NOT the caller's own activity. A malformed ref is still an
+    error. At most 20 refs.
 
     Only non-empty buckets are returned — zero-fill the window client-side.
     Counts only events of type read and write. Window bounds are ISO-8601
@@ -3355,8 +3379,8 @@ export const typeDefs = `#graphql
       "Window end, exclusive. Default: now."
       to: String
       bucket: UsageActivityBucketSize = DAY
-      "Switch scope to all users of this memory (ID or URN)."
-      memoryRef: ID
+      "Switch scope to all users of these memories, unioned (each ID or URN; max 20)."
+      memoryRefs: [ID!]
       "IANA zone deciding where bucket boundaries fall. Default UTC."
       timeZone: String
     ): [UsageActivityBucket!]!
@@ -3480,6 +3504,16 @@ export const typeDefs = `#graphql
     dashboardWidgets: [DashboardWidget!]!
     "#797 — data for each of the caller's PLACED widgets, in position order, one entry per placement built from its own config. Empty for a non-user caller."
     dashboardWidgetData: [DashboardWidgetData!]!
+
+    """
+    #806 — the caller's saved widget configurations, name-ordered (id tiebreak),
+    optionally narrowed to one widget type. Empty for a non-user caller; never
+    another user's presets.
+    """
+    dashboardWidgetPresets(
+      "Return only presets for this widget type. Omit for all of them."
+      type: DashboardWidgetType
+    ): [DashboardWidgetPreset!]!
 
     """
     Exchange connections for an org.
@@ -3992,6 +4026,39 @@ export const typeDefs = `#graphql
     selection. Requires an authenticated user.
     """
     setDashboardWidgets(widgets: [DashboardWidgetInput!]!): [DashboardWidget!]!
+
+    """
+    #806 — save a named widget configuration for the caller. 'name' is trimmed
+    and must be 1-60 characters, unique among the caller's presets for that
+    widget type; a duplicate is BAD_USER_INPUT. 'config' must be a JSON object
+    within the same 4KB budget as a placement's config. Requires an
+    authenticated user.
+    """
+    createDashboardWidgetPreset(
+      type: DashboardWidgetType!
+      name: String!
+      config: JSON!
+    ): DashboardWidgetPreset!
+
+    """
+    #806 — rename a preset and/or replace its settings. Partial: an omitted (or
+    null) argument leaves that field alone; there is no way to clear 'config',
+    since a preset with no settings has nothing to apply. 'type' is immutable —
+    delete and re-create to move settings to another widget. A preset the caller
+    does not own is indistinguishable from one that does not exist (NOT_FOUND).
+    """
+    updateDashboardWidgetPreset(
+      presetRef: ID!
+      name: String
+      config: JSON
+    ): DashboardWidgetPreset!
+
+    """
+    #806 — delete one of the caller's presets. Placements already seeded from it
+    keep their config (apply copies; there is no live link). A preset the caller
+    does not own is indistinguishable from one that does not exist (NOT_FOUND).
+    """
+    deleteDashboardWidgetPreset(presetRef: ID!): Boolean!
 
     """
     Create a single node. Rejects with NodeLocConflictError when a live node

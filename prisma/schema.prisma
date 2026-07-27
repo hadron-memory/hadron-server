@@ -421,6 +421,8 @@ model User {
   usageEvents               UsageEvent[]
   // #772: the user's placed /app/dashboard widgets (user-scoped layout config).
   dashboardWidgets          DashboardWidget[]
+  // #806: the user's SAVED widget configurations (a palette, not a placement).
+  dashboardWidgetPresets    DashboardWidgetPreset[]
   // #692 — the user's root principal in the unified pool (handle is the
   // denormalized read source-of-truth, kept in sync at mint).
   principalId               String?                    @unique @map("principal_id")
@@ -466,6 +468,33 @@ model DashboardWidget {
 
   @@index([userId, position])
   @@map("dashboard_widgets")
+}
+
+/// A named, user-scoped widget configuration (#806) — a palette entry the
+/// portal COPIES into a placement's `config` on apply. Deliberately not a live
+/// link: editing a preset never reaches back into placements already seeded
+/// from it, and deleting one never orphans a placement. Generic over widget
+/// types so the next configurable widget inherits the mechanism.
+///
+/// Owner-only in every direction, like DashboardWidget: no org, no sharing.
+model DashboardWidgetPreset {
+  id     String              @id @default(cuid())
+  userId String              @map("user_id")
+  type   DashboardWidgetType
+  /// Display name, unique per (user, type). Trimmed, 1-60 chars.
+  name   String
+  /// The saved settings, shape widget-defined — same 4KB cap and plain-object
+  /// guard as a placement's `config`, since it becomes one verbatim.
+  config Json
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type, name])
+  @@index([userId, type])
+  @@map("dashboard_widget_presets")
 }
 
 /// A company, team, or group that owns memories and has members.
