@@ -673,9 +673,11 @@ export const typeDefs = `#graphql
     id: ID!
     type: String!
     nodeLoc: String
-    # Memory the event is attributed to (#796). Stored at write time, so it
-    # outlives the node — null only for events written before the backfill
-    # whose node was already deleted, or paths with no memory in scope.
+    """
+    Memory the event is attributed to (#796). Stored at write time, so it
+    outlives the node — null only for events written before the backfill
+    whose node was already deleted, or paths with no memory in scope.
+    """
     memoryId: String
     actionArgs: JSON
     # Caller identity — the App that authored this event.
@@ -4021,9 +4023,9 @@ export const typeDefs = `#graphql
   type Mutation {
     """
     #772 — replace the caller's entire dashboard widget selection. Grid position
-    is the array order; span defaults to 4 and is clamped to 1-12. Covers both
-    create and update (the layout is always saved as a whole). Returns the new
-    selection. Requires an authenticated user.
+    is the array order; each widget's span (1-12) and rowSpan (1-4) are required
+    and clamped server-side. Covers both create and update (the layout is always
+    saved as a whole). Returns the new selection. Requires an authenticated user.
     """
     setDashboardWidgets(widgets: [DashboardWidgetInput!]!): [DashboardWidget!]!
 
