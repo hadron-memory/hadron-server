@@ -1261,9 +1261,45 @@ export const nodeQueries = {
       return { nodes, unavailable, truncated, omitted };
     },
 
+    /**
+     * Usage events for a node loc, most recent first.
+     *
+     * `loc` names no memory, so this is a CROSS-MEMORY exact `nodeLoc` match —
+     * the same bare-loc semantics as `usageEvents(nodeId: <loc>)`, bounded to
+     * the memories the caller may read. It is a filter, not a lookup: an
+     * unknown loc yields `[]` rather than NODE_NOT_FOUND.
+     *
+     * Access control (#802): this resolver previously had NO gate at all —
+     * neither `requireRole` nor memory scoping — so any caller could read any
+     * tenant's usage events for any loc they could guess. It now mirrors its
+     * siblings (`usageEvents` #250, `memoryUsageSummary`, `nodeRevisions`
+     * #602): `requireRole(READER)`, which also rejects App-key callers
+     * (`roles: []` — App usage reads go through MCP, not GraphQL), plus
+     * `getAccessibleMemoryIds` scoping.
+     *
+     * Scoping is on the denormalized `UsageEvent.memoryId` COLUMN, not a
+     * `node: { memoryId }` relation join: `nodeId` is `SetNull`, so a join
+     * drops every event whose node has since been deleted — the loss #796
+     * moved `usageEvents` / `memoryUsageSummary` onto the column to prevent.
+     * An event with a NULL `memoryId` (its node was already gone at backfill
+     * time) is excluded by the `IN`, exactly as in `usageEvents`, so the two
+     * surfaces stay in parity.
+     *
+     * Non-disclosure: an unreadable loc and a nonexistent one are both `[]` —
+     * never a thrown Forbidden, matching `memoryUsageSummary` / `usageActivity`.
+     */
     nodeUsage: async (_: unknown, { loc, limit }: { loc: string; limit?: number }, ctx: Context) => {
+      requireRole(ctx, 'READER');
+      // `string[] | null`, where null means "unrestricted (no filter)". Every
+      // branch returns an explicit list today — ADMIN/OWNER included, so the
+      // personal/private carve-out still applies — so the `!== null` guard is
+      // defensive for the type contract rather than a live path.
+      const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
       return ctx.db.usageEvent.findMany({
-        where: { nodeLoc: loc },
+        where: {
+          nodeLoc: loc,
+          ...(accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : {}),
+        },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 50,
       });
