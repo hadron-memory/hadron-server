@@ -772,10 +772,30 @@ export async function createServer(): Promise<Express> {
   });
 
   app.get('/auth/email/verify', async (req, res) => {
-    const { token, redirect: redirectParam } = req.query as { token?: string; redirect?: string };
+    const { token, redirect: redirectParam, return_to: returnToRaw } = req.query as {
+      token?: string;
+      redirect?: string;
+      return_to?: unknown;
+    };
     if (!token) {
       res.status(400).json({ error: 'Missing token' });
       return;
+    }
+
+    // #804 Option-C: `return_to` rides in the emailed verify URL (appended by
+    // sendMagicLink for links requested from the OAuth email-entry page).
+    // Validate with the SAME strict server-local-path predicate as the
+    // github/google/apple legs — and BEFORE consuming the single-use token, so
+    // a tampered value 400s without burning a link the user could still use.
+    let returnTo: string | undefined;
+    if (returnToRaw !== undefined) {
+      if (!isServerLocalPath(returnToRaw)) {
+        res.status(400).json({
+          error: 'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
+        });
+        return;
+      }
+      returnTo = returnToRaw;
     }
 
     try {
@@ -793,7 +813,19 @@ export async function createServer(): Promise<Express> {
       // would leave the email fixation gap open for still-valid legacy tokens).
       // Fail closed: the user re-requests and gets a bound link. verifyMagicLink
       // has already consumed the token, so there's nothing to clean up.
-      if (!result.clientStateHash) {
+      //
+      // #804 Option-C exemption: a token minted via /oauth/authorize/email
+      // carries NO clientStateHash by design — the magic link opens out-of-band
+      // (on iOS, the system browser OUTSIDE the app's auth session), so binding
+      // to the requesting browser is impossible. The Option-C branch below
+      // mints no handoff code (it sets the hadron_token cookie on THIS origin
+      // and redirects to the validated server-local return_to), so there is
+      // nothing to bind — the same exemption the github/google/apple Option-C
+      // legs document. An unbound token WITHOUT a return_to still fails closed
+      // here; a BOUND (portal) token always takes the handoff path below, so
+      // appending return_to to a portal link cannot bypass the #505 binding.
+      const isOptionC = !result.clientStateHash && returnTo !== undefined;
+      if (!result.clientStateHash && !isOptionC) {
         res.status(400).json({ error: 'Invalid or expired token' });
         return;
       }
@@ -817,6 +849,32 @@ export async function createServer(): Promise<Express> {
       // #627 / spec 048: no workspace provisioned at signup; `isNew` is an
       // onboarding hint only.
       const isNew = user.createdAt.getTime() >= startedAt;
+
+      // #804 Option-C: same contract as the github/google/apple callbacks —
+      // set the JWT as an HttpOnly `hadron_token` cookie on THIS server's
+      // origin and 302 to the validated server-local return_to (the original
+      // /oauth/authorize URL), which then renders consent and completes the
+      // standard code+PKCE dance. Cookie maxAge derived from the JWT exp so
+      // both expire together (see the GitHub callback for the full
+      // rationale). Option-C honors return_to regardless of isNew.
+      if (isOptionC) {
+        const jwt = await signJwt({
+          sub: user.id,
+          roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+          ...(user.email ? { email: user.email } : {}),
+        });
+        const { exp } = decodeJwt(jwt);
+        const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
+        res.cookie('hadron_token', jwt, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'lax',
+          maxAge,
+          path: '/',
+        });
+        res.redirect(returnTo!);
+        return;
+      }
 
       // #477 Sink 1: hand off via a single-use code, not the JWT-in-URL.
       // #505 session-fixation binding: the handoff code inherits the
