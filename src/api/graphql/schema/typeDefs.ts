@@ -3310,9 +3310,10 @@ export const typeDefs = `#graphql
 
     Access control (#802): results are scoped to the memories the caller may
     read (org membership / subscriptions / public / owned personal+private per
-    spec 034; ADMIN/OWNER see all but other users' personal+private), so this
-    is never cross-tenant. An unreadable loc and a nonexistent one both return
-    an empty list (no existence disclosure).
+    spec 034; ADMIN/OWNER see all EXCEPT another user's personal/private
+    memories and, per spec 047, another user's user-owned memories), so this is
+    never cross-tenant. An unreadable loc and a nonexistent one both return an
+    empty list (no existence disclosure).
 
     Equivalent to usageEvents(nodeId: <loc>), which additionally supports a PK
     or fully-qualified URN, type filtering, and paging — prefer it for new
@@ -3325,12 +3326,14 @@ export const typeDefs = `#graphql
     #
     # Access control (#250): results are always scoped to memories the caller
     # may read (org membership / subscriptions / public / owned personal+private
-    # per spec 034; ADMIN/OWNER see all but other users' personal+private). A
+    # per spec 034; ADMIN/OWNER see all EXCEPT another user's personal/private
+    # memories and, per spec 047, another user's user-owned memories). A
     # memoryId the caller can't read returns [] (no existence leak); the global
     # form (no memoryId) is bounded to the readable set, never cross-tenant.
     #
     # memoryId is a memory identifier — accepts the memory's ID or URN. Results
-    # are scoped to events whose node belongs to that memory (FK-precise).
+    # are scoped on the denormalized UsageEvent.memoryId column (#796), so an
+    # event stays attributed to its memory after its node is deleted.
     #
     # nodeId is a node token accepting a PK, a fully-qualified URN, or a bare
     # loc (no memoryId needed):
