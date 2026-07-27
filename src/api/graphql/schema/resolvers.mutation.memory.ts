@@ -98,6 +98,10 @@ import {
   requireMemorySharePrincipal,
   isMemorySharePrincipal,
   memoryShareForbidden,
+  isMemoryMemberOwner,
+  memoryMemberForbidden,
+  resolveMemoryRefForMemberGate,
+  resolveSelfUserRefForMemberGate,
   resolveUserRefArg,
   resolveOrgRefArg,
   resolveMemoryRefArg,
@@ -1990,10 +1994,11 @@ export const memoryMutations = {
       ctx: Context,
     ) => {
       // #764: memoryRef/userRef accept id/URN/handle/email. Resolve the memory
-      // + run the owner gate FIRST, then resolve the user — so an unauthorized
-      // caller gets FORBIDDEN and can't use NOT_FOUND to enumerate users
-      // (mirrors createMemoryShare).
-      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      // (a miss maps to the uniform member FORBIDDEN — no existence oracle) +
+      // run the owner gate FIRST, then resolve the user — so an unauthorized
+      // caller gets FORBIDDEN and can't use NOT_FOUND to enumerate memories or
+      // users (mirrors createMemoryShare; #816 review).
+      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, { ref: memoryRef, id: memoryId });
       await requireMemoryMemberOwner(ctx, resolvedMemoryId);
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       try {
@@ -2038,9 +2043,10 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
-      // #764: resolve memory + owner-gate FIRST, then resolve the user (auth
-      // before revealing user existence — mirrors createMemoryShare).
-      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      // #764: resolve memory (miss → uniform member FORBIDDEN, no existence
+      // oracle) + owner-gate FIRST, then resolve the user (auth before
+      // revealing user existence — #816 review).
+      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, { ref: memoryRef, id: memoryId });
       await requireMemoryMemberOwner(ctx, resolvedMemoryId);
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       try {
@@ -2083,11 +2089,20 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
-      // #764: owner-OR-self gate needs the resolved user, so resolve both up
-      // front, then gate (matches the prior order — no new pre-auth surface
-      // beyond the ref lookups).
-      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      // #764 + #816 review: owner-OR-self, with no existence oracle. Resolve
+      // the memory (miss → uniform member FORBIDDEN). An OWNER may target any
+      // user (resolve normally). A NON-owner may only remove THEMSELVES, so
+      // their target resolution maps any miss to the same FORBIDDEN and the
+      // resolved id must equal the caller — an unknown handle/email is then
+      // indistinguishable from a real user they can't act on.
+      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, { ref: memoryRef, id: memoryId });
+      let resolvedUserId: string;
+      if (await isMemoryMemberOwner(ctx, resolvedMemoryId)) {
+        resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      } else {
+        resolvedUserId = await resolveSelfUserRefForMemberGate(ctx, { ref: userRef, id: userId });
+        if (resolvedUserId !== ctx.userId) throw memoryMemberForbidden();
+      }
       await requireMemoryMemberOwnerOrSelf(ctx, resolvedMemoryId, resolvedUserId);
       try {
         return await removeMemoryMember(ctx.db, { memoryId: resolvedMemoryId, userId: resolvedUserId });

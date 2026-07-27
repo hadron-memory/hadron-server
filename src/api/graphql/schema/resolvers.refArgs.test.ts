@@ -134,3 +134,84 @@ describe('#764 addOrgMember accepts refs end-to-end', () => {
     ).rejects.toThrow(/not both/);
   });
 });
+
+// #816 review: resolving a ref must not become an existence oracle. On the
+// member-management surfaces, an unauthorized caller must get the SAME uniform
+// FORBIDDEN whether the memory/user ref is unknown or names a real entity they
+// may not act on.
+describe('#816 member surfaces do not leak existence via refs', () => {
+  const adminCtx = (userId: string): Context => ({ db, userId, roles: ['ADMIN'] });
+  const userCtx = (userId: string): Context => ({ db, userId, roles: ['READER'] });
+
+  let org: { id: string };
+  let owner: { id: string };
+  let stranger: { id: string }; // authenticated, NOT a member/owner of the memory
+  let target: { id: string; handle: string };
+  let mem: { id: string };
+
+  beforeEach(async () => {
+    await cleanDb(db);
+    org = await db.organization.create({
+      data: { id: generateId(), name: 'oracle-org', urn: `oracle-org-${generateId().slice(-8)}` },
+    });
+    const mkUser = async (h: string) => {
+      const handle = `${h}${generateId().slice(-8)}`.toLowerCase();
+      return { ...(await db.user.create({ data: { id: generateId(), handle } })), handle };
+    };
+    owner = await mkUser('orc-owner');
+    stranger = await mkUser('orc-stranger');
+    target = await mkUser('orc-target');
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: owner.id, role: 'OWNER' },
+    });
+    mem = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: org.id, name: 'oracle-group', memoryClass: 'group', visibility: 'GROUP' },
+      adminCtx(owner.id),
+    );
+    // The owner adds `target` as a reader — also proves userRef-by-handle on the
+    // authorized path.
+    await M.addMemoryMember({}, { memoryId: mem.id, userRef: target.handle, role: 'reader' }, userCtx(owner.id));
+  });
+
+  const isMember = async (userId: string) =>
+    !!(await db.memoryMember.findUnique({
+      where: { memoryId_userId: { memoryId: mem.id, userId } },
+    }));
+
+  it('owner added the member by handle (authorized path works)', async () => {
+    expect(await isMember(target.id)).toBe(true);
+  });
+
+  it('addMemoryMember: a non-owner + UNKNOWN (well-formed) memory ref → uniform FORBIDDEN, not NOT_FOUND', async () => {
+    // 25-char cuid-shaped id that doesn't exist → resolveMemoryRef misses →
+    // must collapse to the same FORBIDDEN a real-but-unauthorized memory gives.
+    await expect(
+      M.addMemoryMember({}, { memoryId: 'cnonexistentnonexistent12', userRef: target.handle, role: 'reader' }, userCtx(stranger.id)),
+    ).rejects.toThrow(/not authorized to manage members/);
+  });
+
+  it('addMemoryMember: a non-owner + real memory + unknown user → FORBIDDEN (gate before user resolution)', async () => {
+    await expect(
+      M.addMemoryMember({}, { memoryId: mem.id, userRef: 'ghost-user-ref', role: 'reader' }, userCtx(stranger.id)),
+    ).rejects.toThrow(/not authorized to manage members/);
+  });
+
+  it('removeMemoryMember: a non-owner targeting a REAL other user → FORBIDDEN, not NOT_FOUND', async () => {
+    await expect(
+      M.removeMemoryMember({}, { memoryId: mem.id, userRef: target.handle }, userCtx(stranger.id)),
+    ).rejects.toThrow(/not authorized to manage members/);
+    expect(await isMember(target.id)).toBe(true); // untouched
+  });
+
+  it('removeMemoryMember: a non-owner targeting an UNKNOWN user → same FORBIDDEN (no user oracle)', async () => {
+    await expect(
+      M.removeMemoryMember({}, { memoryId: mem.id, userRef: 'ghost-user-ref' }, userCtx(stranger.id)),
+    ).rejects.toThrow(/not authorized to manage members/);
+  });
+
+  it('removeMemoryMember: self-removal by handle is permitted', async () => {
+    await M.removeMemoryMember({}, { memoryId: mem.id, userRef: target.handle }, userCtx(target.id));
+    expect(await isMember(target.id)).toBe(false);
+  });
+});
