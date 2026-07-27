@@ -1137,28 +1137,43 @@ export const nodeQueries = {
      * Spec cor:api:040 — batch node read. Returns the full per-node projection
      * for MANY nodes in one round-trip (the durable server-side primitive that
      * lets `spec lint --all` stop doing one nodeById per node). Two mutually-
-     * exclusive forms: an explicit `ids` set (input order) or a `memory` +
+     * exclusive forms: an explicit `refs` set (input order) or a `memory` +
      * `locPrefix` subtree (loc order).
      *
-     * Authorization is per-node and identical to the single-node read: the
-     * memoryAccessFilter scopes the fetch to readable memories, so a denied OR
-     * missing id simply isn't in the result and lands in `unavailable` —
-     * indistinguishable, never failing the call (cor:api:040:03, BOLA). Hard
-     * caps (cor:api:040:02): over the node-count cap throws; over the
-     * response-size cap returns a partial result flagged `truncated` — never a
-     * silent short read. No UsageEvent is recorded, matching the single-node
-     * GraphQL reads (nodeById / node), which don't either — per-surface parity.
+     * cor:api:140 / conventions:ref-param-naming (#813): each entry of `refs`
+     * is a PK **or** a fully-qualified node URN, resolved through the shared
+     * `resolveNodeRef`. It was PK-only until #813, which made the batch not
+     * actually batch for URN callers — every URN needed its own resolveUrn
+     * round trip first, so `nodeBatch` only halved the N+1 it exists to
+     * remove. A malformed / unqualified ref still throws
+     * (`UrnNotQualifiedError`): a caller bug must stay loud rather than hide
+     * in `unavailable`, which is exactly the failure mode that let the missing
+     * URN capability go unnoticed.
+     *
+     * Authorization is per-node and identical to the single-node read.
+     * `resolveNodeRef` is a pure lookup — it does NOT gate — so the
+     * memoryAccessFilter still scopes the fetch to readable memories AFTER
+     * resolution (#554: widening an arg to accept a URN must not broaden the
+     * reachable set). A denied OR missing ref simply isn't in the result and
+     * lands in `unavailable` — indistinguishable, never failing the call
+     * (cor:api:040:03, BOLA). `unavailable` / `omitted` echo the caller's own
+     * ref strings, so a URN caller gets back something actionable rather than
+     * a PK it never sent. Hard caps (cor:api:040:02): over the node-count cap
+     * throws; over the response-size cap returns a partial result flagged
+     * `truncated` — never a silent short read. No UsageEvent is recorded,
+     * matching the single-node GraphQL reads (nodeById / node), which don't
+     * either — per-surface parity.
      */
     nodeBatch: async (
       _: unknown,
-      { ids, memory, locPrefix }: { ids?: string[]; memory?: string; locPrefix?: string },
+      { refs, memory, locPrefix }: { refs?: string[]; memory?: string; locPrefix?: string },
       ctx: Context,
     ) => {
-      const hasSet = Array.isArray(ids) && ids.length > 0;
+      const hasSet = Array.isArray(refs) && refs.length > 0;
       const hasPrefix = memory != null && locPrefix != null;
       if (hasSet === hasPrefix) {
         throw new GraphQLError(
-          'nodeBatch: provide EITHER `ids` (an explicit set) OR `memory` + `locPrefix` (a subtree) — not both, not neither.',
+          'nodeBatch: provide EITHER `refs` (an explicit set) OR `memory` + `locPrefix` (a subtree) — not both, not neither.',
           { extensions: { code: 'BAD_USER_INPUT' } },
         );
       }
@@ -1177,30 +1192,62 @@ export const nodeQueries = {
         properties?: unknown;
       }> = [];
       const unavailable: string[] = [];
+      // Explicit-set form only: resolved node id -> the caller's ref string, so
+      // `unavailable` / `omitted` report back what the caller actually sent.
+      // Null for the prefix form, where there are no caller refs (ids there).
+      let refByNodeId: Map<string, string> | null = null;
 
       if (hasSet) {
         // Count cap (cor:api:040:02) — caller knows the count; fail loud up front.
-        if (ids!.length > BATCH_READ_MAX_NODES) {
+        if (refs!.length > BATCH_READ_MAX_NODES) {
           throw new GraphQLError(
-            `nodeBatch: ${ids!.length} ids exceeds the ${BATCH_READ_MAX_NODES}-node cap. Split into smaller batches; the batch read does not silently truncate.`,
+            `nodeBatch: ${refs!.length} refs exceeds the ${BATCH_READ_MAX_NODES}-node cap. Split into smaller batches; the batch read does not silently truncate.`,
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
-        // The access filter scopes to readable memories, so a denied OR missing
-        // id is simply absent from the result — reported indistinguishably.
-        // Dedup so a repeated id isn't returned twice (the single nodeById
-        // can't duplicate); first-occurrence order preserved.
-        const uniqueIds = [...new Set(ids!)];
+        // Dedup the raw input first (a repeated ref costs nothing to resolve
+        // twice), then again on the RESOLVED id below — a PK and that node's
+        // URN are different strings naming one node, and the single nodeById
+        // can't duplicate, so neither should the batch.
+        const uniqueRefs = [...new Set(refs!)];
+        // Resolve every ref concurrently. A ref that names no live node
+        // (NodeNotFoundError) is reported in `unavailable` exactly like a
+        // denied one — one bad ref never fails the batch. A malformed /
+        // unqualified ref propagates (UrnNotQualifiedError).
+        const resolved = await Promise.all(
+          uniqueRefs.map(async (ref) => {
+            try {
+              const { id } = await resolveNodeRef(ctx.db, ref);
+              return { ref, id: id as string | null };
+            } catch (e) {
+              if (e instanceof NodeNotFoundError) return { ref, id: null };
+              throw e;
+            }
+          }),
+        );
+        refByNodeId = new Map();
+        for (const { ref, id } of resolved) {
+          if (id === null) {
+            unavailable.push(ref);
+            continue;
+          }
+          // First occurrence wins — its ref is the one echoed back and its
+          // position sets the input order.
+          if (!refByNodeId.has(id)) refByNodeId.set(id, ref);
+        }
+        // The access filter scopes to readable memories, so a denied node is
+        // simply absent from the result — reported indistinguishably from a
+        // ref that never resolved.
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: uniqueIds }, deletedAt: null, ...access },
+          where: { id: { in: [...refByNodeId.keys()] }, deletedAt: null, ...access },
           include,
         });
         await decryptNodesBatch(ctx.db, rows);
         const byId = new Map(rows.map((n) => [n.id, n]));
-        for (const id of uniqueIds) {
+        for (const [id, ref] of refByNodeId) {
           const n = byId.get(id);
           if (n) ordered.push(n);
-          else unavailable.push(id);
+          else unavailable.push(ref);
         }
       } else {
         const { id: memId } = await resolveMemoryRef(ctx.db, memory!);
@@ -1227,16 +1274,20 @@ export const nodeQueries = {
       }
 
       // Response-size cap (cor:api:040:02) — pack until the byte ceiling, then
-      // stop and flag `truncated` with the omitted ids. At least one node always
-      // returns (a single oversize node still comes back). Size is measured on
-      // the decrypted content + abstract; the client selects the rest.
+      // stop and flag `truncated` with the omitted nodes. At least one node
+      // always returns (a single oversize node still comes back). Size is
+      // measured on the decrypted content + abstract; the client selects the
+      // rest. Dropped entries are reported as the caller's own ref (explicit-set
+      // form) so they can be re-requested verbatim; the prefix form has no
+      // caller refs, so it reports ids.
       const nodes: unknown[] = [];
       const omitted: string[] = [];
+      const echo = (id: string) => refByNodeId?.get(id) ?? id;
       let bytes = 0;
       let truncated = false;
       for (const n of ordered) {
         if (truncated) {
-          omitted.push(n.id);
+          omitted.push(echo(n.id));
           continue;
         }
         // Approximate the serialized payload from the heavy scalar fields a
@@ -1251,7 +1302,7 @@ export const nodeQueries = {
         );
         if (nodes.length > 0 && bytes + size > BATCH_READ_MAX_BYTES) {
           truncated = true;
-          omitted.push(n.id);
+          omitted.push(echo(n.id));
           continue;
         }
         nodes.push(n);

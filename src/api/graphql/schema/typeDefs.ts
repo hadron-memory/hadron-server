@@ -513,12 +513,15 @@ export const typeDefs = `#graphql
 
   """
   Spec cor:api:040 — result envelope for the batch node read (nodeBatch).
-  'nodes' is the authorized, existing subset (input order for an id set, loc
+  'nodes' is the authorized, existing subset (input order for a ref set, loc
   order for a prefix). 'unavailable' lists the requested refs that were denied
   OR not found — indistinguishable, so the result never discloses whether an
   unreadable node exists. 'truncated' is true when the response-size cap was
-  reached, and 'omitted' then carries the dropped node ids. (Over the
-  node-count cap the query errors instead — never a silent short read.)
+  reached, and 'omitted' then carries the dropped nodes. (Over the node-count
+  cap the query errors instead — never a silent short read.) Both lists echo
+  the caller's OWN ref strings for the 'refs' form — pass a URN, get that URN
+  back, not a primary key you never sent — and node ids for the prefix form,
+  which has no caller refs.
   """
   type NodeBatchResult {
     nodes: [Node!]!
@@ -3287,17 +3290,21 @@ export const typeDefs = `#graphql
     Batch read (spec cor:api:040) — the full node projection (select any Node
     fields, including content + edges) for MANY nodes in one call, eliminating
     the N+1 of one node(ref:) per node (e.g. 'spec lint --all'). Provide EITHER
-    'ids' (explicit set, returned in input order) OR 'memory' + 'locPrefix'
-    (subtree, loc order) — not both. Per-node access is applied independently:
-    denied or missing ids come back in 'unavailable' and never fail the call.
-    Bounded by hard caps — over the node-count cap throws BAD_USER_INPUT; over
-    the response-size cap returns a partial result with 'truncated: true' and
-    the dropped ids in 'omitted' (never a silent short read). Node content is
-    returned raw — Mustache templates are NOT compiled (unlike the single-node
-    'node' read), since this is a bulk source read for lint / audit /
-    migration and compiling per node would re-introduce the N+1 it eliminates.
+    'refs' (explicit set, returned in input order) OR 'memory' + 'locPrefix'
+    (subtree, loc order) — not both. Each entry of 'refs' is a primary key OR a
+    fully-qualified node URN (cor:api:140), so a URN-holding caller batches in
+    ONE call instead of resolving each ref first; a malformed / unqualified ref
+    errors rather than landing silently in 'unavailable'. Per-node access is
+    applied independently AFTER resolution: denied or missing refs come back in
+    'unavailable' and never fail the call. Bounded by hard caps — over the
+    node-count cap throws BAD_USER_INPUT; over the response-size cap returns a
+    partial result with 'truncated: true' and the dropped refs in 'omitted'
+    (never a silent short read). Node content is returned raw — Mustache
+    templates are NOT compiled (unlike the single-node 'node' read), since this
+    is a bulk source read for lint / audit / migration and compiling per node
+    would re-introduce the N+1 it eliminates.
     """
-    nodeBatch(ids: [ID!], memory: ID, locPrefix: String): NodeBatchResult!
+    nodeBatch(refs: [ID!], memory: ID, locPrefix: String): NodeBatchResult!
 
     # Usage stats for a node (most recent events first)
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
