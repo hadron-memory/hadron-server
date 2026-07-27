@@ -20,6 +20,7 @@ import type { Context } from './resolvers.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { getUsageActivity } from '../../../lib/usageActivity.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -376,6 +377,25 @@ describe('usageActivity — multi-memory union (#805)', () => {
     );
     // Exactly at the cap is fine (all unknown ⇒ empty, but no error).
     expect(await Q.usageActivity(null, { memoryRefs: refs.slice(0, 20) }, asMember())).toEqual([]);
+  });
+
+  it('answers [] for an empty memoryIds at the SERVICE layer too, without falling back to the user scope', async () => {
+    // Defense in depth (PR #808 review, Copilot): the resolver short-circuits
+    // before reaching here, but getUsageActivity is exported and shared, so a
+    // future caller that forgets must get the contract's [] rather than a 500 —
+    // and must NOT silently drop to the userId predicate, which would report
+    // this user's 5 reads as the (empty) memory scope's.
+    await seed({ count: 5, type: 'read', at: daysAgo(1), userId: member.id });
+    const scope = {
+      from: daysAgo(7),
+      to: new Date(Date.now() + 60_000),
+      bucket: 'DAY' as const,
+      timeZone: 'UTC',
+    };
+    expect(await getUsageActivity(db, { ...scope, memoryIds: [], userId: member.id })).toEqual([]);
+    // Sanity: the same scope WITHOUT memoryIds does see them, so the [] above
+    // is the empty union and not an unrelated miss.
+    expect(totals(await getUsageActivity(db, { ...scope, userId: member.id })).reads).toBe(5);
   });
 
   it('still throws on a MALFORMED ref — a shape error discloses nothing', async () => {

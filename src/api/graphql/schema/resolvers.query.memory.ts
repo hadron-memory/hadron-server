@@ -133,8 +133,12 @@ export const memoryQueries = {
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
-        // Dedupe on the RESOLVED id, not the ref string: the same memory named
-        // once by PK and once by URN must not be resolved (or counted) twice.
+        // Two dedupes, doing different jobs. The first drops byte-identical
+        // repeats so they aren't resolved twice (cheap, not load-bearing). The
+        // second is the one that matters: PK and URN forms of the SAME memory
+        // are distinct strings, so both survive the first and both resolve —
+        // only deduping the RESOLVED ids keeps that memory out of the `IN` list
+        // twice (PR #808 review, Copilot).
         const resolved = await Promise.all(
           [...new Set(memoryRefs)].map((ref) => resolveReadableMemoryId(ctx, ref)),
         );

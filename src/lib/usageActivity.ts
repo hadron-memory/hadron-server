@@ -69,9 +69,8 @@ export interface UsageActivityScope {
   /**
    * Memory scope (#805): every user's events attributed to ANY of these
    * memories — a UNION, still one read/write series. Takes precedence over
-   * `userId` when both are set. Every id MUST be pre-authorized, and the list
-   * MUST be non-empty (an empty union has no rows to count, so the caller
-   * short-circuits to `[]` rather than building a degenerate predicate).
+   * `userId` when both are set. Every id MUST be pre-authorized. An EMPTY list
+   * is the empty union and yields `[]` — never a fallback to `userId`.
    */
   memoryIds?: string[];
 }
@@ -122,12 +121,18 @@ export async function getUsageActivity(
   // The union is an IN over the `memory_id` COLUMN, so it stays a range scan on
   // (memory_id, created_at) and — because every event carries exactly ONE
   // memory_id — the counts are the sum of the per-memory scopes with no
-  // double-counting (#805). An empty list is a caller bug, not an empty union:
-  // `IN ()` isn't valid SQL, and silently widening to the user scope would
-  // mislabel one user's activity as the memories'.
-  if (scope.memoryIds && scope.memoryIds.length === 0) {
-    throw new Error('usageActivity memory scope requires at least one memoryId');
-  }
+  // double-counting (#805).
+  //
+  // An EMPTY list answers `[]` here rather than throwing (PR #808 review,
+  // Copilot). `IN ()` isn't valid SQL, so the degenerate predicate has to be
+  // intercepted either way, and `[]` is both the documented GraphQL contract
+  // for `memoryRefs: []` and the arithmetically right answer for a union of no
+  // memories — so a caller that reaches this without short-circuiting gets the
+  // correct result instead of a 500. What must NEVER happen is falling through
+  // to the `userId` predicate: that relabels one user's activity as the
+  // memories'. The early return makes that unreachable.
+  if (scope.memoryIds?.length === 0) return [];
+
   const scopePredicate = scope.memoryIds
     ? Prisma.sql`e.memory_id IN (${Prisma.join(scope.memoryIds)})`
     : Prisma.sql`e.user_id = ${scope.userId}`;
