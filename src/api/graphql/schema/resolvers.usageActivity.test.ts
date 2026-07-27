@@ -6,9 +6,10 @@
  * resolver's defensive handling is reachable.
  *
  * Fixture mirrors resolvers.usageEvents.access.test.ts — two orgs so the
- * memory-scope gate has something to exclude:
+ * memory-scope gate has something to exclude, plus a SECOND readable memory so
+ * the #805 union has two members to sum:
  *
- *   orgA: memA (knowledge, org-readable)      orgB: memB (knowledge)
+ *   orgA: memA + memA2 (knowledge, org-readable)   orgB: memB (knowledge)
  *   member    — READER of orgA
  *   outsider  — member of neither
  */
@@ -19,11 +20,13 @@ import type { Context } from './resolvers.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { getUsageActivity } from '../../../lib/usageActivity.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
 
 let memA: { id: string; urn: string };
+let memA2: { id: string; urn: string };
 let memB: { id: string };
 let member: { id: string };
 let outsider: { id: string };
@@ -77,6 +80,16 @@ beforeEach(async () => {
       organizationId: orgA.id,
       urn: `${orgA.urn}:mem-a`,
       name: 'mem-a',
+      class: 'knowledge',
+      visibility: 'ORGANIZATION',
+    },
+  });
+  memA2 = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: orgA.id,
+      urn: `${orgA.urn}:mem-a2`,
+      name: 'mem-a2',
       class: 'knowledge',
       visibility: 'ORGANIZATION',
     },
@@ -244,25 +257,25 @@ describe('usageActivity — scoping and auth', () => {
     expect(totals(await Q.usageActivity(null, {}, asMember())).reads).toBe(2);
   });
 
-  it('memoryRef scope counts ALL users of that memory', async () => {
+  it('memoryRefs scope counts ALL users of that memory', async () => {
     await seed({ count: 2, type: 'read', at: daysAgo(1), userId: member.id, memoryId: memA.id });
     await seed({ count: 3, type: 'read', at: daysAgo(1), userId: outsider.id, memoryId: memA.id });
 
-    const r = await Q.usageActivity(null, { memoryRef: memA.id }, asMember());
+    const r = await Q.usageActivity(null, { memoryRefs: [memA.id] }, asMember());
     expect(totals(r).reads).toBe(5);
   });
 
-  it('memoryRef scope excludes other memories', async () => {
+  it('memoryRefs scope excludes other memories', async () => {
     await seed({ count: 2, type: 'read', at: daysAgo(1), userId: member.id, memoryId: memA.id });
     await seed({ count: 9, type: 'read', at: daysAgo(1), userId: member.id, memoryId: memB.id });
 
-    const r = await Q.usageActivity(null, { memoryRef: memA.id }, asMember());
+    const r = await Q.usageActivity(null, { memoryRefs: [memA.id] }, asMember());
     expect(totals(r).reads).toBe(2);
   });
 
   it('accepts a memory URN as well as a PK', async () => {
     await seed({ count: 2, type: 'read', at: daysAgo(1), userId: member.id, memoryId: memA.id });
-    const r = await Q.usageActivity(null, { memoryRef: `hrn:memory:${memA.urn}` }, asMember());
+    const r = await Q.usageActivity(null, { memoryRefs: [`hrn:memory:${memA.urn}`] }, asMember());
     expect(totals(r).reads).toBe(2);
   });
 
@@ -270,14 +283,127 @@ describe('usageActivity — scoping and auth', () => {
     await seed({ count: 5, type: 'read', at: daysAgo(1), userId: outsider.id, memoryId: memB.id });
 
     // memB belongs to orgB; `member` is not a member of it.
-    expect(await Q.usageActivity(null, { memoryRef: memB.id }, asMember())).toEqual([]);
+    expect(await Q.usageActivity(null, { memoryRefs: [memB.id] }, asMember())).toEqual([]);
     // A PK that resolves to nothing is indistinguishable.
-    expect(await Q.usageActivity(null, { memoryRef: generateId() }, asMember())).toEqual([]);
+    expect(await Q.usageActivity(null, { memoryRefs: [generateId()] }, asMember())).toEqual([]);
   });
 
   it('returns [] for an App-key caller (no user, so no own activity)', async () => {
     await seed({ count: 3, type: 'read', at: daysAgo(1), userId: member.id });
     expect(await Q.usageActivity(null, {}, asAppKey())).toEqual([]);
+  });
+});
+
+describe('usageActivity — multi-memory union (#805)', () => {
+  it('counts the UNION of several memories — exactly the sum of their separate scopes', async () => {
+    await seed({ count: 2, type: 'read', at: daysAgo(1), userId: member.id, memoryId: memA.id });
+    await seed({ count: 1, type: 'write', at: daysAgo(1), userId: member.id, memoryId: memA.id });
+    await seed({ count: 3, type: 'read', at: daysAgo(1), userId: outsider.id, memoryId: memA2.id });
+    // A memory NOT in the list must not contribute.
+    await seed({ count: 9, type: 'read', at: daysAgo(1), userId: member.id, memoryId: memB.id });
+
+    const a = totals(await Q.usageActivity(null, { memoryRefs: [memA.id] }, asMember()));
+    const a2 = totals(await Q.usageActivity(null, { memoryRefs: [memA2.id] }, asMember()));
+    const union = totals(await Q.usageActivity(null, { memoryRefs: [memA.id, memA2.id] }, asMember()));
+
+    // No double-counting: every event carries exactly one memory_id, so the
+    // union is the sum — the property the `IN` predicate has to preserve.
+    expect(union).toEqual({ reads: a.reads + a2.reads, writes: a.writes + a2.writes });
+    expect(union).toEqual({ reads: 5, writes: 1 });
+  });
+
+  it('merges the two memories into ONE series per bucket, not two rows per day', async () => {
+    const at = new Date('2026-07-15T12:00:00.000Z');
+    await seed({ count: 2, type: 'read', at, userId: member.id, memoryId: memA.id });
+    await seed({ count: 3, type: 'read', at, userId: member.id, memoryId: memA2.id });
+
+    const r = await Q.usageActivity(
+      null,
+      {
+        memoryRefs: [memA.id, memA2.id],
+        from: '2026-07-01T00:00:00.000Z',
+        to: '2026-08-01T00:00:00.000Z',
+      },
+      asMember(),
+    );
+    expect(r).toEqual([{ date: '2026-07-15', reads: 5, writes: 0 }]);
+  });
+
+  it('naming one memory twice (by PK and by URN) does not double-count it', async () => {
+    await seed({ count: 4, type: 'read', at: daysAgo(1), userId: member.id, memoryId: memA.id });
+    const r = await Q.usageActivity(
+      null,
+      { memoryRefs: [memA.id, `hrn:memory:${memA.urn}`, memA.id] },
+      asMember(),
+    );
+    expect(totals(r).reads).toBe(4);
+  });
+
+  it('silently DROPS an unreadable or unknown ref and still counts the readable ones', async () => {
+    await seed({ count: 2, type: 'read', at: daysAgo(1), userId: member.id, memoryId: memA.id });
+    await seed({ count: 7, type: 'read', at: daysAgo(1), userId: outsider.id, memoryId: memB.id });
+
+    // memB is another org's; the third ref never existed. Both vanish from the
+    // union rather than failing the query, so the caller can't use the outcome
+    // to tell "foreign" from "nonexistent" from "readable but empty".
+    const r = await Q.usageActivity(
+      null,
+      { memoryRefs: [memA.id, memB.id, generateId()] },
+      asMember(),
+    );
+    expect(totals(r).reads).toBe(2);
+    // Identical answer when the unreadable refs are simply absent.
+    const readableOnly = await Q.usageActivity(null, { memoryRefs: [memA.id] }, asMember());
+    expect(r).toEqual(readableOnly);
+  });
+
+  it('returns [] when EVERY ref drops out — never a fallback to own activity', async () => {
+    // The caller has plenty of own activity; if the empty union silently fell
+    // back to the user scope, this would report it as the memories' activity.
+    await seed({ count: 5, type: 'read', at: daysAgo(1), userId: member.id });
+
+    expect(await Q.usageActivity(null, { memoryRefs: [memB.id] }, asMember())).toEqual([]);
+    expect(await Q.usageActivity(null, { memoryRefs: [generateId()] }, asMember())).toEqual([]);
+    // An explicitly EMPTY list is the empty union for the same reason.
+    expect(await Q.usageActivity(null, { memoryRefs: [] }, asMember())).toEqual([]);
+    // Sanity: the own-activity scope (no memoryRefs at all) does see them.
+    expect(totals(await Q.usageActivity(null, {}, asMember())).reads).toBe(5);
+  });
+
+  it('rejects a list longer than the 20-ref cap with BAD_USER_INPUT', async () => {
+    const refs = Array.from({ length: 21 }, () => generateId());
+    await expect(Q.usageActivity(null, { memoryRefs: refs }, asMember())).rejects.toThrow(
+      /Too many memoryRefs/,
+    );
+    // Exactly at the cap is fine (all unknown ⇒ empty, but no error).
+    expect(await Q.usageActivity(null, { memoryRefs: refs.slice(0, 20) }, asMember())).toEqual([]);
+  });
+
+  it('answers [] for an empty memoryIds at the SERVICE layer too, without falling back to the user scope', async () => {
+    // Defense in depth (PR #808 review, Copilot): the resolver short-circuits
+    // before reaching here, but getUsageActivity is exported and shared, so a
+    // future caller that forgets must get the contract's [] rather than a 500 —
+    // and must NOT silently drop to the userId predicate, which would report
+    // this user's 5 reads as the (empty) memory scope's.
+    await seed({ count: 5, type: 'read', at: daysAgo(1), userId: member.id });
+    const scope = {
+      from: daysAgo(7),
+      to: new Date(Date.now() + 60_000),
+      bucket: 'DAY' as const,
+      timeZone: 'UTC',
+    };
+    expect(await getUsageActivity(db, { ...scope, memoryIds: [], userId: member.id })).toEqual([]);
+    // Sanity: the same scope WITHOUT memoryIds does see them, so the [] above
+    // is the empty union and not an unrelated miss.
+    expect(totals(await getUsageActivity(db, { ...scope, userId: member.id })).reads).toBe(5);
+  });
+
+  it('still throws on a MALFORMED ref — a shape error discloses nothing', async () => {
+    // Unknown-vs-unreadable is silenced; a ref that cannot be parsed at all is
+    // caller error and stays loud (the widget provider catches it per-placement).
+    await expect(
+      Q.usageActivity(null, { memoryRefs: [memA.id, 'hrn:memory:'] }, asMember()),
+    ).rejects.toThrow();
   });
 });
 
@@ -298,11 +424,21 @@ describe('usageActivity — events recorded through the API surface it (PR #799 
     expect(written.memoryId).toBe(memA.id);
     expect(written.nodeId).toBe(node.id);
 
+    // Explicit `to` in the near future rather than the default "now". The
+    // default window ends at the instant the resolver runs and `to` is
+    // EXCLUSIVE, while created_at is timestamp(3) — so an event written in the
+    // same millisecond as the read falls just outside its own window. That made
+    // this the one flaky test in the file (~50% locally); the flake is in the
+    // test's timing, not the aggregation, so widen the window rather than
+    // loosen the assertion.
+    const soon = { to: new Date(Date.now() + 60_000).toISOString() };
     // Visible in BOTH scopes without any direct row seeding.
-    expect(totals(await Q.usageActivity(null, {}, asMember())).reads).toBe(1);
-    expect(totals(await Q.usageActivity(null, { memoryRef: memA.id }, asMember())).reads).toBe(1);
+    expect(totals(await Q.usageActivity(null, soon, asMember())).reads).toBe(1);
+    expect(
+      totals(await Q.usageActivity(null, { ...soon, memoryRefs: [memA.id] }, asMember())).reads,
+    ).toBe(1);
     // And not in another user's own activity.
-    expect(totals(await Q.usageActivity(null, {}, asOutsider())).reads).toBe(0);
+    expect(totals(await Q.usageActivity(null, soon, asOutsider())).reads).toBe(0);
   });
 });
 
@@ -323,7 +459,7 @@ describe('usageActivity — attribution survives node deletion (#796)', () => {
       },
     });
 
-    expect(totals(await Q.usageActivity(null, { memoryRef: memA.id }, asMember())).reads).toBe(1);
+    expect(totals(await Q.usageActivity(null, { memoryRefs: [memA.id] }, asMember())).reads).toBe(1);
 
     // Hard-delete the node: `nodeId` goes NULL (SetNull), which used to erase
     // the event from every memory-scoped surface. The memoryId column is the
@@ -333,7 +469,7 @@ describe('usageActivity — attribution survives node deletion (#796)', () => {
     expect(orphaned?.nodeId).toBeNull();
     expect(orphaned?.memoryId).toBe(memA.id);
 
-    expect(totals(await Q.usageActivity(null, { memoryRef: memA.id }, asMember())).reads).toBe(1);
+    expect(totals(await Q.usageActivity(null, { memoryRefs: [memA.id] }, asMember())).reads).toBe(1);
     // memoryUsageSummary moved onto the same column, so it agrees.
     const summary = await Q.memoryUsageSummary(null, { memoryRef: memA.id }, asMember());
     expect(summary).toEqual([{ nodeLoc: 'doomed', type: 'read', count: 1 }]);

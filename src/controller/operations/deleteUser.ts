@@ -62,8 +62,8 @@ const SERIALIZATION_RETRIES = 3;
  *    Sessions, AuthCodes, AuthHandoffCodes, ExchangeConnections (provider
  *    tokens; their ConnectionGrants cascade), grantor-side ConnectionGrants,
  *    PrincipalGrants, MemoryShares (granted and received), MemoryMembers,
- *    AppMembers, AgentSubscriptions, DashboardWidgets, PendingSetup, and
- *    user-scoped Secrets are deleted.
+ *    AppMembers, AgentSubscriptions, DashboardWidgets, DashboardWidgetPresets,
+ *    PendingSetup, and user-scoped Secrets are deleted.
  * 4. **Scrubs + soft-deletes the User row:** identity/PII fields nulled, the
  *    handle replaced with a fresh non-identifying `deleted-<12 hex>` value (so
  *    the old handle frees up under the case-insensitive unique index), the
@@ -226,6 +226,7 @@ async function runDeletionTxn(
       await tx.appMember.deleteMany({ where: { userId: targetUserId } });
       await tx.agentSubscription.deleteMany({ where: { userId: targetUserId } });
       await tx.dashboardWidget.deleteMany({ where: { userId: targetUserId } });
+      await tx.dashboardWidgetPreset.deleteMany({ where: { userId: targetUserId } });
       await tx.pendingSetup.deleteMany({ where: { userId: targetUserId } });
       await deleteSecretsForOwner(tx, 'user', targetUserId);
 
