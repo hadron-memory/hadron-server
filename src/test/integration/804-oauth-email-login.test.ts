@@ -411,3 +411,147 @@ describe('email leg end-to-end: entry page → verify → consent', () => {
     expect(html).toContain(`value="${testClientId}"`);
   });
 });
+
+// ── App Review demo bypass (REVIEW_DEMO_EMAIL + REVIEW_DEMO_CODE) ────
+
+describe('POST /oauth/authorize/email — App Review demo bypass', () => {
+  const DEMO_EMAIL = 'review-demo@example.test';
+  const DEMO_CODE = '424242';
+
+  /** Enable the bypass for one test; afterEach restores. */
+  function enableBypass() {
+    process.env.REVIEW_DEMO_EMAIL = DEMO_EMAIL;
+    process.env.REVIEW_DEMO_CODE = DEMO_CODE;
+  }
+
+  afterEach(() => {
+    delete process.env.REVIEW_DEMO_EMAIL;
+    delete process.env.REVIEW_DEMO_CODE;
+  });
+
+  async function createDemoUser() {
+    return db.user.create({
+      data: { id: generateId(), handle: 'review-demo', email: DEMO_EMAIL, roles: ['READER'] },
+    });
+  }
+
+  /** Submit the entry form with the demo address; returns the response. */
+  async function submitDemoEmail() {
+    const { csrfToken, csrfCookieValue, returnTo } = await startEmailEntryFlow();
+    const res = await postAuthorizeEmail(
+      { _csrf: csrfToken, return_to: returnTo, email: DEMO_EMAIL },
+      { csrfCookieValue },
+    );
+    return { res, returnTo };
+  }
+
+  /** Extract csrf token + cookie from the rendered code page. */
+  function parseCodePage(html: string, setCookie: string | null) {
+    const tokenMatch = html.match(/name="_csrf"\s+value="([^"]+)"/);
+    expect(tokenMatch, 'csrf token must be in the code-entry HTML').not.toBeNull();
+    const cookieMatch = (setCookie ?? '').match(/_hadron_csrf=([^;]+)/);
+    expect(cookieMatch, 'fresh _hadron_csrf cookie must accompany the code page').not.toBeNull();
+    return { csrfToken: tokenMatch![1], csrfCookieValue: cookieMatch![1] };
+  }
+
+  async function postCode(fields: Record<string, string>, csrfCookieValue: string) {
+    return fetch(`${baseUrl}/oauth/authorize/email/code`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        cookie: `_hadron_csrf=${csrfCookieValue}`,
+      },
+      body: new URLSearchParams(fields).toString(),
+    });
+  }
+
+  it('inactive when the env vars are unset: demo address gets a normal send', async () => {
+    const { res } = await submitDemoEmail();
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Check your email');
+    expect(sendMagicLinkMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('active: demo address renders the code page and sends NO email', async () => {
+    enableBypass();
+    await createDemoUser();
+    const { res } = await submitDemoEmail();
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('Enter access code');
+    expect(html).toContain('/oauth/authorize/email/code');
+    expect(sendMagicLinkMock).not.toHaveBeenCalled();
+  });
+
+  it('active: a non-demo address still gets the normal send', async () => {
+    enableBypass();
+    const { csrfToken, csrfCookieValue, returnTo } = await startEmailEntryFlow();
+    const res = await postAuthorizeEmail(
+      { _csrf: csrfToken, return_to: returnTo, email: 'someone-else@example.test' },
+      { csrfCookieValue },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Check your email');
+    expect(sendMagicLinkMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('wrong code → generic 400, no cookie', async () => {
+    enableBypass();
+    await createDemoUser();
+    const { res, returnTo } = await submitDemoEmail();
+    const { csrfToken, csrfCookieValue } = parseCodePage(await res.text(), res.headers.get('set-cookie'));
+    const codeRes = await postCode(
+      { _csrf: csrfToken, return_to: returnTo, email: DEMO_EMAIL, code: '999999' },
+      csrfCookieValue,
+    );
+    expect(codeRes.status).toBe(400);
+    expect(codeRes.headers.get('set-cookie') ?? '').not.toContain('hadron_token=');
+  });
+
+  it('correct code signs into the EXISTING demo user and 302s to return_to', async () => {
+    enableBypass();
+    const demoUser = await createDemoUser();
+    const { res, returnTo } = await submitDemoEmail();
+    const { csrfToken, csrfCookieValue } = parseCodePage(await res.text(), res.headers.get('set-cookie'));
+    const codeRes = await postCode(
+      { _csrf: csrfToken, return_to: returnTo, email: DEMO_EMAIL, code: DEMO_CODE },
+      csrfCookieValue,
+    );
+    expect(codeRes.status).toBe(302);
+    expect(codeRes.headers.get('location')).toBe(returnTo);
+    const setCookie = codeRes.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('hadron_token=');
+    // The minted session belongs to the pre-existing demo user.
+    const jwt = setCookie.match(/hadron_token=([^;]+)/)![1];
+    const payload = JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString());
+    expect(payload.sub).toBe(demoUser.id);
+    // Bypass never creates users.
+    expect(await db.user.count({ where: { email: DEMO_EMAIL } })).toBe(1);
+  });
+
+  it('correct code but NO existing user → generic 400 (never auto-creates)', async () => {
+    enableBypass();
+    const { res, returnTo } = await submitDemoEmail();
+    const { csrfToken, csrfCookieValue } = parseCodePage(await res.text(), res.headers.get('set-cookie'));
+    const codeRes = await postCode(
+      { _csrf: csrfToken, return_to: returnTo, email: DEMO_EMAIL, code: DEMO_CODE },
+      csrfCookieValue,
+    );
+    expect(codeRes.status).toBe(400);
+    expect(await db.user.count({ where: { email: DEMO_EMAIL } })).toBe(0);
+  });
+
+  it('code POST without CSRF → 403', async () => {
+    enableBypass();
+    await createDemoUser();
+    const { returnTo } = await submitDemoEmail();
+    const res = await fetch(`${baseUrl}/oauth/authorize/email/code`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ return_to: returnTo, email: DEMO_EMAIL, code: DEMO_CODE }).toString(),
+    });
+    expect(res.status).toBe(403);
+  });
+});
