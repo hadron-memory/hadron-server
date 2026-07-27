@@ -134,3 +134,38 @@ ${SHARED_STYLE}
 </body>
 </html>
 `;
+
+/**
+ * App Review demo bypass (env-gated; see `reviewDemoConfig` in
+ * `oauth.ts`): rendered instead of EMAIL_SENT_TEMPLATE when the
+ * submitted address IS the configured demo account. The reviewer types
+ * the fixed code from the App Review notes; no email is sent. The form
+ * POSTs to /oauth/authorize/email/code with the same hidden
+ * return_to + email and a fresh CSRF token.
+ */
+export const REVIEW_CODE_TEMPLATE = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Enter access code</title>
+${SHARED_STYLE}
+</head>
+<body>
+  <main>
+    <h1>Enter access code</h1>
+    <p>This account uses a pre-shared access code instead of an emailed link.</p>
+    <form method="post" action="/oauth/authorize/email/code">
+      <input type="hidden" name="_csrf" value="{{csrfToken}}">
+      <input type="hidden" name="return_to" value="{{returnTo}}">
+      <input type="hidden" name="email" value="{{email}}">
+      <label for="code">Access code</label>
+      <input type="text" id="code" name="code" required autofocus
+             autocomplete="one-time-code" inputmode="numeric" maxlength="64">
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>
+`;

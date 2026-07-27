@@ -39,11 +39,12 @@ import rateLimit from 'express-rate-limit';
 import { doubleCsrf, type DoubleCsrfUtilities } from 'csrf-csrf';
 import { decodeJwt } from 'jose';
 import { db } from '../integrations/db/client.js';
-import { verifyJwt } from './jwt.js';
+import { signJwt, verifyJwt } from './jwt.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
 import {
   EMAIL_ENTRY_TEMPLATE,
   EMAIL_SENT_TEMPLATE,
+  REVIEW_CODE_TEMPLATE,
 } from './email-entry.template.js';
 import { sendMagicLink, TOKEN_EXPIRY_MINUTES } from './email.js';
 import { isServerLocalPath } from './server-local-path.js';
@@ -1041,6 +1042,64 @@ export function buildAuthorizeEmailRateLimit() {
 }
 
 /**
+ * App Review demo bypass (approved by Holger 2026-07-27: a curated,
+ * trackable reviewer account for a password-less platform — Apple's
+ * reviewers cannot read a demo inbox, so the magic link alone can't
+ * give them access). ACTIVE ONLY when BOTH env vars are set:
+ *
+ *   - `REVIEW_DEMO_EMAIL` — the one address the bypass applies to.
+ *   - `REVIEW_DEMO_CODE`  — the fixed code from the App Review notes.
+ *
+ * When the email-entry form receives exactly that address, no mail is
+ * sent; a code-entry page renders instead, and the correct code signs
+ * into the EXISTING user with that email (never auto-creates). Scope
+ * is deliberately minimal: one account, static secret in the
+ * deployment env, normal session semantics, failures indistinguishable
+ * from a wrong code. Unset either var and the path does not exist.
+ */
+function reviewDemoConfig(): { email: string; code: string } | null {
+  const email = process.env.REVIEW_DEMO_EMAIL?.trim();
+  const code = process.env.REVIEW_DEMO_CODE?.trim();
+  if (!email || !code) return null;
+  return { email, code };
+}
+
+/** Case-insensitive match against the configured demo address. */
+function isReviewDemoEmail(email: string): boolean {
+  const config = reviewDemoConfig();
+  return config !== null && email.toLowerCase() === config.email.toLowerCase();
+}
+
+/**
+ * Constant-time code comparison. Both sides are hashed first so length
+ * differences neither throw (timingSafeEqual requires equal lengths)
+ * nor leak.
+ */
+function reviewCodeMatches(submitted: string): boolean {
+  const config = reviewDemoConfig();
+  if (!config) return false;
+  const a = createHash('sha256').update(submitted).digest();
+  const b = createHash('sha256').update(config.code).digest();
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Per-IP limiter for demo-code attempts. Unlike the send limiter this
+ * COUNTS failures (`skipFailedRequests: false` default) — it exists to
+ * brake code guessing, so failed guesses are exactly what must burn
+ * the budget.
+ */
+export function buildAuthorizeEmailCodeRateLimit() {
+  return rateLimit({
+    windowMs: 15 * 60_000,
+    limit: 10,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: RATE_LIMITED_BODY,
+  });
+}
+
+/**
  * `POST /oauth/authorize/email` — the email-entry form target (#804).
  * CSRF middleware has already validated `_csrf` (or rejected with 403).
  *
@@ -1060,7 +1119,8 @@ export function buildAuthorizeEmailRateLimit() {
  * verify handler (GET /auth/email/verify, src/server.ts) recognizes
  * the Option-C `return_to` and completes sign-in on THIS origin.
  */
-async function handleAuthorizeEmailPost(req: Request, res: Response): Promise<void> {
+function buildHandleAuthorizeEmailPost(csrf: DoubleCsrfUtilities) {
+  return async function handleAuthorizeEmailPost(req: Request, res: Response): Promise<void> {
   const body = (req.body ?? {}) as Record<string, unknown>;
 
   const email = typeof body.email === 'string' ? body.email.trim() : '';
@@ -1075,6 +1135,16 @@ async function handleAuthorizeEmailPost(req: Request, res: Response): Promise<vo
       error:
         'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
     });
+    return;
+  }
+
+  // App Review demo bypass: the configured demo address gets a
+  // code-entry page instead of an emailed link (see reviewDemoConfig).
+  if (isReviewDemoEmail(email)) {
+    const csrfToken = csrf.generateCsrfToken(req, res);
+    res.type('html').send(
+      renderTemplate(REVIEW_CODE_TEMPLATE, { csrfToken, returnTo, email }),
+    );
     return;
   }
 
@@ -1098,6 +1168,71 @@ async function handleAuthorizeEmailPost(req: Request, res: Response): Promise<vo
       expiryMinutes: String(TOKEN_EXPIRY_MINUTES),
     }),
   );
+  };
+}
+
+/**
+ * `POST /oauth/authorize/email/code` — the App Review demo bypass's
+ * code-entry form target. CSRF-validated by middleware; rate-limited
+ * counting failures (code-guessing brake). Every non-success shape —
+ * bypass inactive, wrong address, wrong code, no such user — collapses
+ * into ONE generic 400, so nothing is enumerable. Success mints the
+ * same Option-C session the magic-link verify handler mints (cookie
+ * maxAge tied to JWT exp) and 302s to the validated return_to, which
+ * re-renders /oauth/authorize and completes the standard PKCE dance.
+ * Signs into the EXISTING demo user only — never creates one.
+ */
+async function handleAuthorizeEmailCodePost(req: Request, res: Response): Promise<void> {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const email = typeof body.email === 'string' ? body.email.trim() : '';
+  const code = typeof body.code === 'string' ? body.code.trim() : '';
+
+  const returnTo = body.return_to;
+  if (!isServerLocalPath(returnTo)) {
+    res.status(400).json({
+      error:
+        'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
+    });
+    return;
+  }
+
+  const fail = () => res.status(400).json({ error: 'Sign-in failed' });
+  if (!isReviewDemoEmail(email) || code.length === 0 || !reviewCodeMatches(code)) {
+    fail();
+    return;
+  }
+
+  // Express 4 does not catch async rejections — a transient DB/pool
+  // failure here must become a 500, not an unhandled rejection.
+  try {
+    const config = reviewDemoConfig()!;
+    const user = await db.user.findFirst({
+      where: { email: { equals: config.email, mode: 'insensitive' }, deletedAt: null },
+    });
+    if (!user) {
+      fail();
+      return;
+    }
+
+    const jwt = await signJwt({
+      sub: user.id,
+      roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+      ...(user.email ? { email: user.email } : {}),
+    });
+    const { exp } = decodeJwt(jwt);
+    const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
+    res.cookie('hadron_token', jwt, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge,
+      path: '/',
+    });
+    res.redirect(returnTo as string);
+  } catch (err) {
+    console.error('OAuth demo-code sign-in error:', err);
+    res.status(500).json({ error: 'Sign-in failed' });
+  }
 }
 
 // ── /oauth/token (FR-013, FR-015) ────────────────────────────────────
@@ -1471,7 +1606,18 @@ export function buildOAuthRouter(): Router {
     buildAuthorizeEmailRateLimit(),
     express.urlencoded({ extended: false }),
     csrf.doubleCsrfProtection,
-    handleAuthorizeEmailPost,
+    buildHandleAuthorizeEmailPost(csrf),
+  );
+
+  // /oauth/authorize/email/code: the App Review demo bypass's code
+  // form. Its limiter COUNTS failures (guessing brake), unlike the
+  // send limiter above.
+  router.post(
+    '/oauth/authorize/email/code',
+    buildAuthorizeEmailCodeRateLimit(),
+    express.urlencoded({ extended: false }),
+    csrf.doubleCsrfProtection,
+    handleAuthorizeEmailCodePost,
   );
 
   // /oauth/token: form-encoded (RFC 6749 §4.1.3); unauthenticated
