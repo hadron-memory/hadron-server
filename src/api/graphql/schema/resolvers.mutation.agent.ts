@@ -41,6 +41,8 @@ import {
   toGqlAiServiceConfig,
   requireAiConfigOwnerAdmin,
   rethrowAiConfigTyped,
+  resolveUserRefArg,
+  resolveAgentRefArg,
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 
@@ -510,14 +512,28 @@ export const agentMutations = {
 
     revokeAgentSubscription: async (
       _: unknown,
-      { userId, agentId }: { userId: string; agentId: string },
+      {
+        userRef,
+        userId,
+        agentRef,
+        agentId,
+      }: {
+        userRef?: string | null;
+        userId?: string | null;
+        agentRef?: string | null;
+        agentId?: string | null;
+      },
       ctx: Context,
     ) => {
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      // #764: agentRef/userRef accept id / URN / (user) handle / email. Resolve
+      // the agent + owner-gate FIRST, then resolve the user.
+      const resolvedAgentId = await resolveAgentRefArg(ctx.db, { ref: agentRef, id: agentId });
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
 
       const updated = await ctx.db.agentSubscription.update({
-        where: { userId_agentId: { userId, agentId } },
+        where: { userId_agentId: { userId: resolvedUserId, agentId: resolvedAgentId } },
         data: {
           revokedAt: new Date(),
           revokedBy: ctx.userId ?? null,
@@ -530,8 +546,8 @@ export const agentMutations = {
       // so free-standing user memories (agent NULL) never match.
       const userMemory = await ctx.db.memory.findFirst({
         where: {
-          userId,
-          userMemoryOfAgentId: agentId,
+          userId: resolvedUserId,
+          userMemoryOfAgentId: resolvedAgentId,
           class: { in: ['personal', 'private'] },
           deletedAt: null,
         },

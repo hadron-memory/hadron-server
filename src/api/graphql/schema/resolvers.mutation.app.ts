@@ -48,10 +48,50 @@ import {
   requireOrgRole,
   requireOwnerOrOrgRole,
   rethrowAiConfigTyped,
+  resolveUserRefArg,
+  resolveAppRefArg,
   APP_INCLUDE,
   installAgentIntoAppCore,
   uninstallAgentFromAppCore,
 } from './resolvers.helpers.js';
+
+/**
+ * Can the caller manage this App's members by ROLE alone — independent of any
+ * target user? Platform ADMIN/OWNER for an ORG-owned App, the user-owner of a
+ * user-owned App, an org ADMIN/OWNER of the App's org, or an owner-role
+ * AppMember. spec 047 (blocker 3): the platform-admin bypass applies ONLY to an
+ * org-owned App (a user-owned App is strictly owner-only). Shared by
+ * ensureAppMember + removeAppMember so the role gate is evaluated BEFORE the
+ * target user is resolved — a non-authorized caller can't turn user-ref
+ * resolution into an existence oracle (#816 review).
+ */
+async function callerManagesAppMembers(
+  ctx: Context,
+  app: { ownerUserId: string | null; organizationId: string | null },
+  resolvedAppId: string,
+): Promise<boolean> {
+  const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+  if (isPlatformAdmin && app.ownerUserId === null) return true;
+  const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
+  if (isAppOwnerUser) return true;
+  if (app.organizationId) {
+    const orgMember = await ctx.db.orgMember.findFirst({
+      where: {
+        organizationId: app.organizationId,
+        userId: ctx.userId ?? '',
+        deletedAt: null,
+        role: { in: ['ADMIN', 'OWNER'] },
+      },
+    });
+    if (orgMember) return true;
+  }
+  const ownerMember = ctx.userId
+    ? await ctx.db.appMember.findUnique({
+        where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
+      })
+    : null;
+  return ownerMember?.role === 'owner';
+}
 
 export const appMutations = {
     regenerateAppKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {
@@ -641,48 +681,38 @@ export const appMutations = {
     // and contracts/agent-app-graphql.md "ensureAppMember".
     ensureAppMember: async (
       _: unknown,
-      { appId, userId, role }: { appId: string; userId: string; role: string },
+      {
+        appRef,
+        appId,
+        userRef,
+        userId,
+        role,
+      }: {
+        appRef?: string | null;
+        appId?: string | null;
+        userRef?: string | null;
+        userId?: string | null;
+        role: string;
+      },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      // #764: appRef/userRef accept id / URN / (user) handle / email.
+      const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
 
-      // Authorization: ADMIN/OWNER of the App's owning org, OR an existing
-      // owner-role AppMember. Self-service joins are not allowed in v1.
-      // spec 047 (blocker 3): the platform-admin bypass applies ONLY to an
-      // ORG-owned App. A user-owned App is STRICTLY owner-only, so a platform
-      // admin who isn't the owner must still fall through the block below and be
-      // denied — hence `|| app.ownerUserId !== null`.
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin || app.ownerUserId !== null) {
-        // spec 047: a user-owned App is authorized by its user owner (no org).
-        const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
-        const orgMember =
-          !isAppOwnerUser && app.organizationId
-            ? await ctx.db.orgMember.findFirst({
-                where: {
-                  organizationId: app.organizationId,
-                  userId: ctx.userId ?? '',
-                  deletedAt: null,
-                  role: { in: ['ADMIN', 'OWNER'] },
-                },
-              })
-            : null;
-        if (!isAppOwnerUser && !orgMember) {
-          const ownerMember = ctx.userId
-            ? await ctx.db.appMember.findUnique({
-                where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
-              })
-            : null;
-          if (!ownerMember || ownerMember.role !== 'owner') {
-            throw new Error('Forbidden: only org admins or App owners can manage members');
-          }
-        }
+      // Authorization: ADMIN/OWNER of the App's owning org, the user-owner of a
+      // user-owned App, or an existing owner-role AppMember (spec 047 — see
+      // callerManagesAppMembers). Self-service joins are not allowed in v1.
+      if (!(await callerManagesAppMembers(ctx, app, resolvedAppId))) {
+        throw new Error('Forbidden: only org admins or App owners can manage members');
       }
 
+      // Target user resolved AFTER the authorization gate above (which keys off
+      // ctx.userId), so an unauthorized caller can't use NOT_FOUND to enumerate
+      // users.
+      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       try {
-        await ensureAppMember(ctx.db, resolvedAppId, userId, role, {
+        await ensureAppMember(ctx.db, resolvedAppId, resolvedUserId, role, {
           actorId: ctx.userId ?? null,
         });
       } catch (e: unknown) {
@@ -701,7 +731,7 @@ export const appMutations = {
       }
 
       return ctx.db.appMember.findUniqueOrThrow({
-        where: { appId_userId: { appId: resolvedAppId, userId } },
+        where: { appId_userId: { appId: resolvedAppId, userId: resolvedUserId } },
       });
     },
 
@@ -710,48 +740,48 @@ export const appMutations = {
     // retained as an orphan per FR-015.
     removeAppMember: async (
       _: unknown,
-      { appId, userId }: { appId: string; userId: string },
+      {
+        appRef,
+        appId,
+        userRef,
+        userId,
+      }: {
+        appRef?: string | null;
+        appId?: string | null;
+        userRef?: string | null;
+        userId?: string | null;
+      },
       ctx: Context,
     ) => {
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      // #764 + #816 review: appRef/userRef accept id / URN / (user) handle /
+      // email. Evaluate the ROLE gate BEFORE resolving the target user, so an
+      // unauthorized caller can't turn user resolution into an existence
+      // oracle. A role-authorized caller may remove anyone; everyone else may
+      // remove ONLY themselves — and a self-only caller's target resolution
+      // maps any miss to the same Forbidden, with the resolved id required to
+      // be the caller, so an unknown handle/email is indistinguishable from a
+      // real user they can't remove.
+      const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+      const forbidRemove = () =>
+        new Error('Forbidden: only org admins, App owners, or the user themselves can remove members');
 
-      // Authorization: same gate as ensureAppMember, plus self-removal —
-      // a member can remove themselves at any time without org/owner role.
-      const isSelfRemoval = ctx.userId === userId;
-      if (!isSelfRemoval) {
-        // spec 047 (blocker 3): platform-admin bypass applies ONLY to an
-        // ORG-owned App; a user-owned App stays strictly owner-only.
-        const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-        if (!isPlatformAdmin || app.ownerUserId !== null) {
-          // spec 047: a user-owned App is authorized by its user owner (no org).
-          const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
-          const orgMember =
-            !isAppOwnerUser && app.organizationId
-              ? await ctx.db.orgMember.findFirst({
-                  where: {
-                    organizationId: app.organizationId,
-                    userId: ctx.userId ?? '',
-                    deletedAt: null,
-                    role: { in: ['ADMIN', 'OWNER'] },
-                  },
-                })
-              : null;
-          if (!isAppOwnerUser && !orgMember) {
-            const ownerMember = ctx.userId
-              ? await ctx.db.appMember.findUnique({
-                  where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
-                })
-              : null;
-            if (!ownerMember || ownerMember.role !== 'owner') {
-              throw new Error('Forbidden: only org admins, App owners, or the user themselves can remove members');
-            }
-          }
-        }
+      const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
+      let resolvedUserId: string;
+      if (authorizedByRole) {
+        resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      } else {
+        resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId }).catch(
+          (e: unknown) => {
+            if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') throw forbidRemove();
+            throw e;
+          },
+        );
+        if (resolvedUserId !== ctx.userId) throw forbidRemove();
       }
 
       await ctx.db.appMember
-        .delete({ where: { appId_userId: { appId: resolvedAppId, userId } } })
+        .delete({ where: { appId_userId: { appId: resolvedAppId, userId: resolvedUserId } } })
         .catch(() => {}); // idempotent: missing row → no-op
       return true;
     },
