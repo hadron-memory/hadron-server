@@ -48,6 +48,8 @@ import {
   requireOrgRole,
   requireOwnerOrOrgRole,
   rethrowAiConfigTyped,
+  resolveUserRefArg,
+  resolveAppRefArg,
   APP_INCLUDE,
   installAgentIntoAppCore,
   uninstallAgentFromAppCore,
@@ -641,11 +643,23 @@ export const appMutations = {
     // and contracts/agent-app-graphql.md "ensureAppMember".
     ensureAppMember: async (
       _: unknown,
-      { appId, userId, role }: { appId: string; userId: string; role: string },
+      {
+        appRef,
+        appId,
+        userRef,
+        userId,
+        role,
+      }: {
+        appRef?: string | null;
+        appId?: string | null;
+        userRef?: string | null;
+        userId?: string | null;
+        role: string;
+      },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      // #764: appRef/userRef accept id / URN / (user) handle / email.
+      const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
 
       // Authorization: ADMIN/OWNER of the App's owning org, OR an existing
@@ -681,8 +695,12 @@ export const appMutations = {
         }
       }
 
+      // Target user resolved AFTER the authorization block above (which keys
+      // off ctx.userId), so an unauthorized caller can't use NOT_FOUND to
+      // enumerate users.
+      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       try {
-        await ensureAppMember(ctx.db, resolvedAppId, userId, role, {
+        await ensureAppMember(ctx.db, resolvedAppId, resolvedUserId, role, {
           actorId: ctx.userId ?? null,
         });
       } catch (e: unknown) {
@@ -701,7 +719,7 @@ export const appMutations = {
       }
 
       return ctx.db.appMember.findUniqueOrThrow({
-        where: { appId_userId: { appId: resolvedAppId, userId } },
+        where: { appId_userId: { appId: resolvedAppId, userId: resolvedUserId } },
       });
     },
 
@@ -710,15 +728,28 @@ export const appMutations = {
     // retained as an orphan per FR-015.
     removeAppMember: async (
       _: unknown,
-      { appId, userId }: { appId: string; userId: string },
+      {
+        appRef,
+        appId,
+        userRef,
+        userId,
+      }: {
+        appRef?: string | null;
+        appId?: string | null;
+        userRef?: string | null;
+        userId?: string | null;
+      },
       ctx: Context,
     ) => {
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      // #764: appRef/userRef accept id / URN / (user) handle / email. The
+      // self-removal branch needs the resolved target, so resolve both up front.
+      const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
+      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
 
       // Authorization: same gate as ensureAppMember, plus self-removal —
       // a member can remove themselves at any time without org/owner role.
-      const isSelfRemoval = ctx.userId === userId;
+      const isSelfRemoval = ctx.userId === resolvedUserId;
       if (!isSelfRemoval) {
         // spec 047 (blocker 3): platform-admin bypass applies ONLY to an
         // ORG-owned App; a user-owned App stays strictly owner-only.
@@ -751,7 +782,7 @@ export const appMutations = {
       }
 
       await ctx.db.appMember
-        .delete({ where: { appId_userId: { appId: resolvedAppId, userId } } })
+        .delete({ where: { appId_userId: { appId: resolvedAppId, userId: resolvedUserId } } })
         .catch(() => {}); // idempotent: missing row → no-op
       return true;
     },

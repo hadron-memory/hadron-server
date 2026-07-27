@@ -35,6 +35,16 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
+import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import {
+  UserNotFoundError,
+  AmbiguousUserRefError,
+  OrganizationNotFoundError,
+  AppNotFoundError,
+  AgentNotFoundError,
+} from '../../../lib/entityRef/errors.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { GraphQLError } from 'graphql';
 import {
   Prisma,
@@ -73,6 +83,103 @@ export interface Context {
   // per request (lazily created; see resolveRevisionEditor).
   revisionEditorCache?: Map<string, Promise<{ handle: string; urn: string | null } | null>>;
 }
+
+/** entityRef resolvers each throw a distinct `*NotFoundError` on a genuine miss. */
+function isEntityNotFound(e: unknown): boolean {
+  return (
+    e instanceof UserNotFoundError ||
+    e instanceof OrganizationNotFoundError ||
+    e instanceof AppNotFoundError ||
+    e instanceof AgentNotFoundError ||
+    e instanceof MemoryNotFoundError
+  );
+}
+
+/**
+ * Resolve a GraphQL mutation's `<label>Ref` / deprecated `<label>Id` argument
+ * pair to a definite entity id (#764, spec cor:api:180). Generalizes
+ * `resolveGranteeId` (PR #774) over any `resolveXRef` helper so every access
+ * mutation accepts a URN / handle / email / id uniformly:
+ *
+ *  - BOTH ref and id supplied → `BAD_USER_INPUT` (silently preferring one would
+ *    contradict the schema).
+ *  - a ref that resolves to nothing → `NOT_FOUND` (the shape that missed is not
+ *    leaked, matching `resolveGranteeId`).
+ *  - `AmbiguousUserRefError` (two accounts differing only by email case) →
+ *    `BAD_USER_INPUT`.
+ *  - neither supplied → `BAD_USER_INPUT` naming the ref arg.
+ *
+ * BOTH the new `xRef` and the deprecated `xId` are resolved through the same
+ * `resolveXRef` helper (every one accepts a raw id, a URN, and — for users —
+ * a handle/email). Routing `xId` through the resolver too preserves the
+ * pre-#764 behavior of the id-named args that already accepted URNs
+ * (subscription memoryId/orgId, orgMember orgId, appMember appId), rather than
+ * silently narrowing them to raw-PK-only.
+ */
+export async function resolveRefArg(
+  db: Context['db'],
+  resolve: (db: Context['db'], ref: string) => Promise<{ id: string }>,
+  args: { ref?: string | null; id?: string | null; label: string },
+): Promise<string> {
+  const ref = args.ref?.trim();
+  const id = args.id?.trim();
+  if (ref && id) {
+    throw new GraphQLError(`Pass either ${args.label}Ref or ${args.label}Id, not both.`, {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  const chosen = ref || id;
+  if (!chosen) {
+    throw new GraphQLError(
+      `A ${args.label} is required: pass ${args.label}Ref (or the deprecated ${args.label}Id).`,
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
+  try {
+    const { id: resolvedId } = await resolve(db, chosen);
+    return resolvedId;
+  } catch (e) {
+    if (isEntityNotFound(e)) {
+      throw new GraphQLError(`No match for ${args.label}Ref "${chosen}".`, {
+        extensions: { code: 'NOT_FOUND' },
+      });
+    }
+    if (e instanceof AmbiguousUserRefError) {
+      throw new GraphQLError(
+        `${args.label}Ref "${chosen}" matches more than one account (differing only by email case). Use the exact-case email, the handle, or the id.`,
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
+    }
+    throw e;
+  }
+}
+
+/** #764 — per-entity `resolveRefArg` wrappers (label = the ref arg's name). */
+export const resolveUserRefArg = (
+  db: Context['db'],
+  a: { ref?: string | null; id?: string | null },
+): Promise<string> =>
+  resolveRefArg(db, (d, ref) => resolveUserRefOrEmail(d, ref), { ...a, label: 'user' });
+export const resolveOrgRefArg = (
+  db: Context['db'],
+  a: { ref?: string | null; id?: string | null },
+): Promise<string> =>
+  resolveRefArg(db, (d, ref) => resolveOrgRef(d, ref), { ...a, label: 'org' });
+export const resolveMemoryRefArg = (
+  db: Context['db'],
+  a: { ref?: string | null; id?: string | null },
+): Promise<string> =>
+  resolveRefArg(db, (d, ref) => resolveMemoryRef(d, ref), { ...a, label: 'memory' });
+export const resolveAppRefArg = (
+  db: Context['db'],
+  a: { ref?: string | null; id?: string | null },
+): Promise<string> =>
+  resolveRefArg(db, (d, ref) => resolveAppRef(d, ref), { ...a, label: 'app' });
+export const resolveAgentRefArg = (
+  db: Context['db'],
+  a: { ref?: string | null; id?: string | null },
+): Promise<string> =>
+  resolveRefArg(db, (d, ref) => resolveAgentRef(d, ref), { ...a, label: 'agent' });
 
 /**
  * Fetch a memory's stored urn by id, memoized per request (#481). Backs the

@@ -34,6 +34,8 @@ import {
   isPlatformAdmin,
   requireRole,
   requireOrgRole,
+  resolveUserRefArg,
+  resolveOrgRefArg,
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
 
@@ -608,26 +610,40 @@ export const orgMutations = {
 
     addOrgMember: async (
       _: unknown,
-      { orgId, userId, role }: { orgId: string; userId: string; role: string },
+      {
+        orgRef,
+        orgId,
+        userRef,
+        userId,
+        role,
+      }: {
+        orgRef?: string | null;
+        orgId?: string | null;
+        userRef?: string | null;
+        userId?: string | null;
+        role: string;
+      },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      // (userId is keyed by raw ID — User has no urn column.)
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // #764 (was 007-entity-id-or-urn): orgRef/userRef accept id / URN / (org)
+      // handle / (user) email. Resolve the org + admin-gate FIRST, then resolve
+      // the user (auth before revealing user existence).
+      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       // Membership revocation is a soft delete, so the composite (org, user)
       // PK may hold a tombstone. Reactivate it with the new role instead of
       // letting the create fail with a raw P2002; a LIVE duplicate gets a
       // clean typed error instead of P2002 too.
       const existing = await ctx.db.orgMember.findUnique({
-        where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
+        where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
       });
       if (existing && !existing.deletedAt) {
         throw new Error('User is already a member of this organization');
       }
       if (existing) {
         return ctx.db.orgMember.update({
-          where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
+          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
           data: {
             deletedAt: null,
             deletedBy: null,
@@ -641,24 +657,37 @@ export const orgMutations = {
         });
       }
       return ctx.db.orgMember.create({
-        data: { id: generateId(), organizationId: resolvedOrgId, userId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
+        data: { id: generateId(), organizationId: resolvedOrgId, userId: resolvedUserId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
         include: { user: true },
       });
     },
 
     updateOrgMember: async (
       _: unknown,
-      { orgId, userId, role }: { orgId: string; userId: string; role: string },
+      {
+        orgRef,
+        orgId,
+        userRef,
+        userId,
+        role,
+      }: {
+        orgRef?: string | null;
+        orgId?: string | null;
+        userRef?: string | null;
+        userId?: string | null;
+        role: string;
+      },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // #764: orgRef/userRef accept id / URN / (org) handle / (user) email.
+      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       // Refuse to edit a soft-revoked row — silently retitling a tombstone
       // (which no UI surfaces) would be API-misuse-only behavior; rejoin goes
       // through addOrgMember / invitation reactivation.
       const existing = await ctx.db.orgMember.findFirst({
-        where: { organizationId: resolvedOrgId, userId, deletedAt: null },
+        where: { organizationId: resolvedOrgId, userId: resolvedUserId, deletedAt: null },
       });
       if (!existing) {
         throw new Error('User is not a member of this organization');
@@ -675,7 +704,7 @@ export const orgMutations = {
         }
       }
       return ctx.db.orgMember.update({
-        where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
+        where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
         data: { role: role as Role },
         include: { user: true },
       });
@@ -683,14 +712,25 @@ export const orgMutations = {
 
     removeOrgMember: async (
       _: unknown,
-      { orgId, userId }: { orgId: string; userId: string },
+      {
+        orgRef,
+        orgId,
+        userRef,
+        userId,
+      }: {
+        orgRef?: string | null;
+        orgId?: string | null;
+        userRef?: string | null;
+        userId?: string | null;
+      },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // #764: orgRef/userRef accept id / URN / (org) handle / (user) email.
+      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       const member = await ctx.db.orgMember.findUniqueOrThrow({
-        where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
+        where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
       });
       // Already revoked → idempotent success. Checked BEFORE the last-owner
       // guard: a revoked ex-OWNER isn't in the live owners count, so the
@@ -713,7 +753,7 @@ export const orgMutations = {
       // addOrgMember / invitation acceptance, so history is preserved without
       // ever authorizing a revoked member.
       await ctx.db.orgMember.update({
-        where: { organizationId_userId: { organizationId: resolvedOrgId, userId } },
+        where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
         data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
       });
       return true;

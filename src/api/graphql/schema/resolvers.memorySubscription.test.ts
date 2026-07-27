@@ -160,7 +160,10 @@ describe('createMemorySubscription', () => {
     ).rejects.toThrow(/implicit access/);
   });
 
-  it('rejects unknown memoryId with MEMORY_NOT_FOUND', async () => {
+  // #764: the shared resolveRefArg helper maps every entity-ref miss to the
+  // uniform NOT_FOUND ("No match for <label>Ref …"), matching granteeRef —
+  // superseding the old per-entity MEMORY_NOT_FOUND / ORGANIZATION_NOT_FOUND.
+  it('rejects unknown memory ref with a uniform NOT_FOUND', async () => {
     await expect(
       resolvers.Mutation.createMemorySubscription(
         null,
@@ -168,10 +171,10 @@ describe('createMemorySubscription', () => {
         { memoryId: 'cnonexistentnonexistent12', orgId: subscriberOrg.id, role: 'READER' },
         adminCtx(subscriberAdminUser.id),
       ),
-    ).rejects.toThrow(/MEMORY_NOT_FOUND/);
+    ).rejects.toThrow(/No match for memoryRef/);
   });
 
-  it('rejects unknown orgId with ORGANIZATION_NOT_FOUND', async () => {
+  it('rejects unknown org ref with a uniform NOT_FOUND', async () => {
     await expect(
       resolvers.Mutation.createMemorySubscription(
         null,
@@ -179,7 +182,7 @@ describe('createMemorySubscription', () => {
         { memoryId: publicMemory.id, orgId: 'no-such-org-urn', role: 'READER' },
         adminCtx(subscriberAdminUser.id),
       ),
-    ).rejects.toThrow(/ORGANIZATION_NOT_FOUND/);
+    ).rejects.toThrow(/No match for orgRef/);
   });
 });
 

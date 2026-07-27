@@ -4451,11 +4451,34 @@ export const typeDefs = `#graphql
     # orgId accepts the entity's ID or URN. userId is keyed by raw ID only —
     # User has no urn column.
     """Accepts the entity's ID or URN (orgId)."""
-    addOrgMember(orgId: ID!, userId: ID!, role: Role!): OrgMember!
+    addOrgMember(
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
+      orgRef: String
+      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
+      userRef: String
+      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      role: Role!
+    ): OrgMember!
     """Accepts the entity's ID or URN (orgId)."""
-    updateOrgMember(orgId: ID!, userId: ID!, role: Role!): OrgMember!
+    updateOrgMember(
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
+      orgRef: String
+      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
+      userRef: String
+      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      role: Role!
+    ): OrgMember!
     """Accepts the entity's ID or URN (orgId)."""
-    removeOrgMember(orgId: ID!, userId: ID!): Boolean!
+    removeOrgMember(
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
+      orgRef: String
+      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
+      userRef: String
+      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+    ): Boolean!
 
     # Memory management (org ADMIN)
     """
@@ -4706,7 +4729,15 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    createMemorySubscription(memoryId: ID!, orgId: ID!, role: Role!): MemorySubscription!
+    createMemorySubscription(
+      "#764 — the memory as an id or URN. Supply this OR memoryId."
+      memoryRef: String
+      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
+      orgRef: String
+      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
+      role: Role!
+    ): MemorySubscription!
 
     """
     Subscribe an organization to a PUBLIC Agent without creating an App.
@@ -4727,14 +4758,29 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateMemorySubscription(memoryId: ID!, orgId: ID!, role: Role!): MemorySubscription!
+    updateMemorySubscription(
+      "#764 — the memory as an id or URN. Supply this OR memoryId."
+      memoryRef: String
+      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
+      orgRef: String
+      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
+      role: Role!
+    ): MemorySubscription!
 
     """
     Delete a cross-org Memory subscription.
 
     Accepts the entity's ID or URN.
     """
-    deleteMemorySubscription(memoryId: ID!, orgId: ID!): Boolean!
+    deleteMemorySubscription(
+      "#764 — the memory as an id or URN. Supply this OR memoryId."
+      memoryRef: String
+      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
+      orgRef: String
+      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
+    ): Boolean!
 
     """
     Trigger an on-demand sync for one memory (org ADMIN or CONTRIBUTOR).
@@ -5293,7 +5339,15 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    ensureAppMember(appId: ID!, userId: ID!, role: String!): AppMember!
+    ensureAppMember(
+      "#764 — the App as an id / URN. Supply this OR appId."
+      appRef: String
+      appId: ID @deprecated(reason: "Use appRef (accepts id / URN).")
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
+      userRef: String
+      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      role: String!
+    ): AppMember!
 
     """
     Delete an AppMember row. Idempotent (no-op when the row doesn't exist).
@@ -5303,7 +5357,14 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    removeAppMember(appId: ID!, userId: ID!): Boolean!
+    removeAppMember(
+      "#764 — the App as an id / URN. Supply this OR appId."
+      appRef: String
+      appId: ID @deprecated(reason: "Use appRef (accepts id / URN).")
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
+      userRef: String
+      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+    ): Boolean!
 
     """
     023-app-shape US2 — user-level install. The currently-logged-in user
@@ -5473,8 +5534,12 @@ export const typeDefs = `#graphql
         existing sole owner to reader/writer.
     """
     addMemoryMember(
-      memoryId: ID!
-      userId: ID!
+      "#764 — the memory as an id or URN. Supply this OR memoryId."
+      memoryRef: String
+      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
+      userRef: String
+      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
       role: MemoryMemberRole!
     ): AddMemoryMemberPayload!
 
@@ -5498,8 +5563,12 @@ export const typeDefs = `#graphql
       - LastOwnerProtectedError (FR-038) — would demote the sole owner.
     """
     updateMemoryMemberRole(
-      memoryId: ID!
-      userId: ID!
+      "#764 — the memory as an id or URN. Supply this OR memoryId."
+      memoryRef: String
+      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
+      userRef: String
+      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
       role: MemoryMemberRole!
     ): UpdateMemoryMemberRolePayload!
 
@@ -5516,8 +5585,12 @@ export const typeDefs = `#graphql
     being removed (self-removal).
     """
     removeMemoryMember(
-      memoryId: ID!
-      userId: ID!
+      "#764 — the memory as an id or URN. Supply this OR memoryId."
+      memoryRef: String
+      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
+      userRef: String
+      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
     ): RemoveMemoryMemberPayload!
 
     """
@@ -5586,7 +5659,14 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN (agentId).
     """
-    revokeAgentSubscription(userId: ID!, agentId: ID!): AgentSubscription!
+    revokeAgentSubscription(
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
+      userRef: String
+      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      "#764 — the Agent as an id / URN. Supply this OR agentId."
+      agentRef: String
+      agentId: ID @deprecated(reason: "Use agentRef (accepts id / URN).")
+    ): AgentSubscription!
 
     # App Key callers only: vouch for a user and manage sessions.
     # Identity lifecycle

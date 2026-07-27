@@ -98,6 +98,9 @@ import {
   requireMemorySharePrincipal,
   isMemorySharePrincipal,
   memoryShareForbidden,
+  resolveUserRefArg,
+  resolveOrgRefArg,
+  resolveMemoryRefArg,
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
@@ -1387,13 +1390,25 @@ export const memoryMutations = {
 
     createMemorySubscription: async (
       _: unknown,
-      { memoryId, orgId, role }: { memoryId: string; orgId: string; role: string },
+      {
+        memoryRef,
+        memoryId,
+        orgRef,
+        orgId,
+        role,
+      }: {
+        memoryRef?: string | null;
+        memoryId?: string | null;
+        orgRef?: string | null;
+        orgId?: string | null;
+        role: string;
+      },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: memoryId and orgId may be IDs, bare URNs,
-      // or prefixed URNs.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // #764 (was 007-entity-id-or-urn): memoryRef/orgRef accept id / URN /
+      // (org) handle. memoryId/orgId are the deprecated aliases.
+      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
 
       // 035-visibility-enum-cleanup: only PUBLIC memories are cross-org
@@ -1417,11 +1432,23 @@ export const memoryMutations = {
 
     updateMemorySubscription: async (
       _: unknown,
-      { memoryId, orgId, role }: { memoryId: string; orgId: string; role: string },
+      {
+        memoryRef,
+        memoryId,
+        orgRef,
+        orgId,
+        role,
+      }: {
+        memoryRef?: string | null;
+        memoryId?: string | null;
+        orgRef?: string | null;
+        orgId?: string | null;
+        role: string;
+      },
       ctx: Context,
     ) => {
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
       return ctx.db.memorySubscription.update({
@@ -1433,11 +1460,21 @@ export const memoryMutations = {
 
     deleteMemorySubscription: async (
       _: unknown,
-      { memoryId, orgId }: { memoryId: string; orgId: string },
+      {
+        memoryRef,
+        memoryId,
+        orgRef,
+        orgId,
+      }: {
+        memoryRef?: string | null;
+        memoryId?: string | null;
+        orgRef?: string | null;
+        orgId?: string | null;
+      },
       ctx: Context,
     ) => {
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       // findFirst + deletedAt in both checks so a REVOKED membership no
       // longer authorizes subscription management (same rule as requireOrgRole).
@@ -1938,17 +1975,31 @@ export const memoryMutations = {
     addMemoryMember: async (
       _: unknown,
       {
+        memoryRef,
         memoryId,
+        userRef,
         userId,
         role,
-      }: { memoryId: string; userId: string; role: MemoryMemberRoleType },
+      }: {
+        memoryRef?: string | null;
+        memoryId?: string | null;
+        userRef?: string | null;
+        userId?: string | null;
+        role: MemoryMemberRoleType;
+      },
       ctx: Context,
     ) => {
-      await requireMemoryMemberOwner(ctx, memoryId);
+      // #764: memoryRef/userRef accept id/URN/handle/email. Resolve the memory
+      // + run the owner gate FIRST, then resolve the user — so an unauthorized
+      // caller gets FORBIDDEN and can't use NOT_FOUND to enumerate users
+      // (mirrors createMemoryShare).
+      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      await requireMemoryMemberOwner(ctx, resolvedMemoryId);
+      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       try {
         const memoryMember = await addMemoryMember(ctx.db, {
-          memoryId,
-          userId,
+          memoryId: resolvedMemoryId,
+          userId: resolvedUserId,
           role,
           actorId: ctx.userId!,
         });
@@ -1973,17 +2024,29 @@ export const memoryMutations = {
     updateMemoryMemberRole: async (
       _: unknown,
       {
+        memoryRef,
         memoryId,
+        userRef,
         userId,
         role,
-      }: { memoryId: string; userId: string; role: MemoryMemberRoleType },
+      }: {
+        memoryRef?: string | null;
+        memoryId?: string | null;
+        userRef?: string | null;
+        userId?: string | null;
+        role: MemoryMemberRoleType;
+      },
       ctx: Context,
     ) => {
-      await requireMemoryMemberOwner(ctx, memoryId);
+      // #764: resolve memory + owner-gate FIRST, then resolve the user (auth
+      // before revealing user existence — mirrors createMemoryShare).
+      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      await requireMemoryMemberOwner(ctx, resolvedMemoryId);
+      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       try {
         const memoryMember = await updateMemoryMemberRole(ctx.db, {
-          memoryId,
-          userId,
+          memoryId: resolvedMemoryId,
+          userId: resolvedUserId,
           role,
           actorId: ctx.userId!,
         });
@@ -2007,12 +2070,27 @@ export const memoryMutations = {
     // Enforces FR-038 last-owner protection.
     removeMemoryMember: async (
       _: unknown,
-      { memoryId, userId }: { memoryId: string; userId: string },
+      {
+        memoryRef,
+        memoryId,
+        userRef,
+        userId,
+      }: {
+        memoryRef?: string | null;
+        memoryId?: string | null;
+        userRef?: string | null;
+        userId?: string | null;
+      },
       ctx: Context,
     ) => {
-      await requireMemoryMemberOwnerOrSelf(ctx, memoryId, userId);
+      // #764: owner-OR-self gate needs the resolved user, so resolve both up
+      // front, then gate (matches the prior order — no new pre-auth surface
+      // beyond the ref lookups).
+      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      await requireMemoryMemberOwnerOrSelf(ctx, resolvedMemoryId, resolvedUserId);
       try {
-        return await removeMemoryMember(ctx.db, { memoryId, userId });
+        return await removeMemoryMember(ctx.db, { memoryId: resolvedMemoryId, userId: resolvedUserId });
       } catch (e: unknown) {
         if (e instanceof LastOwnerProtectedError) {
           throw new GraphQLError(e.message, {
