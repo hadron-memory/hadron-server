@@ -1214,8 +1214,16 @@ export const nodeQueries = {
         // (NodeNotFoundError) is reported in `unavailable` exactly like a
         // denied one — one bad ref never fails the batch. A malformed /
         // unqualified ref propagates (UrnNotQualifiedError).
+        //
+        // A PK-shaped ref IS its own id, so it skips the lookup entirely: the
+        // findMany below already filters `deletedAt` + access, which is where a
+        // missing PK became `unavailable` before this surface took URNs at all.
+        // That keeps the heavy PK callers (`spec lint --all`, `memory export` —
+        // 200 ids straight off a findNodes page) at exactly one query, and
+        // makes the added round trips proportional to the URNs actually passed.
         const resolved = await Promise.all(
           uniqueRefs.map(async (ref) => {
+            if (isId(ref)) return { ref, id: ref as string | null };
             try {
               const { id } = await resolveNodeRef(ctx.db, ref);
               return { ref, id: id as string | null };
