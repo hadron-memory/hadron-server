@@ -11,6 +11,7 @@ import {
   parseUrnInput,
   assertFullyQualifiedUrn,
   splitNodeUrn,
+  validateUrnType,
   normalizeUrnForLookup,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
@@ -1868,12 +1869,12 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_get_nodes',
-    "Batch read — return the full per-node projection (meta + edges + contentScope body, identical to hadron_get_node) for MANY nodes in one call. Two mutually-exclusive forms: (1) `urns` — an explicit list of fully-qualified node URNs, returned in input order; (2) `memoryUrn` + `locPrefix` — every readable node whose loc starts with the prefix in one memory, returned in loc order. Optional `contentScope` ('content' default | 'abstract' | 'all') applies to every node, so abstract-only triage is cheap. Per-node authorization: unreadable or non-existent refs are reported in a separate Unavailable list (denied and not-found are indistinguishable) and never fail the batch. Bounded by hard caps — exceeding the node-count cap is a loud error; exceeding the response-size cap returns a partial result flagged `truncated` (never a silent short read). Spec cor:api:040.",
+    "Batch read — return the full per-node projection (meta + edges + contentScope body, identical to hadron_get_node) for MANY nodes in one call. Two mutually-exclusive forms: (1) `refs` — an explicit list of node references, returned in input order; (2) `memoryUrn` + `locPrefix` — every readable node whose loc starts with the prefix in one memory, returned in loc order. Each `refs` entry is a node's primary key OR its fully-qualified URN, so a caller holding either form reads in ONE call. Optional `contentScope` ('content' default | 'abstract' | 'all') applies to every node, so abstract-only triage is cheap. Per-node authorization: unreadable or non-existent refs are reported in a separate Unavailable list (denied and not-found are indistinguishable) and never fail the batch. A ref whose SHAPE is wrong (relative/unqualified, or a URN of another entity kind) is a loud error instead — a caller mistake never hides among denials. Bounded by hard caps — exceeding the node-count cap is a loud error; exceeding the response-size cap returns a partial result flagged `truncated` (never a silent short read). Spec cor:api:040.",
     {
-      urns: z
+      refs: z
         .array(z.string())
         .optional()
-        .describe('Explicit-set form: fully-qualified node URNs (org::memory::loc). Returned in input order. Mutually exclusive with memoryUrn/locPrefix.'),
+        .describe('Explicit-set form: node references, each a primary key OR a fully-qualified node URN (org::memory::loc). Returned in input order. Mutually exclusive with memoryUrn/locPrefix.'),
       memoryUrn: z
         .string()
         .optional()
@@ -1887,7 +1888,7 @@ export function createMcpServerInstance(
         .optional()
         .describe("Per-node projection scope, as on hadron_get_node. Default 'content'."),
     },
-    async ({ urns, memoryUrn, locPrefix, contentScope }) => {
+    async ({ refs, memoryUrn, locPrefix, contentScope }) => {
       // Defensive contentScope validation — parity with hadron_get_node (covers
       // direct-handler callers that bypass the transport's zod parsing).
       if (
@@ -1900,14 +1901,14 @@ export function createMcpServerInstance(
       }
       const scope = contentScope ?? 'content';
 
-      const hasSet = Array.isArray(urns) && urns.length > 0;
+      const hasSet = Array.isArray(refs) && refs.length > 0;
       // locPrefix '' is a valid "whole memory" prefix — test for presence, not
       // truthiness, so an empty prefix isn't mistaken for the absent form.
       const hasPrefix = memoryUrn !== undefined && locPrefix !== undefined;
       // Exactly one form (FR-002: both capabilities exist; one tool, two modes).
       if (hasSet === hasPrefix) {
         return textResult(
-          'hadron_get_nodes: provide EITHER `urns` (an explicit set) OR `memoryUrn` + `locPrefix` (a subtree) — not both, not neither.',
+          'hadron_get_nodes: provide EITHER `refs` (an explicit set) OR `memoryUrn` + `locPrefix` (a subtree) — not both, not neither.',
         );
       }
 
@@ -1946,61 +1947,138 @@ export function createMcpServerInstance(
         // ── Explicit set (mixed-memory; per-node gate) ───────────────────────
         // Count cap up front — the caller knows the count, so fail loud before
         // any work (cor:api:040:02).
-        if (urns!.length > BATCH_READ_MAX_NODES) {
+        if (refs!.length > BATCH_READ_MAX_NODES) {
           return textResult(
-            `hadron_get_nodes: ${urns!.length} URNs exceeds the ${BATCH_READ_MAX_NODES}-node cap. Split into smaller batches; the batch read does not silently truncate.`,
+            `hadron_get_nodes: ${refs!.length} refs exceeds the ${BATCH_READ_MAX_NODES}-node cap. Split into smaller batches; the batch read does not silently truncate.`,
           );
         }
-        // Dedup the input set up front so a repeated URN isn't rendered (and
-        // billed via a UsageEvent) twice — the single read can't duplicate, so
-        // neither should the batch. First-occurrence order is preserved.
-        const uniqueUrns = [...new Set(urns!)];
-        // Parse + group by memory so each distinct memory is gated + fetched
-        // once (not N findFirsts). Unparseable refs go straight to unavailable —
-        // one bad ref never fails the batch.
-        type Ref = { rawUrn: string; memoryUrn: string; loc: string };
-        const refs: Ref[] = [];
-        for (const rawUrn of uniqueUrns) {
+        // Dedup the input strings up front so a repeated ref isn't rendered (and
+        // billed via a UsageEvent) twice. This only collapses byte-identical
+        // repeats; the load-bearing dedup is on the RESOLVED node below, since a
+        // PK and that node's URN are different strings naming one node.
+        // First-occurrence order is preserved.
+        const uniqueRefs = [...new Set(refs!)];
+
+        // A ref is a PK or a fully-qualified node URN (cor:api:140). Splitting by
+        // shape keeps the URN path's group-by-memory fetch — one gate + one query
+        // per distinct memory, not N lookups — while a PK needs no resolution at
+        // all: it IS the node id, and the gate below still decides readability.
+        //
+        // A ref whose SHAPE is wrong fails the whole call. Filing it under
+        // `unavailable` next to genuinely-denied nodes is what let this tool's
+        // missing PK capability sit unnoticed: the symptom was indistinguishable
+        // from a legitimate access outcome (#822, mirroring #813 on GraphQL).
+        type UrnRef = { raw: string; memoryUrn: string; loc: string };
+        const urnRefs: UrnRef[] = [];
+        const pkRefs: string[] = [];
+        for (const raw of uniqueRefs) {
+          if (isId(raw)) {
+            pkRefs.push(raw);
+            continue;
+          }
+          // A wrong-type URN (`hrn:mem:…`, `hrn:app:…`) is a coercion bug, not a
+          // miss — the same screen hadron_get_node and nodeBatch(refs:) apply.
+          const typeErr = validateUrnType(parseUrnInput(raw), 'node');
+          if (typeErr) {
+            return textResult(`hadron_get_nodes: ${typeErr} (ref "${raw}")`);
+          }
           try {
-            assertFullyQualifiedUrn(rawUrn, 'node');
-            const { memoryUrn: mu, loc } = splitNodeUrn(rawUrn);
-            refs.push({ rawUrn, memoryUrn: mu, loc });
+            assertFullyQualifiedUrn(raw, 'node');
+            const { memoryUrn: mu, loc } = splitNodeUrn(raw);
+            urnRefs.push({ raw, memoryUrn: mu, loc });
           } catch {
-            unavailable.push(rawUrn);
+            return textResult(
+              `hadron_get_nodes: "${raw}" is neither a node id nor a fully-qualified node URN (org::memory::loc). A relative or malformed ref is a caller error, not an access outcome, so it is reported here rather than in the Unavailable list.`,
+            );
           }
         }
-        const byMemory = new Map<string, Ref[]>();
-        for (const r of refs) {
+
+        // The per-node projection every fetch below must produce, identical to
+        // hadron_get_node's (cor:api:040:01) — kept in one place so the PK and
+        // URN paths cannot drift apart.
+        const projectionInclude = {
+          outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
+          incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
+          memory: { select: { isEncrypted: true } },
+        } as const;
+
+        const nodeByRef = new Map<string, ReadProjectionNode & { id: string }>();
+
+        // URN refs: group by memory so each distinct memory is gated + fetched
+        // once (not N findFirsts).
+        const byMemory = new Map<string, UrnRef[]>();
+        for (const r of urnRefs) {
           const arr = byMemory.get(r.memoryUrn);
           if (arr) arr.push(r);
           else byMemory.set(r.memoryUrn, [r]);
         }
-        const nodeByRawUrn = new Map<string, ReadProjectionNode & { id: string }>();
         for (const [mu, group] of byMemory) {
           const mem = await resolveMemoryByUrn(mu);
           if (!mem || !(await canReadMemory(db, auth, mem.id))) {
-            for (const r of group) unavailable.push(r.rawUrn);
+            for (const r of group) unavailable.push(r.raw);
             continue;
           }
           const rows = await db.node.findMany({
             where: { memoryId: mem.id, loc: { in: group.map((r) => r.loc) }, deletedAt: null },
-            include: {
-              outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
-              incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
-              memory: { select: { isEncrypted: true } },
-            },
+            include: projectionInclude,
           });
           const rowByLoc = new Map(rows.map((r) => [r.loc, r]));
           for (const r of group) {
             const row = rowByLoc.get(r.loc);
-            if (row) nodeByRawUrn.set(r.rawUrn, row as unknown as ReadProjectionNode & { id: string });
-            else unavailable.push(r.rawUrn);
+            if (row) nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
+            else unavailable.push(r.raw);
           }
         }
-        // Reassemble in input order (cor:api:040:01).
-        for (const rawUrn of uniqueUrns) {
-          const n = nodeByRawUrn.get(rawUrn);
-          if (n) ordered.push(n);
+
+        // PK refs: gate BEFORE fetching the projection, mirroring the URN path
+        // above (which gates a memory, then reads only inside it). A PK carries
+        // no memory, so that takes two queries: a cheap id+memoryId probe to
+        // learn each row's memory, then the full projection for the readable
+        // subset only. Fetching everything first and filtering after would pull
+        // denied nodes' content and edges into memory just to discard them —
+        // wasted work on a 200-ref batch, and content the caller was refused
+        // has no reason to be materialized at all (PR #824 review, Copilot).
+        //
+        // A PK naming an unreadable node and a PK naming nothing both land in
+        // `unavailable`, indistinguishably — the same answer the URN path gives
+        // (cor:api:040:03).
+        if (pkRefs.length > 0) {
+          const probes = await db.node.findMany({
+            where: { id: { in: pkRefs }, deletedAt: null },
+            select: { id: true, memoryId: true },
+          });
+          const readable = new Map<string, boolean>();
+          for (const memId of new Set(probes.map((p) => p.memoryId))) {
+            readable.set(memId, await canReadMemory(db, auth, memId));
+          }
+          const allowedIds = probes.filter((p) => readable.get(p.memoryId)).map((p) => p.id);
+          const rowById = new Map(
+            (allowedIds.length > 0
+              ? await db.node.findMany({
+                  where: { id: { in: allowedIds } },
+                  include: projectionInclude,
+                })
+              : []
+            ).map((r) => [r.id, r]),
+          );
+          for (const pk of pkRefs) {
+            const row = rowById.get(pk);
+            if (row) {
+              nodeByRef.set(pk, row as unknown as ReadProjectionNode & { id: string });
+            } else {
+              unavailable.push(pk);
+            }
+          }
+        }
+
+        // Reassemble in input order (cor:api:040:01), deduping on the RESOLVED
+        // node so a PK and that node's URN in one call render — and bill — once.
+        const seenIds = new Set<string>();
+        for (const raw of uniqueRefs) {
+          const n = nodeByRef.get(raw);
+          if (!n || seenIds.has(n.id)) continue;
+          seenIds.add(n.id);
+          ordered.push(n);
         }
       }
 
