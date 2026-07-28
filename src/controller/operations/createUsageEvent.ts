@@ -13,7 +13,9 @@ export const createUsageEvent = async (
 
   try {
     const node = event.nodeLoc
+      // loc-scope-ok: #825 — unscoped + unauthorized attribution, tracked; fix takes a node ref
       ? await db.node.findFirst({ where: { loc: event.nodeLoc, isLink: false } })
+        // loc-scope-ok: #825 — same tracked call site (fallback branch)
         ?? await db.node.findFirst({ where: { loc: event.nodeLoc } })
       : null;
 

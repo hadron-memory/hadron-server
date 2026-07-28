@@ -480,6 +480,7 @@ export const chatMutations = {
 
       // Find the chat node
       const chatNode = await ctx.db.node.findFirst({
+        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
         where: { loc: chatId, deletedAt: null },
       });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
@@ -790,6 +791,7 @@ export const chatMutations = {
     ) => {
       requireRole(ctx, 'READER');
 
+      // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
       const chatNode = await ctx.db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
 
@@ -1094,6 +1096,7 @@ export const chatMutations = {
     ) => {
       requireRole(ctx, 'READER');
 
+      // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
       const chatNode = await ctx.db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
 
@@ -1126,6 +1129,7 @@ export const chatMutations = {
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
       const chatNode = await ctx.db.node.findFirst({
+        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
         where: { loc: chatId, deletedAt: null },
       });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
@@ -1163,6 +1167,7 @@ export const chatMutations = {
     deleteChat: async (_: unknown, { chatId }: { chatId: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
       const chatNode = await ctx.db.node.findFirst({
+        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
         where: { loc: chatId, deletedAt: null },
       });
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);

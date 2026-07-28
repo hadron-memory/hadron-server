@@ -392,6 +392,7 @@ export const nodeQueries = {
       // Form 3c: bare loc across EVERY readable memory. #391: exclude
       // soft-deleted rows so node(ref:) matches resolveUrn.
       const candidates = await ctx.db.node.findMany({
+        // loc-scope-ok: deliberately cross-memory — scoped to the caller's readable set by ...access, then fails loud with AMBIGUOUS_NODE_LOC on >1 (#335)
         where: { loc: value, ...access, deletedAt: null },
         include,
       });

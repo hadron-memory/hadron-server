@@ -143,6 +143,7 @@ export const chatQueries = {
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
       const chatNode = await ctx.db.node.findFirst({
+        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
         where: { loc: chatId, deletedAt: null },
         select: { id: true, memoryId: true, createdBy: true },
       });

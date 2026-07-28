@@ -1,0 +1,41 @@
+name: No Unscoped Loc Lookups
+
+# `Node.loc` is unique WITHIN a memory (`@@unique([loc, memoryId])`), never
+# globally, so a lookup keyed on `loc` alone silently resolves to an arbitrary
+# tenant's row. Short conventional locs (`preflight`, `instructions`,
+# `start-here`) exist in several memories at once, and that is how the
+# unauthenticated `POST /usage` path came to attribute UsageEvents to a
+# stranger's memory (#825).
+#
+# The GraphQL surface already handles this — `node(ref:)` takes a self-scoping
+# PK or URN and its bare-loc path fails loud with AMBIGUOUS_NODE_LOC (#335).
+# This gate covers code that bypasses that surface and queries Prisma directly.
+#
+# Deliberately cross-memory (or tracked debt)? Add a `loc-scope-ok: <reason>`
+# comment on the offending line or the one above it.
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'scripts/check-loc-scope.mjs'
+      - '.github/workflows/no-unscoped-loc.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/check-loc-scope.mjs'
+      - '.github/workflows/no-unscoped-loc.yml'
+
+jobs:
+  no-unscoped-loc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The checker is dependency-free (node:fs + node:path only), so it runs
+      # without installing the project — same posture as the SDL-parse gate.
+      - name: Check for unscoped loc lookups
+        run: node scripts/check-loc-scope.mjs
