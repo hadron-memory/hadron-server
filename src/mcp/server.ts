@@ -92,6 +92,7 @@ import {
   InvalidContentScopeError,
 } from '../lib/entityRef/errors.js';
 import { isId } from '../lib/entityRef/shape.js';
+import { chatLocFilter, exactlyOneChatNode } from '../lib/chatLoc.js';
 import { HADRON_SERVER_VERSION, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
@@ -4906,8 +4907,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const appScopeError = requireAppScope();
       if (appScopeError) return appScopeError;
       try {
-        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
-        const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+        // #829: narrow to chats this caller is entitled to BEFORE picking one.
+        // `loc` is unique per memory, so an attacker who learns a chat id could
+        // plant a node at that loc; filtering by entitlement first means it can
+        // neither be picked nor block the read. The site's own gate still runs.
+        const chatNode = exactlyOneChatNode(
+          await db.node.findMany({
+            where: await chatLocFilter(db, chatId, auth),
+            take: 2,
+          }),
+          chatId,
+        );
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
         const chatData = (chatNode.data as Record<string, unknown>) ?? {};
         return textResult(JSON.stringify({
@@ -4937,8 +4947,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const appScopeError = requireAppScope();
       if (appScopeError) return appScopeError;
       try {
-        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
-        const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+        // #829: narrow to chats this caller is entitled to BEFORE picking one.
+        // `loc` is unique per memory, so an attacker who learns a chat id could
+        // plant a node at that loc; filtering by entitlement first means it can
+        // neither be picked nor block the read. The site's own gate still runs.
+        const chatNode = exactlyOneChatNode(
+          await db.node.findMany({
+            where: await chatLocFilter(db, chatId, auth),
+            take: 2,
+          }),
+          chatId,
+        );
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
         const chatData = (chatNode.data as Record<string, unknown>) ?? {};
         const stack = (chatData.goalStack as Array<Record<string, unknown>>) ?? [];
@@ -4977,8 +4996,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const appScopeError = requireAppScope();
       if (appScopeError) return appScopeError;
       try {
-        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
-        const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+        // #829: narrow to chats this caller is entitled to BEFORE picking one.
+        // `loc` is unique per memory, so an attacker who learns a chat id could
+        // plant a node at that loc; filtering by entitlement first means it can
+        // neither be picked nor block the read. The site's own gate still runs.
+        const chatNode = exactlyOneChatNode(
+          await db.node.findMany({
+            where: await chatLocFilter(db, chatId, auth),
+            take: 2,
+          }),
+          chatId,
+        );
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
         const chatData = (chatNode.data as Record<string, unknown>) ?? {};
         const stack = (chatData.goalStack as Array<Record<string, unknown>>) ?? [];
@@ -5254,8 +5282,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
         if (followUpIdx >= followUps.length) {
           // All follow-ups done — generate the test report
-          // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
-          const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+          // #829: narrow to chats this caller is entitled to BEFORE picking one.
+          // `loc` is unique per memory, so an attacker who learns a chat id could
+          // plant a node at that loc; filtering by entitlement first means it can
+          // neither be picked nor block the read. The site's own gate still runs.
+          const chatNode = exactlyOneChatNode(
+            await db.node.findMany({
+              where: await chatLocFilter(db, chatId, auth),
+              take: 2,
+            }),
+            chatId,
+          );
           const chatData = (chatNode?.data as Record<string, unknown>) ?? {};
           const expected = (persona.expectedConversations as string[]) ?? [];
           const routeHistory = (chatData.routeHistory as Array<Record<string, unknown>>) ?? [];

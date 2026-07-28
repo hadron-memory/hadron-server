@@ -28,6 +28,7 @@ import {
   chatScopeAccessFilter,
   ChatScopeError,
 } from './chat-scope.js';
+import { chatLocFilter, exactlyOneChatNode } from '../../../lib/chatLoc.js';
 import {
   type Context,
   type SnapshotNode,
@@ -479,10 +480,17 @@ export const chatMutations = {
       requireRole(ctx, 'READER');
 
       // Find the chat node
-      const chatNode = await ctx.db.node.findFirst({
-        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
-        where: { loc: chatId, deletedAt: null },
-      });
+      // #829: narrow to chats this caller is entitled to BEFORE picking one.
+      // `loc` is unique per memory, so an attacker who learns a chat id could
+      // plant a node at that loc; filtering by entitlement first means it can
+      // neither be picked nor block the read. The site's own gate still runs.
+      const chatNode = exactlyOneChatNode(
+        await ctx.db.node.findMany({
+          where: await chatLocFilter(ctx.db, chatId, ctx),
+          take: 2,
+        }),
+        chatId,
+      );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
 
       // Decrypt the chat node's metadata (it holds conversationName, stageName,
@@ -791,8 +799,17 @@ export const chatMutations = {
     ) => {
       requireRole(ctx, 'READER');
 
-      // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
-      const chatNode = await ctx.db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+      // #829: narrow to chats this caller is entitled to BEFORE picking one.
+      // `loc` is unique per memory, so an attacker who learns a chat id could
+      // plant a node at that loc; filtering by entitlement first means it can
+      // neither be picked nor block the read. The site's own gate still runs.
+      const chatNode = exactlyOneChatNode(
+        await ctx.db.node.findMany({
+          where: await chatLocFilter(ctx.db, chatId, ctx),
+          take: 2,
+        }),
+        chatId,
+      );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
 
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
@@ -1096,8 +1113,17 @@ export const chatMutations = {
     ) => {
       requireRole(ctx, 'READER');
 
-      // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
-      const chatNode = await ctx.db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
+      // #829: narrow to chats this caller is entitled to BEFORE picking one.
+      // `loc` is unique per memory, so an attacker who learns a chat id could
+      // plant a node at that loc; filtering by entitlement first means it can
+      // neither be picked nor block the read. The site's own gate still runs.
+      const chatNode = exactlyOneChatNode(
+        await ctx.db.node.findMany({
+          where: await chatLocFilter(ctx.db, chatId, ctx),
+          take: 2,
+        }),
+        chatId,
+      );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
 
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
@@ -1128,10 +1154,17 @@ export const chatMutations = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
-      const chatNode = await ctx.db.node.findFirst({
-        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
-        where: { loc: chatId, deletedAt: null },
-      });
+      // #829: narrow to chats this caller is entitled to BEFORE picking one.
+      // `loc` is unique per memory, so an attacker who learns a chat id could
+      // plant a node at that loc; filtering by entitlement first means it can
+      // neither be picked nor block the read. The site's own gate still runs.
+      const chatNode = exactlyOneChatNode(
+        await ctx.db.node.findMany({
+          where: await chatLocFilter(ctx.db, chatId, ctx),
+          take: 2,
+        }),
+        chatId,
+      );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
       // Spec 017 — write-ownership is author-only regardless of scope
       // (per design-discussion D7). A non-author AppMember of a shared
@@ -1166,10 +1199,17 @@ export const chatMutations = {
 
     deleteChat: async (_: unknown, { chatId }: { chatId: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
-      const chatNode = await ctx.db.node.findFirst({
-        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
-        where: { loc: chatId, deletedAt: null },
-      });
+      // #829: narrow to chats this caller is entitled to BEFORE picking one.
+      // `loc` is unique per memory, so an attacker who learns a chat id could
+      // plant a node at that loc; filtering by entitlement first means it can
+      // neither be picked nor block the read. The site's own gate still runs.
+      const chatNode = exactlyOneChatNode(
+        await ctx.db.node.findMany({
+          where: await chatLocFilter(ctx.db, chatId, ctx),
+          take: 2,
+        }),
+        chatId,
+      );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
       // Spec 017 — author-only deletion (D7). Legacy fallback to
       // memory owner for pre-feature chats that lack chat-root createdBy.

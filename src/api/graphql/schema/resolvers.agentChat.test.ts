@@ -591,9 +591,15 @@ describe('chatHistory', () => {
       { agentId: agent.id },
       userCtx(adminUser.id),
     );
+    // #829: a caller with NO entitlement to this chat now gets not-found
+    // rather than Forbidden — the chat-loc lookup filters to the caller's
+    // entitled set before selecting, so an unentitled node is invisible, not
+    // merely refused. That also removes an existence oracle for chat ids. A
+    // caller who IS entitled but not authorized (e.g. an AppMember who did not
+    // author the chat) still gets Forbidden — see below.
     await expect(
       resolvers.Query.chatHistory({}, { chatId: start.chatId }, userCtx(otherUser.id)),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow(/not found/i);
   });
 
   // Regression: when the agent has no matching App in the caller's orgs,
@@ -687,9 +693,15 @@ describe('chatHistory', () => {
     expect(history[0].content).toBe('hi');
 
     // Non-owner still cannot.
+    // #829: a caller with NO entitlement to this chat now gets not-found
+    // rather than Forbidden — the chat-loc lookup filters to the caller's
+    // entitled set before selecting, so an unentitled node is invisible, not
+    // merely refused. That also removes an existence oracle for chat ids. A
+    // caller who IS entitled but not authorized (e.g. an AppMember who did not
+    // author the chat) still gets Forbidden — see below.
     await expect(
       resolvers.Query.chatHistory({}, { chatId: start.chatId }, userCtx(otherUser.id)),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow(/not found/i);
   });
 
   // Regression for Constitution Invariant #14: role detection must not
@@ -774,13 +786,19 @@ describe('chat ownership mutations', () => {
       { agentId: agent.id },
       userCtx(adminUser.id),
     );
+    // #829: a caller with NO entitlement to this chat now gets not-found
+    // rather than Forbidden — the chat-loc lookup filters to the caller's
+    // entitled set before selecting, so an unentitled node is invisible, not
+    // merely refused. That also removes an existence oracle for chat ids. A
+    // caller who IS entitled but not authorized (e.g. an AppMember who did not
+    // author the chat) still gets Forbidden — see below.
     await expect(
       resolvers.Mutation.updateChatTitle(
         {},
         { chatId: start.chatId, title: 'hijacked' },
         userCtx(otherUser.id),
       ),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow(/not found/i);
   });
 
   it('deleteChat soft-deletes the chat and its messages', async () => {
@@ -823,9 +841,15 @@ describe('chat ownership mutations', () => {
       { agentId: agent.id },
       userCtx(adminUser.id),
     );
+    // #829: a caller with NO entitlement to this chat now gets not-found
+    // rather than Forbidden — the chat-loc lookup filters to the caller's
+    // entitled set before selecting, so an unentitled node is invisible, not
+    // merely refused. That also removes an existence oracle for chat ids. A
+    // caller who IS entitled but not authorized (e.g. an AppMember who did not
+    // author the chat) still gets Forbidden — see below.
     await expect(
       resolvers.Mutation.deleteChat({}, { chatId: start.chatId }, userCtx(otherUser.id)),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow(/not found/i);
   });
 });
 
@@ -972,11 +996,17 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await resolvers.Mutation.sendChatMessage(
       {}, { chatId: shared.chatId, userMessage: 'secret family chat' }, userCtx(adminUser.id),
     );
+    // #829: a caller with NO entitlement to this chat now gets not-found
+    // rather than Forbidden — the chat-loc lookup filters to the caller's
+    // entitled set before selecting, so an unentitled node is invisible, not
+    // merely refused. That also removes an existence oracle for chat ids. A
+    // caller who IS entitled but not authorized (e.g. an AppMember who did not
+    // author the chat) still gets Forbidden — see below.
     await expect(
       resolvers.Query.chatHistory(
         {}, { chatId: shared.chatId }, userCtx(otherUser.id),
       ),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow(/not found/i);
   });
 
   it("deleteChat: only the chat author can delete a shared chat, not any AppMember", async () => {
