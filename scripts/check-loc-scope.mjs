@@ -172,15 +172,24 @@ const WHERE = /\bwhere:\s*\{/g;
  * Looks on that line, then walks UP through the contiguous comment block
  * directly above it. Requiring the marker on exactly one line was too strict:
  * an exemption is supposed to carry a real reason, and real reasons wrap onto a
- * second line — which silently voided the exemption. Walking the comment block
- * stops at the first non-comment line, so it never reaches past adjacent code.
+ * second line — which silently voided the exemption.
+ *
+ * Comment-ness is decided by the BLANKED source, not by a `//` / `*` prefix. A
+ * prefix test would call a line-broken multiplication (`x = a`, then `  * b`) a
+ * comment and let a stale marker reach past real code — weakening the gate by
+ * formatting alone (PR #827 review, Copilot). A line that is whitespace-only
+ * after blanking, but not empty in the original, is exactly a pure comment
+ * line; the marker itself is matched against the RAW text, since blanking
+ * erased it.
  */
-function isExempt(lines, lineNo) {
-  if ((lines[lineNo - 1] ?? '').includes(MARKER)) return true;
+function isExempt(rawLines, blankLines, lineNo) {
+  if ((rawLines[lineNo - 1] ?? '').includes(MARKER)) return true;
   for (let i = lineNo - 2; i >= 0; i--) {
-    const t = (lines[i] ?? '').trim();
-    if (!(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'))) break;
-    if (t.includes(MARKER)) return true;
+    const raw = rawLines[i] ?? '';
+    const blanked = blankLines[i] ?? '';
+    const isPureComment = raw.trim() !== '' && blanked.trim() === '';
+    if (!isPureComment) break;
+    if (raw.includes(MARKER)) return true;
   }
   return false;
 }
@@ -196,6 +205,7 @@ export function scanSource(raw) {
   const found = [];
   const src = blankNonCode(raw);
   const lines = raw.split('\n');
+  const blankLines = src.split('\n');
   for (const m of src.matchAll(WHERE)) {
     const openIdx = src.indexOf('{', m.index);
     const body = readObject(src, openIdx);
@@ -211,7 +221,7 @@ export function scanSource(raw) {
     if (!keys.includes('loc') || /\bmemoryId\b/.test(body)) continue;
 
     const lineNo = src.slice(0, m.index).split('\n').length;
-    if (isExempt(lines, lineNo)) continue;
+    if (isExempt(lines, blankLines, lineNo)) continue;
 
     found.push({ line: lineNo, text: (lines[lineNo - 1] ?? '').trim() });
   }

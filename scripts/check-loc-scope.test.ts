@@ -95,4 +95,29 @@ describe('check-loc-scope — the escape hatch', () => {
   it('stops at the first non-comment line — a marker cannot reach past code', () => {
     expect(scan(`// loc-scope-ok: stale\nconst x = 1;\nk = db.node.findFirst({ where: { loc: v } });`)).toEqual([3]);
   });
+
+  it('a code line STARTING WITH `*` still stops the walk', () => {
+    // A line-broken multiplication looks like a block-comment continuation. A
+    // prefix test would treat it as one and let a stale marker reach past real
+    // code — the gate weakened by formatting alone (PR #827 review, Copilot).
+    // Comment-ness is decided by the blanked source instead, so this is code.
+    const src = [
+      '// loc-scope-ok: stale — must NOT apply below',
+      'const y = a',
+      '  * b;',
+      'k = db.node.findFirst({ where: { loc: v } });',
+    ].join('\n');
+    expect(scan(src)).toEqual([4]);
+  });
+
+  it('a genuine block-comment continuation line DOES carry the marker', () => {
+    const src = [
+      '/**',
+      ' * loc-scope-ok: deliberate, and the reason wraps',
+      ' * onto a second line like a real justification.',
+      ' */',
+      'k = db.node.findFirst({ where: { loc: v } });',
+    ].join('\n');
+    expect(scan(src)).toEqual([]);
+  });
 });
