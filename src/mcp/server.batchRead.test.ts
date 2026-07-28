@@ -189,10 +189,21 @@ describe('hadron_get_nodes — explicit set', () => {
 
 // ───── refs are PK-or-URN (cor:api:140, #822) ─────────────────────────────
 
-/** The node's primary key — what a caller holds after a findNodes / list read. */
-async function pkOf(loc: string): Promise<string> {
-  const n = await db.node.findFirst({ where: { loc }, select: { id: true } });
-  if (!n) throw new Error(`no node at loc ${loc}`);
+/**
+ * The node's primary key — what a caller holds after a findNodes / list read.
+ *
+ * Scoped to a memory on purpose. `loc` is unique per MEMORY, not globally, and
+ * this file creates two (`batchmem` + `pmem`), so an unscoped `findFirst` would
+ * silently return whichever row came first the day a loc got reused — the exact
+ * ambiguity #825 is about, and a lookup that lies to a test is worse than one
+ * that fails (PR #824 review, Copilot).
+ */
+async function pkOf(loc: string, memoryId: string = fx.memory.id): Promise<string> {
+  const n = await db.node.findUnique({
+    where: { loc_memoryId: { loc, memoryId } },
+    select: { id: true },
+  });
+  if (!n) throw new Error(`no node at loc "${loc}" in memory ${memoryId}`);
   return n.id;
 }
 
@@ -253,7 +264,7 @@ describe('hadron_get_nodes — refs are PK-or-URN', () => {
       name: 'PkSecret',
       content: 'SECRET pk content',
     });
-    const deniedPk = await pkOf('pksecret');
+    const deniedPk = await pkOf('pksecret', fx.pmem.id);
     const missingPk = generateId();
 
     const out = await batchRead({ refs: [deniedPk, missingPk] });

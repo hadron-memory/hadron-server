@@ -2030,22 +2030,40 @@ export function createMcpServerInstance(
           }
         }
 
-        // PK refs: one fetch, then gate each distinct memory once. A PK naming
-        // an unreadable node and a PK naming nothing both land in `unavailable`,
-        // indistinguishably — the same answer the URN path gives (cor:api:040:03).
+        // PK refs: gate BEFORE fetching the projection, mirroring the URN path
+        // above (which gates a memory, then reads only inside it). A PK carries
+        // no memory, so that takes two queries: a cheap id+memoryId probe to
+        // learn each row's memory, then the full projection for the readable
+        // subset only. Fetching everything first and filtering after would pull
+        // denied nodes' content and edges into memory just to discard them —
+        // wasted work on a 200-ref batch, and content the caller was refused
+        // has no reason to be materialized at all (PR #824 review, Copilot).
+        //
+        // A PK naming an unreadable node and a PK naming nothing both land in
+        // `unavailable`, indistinguishably — the same answer the URN path gives
+        // (cor:api:040:03).
         if (pkRefs.length > 0) {
-          const rows = await db.node.findMany({
+          const probes = await db.node.findMany({
             where: { id: { in: pkRefs }, deletedAt: null },
-            include: projectionInclude,
+            select: { id: true, memoryId: true },
           });
-          const rowById = new Map(rows.map((r) => [r.id, r]));
           const readable = new Map<string, boolean>();
-          for (const memId of new Set(rows.map((r) => r.memoryId))) {
+          for (const memId of new Set(probes.map((p) => p.memoryId))) {
             readable.set(memId, await canReadMemory(db, auth, memId));
           }
+          const allowedIds = probes.filter((p) => readable.get(p.memoryId)).map((p) => p.id);
+          const rowById = new Map(
+            (allowedIds.length > 0
+              ? await db.node.findMany({
+                  where: { id: { in: allowedIds } },
+                  include: projectionInclude,
+                })
+              : []
+            ).map((r) => [r.id, r]),
+          );
           for (const pk of pkRefs) {
             const row = rowById.get(pk);
-            if (row && readable.get(row.memoryId)) {
+            if (row) {
               nodeByRef.set(pk, row as unknown as ReadProjectionNode & { id: string });
             } else {
               unavailable.push(pk);
