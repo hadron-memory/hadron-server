@@ -4,7 +4,7 @@ import {
   getMemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
-import { chatLocFilter, exactlyOneChatNode } from '../../../lib/chatLoc.js';
+import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import {
   type Context,
   deriveChatTitle,
@@ -147,10 +147,12 @@ export const chatQueries = {
       // `loc` is unique per memory, so an attacker who learns a chat id could
       // plant a node at that loc; filtering by entitlement first means it can
       // neither be picked nor block the read. The site's own gate still runs.
-      const chatNode = exactlyOneChatNode(
+      const chatNode = pickChatNode(
         await ctx.db.node.findMany({
           where: await chatLocFilter(ctx.db, chatId, ctx),
           select: { id: true, memoryId: true, createdBy: true },
+          // Oldest wins — a planted duplicate is always newer (#829).
+          orderBy: { createdAt: 'asc' as const },
           take: 2,
         }),
         chatId,

@@ -4,7 +4,7 @@
  * A chat is addressed by its `loc` (the "chatId"). `Node.loc` is unique per
  * MEMORY, not globally (`@@unique([loc, memoryId])`), so a loc can name more
  * than one node — and any tenant can create a node at any loc in a memory they
- * can write. Two earlier attempts at this both failed, in opposite directions:
+ * can write. Three attempts, and the two failure modes worth remembering:
  *
  * 1. **Scoping with the shared read gate** (`memoryAccessFilter`) breaks shared
  *    app chats. `getAccessibleMemoryIds` covers `class IN (knowledge, group)`
@@ -12,29 +12,37 @@
  *    AppMember *elsewhere* — while the spec-017 chat gate grants app-class
  *    chats to any AppMember. The shared gate is NARROWER than the chat gate.
  *
- * 2. **Refusing to guess** — fetch two, throw if two come back — is a
- *    cross-tenant denial of service. Ambiguity was detected BEFORE the access
- *    rules, so an attacker who learns a chat id (every participant of a shared
- *    chat has one) could plant a node at that loc in their own memory and
- *    permanently break the rightful caller's chat. `findFirst` is only
- *    *intermittently* wrong under that attack; throwing makes it total.
+ * 2. **Treating a collision as an error** is a denial of service, and narrowing
+ *    who can trigger it only shrinks the blast radius. Planting a node at a
+ *    known chat loc made the rightful caller's read throw — first from any
+ *    tenant (PR #828 review), then, once entitlement filtering landed, from any
+ *    CO-MEMBER of one of the caller's Apps, who can write the loc into a second
+ *    app-class memory the caller also belongs to (PR #830 review). Any rule
+ *    that lets a stranger's row decide whether YOUR read succeeds is the bug.
  *
- * The rule that survives both: **resolve the collision INSIDE the caller's
- * authorized set, never before it.** A planted node then fails the caller's
- * entitlement and drops out, so it can neither be picked nor block the read.
+ * So this does two independent things:
  *
- * This filter is deliberately the UNION of every chat surface's gate — author,
- * memory creator, AppMember of an app-class memory, or platform admin. Being a
- * superset, it can only ever remove rows that no call site would have accepted,
- * so it narrows the candidates without narrowing access. Each site still runs
- * its own (stricter) gate on the result, unchanged.
+ * - **`chatLocFilter` bounds what can be READ.** It is the UNION of every chat
+ *   surface's gate — author, memory creator, AppMember of an app-class memory,
+ *   platform admin. Being a superset it can only remove rows no call site would
+ *   have accepted, so it narrows candidates without narrowing access, and each
+ *   site's own (stricter) gate still runs on the result.
  *
- * Applying it in the DB rather than in memory also means `take: 2` is safe: the
- * attacker's rows never come back, so they cannot crowd the caller's own row
- * out of a capped fetch.
+ * - **`pickChatNode` makes the choice DETERMINISTIC and unforgeable**, instead
+ *   of erroring. Callers order by `createdAt ASC` and the oldest wins. A plant
+ *   is always NEWER than the chat it imitates: the attacker must learn the chat
+ *   id before they can copy it, which requires the chat to already exist, and
+ *   `createdAt` is `@default(now())` — server-set, not caller-supplied. Locs
+ *   carry a timestamp plus 8 random hex, so pre-creating a future chat's loc is
+ *   not feasible either. The original therefore always wins, and a planted row
+ *   can neither be selected nor prevent selection.
+ *
+ * Together: a stranger's row can't be read (filter) and can't interfere
+ * (ordering). Availability beats loudness here — an error would have handed an
+ * attacker exactly the outcome they wanted.
  */
 
-import type { PrismaClient } from '../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 
 /** The fields of a GraphQL `Context` / MCP `AuthContext` this needs. */
 export interface ChatLocPrincipal {
@@ -43,42 +51,18 @@ export interface ChatLocPrincipal {
 }
 
 /**
- * A chat loc matched more than one node THE CALLER IS ENTITLED TO.
- *
- * Unreachable in practice: a chat loc is `chats:<ts>-<8 hex>-<sanitized name>`,
- * and an attacker's planted node is filtered out before this can fire. It
- * exists so that if the uniqueness assumption ever breaks for real, it breaks
- * loudly instead of silently reading the wrong conversation.
- */
-export class AmbiguousChatLocError extends Error {
-  constructor(public readonly chatId: string, public readonly count: number) {
-    super(
-      `Chat "${chatId}" matches at least ${count} chat nodes you can access. ` +
-        `Refusing to guess which one you meant — chat locs are expected to be unique.`,
-    );
-    this.name = 'AmbiguousChatLocError';
-  }
-}
-
-/**
  * Build the `where` for a chat-loc lookup, narrowed to nodes this principal
  * could plausibly be entitled to.
  *
- * Pass the result straight to `findMany` with whatever `select` the call site
- * needs and `take: 2`, then hand the rows to `exactlyOneChatNode`.
- *
- * A platform admin gets no entitlement narrowing (they can read across
- * tenants), so a collision stays visible to them as an ambiguity error rather
- * than an arbitrary pick — the right answer for an operator, who can
- * disambiguate with the node's primary key.
+ * Pair it with `orderBy: { createdAt: 'asc' }`, `take: 2`, and `pickChatNode`.
  */
 export async function chatLocFilter(
   db: Pick<PrismaClient, 'appMember'>,
   chatId: string,
   principal: ChatLocPrincipal,
   opts: { includeDeleted?: boolean } = {},
-): Promise<Record<string, unknown>> {
-  const base = {
+): Promise<Prisma.NodeWhereInput> {
+  const base: Prisma.NodeWhereInput = {
     loc: chatId,
     ...(opts.includeDeleted ? {} : { deletedAt: null }),
   };
@@ -110,20 +94,30 @@ export async function chatLocFilter(
       { memory: { createdBy: userId } },
       // A shared app chat in an App the caller belongs to.
       ...(appIds.length > 0
-        ? [{ memory: { class: 'app' as const, appId: { in: appIds } } }]
+        ? [{ memory: { class: 'app', appId: { in: appIds } } } as Prisma.NodeWhereInput]
         : []),
     ],
   };
 }
 
 /**
- * Pick the single chat node the caller is entitled to, or refuse.
+ * Pick the chat node from an entitled, `createdAt ASC`-ordered candidate list.
  *
- * Returns null when nothing matched, so each call site keeps its own not-found
- * message. Throws only when the caller can legitimately reach two chats at the
- * same loc — which the filter above makes unreachable for an attacker.
+ * The OLDEST wins — see the header for why that is unforgeable. Returns null
+ * when nothing matched, so each call site keeps its own not-found message.
+ *
+ * Deliberately does NOT throw on multiple rows. An error here would let anyone
+ * who can write one node decide whether someone else's chat is readable; that
+ * was the #828 and #830 review findings, in two different disguises. A
+ * collision is still worth knowing about, so it is logged and moved past.
  */
-export function exactlyOneChatNode<T>(rows: T[], chatId: string): T | null {
-  if (rows.length > 1) throw new AmbiguousChatLocError(chatId, rows.length);
+export function pickChatNode<T extends { id: string }>(rows: T[], chatId: string): T | null {
+  if (rows.length > 1) {
+    console.warn(
+      `[chatLoc] loc "${chatId}" matches ${rows.length}+ nodes this caller may access; ` +
+        `taking the oldest (${rows[0].id}). Chat locs are expected to be unique — ` +
+        `if this is not a planted duplicate, something upstream is minting colliding locs.`,
+    );
+  }
   return rows[0] ?? null;
 }

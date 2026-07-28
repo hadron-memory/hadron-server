@@ -92,7 +92,7 @@ import {
   InvalidContentScopeError,
 } from '../lib/entityRef/errors.js';
 import { isId } from '../lib/entityRef/shape.js';
-import { chatLocFilter, exactlyOneChatNode } from '../lib/chatLoc.js';
+import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
 import { HADRON_SERVER_VERSION, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
@@ -4911,9 +4911,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // `loc` is unique per memory, so an attacker who learns a chat id could
         // plant a node at that loc; filtering by entitlement first means it can
         // neither be picked nor block the read. The site's own gate still runs.
-        const chatNode = exactlyOneChatNode(
+        const chatNode = pickChatNode(
           await db.node.findMany({
             where: await chatLocFilter(db, chatId, auth),
+            // Oldest wins — a planted duplicate is always newer (#829).
+            orderBy: { createdAt: 'asc' as const },
             take: 2,
           }),
           chatId,
@@ -4951,9 +4953,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // `loc` is unique per memory, so an attacker who learns a chat id could
         // plant a node at that loc; filtering by entitlement first means it can
         // neither be picked nor block the read. The site's own gate still runs.
-        const chatNode = exactlyOneChatNode(
+        const chatNode = pickChatNode(
           await db.node.findMany({
             where: await chatLocFilter(db, chatId, auth),
+            // Oldest wins — a planted duplicate is always newer (#829).
+            orderBy: { createdAt: 'asc' as const },
             take: 2,
           }),
           chatId,
@@ -5000,9 +5004,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // `loc` is unique per memory, so an attacker who learns a chat id could
         // plant a node at that loc; filtering by entitlement first means it can
         // neither be picked nor block the read. The site's own gate still runs.
-        const chatNode = exactlyOneChatNode(
+        const chatNode = pickChatNode(
           await db.node.findMany({
             where: await chatLocFilter(db, chatId, auth),
+            // Oldest wins — a planted duplicate is always newer (#829).
+            orderBy: { createdAt: 'asc' as const },
             take: 2,
           }),
           chatId,
@@ -5286,9 +5292,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // `loc` is unique per memory, so an attacker who learns a chat id could
           // plant a node at that loc; filtering by entitlement first means it can
           // neither be picked nor block the read. The site's own gate still runs.
-          const chatNode = exactlyOneChatNode(
+          const chatNode = pickChatNode(
             await db.node.findMany({
               where: await chatLocFilter(db, chatId, auth),
+              // Oldest wins — a planted duplicate is always newer (#829).
+              orderBy: { createdAt: 'asc' as const },
               take: 2,
             }),
             chatId,
