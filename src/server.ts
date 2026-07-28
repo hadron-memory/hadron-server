@@ -1118,14 +1118,19 @@ export async function createServer(): Promise<Express> {
   // REST endpoints
   // ---------------------------------------------------------------------------
 
-  app.post('/usage', async (req, res) => {
-    const result = await controller.operations.createUsageEvent(req.body);
-    if (result.error) {
-      res.status(400).json({ error: result.error });
-      return;
-    }
-    res.json({ ok: true });
-  });
+  // REMOVED (#825): `POST /usage`. It was UNAUTHENTICATED — the only global
+  // middleware is CORS, JSON, cookies, and the /graphql key store — and
+  // resolved a caller-supplied `nodeLoc` with no memory scope and no access
+  // check, stamping the resolved node's memoryId onto the row. Since #796/#799
+  // scope usage analytics on UsageEvent.memoryId, anyone who could reach the
+  // server could write events into another org's dashboards by naming a
+  // guessable loc (`preflight`, `instructions`, …).
+  //
+  // Deleted rather than authenticated: nothing called it — verified across
+  // every sibling repo, portal and CLI included — and `Mutation.recordUsage`
+  // already covers the capability on the authenticated GraphQL surface, with
+  // the metering chokepoint (`recordLlmUsage`) covering token-bearing spend.
+  // An unauthenticated write endpoint with no callers is pure attack surface.
 
   app.post('/sessions/:id/outcome', async (req, res) => {
     const { id } = req.params;

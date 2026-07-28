@@ -209,7 +209,6 @@ and adds the graph to their default bundle).
 |----------|------|-------------|
 | `GET /health` | — | Health check |
 | `POST /graphql` | Bearer | GraphQL API (Apollo) |
-| `POST /usage` | — | Ingest a usage event (REST) |
 | `POST /reload` | — | Re-sync all graphs from GitHub |
 | `GET /auth/github` | — | Start GitHub OAuth flow |
 | `GET /auth/github/callback` | — | OAuth callback |

@@ -830,6 +830,50 @@ export async function memoryAccessFilter(ctx: Context): Promise<Record<string, u
   return ids === null ? {} : { memoryId: { in: ids } };
 }
 
+/**
+ * Resolve a BARE LOC to a node the caller may read — the safe replacement for
+ * `db.node.findFirst({ where: { loc } })` (#825).
+ *
+ * `Node.loc` is unique per MEMORY, not globally (`@@unique([loc, memoryId])`),
+ * so an unscoped lookup silently returns an arbitrary tenant's node. Short
+ * conventional locs collide heavily — `preflight` exists in five memories at
+ * once — which is how usage rows came to be attributed to strangers' memories.
+ *
+ * Contract:
+ *   - The candidate set is scoped by the SHARED read gate (`memoryAccessFilter`),
+ *     so nothing outside the caller's readable set can ever be returned.
+ *   - A loc that names nothing readable resolves to `null`. Denied and missing
+ *     are indistinguishable, so a caller can't probe for existence.
+ *   - An AMBIGUOUS loc — readable in more than one memory — also resolves to
+ *     `null` rather than guessing. Silently picking one is the bug this exists
+ *     to prevent; a caller that needs a specific node should name it by PK or
+ *     fully-qualified URN (`resolveNodeRef`), which is self-scoping.
+ *   - A real node beats a link at the same loc, preserving the previous
+ *     preference order.
+ *
+ * Prefer a PK or URN over a bare loc wherever the surface allows it. This
+ * helper exists for the surfaces whose input shape is a loc and cannot change
+ * without breaking their published contract.
+ */
+export async function resolveReadableNodeByLoc(
+  ctx: Context,
+  loc: string,
+): Promise<{ id: string; memoryId: string } | null> {
+  const access = await memoryAccessFilter(ctx);
+  const candidates = await ctx.db.node.findMany({
+    // loc-scope-ok: scoped by the shared read gate (memoryAccessFilter) on the
+    // line below; ambiguity across readable memories resolves to null.
+    where: { loc, deletedAt: null, ...access },
+    select: { id: true, memoryId: true, isLink: true },
+  });
+  if (candidates.length === 0) return null;
+  const real = candidates.filter((c) => !c.isLink);
+  const pool = real.length > 0 ? real : candidates;
+  // More than one readable match ⇒ genuinely ambiguous. Refuse to choose.
+  if (pool.length > 1) return null;
+  return { id: pool[0].id, memoryId: pool[0].memoryId };
+}
+
 // 298 follow-up: canonicalizing a stored URN on read must never take down the
 // whole query. A single legacy or corrupted row — e.g. a pre-fix updateMemory
 // that persisted `<org>:memory:<org>::<slug>` — would otherwise throw inside a

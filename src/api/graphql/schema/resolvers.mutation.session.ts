@@ -35,8 +35,10 @@ import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import {
   type Context,
+  requireRole,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  resolveReadableNodeByLoc,
   SESSION_INCLUDE,
   mapToolCalendarEvent,
   runOwnedEmailOperation,
@@ -98,11 +100,20 @@ export const sessionMutations = {
     },
 
     recordUsage: async (_: unknown, { event }: { event: UsageEventInput }, ctx: Context) => {
+      // #825: attribution must never name a node the caller cannot read.
+      // `nodeLoc` is a bare loc, and loc is unique per MEMORY rather than
+      // globally, so the old unscoped `findFirst` resolved to an arbitrary
+      // tenant's node and stamped ITS memoryId onto the row — landing in that
+      // org's usage analytics (#796/#799 scope on UsageEvent.memoryId).
+      //
+      // Resolution now runs through the shared read gate, so the candidate set
+      // is exactly what this caller may read. An unreadable or absent loc
+      // yields no attribution (nodeId/memoryId stay null) rather than an error:
+      // the raw `nodeLoc` string is still recorded, and denied and missing stay
+      // indistinguishable, so this can't be used to probe what exists.
+      requireRole(ctx, 'READER');
       const node = event.nodeLoc
-        // loc-scope-ok: #825 — unscoped + unauthorized attribution, tracked; fix takes a node ref
-        ? await ctx.db.node.findFirst({ where: { loc: event.nodeLoc, isLink: false } })
-          // loc-scope-ok: #825 — same tracked call site (fallback branch)
-          ?? await ctx.db.node.findFirst({ where: { loc: event.nodeLoc } })
+        ? await resolveReadableNodeByLoc(ctx, event.nodeLoc)
         : null;
 
       await ctx.db.usageEvent.create({
@@ -110,9 +121,9 @@ export const sessionMutations = {
           type: event.type,
           nodeLoc: event.nodeLoc,
           nodeId: node?.id,
-          // #796: derived from the same row `nodeId` comes from, so it inherits
-          // this path's documented cross-memory loc ambiguity and nothing more.
-          // Keeping it derived leaves UsageEventInput unchanged.
+          // #796: derived from the same row `nodeId` comes from — now a row the
+          // caller demonstrably can read, so the memory attribution is theirs
+          // to make. Keeping it derived leaves UsageEventInput unchanged.
           memoryId: node?.memoryId,
           actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
           appId: ctx.appId,

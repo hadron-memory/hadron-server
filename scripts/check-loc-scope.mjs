@@ -42,7 +42,8 @@
  * updated first.
  *
  * ESCAPE HATCH: put `loc-scope-ok:` with a reason in a comment on the line the
- * `where` starts on, or the line directly above. Use it for a deliberately
+ * `where` starts on, or anywhere in the contiguous comment block directly above
+ * it (so a wrapped, multi-line justification still counts). Use it for a deliberately
  * cross-memory query (and say why), or for tracked debt (cite the issue).
  *
  * Run: node scripts/check-loc-scope.mjs   (or `pnpm check:loc-scope`)
@@ -166,6 +167,34 @@ function topLevelKeys(body) {
 const WHERE = /\bwhere:\s*\{/g;
 
 /**
+ * Is the `where` starting on 1-indexed `lineNo` exempted by a marker?
+ *
+ * Looks on that line, then walks UP through the contiguous comment block
+ * directly above it. Requiring the marker on exactly one line was too strict:
+ * an exemption is supposed to carry a real reason, and real reasons wrap onto a
+ * second line — which silently voided the exemption.
+ *
+ * Comment-ness is decided by the BLANKED source, not by a `//` / `*` prefix. A
+ * prefix test would call a line-broken multiplication (`x = a`, then `  * b`) a
+ * comment and let a stale marker reach past real code — weakening the gate by
+ * formatting alone (PR #827 review, Copilot). A line that is whitespace-only
+ * after blanking, but not empty in the original, is exactly a pure comment
+ * line; the marker itself is matched against the RAW text, since blanking
+ * erased it.
+ */
+function isExempt(rawLines, blankLines, lineNo) {
+  if ((rawLines[lineNo - 1] ?? '').includes(MARKER)) return true;
+  for (let i = lineNo - 2; i >= 0; i--) {
+    const raw = rawLines[i] ?? '';
+    const blanked = blankLines[i] ?? '';
+    const isPureComment = raw.trim() !== '' && blanked.trim() === '';
+    if (!isPureComment) break;
+    if (raw.includes(MARKER)) return true;
+  }
+  return false;
+}
+
+/**
  * Scan one file's text. Exported so the gate's own behavior is pinned by
  * `check-loc-scope.test.ts` — an unverified gate rots silently, which is the
  * very failure mode it exists to prevent.
@@ -176,6 +205,7 @@ export function scanSource(raw) {
   const found = [];
   const src = blankNonCode(raw);
   const lines = raw.split('\n');
+  const blankLines = src.split('\n');
   for (const m of src.matchAll(WHERE)) {
     const openIdx = src.indexOf('{', m.index);
     const body = readObject(src, openIdx);
@@ -191,11 +221,9 @@ export function scanSource(raw) {
     if (!keys.includes('loc') || /\bmemoryId\b/.test(body)) continue;
 
     const lineNo = src.slice(0, m.index).split('\n').length;
-    const here = lines[lineNo - 1] ?? '';
-    const above = lines[lineNo - 2] ?? '';
-    if (here.includes(MARKER) || above.includes(MARKER)) continue;
+    if (isExempt(lines, blankLines, lineNo)) continue;
 
-    found.push({ line: lineNo, text: here.trim() });
+    found.push({ line: lineNo, text: (lines[lineNo - 1] ?? '').trim() });
   }
   return found;
 }
