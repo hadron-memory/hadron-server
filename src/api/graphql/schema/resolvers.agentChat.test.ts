@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, chatNodeByLoc, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 
@@ -661,7 +661,7 @@ describe('chatHistory', () => {
 
     // Verify the holding memory is class='knowledge' — this is the case
     // the original Forbidden bug missed.
-    const chatNode = await db.node.findFirstOrThrow({ where: { loc: start.chatId } });
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     const holdingMem = await db.memory.findUniqueOrThrow({
       where: { id: chatNode.memoryId },
       select: { class: true, userMemoryOfAgentId: true, createdBy: true },
@@ -710,9 +710,7 @@ describe('chatHistory', () => {
     // The chatNode's userId determines the user-message loc suffix. Set
     // it to a value that *contains* known agent names ('juno', 'mealplan')
     // — pre-cleanup, this would misclassify the message as assistant.
-    const chatNode = await db.node.findFirstOrThrow({
-      where: { loc: start.chatId },
-    });
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     const data = (chatNode.data as Record<string, unknown>) ?? {};
     await db.node.update({
       where: { id: chatNode.id },
@@ -752,9 +750,12 @@ describe('chatHistory', () => {
     // sendChatMessage, an MCP tool, an audit query) gets the correct
     // answer without having to parse loc strings.
     const userMsg = await db.node.findFirstOrThrow({
+      // loc-scope-ok: probes a message row by a loc fragment unique to this
+      // fixture's chat; the holding memory is startChat's to choose.
       where: { loc: { contains: '-mealplan-juno-fan' }, deletedAt: null },
     });
     const assistantMsg = await db.node.findFirstOrThrow({
+      // loc-scope-ok: as above — a fixture-unique loc suffix, not a tenant key.
       where: { loc: { endsWith: '-assistant' }, deletedAt: null },
     });
     expect((userMsg.data as { role?: string } | null)?.role).toBe('user');
@@ -797,13 +798,12 @@ describe('chat ownership mutations', () => {
     await resolvers.Mutation.deleteChat({}, { chatId: start.chatId }, userCtx(adminUser.id));
 
     // Chat node should be deletedAt-stamped
-    const chatNode = await db.node.findFirst({
-      where: { loc: start.chatId },
-    });
+    const chatNode = await chatNodeByLoc(db, start.chatId, { includeDeleted: true });
     expect(chatNode?.deletedAt).not.toBeNull();
 
     // Messages under it should be too
     const msgs = await db.node.findMany({
+      // loc-scope-ok: already scoped by the chat's own unique loc prefix.
       where: { loc: { startsWith: `${start.chatId}:messages:` }, deletedAt: null },
     });
     expect(msgs.length).toBe(0);
@@ -854,8 +854,8 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     expect(r1.chatId).not.toBe(r2.chatId);
 
     // Both chats land in the SAME app-class memory.
-    const chat1 = await db.node.findFirstOrThrow({ where: { loc: r1.chatId } });
-    const chat2 = await db.node.findFirstOrThrow({ where: { loc: r2.chatId } });
+    const chat1 = await chatNodeByLocOrThrow(db, r1.chatId);
+    const chat2 = await chatNodeByLocOrThrow(db, r2.chatId);
     expect(chat1.memoryId).toBe(chat2.memoryId);
 
     const sharedMem = await db.memory.findUniqueOrThrow({ where: { id: chat1.memoryId } });

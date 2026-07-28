@@ -24,6 +24,9 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  // loc-scope-ok: fixture cleanup is deliberately cross-memory — it sweeps
+  // whatever memories a previous run created, keyed on a prefix unique to
+  // this file. Scoping it to one memory would leave the rest behind.
   await db.node.deleteMany({ where: { loc: { startsWith: 'noderef-test-' } } });
   await db.memory.deleteMany({ where: { name: { startsWith: 'noderef-test-' } } });
   await db.organization.deleteMany({ where: { name: { startsWith: 'noderef-test-' } } });

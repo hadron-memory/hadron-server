@@ -454,3 +454,49 @@ export function writeFrontmatterNode(
     writeFileSync(join(sidecarDir, 'edges.yaml'), stringify(edges), 'utf-8');
   }
 }
+
+/**
+ * Fetch a chat-root node by its chatId — which IS its loc — asserting the loc
+ * is unambiguous (#828).
+ *
+ * Mirrors production's `exactlyOneChatNode`. `loc` is unique per MEMORY, not
+ * globally, so `findFirst` here would silently pick a row if a fixture ever
+ * created the same chat loc twice. A chat loc is
+ * `chats:<ts>-<8 hex>-<name>`, so a collision means the FIXTURE is wrong — and
+ * that is precisely the kind of thing a test should shout about rather than
+ * paper over.
+ *
+ * Returns null when nothing matched, so a caller can assert absence.
+ */
+export async function chatNodeByLoc(
+  db: PrismaClient,
+  chatId: string,
+  opts: { includeDeleted?: boolean } = {},
+) {
+  const rows = await db.node.findMany({
+    // loc-scope-ok: deliberately not narrowed — a test rarely holds the chat's
+    // holding memory (startChat picks it). Uniqueness is ASSERTED below instead,
+    // which is the property the test actually depends on.
+    where: { loc: chatId, ...(opts.includeDeleted ? {} : { deletedAt: null }) },
+    take: 2,
+  });
+  if (rows.length > 1) {
+    throw new Error(
+      `Fixture bug: chat loc "${chatId}" matches ${rows.length} nodes. ` +
+        `Chat locs are expected to be unique; a test asserting on "the" chat ` +
+        `node would otherwise pick one arbitrarily.`,
+    );
+  }
+  return rows[0] ?? null;
+}
+
+/** `chatNodeByLoc` for the common case where the chat must exist. */
+export async function chatNodeByLocOrThrow(
+  db: PrismaClient,
+  chatId: string,
+  opts: { includeDeleted?: boolean } = {},
+) {
+  const node = await chatNodeByLoc(db, chatId, opts);
+  if (!node) throw new Error(`No chat node at loc "${chatId}"`);
+  return node;
+}
