@@ -4,6 +4,7 @@ import {
   getMemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import {
   type Context,
   deriveChatTitle,
@@ -142,11 +143,20 @@ export const chatQueries = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
-      const chatNode = await ctx.db.node.findFirst({
-        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
-        where: { loc: chatId, deletedAt: null },
-        select: { id: true, memoryId: true, createdBy: true },
-      });
+      // #829: narrow to chats this caller is entitled to BEFORE picking one.
+      // `loc` is unique per memory, so an attacker who learns a chat id could
+      // plant a node at that loc; filtering by entitlement first means it can
+      // neither be picked nor block the read. The site's own gate still runs.
+      const chatNode = pickChatNode(
+        await ctx.db.node.findMany({
+          where: await chatLocFilter(ctx.db, chatId, ctx),
+          select: { id: true, memoryId: true, createdBy: true },
+          // Oldest wins — a planted duplicate is always newer (#829).
+          orderBy: { createdAt: 'asc' as const },
+          take: 2,
+        }),
+        chatId,
+      );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
       // Spec 017 — read-visibility check (FR-007/FR-008):
       //   - shared (app-class memory)         → any AppMember of memory.appId
