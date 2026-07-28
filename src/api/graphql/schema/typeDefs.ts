@@ -514,14 +514,15 @@ export const typeDefs = `#graphql
   """
   Spec cor:api:040 — result envelope for the batch node read (nodeBatch).
   'nodes' is the authorized, existing subset (input order for a ref set, loc
-  order for a prefix). 'unavailable' lists the requested refs that were denied
-  OR not found — indistinguishable, so the result never discloses whether an
+  order for a prefix). 'unavailable' and 'omitted' are both lists of REFS, not
+  node objects. 'unavailable' lists the requested refs that were denied OR not
+  found — indistinguishable, so the result never discloses whether an
   unreadable node exists. 'truncated' is true when the response-size cap was
-  reached, and 'omitted' then carries the dropped nodes. (Over the node-count
-  cap the query errors instead — never a silent short read.) Both lists echo
-  the caller's OWN ref strings for the 'refs' form — pass a URN, get that URN
-  back, not a primary key you never sent — and node ids for the prefix form,
-  which has no caller refs.
+  reached, and 'omitted' then carries the refs of the nodes dropped to stay
+  under it. (Over the node-count cap the query errors instead — never a silent
+  short read.) Both lists echo the caller's OWN ref strings for the 'refs'
+  form — pass a URN, get that URN back, not a primary key you never sent — and
+  node ids for the prefix form, which has no caller refs.
   """
   type NodeBatchResult {
     nodes: [Node!]!
@@ -3293,9 +3294,13 @@ export const typeDefs = `#graphql
     'refs' (explicit set, returned in input order) OR 'memory' + 'locPrefix'
     (subtree, loc order) — not both. Each entry of 'refs' is a primary key OR a
     fully-qualified node URN (cor:api:140), so a URN-holding caller batches in
-    ONE call instead of resolving each ref first; a malformed / unqualified ref
-    errors rather than landing silently in 'unavailable'. Per-node access is
-    applied independently AFTER resolution: denied or missing refs come back in
+    ONE call instead of resolving each ref first. The split on a bad ref is by
+    KIND, not by luck: a ref whose SHAPE is wrong errors the call — unqualified
+    / relative (UrnNotQualifiedError) or a URN of the wrong entity type, e.g.
+    'hrn:mem:...' (BAD_USER_INPUT) — while a well-formed ref that names nothing
+    the caller may read comes back in 'unavailable'. A caller mistake stays
+    loud instead of hiding among denials. Per-node access is applied
+    independently AFTER resolution: denied or missing refs come back in
     'unavailable' and never fail the call. Bounded by hard caps — over the
     node-count cap throws BAD_USER_INPUT; over the response-size cap returns a
     partial result with 'truncated: true' and the dropped refs in 'omitted'

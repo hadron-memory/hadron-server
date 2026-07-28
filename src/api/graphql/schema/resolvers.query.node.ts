@@ -1224,6 +1224,19 @@ export const nodeQueries = {
         const resolved = await Promise.all(
           uniqueRefs.map(async (ref) => {
             if (isId(ref)) return { ref, id: ref as string | null };
+            // A WRONG-TYPE URN (`hrn:mem:…`, `hrn:app:…`) is a coercion bug,
+            // not a miss — but resolveNodeRef reports it with the SAME
+            // NodeNotFoundError a genuinely absent node raises, so letting it
+            // reach the catch below would file a caller's type error under
+            // `unavailable`: the exact silence this surface just removed.
+            // Screen it here with the shared parser, matching what the
+            // single-node node(ref:) read does (PR #815 review, Codex P2).
+            const typeErr = validateUrnType(parseUrnInput(ref), 'node');
+            if (typeErr) {
+              throw new GraphQLError(`nodeBatch: ${typeErr} (ref "${ref}")`, {
+                extensions: { code: 'BAD_USER_INPUT' },
+              });
+            }
             try {
               const { id } = await resolveNodeRef(ctx.db, ref);
               return { ref, id: id as string | null };

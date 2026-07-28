@@ -150,6 +150,19 @@ describe('nodeBatch — refs are PK-or-URN (cor:api:140, #813)', () => {
     // A bare loc is the relative form — never resolvable at the API boundary.
     await expect(nodeBatch({ refs: ['a'] })).rejects.toThrow(/not fully qualified/i);
   });
+
+  it('throws on a WRONG-TYPE URN — a coercion bug must not read as denied-or-missing', async () => {
+    const a = await createDbNode(db, { loc: 'a', memoryId: graph.id, content: 'A body' });
+    // resolveNodeRef reports a wrong-type prefix with the same NodeNotFoundError
+    // an absent node raises, so without an explicit screen this would land in
+    // `unavailable` — the silence #813 exists to remove (PR #815, Codex P2).
+    await expect(nodeBatch({ refs: [a.id, 'hrn:mem:bg-org:bgmem'] })).rejects.toThrow(
+      /Expected node URN/i,
+    );
+    await expect(nodeBatch({ refs: ['hrn:app:bg-org:some-app'] })).rejects.toThrow(
+      /Expected node URN/i,
+    );
+  });
 });
 
 describe('nodeBatch — partial success', () => {
