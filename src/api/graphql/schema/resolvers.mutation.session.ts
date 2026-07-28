@@ -99,7 +99,9 @@ export const sessionMutations = {
 
     recordUsage: async (_: unknown, { event }: { event: UsageEventInput }, ctx: Context) => {
       const node = event.nodeLoc
+        // loc-scope-ok: #825 — unscoped + unauthorized attribution, tracked; fix takes a node ref
         ? await ctx.db.node.findFirst({ where: { loc: event.nodeLoc, isLink: false } })
+          // loc-scope-ok: #825 — same tracked call site (fallback branch)
           ?? await ctx.db.node.findFirst({ where: { loc: event.nodeLoc } })
         : null;
 

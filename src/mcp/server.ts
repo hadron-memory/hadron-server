@@ -4906,6 +4906,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const appScopeError = requireAppScope();
       if (appScopeError) return appScopeError;
       try {
+        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
         const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
         const chatData = (chatNode.data as Record<string, unknown>) ?? {};
@@ -4936,6 +4937,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const appScopeError = requireAppScope();
       if (appScopeError) return appScopeError;
       try {
+        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
         const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
         const chatData = (chatNode.data as Record<string, unknown>) ?? {};
@@ -4975,6 +4977,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const appScopeError = requireAppScope();
       if (appScopeError) return appScopeError;
       try {
+        // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
         const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
         const chatData = (chatNode.data as Record<string, unknown>) ?? {};
@@ -5251,6 +5254,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
         if (followUpIdx >= followUps.length) {
           // All follow-ups done — generate the test report
+          // loc-scope-ok: a chat loc is chats:<ts>-<8 hex>-<name>, unique in practice; the unscoped read is tracked in #825
           const chatNode = await db.node.findFirst({ where: { loc: chatId, deletedAt: null } });
           const chatData = (chatNode?.data as Record<string, unknown>) ?? {};
           const expected = (persona.expectedConversations as string[]) ?? [];
