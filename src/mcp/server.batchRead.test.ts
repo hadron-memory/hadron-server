@@ -4,7 +4,11 @@
  *
  * What this file pins:
  *   - Explicit-set form: full per-node projection (content + edges) for many
- *     URNs in one call, returned in INPUT order (cor:api:040:01).
+ *     refs in one call, returned in INPUT order (cor:api:040:01).
+ *   - A ref is a PK or a fully-qualified node URN (cor:api:140, #822): both read
+ *     in the SAME call and produce the same projection, dedup happens on the
+ *     RESOLVED node so one node named two ways renders (and bills) once, and a
+ *     ref whose SHAPE is wrong is a loud error rather than an Unavailable entry.
  *   - Prefix-subtree form: every readable node under a loc-prefix, in LOC order.
  *   - Per-node projection parity with hadron_get_node — the batch block for a node
  *     is byte-identical to a single hadron_get_node of that node (the shared
@@ -17,7 +21,7 @@
  *   - Hard caps (cor:api:040:02): over the node-count cap is a LOUD error;
  *     over the response-size cap returns a partial result flagged `truncated`
  *     with the omitted refs — never a silent short read.
- *   - Form validation: exactly one of (urns) XOR (memoryUrn + locPrefix).
+ *   - Form validation: exactly one of (refs) XOR (memoryUrn + locPrefix).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -133,7 +137,7 @@ describe('hadron_get_nodes — explicit set', () => {
     await addNode({ loc: 'gamma', name: 'NodeGamma', content: 'gamma body' });
 
     // Request in a deliberately non-loc order.
-    const out = await batchRead({ urns: [nodeUrn('gamma'), nodeUrn('alpha'), nodeUrn('beta')] });
+    const out = await batchRead({ refs: [nodeUrn('gamma'), nodeUrn('alpha'), nodeUrn('beta')] });
 
     expect(out).toContain('returned 3 node(s)');
     // Bodies present.
@@ -163,7 +167,7 @@ describe('hadron_get_nodes — explicit set', () => {
     });
 
     const single = await readNode(nodeUrn('par'), 'all');
-    const batch = await batchRead({ urns: [nodeUrn('par')], contentScope: 'all' });
+    const batch = await batchRead({ refs: [nodeUrn('par')], contentScope: 'all' });
 
     // The batch wraps the identical single-read projection with a header.
     expect(batch).toContain(single);
@@ -171,15 +175,108 @@ describe('hadron_get_nodes — explicit set', () => {
 
   it("contentScope: 'abstract' returns abstracts, omits bodies", async () => {
     await addNode({ loc: 'abs', name: 'NodeAbs', content: 'secret body text', abstract: 'the abstract' });
-    const out = await batchRead({ urns: [nodeUrn('abs')], contentScope: 'abstract' });
+    const out = await batchRead({ refs: [nodeUrn('abs')], contentScope: 'abstract' });
     expect(out).toContain('the abstract');
     expect(out).not.toContain('secret body text');
   });
 
   it('dedups a repeated URN — renders it once (no double UsageEvent)', async () => {
     await addNode({ loc: 'dup', name: 'NodeDup', content: 'dup body' });
-    const out = await batchRead({ urns: [nodeUrn('dup'), nodeUrn('dup')] });
+    const out = await batchRead({ refs: [nodeUrn('dup'), nodeUrn('dup')] });
     expect(out).toContain('returned 1 node(s)');
+  });
+});
+
+// ───── refs are PK-or-URN (cor:api:140, #822) ─────────────────────────────
+
+/** The node's primary key — what a caller holds after a findNodes / list read. */
+async function pkOf(loc: string): Promise<string> {
+  const n = await db.node.findFirst({ where: { loc }, select: { id: true } });
+  if (!n) throw new Error(`no node at loc ${loc}`);
+  return n.id;
+}
+
+describe('hadron_get_nodes — refs are PK-or-URN', () => {
+  it('reads a node by primary key, with the same projection its URN gives', async () => {
+    await addNode({ loc: 'bypk', name: 'NodeByPk', content: 'pk body' });
+    const pk = await pkOf('bypk');
+
+    const byPk = await batchRead({ refs: [pk] });
+    const byUrn = await batchRead({ refs: [nodeUrn('bypk')] });
+
+    expect(byPk).toContain('returned 1 node(s)');
+    expect(byPk).toContain('pk body');
+    // Same rendered projection either way — the ref form is addressing, not shape.
+    expect(byPk).toEqual(byUrn);
+  });
+
+  it('mixes PKs and URNs in one call, in input order', async () => {
+    await addNode({ loc: 'mixa', name: 'NodeMixA', content: 'mixa body' });
+    await addNode({ loc: 'mixb', name: 'NodeMixB', content: 'mixb body' });
+
+    const out = await batchRead({ refs: [await pkOf('mixb'), nodeUrn('mixa')] });
+
+    expect(out).toContain('returned 2 node(s)');
+    const iB = out.indexOf('**NodeMixB**');
+    const iA = out.indexOf('**NodeMixA**');
+    expect(iB).toBeGreaterThanOrEqual(0);
+    expect(iB).toBeLessThan(iA);
+  });
+
+  it('dedups on the RESOLVED node — a PK and its URN render (and bill) once', async () => {
+    await addNode({ loc: 'twice', name: 'NodeTwice', content: 'twice body' });
+    const pk = await pkOf('twice');
+
+    await db.usageEvent.deleteMany({});
+    const out = await batchRead({ refs: [pk, nodeUrn('twice')] });
+
+    expect(out).toContain('returned 1 node(s)');
+    // One read event, not two — this surface meters per RETURNED node, so a
+    // string-only dedup would double-bill the same node named two ways.
+    //
+    // The read events are inserted fire-and-forget (non-blocking, matching
+    // hadron_get_node), so poll for the write to land rather than reading
+    // straight after the call and racing it. Counting is safe once ANY event
+    // appears: the tool emits every event for a call in ONE createMany, so a
+    // second row for this node would already be visible alongside the first.
+    const count = async () => db.usageEvent.count({ where: { type: 'read', nodeId: pk } });
+    for (let i = 0; i < 50 && (await count()) === 0; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(await count()).toBe(1);
+  });
+
+  it('a PK for an unreadable node is denied, indistinguishably from a missing PK', async () => {
+    const secretUrn = `${PMEM_URN}::pksecret`;
+    await createTestableMcpServer(user2Auth()).callToolText('hadron_create_node', {
+      urn: secretUrn,
+      name: 'PkSecret',
+      content: 'SECRET pk content',
+    });
+    const deniedPk = await pkOf('pksecret');
+    const missingPk = generateId();
+
+    const out = await batchRead({ refs: [deniedPk, missingPk] });
+
+    expect(out).toContain('2 unavailable');
+    expect(out).toContain(deniedPk);
+    expect(out).toContain(missingPk);
+    expect(out).not.toContain('SECRET pk content');
+  });
+
+  it('a WRONG-TYPE URN is a loud error, not an Unavailable entry', async () => {
+    await addNode({ loc: 'ok2', name: 'NodeOk2', content: 'ok2 body' });
+    const out = await batchRead({ refs: [nodeUrn('ok2'), `hrn:mem:${MEM_URN}`] });
+    expect(out).toContain('Expected node URN');
+    expect(out).not.toContain('returned'); // the whole call errors
+  });
+
+  it('a relative / malformed ref is a loud error, not an Unavailable entry', async () => {
+    await addNode({ loc: 'ok3', name: 'NodeOk3', content: 'ok3 body' });
+    // Previously this landed silently among denials — the #813/#822 conflation.
+    const out = await batchRead({ refs: [nodeUrn('ok3'), 'just-a-loc'] });
+    expect(out).toContain('neither a node id nor a fully-qualified node URN');
+    expect(out).not.toContain('returned');
   });
 });
 
@@ -197,7 +294,7 @@ describe('hadron_get_nodes — partial success', () => {
     });
     const missingUrn = nodeUrn('does-not-exist');
 
-    const out = await batchRead({ urns: [nodeUrn('ok'), secretUrn, missingUrn] });
+    const out = await batchRead({ refs: [nodeUrn('ok'), secretUrn, missingUrn] });
 
     // Readable one returned; batch did NOT fail wholesale.
     expect(out).toContain('readable body');
@@ -244,7 +341,7 @@ describe('hadron_get_nodes — prefix subtree', () => {
 describe('hadron_get_nodes — hard caps', () => {
   it('over the node-count cap is a LOUD error, not a silent short read', async () => {
     const tooMany = Array.from({ length: BATCH_READ_MAX_NODES + 1 }, (_, i) => nodeUrn(`d${i}`));
-    const out = await batchRead({ urns: tooMany });
+    const out = await batchRead({ refs: tooMany });
     expect(out).toContain(`exceeds the ${BATCH_READ_MAX_NODES}-node cap`);
     expect(out).not.toContain('returned'); // no partial render
   });
@@ -254,7 +351,7 @@ describe('hadron_get_nodes — hard caps', () => {
     await addNode({ loc: 'big1', name: 'Big1', content: big });
     await addNode({ loc: 'big2', name: 'Big2', content: big });
 
-    const out = await batchRead({ urns: [nodeUrn('big1'), nodeUrn('big2')] });
+    const out = await batchRead({ refs: [nodeUrn('big1'), nodeUrn('big2')] });
 
     expect(out).toContain('returned 1 node(s)');
     expect(out).toContain('truncated');
@@ -271,7 +368,7 @@ describe('hadron_get_nodes — form validation', () => {
     expect(out).toContain('provide EITHER');
   });
   it('rejects both forms at once', async () => {
-    const out = await batchRead({ urns: [nodeUrn('x')], memoryUrn: MEM_URN, locPrefix: 'a' });
+    const out = await batchRead({ refs: [nodeUrn('x')], memoryUrn: MEM_URN, locPrefix: 'a' });
     expect(out).toContain('provide EITHER');
   });
 });
