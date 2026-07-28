@@ -35,11 +35,12 @@
  * Brace matching runs over the whole file, so a `where` clause spanning several
  * lines is checked like any other.
  *
- * Scope: `src/`, excluding tests. A test DB holds one memory with unique locs,
- * so the ambiguity is invisible there — which is exactly why the habit forms in
- * tests and then leaks into production code and verification scripts. Tightening
- * to tests too is a reasonable follow-up; it would need ~30 existing call sites
- * updated first.
+ * Scope: all of `src/`, TESTS INCLUDED (#828). Tests were exempt at first, on
+ * the reasoning that a test DB holds one memory with unique locs so the
+ * ambiguity is invisible there. That exemption was the problem: invisible is
+ * exactly why the habit forms in tests and then walks into production code and
+ * throwaway verification scripts. Two of the bugs behind #825 were written by
+ * someone fluent in the unscoped shape from test code.
  *
  * ESCAPE HATCH: put `loc-scope-ok:` with a reason in a comment on the line the
  * `where` starts on, or anywhere in the contiguous comment block directly above
@@ -60,7 +61,7 @@ function* walk(dir) {
     const path = join(dir, entry);
     if (statSync(path).isDirectory()) {
       yield* walk(path);
-    } else if (/\.tsx?$/.test(path) && !/\.test\.tsx?$/.test(path)) {
+    } else if (/\.tsx?$/.test(path)) {
       yield path;
     }
   }

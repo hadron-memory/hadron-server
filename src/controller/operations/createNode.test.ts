@@ -48,7 +48,7 @@ describe('createNode', () => {
     expect(node.description).toBe('A test node');
 
     // Verify it was actually persisted
-    const inDb = await db.node.findFirst({ where: { loc: 'org.graph.node' } });
+    const inDb = await db.node.findFirst({ where: { loc: 'org.graph.node', memoryId } });
     expect(inDb).not.toBeNull();
   });
 
@@ -69,7 +69,7 @@ describe('createNode', () => {
     expect(second.id).toBe(first.id);
 
     // Only one row in DB
-    const count = await db.node.count({ where: { loc: 'org.g.n' } });
+    const count = await db.node.count({ where: { loc: 'org.g.n', memoryId } });
     expect(count).toBe(1);
   });
 

@@ -159,7 +159,7 @@ describe('syncGraphFromGithub', () => {
     expect(result.nodeCount).toBe(1);
 
     // loc is the path relative to the graph root, not prefixed with the graph name
-    const inDb = await db.node.findFirst({ where: { loc: 'nodeA' } });
+    const inDb = await db.node.findFirst({ where: { loc: 'nodeA', memoryId: dbGraphId } });
     expect(inDb).not.toBeNull();
     expect(inDb!.name).toBe('nodeA');
   });
@@ -171,11 +171,11 @@ describe('syncGraphFromGithub', () => {
     writeNodeFiles(nodeA, { id: nodeId, name: 'nodeA', description: 'v1' });
 
     await syncGraphFromGithub(makeGraph());
-    const first = await db.node.findFirst({ where: { loc: 'nodeA' } });
+    const first = await db.node.findFirst({ where: { loc: 'nodeA', memoryId: dbGraphId } });
 
     writeNodeFiles(nodeA, { id: nodeId, name: 'nodeA', description: 'v2' });
     await syncGraphFromGithub(makeGraph());
-    const second = await db.node.findFirst({ where: { loc: 'nodeA' } });
+    const second = await db.node.findFirst({ where: { loc: 'nodeA', memoryId: dbGraphId } });
 
     expect(second!.id).toBe(first!.id);
     expect(second!.description).toBe('v2');

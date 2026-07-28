@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, chatNodeByLoc } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
@@ -259,7 +259,7 @@ describe('onTrack in processChatResponse', () => {
     expect(result.offTrackReason).toBe('User asking about billing, not onboarding');
 
     // Verify it's stored on the chat node
-    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
     const chatData = chatNode?.data as Record<string, unknown>;
     expect(chatData.lastOffTrackReason).toBe('User asking about billing, not onboarding');
   });
@@ -291,7 +291,7 @@ describe('Goal stack and route history', () => {
       userCtx(adminUser.id),
     );
 
-    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
     const chatData = chatNode?.data as Record<string, unknown>;
 
     // Goal stack should have one ACTIVE entry
@@ -337,7 +337,7 @@ describe('Goal stack and route history', () => {
       userCtx(adminUser.id),
     );
 
-    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
     const chatData = chatNode?.data as Record<string, unknown>;
     const history = chatData.routeHistory as Array<Record<string, unknown>>;
 
@@ -409,7 +409,7 @@ describe('Edge evaluation in processChatResponse', () => {
     expect(result.newStageName).toBe('diagnose');
 
     // Verify the chat node was updated
-    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
     const chatData = chatNode?.data as Record<string, unknown>;
     expect(chatData.conversationName).toBe('strategy');
     expect(chatData.stageName).toBe('diagnose');
@@ -475,7 +475,7 @@ describe('Edge evaluation in processChatResponse', () => {
     expect(result.newStageName).toBe('fill');
 
     // Should have pushed a goal (detour behavior)
-    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
     const chatData = chatNode?.data as Record<string, unknown>;
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
     // Original goal + detour goal
@@ -895,7 +895,7 @@ describe('Goal descriptions on conversations', () => {
       userCtx(adminUser.id),
     );
 
-    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
     const chatData = chatNode?.data as Record<string, unknown>;
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
 
@@ -919,7 +919,7 @@ describe('Goal descriptions on conversations', () => {
       userCtx(adminUser.id),
     );
 
-    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
     const chatData = chatNode?.data as Record<string, unknown>;
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
 
@@ -979,7 +979,7 @@ describe('Fallback re-routing', () => {
     expect(sendResult.systemMessage).toContain('mentor');
 
     // The chat node should have been updated to mentoring
-    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
     const chatData = chatNode?.data as Record<string, unknown>;
     expect(chatData.conversationName).toBe('mentoring');
     expect(chatData.stageName).toBe('start');
@@ -1015,7 +1015,7 @@ describe('Fallback re-routing', () => {
     );
 
     // Should still be in fallback
-    const chatNode = await db.node.findFirst({ where: { loc: chat.chatId } });
+    const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
     const chatData = chatNode?.data as Record<string, unknown>;
     expect(chatData.conversationName).toBe('fallback');
   });

@@ -185,7 +185,7 @@ describe('deleteNode: idempotency + hard-delete safeguards (parity with hadron_d
     expect(ok).toBe(true);
     expect(await db.node.findUnique({ where: { id: idOf['parent'] } })).toBeNull();
     expect(await db.node.findUnique({ where: { id: idOf['parent:child'] } })).toBeNull();
-    expect(await db.edge.findFirst({ where: { loc: 'bridge' } })).toBeNull();
+    expect(await db.edge.findFirst({ where: { loc: 'bridge', memoryId: memAId } })).toBeNull();
     // …but the node in memory B survives — only the edge left its view.
     expect(await db.node.findUnique({ where: { id: idOf['extnode'] } })).not.toBeNull();
   });

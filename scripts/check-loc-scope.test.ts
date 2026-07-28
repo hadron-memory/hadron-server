@@ -2,7 +2,8 @@
  * Behavior of the unscoped-loc-lookup gate (#825).
  *
  * A gate nobody tests rots silently — which is the exact failure mode this one
- * exists to prevent, so its own rules are pinned here. Each case below is a
+ * exists to prevent, so its own rules are pinned here. (It covers test files
+ * too since #828, this one included.) Each case below is a
  * shape that came up while building it, several of them straight out of the
  * PR #826 review.
  */
