@@ -79,7 +79,20 @@ describe('check-loc-scope — the escape hatch', () => {
     expect(scan(`k = db.node.findFirst({ where: { loc: v } }); // loc-scope-ok: deliberate`)).toEqual([]);
   });
 
-  it('does not let a marker two lines up exempt a lookup', () => {
+  it('honors a marker anywhere in the contiguous comment block above', () => {
+    // A justification that wraps must still count — requiring exactly one line
+    // silently voided real reasons (#825 hit this on its own helper).
+    const src = [
+      '  const rows = await db.node.findMany({',
+      '    // loc-scope-ok: scoped by the shared read gate on the',
+      '    // line below; ambiguity resolves to null.',
+      '    where: { loc, deletedAt: null, ...access },',
+      '  });',
+    ].join('\n');
+    expect(scan(src)).toEqual([]);
+  });
+
+  it('stops at the first non-comment line — a marker cannot reach past code', () => {
     expect(scan(`// loc-scope-ok: stale\nconst x = 1;\nk = db.node.findFirst({ where: { loc: v } });`)).toEqual([3]);
   });
 });
