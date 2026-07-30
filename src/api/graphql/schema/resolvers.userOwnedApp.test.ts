@@ -268,3 +268,97 @@ describe('createApp — personal-App dependency rejection leaves no orphan (code
     ).toBe(0);
   });
 });
+
+describe('installAgentIntoApp — personal-App accessibility gate (#756)', () => {
+  /** A personal App owned by `ownerId`, created via the licensed PUBLIC path. */
+  async function seedPersonalApp() {
+    return resolvers.Mutation.createApp(
+      {},
+      { agentId: publicAgentId, name: 'My Gmail' },
+      ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+  }
+
+  it('rejects installing ANOTHER user’s personal agent — the null-org bypass', async () => {
+    // The victim's user-owned agent: organizationId NULL, visibility PERSONAL.
+    const victimAgent = await resolvers.Mutation.createAgent(
+      {},
+      { name: 'Victim Helper', systemPrompt: 'SECRET-SYSTEM-PROMPT' },
+      ctx({ userId: otherId, roles: ['READER'] }),
+    );
+    expect(victimAgent.organizationId).toBeNull();
+    expect(victimAgent.visibility).toBe('PERSONAL');
+
+    const app = await seedPersonalApp();
+    // Pre-#756 this passed the guard (`null !== null` ⇒ false) and returned
+    // the victim's agent with AGENT_INCLUDE — systemPrompt and all.
+    await expect(
+      resolvers.Mutation.installAgentIntoApp(
+        {},
+        { appId: app.id, agentId: victimAgent.id },
+        ctx({ userId: ownerId, roles: ['READER'] }),
+      ),
+    ).rejects.toThrow(/PUBLIC agent or your own/i);
+
+    // No link and no license were written.
+    expect(await db.appAgent.count({ where: { appId: app.id, agentId: victimAgent.id } })).toBe(0);
+    expect(await db.agentSubscription.count({ where: { agentId: victimAgent.id } })).toBe(0);
+  });
+
+  it('rejects another ORG’s non-PUBLIC agent into a personal App', async () => {
+    const privOrg = await db.organization.create({
+      data: { id: generateId(), name: 'Priv', urn: `priv-${generateId()}` },
+    });
+    const privAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Private', urn: `${privOrg.urn}:private-agent`, organizationId: privOrg.id, visibility: 'ORGANIZATION' },
+    });
+    const app = await seedPersonalApp();
+    await expect(
+      resolvers.Mutation.installAgentIntoApp(
+        {},
+        { appId: app.id, agentId: privAgent.id },
+        ctx({ userId: ownerId, roles: ['READER'] }),
+      ),
+    ).rejects.toThrow(/PUBLIC agent or your own/i);
+  });
+
+  it('allows the owner’s OWN personal agent, unlicensed (ownership licenses it)', async () => {
+    const ownAgent = await resolvers.Mutation.createAgent(
+      {},
+      { name: 'My Own Helper' },
+      ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    const app = await seedPersonalApp();
+    const res = await resolvers.Mutation.installAgentIntoApp(
+      {},
+      { appId: app.id, agentId: ownAgent.id },
+      ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    expect(res.appAgent.agentId).toBe(ownAgent.id);
+    // Own agent ⇒ no subscription, and never an org grant (the App has no org).
+    expect(
+      await db.agentSubscription.count({ where: { userId: ownerId, agentId: ownAgent.id } }),
+    ).toBe(0);
+    expect(await db.agentOrgGrant.count({ where: { agentId: ownAgent.id } })).toBe(0);
+  });
+
+  it('licenses a PUBLIC agent installed through this path with an AgentSubscription', async () => {
+    const otherPublic = await db.agent.create({
+      data: { id: generateId(), name: 'Other Public', urn: `${generateId()}:other-public`, organizationId: pubOrgId, visibility: 'PUBLIC' },
+    });
+    const app = await seedPersonalApp();
+    await resolvers.Mutation.installAgentIntoApp(
+      {},
+      { appId: app.id, agentId: otherPublic.id },
+      ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    // #756: previously the install linked the agent but provisioned no license.
+    const sub = await db.agentSubscription.findUnique({
+      where: { userId_agentId: { userId: ownerId, agentId: otherPublic.id } },
+    });
+    expect(sub?.activatedAt).toBeTruthy();
+    expect(sub?.revokedAt).toBeNull();
+    // Still no AgentOrgGrant — a personal install is org-less.
+    expect(await db.agentOrgGrant.count({ where: { agentId: otherPublic.id } })).toBe(0);
+  });
+});
