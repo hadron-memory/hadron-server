@@ -147,6 +147,34 @@ describe('#205 DateTime scalar coercion', () => {
     );
   });
 
+  it('rejects an unparseable string instead of forwarding it (PR #834 review)', () => {
+    // Passing junk through would hand the client the exact Invalid Date this
+    // scalar exists to prevent, under a field documented as a timestamp.
+    expect(() => dateTimeScalar.serialize('not-a-date')).toThrow(/unparseable/i);
+  });
+
+  it('reads an empty string as absent, not malformed', () => {
+    // A provider sending "" where the tool contract says null means "no
+    // value" — null loses no signal; throwing would fail a fine nullable field.
+    expect(dateTimeScalar.serialize('')).toBeNull();
+    expect(dateTimeScalar.serialize('   ')).toBeNull();
+  });
+
+  it('rejects out-of-range epoch millis instead of leaking a RangeError', () => {
+    // new Date(n).toISOString() throws a raw RangeError beyond ±8.64e15 ms;
+    // that must surface as a GraphQLError, not an unhandled RangeError.
+    expect(() => dateTimeScalar.serialize(1e20)).toThrow(/out-of-range/i);
+    expect(() => dateTimeScalar.serialize(8.64e15 + 1)).toThrow(/out-of-range/i);
+    expect(() => dateTimeScalar.serialize('999999999999999999999')).toThrow(
+      /out-of-range/i,
+    );
+  });
+
+  it('still accepts the extremes Date can represent', () => {
+    expect(dateTimeScalar.serialize(8.64e15)).toBe('+275760-09-13T00:00:00.000Z');
+    expect(dateTimeScalar.serialize(0)).toBe('1970-01-01T00:00:00.000Z');
+  });
+
   it('maps null and undefined to null', () => {
     expect(dateTimeScalar.serialize(null)).toBeNull();
     expect(dateTimeScalar.serialize(undefined)).toBeNull();

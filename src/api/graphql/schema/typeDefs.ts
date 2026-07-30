@@ -2804,13 +2804,17 @@ export const typeDefs = `#graphql
   scalar JSON
 
   """
-  An ISO 8601 timestamp, e.g. '2026-07-30T12:34:56.789Z'.
+  A timestamp string, e.g. '2026-07-30T12:34:56.789Z'.
+
+  Guaranteed parseable by Date.parse / new Date(). Values Hadron mints are
+  ISO 8601 UTC; a value passed through from an external provider (calendar,
+  mail, drive) keeps that provider's representation, which may carry a
+  non-UTC offset — so compare instants, don't compare these as strings.
 
   Issue #205: date fields used to be declared String and fed a Prisma Date,
   which graphql-js coerced through Date.valueOf() into epoch milliseconds
   ('1716943200000') — a value new Date() parses as Invalid Date. This scalar
-  serializes every date field as an ISO string, so Date.parse works directly
-  and no client needs to sniff the format.
+  makes that shape unrepresentable, so no client needs to sniff the format.
 
   Output-only today: date-valued arguments remain String.
   """

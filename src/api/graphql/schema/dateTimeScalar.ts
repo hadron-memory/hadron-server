@@ -25,24 +25,55 @@
 // Wire compatibility: a `DateTime` still travels as a JSON string, so no
 // runtime client breaks. Schema-driven codegen clients do see a new named
 // scalar — hadron-cli (genqlient) needs a `DateTime: string` binding.
+//
+// The guarantee is "parseable by Date.parse", not "byte-for-byte ISO UTC":
+// values Hadron mints go through `Date.toISOString()`, while a provider
+// pass-through value (calendar / mail / drive) keeps the provider's own
+// representation so a non-UTC offset survives. Anything unparseable is
+// rejected rather than forwarded — see serializeDateTime.
 import { GraphQLScalarType, GraphQLError, Kind } from 'graphql';
 
 /** Digits-only string — an epoch-millis value that already lost its Date type. */
 const EPOCH_MILLIS = /^-?\d+$/;
 
 /**
- * Coerce a resolver's return value to an ISO 8601 string.
+ * Epoch millis → ISO, rejecting anything `Date` can't represent.
  *
- * Deliberately lenient rather than validating: this runs on every date field of
- * every response, including provider pass-through values (Google Calendar,
- * Exchange, Drive) that Hadron does not mint. Rejecting an odd-but-parseable
- * provider timestamp would turn a cosmetic formatting quirk into a failed
- * query, so a non-numeric string is returned untouched. Only a value of a type
- * that can never be a timestamp throws — that is a server bug, not bad data.
+ * `new Date(n).toISOString()` throws a raw `RangeError: Invalid time value`
+ * outside ±8.64e15 ms, so a finite-but-absurd number (or a long digit string)
+ * would escape as an unhandled RangeError rather than a GraphQLError. Checking
+ * `getTime()` catches non-finite and out-of-range in one test.
+ */
+function fromEpochMillis(millis: number, raw: unknown): string {
+  const date = new Date(millis);
+  if (Number.isNaN(date.getTime())) {
+    throw new GraphQLError(
+      `DateTime cannot serialize an out-of-range timestamp: ${String(raw)}`,
+    );
+  }
+  return date.toISOString();
+}
+
+/**
+ * Coerce a resolver's return value to a timestamp string every client can parse.
  *
- * @param value Raw field value: `Date` (Prisma), ISO string (shape-mappers and
- *   provider payloads), epoch millis as number or digit-string, or nullish.
- * @returns ISO 8601 string, or `null` for a nullish input.
+ * The contract is `Date.parse`-able, which is what #205 is actually about.
+ * Hadron-minted values (Prisma `Date`s) always come out as ISO 8601 UTC. A
+ * string is only passed through when it already parses — that preserves the
+ * representation a provider chose, including a non-UTC offset that
+ * round-tripping through `toISOString()` would flatten to Z.
+ *
+ * An UNPARSEABLE string throws rather than passing through. The earlier
+ * lenient-passthrough version justified itself as "don't turn a provider quirk
+ * into a failed query", but that argument only ever covered *parseable* odd
+ * formatting: forwarding genuine junk hands the client the exact `Invalid Date`
+ * this scalar exists to prevent, under a field documented as a timestamp. A
+ * GraphQL error on that one field is the honest outcome (PR #834 review).
+ *
+ * @param value Raw field value: `Date` (Prisma), a parseable timestamp string
+ *   (shape-mappers and provider payloads), epoch millis as number or
+ *   digit-string, or nullish.
+ * @returns A `Date.parse`-able string, or `null` for a nullish input.
  */
 function serializeDateTime(value: unknown): string | null {
   if (value == null) return null;
@@ -56,17 +87,22 @@ function serializeDateTime(value: unknown): string | null {
     return value.toISOString();
   }
 
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) {
-      throw new GraphQLError(`DateTime cannot serialize the number ${value}`);
-    }
-    return new Date(value).toISOString();
-  }
+  if (typeof value === 'number') return fromEpochMillis(value, value);
 
   if (typeof value === 'string') {
+    // Absent, not malformed. The capability-tool contracts use `null` for a
+    // missing timestamp, but a provider sending "" instead is unambiguously
+    // "no value" — reading it as null loses no signal, where throwing would
+    // fail an otherwise fine nullable field over a formatting nit.
+    if (value.trim() === '') return null;
     // The #205 failure mode, already stringified somewhere upstream. Recover it
     // rather than passing the client a value it will parse as Invalid Date.
-    if (EPOCH_MILLIS.test(value)) return new Date(Number(value)).toISOString();
+    if (EPOCH_MILLIS.test(value)) return fromEpochMillis(Number(value), value);
+    if (Number.isNaN(Date.parse(value))) {
+      throw new GraphQLError(
+        `DateTime cannot serialize an unparseable timestamp: ${value}`,
+      );
+    }
     return value;
   }
 
@@ -87,9 +123,10 @@ function serializeDateTime(value: unknown): string | null {
 export const dateTimeScalar = new GraphQLScalarType({
   name: 'DateTime',
   description:
-    'An ISO 8601 timestamp, e.g. "2026-07-30T12:34:56.789Z". Always serialized ' +
-    'as an ISO string — never epoch milliseconds — so Date.parse / new Date() ' +
-    'work on it directly.',
+    'A timestamp string, e.g. "2026-07-30T12:34:56.789Z". Guaranteed parseable ' +
+    'by Date.parse / new Date() — never epoch milliseconds. Values Hadron mints ' +
+    'are ISO 8601 UTC; a value passed through from an external provider keeps ' +
+    "that provider's representation (which may carry a non-UTC offset).",
   serialize: serializeDateTime,
 
   /** Accept an ISO string from a variable; hand resolvers the string unchanged. */
