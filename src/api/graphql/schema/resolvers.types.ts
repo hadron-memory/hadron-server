@@ -39,7 +39,6 @@ import {
   safeCanonicalUrn,
   AGENT_INCLUDE,
   APP_INCLUDE,
-  toISO,
   readPrimaryAgentIdFromEager,
   readPrimaryAgentRecordFromEager,
   readAllAgentRecordsFromEager,
@@ -190,31 +189,17 @@ export const typeResolvers = {
     // headersEncrypted is not in the GraphQL type at all; readers get only
     // this boolean (write-only secret posture, same as tool-held tokens).
     hasHeaders: (s: { headersEncrypted?: string | null }) => s.headersEncrypted != null,
-    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
-    updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
   },
-  HomeAssistantInstance: {
-    // tokenEncrypted is not in the GraphQL type at all (write-only secret
-    // posture) — nothing to derive, just date serialization.
-    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
-    updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
-  },
-  Secret: {
-    // valueEncrypted is not in the GraphQL type at all (write-only secret
-    // posture, #677) — nothing to derive, just date serialization.
-    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
-    updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
-  },
+  // HomeAssistantInstance / Secret have no entry: their encrypted columns
+  // (tokenEncrypted, valueEncrypted) are absent from the GraphQL type entirely
+  // (write-only secret posture, #677), so there is nothing to derive — and
+  // since #205 their timestamps serialize through the DateTime scalar.
   ResendSender: {
     hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
     from: (s: { fromAddress: string }) => s.fromAddress,
-    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
-    updatedAt: (s: { updatedAt: Date | string }) => toISO(s.updatedAt)!,
   },
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
-    createdAt: (n: { createdAt: Date | string }) => toISO(n.createdAt)!,
-    updatedAt: (n: { updatedAt: Date | string }) => toISO(n.updatedAt)!,
     // `node { memory { urn … } }` powers full-URN rendering in clients
     // (the portal composes `<memory.urn>::<loc>`). The generic `nodes`
     // query doesn't `include` the relation, so resolve it lazily by
@@ -250,12 +235,6 @@ export const typeResolvers = {
         return bestEffortFlatNodeUrn('node', memUrn, n.loc);
       }
     },
-    // Spec 033 embedding-state DateTime fields — Prisma returns Date,
-    // portal (and any other GraphQL consumer) needs ISO strings.
-    embeddingPendingAt: (n: { embeddingPendingAt?: Date | string | null }) =>
-      toISO(n.embeddingPendingAt),
-    embeddingFailedAt: (n: { embeddingFailedAt?: Date | string | null }) =>
-      toISO(n.embeddingFailedAt),
   },
   Edge: {
     // `Edge.source` / `Edge.target` are NULLABLE (`Node`) in the schema, for two
@@ -297,7 +276,6 @@ export const typeResolvers = {
     },
   },
   NodeRevision: {
-    createdAt: (nv: { createdAt: Date | string }) => toISO(nv.createdAt)!,
     // #696 — the computed end-anchored noderev URN. Null for legacy rows with
     // no revNo, and for the rare multi-segment per-user memory the flat shape
     // can't express (the compose helper throws → served as null, never crashes).
@@ -368,8 +346,6 @@ export const typeResolvers = {
     },
   },
   Asset: {
-    uploadedAt: (a: { uploadedAt: Date | string }) => toISO(a.uploadedAt)!,
-    deletedAt: (a: { deletedAt?: Date | string | null }) => toISO(a.deletedAt),
     urn: async (a: { id: string; memoryId: string }, _: unknown, ctx: Context) => {
       const memory = await ctx.db.memory.findUnique({
         where: { id: a.memoryId },
@@ -385,14 +361,6 @@ export const typeResolvers = {
     },
   },
   Memory: {
-    lastSyncedAt: (g: { lastSyncedAt?: Date | string | null }) => toISO(g.lastSyncedAt),
-    createdAt: (g: { createdAt: Date | string }) => toISO(g.createdAt)!,
-    updatedAt: (g: { updatedAt: Date | string }) => toISO(g.updatedAt)!,
-    // Spec 033 FR-026 — readback for the encrypted-memory vector-
-    // inversion disclosure ack.
-    vectorIndexEncryptedAckAt: (g: {
-      vectorIndexEncryptedAckAt?: Date | string | null;
-    }) => toISO(g.vectorIndexEncryptedAckAt),
     // spec 047: organizationId is nullable (a user-owned memory has no org) —
     // guard the fallback lookup so it resolves to null instead of calling
     // findUnique({ id: null }) (codex review, #685).
@@ -622,9 +590,6 @@ export const typeResolvers = {
     },
   },
   App: {
-    createdAt: (a: { createdAt: Date | string }) => toISO(a.createdAt)!,
-    updatedAt: (a: { updatedAt?: Date | string | null }) => toISO(a.updatedAt ?? null),
-    expiresAt: (a: { expiresAt?: Date | string | null }) => toISO(a.expiresAt ?? null),
     // 036-ai-service-config: registry-backed reads of the App's
     // 'default' config (legacy ai_* columns dropped).
     aiProvider: async (a: { id: string }, _: unknown, ctx: Context) =>
@@ -759,8 +724,6 @@ export const typeResolvers = {
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
-    createdAt: (aa: { createdAt: Date | string }) => toISO(aa.createdAt)!,
-    updatedAt: (aa: { updatedAt?: Date | string | null }) => toISO(aa.updatedAt ?? null),
     app: async (aa: { appId: string; app?: unknown }, _: unknown, ctx: Context) =>
       aa.app ?? ctx.db.app.findUniqueOrThrow({ where: { id: aa.appId } }),
     agent: async (aa: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) =>
@@ -771,10 +734,6 @@ export const typeResolvers = {
       }),
   },
   AgentSubscription: {
-    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
-    activatedAt: (s: { activatedAt?: Date | string | null }) => toISO(s.activatedAt ?? null),
-    expiresAt: (s: { expiresAt?: Date | string | null }) => toISO(s.expiresAt ?? null),
-    revokedAt: (s: { revokedAt?: Date | string | null }) => toISO(s.revokedAt ?? null),
     isActive: (s: { activatedAt?: Date | null; revokedAt?: Date | null; expiresAt?: Date | null }) =>
       isLifecycleActive({
         activatedAt: s.activatedAt ?? null,
@@ -788,8 +747,6 @@ export const typeResolvers = {
   },
   // 008-agent-installation: User↔App membership join.
   AppMember: {
-    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
-    updatedAt: (s: { updatedAt?: Date | string | null }) => toISO(s.updatedAt ?? null),
     app: async (s: { appId: string; app?: unknown }, _: unknown, ctx: Context) =>
       s.app ?? ctx.db.app.findUnique({ where: { id: s.appId } }),
     user: async (s: { userId: string; user?: unknown }, _: unknown, ctx: Context) =>
@@ -831,8 +788,6 @@ export const typeResolvers = {
   },
   // 023-app-shape US3: asymmetric cross-user grant on personal-class memory.
   MemoryShare: {
-    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
-    updatedAt: (s: { updatedAt?: Date | string | null }) => toISO(s.updatedAt ?? null),
     memory: async (s: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
       s.memory ?? ctx.db.memory.findUnique({ where: { id: s.memoryId } }),
     grantee: async (s: { granteeId: string; grantee?: unknown }, _: unknown, ctx: Context) =>
@@ -842,8 +797,6 @@ export const typeResolvers = {
   },
   // 023-app-shape US4: symmetric team membership on group-class memory.
   MemoryMember: {
-    createdAt: (m: { createdAt: Date | string }) => toISO(m.createdAt)!,
-    updatedAt: (m: { updatedAt?: Date | string | null }) => toISO(m.updatedAt ?? null),
     memory: async (m: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
       m.memory ?? ctx.db.memory.findUnique({ where: { id: m.memoryId } }),
     user: async (m: { userId: string; user?: unknown }, _: unknown, ctx: Context) =>
@@ -851,7 +804,6 @@ export const typeResolvers = {
   },
   // 008-agent-installation: Agent dependency edge.
   AgentImport: {
-    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
     parentAgent: async (s: { parentAgentId: string }, _: unknown, ctx: Context) =>
       ctx.db.agent.findUnique({ where: { id: s.parentAgentId } }),
     importedAgent: async (s: { importedAgentId: string }, _: unknown, ctx: Context) =>
@@ -859,10 +811,6 @@ export const typeResolvers = {
   },
   // 008-agent-installation: Org↔Agent license — sibling to AgentSubscription.
   AgentOrgGrant: {
-    createdAt: (s: { createdAt: Date | string }) => toISO(s.createdAt)!,
-    activatedAt: (s: { activatedAt?: Date | string | null }) => toISO(s.activatedAt ?? null),
-    expiresAt: (s: { expiresAt?: Date | string | null }) => toISO(s.expiresAt ?? null),
-    revokedAt: (s: { revokedAt?: Date | string | null }) => toISO(s.revokedAt ?? null),
     isActive: (s: { activatedAt?: Date | null; revokedAt?: Date | null; expiresAt?: Date | null }) =>
       isLifecycleActive({
         activatedAt: s.activatedAt ?? null,
@@ -886,18 +834,10 @@ export const typeResolvers = {
     maxMembers: (p: { maxMembers: number | 'unlimited' }) => String(p.maxMembers),
     memberRoles: (p: { memberRoles: string[] }) => p.memberRoles,
   },
-  AppKey: {
-    createdAt: (k: { createdAt: Date | string }) => toISO(k.createdAt)!,
-    lastUsedAt: (k: { lastUsedAt?: Date | string | null }) => toISO(k.lastUsedAt ?? null),
-    revokedAt: (k: { revokedAt?: Date | string | null }) => toISO(k.revokedAt ?? null),
-  },
-  // 025-oauth-for-mcp: serialize timestamp fields the same way AppKey
-  // does. `userId` is intentionally NOT exposed (PR-137 delta D1).
-  UserApiKey: {
-    createdAt: (k: { createdAt: Date | string }) => toISO(k.createdAt)!,
-    lastUsedAt: (k: { lastUsedAt?: Date | string | null }) => toISO(k.lastUsedAt ?? null),
-    revokedAt: (k: { revokedAt?: Date | string | null }) => toISO(k.revokedAt ?? null),
-  },
+  // AppKey / UserApiKey have no entry: every field they exposed a resolver for
+  // was a timestamp, and since #205 those serialize through the DateTime
+  // scalar. On UserApiKey, `userId` remains intentionally NOT exposed in the
+  // GraphQL type (025-oauth-for-mcp, PR-137 delta D1).
   // #562: the current request's principal. `principalType`/`appId`/`agentId`
   // resolve from the source object the Query.authContext resolver returns;
   // `user` and `apiKey` are loaded lazily from the ids it threaded so the
@@ -929,7 +869,6 @@ export const typeResolvers = {
     ) => ((await canSeeOrgMemberRole(ctx, m)) ? m.role : null),
   },
   User: {
-    linkedAt: (u: { linkedAt?: Date | string | null }) => toISO(u.linkedAt ?? null),
     // Canonical hrn:user:<handle> URN (spec cor:urn:010:01) — lowercase, and
     // null for a handle-less or not-URN-legal (grandfathered) handle.
     urn: (u: { handle?: string | null }) => userUrn(u.handle),
@@ -954,15 +893,9 @@ export const typeResolvers = {
     },
   },
   Session: {
-    startedAt: (s: { startedAt: Date | string }) => toISO(s.startedAt)!,
-    endedAt: (s: { endedAt?: Date | string | null }) => toISO(s.endedAt ?? null),
-    expiresAt: (s: { expiresAt?: Date | string | null }) => toISO(s.expiresAt ?? null),
-    autoExpiredAt: (s: { autoExpiredAt?: Date | string | null }) => toISO(s.autoExpiredAt ?? null),
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
   },
   Organization: {
-    createdAt: (o: { createdAt: Date | string }) => toISO(o.createdAt)!,
-    updatedAt: (o: { updatedAt: Date | string }) => toISO(o.updatedAt)!,
     hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
     apps: async (org: { id: string; apps?: unknown[] }, _: unknown, ctx: Context) => {
       if (org.apps) return org.apps;
@@ -1048,17 +981,9 @@ export const typeResolvers = {
       return rows.map(agentRowToRef);
     },
   },
-  ExchangeConnection: {
-    lastSyncAt: (c: { lastSyncAt?: Date | string | null }) => toISO(c.lastSyncAt),
-    createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,
-    updatedAt: (c: { updatedAt: Date | string }) => toISO(c.updatedAt)!,
-  },
-  SlackConnection: {
-    createdAt: (c: { createdAt: Date | string }) => toISO(c.createdAt)!,
-    updatedAt: (c: { updatedAt: Date | string }) => toISO(c.updatedAt)!,
-  },
+  // ExchangeConnection / SlackConnection have no entry: their only resolvers
+  // were timestamp serializers, now handled by the DateTime scalar (#205).
   Agent: {
-    createdAt: (b: { createdAt: Date | string }) => toISO(b.createdAt)!,
     // 036-ai-service-config: registry-backed reads of the Agent's
     // 'default' config (legacy ai_* columns dropped). Never return the
     // encrypted key itself — only whether one exists + the preview.
@@ -1156,7 +1081,6 @@ export const typeResolvers = {
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
-    createdAt: (ue: { createdAt: Date | string }) => toISO(ue.createdAt)!,
     // 046-usage-metering: bigint travels as a base-10 integer String
     // (graphql-js does not serialize bigint to GraphQLString by itself).
     costMicroCents: (ue: { costMicroCents: bigint | null }) =>

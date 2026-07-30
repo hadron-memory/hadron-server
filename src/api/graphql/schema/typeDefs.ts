@@ -572,7 +572,7 @@ export const typeDefs = `#graphql
     just edited isn't confused that their change "didn't take" in
     search yet. System-managed.
     """
-    embeddingPendingAt: String
+    embeddingPendingAt: DateTime
     """
     Spec 033 FR-009 — set when an embed attempt failed (record, not a
     work signal). Transient failures keep embeddingPendingAt set for
@@ -581,7 +581,7 @@ export const typeDefs = `#graphql
     empty index can distinguish "nothing matched" from "every embed
     failed". System-managed.
     """
-    embeddingFailedAt: String
+    embeddingFailedAt: DateTime
     """
     Spec 033 — last embed error message (diagnosability; also surfaced
     by hadron_validate). Common values: encrypted-no-plaintext (#206),
@@ -606,8 +606,8 @@ export const typeDefs = `#graphql
     isRunnable: Boolean
     llmModel: String
     aiAgent: String
-    createdAt: String!
-    updatedAt: String!
+    createdAt: DateTime!
+    updatedAt: DateTime!
     memory: Memory
     outgoingEdges: [Edge!]!
     incomingEdges: [Edge!]!
@@ -649,7 +649,7 @@ export const typeDefs = `#graphql
     userId: String
     agentId: String
     memoryId: String
-    expiresAt: String
+    expiresAt: DateTime
     repo: String
     branch: String
     prNumber: Int
@@ -667,9 +667,9 @@ export const typeDefs = `#graphql
     outcome: Float
     outcomeRef: String
     outcomeMeta: JSON
-    startedAt: String!
-    endedAt: String
-    autoExpiredAt: String
+    startedAt: DateTime!
+    endedAt: DateTime
+    autoExpiredAt: DateTime
     events: [UsageEvent!]!
   }
 
@@ -700,7 +700,7 @@ export const typeDefs = `#graphql
     # Provider cost snapshot in micro-cents (1e-8 USD), as a base-10
     # integer string. Null when the (provider, model) pair is unpriced.
     costMicroCents: String
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   """
@@ -727,8 +727,8 @@ export const typeDefs = `#graphql
     # Per-tier debit markup in basis points (2500 = 25%). Null falls back
     # to the CREDIT_MARKUP_PERCENT env default.
     markupBasisPoints: Int
-    effectiveAt: String!
-    createdAt: String!
+    effectiveAt: DateTime!
+    createdAt: DateTime!
     createdBy: String
   }
 
@@ -744,11 +744,11 @@ export const typeDefs = `#graphql
     organizationId: ID!
     kind: String!
     amountMicroCents: String!
-    expiresAt: String
+    expiresAt: DateTime
     sourceType: String
     sourceId: String
     note: String
-    createdAt: String!
+    createdAt: DateTime!
     createdBy: String
   }
 
@@ -847,7 +847,7 @@ export const typeDefs = `#graphql
     approvedBy: String
     "approvedBy resolved to public identifiers (handle + URN), like editedByUser."
     approvedByUser: NodeRevisionEditor
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   type User {
@@ -863,7 +863,7 @@ export const typeDefs = `#graphql
     identityProvider: String
     externalId: String
     externalAppId: String
-    linkedAt: String
+    linkedAt: DateTime
     name: String
     email: String
     avatarUrl: String
@@ -915,7 +915,7 @@ export const typeDefs = `#graphql
     aiProvider: String
     aiModel: String
     hasAiApiKey: Boolean!
-    expiresAt: String
+    expiresAt: DateTime
     # App-original fields
     createUserPermission: CreateUserPermission!
     identifyUserMethod: IdentifyUserMethod!
@@ -935,8 +935,8 @@ export const typeDefs = `#graphql
     """
     agents: [Agent!]!
     keys: [AppKey!]!
-    createdAt: String!
-    updatedAt: String
+    createdAt: DateTime!
+    updatedAt: DateTime
   }
 
   """
@@ -948,9 +948,9 @@ export const typeDefs = `#graphql
   type AppAgent {
     app: App!
     agent: Agent!
-    createdAt: String!
+    createdAt: DateTime!
     createdBy: String
-    updatedAt: String
+    updatedAt: DateTime
     updatedBy: String
   }
 
@@ -1014,13 +1014,13 @@ export const typeDefs = `#graphql
     """
     grantor: User!
     role: MemoryShareRole!
-    createdAt: String!
+    createdAt: DateTime!
     """
     The API actor who created the row. Distinct from grantor when an
     App backend creates the share on the principal's behalf.
     """
     createdBy: String
-    updatedAt: String
+    updatedAt: DateTime
     updatedBy: String
   }
 
@@ -1070,9 +1070,9 @@ export const typeDefs = `#graphql
     memory: Memory!
     user: User!
     role: MemoryMemberRole!
-    createdAt: String!
+    createdAt: DateTime!
     createdBy: String
-    updatedAt: String
+    updatedAt: DateTime
     updatedBy: String
   }
 
@@ -1133,8 +1133,8 @@ export const typeDefs = `#graphql
     use an App without joining the operator's org.
     """
     isOrgExternal: Boolean!
-    createdAt: String!
-    updatedAt: String
+    createdAt: DateTime!
+    updatedAt: DateTime
   }
 
   # 008-agent-installation: the Agent declarative knobs.
@@ -1167,7 +1167,7 @@ export const typeDefs = `#graphql
     importedAgent: Agent!
     position: Int!
     required: Boolean!
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   # 008-agent-installation: Org↔Agent license. Authorizes (a) creating an App
@@ -1178,12 +1178,12 @@ export const typeDefs = `#graphql
     agentId: ID!
     organization: Organization!
     agent: Agent!
-    activatedAt: String
-    expiresAt: String
-    revokedAt: String
+    activatedAt: DateTime
+    expiresAt: DateTime
+    revokedAt: DateTime
     revokedBy: ID
     isActive: Boolean!
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   # 005-agent-subscription: User-side license expressing "this user is
@@ -1228,12 +1228,12 @@ export const typeDefs = `#graphql
     agentId: ID!
     user: User
     agent: Agent
-    activatedAt: String
-    expiresAt: String
-    revokedAt: String
+    activatedAt: DateTime
+    expiresAt: DateTime
+    revokedAt: DateTime
     revokedBy: ID
     isActive: Boolean!
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   type AppKey {
@@ -1241,9 +1241,9 @@ export const typeDefs = `#graphql
     appId: String!
     keyPreview: String!
     label: String
-    createdAt: String!
-    lastUsedAt: String
-    revokedAt: String
+    createdAt: DateTime!
+    lastUsedAt: DateTime
+    revokedAt: DateTime
   }
 
   # Returned once at creation — the raw key is never stored
@@ -1262,9 +1262,9 @@ export const typeDefs = `#graphql
     id: ID!
     keyPreview: String!
     label: String
-    createdAt: String!
-    lastUsedAt: String
-    revokedAt: String
+    createdAt: DateTime!
+    lastUsedAt: DateTime
+    revokedAt: DateTime
     # Issuance path: portal (createUserApiKey) or oauth:<client_id>
     # (POST /oauth/token). Powers source labels in the revocation UI.
     issuedVia: String
@@ -1351,8 +1351,8 @@ export const typeDefs = `#graphql
     # 008-agent-installation: this org's grants for using/bundling Agents.
     # Resolvable to ADMIN/OWNER of the org only.
     agentOrgGrants: [AgentOrgGrant!]!
-    createdAt: String!
-    updatedAt: String!
+    createdAt: DateTime!
+    updatedAt: DateTime!
   }
 
   """
@@ -1393,7 +1393,7 @@ export const typeDefs = `#graphql
     "Target member's role in this org. Null when the viewer isn't an ADMIN/OWNER of the org (#384 field-level visibility); always visible for one's own membership."
     role: Role
     canInvite: Boolean!
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   # A Hadron memory (git repo + branch settings).
@@ -1490,9 +1490,9 @@ export const typeDefs = `#graphql
     unencrypted memories and for encrypted memories where the index
     was never enabled.
     """
-    vectorIndexEncryptedAckAt: String
+    vectorIndexEncryptedAckAt: DateTime
     userMemoryOfAgentId: String
-    anonymousExpiresAt: String
+    anonymousExpiresAt: DateTime
     # 008-agent-installation: app pivot for app/personal-class memories.
     # Required when class IN ('app', 'personal'); NULL otherwise.
     appId: ID
@@ -1503,9 +1503,9 @@ export const typeDefs = `#graphql
     syncStatus: SyncStatus!
     syncError: String
     pendingEdgeCount: Int!
-    lastSyncedAt: String
-    createdAt: String!
-    updatedAt: String!
+    lastSyncedAt: DateTime
+    createdAt: DateTime!
+    updatedAt: DateTime!
     subscriptions: [MemorySubscription!]!
     """
     023-app-shape US3: cross-user grants on this memory. Non-empty
@@ -1585,7 +1585,7 @@ export const typeDefs = `#graphql
     otherwise), regardless of the agent's PUBLIC visibility.
     """
     orgGrants: [AgentOrgGrant!]!
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   # Decrypted AI config for an agent. Only returned to org admins — the
@@ -1635,8 +1635,8 @@ export const typeDefs = `#graphql
     params: JSON
     "Disabled configs are skipped by resolution (the walk continues outward)."
     enabled: Boolean!
-    createdAt: String!
-    updatedAt: String
+    createdAt: DateTime!
+    updatedAt: DateTime
   }
 
   """
@@ -1673,8 +1673,8 @@ export const typeDefs = `#graphql
     conversationName: String
     stageName: String
     messageCount: Int!
-    createdAt: String!
-    lastMessageAt: String
+    createdAt: DateTime!
+    lastMessageAt: DateTime
     # 017-chat-visibility-and-personal-memory.
     scope: ChatScope!
     # The chat's author (chat-root node's createdBy). Null for legacy
@@ -1689,14 +1689,14 @@ export const typeDefs = `#graphql
     role: String!
     content: String!
     seq: Int
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   type AgentMemoryItem {
     id: ID!
     memory: Memory!
     role: String!
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   # An organization's subscription to a memory it does not own.
@@ -1706,7 +1706,7 @@ export const typeDefs = `#graphql
     organization: Organization!
     role: Role!
     activated: Boolean!
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   # A connected email mailbox (identity record). Provider state lives in the
@@ -1723,10 +1723,10 @@ export const typeDefs = `#graphql
     provider: String!
     syncEnabled: Boolean!
     syncStatus: SyncStatus!
-    lastSyncAt: String
+    lastSyncAt: DateTime
     lastError: String
-    createdAt: String!
-    updatedAt: String!
+    createdAt: DateTime!
+    updatedAt: DateTime!
   }
 
   # One Slack workspace install of the Hadron Slack app (spec 043).
@@ -1750,8 +1750,8 @@ export const typeDefs = `#graphql
     "'ACTIVE' or 'ERROR' (the tool's connection-status vocabulary)."
     status: String!
     lastError: String
-    createdAt: String!
-    updatedAt: String!
+    createdAt: DateTime!
+    updatedAt: DateTime!
   }
 
   # Uniform paginated list shape (cor:api:120).
@@ -1779,9 +1779,9 @@ export const typeDefs = `#graphql
     hasHeaders: Boolean!
     "Disabled servers fail run-tool resolution loud, same as an unregistered slug."
     enabled: Boolean!
-    createdAt: String!
+    createdAt: DateTime!
     createdBy: String
-    updatedAt: String!
+    updatedAt: DateTime!
     updatedBy: String
   }
 
@@ -1822,9 +1822,9 @@ export const typeDefs = `#graphql
     kind: String!
     "The NON-secret, inspectable half (webfetch-auth: { type, urlPrefix })."
     metadata: JSON
-    createdAt: String!
+    createdAt: DateTime!
     createdBy: String
-    updatedAt: String!
+    updatedAt: DateTime!
     updatedBy: String
   }
 
@@ -1851,9 +1851,9 @@ export const typeDefs = `#graphql
     opAllowlist: [String!]!
     "Disabled instances fail run-tool resolution loud, same as an unregistered slug."
     enabled: Boolean!
-    createdAt: String!
+    createdAt: DateTime!
     createdBy: String
-    updatedAt: String!
+    updatedAt: DateTime!
     updatedBy: String
   }
 
@@ -1872,9 +1872,9 @@ export const typeDefs = `#graphql
     "Whether an encrypted API key is stored; the key is never returned."
     hasApiKey: Boolean!
     enabled: Boolean!
-    createdAt: String!
+    createdAt: DateTime!
     createdBy: String
-    updatedAt: String!
+    updatedAt: DateTime!
     updatedBy: String
   }
 
@@ -1915,7 +1915,7 @@ export const typeDefs = `#graphql
     id: ID!
     subject: String
     from: String
-    receivedDateTime: String
+    receivedDateTime: DateTime
     isRead: Boolean
     bodyPreview: String
     body: String
@@ -1960,7 +1960,13 @@ export const typeDefs = `#graphql
   date (YYYY-MM-DD, all-day) is set.
   """
   type CalendarEventTime {
-    dateTime: String
+    "Instant for a timed event. Exactly one of dateTime / date is set."
+    dateTime: DateTime
+    """
+    Calendar date for an all-day event, as YYYY-MM-DD. Deliberately String
+    and NOT DateTime (#205): an all-day event has no instant, and widening it
+    to a timestamp would force a timezone the provider never supplied.
+    """
     date: String
     timeZone: String
   }
@@ -1997,13 +2003,13 @@ export const typeDefs = `#graphql
     webLink: String
     "Series id when this is an instance of a recurring event."
     seriesId: ID
-    createdAt: String
-    updatedAt: String
+    createdAt: DateTime
+    updatedAt: DateTime
   }
 
   type ScheduleBusyInterval {
-    start: String!
-    end: String!
+    start: DateTime!
+    end: DateTime!
   }
 
   "Free/busy intervals for one requested schedule (calendarSchedule)."
@@ -2056,8 +2062,8 @@ export const typeDefs = `#graphql
     webLink: String
     "Parent folder ids."
     parents: [ID!]!
-    createdAt: String
-    modifiedAt: String
+    createdAt: DateTime
+    modifiedAt: DateTime
   }
 
   "One page of a drive listing/search."
@@ -2097,9 +2103,9 @@ export const typeDefs = `#graphql
     email: String
     githubUsername: String
     maxActivations: Int
-    expiresAt: String
-    acceptedAt: String
-    createdAt: String!
+    expiresAt: DateTime
+    acceptedAt: DateTime
+    createdAt: DateTime!
     activationCount: Int!
   }
 
@@ -2340,9 +2346,9 @@ export const typeDefs = `#graphql
     failure: JSON
     timeoutMs: Int
     attempts: Int!
-    startedAt: String
-    finishedAt: String
-    createdAt: String!
+    startedAt: DateTime
+    finishedAt: DateTime
+    createdAt: DateTime!
     createdBy: String
   }
 
@@ -2363,16 +2369,16 @@ export const typeDefs = `#graphql
     "5-field cron for recurring schedules; null for one-shots (#510)."
     cron: String
     "One-shot instant (#510); null for recurring schedules. XOR with cron."
-    runAt: String
+    runAt: DateTime
     timezone: String!
     entryNodeUrn: String!
     eventData: JSON
     policy: JSON
     aiConfigName: String
     enabled: Boolean!
-    lastRunAt: String
-    nextRunAt: String
-    createdAt: String!
+    lastRunAt: DateTime
+    nextRunAt: DateTime
+    createdAt: DateTime!
     createdBy: String
   }
 
@@ -2449,8 +2455,8 @@ export const typeDefs = `#graphql
     "Covered scopes: mail.read, mail.send, calendar.freebusy, calendar.read."
     scopes: [String!]!
     "ISO-8601 expiry, or null for perpetual (until revoked)."
-    expiresAt: String
-    createdAt: String!
+    expiresAt: DateTime
+    createdAt: DateTime!
   }
 
   type ConnectionGrantsPage {
@@ -2470,8 +2476,8 @@ export const typeDefs = `#graphql
     "Allowed actions - exact ('memory.clone'), prefix ('memory.*'), or '*'."
     actions: [String!]!
     "ISO-8601 expiry, or null for perpetual (until revoked)."
-    expiresAt: String
-    createdAt: String!
+    expiresAt: DateTime
+    createdAt: DateTime!
   }
 
   type PrincipalGrantsPage {
@@ -2493,8 +2499,8 @@ export const typeDefs = `#graphql
     policy: JSON
     aiConfigName: String
     enabled: Boolean!
-    lastCalledAt: String
-    createdAt: String!
+    lastCalledAt: DateTime
+    createdAt: DateTime!
     createdBy: String
   }
 
@@ -2538,9 +2544,9 @@ export const typeDefs = `#graphql
     mintedBy: String!
     note: String
     consumedByRunId: ID
-    consumedAt: String
-    expiresAt: String
-    createdAt: String!
+    consumedAt: DateTime
+    expiresAt: DateTime
+    createdAt: DateTime!
   }
 
   "Usage-vs-limit for one scope x action window (#510). The stored limit is the enforced value; env defaults only seed first touch."
@@ -2555,7 +2561,7 @@ export const typeDefs = `#graphql
     window: String!
     used: Int!
     limit: Int!
-    resetAt: String!
+    resetAt: DateTime!
   }
 
   input SetQuotaLimitInput {
@@ -2777,7 +2783,12 @@ export const typeDefs = `#graphql
 
   "One time bucket of read+write activity (#796)."
   type UsageActivityBucket {
-    "Bucket start as YYYY-MM-DD, in the requested timeZone."
+    """
+    Bucket start as YYYY-MM-DD, in the requested timeZone. Deliberately
+    String and NOT DateTime (#205): it is a calendar-day label in the
+    caller's zone, not an instant — rendering it as a UTC timestamp would
+    shift buckets across the date line.
+    """
     date: String!
     reads: Int!
     writes: Int!
@@ -2791,6 +2802,23 @@ export const typeDefs = `#graphql
   }
 
   scalar JSON
+
+  """
+  A timestamp string, e.g. '2026-07-30T12:34:56.789Z'.
+
+  Guaranteed parseable by Date.parse / new Date(). Values Hadron mints are
+  ISO 8601 UTC; a value passed through from an external provider (calendar,
+  mail, drive) keeps that provider's representation, which may carry a
+  non-UTC offset — so compare instants, don't compare these as strings.
+
+  Issue #205: date fields used to be declared String and fed a Prisma Date,
+  which graphql-js coerced through Date.valueOf() into epoch milliseconds
+  ('1716943200000') — a value new Date() parses as Invalid Date. This scalar
+  makes that shape unrepresentable, so no client needs to sniff the format.
+
+  Output-only today: date-valued arguments remain String.
+  """
+  scalar DateTime
 
   # ─── Assets ──────────────────────────────────────────────────────
   # Per spec 004-asset-upload. Assets live in a dedicated Asset
@@ -2811,10 +2839,10 @@ export const typeDefs = `#graphql
     sizeBytes:   Int!
     scanStatus:  AssetScanStatus!
     description: String
-    uploadedAt:  String!
+    uploadedAt:  DateTime!
     """Uploader (User id). Null when the asset was created server-side by an app run (hadron_store_file)."""
     uploadedBy:  ID
-    deletedAt:   String
+    deletedAt:   DateTime
     """The asset's URN: <memory.urn>:assets:<asset.id>."""
     urn:         String!
   }
@@ -2863,7 +2891,7 @@ export const typeDefs = `#graphql
     uploadId:        ID!
     putUrl:          String!
     putHeaders:      [AssetPutHeader!]!
-    expiresAt:       String!
+    expiresAt:       DateTime!
     storageKey:      String!
     maxSizeBytes:    Int!
     allowedMimeType: String!
@@ -2892,7 +2920,7 @@ export const typeDefs = `#graphql
 
   type AssetDownloadUrl {
     url:       String!
-    expiresAt: String!
+    expiresAt: DateTime!
     filename:  String!
     mimeType:  String!
     sizeBytes: Int!
@@ -5754,12 +5782,12 @@ export const typeDefs = `#graphql
     revisionLoc: String!
     label: String!
     published: Boolean!
-    createdAt: String!
+    createdAt: DateTime!
   }
 
   type EditorLockResult {
     locked: Boolean!
     lockedBy: String
-    expiresAt: String
+    expiresAt: DateTime
   }
 `;

@@ -13,6 +13,7 @@
 import { type Context } from './resolvers.helpers.js';
 export type { Context };
 
+import { dateTimeScalar } from './dateTimeScalar.js';
 import { typeResolvers } from './resolvers.types.js';
 
 import { nodeQueries } from './resolvers.query.node.js';
@@ -52,6 +53,9 @@ import { homeAssistantMutations } from './resolvers.mutation.homeAssistant.js';
 import { resendSenderMutations } from './resolvers.mutation.resendSender.js';
 
 export const resolvers = {
+  // Issue #205: every date field is declared `DateTime`, so serialization is a
+  // property of the schema rather than something each type has to remember.
+  DateTime: dateTimeScalar,
   ...typeResolvers,
   Query: {
     ...nodeQueries,
