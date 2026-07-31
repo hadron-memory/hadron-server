@@ -1080,6 +1080,48 @@ export const typeResolvers = {
     installationPolicy: (a: { installationPolicy?: unknown }) =>
       (a.installationPolicy as { maxMembers: number | 'unlimited'; memberRoles: string[] } | undefined) ??
       { maxMembers: 'unlimited', memberRoles: ['owner'] },
+    // #759 — the #740 PUBLIC-congruence invariant deliberately EXCLUDES
+    // personal/private and app-scoped memories from the covered set, so
+    // `assertLinkAllowedForPublicAgent` lets a PUBLIC agent link a NON-public
+    // memory of those classes. `agent(ref:)` / `publicAgents` then handed
+    // `memoryItems[].memory` to anonymous callers, and the Memory type gates
+    // only userId/shares/members — the scalars (name, shortDescription,
+    // description, data) passed straight through. The congruence code's claim
+    // that excluded memories are "never publicly readable (effectiveAccess
+    // blocks public read)" holds for node CONTENT, not for these object
+    // scalars.
+    //
+    // Filter to the memories this caller may actually read, through the shared
+    // gate (isMemoryReadableCached -> getAccessibleMemoryIds) rather than a
+    // bespoke predicate that would drift from it. A PUBLIC non-app-scoped
+    // memory short-circuits, so the marketplace listing costs no extra query.
+    memoryItems: async (
+      a: { id: string; memoryItems?: unknown },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      type Item = { memory?: { id: string; visibility: string | null; appId: string | null } | null };
+      const eager = a.memoryItems as Item[] | undefined;
+      const items =
+        eager ??
+        ((await ctx.db.agentMemoryItem.findMany({
+          where: { agentId: a.id, deletedAt: null, memory: { deletedAt: null } },
+          include: { memory: true },
+        })) as Item[]);
+      const kept: Item[] = [];
+      for (const item of items) {
+        const mem = item.memory;
+        if (!mem) continue;
+        // Readable by anyone (#362 PUBLIC carve-out); #653 keeps app-scoped
+        // rows out of the public set even when their visibility says PUBLIC.
+        if (mem.visibility === 'PUBLIC' && mem.appId == null) {
+          kept.push(item);
+          continue;
+        }
+        if (await isMemoryReadableCached(ctx, mem.id)) kept.push(item);
+      }
+      return kept;
+    },
     imports: async (a: { id: string }, _: unknown, ctx: Context) =>
       ctx.db.agentImport.findMany({
         where: { parentAgentId: a.id },

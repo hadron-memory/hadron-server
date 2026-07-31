@@ -109,3 +109,73 @@ describe('updateMemory un-PUBLIC-ing knowledge of a PUBLIC agent', () => {
     expect((await M.updateMemory({}, { id: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility).toBe('ORGANIZATION');
   });
 });
+
+/**
+ * #759 — the covered-set exclusions above are exactly what makes this
+ * reachable: a PUBLIC agent may legally link a NON-public personal/private or
+ * app-scoped memory, and `agent(ref:)` / `publicAgents` hand `memoryItems[].memory`
+ * to anonymous callers. The Memory type gates only userId/shares/members, so
+ * the object scalars (name / shortDescription / description / data) leaked.
+ */
+describe('Agent.memoryItems — non-public linked memories are gated (#759)', () => {
+  const A = resolvers.Agent as any;
+  const anon = (): Context => ({ db, roles: ['READER'] });
+  const outsider = (id: string): Context => ({ db, userId: id, roles: ['READER'] });
+
+  let pubAgent: { id: string };
+  let appMem: { id: string };
+  let stranger: { id: string };
+
+  beforeEach(async () => {
+    pubAgent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:pub-agent`, name: 'pub-agent', visibility: 'PUBLIC' },
+    });
+    // An app-scoped memory: excluded from the covered set, so it may be linked
+    // to a PUBLIC agent while itself being non-public (#653).
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app-${generateId()}`, name: 'App' },
+    });
+    appMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:app-mem`,
+        name: 'App Internal', class: 'knowledge', visibility: 'ORGANIZATION',
+        appId: app.id, shortDescription: 'INTERNAL-ONLY', description: 'SECRET-DESCRIPTION',
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: pubAgent.id, memoryId: appMem.id } });
+    await db.agentMemoryItem.create({ data: { agentId: pubAgent.id, memoryId: pubMem.id } });
+    stranger = await db.user.create({
+      data: { id: generateId(), githubId: 56002, githubUsername: 'cong-stranger', roles: [] },
+    });
+  });
+
+  /** The eager shape AGENT_INCLUDE produces, which the resolver receives. */
+  const eagerAgent = () =>
+    db.agent.findUniqueOrThrow({
+      where: { id: pubAgent.id },
+      include: { memoryItems: { where: { deletedAt: null }, include: { memory: true } } },
+    });
+
+  it('an ANONYMOUS caller sees only the PUBLIC memory', async () => {
+    const items = await A.memoryItems(await eagerAgent(), {}, anon());
+    expect(items.map((i: { memoryId: string }) => i.memoryId)).toEqual([pubMem.id]);
+  });
+
+  it('the app-scoped memory’s scalars are unreachable to an outsider', async () => {
+    const items = await A.memoryItems(await eagerAgent(), {}, outsider(stranger.id));
+    const descriptions = items.map((i: { memory?: { description?: string | null } }) => i.memory?.description);
+    expect(descriptions).not.toContain('SECRET-DESCRIPTION');
+    expect(items.map((i: { memoryId: string }) => i.memoryId)).toEqual([pubMem.id]);
+  });
+
+  it('an org member still sees both (no regression for the intended audience)', async () => {
+    const items = await A.memoryItems(await eagerAgent(), {}, ctx());
+    expect(items.map((i: { memoryId: string }) => i.memoryId).sort())
+      .toEqual([appMem.id, pubMem.id].sort());
+  });
+
+  it('falls back to a query when memoryItems was not eager-loaded', async () => {
+    const items = await A.memoryItems({ id: pubAgent.id }, {}, anon());
+    expect(items.map((i: { memoryId: string }) => i.memoryId)).toEqual([pubMem.id]);
+  });
+});
