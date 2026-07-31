@@ -209,6 +209,46 @@ describe('restoreRevision', () => {
     expect(((autoSave?.data as Record<string, unknown>).snapshot as any).nodes.length).toBeGreaterThan(6);
   });
 
+  // Regression (#752, Copilot): the restore soft-deletes existing edges, whose
+  // (loc, memoryId) slot survives the soft-delete (Edge @@unique is unfiltered).
+  // Re-creating snapshot edges with `create` would hit the unique index for any
+  // graph that already had an edge at that loc; the restore must upsert-resurrect.
+  it('restores a snapshot containing edges without a unique-constraint failure', async () => {
+    const hello = await db.node.findFirstOrThrow({
+      where: { memoryId: systemMemory.id, loc: 'conversations:hello' },
+    });
+    const greet = await db.node.findFirstOrThrow({
+      where: { memoryId: systemMemory.id, loc: 'conversations:hello:greet' },
+    });
+    await db.edge.create({
+      data: {
+        id: generateId(), memoryId: systemMemory.id,
+        sourceId: hello.id, targetId: greet.id,
+        loc: 'conversations:hello:step:greet', name: 'step',
+      },
+    });
+
+    // Snapshot the graph WITH the edge, then restore it. The restore's preamble
+    // soft-deletes the live edge, so the snapshot edge collides on (loc, memoryId)
+    // unless it's upserted — before the fix this threw a P2002 unique violation.
+    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'v1' }, adminCtx());
+    const result = await resolvers.Mutation.restoreRevision(
+      {},
+      { agentId: agent.id, revisionLoc: 'revisions:rev-1' },
+      adminCtx(),
+    );
+    expect(result.revisionLoc).toBe('revisions:rev-1');
+
+    // Exactly one LIVE edge at that loc survives the round-trip (resurrected,
+    // not duplicated).
+    const liveEdges = await db.edge.findMany({
+      where: { memoryId: systemMemory.id, loc: 'conversations:hello:step:greet', deletedAt: null },
+    });
+    expect(liveEdges).toHaveLength(1);
+    expect(liveEdges[0]?.sourceId).toBe(hello.id);
+    expect(liveEdges[0]?.targetId).toBe(greet.id);
+  });
+
   // 007-entity-id-or-urn: restoreRevision accepts agentId as ID or URN.
   it('accepts a URN as agentId input', async () => {
     await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'v1' }, adminCtx());

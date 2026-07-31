@@ -5081,11 +5081,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               update: {},
             });
           } catch { /* exists */ }
-          trainingNode = await db.node.create({
-            data: {
-              id: generateId(), memoryId: sysMemId, loc: trainingLoc, name: 'training',
-              nodeType: 'system', data: { entries: [] } as InputJsonValue,
-            },
+          // #664/#752: trainingLoc is `goals:training` — lock the ancestor path
+          // across the insert so a concurrent non-recursive delete of `goals`
+          // can't orphan it (advisory before row; READ COMMITTED).
+          trainingNode = await db.$transaction(async (tx) => {
+            await lockAncestorsForCreate(tx, sysMemId, trainingLoc);
+            return tx.node.create({
+              data: {
+                id: generateId(), memoryId: sysMemId, loc: trainingLoc, name: 'training',
+                nodeType: 'system', data: { entries: [] } as InputJsonValue,
+              },
+            });
           });
         }
 
@@ -5148,7 +5154,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           });
         } catch { /* exists */ }
 
-        await db.node.upsert({
+        // #664/#752: personaLoc is `test-personas:<slug>` — lock the ancestor
+        // path across the upsert so a concurrent non-recursive delete of
+        // `test-personas` can't orphan it (advisory before row; READ COMMITTED).
+        const personaUpsertArgs = {
           where: { loc_memoryId: { loc: personaLoc, memoryId: sysMemId } },
           create: {
             id: generateId(), memoryId: sysMemId, loc: personaLoc, name: slug,
@@ -5172,6 +5181,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             } as InputJsonValue,
             deletedAt: null,
           },
+        };
+        await db.$transaction(async (tx) => {
+          await lockAncestorsForCreate(tx, sysMemId, personaLoc);
+          await tx.node.upsert(personaUpsertArgs);
         });
 
         return textResult(`Persona "${name}" saved at ${personaLoc}.\nOpening: "${openingMessage}"\nFollow-ups: ${(followUpMessages ?? []).length}`);
