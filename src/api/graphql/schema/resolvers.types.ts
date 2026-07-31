@@ -50,6 +50,30 @@ import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 
+/**
+ * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
+ * mirroring the `agent(ref:)` gate: PUBLIC resolves for anyone (#551), a
+ * non-public agent needs membership in its owning org, and a user-owned agent
+ * (spec 047) is readable by its owner. Platform ADMIN/OWNER get `undefined` —
+ * no restriction, so the callsite omits the relation filter entirely.
+ *
+ * Use this to scope any field that returns OTHER tenants' Agent objects, where
+ * the outer gate authorized a different agent than the one being hydrated.
+ */
+async function callerReadableAgentFilter(
+  ctx: Context,
+): Promise<Record<string, unknown> | undefined> {
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return undefined;
+  const or: Record<string, unknown>[] = [{ visibility: 'PUBLIC' }];
+  if (ctx.userId) {
+    const orgIds = await getMemberOrgIds(ctx.db, ctx.userId);
+    if (orgIds.length > 0) or.push({ organizationId: { in: orgIds } });
+    // spec 047: the caller's own org-less agents.
+    or.push({ ownerUserId: ctx.userId });
+  }
+  return { OR: or };
+}
+
 /** An edge endpoint's memoryId (preloaded relation, or a memoized FK load). */
 async function edgeEndpointMemoryId(
   ctx: Context,
@@ -1085,16 +1109,34 @@ export const typeResolvers = {
         where: { parentAgentId: a.id },
         orderBy: { position: 'asc' },
       }),
-    importedBy: async (a: { id: string }, _: unknown, ctx: Context) =>
-      ctx.db.agentImport.findMany({
-        where: { importedAgentId: a.id },
+    // #757 — `importedBy` surfaces the agents that import THIS one, i.e. OTHER
+    // tenants' parent agents, and `AgentImport.parentAgent` hydrates each one
+    // with a bare `findUnique`. On a PUBLIC agent (readable by anyone,
+    // including anonymous) that handed out foreign orgs' private parent-agent
+    // definitions — `systemPrompt`, description, linked-memory metadata — the
+    // exact #552 class. `publishAgentImport` puts no visibility constraint on
+    // the parent, so this is the intended marketplace flow, not a rare shape.
+    //
+    // Scope to parents the CALLER may read, mirroring the `agent(ref:)` gate
+    // (PUBLIC → anyone; else the caller's member orgs or their own user-owned
+    // agents; platform ADMIN/OWNER → unscoped). A non-member simply sees fewer
+    // rows — the list is an adoption signal, not a correctness input.
+    importedBy: async (a: { id: string }, _: unknown, ctx: Context) => {
+      const parentFilter = await callerReadableAgentFilter(ctx);
+      return ctx.db.agentImport.findMany({
+        where: {
+          importedAgentId: a.id,
+          ...(parentFilter ? { parentAgent: parentFilter } : {}),
+        },
         orderBy: { position: 'asc' },
-      }),
+      });
+    },
     // #551 — the Agent's OWN definition (systemPrompt / systemMemoryId /
-    // memoryItems / imports / importedBy, above) is public on a PUBLIC agent:
-    // reaching the Agent object means the object-level read gate already
-    // admitted the caller (PUBLIC → anyone; non-public → members), and the
-    // agent's own content is what a marketplace listing publishes.
+    // memoryItems / imports, above) is public on a PUBLIC agent: reaching the
+    // Agent object means the object-level read gate already admitted the
+    // caller (PUBLIC → anyone; non-public → members), and the agent's own
+    // content is what a marketplace listing publishes. (`importedBy` is NOT in
+    // that set — see #757 above; it returns other tenants' agents.)
     //
     // The "who USES this agent" fields below are different: they surface OTHER
     // tenants' data, so they are NOT public. `apps` / `appAgents` return full

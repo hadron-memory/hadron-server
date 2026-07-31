@@ -18,7 +18,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createDbAgentImport, createDbAgentOrgGrant } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -252,5 +252,85 @@ describe('installAgentIntoApp — CONTRIBUTOR floor + cross-org PUBLIC (issue #5
     await expect(
       M.installAgentIntoApp(null, { appId: app.id, agentId: foreignPriv.id }, ctx(contributor.id)),
     ).rejects.toThrow(/organization/i);
+  });
+});
+
+/**
+ * #757 — `Agent.importedBy` returns OTHER tenants' parent agents, and
+ * `AgentImport.parentAgent` hydrates each with no gate of its own. On a PUBLIC
+ * agent that leaked foreign orgs' private agent definitions (systemPrompt) to
+ * any caller, including anonymous. Same class as #552.
+ */
+describe('Agent.importedBy — cross-tenant parent-agent scoping (#757)', () => {
+  // orgB privately bundles orgA's PUBLIC agent — the intended marketplace flow.
+  let orgBPrivateParent: { id: string };
+  let orgBMember: { id: string };
+
+  beforeEach(async () => {
+    await createDbAgentOrgGrant(db, orgB.id, pubAgentA.id);
+    orgBPrivateParent = await db.agent.create({
+      data: {
+        id: generateId(), organizationId: orgB.id, urn: `${orgB.urn}:suite`,
+        name: 'Org B Suite', visibility: 'ORGANIZATION',
+        systemPrompt: 'ORG-B-PROPRIETARY-PROMPT',
+      },
+    });
+    await createDbAgentImport(db, orgBPrivateParent.id, pubAgentA.id);
+    orgBMember = await db.user.create({
+      data: { id: generateId(), githubId: 55104, githubUsername: 'pa-orgb', roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgB.id, userId: orgBMember.id, role: 'READER' },
+    });
+  });
+
+  it('an ANONYMOUS caller gets no importedBy row for a foreign private parent', async () => {
+    expect(await A.importedBy(pubAgentA, {}, asAnon())).toEqual([]);
+  });
+
+  it('a NON-MEMBER of the parent org gets nothing (member of orgA only)', async () => {
+    expect(await A.importedBy(pubAgentA, {}, asMember())).toEqual([]);
+    expect(await A.importedBy(pubAgentA, {}, asStranger())).toEqual([]);
+  });
+
+  it('a member of the PARENT org still sees the row (no regression)', async () => {
+    const rows = await A.importedBy(pubAgentA, {}, ctx(orgBMember.id));
+    expect(rows.map((r: { parentAgentId: string }) => r.parentAgentId)).toEqual([orgBPrivateParent.id]);
+  });
+
+  it('a platform ADMIN sees every row unscoped', async () => {
+    const rows = await A.importedBy(pubAgentA, {}, asAdmin());
+    expect(rows.map((r: { parentAgentId: string }) => r.parentAgentId)).toEqual([orgBPrivateParent.id]);
+  });
+
+  it('a PUBLIC parent stays visible to everyone (it publishes itself)', async () => {
+    const publicParent = await db.agent.create({
+      data: {
+        id: generateId(), organizationId: orgB.id, urn: `${orgB.urn}:pub-suite`,
+        name: 'Org B Public Suite', visibility: 'PUBLIC',
+      },
+    });
+    await createDbAgentImport(db, publicParent.id, pubAgentA.id, { position: 200 });
+    const anonRows = await A.importedBy(pubAgentA, {}, asAnon());
+    expect(anonRows.map((r: { parentAgentId: string }) => r.parentAgentId)).toEqual([publicParent.id]);
+  });
+
+  it('the leak is closed end-to-end: the foreign systemPrompt is unreachable', async () => {
+    // The pre-#757 exploit: read the PUBLIC agent, walk importedBy →
+    // parentAgent → systemPrompt.
+    const agent = await Q.agent(null, { ref: pubAgentA.id }, asAnon());
+    expect(agent).not.toBeNull();
+    const rows = await A.importedBy(agent, {}, asAnon());
+    const parents = await Promise.all(
+      rows.map((r: unknown) => (resolvers.AgentImport as any).parentAgent(r, {}, asAnon())),
+    );
+    expect(parents.map((p: { systemPrompt: string } | null) => p?.systemPrompt))
+      .not.toContain('ORG-B-PROPRIETARY-PROMPT');
+  });
+
+  it('the agent’s OWN definition stays public (#551 not regressed)', async () => {
+    const agent = await Q.agent(null, { ref: pubAgentA.id }, asAnon());
+    expect(agent.systemPrompt).toBe('SECRET-PROMPT');
+    expect(await A.imports(agent, {}, asAnon())).toEqual([]);
   });
 });
