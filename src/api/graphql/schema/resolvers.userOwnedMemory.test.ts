@@ -139,3 +139,71 @@ describe('computeEffectiveAccess — user-owned memory grants', () => {
     expect(res.canWrite).toBe(false);
   });
 });
+
+/**
+ * #758 — the same strict-ownership invariant, but for a user-owned memory whose
+ * VISIBILITY is PUBLIC. The `orgReadableMemory` PUBLIC clause matched on
+ * class/appId/userMemoryOfAgentId only, so a user-owned knowledge or group
+ * memory set PUBLIC would enter every tenant's readable set — the list/search
+ * side (getAccessibleMemoryIds + MCP getMemoryAccess both build on it). The
+ * per-memory point reads were already safe via their ownerUserId early-returns.
+ *
+ * Latent when filed: nothing sets `ownerUserId` on a non-system memory yet
+ * (createMemory/cloneMemory set the strict `userId` column). These tests build
+ * the row directly so the guard is pinned BEFORE free-standing user-owned
+ * creation lands and makes it reachable.
+ */
+describe('user-owned memory set PUBLIC stays owner-only (#758)', () => {
+  // knowledge-class only: `chk_memory_group_visibility` forbids a group memory
+  // from being PUBLIC, so knowledge is the whole reachable surface here.
+  async function createPublicUserOwned(ownerUserId: string) {
+    return db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'knowledge',
+        name: 'pub-uo',
+        urn: `@${ownerUserId}:pub-uo-${generateId()}`,
+        ownerUserId,
+        visibility: 'PUBLIC',
+      },
+    });
+  }
+
+  it('is excluded from another user’s accessible set', async () => {
+    const mem = await createPublicUserOwned(ownerId);
+    const ids = await getAccessibleMemoryIds(ctx({ userId: otherId, roles: ['READER'] }));
+    expect(ids).not.toContain(mem.id);
+  });
+
+  it('is excluded from an ANONYMOUS caller’s accessible set', async () => {
+    const mem = await createPublicUserOwned(ownerId);
+    const ids = await getAccessibleMemoryIds(ctx({ roles: ['READER'] }));
+    expect(ids).not.toContain(mem.id);
+  });
+
+  it('is excluded from a platform ADMIN’s set (strict ownership, no bypass)', async () => {
+    const mem = await createPublicUserOwned(ownerId);
+    const ids = await getAccessibleMemoryIds(ctx({ userId: otherId, roles: ['ADMIN'] }));
+    expect(ids).not.toContain(mem.id);
+  });
+
+  it('the OWNER still reads their own PUBLIC user-owned memory', async () => {
+    const mem = await createPublicUserOwned(ownerId);
+    const ids = await getAccessibleMemoryIds(ctx({ userId: ownerId, roles: ['READER'] }));
+    expect(ids).toContain(mem.id);
+  });
+
+  it('an ORG-owned PUBLIC memory is still world-readable (no regression)', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'uo-org', urn: `uo-org-${generateId()}` },
+    });
+    const orgPub = await db.memory.create({
+      data: {
+        id: generateId(), class: 'knowledge', name: 'org-pub',
+        urn: `${org.urn}:org-pub`, organizationId: org.id, visibility: 'PUBLIC',
+      },
+    });
+    const ids = await getAccessibleMemoryIds(ctx({ userId: otherId, roles: ['READER'] }));
+    expect(ids).toContain(orgPub.id);
+  });
+});

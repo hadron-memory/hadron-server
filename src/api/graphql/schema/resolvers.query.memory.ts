@@ -383,6 +383,7 @@ export const memoryQueries = {
           where: { id: ctx.appId },
           select: {
             organizationId: true,
+            ownerUserId: true,
             appAgents: {
               select: {
                 agent: {
@@ -395,11 +396,19 @@ export const memoryQueries = {
           },
         });
         if (!app || app.appAgents.length === 0) return empty;
+        // #758 — the twin of the #676 blocker-2 fix, which landed only in the
+        // MCP `getAppMemoryAccess`. spec 047: a USER-owned memory is strictly
+        // owner-only, so one owned by someone other than this App's owner must
+        // never fold into the App-key listing. Org-owned memories
+        // (ownerUserId NULL) are unaffected.
+        const foreignUserOwned = (owner: string | null | undefined): boolean =>
+          owner != null && owner !== app.ownerUserId;
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
           for (const item of aa.agent.memoryItems) {
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
             if (f.visibility && item.memory.visibility !== f.visibility) continue;
+            if (foreignUserOwned(item.memory.ownerUserId)) continue;
             memoryMap.set(item.memory.id, item.memory);
           }
         }
