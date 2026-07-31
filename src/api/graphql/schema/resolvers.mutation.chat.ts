@@ -1,5 +1,6 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
@@ -447,21 +448,27 @@ export const chatMutations = {
         }],
       };
 
-      await ctx.db.node.create({
-        data: {
-          id: generateId(), memoryId: targetMemoryId, loc: chatLoc, name: chatName,
-          nodeType: 'record',
-          description: `Chat: ${convName}`,
-          data: initialChatData as InputJsonValue,
-        },
-      });
-
-      // Create the messages parent (so the chat subtree is well-formed)
-      await ctx.db.node.create({
-        data: {
-          id: generateId(), memoryId: targetMemoryId, loc: `${chatLoc}:messages`,
-          name: 'messages', nodeType: 'record',
-        },
+      // #664/#752: the chat node and its messages parent live under the `chats`
+      // subtree — a concurrent non-recursive delete of `chats` (or the chat)
+      // could count zero descendants and orphan them. Create both under the
+      // ancestor-path lock in one READ COMMITTED tx (advisory before row).
+      await ctx.db.$transaction(async (tx) => {
+        await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
+        await tx.node.create({
+          data: {
+            id: generateId(), memoryId: targetMemoryId, loc: chatLoc, name: chatName,
+            nodeType: 'record',
+            description: `Chat: ${convName}`,
+            data: initialChatData as InputJsonValue,
+          },
+        });
+        // Create the messages parent (so the chat subtree is well-formed)
+        await tx.node.create({
+          data: {
+            id: generateId(), memoryId: targetMemoryId, loc: `${chatLoc}:messages`,
+            name: 'messages', nodeType: 'record',
+          },
+        });
       });
 
       // Prepend the agent's system prompt to the compiled stage prompt
@@ -532,14 +539,21 @@ export const chatMutations = {
         { content: userMessage, data: { role: 'user' } },
         memEncInfo,
       );
-      await ctx.db.node.create({
-        data: {
-          id: generateId(), memoryId: chatNode.memoryId,
-          loc: `${chatId}:messages:${msgNum}-${userId}`, name: `${msgNum}-${userId}`,
-          nodeType: 'record', content: newMsgFields.content ?? null,
-          data: (newMsgFields.data ?? null) as InputJsonValue,
-          seq: messageCount,
-        },
+      // #664/#752: a message lands under `${chatId}:messages` — hold the
+      // ancestor-path lock across the insert so a concurrent non-recursive
+      // delete of the chat (or its messages parent) can't orphan it.
+      const userMsgLoc = `${chatId}:messages:${msgNum}-${userId}`;
+      await ctx.db.$transaction(async (tx) => {
+        await lockAncestorsForCreate(tx, chatNode.memoryId, userMsgLoc);
+        await tx.node.create({
+          data: {
+            id: generateId(), memoryId: chatNode.memoryId,
+            loc: userMsgLoc, name: `${msgNum}-${userId}`,
+            nodeType: 'record', content: newMsgFields.content ?? null,
+            data: (newMsgFields.data ?? null) as InputJsonValue,
+            seq: messageCount,
+          },
+        });
       });
 
       // Update message count + lastMessageAt
@@ -863,14 +877,20 @@ export const chatMutations = {
         { content: message, data: { role: 'assistant' } },
         memEncInfo,
       );
-      await ctx.db.node.create({
-        data: {
-          id: generateId(), memoryId: chatNode.memoryId,
-          loc: `${chatId}:messages:${msgNum}-assistant`, name: `${msgNum}-assistant`,
-          nodeType: 'record', content: encMsg.content ?? null,
-          data: (encMsg.data ?? null) as InputJsonValue,
-          seq: messageCount,
-        },
+      // #664/#752: assistant message under `${chatId}:messages` — lock the
+      // ancestor path across the insert (see the user-message create above).
+      const assistantMsgLoc = `${chatId}:messages:${msgNum}-assistant`;
+      await ctx.db.$transaction(async (tx) => {
+        await lockAncestorsForCreate(tx, chatNode.memoryId, assistantMsgLoc);
+        await tx.node.create({
+          data: {
+            id: generateId(), memoryId: chatNode.memoryId,
+            loc: assistantMsgLoc, name: `${msgNum}-assistant`,
+            nodeType: 'record', content: encMsg.content ?? null,
+            data: (encMsg.data ?? null) as InputJsonValue,
+            seq: messageCount,
+          },
+        });
       });
 
       // Save extracted data to memory's default data node
@@ -1140,13 +1160,19 @@ export const chatMutations = {
       const summaryName = `${String(messageCount).padStart(3, '0')}a-summary`;
 
       const encSummary = encryptNodeFields({ content: summary, data: null }, memEncInfo);
-      await ctx.db.node.create({
-        data: {
-          id: generateId(), memoryId: chatNode.memoryId,
-          loc: `${chatId}:messages:${summaryName}`, name: summaryName,
-          nodeType: 'abstract', content: encSummary.content ?? null, seq: messageCount + 1,
-          tags: ['summary'],
-        },
+      // #664/#752: summary lands under `${chatId}:messages` — lock the ancestor
+      // path across the insert (see the message creates above).
+      const summaryLoc = `${chatId}:messages:${summaryName}`;
+      await ctx.db.$transaction(async (tx) => {
+        await lockAncestorsForCreate(tx, chatNode.memoryId, summaryLoc);
+        await tx.node.create({
+          data: {
+            id: generateId(), memoryId: chatNode.memoryId,
+            loc: summaryLoc, name: summaryName,
+            nodeType: 'abstract', content: encSummary.content ?? null, seq: messageCount + 1,
+            tags: ['summary'],
+          },
+        });
       });
 
       return true;

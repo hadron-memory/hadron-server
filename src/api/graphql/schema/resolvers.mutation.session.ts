@@ -1,5 +1,6 @@
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
@@ -425,19 +426,26 @@ export const sessionMutations = {
         });
       } catch { /* exists */ }
 
-      await ctx.db.node.create({
-        data: {
-          id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
-          nodeType: 'system',
-          description: description ?? `Revision ${revNum}`,
+      // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive
+      // delete of the `revisions` parent could count zero descendants and then
+      // orphan this row. Hold the ancestor-path lock across the insert (advisory
+      // before row; READ COMMITTED so the delete's count sees this post-commit).
+      await ctx.db.$transaction(async (tx) => {
+        await lockAncestorsForCreate(tx, sysMemId, revLoc);
+        await tx.node.create({
           data: {
-            revision: revNum,
-            label,
-            published: false,
-            createdBy: ctx.userId ?? null,
-            snapshot: { nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
-          } as InputJsonValue,
-        },
+            id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
+            nodeType: 'system',
+            description: description ?? `Revision ${revNum}`,
+            data: {
+              revision: revNum,
+              label,
+              published: false,
+              createdBy: ctx.userId ?? null,
+              snapshot: { nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
+            } as InputJsonValue,
+          },
+        });
       });
 
       return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
@@ -502,73 +510,93 @@ export const sessionMutations = {
       // Auto-save current state before restoring
       await sessionMutations.createRevision({}, { agentId: resolvedAgentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
 
-      // Delete all current non-revision nodes in the system memory
-      await ctx.db.node.updateMany({
-        where: {
-          memoryId: sysMemId,
-          deletedAt: null,
-          NOT: { loc: { startsWith: 'revisions' } },
-        },
-        data: { deletedAt: new Date() },
-      });
-
-      // Delete all edges in the system memory
-      const currentNodeIds = (await ctx.db.node.findMany({
-        where: { memoryId: sysMemId },
-        select: { id: true },
-      })).map((n) => n.id);
-      await ctx.db.edge.updateMany({
-        where: { sourceId: { in: currentNodeIds }, deletedAt: null },
-        data: { deletedAt: new Date() },
-      });
-
-      // Restore nodes from snapshot (upsert to handle soft-deleted rows
-      // that still hold the unique (loc, memoryId) constraint)
+      // Restore is ATOMIC (#752 review, Codex P1): the destructive soft-deletes
+      // AND the snapshot restore run in ONE transaction, so any failure — the
+      // interactive-transaction timeout included — rolls the whole thing back
+      // rather than leaving the system memory emptied by the preamble. Advisory
+      // locks come first (#664 — a concurrent non-recursive ancestor-delete
+      // can't miss the restored rows, and advisory-before-row ordering avoids a
+      // lock-order inversion with the delete path). The generous timeout covers
+      // a large snapshot; READ COMMITTED (the default) gives each statement a
+      // fresh snapshot after the lock is granted.
       const locToId = new Map<string, string>();
-      for (const n of snapshot.nodes) {
-        const loc = n.loc as string;
-        const nodeData = {
-          name: n.name as string,
-          nodeType: (n.nodeType as string) ?? 'system',
-          description: (n.description as string) ?? null,
-          content: (n.content as string) ?? null,
-          data: (n.data ?? null) as InputJsonValue,
-          tags: (n.tags as string[]) ?? [],
-          deletedAt: null,
-        };
-        const upserted = await ctx.db.node.upsert({
-          where: { loc_memoryId: { loc, memoryId: sysMemId } },
-          create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData },
-          update: nodeData,
-        });
-        locToId.set(loc, upserted.id);
-      }
+      await ctx.db.$transaction(
+        async (tx) => {
+          await lockAncestorsForCreateMany(
+            tx,
+            sysMemId,
+            snapshot.nodes.map((n) => n.loc as string).filter((l) => typeof l === 'string' && l !== ''),
+          );
 
-      // Restore edges from snapshot. Spec 037: derive loc when an older
-      // snapshot predates the edge `loc`/`name` fields (it would carry the
-      // legacy `label`); memoryId is the system memory being restored into.
-      for (const e of snapshot.edges) {
-        const sourceId = locToId.get(e.sourceLoc as string);
-        const targetId = locToId.get(e.targetLoc as string);
-        if (sourceId && targetId) {
-          const edgeName = ((e.name ?? e.label) as string | null) ?? null;
-          const edgeLoc = (e.loc as string | undefined)
-            ?? deriveEdgeLoc(e.sourceLoc as string, edgeName, e.targetLoc as string);
-          await ctx.db.edge.create({
-            data: {
-              id: generateId(),
+          // Delete all current non-revision nodes in the system memory
+          await tx.node.updateMany({
+            where: {
               memoryId: sysMemId,
-              sourceId,
-              targetId,
-              loc: edgeLoc,
-              name: edgeName,
-              description: (e.description as string | null) ?? null,
-              isRunnable: (e.isRunnable as boolean | null) ?? null,
-              data: (e.data ?? null) as InputJsonValue,
+              deletedAt: null,
+              NOT: { loc: { startsWith: 'revisions' } },
             },
+            data: { deletedAt: new Date() },
           });
-        }
-      }
+
+          // Delete all edges in the system memory
+          const currentNodeIds = (await tx.node.findMany({
+            where: { memoryId: sysMemId },
+            select: { id: true },
+          })).map((n) => n.id);
+          await tx.edge.updateMany({
+            where: { sourceId: { in: currentNodeIds }, deletedAt: null },
+            data: { deletedAt: new Date() },
+          });
+
+          // Restore nodes from snapshot (upsert to handle soft-deleted rows
+          // that still hold the unique (loc, memoryId) constraint).
+          for (const n of snapshot.nodes) {
+            const loc = n.loc as string;
+            const nodeData = {
+              name: n.name as string,
+              nodeType: (n.nodeType as string) ?? 'system',
+              description: (n.description as string) ?? null,
+              content: (n.content as string) ?? null,
+              data: (n.data ?? null) as InputJsonValue,
+              tags: (n.tags as string[]) ?? [],
+              deletedAt: null,
+            };
+            const upserted = await tx.node.upsert({
+              where: { loc_memoryId: { loc, memoryId: sysMemId } },
+              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData },
+              update: nodeData,
+            });
+            locToId.set(loc, upserted.id);
+          }
+
+          // Restore edges from snapshot. Spec 037: derive loc when an older
+          // snapshot predates the edge `loc`/`name` fields (it would carry the
+          // legacy `label`); memoryId is the system memory being restored into.
+          for (const e of snapshot.edges) {
+            const sourceId = locToId.get(e.sourceLoc as string);
+            const targetId = locToId.get(e.targetLoc as string);
+            if (sourceId && targetId) {
+              const edgeName = ((e.name ?? e.label) as string | null) ?? null;
+              const edgeLoc = (e.loc as string | undefined)
+                ?? deriveEdgeLoc(e.sourceLoc as string, edgeName, e.targetLoc as string);
+              await tx.edge.create({
+                data: {
+                  id: generateId(),
+                  memoryId: sysMemId,
+                  sourceId,
+                  targetId,
+                  loc: edgeLoc,
+                  name: edgeName,
+                  description: (e.description as string | null) ?? null,
+                  isRunnable: (e.isRunnable as boolean | null) ?? null,
+                  data: (e.data ?? null) as InputJsonValue,
+                },
+              });
+            }
+          }
+        },
+        { timeout: 30_000, maxWait: 10_000 },
+      );
 
       return { revisionLoc, label: (revData.label as string) ?? revisionLoc, published: false, createdAt: new Date().toISOString() };
     },
