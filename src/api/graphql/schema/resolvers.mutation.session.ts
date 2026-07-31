@@ -579,18 +579,24 @@ export const sessionMutations = {
               const edgeName = ((e.name ?? e.label) as string | null) ?? null;
               const edgeLoc = (e.loc as string | undefined)
                 ?? deriveEdgeLoc(e.sourceLoc as string, edgeName, e.targetLoc as string);
-              await tx.edge.create({
-                data: {
-                  id: generateId(),
-                  memoryId: sysMemId,
-                  sourceId,
-                  targetId,
-                  loc: edgeLoc,
-                  name: edgeName,
-                  description: (e.description as string | null) ?? null,
-                  isRunnable: (e.isRunnable as boolean | null) ?? null,
-                  data: (e.data ?? null) as InputJsonValue,
-                },
+              const edgeFields = {
+                sourceId,
+                targetId,
+                name: edgeName,
+                description: (e.description as string | null) ?? null,
+                isRunnable: (e.isRunnable as boolean | null) ?? null,
+                data: (e.data ?? null) as InputJsonValue,
+              };
+              // Upsert, not create: the edge soft-delete above leaves the
+              // (loc, memoryId) slot occupied (Edge @@unique([loc, memoryId]) is
+              // unfiltered), so a plain create would hit the unique index for any
+              // graph that already had an edge at this loc (Copilot review). The
+              // update branch RESURRECTS that soft-deleted row — mirrors the node
+              // upsert above.
+              await tx.edge.upsert({
+                where: { loc_memoryId: { loc: edgeLoc, memoryId: sysMemId } },
+                create: { id: generateId(), memoryId: sysMemId, loc: edgeLoc, ...edgeFields },
+                update: { ...edgeFields, deletedAt: null },
               });
             }
           }
