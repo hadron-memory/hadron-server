@@ -126,3 +126,88 @@ describe('Edge.source / Edge.target cross-memory gate (#781)', () => {
     expect(await E.target(e, {}, ctx(stranger.id))).toBeNull();
   });
 });
+
+/**
+ * #755 — the WRITE half of the same story. `createNode`/`updateNode` resolve
+ * inline `edges: [{ targetId }]` through `resolveNodeRef` with no gate on the
+ * resolved target's memory, while the standalone `createEdge` requires write on
+ * the source and read on the target ("Without this any CONTRIBUTOR could write
+ * an edge into a memory they can't touch").
+ *
+ * Left open, that plants an edge pointing at a node the caller can't read;
+ * paired with endpoint hydration it was a cross-tenant read primitive. The
+ * #781 gate above blocks the read-back, but the write must be refused too —
+ * defense in depth, and the edge row itself is a disclosure (it names a
+ * foreign node id) plus a write-integrity violation.
+ */
+describe('createNode/updateNode inline edge targets — cross-memory gate (#755)', () => {
+  let contributor: { id: string }; // CONTRIBUTOR in orgA: can write memA, cannot read memB
+
+  const asContributor = (): Context => ({ db, userId: contributor.id, roles: ['CONTRIBUTOR'] });
+
+  beforeEach(async () => {
+    contributor = await db.user.create({
+      data: { id: generateId(), githubId: 90103, githubUsername: 'eg-contrib', roles: ['CONTRIBUTOR'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgA.id, userId: contributor.id, role: 'CONTRIBUTOR' },
+    });
+  });
+
+  it('createNode refuses an inline edge into a memory the caller cannot read', async () => {
+    await expect(
+      resolvers.Mutation.createNode(
+        {},
+        { input: { memoryId: memA.id, loc: 'exfil', name: 'exfil', edges: [{ targetId: nodeB.id, name: 'rel' }] } as never },
+        asContributor(),
+      ),
+    ).rejects.toThrow(/Edge target not found/);
+    // Nothing was written — neither the node nor a dangling edge.
+    expect(await db.node.count({ where: { loc: 'exfil', memoryId: memA.id } })).toBe(0);
+    expect(await db.edge.count({ where: { targetId: nodeB.id } })).toBe(0);
+  });
+
+  it('updateNode refuses the same inline edge', async () => {
+    const own = await createDbNode(db, { loc: 'mine', memoryId: memA.id });
+    await expect(
+      resolvers.Mutation.updateNode(
+        {},
+        { input: { id: own.id, edges: [{ targetId: nodeB.id, name: 'rel' }] } as never },
+        asContributor(),
+      ),
+    ).rejects.toThrow(/Edge target not found/);
+    expect(await db.edge.count({ where: { sourceId: own.id } })).toBe(0);
+  });
+
+  it('the denial is indistinguishable from a genuine miss (no existence oracle)', async () => {
+    const attempt = (targetId: string) =>
+      resolvers.Mutation.createNode(
+        {},
+        { input: { memoryId: memA.id, loc: `probe-${targetId.slice(0, 6)}`, name: 'p', edges: [{ targetId, name: 'rel' }] } as never },
+        asContributor(),
+      ).then(() => null, (e: Error) => e.message.replace(targetId, '<REF>'));
+
+    const bogusId = generateId();
+    expect(await attempt(nodeB.id)).toBe(await attempt(bogusId));
+    expect(await attempt(nodeB.id)).toMatch(/Edge target not found/);
+  });
+
+  it('a same-memory inline edge still works (the common case is unaffected)', async () => {
+    const created = await resolvers.Mutation.createNode(
+      {},
+      { input: { memoryId: memA.id, loc: 'ok', name: 'ok', edges: [{ targetId: nodeA.id, name: 'rel' }] } as never },
+      asContributor(),
+    );
+    expect(await db.edge.count({ where: { sourceId: created.id, targetId: nodeA.id } })).toBe(1);
+  });
+
+  it('a caller who CAN read both memories may still link across them', async () => {
+    // Platform admin reads memB, so the cross-memory edge is legitimate.
+    const created = await resolvers.Mutation.createNode(
+      {},
+      { input: { memoryId: memA.id, loc: 'cross-ok', name: 'cross', edges: [{ targetId: nodeB.id, name: 'rel' }] } as never },
+      ctx(admin.id, ['ADMIN']),
+    );
+    expect(await db.edge.count({ where: { sourceId: created.id, targetId: nodeB.id } })).toBe(1);
+  });
+});

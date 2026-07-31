@@ -302,11 +302,27 @@ export async function writeNodeCore(
             const { id: targetNodeId } = await resolveNodeRef(ctx.db, e.targetId, input.memoryId);
             const tgt = await ctx.db.node.findUnique({
               where: { id: targetNodeId },
-              select: { loc: true },
+              select: { loc: true, memoryId: true },
             });
+            // #755: the source memory was gated by requireMemoryWriteAccess
+            // above, but the TARGET was not — so this inline path could point
+            // an edge at a node in a memory the caller cannot read, the exact
+            // gap the standalone createEdge closes. Combined with edge
+            // endpoint hydration that made it a cross-tenant read primitive:
+            // create a personal memory, add an edge to a victim node, then
+            // read it back through Edge.target.
+            //
+            // Mirror createEdge: write on the source memory, at least read on
+            // the target's. The denial reuses the not-found wording so it
+            // can't be used as a cross-memory existence oracle.
+            if (!tgt || !(await canReadMemory(ctx.db, ctx, tgt.memoryId))) {
+              throw new GraphQLError(`Edge target not found: "${e.targetId}"`, {
+                extensions: { code: 'NODE_NOT_FOUND', ref: e.targetId },
+              });
+            }
             resolvedEdges.push({
               targetNodeId,
-              targetLoc: tgt?.loc ?? '',
+              targetLoc: tgt.loc,
               name: e.name ?? null,
               loc: e.loc ?? null,
               description: e.description ?? null,

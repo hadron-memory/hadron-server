@@ -18,6 +18,7 @@ import { cleanDb } from '../test/helpers.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { resolveEdgeRefs, replaceOutgoingEdges, type ResolvedEdge } from './server.js';
 import { generateId } from '../lib/id.js';
+import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -34,6 +35,11 @@ let nested: { id: string; loc: string };
 
 function ctx(): Context {
   return { db, roles: ['ADMIN'], userId: admin.id };
+}
+
+/** ADMIN bypasses the per-memory access map, so the fixture memory is readable. */
+function adminAuth(): AuthContext {
+  return { userId: admin.id, roles: ['ADMIN'], clientId: `user:${admin.id}` };
 }
 
 beforeEach(async () => {
@@ -68,6 +74,7 @@ async function resolveAndWrite(targetId: string): Promise<string | null> {
   const r = await resolveEdgeRefs(
     [{ targetId, name: 'use this pattern' }],
     memory.id,
+    adminAuth(),
   );
   if ('error' in r) return r.error;
   await replaceOutgoingEdges({
@@ -143,7 +150,7 @@ describe('resolveEdgeRefs — canonical `::` URN inputs (#183)', () => {
 
 describe('resolveEdgeRefs — error handling', () => {
   it('returns an error for an unresolvable short loc and writes nothing', async () => {
-    const r = await resolveEdgeRefs([{ targetId: 'does-not-exist', name: 'x' }], memory.id);
+    const r = await resolveEdgeRefs([{ targetId: 'does-not-exist', name: 'x' }], memory.id, adminAuth());
     expect('error' in r && r.error).toMatch(/Edge target not found.*does-not-exist/);
     // Caller would not call replaceOutgoingEdges in this branch, so no
     // edges or pending_edges should ever appear.
@@ -155,6 +162,7 @@ describe('resolveEdgeRefs — error handling', () => {
     const r = await resolveEdgeRefs(
       [{ targetId: `urn:node:${memory.urn}:gone`, name: 'x' }],
       memory.id,
+      adminAuth(),
     );
     expect('error' in r && r.error).toMatch(/Edge target not found/);
     expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(0);
@@ -255,11 +263,87 @@ describe('two-phase API — partial-apply prevention', () => {
         { targetId: 'does-not-exist', name: 'bad' },
       ],
       memory.id,
+      adminAuth(),
     );
     // Resolution failed for one of the refs; caller would short-circuit
     // and never invoke replaceOutgoingEdges, so no edges are written
     // even for the good ref.
     expect('error' in r).toBe(true);
     expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(0);
+  });
+});
+
+/**
+ * #755 — `resolveEdgeRefs` resolves an edge target through `resolveNodeRef`, a
+ * pure DB lookup with NO auth context. Without a `canReadMemory` gate,
+ * `hadron_create_node` / `hadron_update_node` could point an edge at a node in
+ * a memory the caller cannot read — a foreign-memory existence oracle, and a
+ * cross-tenant content read once the edge is hydrated via `Edge.target`. The
+ * single-edge `addEdge` path was always gated; this bulk path was not.
+ */
+describe('resolveEdgeRefs — foreign-memory target gate (#755)', () => {
+  let victimNode: { id: string };
+  let outsiderAuth: AuthContext;
+
+  beforeEach(async () => {
+    const victimOrg = await db.organization.create({
+      data: { id: generateId(), name: 'victim-org', urn: `victim-${generateId()}` },
+    });
+    const victimMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: victimOrg.id, urn: `${victimOrg.urn}:secrets`,
+        name: 'victim secrets', class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    victimNode = await db.node.create({
+      data: {
+        id: generateId(), memoryId: victimMem.id, loc: 'crown-jewels',
+        name: 'crown-jewels', content: 'CROSS-TENANT-SECRET',
+      },
+    });
+    // An authenticated caller who belongs to NO org — no read on victimMem.
+    const outsider = await db.user.create({
+      data: { id: generateId(), githubId: 9402, githubUsername: 'roe-outsider', roles: ['READER'] },
+    });
+    outsiderAuth = { userId: outsider.id, roles: ['READER'], clientId: `user:${outsider.id}` };
+  });
+
+  it('refuses a target in a memory the caller cannot read', async () => {
+    const r = await resolveEdgeRefs(
+      [{ targetId: victimNode.id, name: 'exfil' }],
+      memory.id,
+      outsiderAuth,
+    );
+    expect('error' in r && r.error).toMatch(/Edge target not found/);
+  });
+
+  it('uses the genuine-miss wording — no existence oracle', async () => {
+    const bogusId = generateId();
+    const real = await resolveEdgeRefs(
+      [{ targetId: victimNode.id, name: 'exfil' }],
+      memory.id,
+      outsiderAuth,
+    );
+    const bogus = await resolveEdgeRefs(
+      [{ targetId: bogusId, name: 'exfil' }],
+      memory.id,
+      outsiderAuth,
+    );
+    // Each message echoes the caller's OWN ref, so compare the shape with the
+    // ref factored out: a real-but-unreadable node and a node that never
+    // existed must be indistinguishable.
+    const shape = (msg: string | false, ref: string) => msg && msg.replace(ref, '<REF>');
+    expect(shape('error' in real ? real.error : false, victimNode.id))
+      .toBe(shape('error' in bogus ? bogus.error : false, bogusId));
+    expect('error' in real && real.error).toBe(`Edge target not found: "${victimNode.id}"`);
+  });
+
+  it('a caller who CAN read the target still resolves it (no regression)', async () => {
+    const r = await resolveEdgeRefs(
+      [{ targetId: victimNode.id, name: 'ok' }],
+      memory.id,
+      adminAuth(),
+    );
+    expect('error' in r).toBe(false);
   });
 });
