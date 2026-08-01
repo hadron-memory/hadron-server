@@ -14,7 +14,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbNode } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { renderRunNodeBundle } from '../../../lib/runNodeRender.js';
+import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
+import { compileTemplate } from '../../../lib/template.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -72,9 +73,33 @@ describe('renderRunNode — the render half of the run pipeline (#818)', () => {
     expect(out).toContain('PLAYBOOK BODY');
   });
 
-  it('leaves an unsubstituted placeholder alone when no arg is supplied', async () => {
+  it('renders an unsupplied variable as EMPTY, exactly as runTask does', async () => {
+    // Changed by the #858 review: the preview now assembles with Mustache via
+    // compileTemplate, like the executor, instead of a literal replaceAll. A
+    // missing variable therefore collapses to '' rather than surviving as
+    // `{{subject}}` — which is what the real run would send to the LLM.
     const out = await render(action.id);
-    expect(out).toContain('Review the {{subject}} carefully.');
+    expect(out).not.toContain('{{subject}}');
+    expect(out).toContain('Review the  carefully.');
+  });
+
+  it('does NOT inline flow-ROUTING edges (they are rails, not references)', async () => {
+    // runTask skips `next*` edges so a multi-node flow does not pollute every
+    // hop with the following step's prompt. The legacy MCP bundle inlined
+    // them; the preview must not.
+    const nextStep = await createDbNode(db, {
+      loc: 'flow:step2', memoryId: mem.id, name: 'Step 2', content: 'NEXT STEP PROMPT',
+    });
+    await db.edge.create({
+      data: {
+        id: generateId(), memoryId: mem.id, sourceId: action.id, targetId: nextStep.id,
+        name: 'next', loc: 'actions:review:next:flow:step2',
+      },
+    });
+    const out = await render(action.id, { subject: 'x' });
+    expect(out).not.toContain('NEXT STEP PROMPT');
+    // ...while a genuine reference edge is still inlined.
+    expect(out).toContain('PLAYBOOK BODY');
   });
 
   it('omits the Referenced Nodes section when nothing is linked', async () => {
@@ -157,18 +182,28 @@ describe('renderRunNode — access (#818)', () => {
   });
 });
 
-describe('renderRunNode matches the MCP bundle exactly (#818)', () => {
-  it('produces byte-identical output to the shared renderer the run tools use', async () => {
+describe('renderRunNode predicts what runTask EXECUTES (#818)', () => {
+  it('is byte-identical to the assembler runTask itself calls', async () => {
+    // The #858 review found the original claim false: this used to compare
+    // against the legacy MCP bundle (literal replaceAll, every edge inlined)
+    // while runTask assembles with Mustache and skips routing edges. Both now
+    // call assembleRunNodePrompt, so the comparison is against the real thing.
     const node = await db.node.findUniqueOrThrow({
       where: { id: action.id },
       include: { outgoingEdges: { include: { target: true } } },
     });
-    const memoryUrnOf = async (memoryId: string) =>
-      (await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn;
-
-    const viaShared = await renderRunNodeBundle(node as never, { subject: 'incident report' }, memoryUrnOf);
+    const viaExecutor = await assembleRunNodePrompt(
+      { ...node, loc: action.loc } as never,
+      { subject: 'incident report' },
+      {
+        memoryUrnOf: async (memoryId: string) =>
+          (await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
+        compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
+          compileTemplate(content, data, memoryId, db, {}),
+      },
+    );
     const viaGraphql = await render(action.id, { subject: 'incident report' });
-    // If these ever diverge, a dry-run stops predicting the real run.
-    expect(viaGraphql).toBe(viaShared);
+    // If these ever diverge, a dry run stops predicting the real run.
+    expect(viaGraphql).toBe(viaExecutor);
   });
 });

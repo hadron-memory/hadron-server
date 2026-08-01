@@ -21,6 +21,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
@@ -1105,34 +1106,21 @@ export const sessionMutations = {
         ];
         await decryptNodesBatch(ctx.db, nodesToDecrypt);
 
-        // Render the node with Mustache template compilation and inlined edges.
-        let actionContent = node.content || '';
-        if (actionContent.includes('{{')) {
-          // Use compileTemplate for proper Mustache template handling.
-          // Pass stringArgs as the node data for variable substitution.
-          actionContent = await compileTemplate(actionContent, stringArgs ?? null, memory.id, ctx.db, {});
-        }
-
-        const topicSections: string[] = [];
-        for (const edge of node.outgoingEdges) {
-          // Flow-routing edges (`next*`, plan-multi-node D-MN-4) are the
-          // walker's rails, not references — inlining the NEXT step's prompt
-          // into this one would pollute every hop of a multi-node flow.
-          if (isRoutingName(routingNameOf(edge, loc))) continue;
-          // target can be null for a dangling edge (deleted target row) — skip.
-          const target = edge.target;
-          if (target?.content) {
-            // Compose the target node URN directly.
-            const targetMemory = await ctx.db.memory.findUniqueOrThrow({
-              where: { id: target.memoryId },
-              select: { urn: true },
-            });
-            const targetUrn = emitNodeUrnV2(targetMemory.urn, target.loc);
-            topicSections.push(
-              `## Node: ${target.name} (${targetUrn})\n\n${target.content}`,
-            );
-          }
-        }
+        // #818 review: this assembly is now `assembleRunNodePrompt` in
+        // src/lib/runNodeRender.ts, shared with the GraphQL `renderRunNode`
+        // preview so a dry run predicts THIS prompt rather than approximating
+        // it. Behavior here is unchanged — the Mustache compile, the
+        // routing-edge skip and the dangling-target skip all moved verbatim.
+        const assembled = await assembleRunNodePrompt(
+          { ...node, loc },
+          stringArgs ?? undefined,
+          {
+            memoryUrnOf: async (memoryId) =>
+              (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
+            compileTemplate: (content, data, memoryId) =>
+              compileTemplate(content, data, memoryId, ctx.db, {}),
+          },
+        );
 
         // Record usage event (fire-and-forget).
         ctx.db.usageEvent
@@ -1156,14 +1144,7 @@ export const sessionMutations = {
           })
           .catch(() => {});
 
-        const parts = [`# Node: ${node.name}\n\n${actionContent}`];
-        if (topicSections.length > 0) {
-          parts.push(
-            '---\n\n# Referenced Nodes\n\n' +
-              topicSections.join('\n\n---\n\n'),
-          );
-        }
-        return parts.join('\n\n');
+        return assembled;
       };
 
       // #529 — when an `appRef` is supplied, EXECUTE the task instead of merely

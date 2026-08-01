@@ -4171,9 +4171,18 @@ export const typeDefs = `#graphql
     NO action-run UsageEvent — metering a preview would inflate the ledger with
     actions nobody took.
 
-    Uses the SAME renderer the MCP run tools call, so a preview cannot disagree
-    with what runTask actually executes. Referenced nodes the caller cannot
-    read are omitted from the bundle rather than inlined.
+    Uses the SAME assembler runTask executes (Mustache compilation via
+    compileTemplate; flow-ROUTING edges skipped, since they are the walker's
+    rails rather than references), so a dry run predicts the real prompt.
+
+    Two deliberate narrowings relative to execution, both fail-safe: a
+    referenced node the caller cannot READ is omitted rather than inlined
+    (an edge may cross memories), and an edge whose target was soft-deleted is
+    skipped so a preview cannot resurrect removed instructions.
+
+    NOTE this is NOT the legacy MCP hadron_run_action bundle, which does a
+    literal placeholder replace and inlines every outgoing edge. Where the two
+    differ, this one matches execution.
 
     nodeRef is a node PK or a fully-qualified URN (cor:api:140). Denied and
     missing both raise NODE_NOT_FOUND - no existence oracle.

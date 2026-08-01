@@ -36,6 +36,7 @@ import {
   validateUrnType,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
@@ -199,7 +200,18 @@ export const nodeQueries = {
       }
       const node = await ctx.db.node.findFirst({
         where: { id: nodeId, deletedAt: null },
-        include: { outgoingEdges: { include: { target: true } } },
+        include: {
+          // #858 review (Codex P2): exclude edges whose TARGET is a tombstone.
+          // deleteNode soft-deletes and promises the row drops out of every
+          // read surface, but it leaves the edges intact — so an unfiltered
+          // include would let a preview resurrect removed instructions. Also
+          // skips soft-deleted EDGE rows, which revision-restore can leave
+          // behind and every other edge surface excludes.
+          outgoingEdges: {
+            where: { deletedAt: null, target: { deletedAt: null } },
+            include: { target: true },
+          },
+        },
       });
       // Denied and missing share one message — no existence oracle.
       const denied = () =>
@@ -208,29 +220,40 @@ export const nodeQueries = {
       if (!(await isMemoryReadableCached(ctx, node.memoryId))) throw denied();
 
       // Decrypt the node AND its referenced targets — an encrypted memory
-      // would otherwise render ciphertext into the bundle.
-      const targets = node.outgoingEdges.map((e) => e.target);
-      await decryptNodesBatch(ctx.db, [node, ...targets] as never);
+      // would otherwise render ciphertext into the bundle. A dangling edge can
+      // still carry a null target defensively (PR #858 review, Copilot).
+      type RunEdge = (typeof node.outgoingEdges)[number];
+      const liveEdges: RunEdge[] = node.outgoingEdges.filter((e) => e.target != null);
+      await decryptNodesBatch(ctx.db, [node, ...liveEdges.map((e) => e.target)] as never);
 
       // Only inline a referenced node the caller may actually READ. An edge
       // can point across memories (#781), and the bundle must not become a
       // way to read a foreign node's content through a dependency link.
-      const visibleEdges = [];
-      for (const edge of node.outgoingEdges) {
-        if (await isMemoryReadableCached(ctx, edge.target.memoryId)) visibleEdges.push(edge);
+      const visibleEdges: RunEdge[] = [];
+      for (const edge of liveEdges) {
+        if (await isMemoryReadableCached(ctx, edge.target!.memoryId)) visibleEdges.push(edge);
       }
 
-      // Args are typed JSON on the wire; the renderer substitutes strings.
+      // Args are typed JSON on the wire; the assembler substitutes strings.
       const stringArgs = args
         ? Object.fromEntries(
             Object.entries(args).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),
           )
         : undefined;
 
-      return renderRunNodeBundle(
+      // #858 review (Codex P1): assemble with the SAME function runTask
+      // executes — Mustache via compileTemplate, routing edges skipped — not
+      // the legacy MCP bundle, which does a literal replaceAll and inlines
+      // every edge. A preview that disagrees with the run is worse than none.
+      return assembleRunNodePrompt(
         { ...node, outgoingEdges: visibleEdges } as never,
         stringArgs,
-        (memoryId: string) => loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
+        {
+          memoryUrnOf: (memoryId: string) =>
+            loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
+          compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
+            compileTemplate(content, data, memoryId, ctx.db, {}),
+        },
       );
     },
 

@@ -15,6 +15,7 @@
  */
 
 import { emitNodeUrnV2 } from './urnEmit.js';
+import { isRoutingName, routingNameOf } from './runner/selectNextEdge.js';
 
 /** The node shape the render needs: content, name, and its dependency edges. */
 export interface RenderableRunNode {
@@ -23,12 +24,15 @@ export interface RenderableRunNode {
   content: string | null;
   memoryId: string;
   outgoingEdges: Array<{
+    /** Needed by the routing-edge check in assembleRunNodePrompt. */
+    name?: string | null;
+    loc?: string;
     target: {
       loc: string;
       name: string | null;
       content: string | null;
       memoryId: string;
-    };
+    } | null;
   }>;
 }
 
@@ -57,11 +61,70 @@ export async function renderRunNodeBundle(
   const topicSections: string[] = [];
   for (const edge of node.outgoingEdges) {
     const target = edge.target;
-    if (target.content) {
+    if (target?.content) {
       const targetUrn = emitNodeUrnV2(await memoryUrnOf(target.memoryId), target.loc);
       topicSections.push(`## Node: ${target.name} (${targetUrn})\n\n${target.content}`);
     }
   }
+  const parts = [`# Node: ${node.name}\n\n${actionContent}`];
+  if (topicSections.length > 0) {
+    parts.push('---\n\n# Referenced Nodes\n\n' + topicSections.join('\n\n---\n\n'));
+  }
+  return parts.join('\n\n');
+}
+
+
+/**
+ * What `runTask` ACTUALLY assembles and sends to the LLM (#818 review,
+ * Codex P1), extracted from `resolvers.mutation.session.ts` so a dry run can
+ * predict a real run instead of approximating it.
+ *
+ * This differs from `renderRunNodeBundle` above in three ways that matter, and
+ * every one of them can change the prompt:
+ *   - Mustache via `compileTemplate` (memory-default data, cross-node
+ *     references, partials), not a literal `replaceAll` per key. Even simple
+ *     values diverge: `null` renders as "null" under replaceAll and as the
+ *     empty string under Mustache.
+ *   - Flow-ROUTING edges (`next*`, plan-multi-node D-MN-4) are the walker's
+ *     rails, not references — inlining the next step's prompt into this one
+ *     would pollute every hop of a multi-node flow. The legacy bundle inlines
+ *     every outgoing edge.
+ *   - A dangling edge (target row deleted) is skipped rather than
+ *     dereferenced.
+ *
+ * `renderRunNodeBundle` is retained because the MCP `hadron_run_action` /
+ * `hadron_run_task` render path has always produced it and changing a shipped
+ * tool's output is a separate decision — tracked separately.
+ */
+export async function assembleRunNodePrompt(
+  node: RenderableRunNode & { loc: string },
+  args: Record<string, string> | undefined,
+  deps: {
+    memoryUrnOf: MemoryUrnLookup;
+    compileTemplate: (
+      content: string,
+      data: Record<string, string> | null,
+      memoryId: string,
+    ) => Promise<string>;
+    /** Include a referenced target? Lets a caller drop unreadable/deleted ones. */
+    includeTarget?: (target: RenderableRunNode['outgoingEdges'][number]['target']) => boolean;
+  },
+): Promise<string> {
+  let actionContent = node.content || '';
+  if (actionContent.includes('{{')) {
+    actionContent = await deps.compileTemplate(actionContent, args ?? null, node.memoryId);
+  }
+
+  const topicSections: string[] = [];
+  for (const edge of node.outgoingEdges) {
+    if (isRoutingName(routingNameOf(edge as never, node.loc))) continue;
+    const target = edge.target;
+    if (!target?.content) continue;
+    if (deps.includeTarget && !deps.includeTarget(target)) continue;
+    const targetUrn = emitNodeUrnV2(await deps.memoryUrnOf(target.memoryId), target.loc);
+    topicSections.push(`## Node: ${target.name} (${targetUrn})\n\n${target.content}`);
+  }
+
   const parts = [`# Node: ${node.name}\n\n${actionContent}`];
   if (topicSections.length > 0) {
     parts.push('---\n\n# Referenced Nodes\n\n' + topicSections.join('\n\n---\n\n'));
