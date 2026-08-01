@@ -764,6 +764,15 @@ async function executeAppRunInner(
           });
         }
       } catch (err) {
+        // #832 KNOWN GAP (PR #854 review, Codex P1): every return below skips
+        // the token accounting under it. For the tool-loop terminals the
+        // provider HAS already generated and billed the tool-call response,
+        // but `generateWithTools` discards the accumulated usage when a tool
+        // throws — it rethrows `fatal` without reading `out.totalUsage`, which
+        // the aborted SDK call never produced. So the tokens are not available
+        // here to count. `AppRun.tokensSpent` documents the under-report
+        // rather than inventing a number; closing it needs the tool loop to
+        // surface partial usage on the error.
         // Tool-loop terminal errors (plan-tools D-TL-6) — never retried:
         if (err instanceof AuthorFailError) {
           return fail('AUTHOR_FAIL', err.message); // the author's deliberate abort

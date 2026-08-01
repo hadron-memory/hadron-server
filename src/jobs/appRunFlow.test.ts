@@ -526,9 +526,10 @@ describe('AppRun spend counters (#832)', () => {
     expect(after.tokensSpent).toBe(100);
   });
 
-  it('tokensSpent counts a hop whose LLM succeeded but whose run later failed', async () => {
-    // The hop trail is the thing this must beat: a hop that fails after its
-    // LLM call contributes tokens but may leave no completed-hop element.
+  // PR #854 review (Copilot): this used to be LABELLED as covering a run that
+  // "later failed" while executing a normal one — the label promised a
+  // scenario the body never exercised. Renamed to what it actually asserts.
+  it('tokensSpent is never LESS than the hop-trail sum', async () => {
     const run = await mintFlow();
     const { deps } = flowDeps(0.92);
     await executeAppRun(db, run.id, deps);
@@ -536,9 +537,43 @@ describe('AppRun spend counters (#832)', () => {
     const hopSum = Array.isArray(after.hops)
       ? (after.hops as Array<{ tokensSpent?: number }>).reduce((n, h) => n + (h.tokensSpent ?? 0), 0)
       : 0;
-    // On a fully-successful run the two agree; the counter is never LESS than
-    // the trail, which is the property that survives partial failure.
+    // On a fully-successful run the two agree; the counter can only ever
+    // exceed the trail, never trail it.
     expect(after.tokensSpent).toBeGreaterThanOrEqual(hopSum);
+  });
+
+  it('a hop whose LLM completed but whose run then FAILED is still counted', async () => {
+    // The real failed-hop case the counter beats the trail on: the LLM call
+    // returns (tokens billed), and the run fails afterwards.
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.92);
+    // Make the SECOND hop's text call fail after the first hop's extraction
+    // already completed and was counted.
+    (deps as { llm: unknown }).llm = vi.fn(async () => {
+      throw new Error('provider exploded after hop 1');
+    });
+    await executeAppRun(db, run.id, deps);
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe('FAILED');
+    // Hop 1 (llmObject: 80 + 20) completed and IS counted, even though the run
+    // as a whole failed.
+    expect(after.tokensSpent).toBe(100);
+  });
+
+  it('DOCUMENTS the known gap: a TOOL-LOOP abort is not counted', async () => {
+    // generateWithTools discards accumulated usage when a tool throws, so the
+    // provider's already-billed tokens are unavailable at the failure site.
+    // Pinned so the gap is visible and a future fix has a target to flip.
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.92);
+    (deps as { llmObject: unknown }).llmObject = vi.fn(async () => {
+      throw new ToolDeniedError('hadron_create_node');
+    });
+    await executeAppRun(db, run.id, deps);
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe('FAILED');
+    // Under-reports by construction — see AppRun.tokensSpent's KNOWN GAP note.
+    expect(after.tokensSpent).toBe(0);
   });
 
   it('actionsSpent counts admitted actions only', async () => {

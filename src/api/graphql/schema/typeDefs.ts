@@ -2355,15 +2355,34 @@ export const typeDefs = `#graphql
     "Remaining action budget — live-decremented per write/tool action."
     budgetActions: Int
     """
-    Total LLM tokens consumed by this run (#832), INCLUDING hops that failed
-    mid-execution — a sum over the hops trail misses those, because a failed
-    hop has no element. Unclamped, so it stays truthful if a hop overshoots the
-    remaining budget. 0 on runs minted before the counter existed whose hop
-    trail was empty or unparseable.
+    Total LLM tokens consumed by this run (#832). Unclamped, so it stays
+    truthful when a hop overshoots the remaining budget — unlike
+    budgetTokensInitial minus budgetTokens, whose decrement is clamped.
+
+    Counts every hop whose LLM call COMPLETED, including hops whose run later
+    failed — strictly more than a sum over the hops trail, which has no element
+    for a hop that did not complete.
+
+    KNOWN GAP: a hop aborted by the TOOL LOOP (a tool denied by policy, or a
+    tool handler that threw) is NOT counted. The provider has already billed
+    that call, but the tool-loop helper discards the accumulated usage when a
+    tool throws, so the number is not available at the failure site. Such a run
+    under-reports. Do not treat this as a billing figure.
+
+    NULL means UNKNOWN: a run minted before the counter existed, with no hop
+    trail to back-fill from. 0 means it genuinely spent nothing.
     """
-    tokensSpent: Int!
-    "Total budgeted actions consumed (#832). Counts only actions actually admitted by the budget guard."
-    actionsSpent: Int!
+    tokensSpent: Int
+    """
+    Total budgeted actions consumed (#832) — only actions actually admitted by
+    the budget guard; a denied action counts nothing.
+
+    NULL means UNKNOWN, not zero: runs minted before the counter existed have
+    no recorded action spend and, unlike tokens, no hop-trail signal to
+    reconstruct one from. Reporting 0 would contradict their already-decremented
+    budgetActions.
+    """
+    actionsSpent: Int
     """
     The token budget this run was MINTED with — budgetTokens is what REMAINS.
     NULL for runs minted before this was recorded, which is deliberate: 0 would
