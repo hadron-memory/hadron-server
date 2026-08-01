@@ -267,6 +267,62 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
   return pending;
 }
 
+/**
+ * The RECORD-level memory read gate — "may this caller open this memory's
+ * record (its scalars: name, description, data)?", as distinct from
+ * `isMemoryReadableCached` above, which answers "may they read its NODES?".
+ *
+ * The two are deliberately different (see that function's note): the record
+ * gate keeps an org-member fast-path that admits app/system-class memory
+ * RECORDS which `getOrgReadableMemoryIds` excludes from the node-content set.
+ * Using the node gate for a record-level question silently drops memories the
+ * caller can open directly via `Query.memory` — the #759 review finding
+ * (Codex P1 / Copilot on PR #846).
+ *
+ * Extracted from `Query.memory` so the two callers cannot drift (AGENTS.md:
+ * "reuse the shared access gate; a bespoke per-resolver gate drifts"). Order is
+ * load-bearing and preserved exactly:
+ *   1. personal/private → strict owner, or a MemoryShare grantee (#778).
+ *   2. spec 047 user-owned → strict owner, BEFORE the platform-admin path so an
+ *      ADMIN never reads another user's user-owned record (#676).
+ *   3. otherwise → platform ADMIN/OWNER, a live org membership, or whatever the
+ *      shared node gate already admits (PUBLIC, subscription, App session) —
+ *      the #362 fallback that keeps record reads in step with node reads.
+ */
+export async function canReadMemoryRecord(
+  ctx: Context,
+  memory: {
+    id: string;
+    class: string;
+    userId?: string | null;
+    ownerUserId?: string | null;
+    organizationId?: string | null;
+  },
+): Promise<boolean> {
+  if (memory.class === 'personal' || memory.class === 'private') {
+    if (ctx.userId && memory.userId === ctx.userId) return true;
+    if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory as never))) return true;
+    return false;
+  }
+  if (memory.ownerUserId != null) {
+    return !!ctx.userId && memory.ownerUserId === ctx.userId;
+  }
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
+  // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no longer
+  // grants access. A user-owned memory (org NULL) has no membership fast-path
+  // and was already returned above.
+  const member =
+    ctx.userId && memory.organizationId
+      ? await ctx.db.orgMember.findFirst({
+          where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
+        })
+      : null;
+  if (member) return true;
+  // Scope the shared gate to THIS memory so it stays an indexed point-read.
+  const accessibleIds = await getAccessibleMemoryIds(ctx, memory.id);
+  return accessibleIds === null || accessibleIds.includes(memory.id);
+}
+
 export const ROLE_ORDER: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2, OWNER: 3 };
 
 export function requireRole(ctx: Context, required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER') {
