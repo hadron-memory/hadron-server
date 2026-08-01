@@ -30,9 +30,11 @@ export const agentQueries = {
     // (previously reachable only via Organization.agents / App.agents
     // nesting). Gate mirrors resolveUrn's agent branch: a PUBLIC agent
     // resolves for any caller (#551 — marketplace discovery / share links),
-    // otherwise member of the Agent's org or platform ADMIN/OWNER. Field-level
-    // exposure stays slim for non-members (Agent.systemPrompt / memoryItems /
-    // imports are member-gated).
+    // otherwise member of the Agent's org or platform ADMIN/OWNER. A PUBLIC
+    // agent publishes its OWN definition (systemPrompt / memoryItems /
+    // imports); the fields that surface OTHER tenants (apps / appAgents /
+    // appCount / orgGrants / importedBy) are scoped to the caller's own access
+    // and come back empty for an outsider (#552, #757).
     agent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       let resolvedId: string;
       try {

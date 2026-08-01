@@ -3813,10 +3813,16 @@ export const typeDefs = `#graphql
     explicit, paginated surface rather than a value in a filter.
 
     filter.type narrows by AgentType; filter.visibility is IGNORED (the slice
-    is PUBLIC by definition). Field-level exposure is slim for non-members:
-    systemPrompt / systemMemoryId / memoryItems / imports / importedBy are
-    member/admin-gated (null / [] for outsiders). Name-ascending order
-    (id tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    is PUBLIC by definition).
+
+    Field-level exposure: a PUBLIC agent publishes its OWN definition
+    (systemPrompt / systemMemoryId / memoryItems / imports) to every caller —
+    that is what a marketplace listing is (#551). The fields that surface OTHER
+    tenants (apps / appAgents / appCount / orgGrants / importedBy) are scoped to
+    the caller's own access and come back empty for an outsider (#552, #757).
+
+    Name-ascending order (id tiebreak); limit default 50 / cap 200;
+    limit: 0 -> count only.
     """
     publicAgents(filter: PublicAgentFilter, limit: Int, offset: Int): AgentsPage!
     # 005-agent-subscription FR-005: AgentSubscriptions held by the
