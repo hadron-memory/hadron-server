@@ -168,10 +168,49 @@ describe('Agent.memoryItems — non-public linked memories are gated (#759)', ()
     expect(items.map((i: { memoryId: string }) => i.memoryId)).toEqual([pubMem.id]);
   });
 
-  it('an org member still sees both (no regression for the intended audience)', async () => {
+  // PR #846 review (Copilot): this said "org member" but used ctx() — a
+  // platform ADMIN, whose bypass masked the very regression the reviewers
+  // found. An ORDINARY org member must still see the app-scoped memory, since
+  // Query.memory grants them the record read; the node-content gate would have
+  // dropped it.
+  it('an ordinary ORG MEMBER still sees both (record-level gate, not node-content)', async () => {
+    const orgMember = await db.user.create({
+      data: { id: generateId(), githubId: 56003, githubUsername: 'cong-member', roles: [] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: orgMember.id, role: 'READER' },
+    });
+    const items = await A.memoryItems(await eagerAgent(), {}, outsider(orgMember.id));
+    expect(items.map((i: { memoryId: string }) => i.memoryId).sort())
+      .toEqual([appMem.id, pubMem.id].sort());
+  });
+
+  it('a REVOKED org member does NOT see the app-scoped memory', async () => {
+    const exMember = await db.user.create({
+      data: { id: generateId(), githubId: 56004, githubUsername: 'cong-ex', roles: [] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: exMember.id, role: 'READER', deletedAt: new Date() },
+    });
+    const items = await A.memoryItems(await eagerAgent(), {}, outsider(exMember.id));
+    expect(items.map((i: { memoryId: string }) => i.memoryId)).toEqual([pubMem.id]);
+  });
+
+  it('a platform ADMIN sees both', async () => {
     const items = await A.memoryItems(await eagerAgent(), {}, ctx());
     expect(items.map((i: { memoryId: string }) => i.memoryId).sort())
       .toEqual([appMem.id, pubMem.id].sort());
+  });
+
+  it('falls back to a query when memoryItems lacks its memory relation', async () => {
+    // The eager payload exists but was selected without `memory` — every item
+    // would look unreadable and the list would silently empty out.
+    const bare = await db.agent.findUniqueOrThrow({
+      where: { id: pubAgent.id },
+      include: { memoryItems: { where: { deletedAt: null } } },
+    });
+    const items = await A.memoryItems(bare, {}, anon());
+    expect(items.map((i: { memoryId: string }) => i.memoryId)).toEqual([pubMem.id]);
   });
 
   it('falls back to a query when memoryItems was not eager-loaded', async () => {

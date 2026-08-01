@@ -32,6 +32,7 @@ import {
   type Context,
   loadEdgeEndpointNode,
   isMemoryReadableCached,
+  canReadMemoryRecord,
   loadMemoryUrn,
   loadAppUrn,
   defaultAiConfigOf,
@@ -1092,22 +1093,46 @@ export const typeResolvers = {
     // scalars.
     //
     // Filter to the memories this caller may actually read, through the shared
-    // gate (isMemoryReadableCached -> getAccessibleMemoryIds) rather than a
-    // bespoke predicate that would drift from it. A PUBLIC non-app-scoped
-    // memory short-circuits, so the marketplace listing costs no extra query.
+    // RECORD-level gate (`canReadMemoryRecord`, extracted from Query.memory)
+    // rather than a bespoke predicate that would drift from it.
+    //
+    // Record-level, NOT `isMemoryReadableCached`: the question here is "may the
+    // caller open this memory's scalars", which is exactly what Query.memory
+    // answers. The node-content gate is deliberately narrower — it excludes
+    // app-scoped rows (`getOrgReadableMemoryIds` sets `appId: null`) that an org
+    // member CAN open directly — so using it silently dropped legitimately
+    // readable app-scoped memories from `organization`/`app -> agents ->
+    // memoryItems` (PR #846 review: Codex P1 / Copilot).
+    //
+    // A PUBLIC non-app-scoped memory short-circuits, so the marketplace listing
+    // costs no extra query.
     memoryItems: async (
       a: { id: string; memoryItems?: unknown },
       _: unknown,
       ctx: Context,
     ) => {
-      type Item = { memory?: { id: string; visibility: string | null; appId: string | null } | null };
+      type Mem = {
+        id: string;
+        class: string;
+        visibility: string | null;
+        appId: string | null;
+        userId?: string | null;
+        ownerUserId?: string | null;
+        organizationId?: string | null;
+      };
+      type Item = { memoryId: string; memory?: Mem | null };
       const eager = a.memoryItems as Item[] | undefined;
-      const items =
-        eager ??
-        ((await ctx.db.agentMemoryItem.findMany({
-          where: { agentId: a.id, deletedAt: null, memory: { deletedAt: null } },
-          include: { memory: true },
-        })) as Item[]);
+      // Fall back to a query when the field wasn't eager-loaded AT ALL, and
+      // also when it was loaded WITHOUT its `memory` relation — otherwise every
+      // item would look unreadable and the list would silently empty out
+      // (PR #846 review, Copilot).
+      const needsFetch = !eager || eager.some((i) => i.memory === undefined);
+      const items = needsFetch
+        ? ((await ctx.db.agentMemoryItem.findMany({
+            where: { agentId: a.id, deletedAt: null, memory: { deletedAt: null } },
+            include: { memory: true },
+          })) as Item[])
+        : eager;
       const kept: Item[] = [];
       for (const item of items) {
         const mem = item.memory;
@@ -1118,7 +1143,7 @@ export const typeResolvers = {
           kept.push(item);
           continue;
         }
-        if (await isMemoryReadableCached(ctx, mem.id)) kept.push(item);
+        if (await canReadMemoryRecord(ctx, mem)) kept.push(item);
       }
       return kept;
     },

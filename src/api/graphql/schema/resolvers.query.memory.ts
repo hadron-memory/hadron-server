@@ -17,6 +17,7 @@ import {
   clampListTake,
   getAccessibleMemoryIds,
   granteeShareAccess,
+  canReadMemoryRecord,
   resolveOrgScope,
   MEMORY_INCLUDE,
 } from './resolvers.helpers.js';
@@ -214,63 +215,12 @@ export const memoryQueries = {
         include: MEMORY_INCLUDE,
       });
       if (!memory || memory.deletedAt) return null;
-      // 034-memory-class-access: owner-owned personal/private are owner-only —
-      // no ADMIN/OWNER bypass, no org-member path. Check before the org logic.
-      // #778: a MemoryShare grantee may ALSO open a personal memory shared with
-      // them (private is never shareable). granteeShareAccess mirrors the create
-      // rule — an org-owned personal share requires current org membership.
-      if (memory.class === 'personal' || memory.class === 'private') {
-        if (ctx.userId && memory.userId === ctx.userId) return memory;
-        if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return memory;
-        throw new Error('Forbidden');
-      }
-      // spec 047: a USER-owned memory (ownerUserId set — e.g. a user-owned
-      // agent's system/knowledge memory) is STRICTLY owner-only, even for a
-      // non-personal class. Check BEFORE the platform-admin fast-path below —
-      // otherwise an ADMIN/OWNER would read another user's user-owned memory
-      // record (this point-read bypasses getAccessibleMemoryIds/canReadMemory,
-      // which already enforce this everywhere else). #676 security review.
-      if (memory.ownerUserId !== null) {
-        if (!ctx.userId || memory.ownerUserId !== ctx.userId) throw new Error('Forbidden');
-        return memory;
-      }
-      // Authorization: platform ADMIN/OWNER, a member of the memory's org, OR
-      // any caller the shared read gate already admits — PUBLIC visibility,
-      // a cross-org subscription, or an App session scoped to this memory.
-      // The node queries (nodeById/nodes) authorize through that same set via
-      // memoryAccessFilter → getAccessibleMemoryIds, so without the fallback a
-      // public-visibility reader could read the memory's NODES but not the
-      // memory record itself; the portal's uncaught MEMORY_BY_ID_QUERY then
-      // turned that Forbidden into an HTTP 500 (issue #362). The org-member
-      // fast-path is kept because getAccessibleMemoryIds (via
-      // getOrgReadableMemoryIds) intentionally omits app/system-class org
-      // memories, which members can still open here as they do today. NOTE this
-      // record-level fast-path is INTENTIONALLY broader than the node-content
-      // gate the Edge endpoint check uses (#781) — see isMemoryReadableCached.
-      if (!ctx.roles?.includes('ADMIN') && !ctx.roles?.includes('OWNER')) {
-        // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no
-        // longer grants access — matches getOrgReadableMemoryIds' own
-        // `deletedAt: null` membership filter.
-        // spec 047: a user-owned memory (org NULL) has no org-membership
-        // fast-path — fall straight through to the shared access gate below.
-        const member = ctx.userId && memory.organizationId
-          ? await ctx.db.orgMember.findFirst({
-              where: {
-                organizationId: memory.organizationId,
-                userId: ctx.userId,
-                deletedAt: null,
-              },
-            })
-          : null;
-        if (!member) {
-          // Scope the shared gate to THIS memory so it's an indexed point-read,
-          // not an enumeration of the whole accessible set.
-          const accessibleIds = await getAccessibleMemoryIds(ctx, memory.id);
-          if (accessibleIds !== null && !accessibleIds.includes(memory.id)) {
-            throw new Error('Forbidden');
-          }
-        }
-      }
+      // The record-level read gate, shared with Agent.memoryItems (#759) so the
+      // two cannot drift — see `canReadMemoryRecord` for the full ordering
+      // rationale (personal/private share carve-out #778, spec-047 user-owned
+      // strictness ahead of the admin path #676, and the #362 fallback that
+      // keeps record reads in step with node reads).
+      if (!(await canReadMemoryRecord(ctx, memory))) throw new Error('Forbidden');
       return memory;
     },
 
