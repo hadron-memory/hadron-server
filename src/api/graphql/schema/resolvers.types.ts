@@ -53,17 +53,24 @@ import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 /**
  * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
  * mirroring the `agent(ref:)` gate: PUBLIC resolves for anyone (#551), a
- * non-public agent needs membership in its owning org, and a user-owned agent
- * (spec 047) is readable by its owner. Platform ADMIN/OWNER get `undefined` —
- * no restriction, so the callsite omits the relation filter entirely.
+ * non-public agent needs membership in its owning org, a user-owned agent
+ * (spec 047) is readable by its owner, and an App-key principal may read the
+ * agents installed in that App.
+ *
+ * ALWAYS returns a filter — never `undefined` — because `deletedAt: null` is
+ * unconditional. `AgentImport.parentAgent` hydrates by bare `findUnique` with
+ * no soft-delete check, so an unfiltered admin branch would let a platform
+ * admin resolve a DELETED parent through `importedBy` even though every other
+ * Agent read surface treats soft-deleted as unreadable (`Query.agent` returns
+ * null). PR #843 review, Copilot.
  *
  * Use this to scope any field that returns OTHER tenants' Agent objects, where
  * the outer gate authorized a different agent than the one being hydrated.
  */
-async function callerReadableAgentFilter(
-  ctx: Context,
-): Promise<Record<string, unknown> | undefined> {
-  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return undefined;
+async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, unknown>> {
+  const live = { deletedAt: null };
+  // Platform ADMIN/OWNER: unscoped EXCEPT soft-deleted rows.
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return live;
   const or: Record<string, unknown>[] = [{ visibility: 'PUBLIC' }];
   if (ctx.userId) {
     const orgIds = await getMemberOrgIds(ctx.db, ctx.userId);
@@ -71,7 +78,11 @@ async function callerReadableAgentFilter(
     // spec 047: the caller's own org-less agents.
     or.push({ ownerUserId: ctx.userId });
   }
-  return { OR: or };
+  // App-key principal (ctx.appId, no ctx.userId): the App is already authorized
+  // for the agents installed in it via `myApp.agents`, so dropping those parents
+  // would regress `importedBy` for deployed Apps (PR #843 review, Codex P2).
+  if (ctx.appId) or.push({ appAgents: { some: { appId: ctx.appId } } });
+  return { ...live, OR: or };
 }
 
 /** An edge endpoint's memoryId (preloaded relation, or a memoized FK load). */
@@ -1118,16 +1129,14 @@ export const typeResolvers = {
     // the parent, so this is the intended marketplace flow, not a rare shape.
     //
     // Scope to parents the CALLER may read, mirroring the `agent(ref:)` gate
-    // (PUBLIC → anyone; else the caller's member orgs or their own user-owned
-    // agents; platform ADMIN/OWNER → unscoped). A non-member simply sees fewer
-    // rows — the list is an adoption signal, not a correctness input.
+    // (PUBLIC → anyone; else the caller's member orgs, their own user-owned
+    // agents, or the agents installed in an App-key caller's App; platform
+    // ADMIN/OWNER → unscoped but still live-only). A non-member simply sees
+    // fewer rows — the list is an adoption signal, not a correctness input.
     importedBy: async (a: { id: string }, _: unknown, ctx: Context) => {
-      const parentFilter = await callerReadableAgentFilter(ctx);
+      const parentAgent = await callerReadableAgentFilter(ctx);
       return ctx.db.agentImport.findMany({
-        where: {
-          importedAgentId: a.id,
-          ...(parentFilter ? { parentAgent: parentFilter } : {}),
-        },
+        where: { importedAgentId: a.id, parentAgent },
         orderBy: { position: 'asc' },
       });
     },

@@ -328,6 +328,48 @@ describe('Agent.importedBy — cross-tenant parent-agent scoping (#757)', () => 
       .not.toContain('ORG-B-PROPRIETARY-PROMPT');
   });
 
+  // PR #843 review (Copilot): `AgentImport.parentAgent` hydrates by bare
+  // findUnique with no soft-delete check, so an unfiltered admin branch let a
+  // platform admin resolve a DELETED parent — while Query.agent returns null
+  // for one. `deletedAt: null` is now unconditional in the filter.
+  it('a SOFT-DELETED parent is unreachable, including for a platform ADMIN', async () => {
+    await db.agent.update({
+      where: { id: orgBPrivateParent.id },
+      data: { deletedAt: new Date() },
+    });
+    expect(await A.importedBy(pubAgentA, {}, asAdmin())).toEqual([]);
+    expect(await A.importedBy(pubAgentA, {}, ctx(orgBMember.id))).toEqual([]);
+    // Parity check: the top-level read surface agrees.
+    expect(await Q.agent(null, { ref: orgBPrivateParent.id }, asAdmin())).toBeNull();
+  });
+
+  // PR #843 review (Codex P2): an App-key principal has ctx.appId and NO
+  // ctx.userId, so the member-org clauses can't match. It is nonetheless
+  // authorized for the agents installed in its App via myApp.agents, and
+  // dropping those parents would regress importedBy for deployed Apps.
+  it('an APP-KEY caller sees a parent installed in its own App', async () => {
+    const app = await db.app.create({
+      data: {
+        id: generateId(), organizationId: orgB.id,
+        urn: `${orgB.urn}:ik-app-${generateId()}`, name: 'Installed App',
+        appAgents: { create: { agentId: orgBPrivateParent.id } },
+      },
+    });
+    const rows = await A.importedBy(pubAgentA, {}, { db, appId: app.id, roles: ['READER'] } as Context);
+    expect(rows.map((r: { parentAgentId: string }) => r.parentAgentId)).toEqual([orgBPrivateParent.id]);
+  });
+
+  it('an APP-KEY caller does NOT see a parent installed in a DIFFERENT App', async () => {
+    const otherApp = await db.app.create({
+      data: {
+        id: generateId(), organizationId: orgB.id,
+        urn: `${orgB.urn}:other-app-${generateId()}`, name: 'Other App',
+      },
+    });
+    const rows = await A.importedBy(pubAgentA, {}, { db, appId: otherApp.id, roles: ['READER'] } as Context);
+    expect(rows).toEqual([]);
+  });
+
   it('the agent’s OWN definition stays public (#551 not regressed)', async () => {
     const agent = await Q.agent(null, { ref: pubAgentA.id }, asAnon());
     expect(agent.systemPrompt).toBe('SECRET-PROMPT');
