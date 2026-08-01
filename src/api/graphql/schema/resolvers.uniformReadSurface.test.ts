@@ -565,6 +565,12 @@ describe('User.googleId / User.appleId — provider ids for merge triage (#837)'
     expect(await U.appleId(row, {}, ctx(admin.id, ['ADMIN']))).toBeNull();
   });
 
+  it('a platform ADMIN reads a non-null appleId when present', async () => {
+    await db.user.update({ where: { id: linked.id }, data: { appleId: 'apple-sub-456' } });
+    const row = await db.user.findUniqueOrThrow({ where: { id: linked.id } });
+    expect(await U.appleId(row, {}, ctx(admin.id, ['ADMIN']))).toBe('apple-sub-456');
+  });
+
   it('the user themselves reads their own', async () => {
     const row = await db.user.findUniqueOrThrow({ where: { id: linked.id } });
     expect(await U.googleId(row, {}, ctx(linked.id))).toBe('google-sub-123');
