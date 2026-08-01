@@ -319,6 +319,13 @@ export const memoryQueries = {
           // #653: an app-scoped knowledge/group row is App-internal — never in
           // the public "marketplace" slice, even if its visibility was set PUBLIC.
           appId: null,
+          // #758: and neither is a USER-owned row. This branch RETURNS EARLY,
+          // ahead of both the App-key fold and the JWT union below, so it needs
+          // the spec-047 owner guard in its own right — a caller passing
+          // `filter.visibility: PUBLIC` would otherwise reach a user-owned
+          // memory that every other listing surface now excludes. The owner
+          // reaches their own rows through the default (unfiltered) slice.
+          ownerUserId: null,
           ...classFilter,
           ...(scope.scopedOrgId ? { organizationId: scope.scopedOrgId } : {}),
         });
@@ -333,6 +340,7 @@ export const memoryQueries = {
           where: { id: ctx.appId },
           select: {
             organizationId: true,
+            ownerUserId: true,
             appAgents: {
               select: {
                 agent: {
@@ -345,11 +353,19 @@ export const memoryQueries = {
           },
         });
         if (!app || app.appAgents.length === 0) return empty;
+        // #758 — the twin of the #676 blocker-2 fix, which landed only in the
+        // MCP `getAppMemoryAccess`. spec 047: a USER-owned memory is strictly
+        // owner-only, so one owned by someone other than this App's owner must
+        // never fold into the App-key listing. Org-owned memories
+        // (ownerUserId NULL) are unaffected.
+        const foreignUserOwned = (owner: string | null | undefined): boolean =>
+          owner != null && owner !== app.ownerUserId;
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
           for (const item of aa.agent.memoryItems) {
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
             if (f.visibility && item.memory.visibility !== f.visibility) continue;
+            if (foreignUserOwned(item.memory.ownerUserId)) continue;
             memoryMap.set(item.memory.id, item.memory);
           }
         }

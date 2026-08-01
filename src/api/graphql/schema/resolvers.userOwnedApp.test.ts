@@ -248,6 +248,58 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
     const access = await getAppMemoryAccess(db, app.id);
     expect(access.get(ownMem.id)).toBe('READ_ONLY');
   });
+
+  /**
+   * #758 — the GraphQL twin of the same blocker. The #676 fix landed only in
+   * `getAppMemoryAccess` (MCP); the App-key branch of `Query.memories` folded
+   * every `appAgents[].agent.memoryItems` row with no owner filter, so the same
+   * foreign user-owned memory was listed to an App-key caller.
+   */
+  it('Query.memories (App-key) excludes a foreign user-owned memory, keeps the owner’s', async () => {
+    const foreignMem = await db.memory.create({
+      data: { id: generateId(), class: 'knowledge', name: 'foreign', urn: `@appother:foreign-${generateId()}`, ownerUserId: otherId },
+    });
+    const ownMem = await db.memory.create({
+      data: { id: generateId(), class: 'knowledge', name: 'own', urn: `@appowner:own-${generateId()}`, ownerUserId: ownerId },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), name: 'UO Agent', urn: `@appowner:uo-agent-${generateId()}`, ownerUserId: ownerId,
+        memoryItems: { create: [{ memoryId: foreignMem.id, role: 'read' }, { memoryId: ownMem.id, role: 'read' }] } },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'UO App', urn: `@appowner:uo-app-${generateId()}`, ownerUserId: ownerId,
+        appAgents: { create: { agentId: agent.id } } },
+    });
+
+    const page = await resolvers.Query.memories(
+      null,
+      { filter: { memoryClasses: ['knowledge'] } },
+      ctx({ appId: app.id }),
+    );
+    const ids = page.items.map((m: { id: string }) => m.id);
+    expect(ids).not.toContain(foreignMem.id);
+    expect(ids).toContain(ownMem.id);
+  });
+
+  it('Query.memories (App-key) still lists an ORG-owned memory (no regression)', async () => {
+    const orgMem = await db.memory.create({
+      data: { id: generateId(), class: 'knowledge', name: 'orgmem', urn: `${generateId()}:orgmem`, organizationId: pubOrgId },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), name: 'Org Agent', urn: `${generateId()}:org-agent`, organizationId: pubOrgId,
+        memoryItems: { create: [{ memoryId: orgMem.id, role: 'read' }] } },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'Org App', urn: `${generateId()}:org-app`, organizationId: pubOrgId,
+        appAgents: { create: { agentId: agent.id } } },
+    });
+    const page = await resolvers.Query.memories(
+      null,
+      { filter: { memoryClasses: ['knowledge'] } },
+      ctx({ appId: app.id }),
+    );
+    expect(page.items.map((m: { id: string }) => m.id)).toContain(orgMem.id);
+  });
 });
 
 describe('createApp — personal-App dependency rejection leaves no orphan (codex #685)', () => {

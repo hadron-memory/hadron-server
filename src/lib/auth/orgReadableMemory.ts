@@ -79,7 +79,14 @@ export async function getOrgReadableMemoryIds(
           : []),
         // PUBLIC memories — defensively excluding personal/private, per-user
         // holdings, and app-scoped (#653) so a mis-set visibility can't expose them.
-        { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any }, appId: null, userMemoryOfAgentId: null },
+        // #758: `ownerUserId: null` — spec 047's invariant is that a USER-owned
+        // memory is strictly owner-only REGARDLESS of visibility, and this
+        // clause is the one place that would otherwise admit a user-owned
+        // knowledge/group memory set PUBLIC into every tenant's readable set.
+        // The per-memory point reads have their own ownerUserId early-returns;
+        // this is the list/search side (getAccessibleMemoryIds + MCP
+        // getMemoryAccess both build on it).
+        { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any }, appId: null, userMemoryOfAgentId: null, ownerUserId: null },
       ],
     },
     select: { id: true },

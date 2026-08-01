@@ -852,8 +852,12 @@ export async function getAccessibleMemoryIds(
   // Unauthenticated — public memories only. #653: exclude app-scoped rows — an
   // app-scoped knowledge/group memory is App-internal even if its visibility was
   // changed to PUBLIC (mirrors getOrgReadableMemoryIds' PUBLIC clause).
+  // #758: `ownerUserId: null` for the same reason as that clause — spec 047
+  // makes a USER-owned memory owner-only regardless of visibility, and an
+  // anonymous caller is never its owner. This branch is a SECOND copy of the
+  // PUBLIC predicate, so it needs the guard independently of orgReadableMemory.
   const publicMemories = await ctx.db.memory.findMany({
-    where: { ...scope, visibility: 'PUBLIC', appId: null, deletedAt: null },
+    where: { ...scope, visibility: 'PUBLIC', appId: null, ownerUserId: null, deletedAt: null },
     select: { id: true },
   });
   return publicMemories.map((g) => g.id);
