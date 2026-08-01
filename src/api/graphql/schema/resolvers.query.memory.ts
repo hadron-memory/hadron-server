@@ -22,6 +22,17 @@ import {
   MEMORY_INCLUDE,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
+import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
+import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+
+/** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
+function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
+  try {
+    return emitNodeUrnV2(memoryUrn, loc);
+  } catch {
+    return null;
+  }
+}
 
 // Graph-view fetch (issue #466): default page size + hard cap for the slim
 // memoryNodes / memoryEdges lists. Large enough to fill the graph in a few
@@ -152,6 +163,61 @@ export const memoryQueries = {
       // "own activity" to report — empty, not an error (as dashboardWidgets).
       if (!ctx.userId) return [];
       return getUsageActivity(ctx.db, { ...scope, userId: ctx.userId });
+    },
+
+    /**
+     * #819 — the memory health audit, previously MCP-only. Runs the SAME
+     * checks as `hadron_validate` via the shared `validateMemoryNodes`, so the
+     * two surfaces cannot drift on what "healthy" means.
+     *
+     * Typed findings rather than the tool's prose: a caller has to be able to
+     * branch, and `hadron memory validate` has to be able to gate CI on a
+     * count.
+     *
+     * Findings are CAPPED (default 200, max 1000) because a large memory can
+     * produce thousands, but `totalFindings` always reports the true count —
+     * so a gate is never fooled by truncation, and `truncated` says plainly
+     * that there is more.
+     */
+    validateMemory: async (
+      _: unknown,
+      { memoryRef, limit }: { memoryRef: string; limit?: number | null },
+      ctx: Context,
+    ) => {
+      const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+      // Same record-level gate as the rest of the memory reads. Denied ≡
+      // not-found so this is not an existence oracle.
+      const memory = await ctx.db.memory.findFirst({
+        where: { id: memoryId, deletedAt: null },
+        select: { id: true, class: true, userId: true, ownerUserId: true, organizationId: true, urn: true },
+      });
+      if (!memory || !(await canReadMemoryRecord(ctx, memory))) {
+        throw new GraphQLError(`Memory not found: "${memoryRef}"`, {
+          extensions: { code: 'NOT_FOUND' },
+        });
+      }
+
+      const report = await validateMemoryNodes(ctx.db, memory.id);
+      const cap = Math.min(Math.max(limit ?? 200, 0), 1000);
+      const page = report.findings.slice(0, cap);
+      const findings = page.map((f) => ({
+        kind: f.kind,
+        nodeId: f.nodeId,
+        nodeLoc: f.nodeLoc,
+        nodeUrn: safeCanonicalNodeUrn(memory.urn, f.nodeLoc),
+        detail: f.detail,
+      }));
+      return {
+        memoryId: memory.id,
+        nodesChecked: report.nodesChecked,
+        findings,
+        totalFindings: report.findings.length,
+        truncated: report.findings.length > page.length,
+        skippedChecks: report.skippedChecks,
+        // A skipped check makes `ok` false even with zero findings — you
+        // cannot claim health for a check you did not run.
+        ok: report.findings.length === 0 && report.skippedChecks.length === 0,
+      };
     },
 
     memoryUsageSummary: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
