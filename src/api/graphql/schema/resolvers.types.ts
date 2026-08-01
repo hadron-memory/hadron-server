@@ -88,6 +88,51 @@ async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, u
   return { ...live, OR: or };
 }
 
+/**
+ * #853 — request-memoized "agent this caller may read", by id.
+ *
+ * `callerReadableAgentFilter` issues a membership query every call, and the
+ * agent row is a second. An appRuns page allows 200 rows that commonly repeat
+ * one agent, so the naive form costs up to 400 queries for a single selected
+ * relation. Both halves are cached on the request Context, mirroring `loadApp`.
+ */
+function loadReadableAgent(ctx: Context, agentId: string): Promise<unknown | null> {
+  const filter = (ctx.readableAgentFilterCache ??= callerReadableAgentFilter(ctx));
+  const cache = (ctx.readableAgentCache ??= new Map<string, Promise<unknown | null>>());
+  let pending = cache.get(agentId);
+  if (!pending) {
+    pending = filter.then((readable) =>
+      ctx.db.agent.findFirst({ where: { id: agentId, ...readable } }),
+    );
+    cache.set(agentId, pending);
+  }
+  return pending;
+}
+
+/**
+ * #853 — request-memoized entry-node resolution from a run's `entryNodeUrn`.
+ * Resolving a URN costs a memory lookup plus a node lookup, and runs of one App
+ * overwhelmingly share one entry node. Misses (deleted, moved, or an
+ * unresolvable legacy URN) are cached too — all normal for a historical run.
+ */
+function loadEntryNode(ctx: Context, entryNodeUrn: string): Promise<{ memoryId: string } | null> {
+  const cache = (ctx.entryNodeCache ??= new Map<string, Promise<{ memoryId: string } | null>>());
+  let pending = cache.get(entryNodeUrn);
+  if (!pending) {
+    pending = (async () => {
+      let id: string;
+      try {
+        ({ id } = await resolveNodeRef(ctx.db, entryNodeUrn));
+      } catch {
+        return null;
+      }
+      return ctx.db.node.findFirst({ where: { id, deletedAt: null } }) as Promise<{ memoryId: string } | null>;
+    })();
+    cache.set(entryNodeUrn, pending);
+  }
+  return pending;
+}
+
 /** An edge endpoint's memoryId (preloaded relation, or a memoized FK load). */
 async function edgeEndpointMemoryId(
   ctx: Context,
@@ -397,10 +442,12 @@ export const typeResolvers = {
       // rows (the #696 reason AppRun.urn memoizes the urn lookup).
       const app = await loadApp(ctx, r.appId);
       if (!app || app.deletedAt) return null;
-      // Same bar as a direct `app(ref:)` read — org member (or owner, for a
-      // user-owned App), platform ADMIN/OWNER. In the common case the caller
-      // already cleared org-READER on the run's org and this passes; it is the
-      // cross-org and user-owned shapes that need it.
+      // Same bar as a direct `app(ref:)` read: `requireOwnerOrOrgRole`, i.e.
+      // org member for an ORG-owned App, and STRICTLY the owner for a
+      // user-owned one — there is NO platform-admin bypass on the user-owned
+      // shape (PR #853 review, Copilot; the owner-only test pins it). In the
+      // common case the caller already cleared org-READER on the run's org and
+      // this passes; it is the cross-org and user-owned shapes that need it.
       try {
         await requireOwnerOrOrgRole(ctx, app, 'READER');
       } catch {
@@ -411,29 +458,33 @@ export const typeResolvers = {
     agent: async (r: { agentId?: string | null }, _: unknown, ctx: Context) => {
       if (!r.agentId) return null;
       // Reuse the shared agent-read predicate (#757) rather than a bespoke
-      // check, so this can't drift from `agent(ref:)`.
-      const readable = await callerReadableAgentFilter(ctx);
-      return ctx.db.agent.findFirst({ where: { id: r.agentId, ...readable } });
+      // check, so this can't drift from `agent(ref:)`. Both the predicate (it
+      // queries org memberships) and the row lookup are request-memoized: a
+      // 200-row page commonly repeats one agent, and without this the field
+      // costs up to 400 queries (PR #853 review, Codex P2).
+      return loadReadableAgent(ctx, r.agentId);
     },
     user: async (r: { userId?: string | null }, _: unknown, ctx: Context) => {
       if (!r.userId) return null;
-      // No extra gate: `userId` is already an exposed scalar on this type, and
-      // the User type gates its own personal fields per #384 (name/email, plus
-      // googleId/appleId in #837). Returning the row adds no exposure beyond
-      // what the caller could already fetch via `user(ref:)`.
+      // #853 review (Codex P1 / Copilot): knowing `userId` does NOT authorize
+      // the User record. `Query.user(ref:)` returns null unless the caller is
+      // that user, a platform admin, or shares an org with them — and only
+      // name/email/googleId/appleId have field resolvers, so `policy`,
+      // `identityProvider`, `externalId`, `roles` and `maxReferrals` resolve by
+      // default and WOULD be exposed. A run executed on behalf of an AppMember
+      // or subscriber who is not a co-member is exactly that case.
+      //
+      // Gate on the same shared predicate (self / platform admin / shares an
+      // org), so this cannot drift from `user(ref:)`. Denied ≡ null.
+      if (!(await canSeeUserPersonalFields(ctx, r.userId))) return null;
       return ctx.db.user.findFirst({ where: { id: r.userId, deletedAt: null } });
     },
     entryNode: async (r: { entryNodeUrn?: string | null }, _: unknown, ctx: Context) => {
       if (!r.entryNodeUrn) return null;
-      let id: string;
-      try {
-        ({ id } = await resolveNodeRef(ctx.db, r.entryNodeUrn));
-      } catch {
-        // Deleted, moved, or an un-resolvable legacy URN — all normal for a
-        // historical run. The URN scalar is the audit record.
-        return null;
-      }
-      const node = await ctx.db.node.findFirst({ where: { id, deletedAt: null } });
+      // Request-memoized: resolving a URN is a memory lookup PLUS a node
+      // lookup, and runs of one App overwhelmingly share an entry node
+      // (PR #853 review, Copilot).
+      const node = await loadEntryNode(ctx, r.entryNodeUrn);
       if (!node) return null;
       // Node CONTENT gate — the same predicate node reads and the #781 edge
       // endpoints use.

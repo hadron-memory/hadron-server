@@ -108,6 +108,39 @@ describe('AppRun relations are gated on their OWN entity, not the run (#831/#552
     expect(await R.entryNode(await row(), {}, ctx(stranger.id))).toBeNull();
   });
 
+  // PR #853 review (Codex P1 / Copilot). Knowing `userId` does not authorize
+  // the User record: only name/email/googleId/appleId have field resolvers, so
+  // policy / identityProvider / externalId / roles / maxReferrals would resolve
+  // by default and be exposed.
+  it('a caller who shares NO org with the run user gets null for user', async () => {
+    // A run on behalf of someone who is an App member/subscriber but not an
+    // org co-member — exactly the shape an org audit list surfaces.
+    const outsiderUser = await db.user.create({
+      data: {
+        id: generateId(), githubId: 48105, githubUsername: 'ar-outsider',
+        roles: ['READER'], identityProvider: 'GITHUB', externalId: 'EXT-SECRET',
+      },
+    });
+    const r2 = await db.appRun.create({
+      data: {
+        id: generateId(), organizationId: orgA.id, appId: appA.id, userId: outsiderUser.id,
+        triggerKind: 'MANUAL', entryNodeUrn: `${memA.urn}:${entryNode.loc}`, status: 'COMPLETED',
+      },
+    });
+    const pr = await db.appRun.findUniqueOrThrow({ where: { id: r2.id } });
+    // `member` is in orgA; the run user is in no org — no shared org.
+    expect(await R.user(pr, {}, ctx(member.id))).toBeNull();
+    expect(await R.user(pr, {}, ctx())).toBeNull();
+    // Parity with the top-level read, which is the gate being mirrored.
+    expect(await resolvers.Query.user(null, { ref: outsiderUser.id }, ctx(member.id))).toBeNull();
+  });
+
+  it('a co-member and the user themselves still resolve user', async () => {
+    const r = await row(); // run.userId === member.id
+    expect((await R.user(r, {}, ctx(member.id)))?.id).toBe(member.id);
+    expect((await R.user(r, {}, ctx(admin.id, ['ADMIN'])))?.id).toBe(member.id);
+  });
+
   it('a PUBLIC agent still resolves for an outsider (matches agent(ref:))', async () => {
     await db.agent.update({ where: { id: agentA.id }, data: { visibility: 'PUBLIC' } });
     expect((await R.agent(await row(), {}, ctx(stranger.id)))?.id).toBe(agentA.id);
@@ -168,6 +201,29 @@ describe('AppRun relations degrade to null rather than failing the page (#831)',
     });
     expect(await R.agent(bare, {}, ctx(member.id))).toBeNull();
     expect(await R.user(bare, {}, ctx(member.id))).toBeNull();
+  });
+});
+
+describe('the relation loaders are request-memoized (#831/#853 — no N+1)', () => {
+  it('agent and entryNode resolve through one cache entry across many rows', async () => {
+    for (let i = 0; i < 5; i++) {
+      await db.appRun.create({
+        data: {
+          id: generateId(), organizationId: orgA.id, appId: appA.id, agentId: agentA.id,
+          triggerKind: 'MANUAL', entryNodeUrn: `${memA.urn}:${entryNode.loc}`, status: 'COMPLETED',
+        },
+      });
+    }
+    const rows = await db.appRun.findMany({ where: { appId: appA.id } });
+    const c = ctx(member.id);
+    const agents = await Promise.all(rows.map((r) => R.agent(r, {}, c)));
+    const nodes = await Promise.all(rows.map((r) => R.entryNode(r, {}, c)));
+    expect(agents.every((a) => a?.id === agentA.id)).toBe(true);
+    expect(nodes.every((n) => n?.id === entryNode.id)).toBe(true);
+    // One distinct agent and one distinct entry-node URN ⇒ one entry each,
+    // not one per row (the membership query is shared too).
+    expect(c.readableAgentCache?.size).toBe(1);
+    expect(c.entryNodeCache?.size).toBe(1);
   });
 });
 

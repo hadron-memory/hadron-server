@@ -81,6 +81,12 @@ export interface Context {
   // Request-scoped memo for AppRun.app (#831) — same rationale as appUrnCache,
   // for the full row rather than just the urn (lazily created; see loadApp).
   appRowCache?: Map<string, Promise<AppRow | null>>;
+  // #853 — AppRun.agent / AppRun.entryNode memos. A run page repeats the same
+  // agent and entry node across rows; without these the two relations cost a
+  // membership query + a row lookup EACH (see loadReadableAgent/loadEntryNode).
+  readableAgentFilterCache?: Promise<Record<string, unknown>>;
+  readableAgentCache?: Map<string, Promise<unknown | null>>;
+  entryNodeCache?: Map<string, Promise<{ memoryId: string } | null>>;
   // Request-scoped memo for NodeRevision.editedByUser / approvedByUser
   // candidate lookups (#620) — a node's history repeats the same few editor
   // strings, so each distinct candidate (including misses) is resolved once
