@@ -198,6 +198,15 @@ export type ResolvedEdge = {
  * `targetId.includes(':')` heuristic plus `findFirst({loc})` (no
  * memory scope), which silently no-op'd memory-prefixed/URN forms and
  * FK-errored on single-segment short locs.
+ *
+ * Security (#755): target-memory read access is checked with `canReadMemory`,
+ * exactly as the single-edge `addEdge` path does. `resolveNodeRef` is a pure
+ * DB lookup with no auth context, so without this gate `hadron_create_node` /
+ * `hadron_update_node` could point an edge at a node in a memory the caller
+ * cannot read — both a foreign-memory existence oracle and, once the edge is
+ * hydrated through `Edge.target`, a cross-tenant content read. The
+ * unauthorized-target branch reuses the genuine-miss wording to keep that
+ * channel closed.
  */
 export async function resolveEdgeRefs(
   edges: Array<{
@@ -208,16 +217,23 @@ export async function resolveEdgeRefs(
     isRunnable?: boolean | null;
   }>,
   sourceMemoryId: string,
+  auth: AuthContext,
 ): Promise<{ resolved: ResolvedEdge[] } | { error: string }> {
   const resolved: ResolvedEdge[] = [];
   for (const edge of edges) {
     try {
       const { id: targetNodeId } = await resolveNodeRef(db, edge.targetId, sourceMemoryId);
       // Fetch the target's loc so the edge loc can be derived at write time.
-      const tgt = await db.node.findUnique({ where: { id: targetNodeId }, select: { loc: true } });
+      const tgt = await db.node.findUnique({
+        where: { id: targetNodeId },
+        select: { loc: true, memoryId: true },
+      });
+      if (!tgt || !(await canReadMemory(db, auth, tgt.memoryId))) {
+        return { error: `Edge target not found: "${edge.targetId}"` };
+      }
       resolved.push({
         targetNodeId,
-        targetLoc: tgt?.loc ?? '',
+        targetLoc: tgt.loc,
         name: edge.name ?? null,
         loc: edge.loc ?? null,
         description: edge.description ?? null,
@@ -2704,6 +2720,7 @@ export function createMcpServerInstance(
             isRunnable: e.isRunnable ?? null,
           })),
           memoryId,
+          auth,
         );
         if ('error' in r) return textResult(r.error);
         resolvedEdges = r.resolved;
@@ -3029,6 +3046,7 @@ export function createMcpServerInstance(
             isRunnable: e.isRunnable ?? null,
           })),
           existing.memoryId,
+          auth,
         );
         if ('error' in r) return textResult(r.error);
         resolvedEdges = r.resolved;

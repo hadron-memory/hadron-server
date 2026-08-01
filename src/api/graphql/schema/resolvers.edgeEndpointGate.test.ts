@@ -126,3 +126,156 @@ describe('Edge.source / Edge.target cross-memory gate (#781)', () => {
     expect(await E.target(e, {}, ctx(stranger.id))).toBeNull();
   });
 });
+
+/**
+ * #755 — the WRITE half of the same story. `createNode`/`updateNode` resolve
+ * inline `edges: [{ targetId }]` through `resolveNodeRef` with no gate on the
+ * resolved target's memory, while the standalone `createEdge` requires write on
+ * the source and read on the target ("Without this any CONTRIBUTOR could write
+ * an edge into a memory they can't touch").
+ *
+ * Left open, that plants an edge pointing at a node the caller can't read;
+ * paired with endpoint hydration it was a cross-tenant read primitive. The
+ * #781 gate above blocks the read-back, but the write must be refused too —
+ * defense in depth, and the edge row itself is a disclosure (it names a
+ * foreign node id) plus a write-integrity violation.
+ */
+describe('createNode/updateNode inline edge targets — cross-memory gate (#755)', () => {
+  let contributor: { id: string }; // CONTRIBUTOR in orgA: can write memA, cannot read memB
+
+  const asContributor = (): Context => ({ db, userId: contributor.id, roles: ['CONTRIBUTOR'] });
+
+  beforeEach(async () => {
+    contributor = await db.user.create({
+      data: { id: generateId(), githubId: 90103, githubUsername: 'eg-contrib', roles: ['CONTRIBUTOR'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgA.id, userId: contributor.id, role: 'CONTRIBUTOR' },
+    });
+  });
+
+  it('createNode refuses an inline edge into a memory the caller cannot read', async () => {
+    await expect(
+      resolvers.Mutation.createNode(
+        {},
+        { input: { memoryId: memA.id, loc: 'exfil', name: 'exfil', edges: [{ targetId: nodeB.id, name: 'rel' }] } as never },
+        asContributor(),
+      ),
+    ).rejects.toThrow(/Edge target not found/);
+    // Nothing was written — neither the node nor a dangling edge.
+    expect(await db.node.count({ where: { loc: 'exfil', memoryId: memA.id } })).toBe(0);
+    expect(await db.edge.count({ where: { targetId: nodeB.id } })).toBe(0);
+  });
+
+  it('updateNode refuses the same inline edge', async () => {
+    const own = await createDbNode(db, { loc: 'mine', memoryId: memA.id });
+    await expect(
+      resolvers.Mutation.updateNode(
+        {},
+        { input: { id: own.id, edges: [{ targetId: nodeB.id, name: 'rel' }] } as never },
+        asContributor(),
+      ),
+    ).rejects.toThrow(/Edge target not found/);
+    expect(await db.edge.count({ where: { sourceId: own.id } })).toBe(0);
+  });
+
+  it('the denial is indistinguishable from a genuine miss (no existence oracle)', async () => {
+    const attempt = (targetId: string) =>
+      resolvers.Mutation.createNode(
+        {},
+        { input: { memoryId: memA.id, loc: `probe-${targetId.slice(0, 6)}`, name: 'p', edges: [{ targetId, name: 'rel' }] } as never },
+        asContributor(),
+      ).then(() => null, (e: Error) => e.message.replace(targetId, '<REF>'));
+
+    const bogusId = generateId();
+    expect(await attempt(nodeB.id)).toBe(await attempt(bogusId));
+    expect(await attempt(nodeB.id)).toMatch(/Edge target not found/);
+  });
+
+  it('a same-memory inline edge still works (the common case is unaffected)', async () => {
+    const created = await resolvers.Mutation.createNode(
+      {},
+      { input: { memoryId: memA.id, loc: 'ok', name: 'ok', edges: [{ targetId: nodeA.id, name: 'rel' }] } as never },
+      asContributor(),
+    );
+    expect(await db.edge.count({ where: { sourceId: created.id, targetId: nodeA.id } })).toBe(1);
+  });
+
+  it('a caller who CAN read both memories may still link across them', async () => {
+    // Platform admin reads memB, so the cross-memory edge is legitimate.
+    const created = await resolvers.Mutation.createNode(
+      {},
+      { input: { memoryId: memA.id, loc: 'cross-ok', name: 'cross', edges: [{ targetId: nodeB.id, name: 'rel' }] } as never },
+      ctx(admin.id, ['ADMIN']),
+    );
+    expect(await db.edge.count({ where: { sourceId: created.id, targetId: nodeB.id } })).toBe(1);
+  });
+});
+
+/**
+ * PR #844 review (Codex P2) — the inline-edge gate must use the NODE-CONTENT
+ * read set, not the MCP `canReadMemory` that `createEdge` calls. The latter's
+ * personal-memory branch tests `memory.userId` only and never consults
+ * MemoryShare, so a `writer` share-grantee writing an inline edge into the very
+ * memory shared with them would be refused NODE_NOT_FOUND.
+ *
+ * `getAccessibleMemoryIds` (via isMemoryReadableCached) DOES honor the share —
+ * and is the same predicate #781's Edge.target hydration uses, so write and
+ * read stay symmetric: you may link precisely what you could read back.
+ */
+describe('inline edge targets honor a MemoryShare grantee (#844 review)', () => {
+  // An ORG-owned personal memory belonging to `member` (chk_memory_owner_xor
+  // requires exactly one of organizationId / ownerUserId, so a personal memory
+  // is org-owned + `userId`-owned). granteeShareAccess additionally requires an
+  // org-owned share's grantee to be a current member of that org.
+  async function seedSharedPersonal(granteeId: string | null) {
+    const shared = await db.memory.create({
+      data: {
+        id: generateId(), class: 'personal', name: `shared-${generateId()}`,
+        urn: `${orgA.urn}:shared-${generateId()}`,
+        organizationId: orgA.id, userId: member.id,
+      },
+    });
+    const target = await createDbNode(db, { loc: `t-${generateId()}`, memoryId: shared.id });
+    if (granteeId) {
+      await db.memoryShare.create({
+        data: { memoryId: shared.id, granteeId, grantorId: member.id, role: 'writer' },
+      });
+    }
+    return { shared, target };
+  }
+
+  /** An orgA CONTRIBUTOR — can write memA, so only the TARGET gate is in play. */
+  async function seedContributor(login: string, githubId: number) {
+    const u = await db.user.create({
+      data: { id: generateId(), githubId, githubUsername: login, roles: ['CONTRIBUTOR'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgA.id, userId: u.id, role: 'CONTRIBUTOR' },
+    });
+    return u;
+  }
+
+  it('a writer share-grantee may name a node in the shared memory as an edge target', async () => {
+    const grantee = await seedContributor('eg-grantee', 90104);
+    const { target } = await seedSharedPersonal(grantee.id);
+    const created = await resolvers.Mutation.createNode(
+      {},
+      { input: { memoryId: memA.id, loc: 'grantee-node', name: 'g', edges: [{ targetId: target.id, name: 'rel' }] } as never },
+      ctx(grantee.id, ['CONTRIBUTOR']),
+    );
+    expect(await db.edge.count({ where: { sourceId: created.id, targetId: target.id } })).toBe(1);
+  });
+
+  it('a NON-grantee is still refused the same target', async () => {
+    const stranger = await seedContributor('eg-stranger2', 90105);
+    const { target } = await seedSharedPersonal(null);
+    await expect(
+      resolvers.Mutation.createNode(
+        {},
+        { input: { memoryId: memA.id, loc: 'probe2', name: 'p', edges: [{ targetId: target.id, name: 'rel' }] } as never },
+        ctx(stranger.id, ['CONTRIBUTOR']),
+      ),
+    ).rejects.toThrow(/Edge target not found/);
+  });
+});
