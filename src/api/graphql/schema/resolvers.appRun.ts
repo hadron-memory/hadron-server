@@ -28,6 +28,73 @@ import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 
+/** Orderable columns on the appRuns list (#833). Mirrors the SDL enum. */
+export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status';
+
+/**
+ * #836 — the status filter, widened from one value to a disjunction.
+ *
+ * Semantics follow conventions:multi-ref-scope-args (#805/PR #808), where the
+ * traps were already paid for:
+ *   - OMITTED (undefined/null) means NO status filter, unchanged from today.
+ *   - An explicitly EMPTY list is the EMPTY scope and matches nothing. It must
+ *     NOT fall back to "all" — that relabels one scope as another, the exact
+ *     trap the convention calls out.
+ *   - Values are deduped. An unknown member never reaches here: GraphQL enum
+ *     validation rejects it at the schema layer, so "fail loudly" is free.
+ *
+ * `status` (singular) is deprecated but still accepted for one release. When
+ * both are supplied `statuses` wins, so a client migrating field-by-field can
+ * never end up with the two silently ANDed.
+ */
+export function buildStatusFilter(
+  status?: string | null,
+  statuses?: string[] | null,
+): Record<string, unknown> {
+  if (statuses !== undefined && statuses !== null) {
+    // Explicitly empty ⇒ empty scope. `in: []` matches nothing in Prisma,
+    // which is exactly the intent — spelled out because it reads like a bug.
+    const deduped = [...new Set(statuses)];
+    return { status: { in: deduped as never } };
+  }
+  if (status) return { status: status as never };
+  return {};
+}
+
+/**
+ * #833 — server-side ordering for the appRuns list. Without it a client table
+ * could only sort the window it already held, so "the slowest run" meant "the
+ * slowest of the most recent 200" — an affordance that quietly lies.
+ *
+ * Two things every branch must carry:
+ *   - an `id` TIEBREAK, or rows with equal sort keys (every run sharing a
+ *     status, say) shuffle between offset pages;
+ *   - `nulls: 'last'` on the nullable timestamps. A PENDING run has no
+ *     startedAt/finishedAt, and Postgres would otherwise float those nulls to
+ *     the top of a DESC sort — burying the finished runs the operator asked to
+ *     rank.
+ *
+ * Default stays createdAt desc: existing callers depend on newest-first.
+ */
+export function buildAppRunOrderBy(
+  sortBy?: AppRunSortField | null,
+  sortDir?: 'asc' | 'desc' | null,
+): Record<string, unknown>[] {
+  const dir = sortDir === 'asc' ? 'asc' : 'desc';
+  const tiebreak = { id: dir } as Record<string, unknown>;
+  switch (sortBy) {
+    case 'startedAt':
+      return [{ startedAt: { sort: dir, nulls: 'last' } }, tiebreak];
+    case 'finishedAt':
+      return [{ finishedAt: { sort: dir, nulls: 'last' } }, tiebreak];
+    case 'status':
+      return [{ status: dir }, tiebreak];
+    case 'createdAt':
+    default:
+      return [{ createdAt: dir }, tiebreak];
+  }
+}
+
 export interface CreateAgentScheduleInput {
   /** App reference — PK or fully-qualified URN (the platform-wide `ref` convention). */
   appRef: string;
@@ -717,14 +784,21 @@ export const appRunQueries = {
       appRef,
       orgRef,
       status,
+      statuses,
       parentRunId,
+      sortBy,
+      sortDir,
       limit,
       offset,
     }: {
       appRef?: string | null;
       orgRef?: string | null;
+      /** @deprecated #836 — superseded by `statuses`; still accepted for one release. */
       status?: string | null;
+      statuses?: string[] | null;
       parentRunId?: string | null;
+      sortBy?: AppRunSortField | null;
+      sortDir?: 'asc' | 'desc' | null;
       limit?: number | null;
       offset?: number | null;
     },
@@ -760,7 +834,7 @@ export const appRunQueries = {
     const where = {
       organizationId,
       ...(appId ? { appId } : {}),
-      ...(status ? { status: status as never } : {}),
+      ...buildStatusFilter(status, statuses),
       // Fan-out children of one parent (#548; index from PR-547). Rides the
       // same org/app authorization — the org scope already applies above.
       // Explicit null = top-level runs only; omitted = no filter (PR-550
@@ -769,7 +843,12 @@ export const appRunQueries = {
     };
     const take = Math.min(Math.max(limit ?? 50, 1), 200);
     const [items, total] = await Promise.all([
-      ctx.db.appRun.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
+      ctx.db.appRun.findMany({
+        where,
+        orderBy: buildAppRunOrderBy(sortBy, sortDir),
+        take,
+        skip: Math.max(0, offset ?? 0),
+      }),
       ctx.db.appRun.count({ where }),
     ]);
     return { items, total };

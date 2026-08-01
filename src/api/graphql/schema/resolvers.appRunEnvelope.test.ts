@@ -32,7 +32,24 @@ describe('#548 — fan-out state exposed in GraphQL schema', () => {
     expect(appRunBlock).toMatch(/\n\s*spawn:\s*JSON\b/);
   });
 
+  // The signature went MULTI-LINE in #833/#836, and its docstring contains
+  // parenthesised references — so the original `appRuns\([^)]*...\)` form now
+  // terminates at the first ')' inside the prose. Match the argument BLOCK
+  // instead, which is stable against further argument additions.
+  const appRunsArgs = () =>
+    typeDefs.match(/\n\s*appRuns\(([\s\S]*?)\n\s*\): AppRunsPage!/)?.[1] ?? '';
+
   it('appRuns accepts a parentRunId filter', () => {
-    expect(typeDefs).toMatch(/appRuns\([^)]*parentRunId:\s*ID[^)]*\)/);
+    expect(appRunsArgs()).toMatch(/parentRunId:\s*ID\b/);
+  });
+
+  it('appRuns accepts the #836 statuses list and keeps the deprecated singular', () => {
+    expect(appRunsArgs()).toMatch(/statuses:\s*\[AppRunStatus!\]/);
+    expect(appRunsArgs()).toMatch(/status:\s*AppRunStatus\s*@deprecated/);
+  });
+
+  it('appRuns accepts the #833 sort arguments', () => {
+    expect(appRunsArgs()).toMatch(/sortBy:\s*AppRunSortField\b/);
+    expect(appRunsArgs()).toMatch(/sortDir:\s*SortDirection\b/);
   });
 });
