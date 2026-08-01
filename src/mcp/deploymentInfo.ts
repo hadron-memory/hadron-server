@@ -37,7 +37,12 @@
 // (agentAIConfig/memoryNodes/memoryEdges/memoryUsageSummary/agentSubscriptions/
 // appNodes/appAIConfig/appKeys/myChats/resolveAIConfig/resolveAiServiceConfigs
 // <entity>Id args renamed to <entity>Ref — a caller-visible rename).
-export const HADRON_SERVER_VERSION = '0.10.0';
+// 0.11.0: the #740-#837 API-surface batch — new queries nextNode (#817),
+// renderRunNode (#818) and validateMemory (#819); new MCP tools
+// hadron_update_edge / hadron_delete_edge (#835); new AppRun relation and
+// spend fields (#831/#832); appRuns sortBy/sortDir + statuses (#833/#836);
+// User.googleId/appleId (#837). All caller-detectable additions.
+export const HADRON_SERVER_VERSION = '0.11.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"

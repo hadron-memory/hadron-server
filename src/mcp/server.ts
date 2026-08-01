@@ -86,6 +86,7 @@ import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import { decryptNodeFieldsWithKey, encryptNodeFieldsWithKey } from '../lib/nodeCrypto.js';
 import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
+import { sortSiblings } from '../lib/siblingOrder.js';
 import {
   NodeNotFoundError,
   NodeAbstractTooLongError,
@@ -2214,15 +2215,14 @@ export function createMcpServerInstance(
         orderBy: { loc: 'asc' },
       });
       // Direct children only (no further colons after prefix)
-      const children = allNodes
-        .filter((n) => !n.loc.slice(prefix.length).includes(':'))
-        .sort((a, b) => {
-          // Sort by seq first (nodes with seq come before those without), then by loc
-          if (a.seq !== null && b.seq !== null) return a.seq - b.seq;
-          if (a.seq !== null) return -1;
-          if (b.seq !== null) return 1;
-          return a.loc.localeCompare(b.loc);
-        });
+      // #857 review: the comparator is SHARED with the GraphQL `nextNode`
+      // query (src/lib/siblingOrder.ts) so the two surfaces cannot present
+      // different reading orders. Behavior is unchanged here — that file is
+      // this logic, lifted, with the equal-seq loc tiebreak made explicit
+      // rather than relying on Array.sort stability over a loc-ordered fetch.
+      const children = sortSiblings(
+        allNodes.filter((n) => !n.loc.slice(prefix.length).includes(':')),
+      );
 
       if (children.length === 0) {
         return textResult(`No children found under "${parentLoc}".`);

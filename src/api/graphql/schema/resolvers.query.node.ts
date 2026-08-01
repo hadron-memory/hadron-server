@@ -29,6 +29,7 @@ import {
 import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retrieval/provider.js';
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import { sortSiblings } from '../../../lib/siblingOrder.js';
 import {
   parseUrnInput,
   validateUrnType,
@@ -109,18 +110,25 @@ export const nodeQueries = {
       if (!(await isMemoryReadableCached(ctx, parent.memoryId))) return null;
 
       const prefix = `${parent.loc}:`;
-      // Order in SQL so the tie/null rules are the DB's, not a JS re-sort.
-      // Only the three columns needed to pick a winner — the chosen node is
-      // then fetched in full through node(ref:) below.
+      // Project only what picking a winner needs; the chosen node is fetched in
+      // full through node(ref:) below.
       const descendants = await ctx.db.node.findMany({
         where: { memoryId: parent.memoryId, loc: { startsWith: prefix }, deletedAt: null },
-        select: { id: true, loc: true },
-        orderBy: [{ seq: { sort: 'asc', nulls: 'last' } }, { loc: 'asc' }],
+        select: { id: true, loc: true, seq: true },
       });
       // DIRECT children only — no further ':' beyond the prefix. Prisma can't
       // express that, so the subtree is narrowed here (the same shape the MCP
       // tool uses); the projection above keeps it cheap.
-      const children = descendants.filter((n) => !n.loc.slice(prefix.length).includes(':'));
+      //
+      // Ordering is done with the SHARED comparator rather than in SQL. PR #857
+      // review (Codex P2): SQL ties fall to the database collation while the
+      // MCP tool uses localeCompare, and locs may contain either case
+      // (SEGMENT_RE permits [a-zA-Z0-9]) — so a C-collation Postgres would
+      // order `A` before `a` where MCP orders `a` before `A`, and the traversal
+      // chain would change with the surface. One comparator, no divergence.
+      const children = sortSiblings(
+        descendants.filter((n) => !n.loc.slice(prefix.length).includes(':')),
+      );
       if (children.length === 0) return null;
 
       let nextId: string | null = null;

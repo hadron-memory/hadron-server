@@ -55,6 +55,10 @@ const child = (loc: string, seq: number | null) =>
     },
   });
 
+/** `<org>:<slug>` (stored bare) -> the canonical `<org>::<slug>` form. */
+const canonicalMemoryUrn = (bare: string) =>
+  bare.includes('::') ? bare : bare.replace(/:(?=[^:]*$)/, '::');
+
 const next = (parentRef: string, currentRef?: string) =>
   Q.nextNode(null, { parentRef, currentRef }, ctx(member.id));
 
@@ -129,8 +133,29 @@ describe('nextNode — scope and shape (#817)', () => {
 
   it('accepts a fully-qualified URN as well as a PK (cor:api:140)', async () => {
     const a = await child('a', 10);
-    const urn = `${mem.urn.replace(':', '::')}::${parent.loc}`;
+    // Compose from the memory's own URN shape rather than a blind
+    // replace(':','::'), which only rewrites the FIRST colon and would corrupt
+    // an already-canonical or multi-atom memory URN (PR #857 review, Copilot).
+    const urn = `${canonicalMemoryUrn(mem.urn)}::${parent.loc}`;
     expect((await next(urn))?.id).toBe(a.id);
+  });
+
+  it('an underscore in the parent loc does not match sibling branches (LIKE _)', async () => {
+    // Prisma implements startsWith with SQL LIKE, where `_` is a
+    // single-character wildcard. If it isn't escaped, prefix `foo_a:` also
+    // matches `foo_b:child` — and the JS direct-child filter slices an
+    // equal-length prefix, so the foreign node is admitted and traversal
+    // leaves the requested branch entirely.
+    const pA = await createDbNode(db, { loc: 'foo_a', memoryId: mem.id, name: 'A' });
+    await createDbNode(db, { loc: 'foo_b', memoryId: mem.id, name: 'B' });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: mem.id, loc: 'foo_b:child',
+        name: 'wrong-branch', ownerRepo: 'test/repo', tags: [], seq: 1,
+      },
+    });
+    // foo_a has no children at all, so the only correct answer is null.
+    expect(await next(pA.id)).toBeNull();
   });
 
   it('a childless parent returns null', async () => {
@@ -180,6 +205,28 @@ describe('nextNode — non-disclosure posture (#817)', () => {
 });
 
 describe('nextNode agrees with the MCP tool it mirrors (#817)', () => {
+  it('breaks MIXED-CASE ties the same way regardless of DB collation', async () => {
+    // PR #857 review (Codex P2): GraphQL used to order in SQL, so ties fell to
+    // the database collation, while the MCP tool used localeCompare. locs may
+    // contain either case (SEGMENT_RE permits [a-zA-Z0-9]), so on a
+    // C-collation Postgres SQL orders `A` before `a` while localeCompare
+    // orders `a` before `A` — the chain changed with the surface. Both now use
+    // one comparator. The original parity test used lowercase-only locs and
+    // could never have seen this.
+    const upper = await child('Alpha', null);
+    const lower = await child('alpha', null);
+    const walked: string[] = [];
+    let cur = await next(parent.id);
+    while (cur) {
+      walked.push(cur.loc);
+      cur = await next(parent.id, cur.id);
+    }
+    const expected = ['sections:Alpha', 'sections:alpha'].sort((a, b) => a.localeCompare(b));
+    expect(walked).toEqual(expected);
+    expect([upper.id, lower.id]).toHaveLength(2); // fixture sanity
+  });
+
+
   it('same order for the mixed seq / null / tie case', async () => {
     // The MCP tool sorts: seq-bearing first (ascending), then seq-less, with
     // loc breaking ties in both groups. Reproduce that reference ordering

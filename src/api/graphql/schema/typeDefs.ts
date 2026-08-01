@@ -4089,8 +4089,8 @@ export const typeDefs = `#graphql
     sibling; ties break on loc ascending. Identical to the MCP tool, so the two
     surfaces cannot present different reading orders.
 
-    Returns null at the end of the run, and for a parent that does not exist or
-    the caller cannot read — denied and missing are indistinguishable. A
+    Returns null at the end of the sibling chain, and for a parent that does
+    not exist or the caller cannot read — denied and missing are indistinguishable. A
     currentRef that is not among the parent's direct children is likewise null
     rather than an error, so it cannot probe a node's parentage. A MALFORMED
     ref still throws: a shape error discloses nothing about what exists.
