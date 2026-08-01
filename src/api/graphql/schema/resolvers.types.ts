@@ -19,6 +19,7 @@ import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import {
   canSeeUserPersonalFields,
   canSeeOrgMemberRole,
@@ -35,6 +36,8 @@ import {
   canReadMemoryRecord,
   loadMemoryUrn,
   loadAppUrn,
+  loadApp,
+  requireOwnerOrOrgRole,
   defaultAiConfigOf,
   isOrgMemberOrAdmin,
   safeCanonicalUrn,
@@ -379,6 +382,62 @@ export const typeResolvers = {
       } catch {
         return null;
       }
+    },
+    // #831 — relation fields so a CROSS-APP audit list can render names instead
+    // of raw cuids. Each is gated on its OWN entity, never on the outer
+    // `appRuns` org-READER gate: a nested object hands the caller that type's
+    // whole field-resolver surface, and `App.keys` / `App.members` do NOT
+    // re-check (findings:broadening-read-gate-leaks-nested-objects, #552).
+    //
+    // Every one is nullable and denial is silent. Throwing would fail the whole
+    // page over one unreadable relation, and the FK scalars (appId / agentId /
+    // userId / entryNodeUrn) remain the durable audit record regardless.
+    app: async (r: { appId: string }, _: unknown, ctx: Context) => {
+      // Request-memoized: a run-list page usually shares one App across many
+      // rows (the #696 reason AppRun.urn memoizes the urn lookup).
+      const app = await loadApp(ctx, r.appId);
+      if (!app || app.deletedAt) return null;
+      // Same bar as a direct `app(ref:)` read — org member (or owner, for a
+      // user-owned App), platform ADMIN/OWNER. In the common case the caller
+      // already cleared org-READER on the run's org and this passes; it is the
+      // cross-org and user-owned shapes that need it.
+      try {
+        await requireOwnerOrOrgRole(ctx, app, 'READER');
+      } catch {
+        return null;
+      }
+      return app;
+    },
+    agent: async (r: { agentId?: string | null }, _: unknown, ctx: Context) => {
+      if (!r.agentId) return null;
+      // Reuse the shared agent-read predicate (#757) rather than a bespoke
+      // check, so this can't drift from `agent(ref:)`.
+      const readable = await callerReadableAgentFilter(ctx);
+      return ctx.db.agent.findFirst({ where: { id: r.agentId, ...readable } });
+    },
+    user: async (r: { userId?: string | null }, _: unknown, ctx: Context) => {
+      if (!r.userId) return null;
+      // No extra gate: `userId` is already an exposed scalar on this type, and
+      // the User type gates its own personal fields per #384 (name/email, plus
+      // googleId/appleId in #837). Returning the row adds no exposure beyond
+      // what the caller could already fetch via `user(ref:)`.
+      return ctx.db.user.findFirst({ where: { id: r.userId, deletedAt: null } });
+    },
+    entryNode: async (r: { entryNodeUrn?: string | null }, _: unknown, ctx: Context) => {
+      if (!r.entryNodeUrn) return null;
+      let id: string;
+      try {
+        ({ id } = await resolveNodeRef(ctx.db, r.entryNodeUrn));
+      } catch {
+        // Deleted, moved, or an un-resolvable legacy URN — all normal for a
+        // historical run. The URN scalar is the audit record.
+        return null;
+      }
+      const node = await ctx.db.node.findFirst({ where: { id, deletedAt: null } });
+      if (!node) return null;
+      // Node CONTENT gate — the same predicate node reads and the #781 edge
+      // endpoints use.
+      return (await isMemoryReadableCached(ctx, node.memoryId)) ? node : null;
     },
   },
   Asset: {
