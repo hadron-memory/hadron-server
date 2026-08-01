@@ -369,6 +369,13 @@ export const memoryQueries = {
           // #653: an app-scoped knowledge/group row is App-internal — never in
           // the public "marketplace" slice, even if its visibility was set PUBLIC.
           appId: null,
+          // #758: and neither is a USER-owned row. This branch RETURNS EARLY,
+          // ahead of both the App-key fold and the JWT union below, so it needs
+          // the spec-047 owner guard in its own right — a caller passing
+          // `filter.visibility: PUBLIC` would otherwise reach a user-owned
+          // memory that every other listing surface now excludes. The owner
+          // reaches their own rows through the default (unfiltered) slice.
+          ownerUserId: null,
           ...classFilter,
           ...(scope.scopedOrgId ? { organizationId: scope.scopedOrgId } : {}),
         });

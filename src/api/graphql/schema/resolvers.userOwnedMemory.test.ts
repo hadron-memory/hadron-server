@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import type { Context } from './resolvers.js';
+import { resolvers, type Context } from './resolvers.js';
 import {
   requireMemoryWriteAccess,
   getAccessibleMemoryIds,
@@ -205,5 +205,71 @@ describe('user-owned memory set PUBLIC stays owner-only (#758)', () => {
     });
     const ids = await getAccessibleMemoryIds(ctx({ userId: otherId, roles: ['READER'] }));
     expect(ids).toContain(orgPub.id);
+  });
+});
+
+/**
+ * #758 review (Codex P1) — `Query.memories(filter: { visibility: PUBLIC })` is
+ * the MARKETPLACE branch, and it RETURNS EARLY, ahead of both the App-key fold
+ * and the JWT union. Guarding the other listing surfaces left this one open:
+ * any caller passing the visibility filter still got the user-owned row back in
+ * full. This is the fourth copy of the PUBLIC predicate, and it needs its own
+ * `ownerUserId: null`.
+ *
+ * One case per PRINCIPAL SHAPE — each reaches this branch differently, and the
+ * anonymous/App-key shapes are the ones that get skipped.
+ */
+describe('Query.memories(visibility: PUBLIC) excludes user-owned rows (#758)', () => {
+  async function seedPublicUserOwned() {
+    return db.memory.create({
+      data: {
+        id: generateId(), class: 'knowledge', name: 'pub-uo-marketplace',
+        urn: `@${ownerId}:pub-uo-mkt-${generateId()}`,
+        ownerUserId: ownerId, visibility: 'PUBLIC',
+      },
+    });
+  }
+  const list = (over: Partial<Context>) =>
+    resolvers.Query.memories(null, { filter: { visibility: 'PUBLIC' } }, ctx(over));
+
+  it('a foreign JWT caller does not see it', async () => {
+    const mem = await seedPublicUserOwned();
+    const page = await list({ userId: otherId, roles: ['READER'] });
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(mem.id);
+  });
+
+  it('an ANONYMOUS caller does not see it', async () => {
+    const mem = await seedPublicUserOwned();
+    const page = await list({ roles: ['READER'] });
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(mem.id);
+  });
+
+  it('a platform ADMIN does not see it (strict ownership, no bypass)', async () => {
+    const mem = await seedPublicUserOwned();
+    const page = await list({ userId: otherId, roles: ['ADMIN'] });
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(mem.id);
+  });
+
+  it('an App-key caller does not see it', async () => {
+    const mem = await seedPublicUserOwned();
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'MKT App', urn: `mkt-app-${generateId()}`, ownerUserId: otherId },
+    });
+    const page = await list({ appId: app.id, roles: ['READER'] });
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(mem.id);
+  });
+
+  it('an ORG-owned PUBLIC memory is still listed (marketplace not broken)', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'mkt-org', urn: `mkt-org-${generateId()}` },
+    });
+    const orgPub = await db.memory.create({
+      data: {
+        id: generateId(), class: 'knowledge', name: 'org-pub-mkt',
+        urn: `${org.urn}:org-pub-mkt`, organizationId: org.id, visibility: 'PUBLIC',
+      },
+    });
+    const page = await list({ userId: otherId, roles: ['READER'] });
+    expect(page.items.map((m: { id: string }) => m.id)).toContain(orgPub.id);
   });
 });
