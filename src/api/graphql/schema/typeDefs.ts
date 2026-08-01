@@ -2357,6 +2357,27 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  """
+  Orderable columns on the appRuns list (#833). Reuses the shared
+  SortDirection enum. Default createdAt desc — existing callers depend on
+  newest-first.
+
+  startedAt / finishedAt are NULLABLE (a PENDING run has neither); nulls sort
+  LAST in both directions, so unstarted runs never crowd out the rows an
+  operator asked to see. Every sort carries an id tiebreak so offset paging is
+  deterministic.
+
+  Duration (finishedAt - startedAt) is deliberately absent: it has no stored
+  column and Prisma cannot order by a computed expression, so it needs a
+  generated column of its own - tracked separately rather than half-shipped.
+  """
+  enum AppRunSortField {
+    createdAt
+    startedAt
+    finishedAt
+    status
+  }
+
   "Recurring trigger (cor:agt:010, D-2026-07-04-E)."
   type AgentSchedule {
     id: ID!
@@ -4047,7 +4068,34 @@ export const typeDefs = `#graphql
     appRun(ref: ID!): AppRun
     "The latest run of an App resolved to a concrete run (#696) — 'current/latest/previous' are queries, never magic run-ids in URN space (cor:urn:010:02). previous: true returns the run before the latest."
     latestAppRun(appRef: String!, previous: Boolean): AppRun
-    appRuns(appRef: String, orgRef: String, status: AppRunStatus, parentRunId: ID, limit: Int, offset: Int): AppRunsPage!
+    """
+    The run audit list.
+
+    statuses (#836) is a disjunction — 'everything still in flight' is
+    [PENDING, RUNNING] and 'what went wrong' is [FAILED, TIMED_OUT], neither of
+    which the single-valued status arg could express. Per
+    conventions:multi-ref-scope-args: OMITTING it means no status filter, while
+    an explicitly EMPTY list is the EMPTY scope and returns nothing - it never
+    silently falls back to 'all'. Values are deduped; an unknown member is
+    rejected by enum validation rather than dropped.
+
+    status is DEPRECATED in favour of statuses. Both are accepted for one
+    release; when both are given, statuses wins.
+
+    sortBy / sortDir (#833) order the whole result set server-side, so a client
+    table is no longer limited to sorting the page it happens to hold.
+    """
+    appRuns(
+      appRef: String
+      orgRef: String
+      status: AppRunStatus @deprecated(reason: "Use statuses (#836) - a single value cannot express PENDING-or-RUNNING.")
+      statuses: [AppRunStatus!]
+      parentRunId: ID
+      sortBy: AppRunSortField
+      sortDir: SortDirection
+      limit: Int
+      offset: Int
+    ): AppRunsPage!
     agentSchedules(appRef: String!, limit: Int, offset: Int): AgentSchedulesPage!
     agentWebhooks(appRef: String!, limit: Int, offset: Int): AgentWebhooksPage!
     "The ticket ledger: minted, consumed-by-which-run, expired (org-ADMIN)."
