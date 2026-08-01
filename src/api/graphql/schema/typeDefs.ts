@@ -860,6 +860,20 @@ export const typeDefs = `#graphql
     urn: String
     githubId: Int
     githubUsername: String
+    """
+    Google account subject id (#837). Opaque provider identifier, never an
+    address. Withheld (null) from a viewer who is not the user themselves, a
+    platform admin, or a co-member of one of their orgs — the same #384 gate that
+    name/email use.
+
+    Load-bearing for duplicate-account triage: mergeUsers adopts a source
+    provider id only where the target column is null, and identityProvider
+    records only which provider CREATED the row, so it cannot be used to infer
+    this (a GITHUB row may carry a linked googleId).
+    """
+    googleId: String
+    "Apple account subject id (#837). Same gate and rationale as googleId."
+    appleId: String
     identityProvider: String
     externalId: String
     externalAppId: String

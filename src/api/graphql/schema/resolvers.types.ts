@@ -917,6 +917,21 @@ export const typeResolvers = {
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.name ?? null) : null,
     email: async (u: { id: string; email?: string | null }, _: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.email ?? null) : null,
+    // #837: provider subject ids, behind the SAME #384 gate as name/email.
+    // They are opaque identifiers rather than addresses, but they are still
+    // account-linkage data — ungated they let any caller correlate a Hadron
+    // account with a Google/Apple identity across services. The stated use
+    // case (pre-merge duplicate triage) is a platform admin or the user
+    // themselves, both of which this gate admits, so nothing is lost.
+    //
+    // NOTE the asymmetry with `githubId`/`githubUsername`/`externalId`, which
+    // remain ungated. Adding the gate there is a behavior change to shipped
+    // fields with unknown consumers — tracked separately rather than smuggled
+    // in here.
+    googleId: async (u: { id: string; googleId?: string | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.googleId ?? null) : null,
+    appleId: async (u: { id: string; appleId?: string | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.appleId ?? null) : null,
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
     // list only when the queried User is the authenticated user (mirrors
     // 005's User.agentSubscriptions resolver-side gate).
