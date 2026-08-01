@@ -465,6 +465,10 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       policy: (presentLinks.length > 0 ? { chain: presentLinks } : undefined) as never,
       budgetTokens: DEFAULT_RUN_TOKEN_BUDGET,
       budgetActions: DEFAULT_RUN_ACTION_BUDGET,
+      // #832: snapshot the MINTED budget so a client can render "spent vs
+      // budget" — the two columns above are live-decremented remainders.
+      budgetTokensInitial: DEFAULT_RUN_TOKEN_BUDGET,
+      budgetActionsInitial: DEFAULT_RUN_ACTION_BUDGET,
       timeoutMs: args.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       createdBy: args.createdBy ?? null,
     },
@@ -793,7 +797,15 @@ async function executeAppRunInner(
       const spent = result.tokensIn + result.tokensOut;
       await db.appRun.updateMany({
         where: { id: runId },
-        data: { budgetTokens: { decrement: Math.min(spent, budget ?? spent) } },
+        data: {
+          // The DECREMENT is clamped so the remaining budget never goes
+          // negative...
+          budgetTokens: { decrement: Math.min(spent, budget ?? spent) },
+          // ...but the #832 spend counter is NOT: it must stay truthful when a
+          // hop overshoots the remaining budget, which is precisely the run an
+          // operator is auditing. Same statement, so the two can't diverge.
+          tokensSpent: { increment: spent },
+        },
       });
       // Recorded even into overage — tokens are already spent at the provider;
       // the NEXT launch gate is the enforcement point (PR-493 Codex P2).
@@ -936,7 +948,10 @@ async function checkActivation(
   if (cost > 0) {
     const res = await db.appRun.updateMany({
       where: { id: runId, status: 'RUNNING', budgetActions: { gte: cost } },
-      data: { budgetActions: { decrement: cost } },
+      // #832: the action counter rides the SAME conditional write, so it counts
+      // exactly the actions that were actually admitted — a denied action (the
+      // `gte: cost` guard failing) increments nothing.
+      data: { budgetActions: { decrement: cost }, actionsSpent: { increment: cost } },
     });
     return res.count === 1;
   }

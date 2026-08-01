@@ -3286,6 +3286,21 @@ model AppRun {
   budgetTokens   Int?              @map("budget_tokens")
   /// Remaining tool/write actions — live-decrement kill switch.
   budgetActions  Int?              @map("budget_actions")
+  /// #832 — the budget this run was MINTED with, so a client can render
+  /// "spent vs budget". `budgetTokens` above is what REMAINS. NULL on runs
+  /// minted before the column existed.
+  budgetTokensInitial  Int?        @map("budget_tokens_initial")
+  budgetActionsInitial Int?        @map("budget_actions_initial")
+  /// #832 — cumulative spend, incremented in the same write as the budget
+  /// decrement. Deliberately NOT derived:
+  ///   * a `hops` sum under-reports — a hop that failed mid-execution has no
+  ///     element, which is exactly the run an operator is auditing;
+  ///   * `initial - remaining` under-reports too — the decrement is CLAMPED
+  ///     (`Math.min(spent, budget)`) so the remaining budget never goes
+  ///     negative, and an overspending run would report exactly its budget.
+  /// These counters are unclamped and therefore truthful in overage.
+  tokensSpent    Int               @default(0) @map("tokens_spent")
+  actionsSpent   Int               @default(0) @map("actions_spent")
   status         AppRunStatus      @default(PENDING)
   curNodeUrn     String?           @map("cur_node_urn")
   parentRunId    String?           @map("parent_run_id")

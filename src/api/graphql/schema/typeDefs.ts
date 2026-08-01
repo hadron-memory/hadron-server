@@ -2354,6 +2354,24 @@ export const typeDefs = `#graphql
     budgetTokens: Int
     "Remaining action budget — live-decremented per write/tool action."
     budgetActions: Int
+    """
+    Total LLM tokens consumed by this run (#832), INCLUDING hops that failed
+    mid-execution — a sum over the hops trail misses those, because a failed
+    hop has no element. Unclamped, so it stays truthful if a hop overshoots the
+    remaining budget. 0 on runs minted before the counter existed whose hop
+    trail was empty or unparseable.
+    """
+    tokensSpent: Int!
+    "Total budgeted actions consumed (#832). Counts only actions actually admitted by the budget guard."
+    actionsSpent: Int!
+    """
+    The token budget this run was MINTED with — budgetTokens is what REMAINS.
+    NULL for runs minted before this was recorded, which is deliberate: 0 would
+    render as 'no budget' rather than 'unknown'.
+    """
+    budgetTokensInitial: Int
+    "The action budget this run was minted with (#832). NULL for pre-existing runs."
+    budgetActionsInitial: Int
     status: AppRunStatus!
     curNodeUrn: String
     parentRunId: ID
