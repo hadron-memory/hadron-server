@@ -530,3 +530,67 @@ describe('Node.urn / Edge.urn — legacy role-marker memory URNs (#481 Codex rev
     expect(edgeUrn).toBe(`hrn:edge:${orgA.urn}:agent-x:app-user:42:ml:src:next`);
   });
 });
+
+/**
+ * #837 — `googleId` / `appleId` on `User`, behind the same #384 gate as
+ * name/email. `mergeUsers` adopts a source provider id only where the target's
+ * column is null, and the merge is irreversible with no dry-run — so an
+ * operator must be able to read these before merging. `identityProvider` can
+ * NOT stand in: it records which provider CREATED the row, and the linking
+ * branch in resolveGoogleUser sets googleId while keeping the old value.
+ */
+describe('User.googleId / User.appleId — provider ids for merge triage (#837)', () => {
+  const U = resolvers.User as any;
+  let linked: { id: string };
+
+  beforeEach(async () => {
+    // A GITHUB-created row that later LINKED Google — the exact shape that
+    // makes inferring the credential from identityProvider unsound.
+    linked = await db.user.create({
+      data: {
+        id: generateId(), githubId: 47110, githubUsername: 'uni-linked', handle: 'uni-linked',
+        identityProvider: 'GITHUB', googleId: 'google-sub-123', appleId: null,
+      },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgA.id, userId: linked.id, role: 'READER' },
+    });
+  });
+
+  it('a platform ADMIN reads both — the merge-triage path', async () => {
+    const row = await db.user.findUniqueOrThrow({ where: { id: linked.id } });
+    expect(await U.googleId(row, {}, ctx(admin.id, ['ADMIN']))).toBe('google-sub-123');
+    // A null appleId is the answer that matters: it means an Apple identity
+    // WOULD be adopted from the source by mergeUsers.
+    expect(await U.appleId(row, {}, ctx(admin.id, ['ADMIN']))).toBeNull();
+  });
+
+  it('the user themselves reads their own', async () => {
+    const row = await db.user.findUniqueOrThrow({ where: { id: linked.id } });
+    expect(await U.googleId(row, {}, ctx(linked.id))).toBe('google-sub-123');
+  });
+
+  it('a co-member of one of their orgs reads it (same audience as name/email)', async () => {
+    const row = await db.user.findUniqueOrThrow({ where: { id: linked.id } });
+    expect(await U.googleId(row, {}, ctx(member.id))).toBe('google-sub-123');
+  });
+
+  it('a STRANGER gets null — not correlatable across services', async () => {
+    const row = await db.user.findUniqueOrThrow({ where: { id: linked.id } });
+    expect(await U.googleId(row, {}, ctx(stranger.id))).toBeNull();
+    expect(await U.appleId(row, {}, ctx(stranger.id))).toBeNull();
+  });
+
+  it('an ANONYMOUS caller gets null', async () => {
+    const row = await db.user.findUniqueOrThrow({ where: { id: linked.id } });
+    expect(await U.googleId(row, {}, ctx())).toBeNull();
+  });
+
+  it('identityProvider does not imply the credential (the unsound workaround)', async () => {
+    const row = await db.user.findUniqueOrThrow({ where: { id: linked.id } });
+    expect(row.identityProvider).toBe('GITHUB');
+    // ...yet a googleId is present. Inferring "no Google credential" from the
+    // enum would be wrong exactly on the linked accounts triage is about.
+    expect(await U.googleId(row, {}, ctx(admin.id, ['ADMIN']))).toBe('google-sub-123');
+  });
+});
