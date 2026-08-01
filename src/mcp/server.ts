@@ -2980,7 +2980,7 @@ export function createMcpServerInstance(
         loc: z.string().optional().describe('Explicit edge loc. Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
         description: z.string().optional().describe('Edge description'),
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
-      })).optional().describe('Replace outgoing edges (the full set on this node)'),
+      })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
     async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
@@ -3514,6 +3514,63 @@ export function createMcpServerInstance(
       return textResult(
         `Edge saved: ${result.edgeUrn}${result.name ? ` (${result.name})` : ''}\n  ${result.sourceUrn} → ${result.targetUrn}`,
       );
+    },
+  );
+
+  // ── hadron_update_edge / hadron_delete_edge (#835) ───────────────────────────
+  //
+  // GraphQL has had full edge CRUD since spec 037; MCP exposed only
+  // hadron_create_edge. So an agent wanting to change ONE edge's name had
+  // exactly one route: hadron_update_node(edges:), which REPLACES the node's
+  // whole outgoing set — a whole-set overwrite to express a single-edge intent.
+  // It returns "Node updated" and reports nothing about the edges it dropped.
+  //
+  // These are thin wrappers over the GraphQL resolvers (the delegate-don't-
+  // reimplement rule in findings:node-write-surface-invariants), so the
+  // memory-scoped write gate, loc validation, condition validation and
+  // revision behavior are the resolver's, not a second copy.
+
+  server.tool(
+    'hadron_update_edge',
+    'Change ONE existing edge in place — its name, loc, description, runnability, or routing priority. Non-destructive: every other edge on the source node is left alone. This is the tool to reach for when you want to relabel or retarget a single relationship; do NOT use hadron_update_node(edges:) for that, as it replaces the node\'s entire outgoing edge set and silently deletes the edges you did not re-supply. Only the fields you pass are changed. The edge may be given as an ID-shape PK or a fully-qualified edge URN (hrn:edge:<org>::<memory>::<loc>).',
+    {
+      edgeRef: z.string().describe('Edge to update, as an ID-shape PK (preferred — immutable) OR a fully-qualified edge URN.'),
+      name: z.string().optional().describe('New relationship name, e.g. "depends-on".'),
+      loc: z.string().optional().describe('New edge loc (its identity + URN suffix). Changing this changes the edge URN.'),
+      description: z.string().optional().describe('New human-readable description.'),
+      isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed.'),
+      priority: z.number().optional().describe('Routing priority among sibling edges.'),
+    },
+    async ({ edgeRef, name, loc, description, isRunnable, priority }) => {
+      try {
+        const edge = await resolvers.Mutation.updateEdge(
+          {},
+          { edgeRef, name, loc, description, isRunnable, priority },
+          objectCtx(),
+        );
+        const e = edge as { loc: string; name: string | null; memoryId: string };
+        return textResult(
+          `Edge updated: ${await edgeUrn(e.loc, e.memoryId)}${e.name ? ` (${e.name})` : ''}`,
+        );
+      } catch (err) {
+        return textResult(String((err as Error)?.message ?? err));
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_delete_edge',
+    'Delete ONE edge. Non-destructive to everything else: the source and target nodes and all their other edges are untouched. Use this rather than hadron_update_node(edges:) with the edge omitted — that argument replaces the whole set and would delete the node\'s other edges too. The edge may be given as an ID-shape PK or a fully-qualified edge URN.',
+    {
+      edgeRef: z.string().describe('Edge to delete, as an ID-shape PK OR a fully-qualified edge URN.'),
+    },
+    async ({ edgeRef }) => {
+      try {
+        await resolvers.Mutation.deleteEdge({}, { edgeRef }, objectCtx());
+        return textResult(`Edge deleted: ${edgeRef}`);
+      } catch (err) {
+        return textResult(String((err as Error)?.message ?? err));
+      }
     },
   );
 
